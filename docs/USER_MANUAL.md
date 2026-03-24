@@ -44,6 +44,21 @@ Default live symbols:
 - `GOOG`
 - `TSLA`
 - `AMD`
+- `CAT`
+- `SPOT`
+- `INTC`
+- `MSTR`
+- `MELI`
+- `UBER`
+- `FISV`
+- `NFLX`
+- `LLY`
+- `WMT`
+- `TMUS`
+- `T`
+- `NKE`
+- `XOM`
+- `TIGR`
 
 Use a custom live symbol set:
 

@@ -67,7 +67,7 @@ cargo run
 
 Live mode requires outbound HTTPS access to Yahoo Finance public quote pages.
 
-By default it polls `AAPL,MSFT,NVDA,AMZN,META,GOOG,TSLA,AMD`.
+By default it polls `AAPL,MSFT,NVDA,AMZN,META,GOOG,TSLA,AMD,CAT,SPOT,INTC,MSTR,MELI,UBER,FISV,NFLX,LLY,WMT,TMUS,T,NKE,XOM,TIGR`.
 
 Run with a custom symbol list:
 

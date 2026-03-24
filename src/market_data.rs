@@ -23,8 +23,9 @@ const UPGRADE_DOWNGRADE_HISTORY_MARKER: &str = r#"\"upgradeDowngradeHistory\":"#
 const ANALYST_EVALUATION_HORIZON_DAYS: u32 = 90;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
-pub const DEFAULT_LIVE_SYMBOLS: [&str; 8] = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG", "TSLA", "AMD",
+pub const DEFAULT_LIVE_SYMBOLS: [&str; 24] = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG", "TSLA", "AMD", "CAT", "SPOT", "INTC", "MSTR",
+    "MELI", "UBER", "FISV", "NFLX", "LLY", "WMT", "TMUS", "T", "NKE", "XOM", "TIGR", "JPM",
 ];
 
 pub struct MarketDataClient {
@@ -545,10 +546,43 @@ mod tests {
     use super::LiveSymbolFeed;
     use super::YahooUpgradeDowngradeEntry;
     use super::compute_weighted_analyst_target;
+    use super::default_live_symbols;
     use super::extract_embedded_json_object;
     use super::parse_quote_page;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
+
+    #[test]
+    fn default_live_symbols_expand_the_built_in_universe() {
+        assert_eq!(
+            default_live_symbols(),
+            vec![
+                "AAPL".to_string(),
+                "MSFT".to_string(),
+                "NVDA".to_string(),
+                "AMZN".to_string(),
+                "META".to_string(),
+                "GOOG".to_string(),
+                "TSLA".to_string(),
+                "AMD".to_string(),
+                "CAT".to_string(),
+                "SPOT".to_string(),
+                "INTC".to_string(),
+                "MSTR".to_string(),
+                "MELI".to_string(),
+                "UBER".to_string(),
+                "FISV".to_string(),
+                "NFLX".to_string(),
+                "LLY".to_string(),
+                "WMT".to_string(),
+                "TMUS".to_string(),
+                "T".to_string(),
+                "NKE".to_string(),
+                "XOM".to_string(),
+                "TIGR".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn parses_a_quote_page_into_live_feed_events() {

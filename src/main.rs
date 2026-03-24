@@ -54,6 +54,8 @@ const MAX_VISIBLE_ALERTS: usize = 6;
 const MAX_VISIBLE_TAPE: usize = 8;
 const MAX_VISIBLE_ISSUES: usize = 8;
 const MAX_STORED_ISSUES: usize = 64;
+const TARGET_RANGE_BAR_WIDTH: usize = 18;
+const GAP_METER_WIDTH: usize = 12;
 const ISSUE_TOAST_DURATION: Duration = Duration::from_secs(6);
 const EVENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 const ISSUE_KEY_FEED_UNAVAILABLE: &str = "feed-unavailable";
@@ -1499,12 +1501,36 @@ fn build_ticker_detail_lines(
             format_optional_money(detail.external_signal_fair_value_cents),
         ),
     });
+    if let Some(weighted_target_cents) = detail.weighted_external_signal_fair_value_cents {
+        lines.push(RenderLine {
+            color: Some(Color::DarkCyan),
+            text: format!(
+                "Weighted target: {}  Scored firms: {}",
+                format_money(weighted_target_cents),
+                format_optional_count(detail.weighted_analyst_count),
+            ),
+        });
+    }
+    if let Some(target_range_line) = target_range_line(&detail) {
+        lines.push(RenderLine {
+            color: Some(Color::DarkCyan),
+            text: target_range_line,
+        });
+    }
+    if let Some(target_marker_legend_line) = target_marker_legend_line(&detail) {
+        lines.push(RenderLine {
+            color: Some(Color::DarkGrey),
+            text: target_marker_legend_line,
+        });
+    }
     lines.push(RenderLine {
         color: Some(gap_color(detail.gap_bps, detail.minimum_gap_bps)),
         text: format!(
-            "Discount to mean: {}  Gap to mean: {}",
+            "Discount to mean: {}  Gap to mean: {}  threshold {}  {}",
             format_money(discount_cents),
             format_bps(detail.gap_bps),
+            format_bps(detail.minimum_gap_bps),
+            gap_meter(detail.gap_bps, detail.minimum_gap_bps, GAP_METER_WIDTH),
         ),
     });
     if let Some(weighted_target_cents) = detail.weighted_external_signal_fair_value_cents {
@@ -1513,10 +1539,10 @@ fn build_ticker_detail_lines(
         lines.push(RenderLine {
             color: Some(gap_color(weighted_gap_bps, detail.minimum_gap_bps)),
             text: format!(
-                "Firm-weighted target: {}  Gap to weighted: {}  Scored firms: {}",
-                format_money(weighted_target_cents),
+                "Gap to weighted: {}  threshold {}  {}",
                 format_bps(weighted_gap_bps),
-                format_optional_count(detail.weighted_analyst_count),
+                format_bps(detail.minimum_gap_bps),
+                gap_meter(weighted_gap_bps, detail.minimum_gap_bps, GAP_METER_WIDTH),
             ),
         });
     }
@@ -1556,13 +1582,8 @@ fn build_ticker_detail_lines(
         text: "ANALYST CONSENSUS".to_string(),
     });
     for analyst_line in analyst_consensus_lines(&detail) {
-        let analyst_line_index = lines
-            .iter()
-            .rev()
-            .take_while(|line| line.text != "ANALYST CONSENSUS")
-            .count();
         lines.push(RenderLine {
-            color: Some(analyst_consensus_line_color(&detail, analyst_line_index)),
+            color: Some(analyst_consensus_line_color(&detail, &analyst_line)),
             text: analyst_line,
         });
     }
@@ -1656,21 +1677,7 @@ fn filtered_symbol_rows(state: &TerminalState, view_filter: &ViewFilter) -> Vec<
 }
 
 fn analyst_consensus_lines(detail: &SymbolDetail) -> Vec<String> {
-    let mut lines = vec![format!(
-        "Targets: mean {}  median {}  low {}  high {}",
-        format_money(detail.intrinsic_value_cents),
-        format_optional_money(detail.external_signal_fair_value_cents),
-        format_optional_money(detail.external_signal_low_fair_value_cents),
-        format_optional_money(detail.external_signal_high_fair_value_cents),
-    )];
-
-    if let Some(weighted_target_cents) = detail.weighted_external_signal_fair_value_cents {
-        lines.push(format!(
-            "Firm-weighted target: {}  scored firms: {}",
-            format_money(weighted_target_cents),
-            format_optional_count(detail.weighted_analyst_count),
-        ));
-    }
+    let mut lines = Vec::new();
 
     if let (Some(low_target_cents), Some(high_target_cents)) = (
         detail.external_signal_low_fair_value_cents,
@@ -1681,6 +1688,12 @@ fn analyst_consensus_lines(detail: &SymbolDetail) -> Vec<String> {
             format_money(high_target_cents - low_target_cents),
             format_money(high_target_cents),
             format_money(low_target_cents),
+        ));
+    } else {
+        lines.push(format!(
+            "Targets: mean {}  median {}",
+            format_money(detail.intrinsic_value_cents),
+            format_optional_money(detail.external_signal_fair_value_cents),
         ));
     }
 
@@ -1919,22 +1932,28 @@ fn feed_loop(
     };
 
     while let Ok(FeedControl::RefreshNow) = control_receiver.recv() {
-        let feed_batch = build_feed_batch(&client, &live_symbols.snapshot());
-
-        if !publisher.publish(AppEvent::FeedBatch(feed_batch)) {
+        if !publish_feed_refresh(&publisher, &live_symbols.snapshot(), |symbol| {
+            client.fetch_symbol(symbol)
+        }) {
             return;
         }
     }
 }
 
-fn build_feed_batch(client: &MarketDataClient, symbols: &[String]) -> Vec<FeedEvent> {
+fn publish_feed_refresh<F>(
+    publisher: &AppEventPublisher,
+    symbols: &[String],
+    mut fetch_symbol: F,
+) -> bool
+where
+    F: FnMut(&str) -> io::Result<Option<market_data::LiveSymbolFeed>>,
+{
     let mut loaded_symbols = 0usize;
     let mut unsupported_symbols = 0usize;
     let mut last_error = None;
-    let mut events = Vec::new();
 
     for symbol in symbols {
-        let live_feed = match client.fetch_symbol(symbol) {
+        let live_feed = match fetch_symbol(symbol) {
             Ok(Some(live_feed)) => {
                 loaded_symbols += 1;
                 live_feed
@@ -1949,19 +1968,27 @@ fn build_feed_batch(client: &MarketDataClient, symbols: &[String]) -> Vec<FeedEv
             }
         };
 
-        events.push(FeedEvent::Snapshot(live_feed.snapshot));
-
-        if let Some(signal) = live_feed.external_signal {
-            events.push(FeedEvent::External(signal));
+        if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(live_feed))) {
+            return false;
         }
     }
 
-    events.push(FeedEvent::SourceStatus(LiveSourceStatus {
-        tracked_symbols: symbols.len(),
-        loaded_symbols,
-        unsupported_symbols,
-        last_error,
-    }));
+    publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
+        LiveSourceStatus {
+            tracked_symbols: symbols.len(),
+            loaded_symbols,
+            unsupported_symbols,
+            last_error,
+        },
+    )]))
+}
+
+fn build_symbol_feed_batch(live_feed: market_data::LiveSymbolFeed) -> Vec<FeedEvent> {
+    let mut events = vec![FeedEvent::Snapshot(live_feed.snapshot)];
+
+    if let Some(signal) = live_feed.external_signal {
+        events.push(FeedEvent::External(signal));
+    }
 
     events
 }
@@ -2345,6 +2372,183 @@ fn format_optional_recommendation_mean(value_hundredths: Option<u16>) -> String 
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn target_range_line(detail: &SymbolDetail) -> Option<String> {
+    let (Some(low_target_cents), Some(high_target_cents)) = (
+        detail.external_signal_low_fair_value_cents,
+        detail.external_signal_high_fair_value_cents,
+    ) else {
+        return None;
+    };
+
+    let mut markers = vec![
+        ("P", detail.market_price_cents),
+        ("M", detail.intrinsic_value_cents),
+    ];
+
+    if let Some(weighted_target_cents) = detail.weighted_external_signal_fair_value_cents {
+        markers.push(("W", weighted_target_cents));
+    }
+
+    if let Some(median_target_cents) = detail.external_signal_fair_value_cents {
+        markers.push(("D", median_target_cents));
+    }
+
+    Some(format!(
+        "Target map: {}",
+        unicode_target_map(
+            low_target_cents,
+            high_target_cents,
+            &markers,
+            TARGET_RANGE_BAR_WIDTH
+        )
+    ))
+}
+
+fn target_marker_legend_line(detail: &SymbolDetail) -> Option<String> {
+    let (Some(low_target_cents), Some(high_target_cents)) = (
+        detail.external_signal_low_fair_value_cents,
+        detail.external_signal_high_fair_value_cents,
+    ) else {
+        return None;
+    };
+
+    let mut markers = vec![price_marker_label(
+        detail.market_price_cents,
+        low_target_cents,
+        high_target_cents,
+    )];
+
+    if detail.weighted_external_signal_fair_value_cents.is_some() {
+        markers.push("◆ weighted".to_string());
+    }
+
+    markers.push("▲ mean".to_string());
+
+    if detail.external_signal_fair_value_cents.is_some() {
+        markers.push("■ median".to_string());
+    }
+
+    Some(format!("Markers: {}", markers.join("  ")))
+}
+
+fn price_marker_label(price_cents: i64, low_target_cents: i64, high_target_cents: i64) -> String {
+    if price_cents < low_target_cents {
+        return "● price<low".to_string();
+    }
+
+    if price_cents > high_target_cents {
+        return "● price>high".to_string();
+    }
+
+    "● price".to_string()
+}
+
+fn unicode_target_map(
+    range_start: i64,
+    range_end: i64,
+    markers: &[(&str, i64)],
+    width: usize,
+) -> String {
+    if width == 0 {
+        return format!(
+            "{} ││ {}",
+            format_money(range_start),
+            format_money(range_end)
+        );
+    }
+
+    let mut slots = vec![String::from("─"); width];
+
+    for (label, value) in markers {
+        if *value < range_start || *value > range_end {
+            continue;
+        }
+
+        let index = scaled_bar_index(*value, range_start, range_end, width);
+        place_label(&mut slots, index, label);
+    }
+
+    format!(
+        "{} │{}│ {}",
+        format_money(range_start),
+        slots.join(""),
+        format_money(range_end),
+    )
+}
+
+fn place_label(slots: &mut [String], index: usize, label: &str) {
+    let slot = &mut slots[index];
+    let glyph = marker_glyph(label);
+
+    if slot == "─" {
+        *slot = glyph.to_string();
+        return;
+    }
+
+    if !slot.chars().any(|existing| existing == glyph) {
+        slot.push(glyph);
+    }
+}
+
+fn marker_glyph(label: &str) -> char {
+    match label {
+        "P" => '●',
+        "W" => '◆',
+        "M" => '▲',
+        "D" => '■',
+        _ => '•',
+    }
+}
+
+fn scaled_bar_index(value: i64, range_start: i64, range_end: i64, width: usize) -> usize {
+    if width <= 1 || range_end <= range_start {
+        return 0;
+    }
+
+    let clamped_value = value.clamp(range_start, range_end) as f64;
+    let ratio = (clamped_value - range_start as f64) / (range_end - range_start) as f64;
+
+    (ratio * (width - 1) as f64).round() as usize
+}
+
+fn gap_meter(actual_gap_bps: i32, minimum_gap_bps: i32, width: usize) -> String {
+    if width == 0 {
+        return "[]".to_string();
+    }
+
+    let max_gap_bps = actual_gap_bps
+        .max(minimum_gap_bps)
+        .max(minimum_gap_bps * 2)
+        .max(1);
+    let threshold_index = scaled_gap_index(minimum_gap_bps, max_gap_bps, width);
+    let actual_index = scaled_gap_index(actual_gap_bps.max(0).min(max_gap_bps), max_gap_bps, width);
+    let mut slots = vec!['░'; width];
+
+    for slot in slots.iter_mut().take(actual_index) {
+        *slot = '█';
+    }
+
+    slots[threshold_index] = '│';
+    slots[actual_index] = if actual_index == threshold_index {
+        '◆'
+    } else {
+        '●'
+    };
+
+    format!("[{}]", slots.iter().collect::<String>())
+}
+
+fn scaled_gap_index(value_bps: i32, max_gap_bps: i32, width: usize) -> usize {
+    if width <= 1 || max_gap_bps <= 0 {
+        return 0;
+    }
+
+    let clamped_value = value_bps.clamp(0, max_gap_bps) as f64;
+    let ratio = clamped_value / max_gap_bps as f64;
+
+    (ratio * (width - 1) as f64).round() as usize
+}
+
 fn gap_bps_from_price_and_target(market_price_cents: i64, target_cents: i64) -> i32 {
     (((target_cents - market_price_cents) * 10_000) / target_cents) as i32
 }
@@ -2404,22 +2608,19 @@ fn gap_color(actual_gap_bps: i32, minimum_gap_bps: i32) -> Color {
     }
 }
 
-fn analyst_consensus_line_color(detail: &SymbolDetail, line_index: usize) -> Color {
-    match line_index {
-        0 => Color::DarkCyan,
-        1 => detail
-            .weighted_external_signal_fair_value_cents
-            .map(|weighted_target_cents| {
-                gap_color(
-                    gap_bps_from_price_and_target(detail.market_price_cents, weighted_target_cents),
-                    detail.minimum_gap_bps,
-                )
-            })
-            .unwrap_or(Color::DarkCyan),
-        2 | 3 => Color::DarkCyan,
-        4 | 5 => analyst_sentiment_color(detail),
-        _ => Color::Grey,
+fn analyst_consensus_line_color(detail: &SymbolDetail, line_text: &str) -> Color {
+    if line_text.starts_with("Range:")
+        || line_text.starts_with("Target range width:")
+        || line_text.starts_with("Targets: mean")
+    {
+        return Color::DarkCyan;
     }
+
+    if line_text.starts_with("Analysts:") || line_text.starts_with("Ratings:") {
+        return analyst_sentiment_color(detail);
+    }
+
+    Color::Grey
 }
 
 fn analyst_sentiment_color(detail: &SymbolDetail) -> Color {
@@ -2658,8 +2859,11 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
+    use super::AppEvent;
+    use super::AppEventPublisher;
     use super::AppState;
     use super::Color;
+    use super::FeedEvent;
     use super::InputMode;
     use super::IssueCenter;
     use super::IssueSeverity;
@@ -2674,22 +2878,29 @@ mod tests {
     use super::RenderLine;
     use super::analyst_consensus_lines;
     use super::apply_live_source_status;
+    use super::build_ticker_detail_lines;
     use super::clip_text_to_width;
     use super::collect_clear_rows;
     use super::collect_dirty_rows;
     use super::confidence_justification_lines;
     use super::format_symbol_list;
+    use super::gap_meter;
     use super::health_status_label;
     use super::normalize_frame;
     use super::parse_symbols_argument;
+    use super::publish_feed_refresh;
     use super::qualification_justification_lines;
     use super::should_handle_key_event;
     use super::should_leave_input_mode_on_backspace;
     use discount_screener::CandidateRow;
     use discount_screener::ConfidenceBand;
     use discount_screener::ExternalSignalStatus;
+    use discount_screener::ExternalValuationSignal;
+    use discount_screener::MarketSnapshot;
     use discount_screener::QualificationStatus;
     use discount_screener::SymbolDetail;
+    use discount_screener::TerminalState;
+    use std::sync::mpsc;
 
     fn candidate(symbol: &str, gap_bps: i32) -> CandidateRow {
         CandidateRow {
@@ -2731,6 +2942,33 @@ mod tests {
             last_sequence: 6,
             update_count: 2,
             is_watched: false,
+        }
+    }
+
+    fn live_feed(symbol: &str) -> super::market_data::LiveSymbolFeed {
+        super::market_data::LiveSymbolFeed {
+            snapshot: MarketSnapshot {
+                symbol: symbol.to_string(),
+                profitable: true,
+                market_price_cents: 10_000,
+                intrinsic_value_cents: 12_500,
+            },
+            external_signal: Some(ExternalValuationSignal {
+                symbol: symbol.to_string(),
+                fair_value_cents: 12_000,
+                age_seconds: 0,
+                low_fair_value_cents: None,
+                high_fair_value_cents: None,
+                analyst_opinion_count: None,
+                recommendation_mean_hundredths: None,
+                strong_buy_count: None,
+                buy_count: None,
+                hold_count: None,
+                sell_count: None,
+                strong_sell_count: None,
+                weighted_fair_value_cents: None,
+                weighted_analyst_count: None,
+            }),
         }
     }
 
@@ -2887,6 +3125,67 @@ mod tests {
     }
 
     #[test]
+    fn feed_refresh_publishes_symbol_updates_before_final_source_status() {
+        let (sender, receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let symbols = vec!["AAPL".to_string(), "MSFT".to_string(), "AMD".to_string()];
+        let mut fetch_results = vec![
+            Ok(Some(live_feed("AAPL"))),
+            Ok(None),
+            Ok(Some(live_feed("AMD"))),
+        ]
+        .into_iter();
+
+        assert!(publish_feed_refresh(&publisher, &symbols, |_| {
+            fetch_results
+                .next()
+                .expect("each symbol should have one fetch result")
+        }));
+
+        let first_batch = match receiver.recv().expect("first batch should arrive") {
+            AppEvent::FeedBatch(feed_events) => feed_events,
+            _ => panic!("expected first feed batch"),
+        };
+        let second_batch = match receiver.recv().expect("second batch should arrive") {
+            AppEvent::FeedBatch(feed_events) => feed_events,
+            _ => panic!("expected second feed batch"),
+        };
+        let final_batch = match receiver.recv().expect("final status batch should arrive") {
+            AppEvent::FeedBatch(feed_events) => feed_events,
+            _ => panic!("expected final feed batch"),
+        };
+
+        assert_eq!(first_batch.len(), 2);
+        assert!(
+            matches!(first_batch.first(), Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AAPL")
+        );
+        assert!(
+            matches!(first_batch.get(1), Some(FeedEvent::External(signal)) if signal.symbol == "AAPL")
+        );
+
+        assert_eq!(second_batch.len(), 2);
+        assert!(
+            matches!(second_batch.first(), Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AMD")
+        );
+        assert!(
+            matches!(second_batch.get(1), Some(FeedEvent::External(signal)) if signal.symbol == "AMD")
+        );
+
+        assert_eq!(final_batch.len(), 1);
+        assert!(matches!(
+            final_batch.first(),
+            Some(FeedEvent::SourceStatus(super::LiveSourceStatus {
+                tracked_symbols: 3,
+                loaded_symbols: 2,
+                unsupported_symbols: 1,
+                last_error: None,
+            }))
+        ));
+
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn normalize_frame_clips_lines_to_the_viewport() {
         let lines = vec![
             RenderLine {
@@ -3020,19 +3319,77 @@ mod tests {
     }
 
     #[test]
+    fn target_map_renders_unicode_markers_and_a_separate_legend() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            profitable: true,
+            market_price_cents: 17_270,
+            intrinsic_value_cents: 26_923,
+        });
+        state.ingest_external(ExternalValuationSignal {
+            symbol: "NVDA".to_string(),
+            fair_value_cents: 26_923,
+            age_seconds: 6,
+            low_fair_value_cents: Some(18_500),
+            high_fair_value_cents: Some(32_000),
+            analyst_opinion_count: Some(42),
+            recommendation_mean_hundredths: Some(185),
+            strong_buy_count: Some(20),
+            buy_count: Some(10),
+            hold_count: Some(8),
+            sell_count: Some(3),
+            strong_sell_count: Some(1),
+            weighted_fair_value_cents: Some(27_850),
+            weighted_analyst_count: Some(12),
+        });
+
+        let lines = build_ticker_detail_lines(&state, &AppState::default(), "NVDA");
+        let target_map_line = lines
+            .iter()
+            .find(|line| line.text.starts_with("Target map:"))
+            .expect("target map line should exist");
+        let marker_legend_line = lines
+            .iter()
+            .find(|line| line.text.starts_with("Markers:"))
+            .expect("marker legend line should exist");
+
+        assert!(target_map_line.text.contains("$185.00 │"));
+        assert!(target_map_line.text.contains('◆'));
+        assert!(target_map_line.text.contains('▲'));
+        assert!(target_map_line.text.contains('■'));
+        assert!(target_map_line.text.ends_with("│ $320.00"));
+        assert_eq!(
+            marker_legend_line.text,
+            "Markers: ● price<low  ◆ weighted  ▲ mean  ■ median"
+        );
+    }
+
+    #[test]
+    fn gap_meter_uses_block_fill_with_threshold_and_actual_markers() {
+        let meter = gap_meter(2_500, 2_000, 12);
+
+        assert!(meter.starts_with('['));
+        assert!(meter.ends_with(']'));
+        assert!(meter.contains('│'));
+        assert!(meter.contains('●') || meter.contains('◆'));
+        assert!(meter.contains('█'));
+        assert!(meter.contains('░'));
+    }
+
+    #[test]
     fn analyst_consensus_lines_include_target_range_and_rating_distribution() {
         let lines = analyst_consensus_lines(&detail());
 
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Target range width: $135.00 = $320.00 - $185.00");
         assert_eq!(
-            lines,
-            vec![
-                "Targets: mean $269.23  median $269.23  low $185.00  high $320.00".to_string(),
-                "Firm-weighted target: $278.50  scored firms: 12".to_string(),
-                "Target range width: $135.00 = $320.00 - $185.00".to_string(),
-                "Analysts: 42  Recommendation mean: 1.85 (1.00=strong buy, 5.00=strong sell)"
-                    .to_string(),
-                "Ratings: strong buy 20  buy 10  hold 8  sell 3  strong sell 1".to_string(),
-            ]
+            lines[1],
+            "Analysts: 42  Recommendation mean: 1.85 (1.00=strong buy, 5.00=strong sell)"
+        );
+        assert_eq!(
+            lines[2],
+            "Ratings: strong buy 20  buy 10  hold 8  sell 3  strong sell 1"
         );
     }
 }
