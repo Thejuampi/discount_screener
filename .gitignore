@@ -1,4 +1,5 @@
 /target/
+/target_agent_test/
 **/__pycache__/
 *.pyc
 *.pyo

@@ -1,52 +1,14 @@
-use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+mod support;
 
 use discount_screener::AlertKind;
 use discount_screener::ConfidenceBand;
 use discount_screener::ExternalValuationSignal;
-use discount_screener::MarketSnapshot;
 use discount_screener::TerminalState;
 use discount_screener::ViewFilter;
-
-fn market_snapshot(
-    symbol: &str,
-    profitable: bool,
-    market_price_cents: i64,
-    intrinsic_value_cents: i64,
-) -> MarketSnapshot {
-    MarketSnapshot {
-        symbol: symbol.to_string(),
-        profitable,
-        market_price_cents,
-        intrinsic_value_cents,
-    }
-}
-
-fn external_signal(
-    symbol: &str,
-    fair_value_cents: i64,
-    age_seconds: u64,
-) -> ExternalValuationSignal {
-    ExternalValuationSignal {
-        symbol: symbol.to_string(),
-        fair_value_cents,
-        age_seconds,
-        low_fair_value_cents: None,
-        high_fair_value_cents: None,
-        analyst_opinion_count: None,
-        recommendation_mean_hundredths: None,
-        strong_buy_count: None,
-        buy_count: None,
-        hold_count: None,
-        sell_count: None,
-        strong_sell_count: None,
-        weighted_fair_value_cents: None,
-        weighted_analyst_count: None,
-    }
-}
+use support::external_signal;
+use support::market_snapshot;
+use support::temp_file_path;
 
 #[test]
 fn replays_extended_analyst_consensus_fields_from_the_journal() {
@@ -55,9 +17,6 @@ fn replays_extended_analyst_consensus_fields_from_the_journal() {
 
     state.ingest_snapshot(market_snapshot("NVDA", true, 17_270, 26_923));
     state.ingest_external(ExternalValuationSignal {
-        symbol: "NVDA".to_string(),
-        fair_value_cents: 26_500,
-        age_seconds: 6,
         low_fair_value_cents: Some(18_500),
         high_fair_value_cents: Some(32_000),
         analyst_opinion_count: Some(42),
@@ -69,6 +28,7 @@ fn replays_extended_analyst_consensus_fields_from_the_journal() {
         strong_sell_count: Some(1),
         weighted_fair_value_cents: Some(27_200),
         weighted_analyst_count: Some(9),
+        ..external_signal("NVDA", 26_500, 6)
     });
     state
         .save_journal_file(&journal_path)
@@ -109,14 +69,6 @@ fn replays_extended_analyst_consensus_fields_from_the_journal() {
             Some(9),
         ))
     );
-}
-
-fn temp_file_path(stem: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after epoch")
-        .as_nanos();
-    env::temp_dir().join(format!("discount_screener_{stem}_{nanos}.log"))
 }
 
 #[test]
@@ -254,6 +206,81 @@ fn reloads_journal_file_with_alert_history_intact() {
             AlertKind::ConfidenceUpgraded,
             AlertKind::ExitedQualified,
         ]
+    );
+}
+
+#[test]
+fn replay_file_rejects_non_positive_snapshot_prices() {
+    let file_path = temp_file_path("invalid_snapshot_values");
+    fs::write(&file_path, "S|1|BETA|1|0|10000\n").expect("seed file should be written");
+
+    let replay_result = TerminalState::replay_file(2_000, 30, 8, &file_path);
+
+    fs::remove_file(&file_path).ok();
+
+    assert!(replay_result.is_err());
+}
+
+#[test]
+fn replay_file_ignores_a_truncated_final_line() {
+    let file_path = temp_file_path("truncated_tail");
+    fs::write(
+        &file_path,
+        concat!("S|1|BETA|1|8000|10000\n", "E|2|BETA|12000"),
+    )
+    .expect("seed file should be written");
+
+    let replayed =
+        TerminalState::replay_file(2_000, 30, 8, &file_path).expect("prefix should replay");
+
+    fs::remove_file(&file_path).ok();
+
+    assert_eq!(
+        replayed
+            .top_rows(1)
+            .into_iter()
+            .map(|row| row.symbol)
+            .collect::<Vec<_>>(),
+        vec!["BETA".to_string()]
+    );
+}
+
+#[test]
+fn replay_file_rejects_non_positive_external_fair_values() {
+    let file_path = temp_file_path("invalid_external_values");
+    fs::write(&file_path, "E|1|BETA|0|5\n").expect("seed file should be written");
+
+    let replay_result = TerminalState::replay_file(2_000, 30, 8, &file_path);
+
+    fs::remove_file(&file_path).ok();
+
+    assert!(replay_result.is_err());
+}
+
+#[test]
+fn replay_file_sanitizes_non_positive_weighted_targets() {
+    let file_path = temp_file_path("invalid_weighted_target");
+    fs::write(
+        &file_path,
+        concat!(
+            "S|1|NVDA|1|17270|26923\n",
+            "E|2|NVDA|26500|6|18500|32000|42|185|20|10|8|3|1|0|9\n"
+        ),
+    )
+    .expect("seed file should be written");
+
+    let replayed =
+        TerminalState::replay_file(2_000, 30, 8, &file_path).expect("seed file should replay");
+
+    fs::remove_file(&file_path).ok();
+
+    assert_eq!(
+        replayed.detail("NVDA").map(|detail| (
+            detail.external_signal_fair_value_cents,
+            detail.weighted_external_signal_fair_value_cents,
+            detail.weighted_analyst_count,
+        )),
+        Some((Some(26_500), None, None))
     );
 }
 

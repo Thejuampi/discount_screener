@@ -1,45 +1,11 @@
+mod support;
+
 use discount_screener::CandidateRow;
 use discount_screener::ConfidenceBand;
 use discount_screener::ExternalValuationSignal;
-use discount_screener::MarketSnapshot;
 use discount_screener::TerminalState;
-
-fn market_snapshot(
-    symbol: &str,
-    profitable: bool,
-    market_price_cents: i64,
-    intrinsic_value_cents: i64,
-) -> MarketSnapshot {
-    MarketSnapshot {
-        symbol: symbol.to_string(),
-        profitable,
-        market_price_cents,
-        intrinsic_value_cents,
-    }
-}
-
-fn external_signal(
-    symbol: &str,
-    fair_value_cents: i64,
-    age_seconds: u64,
-) -> ExternalValuationSignal {
-    ExternalValuationSignal {
-        symbol: symbol.to_string(),
-        fair_value_cents,
-        age_seconds,
-        low_fair_value_cents: None,
-        high_fair_value_cents: None,
-        analyst_opinion_count: None,
-        recommendation_mean_hundredths: None,
-        strong_buy_count: None,
-        buy_count: None,
-        hold_count: None,
-        sell_count: None,
-        strong_sell_count: None,
-        weighted_fair_value_cents: None,
-        weighted_analyst_count: None,
-    }
-}
+use support::external_signal;
+use support::market_snapshot;
 
 #[test]
 fn qualifies_profitable_discounted_symbol_without_external_signal() {
@@ -129,5 +95,37 @@ fn keeps_a_bounded_recent_tape_for_high_throughput_rendering() {
             .map(|event| event.symbol)
             .collect::<Vec<_>>(),
         vec!["BETA".to_string(), "CHAR".to_string(), "DELTA".to_string(),]
+    );
+}
+
+#[test]
+fn clamps_large_negative_gap_values_instead_of_overflowing() {
+    let mut state = TerminalState::new(2_000, 30, 8);
+
+    state.ingest_snapshot(market_snapshot("ACME", true, i64::MAX, 1));
+
+    assert_eq!(
+        state.candidate("ACME").map(|row| row.gap_bps),
+        Some(i32::MIN)
+    );
+}
+
+#[test]
+fn ignores_non_positive_weighted_targets_from_external_signals() {
+    let mut state = TerminalState::new(2_000, 30, 8);
+
+    state.ingest_snapshot(market_snapshot("ACME", true, 8_000, 10_000));
+    state.ingest_external(ExternalValuationSignal {
+        weighted_fair_value_cents: Some(0),
+        weighted_analyst_count: Some(9),
+        ..external_signal("ACME", 12_000, 5)
+    });
+
+    assert_eq!(
+        state.detail("ACME").map(|detail| (
+            detail.weighted_external_signal_fair_value_cents,
+            detail.weighted_analyst_count
+        )),
+        Some((None, None))
     );
 }

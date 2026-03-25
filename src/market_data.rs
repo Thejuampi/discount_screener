@@ -8,9 +8,11 @@ use discount_screener::AnalystOutcomeSample;
 use discount_screener::ExternalValuationSignal;
 use discount_screener::MarketSnapshot;
 use discount_screener::build_analyst_score;
+use reqwest::Url;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const QUOTE_PAGE_URL: &str = "https://finance.yahoo.com/quote/";
@@ -61,10 +63,9 @@ impl MarketDataClient {
     }
 
     pub fn fetch_symbol(&self, symbol: &str) -> io::Result<Option<LiveSymbolFeed>> {
-        let url = format!("{QUOTE_PAGE_URL}{symbol}");
         let response = self
             .client
-            .get(url)
+            .get(quote_page_url(symbol)?)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
             .map_err(io::Error::other)?;
@@ -73,43 +74,18 @@ impl MarketDataClient {
             return Ok(None);
         };
 
-        let Some(external_signal) = live_feed.external_signal.as_mut() else {
-            return Ok(Some(live_feed));
-        };
-
-        let Some(upgrade_history) = parse_embedded_json_object::<YahooUpgradeDowngradeHistory>(
-            &body,
-            UPGRADE_DOWNGRADE_HISTORY_MARKER,
-        )?
-        else {
-            return Ok(Some(live_feed));
-        };
-
-        let Some(oldest_epoch) = upgrade_history
-            .history
-            .iter()
-            .map(|entry| entry.epoch_grade_date)
-            .min()
-        else {
-            return Ok(Some(live_feed));
-        };
-
-        let price_history =
-            self.fetch_price_history(symbol, oldest_epoch.saturating_sub(7 * SECONDS_PER_DAY))?;
-        let now_epoch_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(io::Error::other)?
-            .as_secs();
-
-        if let Some(weighted_target) = compute_weighted_analyst_target(
-            &upgrade_history.history,
-            &price_history,
-            ANALYST_EVALUATION_HORIZON_DAYS,
-            now_epoch_seconds,
-        ) {
-            external_signal.weighted_fair_value_cents =
-                Some(weighted_target.weighted_fair_value_cents);
-            external_signal.weighted_analyst_count = Some(weighted_target.scored_firm_count);
+        if let Some(external_signal) = live_feed.external_signal.as_mut() {
+            let now_epoch_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_secs();
+            populate_weighted_target(
+                &body,
+                external_signal,
+                ANALYST_EVALUATION_HORIZON_DAYS,
+                now_epoch_seconds,
+                |period1_epoch_seconds| self.fetch_price_history(symbol, period1_epoch_seconds),
+            )?;
         }
 
         Ok(Some(live_feed))
@@ -124,12 +100,13 @@ impl MarketDataClient {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_secs();
-        let url = format!(
-            "{CHART_API_URL}{symbol}?period1={period1_epoch_seconds}&period2={period2_epoch_seconds}&interval=1d&includePrePost=false"
-        );
         let response = self
             .client
-            .get(url)
+            .get(chart_api_url(
+                symbol,
+                period1_epoch_seconds,
+                period2_epoch_seconds,
+            )?)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
             .map_err(io::Error::other)?;
@@ -146,6 +123,33 @@ pub fn default_live_symbols() -> Vec<String> {
         .iter()
         .map(|symbol| symbol.to_string())
         .collect()
+}
+
+fn quote_page_url(symbol: &str) -> io::Result<Url> {
+    let mut url = Url::parse(QUOTE_PAGE_URL).map_err(io::Error::other)?;
+    url.path_segments_mut()
+        .map_err(|_| io::Error::other("invalid quote page base url"))?
+        .pop_if_empty()
+        .push(symbol);
+    Ok(url)
+}
+
+fn chart_api_url(
+    symbol: &str,
+    period1_epoch_seconds: u64,
+    period2_epoch_seconds: u64,
+) -> io::Result<Url> {
+    let mut url = Url::parse(CHART_API_URL).map_err(io::Error::other)?;
+    url.path_segments_mut()
+        .map_err(|_| io::Error::other("invalid chart api base url"))?
+        .pop_if_empty()
+        .push(symbol);
+    url.query_pairs_mut()
+        .append_pair("period1", &period1_epoch_seconds.to_string())
+        .append_pair("period2", &period2_epoch_seconds.to_string())
+        .append_pair("interval", "1d")
+        .append_pair("includePrePost", "false");
+    Ok(url)
 }
 
 fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFeed>> {
@@ -231,6 +235,52 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
     }))
 }
 
+fn populate_weighted_target<F>(
+    body: &str,
+    external_signal: &mut ExternalValuationSignal,
+    evaluation_horizon_days: u32,
+    now_epoch_seconds: u64,
+    mut fetch_price_history: F,
+) -> io::Result<()>
+where
+    F: FnMut(u64) -> io::Result<Vec<HistoricalPricePoint>>,
+{
+    let Some(upgrade_history) = parse_embedded_json_object::<YahooUpgradeDowngradeHistory>(
+        body,
+        UPGRADE_DOWNGRADE_HISTORY_MARKER,
+    )?
+    else {
+        return Ok(());
+    };
+
+    let Some(oldest_epoch) = upgrade_history
+        .history
+        .iter()
+        .map(|entry| entry.epoch_grade_date)
+        .min()
+    else {
+        return Ok(());
+    };
+
+    let price_history = match fetch_price_history(oldest_epoch.saturating_sub(7 * SECONDS_PER_DAY))
+    {
+        Ok(price_history) => price_history,
+        Err(_) => return Ok(()),
+    };
+
+    if let Some(weighted_target) = compute_weighted_analyst_target(
+        &upgrade_history.history,
+        &price_history,
+        evaluation_horizon_days,
+        now_epoch_seconds,
+    ) {
+        external_signal.weighted_fair_value_cents = Some(weighted_target.weighted_fair_value_cents);
+        external_signal.weighted_analyst_count = Some(weighted_target.scored_firm_count);
+    }
+
+    Ok(())
+}
+
 fn parse_embedded_json_object<T>(body: &str, marker: &str) -> io::Result<Option<T>>
 where
     T: DeserializeOwned,
@@ -249,18 +299,16 @@ fn extract_embedded_json_object<'a>(body: &'a str, marker: &str) -> Option<&'a s
     let object_start =
         marker_index + marker.len() + body[marker_index + marker.len()..].find('{')?;
     let bytes = body.as_bytes();
-    let mut depth = 0usize;
 
     for index in object_start..bytes.len() {
-        match bytes[index] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&body[object_start..=index]);
-                }
-            }
-            _ => {}
+        if bytes[index] != b'}' {
+            continue;
+        }
+
+        let fragment = &body[object_start..=index];
+        let decoded = fragment.replace(r#"\""#, r#"""#);
+        if serde_json::from_str::<Value>(&decoded).is_ok() {
+            return Some(fragment);
         }
     }
 
@@ -390,11 +438,17 @@ struct YahooChartResult {
 #[derive(Deserialize)]
 struct YahooChartIndicators {
     quote: Option<Vec<YahooChartQuote>>,
+    adjclose: Option<Vec<YahooChartAdjustedClose>>,
 }
 
 #[derive(Deserialize)]
 struct YahooChartQuote {
     close: Option<Vec<Option<f64>>>,
+}
+
+#[derive(Deserialize)]
+struct YahooChartAdjustedClose {
+    adjclose: Option<Vec<Option<f64>>>,
 }
 
 impl YahooChartResponse {
@@ -417,12 +471,20 @@ impl YahooChartResponse {
         let Some(closes) = quote.close else {
             return Vec::new();
         };
+        let adjusted_closes = result
+            .indicators
+            .adjclose
+            .and_then(|mut adjusted_quotes| adjusted_quotes.pop())
+            .and_then(|adjusted_quote| adjusted_quote.adjclose);
 
         timestamps
             .into_iter()
-            .zip(closes)
-            .filter_map(|(timestamp, close)| {
-                close
+            .enumerate()
+            .filter_map(|(index, timestamp)| {
+                adjusted_closes
+                    .as_ref()
+                    .and_then(|prices| prices.get(index).copied().flatten())
+                    .or_else(|| closes.get(index).copied().flatten())
                     .and_then(dollars_to_cents)
                     .map(|close_cents| HistoricalPricePoint {
                         epoch_seconds: timestamp,
@@ -544,13 +606,23 @@ fn closing_price_cents_on_or_after(
 mod tests {
     use super::HistoricalPricePoint;
     use super::LiveSymbolFeed;
+    use super::YahooChart;
+    use super::YahooChartAdjustedClose;
+    use super::YahooChartIndicators;
+    use super::YahooChartQuote;
+    use super::YahooChartResponse;
+    use super::YahooChartResult;
     use super::YahooUpgradeDowngradeEntry;
+    use super::chart_api_url;
     use super::compute_weighted_analyst_target;
     use super::default_live_symbols;
     use super::extract_embedded_json_object;
     use super::parse_quote_page;
+    use super::populate_weighted_target;
+    use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
+    use std::io;
 
     #[test]
     fn default_live_symbols_expand_the_built_in_universe() {
@@ -580,7 +652,26 @@ mod tests {
                 "NKE".to_string(),
                 "XOM".to_string(),
                 "TIGR".to_string(),
+                "JPM".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn encodes_symbols_when_building_provider_urls() {
+        assert_eq!(
+            (
+                quote_page_url("BRK/B?")
+                    .expect("quote page url should build")
+                    .to_string(),
+                chart_api_url("BRK/B?", 1, 2)
+                    .expect("chart api url should build")
+                    .to_string(),
+            ),
+            (
+                "https://finance.yahoo.com/quote/BRK%2FB%3F".to_string(),
+                "https://query1.finance.yahoo.com/v8/finance/chart/BRK%2FB%3F?period1=1&period2=2&interval=1d&includePrePost=false".to_string(),
+            )
         );
     }
 
@@ -638,6 +729,80 @@ mod tests {
         assert_eq!(
             extract_embedded_json_object(body, r#"\"financialData\":"#),
             Some(r#"{\"currentPrice\":{\"raw\":191.11},\"targetMeanPrice\":{\"raw\":225.50}}"#),
+        );
+    }
+
+    #[test]
+    fn extracts_embedded_json_objects_with_braces_inside_strings() {
+        let body = r#"prefix \"financialData\":{\"firm\":\"A{B}\",\"currentPrice\":{\"raw\":191.11}} suffix"#;
+
+        assert_eq!(
+            extract_embedded_json_object(body, r#"\"financialData\":"#),
+            Some(r#"{\"firm\":\"A{B}\",\"currentPrice\":{\"raw\":191.11}}"#),
+        );
+    }
+
+    #[test]
+    fn prefers_adjusted_closes_when_available() {
+        let price_history = YahooChartResponse {
+            chart: YahooChart {
+                result: Some(vec![YahooChartResult {
+                    timestamp: Some(vec![1_700_000_000, 1_700_000_000 + 86_400]),
+                    indicators: YahooChartIndicators {
+                        quote: Some(vec![YahooChartQuote {
+                            close: Some(vec![Some(100.0), Some(50.0)]),
+                        }]),
+                        adjclose: Some(vec![YahooChartAdjustedClose {
+                            adjclose: Some(vec![Some(100.0), Some(100.0)]),
+                        }]),
+                    },
+                }]),
+            },
+        }
+        .price_history();
+
+        assert_eq!(
+            price_history
+                .into_iter()
+                .map(|point| point.close_cents)
+                .collect::<Vec<_>>(),
+            vec![10_000, 10_000]
+        );
+    }
+
+    #[test]
+    fn keeps_base_signal_when_price_history_fetch_fails() {
+        let body = r#"prefix \"upgradeDowngradeHistory\":{\"history\":[{\"epochGradeDate\":1700000000,\"firm\":\"Accurate Capital\",\"currentPriceTarget\":120.0}]} suffix"#;
+        let mut external_signal = ExternalValuationSignal {
+            symbol: "AAPL".to_string(),
+            fair_value_cents: 22_300,
+            age_seconds: 0,
+            low_fair_value_cents: None,
+            high_fair_value_cents: None,
+            analyst_opinion_count: None,
+            recommendation_mean_hundredths: None,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            weighted_fair_value_cents: None,
+            weighted_analyst_count: None,
+        };
+
+        assert_eq!(
+            (
+                populate_weighted_target(
+                    body,
+                    &mut external_signal,
+                    90,
+                    1_700_000_000 + 120 * 24 * 60 * 60,
+                    |_| { Err(io::Error::other("provider timeout")) }
+                )
+                .is_ok(),
+                external_signal.weighted_fair_value_cents,
+            ),
+            (true, None)
         );
     }
 

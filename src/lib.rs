@@ -284,9 +284,12 @@ impl TerminalState {
     }
 
     pub fn ingest_external(&mut self, signal: ExternalValuationSignal) {
+        let mut signal = signal;
         if signal.fair_value_cents <= 0 {
             return;
         }
+
+        sanitize_external_signal(&mut signal);
 
         let previous_detail = self.detail(&signal.symbol);
         let symbol = signal.symbol.clone();
@@ -748,19 +751,25 @@ impl TerminalState {
 
 fn read_journal_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<JournalEntry>> {
     let file_content = fs::read_to_string(path)?;
+    let ends_with_newline = file_content.ends_with('\n');
+    let lines = file_content.lines().collect::<Vec<_>>();
     let mut journal = Vec::new();
 
-    for (index, line) in file_content.lines().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
 
-        let entry = decode_journal_entry(line).map_err(|message| {
-            io::Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid journal line {}: {}", index + 1, message),
-            )
-        })?;
+        let entry = match decode_journal_entry(line) {
+            Ok(entry) => entry,
+            Err(_) if !ends_with_newline && index + 1 == lines.len() => break,
+            Err(message) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid journal line {}: {}", index + 1, message),
+                ));
+            }
+        };
         journal.push(entry);
     }
 
@@ -859,13 +868,22 @@ fn decode_snapshot_entry(parts: &[&str]) -> Result<JournalEntry, String> {
         return Err("snapshot entry should have 6 fields".to_string());
     }
 
+    let market_price_cents = require_positive_i64(
+        parse_number(parts[4], "snapshot market_price_cents")?,
+        "snapshot market_price_cents",
+    )?;
+    let intrinsic_value_cents = require_positive_i64(
+        parse_number(parts[5], "snapshot intrinsic_value_cents")?,
+        "snapshot intrinsic_value_cents",
+    )?;
+
     Ok(JournalEntry {
         sequence: parse_number(parts[1], "snapshot sequence")?,
         payload: JournalPayload::Snapshot(MarketSnapshot {
             symbol: parts[2].to_string(),
             profitable: parse_bool_flag(parts[3])?,
-            market_price_cents: parse_number(parts[4], "snapshot market_price_cents")?,
-            intrinsic_value_cents: parse_number(parts[5], "snapshot intrinsic_value_cents")?,
+            market_price_cents,
+            intrinsic_value_cents,
         }),
     })
 }
@@ -875,11 +893,25 @@ fn decode_external_entry(parts: &[&str]) -> Result<JournalEntry, String> {
         return Err("external entry should have 5, 14, or 16 fields".to_string());
     }
 
+    let fair_value_cents = require_positive_i64(
+        parse_number(parts[3], "external fair_value_cents")?,
+        "external fair_value_cents",
+    )?;
+    let mut weighted_fair_value_cents =
+        parse_optional_number(parts.get(14), "external weighted_fair_value_cents")?;
+    let mut weighted_analyst_count =
+        parse_optional_number(parts.get(15), "external weighted_analyst_count")?;
+
+    if matches!(weighted_fair_value_cents, Some(value) if value <= 0) {
+        weighted_fair_value_cents = None;
+        weighted_analyst_count = None;
+    }
+
     Ok(JournalEntry {
         sequence: parse_number(parts[1], "external sequence")?,
         payload: JournalPayload::External(ExternalValuationSignal {
             symbol: parts[2].to_string(),
-            fair_value_cents: parse_number(parts[3], "external fair_value_cents")?,
+            fair_value_cents,
             age_seconds: parse_number(parts[4], "external age_seconds")?,
             low_fair_value_cents: parse_optional_number(
                 parts.get(5),
@@ -902,14 +934,8 @@ fn decode_external_entry(parts: &[&str]) -> Result<JournalEntry, String> {
             hold_count: parse_optional_number(parts.get(11), "external hold_count")?,
             sell_count: parse_optional_number(parts.get(12), "external sell_count")?,
             strong_sell_count: parse_optional_number(parts.get(13), "external strong_sell_count")?,
-            weighted_fair_value_cents: parse_optional_number(
-                parts.get(14),
-                "external weighted_fair_value_cents",
-            )?,
-            weighted_analyst_count: parse_optional_number(
-                parts.get(15),
-                "external weighted_analyst_count",
-            )?,
+            weighted_fair_value_cents,
+            weighted_analyst_count,
         }),
     })
 }
@@ -954,8 +980,34 @@ fn parse_bool_flag(raw: &str) -> Result<bool, String> {
     }
 }
 
+fn require_positive_i64(value: i64, field_name: &str) -> Result<i64, String> {
+    if value > 0 {
+        return Ok(value);
+    }
+
+    Err(format!("{field_name} must be positive"))
+}
+
+fn sanitize_external_signal(signal: &mut ExternalValuationSignal) {
+    if matches!(signal.weighted_fair_value_cents, Some(value) if value <= 0) {
+        signal.weighted_fair_value_cents = None;
+        signal.weighted_analyst_count = None;
+    }
+}
+
+pub fn checked_gap_bps(market_price_cents: i64, fair_value_cents: i64) -> Option<i32> {
+    if fair_value_cents <= 0 {
+        return None;
+    }
+
+    let scaled_gap_bps = ((fair_value_cents as i128 - market_price_cents as i128) * 10_000)
+        / fair_value_cents as i128;
+
+    Some(scaled_gap_bps.clamp(i32::MIN as i128, i32::MAX as i128) as i32)
+}
+
 fn gap_bps(market_price_cents: i64, fair_value_cents: i64) -> i32 {
-    (((fair_value_cents - market_price_cents) * 10_000) / fair_value_cents) as i32
+    checked_gap_bps(market_price_cents, fair_value_cents).unwrap_or(0)
 }
 
 fn analyst_sample_score(sample: &AnalystOutcomeSample) -> f32 {
@@ -982,6 +1034,7 @@ mod tests {
     use super::AnalystScore;
     use super::AnalystScoreScope;
     use super::build_analyst_score;
+    use super::gap_bps;
     use super::select_analyst_score;
 
     fn analyst_score(value: f32, sample_count: u32) -> AnalystScore {
@@ -1036,6 +1089,11 @@ mod tests {
         .expect("samples should produce a score");
 
         assert!(strong_score.value > weak_score.value);
+    }
+
+    #[test]
+    fn gap_bps_clamps_large_negative_values() {
+        assert_eq!(gap_bps(i64::MAX, 1), i32::MIN);
     }
 
     #[test]

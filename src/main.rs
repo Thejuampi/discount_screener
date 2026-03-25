@@ -45,6 +45,7 @@ use discount_screener::QualificationStatus;
 use discount_screener::SymbolDetail;
 use discount_screener::TerminalState;
 use discount_screener::ViewFilter;
+use discount_screener::checked_gap_bps;
 use market_data::DEFAULT_POLL_INTERVAL;
 use market_data::MarketDataClient;
 use market_data::default_live_symbols;
@@ -695,9 +696,9 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
     install_shutdown_publisher(app_event_publisher.clone())?;
 
     let mut stdout = io::stdout();
-    terminal::enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
-    let terminal_guard = TerminalGuard;
+    let mut terminal_guard = TerminalGuard::default();
+    terminal_guard.enable_raw_mode()?;
+    terminal_guard.enter_alternate_screen(&mut stdout)?;
     let mut screen_renderer = ScreenRenderer::default();
     let mut rate_tracker = RateTracker::default();
 
@@ -1534,17 +1535,19 @@ fn build_ticker_detail_lines(
         ),
     });
     if let Some(weighted_target_cents) = detail.weighted_external_signal_fair_value_cents {
-        let weighted_gap_bps =
-            gap_bps_from_price_and_target(detail.market_price_cents, weighted_target_cents);
-        lines.push(RenderLine {
-            color: Some(gap_color(weighted_gap_bps, detail.minimum_gap_bps)),
-            text: format!(
-                "Gap to weighted: {}  threshold {}  {}",
-                format_bps(weighted_gap_bps),
-                format_bps(detail.minimum_gap_bps),
-                gap_meter(weighted_gap_bps, detail.minimum_gap_bps, GAP_METER_WIDTH),
-            ),
-        });
+        if let Some(weighted_gap_bps) =
+            checked_gap_bps(detail.market_price_cents, weighted_target_cents)
+        {
+            lines.push(RenderLine {
+                color: Some(gap_color(weighted_gap_bps, detail.minimum_gap_bps)),
+                text: format!(
+                    "Gap to weighted: {}  threshold {}  {}",
+                    format_bps(weighted_gap_bps),
+                    format_bps(detail.minimum_gap_bps),
+                    gap_meter(weighted_gap_bps, detail.minimum_gap_bps, GAP_METER_WIDTH),
+                ),
+            });
+        }
     }
     lines.push(RenderLine {
         color: Some(status_summary_color(
@@ -2549,10 +2552,6 @@ fn scaled_gap_index(value_bps: i32, max_gap_bps: i32, width: usize) -> usize {
     (ratio * (width - 1) as f64).round() as usize
 }
 
-fn gap_bps_from_price_and_target(market_price_cents: i64, target_cents: i64) -> i32 {
-    (((target_cents - market_price_cents) * 10_000) / target_cents) as i32
-}
-
 fn candidate_row_color(row: &CandidateRow, is_selected: bool) -> Color {
     if is_selected {
         return if row.is_qualified {
@@ -2836,24 +2835,53 @@ fn save_watchlist_if_configured(
 }
 
 fn format_money(value_cents: i64) -> String {
-    let dollars = value_cents / 100;
-    let cents = value_cents.abs() % 100;
-    format!("${dollars}.{cents:02}")
+    let sign = if value_cents < 0 { "-" } else { "" };
+    let absolute_cents = value_cents.unsigned_abs();
+    let dollars = absolute_cents / 100;
+    let cents = absolute_cents % 100;
+    format!("{sign}${dollars}.{cents:02}")
 }
 
 fn format_bps(value_bps: i32) -> String {
-    let whole = value_bps / 100;
-    let fraction = value_bps.abs() % 100;
-    format!("{whole}.{fraction:02}%")
+    let sign = if value_bps < 0 { "-" } else { "" };
+    let absolute_bps = value_bps.unsigned_abs();
+    let whole = absolute_bps / 100;
+    let fraction = absolute_bps % 100;
+    format!("{sign}{whole}.{fraction:02}%")
 }
 
-struct TerminalGuard;
+#[derive(Default)]
+struct TerminalGuard {
+    raw_mode_enabled: bool,
+    alternate_screen_entered: bool,
+}
+
+impl TerminalGuard {
+    fn enable_raw_mode(&mut self) -> io::Result<()> {
+        terminal::enable_raw_mode()?;
+        self.raw_mode_enabled = true;
+        Ok(())
+    }
+
+    fn enter_alternate_screen(&mut self, stdout: &mut Stdout) -> io::Result<()> {
+        execute!(stdout, EnterAlternateScreen)?;
+        self.alternate_screen_entered = true;
+        execute!(stdout, Hide)
+    }
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.raw_mode_enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+
         let mut stdout = io::stdout();
-        let _ = terminal::disable_raw_mode();
-        let _ = execute!(stdout, Show, LeaveAlternateScreen);
+        if self.alternate_screen_entered {
+            let _ = execute!(stdout, Show, LeaveAlternateScreen);
+        } else {
+            let _ = execute!(stdout, Show);
+        }
     }
 }
 
@@ -2883,6 +2911,8 @@ mod tests {
     use super::collect_clear_rows;
     use super::collect_dirty_rows;
     use super::confidence_justification_lines;
+    use super::format_bps;
+    use super::format_money;
     use super::format_symbol_list;
     use super::gap_meter;
     use super::health_status_label;
@@ -2900,6 +2930,7 @@ mod tests {
     use discount_screener::QualificationStatus;
     use discount_screener::SymbolDetail;
     use discount_screener::TerminalState;
+    use discount_screener::checked_gap_bps;
     use std::sync::mpsc;
 
     fn candidate(symbol: &str, gap_bps: i32) -> CandidateRow {
@@ -3316,6 +3347,24 @@ mod tests {
                 "Result: high because internal qualification is qualified and external status is supportive.".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn formatters_keep_minus_signs_for_small_negative_values() {
+        assert_eq!(
+            (format_money(-50), format_bps(-50)),
+            ("-$0.50".to_string(), "-0.50%".to_string())
+        );
+    }
+
+    #[test]
+    fn weighted_gap_clamps_large_negative_values() {
+        assert_eq!(checked_gap_bps(i64::MAX, 1), Some(i32::MIN));
+    }
+
+    #[test]
+    fn weighted_gap_rejects_non_positive_targets() {
+        assert_eq!(checked_gap_bps(10_000, 0), None);
     }
 
     #[test]
