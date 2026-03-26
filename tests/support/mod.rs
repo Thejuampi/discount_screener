@@ -14,6 +14,7 @@ pub fn market_snapshot(
 ) -> MarketSnapshot {
     MarketSnapshot {
         symbol: symbol.to_string(),
+        company_name: None,
         profitable,
         market_price_cents,
         intrinsic_value_cents,

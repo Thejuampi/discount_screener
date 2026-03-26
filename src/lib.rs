@@ -50,6 +50,7 @@ pub struct ViewFilter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarketSnapshot {
     pub symbol: String,
+    pub company_name: Option<String>,
     pub profitable: bool,
     pub market_price_cents: i64,
     pub intrinsic_value_cents: i64,
@@ -317,6 +318,13 @@ impl TerminalState {
         self.symbols
             .get(symbol)
             .and_then(|state| self.build_detail(state))
+    }
+
+    pub fn company_name(&self, symbol: &str) -> Option<&str> {
+        self.symbols
+            .get(symbol)
+            .and_then(|state| state.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.company_name.as_deref())
     }
 
     pub fn top_rows(&self, limit: usize) -> Vec<CandidateRow> {
@@ -779,12 +787,17 @@ fn read_journal_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<JournalEntry>> {
 fn encode_journal_entry(entry: &JournalEntry) -> String {
     match &entry.payload {
         JournalPayload::Snapshot(snapshot) => format!(
-            "S|{}|{}|{}|{}|{}",
+            "S|{}|{}|{}|{}|{}{}",
             entry.sequence,
             snapshot.symbol,
             if snapshot.profitable { 1 } else { 0 },
             snapshot.market_price_cents,
             snapshot.intrinsic_value_cents,
+            snapshot
+                .company_name
+                .as_deref()
+                .map(|company_name| format!("|{}", company_name))
+                .unwrap_or_default(),
         ),
         JournalPayload::External(signal) => {
             let has_extended_fields = signal.low_fair_value_cents.is_some()
@@ -864,8 +877,8 @@ fn decode_journal_entry(line: &str) -> Result<JournalEntry, String> {
 }
 
 fn decode_snapshot_entry(parts: &[&str]) -> Result<JournalEntry, String> {
-    if parts.len() != 6 {
-        return Err("snapshot entry should have 6 fields".to_string());
+    if parts.len() != 6 && parts.len() != 7 {
+        return Err("snapshot entry should have 6 or 7 fields".to_string());
     }
 
     let market_price_cents = require_positive_i64(
@@ -876,11 +889,17 @@ fn decode_snapshot_entry(parts: &[&str]) -> Result<JournalEntry, String> {
         parse_number(parts[5], "snapshot intrinsic_value_cents")?,
         "snapshot intrinsic_value_cents",
     )?;
+    let company_name = if parts.len() == 7 && !parts[6].trim().is_empty() {
+        Some(parts[6].to_string())
+    } else {
+        None
+    };
 
     Ok(JournalEntry {
         sequence: parse_number(parts[1], "snapshot sequence")?,
         payload: JournalPayload::Snapshot(MarketSnapshot {
             symbol: parts[2].to_string(),
+            company_name,
             profitable: parse_bool_flag(parts[3])?,
             market_price_cents,
             intrinsic_value_cents,

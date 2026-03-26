@@ -642,6 +642,7 @@ fn run_smoke() {
     let mut state = TerminalState::new(2_000, 30, 8);
     state.ingest_snapshot(MarketSnapshot {
         symbol: "ACME".to_string(),
+        company_name: None,
         profitable: true,
         market_price_cents: 8_000,
         intrinsic_value_cents: 10_000,
@@ -1218,7 +1219,8 @@ fn build_screen_lines(
     });
     lines.push(RenderLine {
         color: None,
-        text: "Idx  W  Symbol  Price      Fair       Gap      Confidence".to_string(),
+        text: "Idx  W  Ticker / Company             Price      Fair       Gap      Confidence"
+            .to_string(),
     });
 
     for (index, row) in rows.iter().enumerate() {
@@ -1228,14 +1230,18 @@ fn build_screen_lines(
         } else {
             ' '
         };
+        let symbol_label = truncate_text(
+            &format_symbol_with_company(&row.symbol, state.company_name(&row.symbol)),
+            28,
+        );
         lines.push(RenderLine {
             color: Some(candidate_row_color(row, index == selected_index)),
             text: format!(
-                "{} {:>2}  {}  {:<6} {:>10} {:>10} {:>8}  {}",
+                "{} {:>2}  {}  {:<28} {:>10} {:>10} {:>8}  {}",
                 marker,
                 index,
                 watched_marker,
-                row.symbol,
+                symbol_label,
                 format_money(row.market_price_cents),
                 format_money(row.intrinsic_value_cents),
                 format_bps(row.gap_bps),
@@ -1261,7 +1267,10 @@ fn build_screen_lines(
             )),
             text: format!(
                 "Symbol: {}  Watched: {}  Qualification: {}  Confidence: {}",
-                selected_detail.symbol,
+                format_symbol_with_company(
+                    &selected_detail.symbol,
+                    state.company_name(&selected_detail.symbol),
+                ),
                 if selected_detail.is_watched {
                     "yes"
                 } else {
@@ -1487,7 +1496,7 @@ fn build_ticker_detail_lines(
         color: Some(Color::Cyan),
         text: format!(
             "Symbol: {}  Position: {}/{} filtered tickers  Watched: {}",
-            detail.symbol,
+            format_symbol_with_company(&detail.symbol, state.company_name(&detail.symbol)),
             symbol_index,
             symbol_count,
             if detail.is_watched { "yes" } else { "no" },
@@ -2173,6 +2182,15 @@ fn format_symbol_list(symbols: &[String]) -> String {
     }
 
     label
+}
+
+fn format_symbol_with_company(symbol: &str, company_name: Option<&str>) -> String {
+    match company_name {
+        Some(company_name) if !company_name.trim().is_empty() => {
+            format!("{} {}", symbol, company_name.trim())
+        }
+        _ => symbol.to_string(),
+    }
 }
 
 fn should_handle_key_event(key_event: &KeyEvent) -> bool {
@@ -2980,6 +2998,7 @@ mod tests {
         super::market_data::LiveSymbolFeed {
             snapshot: MarketSnapshot {
                 symbol: symbol.to_string(),
+                company_name: None,
                 profitable: true,
                 market_price_cents: 10_000,
                 intrinsic_value_cents: 12_500,
@@ -3372,6 +3391,7 @@ mod tests {
         let mut state = TerminalState::new(2_000, 30, 8);
         state.ingest_snapshot(MarketSnapshot {
             symbol: "NVDA".to_string(),
+            company_name: None,
             profitable: true,
             market_price_cents: 17_270,
             intrinsic_value_cents: 26_923,

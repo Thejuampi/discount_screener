@@ -230,6 +230,7 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
         .trailing_eps
         .as_ref()
         .map(|value| value.raw > 0.0);
+    let company_name = parse_company_name(body, symbol);
 
     let (Some(market_price_cents), Some(intrinsic_value_cents), Some(profitable)) =
         (market_price_cents, intrinsic_value_cents, profitable)
@@ -265,6 +266,7 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
     Ok(Some(LiveSymbolFeed {
         snapshot: MarketSnapshot {
             symbol: symbol.to_string(),
+            company_name,
             profitable,
             market_price_cents,
             intrinsic_value_cents,
@@ -351,6 +353,35 @@ fn extract_embedded_json_object<'a>(body: &'a str, marker: &str) -> Option<&'a s
     }
 
     None
+}
+
+fn parse_company_name(body: &str, symbol: &str) -> Option<String> {
+    let marker = r#"<meta property="og:title" content=""#;
+    let meta_title = extract_meta_content(body, marker)?;
+    let pattern = format!(" ({symbol}) ");
+    let company_name = meta_title.split_once(&pattern)?.0.trim();
+
+    let company_name = html_unescape_basic(company_name);
+    if company_name.is_empty() {
+        None
+    } else {
+        Some(company_name)
+    }
+}
+
+fn extract_meta_content(body: &str, marker: &str) -> Option<String> {
+    let start = body.find(marker)? + marker.len();
+    let end = body[start..].find('"')? + start;
+    Some(body[start..end].to_string())
+}
+
+fn html_unescape_basic(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 
 fn money_from_field(field: Option<&YahooRawValue<f64>>) -> Option<i64> {
@@ -707,7 +738,7 @@ mod tests {
 
     #[test]
     fn parses_a_quote_page_into_live_feed_events() {
-        let body = r#"<!doctype html><html><head></head><body><script>
+        let body = r#"<!doctype html><html><head><meta property="og:title" content="Apple Inc. (AAPL) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
         window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":191.11},\"targetMeanPrice\":{\"raw\":225.50},\"targetMedianPrice\":{\"raw\":223.00},\"targetLowPrice\":{\"raw\":180.00},\"targetHighPrice\":{\"raw\":260.00},\"numberOfAnalystOpinions\":{\"raw\":42},\"recommendationMean\":{\"raw\":1.85}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":6.42}},\"recommendationTrend\":{\"trend\":[{\"period\":\"0m\",\"strongBuy\":20,\"buy\":10,\"hold\":8,\"sell\":3,\"strongSell\":1}]}}";
         </script></body></html>"#;
 
@@ -716,6 +747,7 @@ mod tests {
             Some(LiveSymbolFeed {
                 snapshot: MarketSnapshot {
                     symbol: "AAPL".to_string(),
+                    company_name: Some("Apple Inc.".to_string()),
                     profitable: true,
                     market_price_cents: 19_111,
                     intrinsic_value_cents: 22_550,
