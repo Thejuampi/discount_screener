@@ -6,12 +6,15 @@ This project is provided for informational and educational purposes only. It is 
 
 Market data, analyst targets, ratings, and derived signals may be delayed, incomplete, inaccurate, or unavailable. You are solely responsible for any decisions or actions you take based on this software or its output. Always verify information independently and consult a qualified professional where appropriate.
 
-Rust terminal workstation for monitoring profitable companies trading at a discount to free public fair-value estimates, using Yahoo Finance public quote and analyst-target data in live mode.
+Rust terminal workstation for monitoring profitable companies trading at a discount to free public fair-value estimates, using Yahoo Finance public quote, analyst-target, and historical chart data in live mode.
 
 The current product build is a fast terminal application with:
 
 - ranked candidate view
-- symbol detail view
+- low-noise symbol detail view
+- real Yahoo historical candle charts in detail view
+- day, week, month, year, 5-year, and 10-year chart ranges
+- EMA 20/50/200 overlays, volume, and MACD panes
 - alert stream
 - recent tape
 - operational issue rail and health banner
@@ -44,6 +47,7 @@ Included now:
 
 - in-process Rust state engine
 - free public Yahoo Finance live data adapter
+- Yahoo Finance historical OHLC chart adapter for ticker detail
 - explainable qualification state
 - replayable journal format
 - disk-backed journal persistence
@@ -103,6 +107,16 @@ Replay a prior session:
 cargo run -- --replay-file data/session.journal --watchlist-file data/watchlist.txt
 ```
 
+## Screenshots
+
+Main ranked view with health status, candidate ranking, alerts, and recent tape:
+
+![Main ranked view](docs/screenshots/main.png)
+
+Ticker detail view with Yahoo historical candles, EMA overlays, volume, MACD, valuation context, and analyst consensus:
+
+![Ticker detail view](docs/screenshots/ticker-details.png)
+
 ## Keyboard Controls
 
 - `j` or Down: move selection down
@@ -123,11 +137,16 @@ cargo run -- --replay-file data/session.journal --watchlist-file data/watchlist.
 Ticker detail screen:
 
 - `j` or `k`: move to the previous or next filtered ticker
+- `1` through `6`: jump chart range between day, week, month, year, 5-year, and 10-year history
+- `[` or `]`: cycle chart range backward or forward
 - `w`: toggle watchlist for the active ticker
 - `l`: open the operational issue log
 - `Backspace`, `d`, `Enter`, or `Esc`: close the detail screen
+- shows real Yahoo OHLC candles with EMA 20/50/200 overlays
+- shows separate volume and MACD panes
 - shows mean, median, low, and high analyst targets
 - shows analyst count, recommendation mean, and the strong-buy to strong-sell breakdown
+- adapts chart density to terminal size and available history
 
 The main view also includes:
 
