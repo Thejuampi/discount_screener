@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -25,6 +26,7 @@ const UPGRADE_DOWNGRADE_HISTORY_MARKER: &str = r#"\"upgradeDowngradeHistory\":"#
 const ANALYST_EVALUATION_HORIZON_DAYS: u32 = 90;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const WEIGHTED_TARGET_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
     "MMM", "AOS", "ABT", "ABBV", "ACN", "ADBE", "AMD", "AES", "AFL", "A", "APD", "ABNB", "AKAM",
     "ALB", "ARE", "ALGN", "ALLE", "LNT", "ALL", "GOOGL", "GOOG", "MO", "AMZN", "AMCR", "AEE",
@@ -69,6 +71,7 @@ pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
 
 pub struct MarketDataClient {
     client: Client,
+    weighted_target_cache: Mutex<HashMap<String, CachedWeightedTarget>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,16 +80,48 @@ pub struct LiveSymbolFeed {
     pub external_signal: Option<ExternalValuationSignal>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChartRange {
+    Day,
+    Week,
+    Month,
+    Year,
+    FiveYears,
+    TenYears,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoricalCandle {
+    pub epoch_seconds: u64,
+    pub open_cents: i64,
+    pub high_cents: i64,
+    pub low_cents: i64,
+    pub close_cents: i64,
+    pub volume: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HistoricalPricePoint {
     epoch_seconds: u64,
     close_cents: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChartRangeSpec {
+    range: &'static str,
+    interval: &'static str,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WeightedAnalystTarget {
     weighted_fair_value_cents: i64,
     scored_firm_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedWeightedTarget {
+    fetched_at_epoch_seconds: u64,
+    weighted_target: WeightedAnalystTarget,
 }
 
 impl MarketDataClient {
@@ -96,10 +131,17 @@ impl MarketDataClient {
             .user_agent(QUOTE_PAGE_USER_AGENT)
             .build()
             .map_err(io::Error::other)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            weighted_target_cache: Mutex::new(HashMap::new()),
+        })
     }
 
-    pub fn fetch_symbol(&self, symbol: &str) -> io::Result<Option<LiveSymbolFeed>> {
+    pub fn fetch_symbol_with_options(
+        &self,
+        symbol: &str,
+        refresh_weighted_target: bool,
+    ) -> io::Result<Option<LiveSymbolFeed>> {
         let response = self
             .client
             .get(quote_page_url(symbol)?)
@@ -117,6 +159,16 @@ impl MarketDataClient {
                 .duration_since(UNIX_EPOCH)
                 .map_err(io::Error::other)?
                 .as_secs();
+
+            if !refresh_weighted_target {
+                self.apply_cached_weighted_target(symbol, external_signal);
+                return Ok(Some(live_feed));
+            }
+
+            if self.apply_fresh_cached_weighted_target(symbol, external_signal, now_epoch_seconds) {
+                return Ok(Some(live_feed));
+            }
+
             populate_weighted_target(
                 &body,
                 external_signal,
@@ -124,9 +176,44 @@ impl MarketDataClient {
                 now_epoch_seconds,
                 |period1_epoch_seconds| self.fetch_price_history(symbol, period1_epoch_seconds),
             )?;
+
+            if let (Some(weighted_fair_value_cents), Some(weighted_analyst_count)) = (
+                external_signal.weighted_fair_value_cents,
+                external_signal.weighted_analyst_count,
+            ) {
+                self.cache_weighted_target(
+                    symbol,
+                    CachedWeightedTarget {
+                        fetched_at_epoch_seconds: now_epoch_seconds,
+                        weighted_target: WeightedAnalystTarget {
+                            weighted_fair_value_cents,
+                            scored_firm_count: weighted_analyst_count,
+                        },
+                    },
+                );
+            }
         }
 
         Ok(Some(live_feed))
+    }
+
+    pub fn fetch_historical_candles(
+        &self,
+        symbol: &str,
+        range: ChartRange,
+    ) -> io::Result<Vec<HistoricalCandle>> {
+        let spec = chart_range_spec(range);
+        let response = self
+            .client
+            .get(chart_range_api_url(symbol, spec.range, spec.interval)?)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(io::Error::other)?;
+
+        response
+            .json::<YahooChartResponse>()
+            .map_err(io::Error::other)
+            .map(YahooChartResponse::historical_candles)
     }
 
     fn fetch_price_history(
@@ -153,6 +240,69 @@ impl MarketDataClient {
             .json::<YahooChartResponse>()
             .map_err(io::Error::other)
             .map(YahooChartResponse::price_history)
+    }
+
+    fn apply_cached_weighted_target(
+        &self,
+        symbol: &str,
+        external_signal: &mut ExternalValuationSignal,
+    ) -> bool {
+        let cached_weighted_target = self
+            .weighted_target_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(symbol).cloned());
+
+        if let Some(cached_weighted_target) = cached_weighted_target {
+            external_signal.weighted_fair_value_cents = Some(
+                cached_weighted_target
+                    .weighted_target
+                    .weighted_fair_value_cents,
+            );
+            external_signal.weighted_analyst_count =
+                Some(cached_weighted_target.weighted_target.scored_firm_count);
+            sanitize_weighted_target(external_signal);
+            return true;
+        }
+
+        false
+    }
+
+    fn apply_fresh_cached_weighted_target(
+        &self,
+        symbol: &str,
+        external_signal: &mut ExternalValuationSignal,
+        now_epoch_seconds: u64,
+    ) -> bool {
+        let cached_weighted_target = self
+            .weighted_target_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(symbol).cloned())
+            .filter(|cached_weighted_target| {
+                now_epoch_seconds.saturating_sub(cached_weighted_target.fetched_at_epoch_seconds)
+                    < WEIGHTED_TARGET_CACHE_TTL.as_secs()
+            });
+
+        if let Some(cached_weighted_target) = cached_weighted_target {
+            external_signal.weighted_fair_value_cents = Some(
+                cached_weighted_target
+                    .weighted_target
+                    .weighted_fair_value_cents,
+            );
+            external_signal.weighted_analyst_count =
+                Some(cached_weighted_target.weighted_target.scored_firm_count);
+            sanitize_weighted_target(external_signal);
+            return true;
+        }
+
+        false
+    }
+
+    fn cache_weighted_target(&self, symbol: &str, cached_weighted_target: CachedWeightedTarget) {
+        if let Ok(mut cache) = self.weighted_target_cache.lock() {
+            cache.insert(symbol.to_string(), cached_weighted_target);
+        }
     }
 }
 
@@ -188,6 +338,48 @@ fn chart_api_url(
         .append_pair("interval", "1d")
         .append_pair("includePrePost", "false");
     Ok(url)
+}
+
+fn chart_range_api_url(symbol: &str, range: &str, interval: &str) -> io::Result<Url> {
+    let mut url = Url::parse(CHART_API_URL).map_err(io::Error::other)?;
+    url.path_segments_mut()
+        .map_err(|_| io::Error::other("invalid chart api base url"))?
+        .pop_if_empty()
+        .push(symbol);
+    url.query_pairs_mut()
+        .append_pair("range", range)
+        .append_pair("interval", interval)
+        .append_pair("includePrePost", "false");
+    Ok(url)
+}
+
+fn chart_range_spec(range: ChartRange) -> ChartRangeSpec {
+    match range {
+        ChartRange::Day => ChartRangeSpec {
+            range: "1d",
+            interval: "5m",
+        },
+        ChartRange::Week => ChartRangeSpec {
+            range: "5d",
+            interval: "30m",
+        },
+        ChartRange::Month => ChartRangeSpec {
+            range: "1mo",
+            interval: "1d",
+        },
+        ChartRange::Year => ChartRangeSpec {
+            range: "1y",
+            interval: "1wk",
+        },
+        ChartRange::FiveYears => ChartRangeSpec {
+            range: "5y",
+            interval: "1mo",
+        },
+        ChartRange::TenYears => ChartRangeSpec {
+            range: "10y",
+            interval: "1mo",
+        },
+    }
 }
 
 fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFeed>> {
@@ -316,9 +508,33 @@ where
     ) {
         external_signal.weighted_fair_value_cents = Some(weighted_target.weighted_fair_value_cents);
         external_signal.weighted_analyst_count = Some(weighted_target.scored_firm_count);
+        sanitize_weighted_target(external_signal);
     }
 
     Ok(())
+}
+
+fn sanitize_weighted_target(signal: &mut ExternalValuationSignal) {
+    let Some(mut weighted_fair_value_cents) = signal.weighted_fair_value_cents else {
+        return;
+    };
+
+    if let (Some(low_fair_value_cents), Some(high_fair_value_cents)) =
+        (signal.low_fair_value_cents, signal.high_fair_value_cents)
+    {
+        weighted_fair_value_cents = weighted_fair_value_cents.clamp(
+            low_fair_value_cents.min(high_fair_value_cents),
+            low_fair_value_cents.max(high_fair_value_cents),
+        );
+    }
+
+    if weighted_fair_value_cents <= 0 {
+        signal.weighted_fair_value_cents = None;
+        signal.weighted_analyst_count = None;
+        return;
+    }
+
+    signal.weighted_fair_value_cents = Some(weighted_fair_value_cents);
 }
 
 fn parse_embedded_json_object<T>(body: &str, marker: &str) -> io::Result<Option<T>>
@@ -512,7 +728,11 @@ struct YahooChartIndicators {
 
 #[derive(Deserialize)]
 struct YahooChartQuote {
+    open: Option<Vec<Option<f64>>>,
+    high: Option<Vec<Option<f64>>>,
+    low: Option<Vec<Option<f64>>>,
     close: Option<Vec<Option<f64>>>,
+    volume: Option<Vec<Option<u64>>>,
 }
 
 #[derive(Deserialize)]
@@ -562,6 +782,65 @@ impl YahooChartResponse {
             })
             .collect()
     }
+
+    fn historical_candles(self) -> Vec<HistoricalCandle> {
+        let Some(mut results) = self.chart.result else {
+            return Vec::new();
+        };
+        let Some(result) = results.pop() else {
+            return Vec::new();
+        };
+        let Some(timestamps) = result.timestamp else {
+            return Vec::new();
+        };
+        let Some(mut quotes) = result.indicators.quote else {
+            return Vec::new();
+        };
+        let Some(quote) = quotes.pop() else {
+            return Vec::new();
+        };
+        let (Some(opens), Some(highs), Some(lows), Some(closes)) =
+            (quote.open, quote.high, quote.low, quote.close)
+        else {
+            return Vec::new();
+        };
+        let volumes = quote.volume.unwrap_or_default();
+
+        timestamps
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, epoch_seconds)| {
+                let open_cents = opens
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(dollars_to_cents)?;
+                let high_cents = highs
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(dollars_to_cents)?;
+                let low_cents = lows
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(dollars_to_cents)?;
+                let close_cents = closes
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(dollars_to_cents)?;
+                Some(HistoricalCandle {
+                    epoch_seconds,
+                    open_cents,
+                    high_cents,
+                    low_cents,
+                    close_cents,
+                    volume: volumes.get(index).copied().flatten().unwrap_or(0),
+                })
+            })
+            .collect()
+    }
 }
 
 fn compute_weighted_analyst_target(
@@ -585,6 +864,8 @@ fn compute_weighted_analyst_target(
     let mut weighted_target_sum = 0.0f32;
     let mut total_weight = 0.0f32;
     let mut scored_firm_count = 0u32;
+    let mut min_target_cents: Option<i64> = None;
+    let mut max_target_cents: Option<i64> = None;
 
     for entries in history_by_firm.values_mut() {
         entries.sort_by(|left, right| right.epoch_grade_date.cmp(&left.epoch_grade_date));
@@ -594,6 +875,17 @@ fn compute_weighted_analyst_target(
         else {
             continue;
         };
+
+        min_target_cents = Some(
+            min_target_cents
+                .map(|value| value.min(active_target_cents))
+                .unwrap_or(active_target_cents),
+        );
+        max_target_cents = Some(
+            max_target_cents
+                .map(|value| value.max(active_target_cents))
+                .unwrap_or(active_target_cents),
+        );
 
         let mut samples = Vec::new();
         for entry in entries.iter().copied() {
@@ -647,8 +939,18 @@ fn compute_weighted_analyst_target(
         return None;
     }
 
+    let Some(min_target_cents) = min_target_cents else {
+        return None;
+    };
+    let Some(max_target_cents) = max_target_cents else {
+        return None;
+    };
+
+    let weighted_fair_value_cents = (weighted_target_sum / total_weight).round() as i64;
+
     Some(WeightedAnalystTarget {
-        weighted_fair_value_cents: (weighted_target_sum / total_weight).round() as i64,
+        weighted_fair_value_cents: weighted_fair_value_cents
+            .clamp(min_target_cents, max_target_cents),
         scored_firm_count,
     })
 }
@@ -673,6 +975,8 @@ fn closing_price_cents_on_or_after(
 
 #[cfg(test)]
 mod tests {
+    use super::ChartRange;
+    use super::HistoricalCandle;
     use super::HistoricalPricePoint;
     use super::LiveSymbolFeed;
     use super::YahooChart;
@@ -683,6 +987,8 @@ mod tests {
     use super::YahooChartResult;
     use super::YahooUpgradeDowngradeEntry;
     use super::chart_api_url;
+    use super::chart_range_api_url;
+    use super::chart_range_spec;
     use super::compute_weighted_analyst_target;
     use super::default_live_symbols;
     use super::extract_embedded_json_object;
@@ -812,7 +1118,11 @@ mod tests {
                     timestamp: Some(vec![1_700_000_000, 1_700_000_000 + 86_400]),
                     indicators: YahooChartIndicators {
                         quote: Some(vec![YahooChartQuote {
+                            open: None,
+                            high: None,
+                            low: None,
                             close: Some(vec![Some(100.0), Some(50.0)]),
+                            volume: None,
                         }]),
                         adjclose: Some(vec![YahooChartAdjustedClose {
                             adjclose: Some(vec![Some(100.0), Some(100.0)]),
@@ -829,6 +1139,153 @@ mod tests {
                 .map(|point| point.close_cents)
                 .collect::<Vec<_>>(),
             vec![10_000, 10_000]
+        );
+    }
+
+    #[test]
+    fn chart_ranges_map_to_expected_yahoo_queries() {
+        assert_eq!(
+            (
+                chart_range_spec(ChartRange::Day),
+                chart_range_spec(ChartRange::Week),
+                chart_range_spec(ChartRange::Month),
+                chart_range_spec(ChartRange::Year),
+                chart_range_spec(ChartRange::FiveYears),
+                chart_range_spec(ChartRange::TenYears),
+            ),
+            (
+                super::ChartRangeSpec {
+                    range: "1d",
+                    interval: "5m",
+                },
+                super::ChartRangeSpec {
+                    range: "5d",
+                    interval: "30m",
+                },
+                super::ChartRangeSpec {
+                    range: "1mo",
+                    interval: "1d",
+                },
+                super::ChartRangeSpec {
+                    range: "1y",
+                    interval: "1wk",
+                },
+                super::ChartRangeSpec {
+                    range: "5y",
+                    interval: "1mo",
+                },
+                super::ChartRangeSpec {
+                    range: "10y",
+                    interval: "1mo",
+                },
+            )
+        );
+        assert_eq!(
+            chart_range_api_url("BRK/B?", "1y", "1wk")
+                .expect("range chart url should build")
+                .to_string(),
+            "https://query1.finance.yahoo.com/v8/finance/chart/BRK%2FB%3F?range=1y&interval=1wk&includePrePost=false"
+        );
+    }
+
+    #[test]
+    fn historical_candles_parse_complete_ohlc_rows_and_drop_partial_rows() {
+        let candles = YahooChartResponse {
+            chart: YahooChart {
+                result: Some(vec![YahooChartResult {
+                    timestamp: Some(vec![1, 2, 3]),
+                    indicators: YahooChartIndicators {
+                        quote: Some(vec![YahooChartQuote {
+                            open: Some(vec![Some(100.0), None, Some(120.0)]),
+                            high: Some(vec![Some(110.0), Some(111.0), Some(130.0)]),
+                            low: Some(vec![Some(90.0), Some(91.0), Some(118.0)]),
+                            close: Some(vec![Some(105.0), Some(100.0), Some(125.0)]),
+                            volume: Some(vec![Some(50), None, Some(75)]),
+                        }]),
+                        adjclose: None,
+                    },
+                }]),
+            },
+        }
+        .historical_candles();
+
+        assert_eq!(
+            candles,
+            vec![
+                HistoricalCandle {
+                    epoch_seconds: 1,
+                    open_cents: 10_000,
+                    high_cents: 11_000,
+                    low_cents: 9_000,
+                    close_cents: 10_500,
+                    volume: 50,
+                },
+                HistoricalCandle {
+                    epoch_seconds: 3,
+                    open_cents: 12_000,
+                    high_cents: 13_000,
+                    low_cents: 11_800,
+                    close_cents: 12_500,
+                    volume: 75,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn historical_candles_return_empty_when_quote_arrays_are_missing() {
+        assert_eq!(
+            YahooChartResponse {
+                chart: YahooChart {
+                    result: Some(vec![YahooChartResult {
+                        timestamp: Some(vec![1]),
+                        indicators: YahooChartIndicators {
+                            quote: Some(vec![YahooChartQuote {
+                                open: None,
+                                high: None,
+                                low: None,
+                                close: Some(vec![Some(1.0)]),
+                                volume: Some(vec![Some(1)]),
+                            }]),
+                            adjclose: None,
+                        },
+                    }]),
+                },
+            }
+            .historical_candles(),
+            Vec::<HistoricalCandle>::new()
+        );
+    }
+
+    #[test]
+    fn historical_candles_default_missing_volume_to_zero() {
+        assert_eq!(
+            YahooChartResponse {
+                chart: YahooChart {
+                    result: Some(vec![YahooChartResult {
+                        timestamp: Some(vec![1]),
+                        indicators: YahooChartIndicators {
+                            quote: Some(vec![YahooChartQuote {
+                                open: Some(vec![Some(10.0)]),
+                                high: Some(vec![Some(12.0)]),
+                                low: Some(vec![Some(9.0)]),
+                                close: Some(vec![Some(11.0)]),
+                                volume: None,
+                            }]),
+                            adjclose: None,
+                        },
+                    }]),
+                },
+            }
+            .historical_candles(),
+            vec![HistoricalCandle {
+                epoch_seconds: 1,
+                open_cents: 1_000,
+                high_cents: 1_200,
+                low_cents: 900,
+                close_cents: 1_100,
+                volume: 0,
+            }]
         );
     }
 
@@ -908,22 +1365,11 @@ mod tests {
         );
 
         assert_eq!(
-            weighted_target
-                .as_ref()
-                .map(|target| target.scored_firm_count),
-            Some(2)
-        );
-        assert!(
-            weighted_target
-                .as_ref()
-                .map(|target| target.weighted_fair_value_cents > 12_000)
-                .unwrap_or(false)
-        );
-        assert!(
-            weighted_target
-                .as_ref()
-                .map(|target| target.weighted_fair_value_cents < 15_000)
-                .unwrap_or(false)
+            weighted_target.as_ref().map(|target| (
+                target.scored_firm_count,
+                (12_000..=18_000).contains(&target.weighted_fair_value_cents),
+            )),
+            Some((2, true))
         );
     }
 

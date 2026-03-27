@@ -11,6 +11,7 @@ const ANALYST_DIRECTION_ACCURACY_WEIGHT: f32 = 0.35;
 const ANALYST_ERROR_SCALE_BPS: f32 = 1_000.0;
 const ANALYST_RECENCY_DECAY_DAYS: f32 = 180.0;
 const ANALYST_SAMPLE_SIZE_REGULARIZATION: f32 = 3.0;
+const MAX_PRICE_HISTORY_PER_SYMBOL: usize = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfidenceBand {
@@ -173,6 +174,12 @@ pub struct TapeEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PriceHistoryPoint {
+    pub sequence: usize,
+    pub market_price_cents: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolDetail {
     pub symbol: String,
     pub profitable: bool,
@@ -228,6 +235,7 @@ struct SymbolState {
     external_signal: Option<ExternalValuationSignal>,
     last_sequence: usize,
     update_count: usize,
+    price_history: VecDeque<PriceHistoryPoint>,
 }
 
 pub struct TerminalState {
@@ -275,6 +283,13 @@ impl TerminalState {
         state.snapshot = Some(snapshot.clone());
         state.last_sequence = sequence;
         state.update_count += 1;
+        if state.price_history.len() == MAX_PRICE_HISTORY_PER_SYMBOL {
+            state.price_history.pop_front();
+        }
+        state.price_history.push_back(PriceHistoryPoint {
+            sequence,
+            market_price_cents: snapshot.market_price_cents,
+        });
         self.total_events += 1;
         self.journal.push(JournalEntry {
             sequence,
@@ -325,6 +340,15 @@ impl TerminalState {
             .get(symbol)
             .and_then(|state| state.snapshot.as_ref())
             .and_then(|snapshot| snapshot.company_name.as_deref())
+    }
+
+    pub fn price_history(&self, symbol: &str, limit: usize) -> Vec<PriceHistoryPoint> {
+        let Some(state) = self.symbols.get(symbol) else {
+            return Vec::new();
+        };
+
+        let skip = state.price_history.len().saturating_sub(limit);
+        state.price_history.iter().skip(skip).cloned().collect()
     }
 
     pub fn top_rows(&self, limit: usize) -> Vec<CandidateRow> {
@@ -597,7 +621,7 @@ impl TerminalState {
         let weighted_external_signal_fair_value_cents = state
             .external_signal
             .as_ref()
-            .and_then(|signal| signal.weighted_fair_value_cents);
+            .and_then(clamped_weighted_fair_value);
         let weighted_analyst_count = state
             .external_signal
             .as_ref()
@@ -1007,11 +1031,29 @@ fn require_positive_i64(value: i64, field_name: &str) -> Result<i64, String> {
     Err(format!("{field_name} must be positive"))
 }
 
-fn sanitize_external_signal(signal: &mut ExternalValuationSignal) {
-    if matches!(signal.weighted_fair_value_cents, Some(value) if value <= 0) {
+fn clamped_weighted_fair_value(signal: &ExternalValuationSignal) -> Option<i64> {
+    let mut weighted_fair_value_cents = signal.weighted_fair_value_cents?;
+
+    if let (Some(low_fair_value_cents), Some(high_fair_value_cents)) =
+        (signal.low_fair_value_cents, signal.high_fair_value_cents)
+    {
+        weighted_fair_value_cents = weighted_fair_value_cents.clamp(
+            low_fair_value_cents.min(high_fair_value_cents),
+            low_fair_value_cents.max(high_fair_value_cents),
+        );
+    }
+
+    (weighted_fair_value_cents > 0).then_some(weighted_fair_value_cents)
+}
+
+pub(crate) fn sanitize_external_signal(signal: &mut ExternalValuationSignal) {
+    let Some(weighted_fair_value_cents) = clamped_weighted_fair_value(signal) else {
         signal.weighted_fair_value_cents = None;
         signal.weighted_analyst_count = None;
-    }
+        return;
+    };
+
+    signal.weighted_fair_value_cents = Some(weighted_fair_value_cents);
 }
 
 pub fn checked_gap_bps(market_price_cents: i64, fair_value_cents: i64) -> Option<i32> {
@@ -1052,9 +1094,14 @@ mod tests {
     use super::AnalystOutcomeSample;
     use super::AnalystScore;
     use super::AnalystScoreScope;
+    use super::ExternalValuationSignal;
+    use super::MarketSnapshot;
+    use super::SymbolState;
+    use super::TerminalState;
     use super::build_analyst_score;
     use super::gap_bps;
     use super::select_analyst_score;
+    use std::collections::VecDeque;
 
     fn analyst_score(value: f32, sample_count: u32) -> AnalystScore {
         AnalystScore {
@@ -1188,6 +1235,92 @@ mod tests {
                     value: 0.61,
                     sample_count: 18,
                 }
+            )
+        );
+    }
+
+    #[test]
+    fn clamps_weighted_target_to_reported_forecast_band() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+
+        state.symbols.insert(
+            "SMCI".to_string(),
+            SymbolState {
+                snapshot: Some(MarketSnapshot {
+                    symbol: "SMCI".to_string(),
+                    company_name: None,
+                    profitable: true,
+                    market_price_cents: 17_270,
+                    intrinsic_value_cents: 26_923,
+                }),
+                external_signal: Some(ExternalValuationSignal {
+                    symbol: "SMCI".to_string(),
+                    fair_value_cents: 26_923,
+                    age_seconds: 6,
+                    low_fair_value_cents: Some(18_500),
+                    high_fair_value_cents: Some(32_000),
+                    analyst_opinion_count: Some(42),
+                    recommendation_mean_hundredths: Some(185),
+                    strong_buy_count: Some(20),
+                    buy_count: Some(10),
+                    hold_count: Some(8),
+                    sell_count: Some(3),
+                    strong_sell_count: Some(1),
+                    weighted_fair_value_cents: Some(40_000),
+                    weighted_analyst_count: Some(12),
+                }),
+                last_sequence: 1,
+                update_count: 1,
+                price_history: VecDeque::new(),
+            },
+        );
+
+        state.symbols.insert(
+            "LOW".to_string(),
+            SymbolState {
+                snapshot: Some(MarketSnapshot {
+                    symbol: "LOW".to_string(),
+                    company_name: None,
+                    profitable: true,
+                    market_price_cents: 17_270,
+                    intrinsic_value_cents: 26_923,
+                }),
+                external_signal: Some(ExternalValuationSignal {
+                    symbol: "LOW".to_string(),
+                    fair_value_cents: 26_923,
+                    age_seconds: 6,
+                    low_fair_value_cents: Some(18_500),
+                    high_fair_value_cents: Some(32_000),
+                    analyst_opinion_count: Some(42),
+                    recommendation_mean_hundredths: Some(185),
+                    strong_buy_count: Some(20),
+                    buy_count: Some(10),
+                    hold_count: Some(8),
+                    sell_count: Some(3),
+                    strong_sell_count: Some(1),
+                    weighted_fair_value_cents: Some(10_000),
+                    weighted_analyst_count: Some(12),
+                }),
+                last_sequence: 1,
+                update_count: 1,
+                price_history: VecDeque::new(),
+            },
+        );
+
+        assert_eq!(
+            (
+                state.detail("SMCI").map(|detail| (
+                    detail.weighted_external_signal_fair_value_cents,
+                    detail.weighted_analyst_count,
+                )),
+                state.detail("LOW").map(|detail| (
+                    detail.weighted_external_signal_fair_value_cents,
+                    detail.weighted_analyst_count,
+                )),
+            ),
+            (
+                Some((Some(32_000), Some(12))),
+                Some((Some(18_500), Some(12))),
             )
         );
     }
