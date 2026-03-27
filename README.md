@@ -6,60 +6,33 @@ This project is provided for informational and educational purposes only. It is 
 
 Market data, analyst targets, ratings, and derived signals may be delayed, incomplete, inaccurate, or unavailable. You are solely responsible for any decisions or actions you take based on this software or its output. Always verify information independently and consult a qualified professional where appropriate.
 
-Rust terminal workstation for monitoring profitable companies trading at a discount to free public fair-value estimates, using Yahoo Finance public quote, analyst-target, and historical chart data in live mode.
+## Overview
 
-The current product build is a fast terminal application with:
+Discount Screener Workstation is a Rust terminal application for monitoring profitable companies trading below free public fair-value estimates, using Yahoo Finance public quote data, analyst-target data, and historical chart data.
 
-- ranked candidate view
-- low-noise symbol detail view
-- real Yahoo historical candle charts in detail view
-- day, week, month, year, 5-year, and 10-year chart ranges
-- EMA 20/50/200 overlays, volume, and MACD panes
-- alert stream
-- recent tape
-- operational issue rail and health banner
-- in-terminal issue log viewer
-- durable event journal
-- replay from disk
-- persistent watchlists
-- live row filtering, in-terminal symbol tracking, and watchlist filtering
+Current product shape:
 
-## What It Does
+- ranked live candidate table
+- low-noise ticker detail view
+- real Yahoo historical OHLC candles in detail view
+- chart ranges for `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`
+- `EMA20`, `EMA50`, `EMA200`, volume, and MACD panes
+- issue rail, popup issue notices, and issue log viewer
+- watchlists and watchlist-only filtering
+- durable journal persistence and replay mode
+- in-terminal symbol tracking and row filtering
 
-The workstation ingests free public market snapshots and analyst target signals, computes a discount gap against the provider fair-value estimate, and ranks symbols by:
+The main table is capped for terminal readability. The ticker detail screen still lets you navigate the full filtered ticker set.
 
-1. qualification state
-2. gap size
-3. confidence band
-4. symbol name as a stable tie-breaker
+## Screenshots
 
-Qualification is snapshot-first:
+Main ranked view with health status, candidate ranking, alerts, recent tape, and the selected-row summary:
 
-- `Qualified` means the symbol has positive trailing EPS and its live fair-value gap meets the configured threshold.
-- secondary analyst target signals never create qualification on their own
-- secondary analyst target signals only affect confidence
+![Main ranked view](docs/screenshots/main.png)
 
-## Current Product Shape
+Ticker detail view with historical candles, EMA overlays, volume, MACD, valuation map, consensus, and recent context:
 
-This repository ships a terminal workstation with a best-effort free public market-data adapter. It is not an exchange-direct or broker-connected platform.
-
-Included now:
-
-- in-process Rust state engine
-- free public Yahoo Finance live data adapter
-- Yahoo Finance historical OHLC chart adapter for ticker detail
-- explainable qualification state
-- replayable journal format
-- disk-backed journal persistence
-- disk-backed watchlist persistence
-- interactive terminal workflow
-
-Not included yet:
-
-- paid or authenticated exchange and broker data adapters
-- broker or execution connectivity
-- networked API service layer
-- multi-user storage and auth
+![Ticker detail view](docs/screenshots/ticker-details.png)
 
 ## Build And Run
 
@@ -69,11 +42,11 @@ From the project root:
 cargo run
 ```
 
-Live mode requires outbound HTTPS access to Yahoo Finance public quote pages.
+Live mode requires outbound HTTPS access to Yahoo Finance public endpoints.
 
-By default it polls the current S&P 500 constituents.
+By default the workstation starts with the built-in 503-symbol live universe.
 
-Run with a custom symbol list:
+Use a custom initial symbol list:
 
 ```bash
 cargo run -- --symbols AAPL,MSFT,NVDA
@@ -87,9 +60,9 @@ Smoke mode:
 cargo run -- --smoke
 ```
 
-Smoke mode remains a static verification path and does not hit the network.
+Smoke mode is a static verification path and does not hit the network.
 
-Run with a persistent journal file:
+Run with journal persistence:
 
 ```bash
 cargo run -- --journal-file data/session.journal
@@ -107,75 +80,64 @@ Replay a prior session:
 cargo run -- --replay-file data/session.journal --watchlist-file data/watchlist.txt
 ```
 
-## Screenshots
-
-Main ranked view with health status, candidate ranking, alerts, and recent tape:
-
-![Main ranked view](docs/screenshots/main.png)
-
-Ticker detail view with Yahoo historical candles, EMA overlays, volume, MACD, valuation context, and analyst consensus:
-
-![Ticker detail view](docs/screenshots/ticker-details.png)
+Replay mode is journal-backed for workstation state. The ticker detail screen can still fetch Yahoo historical chart data on demand.
 
 ## Keyboard Controls
 
+Main view:
+
 - `j` or Down: move selection down
 - `k` or Up: move selection up
-- `d` or `Enter`: open the detailed screen for the selected ticker
+- `d` or `Enter`: open ticker detail for the selected row
 - `w`: toggle watchlist on the selected symbol
-- `Space`: pause or resume live application of feed updates
-- `/`: enter row-filter mode for visible symbols
-- `s`: add one or more live symbols from inside the terminal UI
-- `l`: open the operational issue log viewer
+- `Space`: pause or resume live feed application
+- `/`: enter row-filter mode
+- `s`: add one or more live symbols from inside the UI
+- `l`: open the issue log viewer
+- `f`: toggle watchlist-only filtering
 - `Enter`: apply the active filter or symbol input buffer
-- `Backspace`: go back in every screen and mode; in filter and symbol entry it deletes text until the buffer is empty, then goes back
-- `f`: toggle watchlist-only filter
+- `Backspace`: go back in every screen and mode; in text entry it deletes characters until the buffer is empty, then goes back
 - `Esc`: clear the active filter in normal mode, or leave the active input mode
 - `q`: quit from normal mode
 - `Ctrl+C`: quit from any mode
 
-Ticker detail screen:
+Ticker detail view:
 
-- `j` or `k`: move to the previous or next filtered ticker
-- `1` through `6`: jump chart range between day, week, month, year, 5-year, and 10-year history
+- `j` or `k`: move to the previous or next ticker in the full filtered set
+- `1` through `6`: jump chart range between `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`
 - `[` or `]`: cycle chart range backward or forward
-- `w`: toggle watchlist for the active ticker
-- `l`: open the operational issue log
-- `Backspace`, `d`, `Enter`, or `Esc`: close the detail screen
-- shows real Yahoo OHLC candles with EMA 20/50/200 overlays
-- shows separate volume and MACD panes
-- shows mean, median, low, and high analyst targets
-- shows analyst count, recommendation mean, and the strong-buy to strong-sell breakdown
-- adapts chart density to terminal size and available history
+- `w`: toggle watchlist on the active ticker
+- `l`: open the issue log
+- `Backspace`, `d`, `Enter`, or `Esc`: close the detail view
 
-The main view also includes:
-
-- a health banner showing whether the workstation is healthy, degraded, or down
-- an issue rail for the most important active operational issue
-- a temporary popup-style issue banner for new warnings and errors
-
-## File Formats
+## Journal And Watchlist Files
 
 Journal file:
 
 - one event per line
-- snapshot line format:
+- snapshot lines support 6 or 7 fields
+- external valuation lines support 5, 14, or 16 fields
+
+Snapshot line format:
 
 ```text
 S|sequence|symbol|profitable_flag|market_price_cents|intrinsic_value_cents
+S|sequence|symbol|profitable_flag|market_price_cents|intrinsic_value_cents|company_name
 ```
 
-- external valuation line format:
+External valuation line formats:
 
 ```text
 E|sequence|symbol|fair_value_cents|age_seconds
+E|sequence|symbol|fair_value_cents|age_seconds|low_fair_value_cents|high_fair_value_cents|analyst_opinion_count|recommendation_mean_hundredths|strong_buy_count|buy_count|hold_count|sell_count|strong_sell_count
+E|sequence|symbol|fair_value_cents|age_seconds|low_fair_value_cents|high_fair_value_cents|analyst_opinion_count|recommendation_mean_hundredths|strong_buy_count|buy_count|hold_count|sell_count|strong_sell_count|weighted_fair_value_cents|weighted_analyst_count
 ```
 
 Watchlist file:
 
 - one symbol per line
 
-## Test And Verification
+## Verification
 
 Run all tests:
 
@@ -192,5 +154,5 @@ cargo fmt
 ## Documentation
 
 - [Quick Start](docs/QUICK_START.md)
-- [User Manual](docs/USER_MANUAL.md)
 - [Screen Guide](docs/SCREENS.md)
+- [User Manual](docs/USER_MANUAL.md)

@@ -2,237 +2,162 @@
 
 This document shows the current terminal layouts and explains what each area means.
 
-The layouts below are representative. Exact spacing depends on terminal width and height.
+The layouts are viewport-aware. Exact spacing, pane height, and how much secondary text is shown depend on terminal width and height.
 
-## Screen 1: Live Session
+## Screen 1: Live Main View
+
+![Main ranked view](screenshots/main.png)
+
+### What You Are Seeing
+
+1. Header: main controls for the live session
+2. Status line: mode, source, feed state, tracked symbols, loaded symbols, unavailable symbols, applied events, pending backlog, and update rate
+3. Health banner: overall operational state
+4. Issue rail or popup: the most important current issue, or a temporary warning/error popup
+5. Tracked symbols line: current live universe
+6. Filter line: current query, watchlist-only mode, input mode, and selected symbol
+7. Prompt line: current input hint or status message
+8. Top candidates table: ranked rows, capped in the main screen for readability
+9. Selected detail summary: compact explanation for the highlighted row
+10. Alerts and recent tape: recent transitions and latest event-derived state changes
+
+### Current Main-View Notes
+
+- `Unavailable` is the tracked symbol count that is not currently loaded.
+- The main table is intentionally capped. Open ticker detail to navigate the full filtered set.
+- `Upside` is the table percentage column shown in the current UI.
+- `w` toggles watchlist membership and `f` toggles watchlist-only mode.
+- `Space` pauses live application of feed updates without leaving the main screen.
+
+Representative current header and status strings:
 
 ```text
 DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
-Mode: live  Source: yahoo  Feed: running  Tracked: 8  Loaded: 8  Applied: 48  Pending: 0  Rate: 1/s
-Health: healthy  Active issues: 0  Resolved: 0  Press l for issue log
-Issue rail: no active operational issues.
-Tracked symbols: AAPL, MSFT, NVDA, AMZN, META, GOOG, TSLA, AMD
-Filter: query='' watchlist_only=off input_mode=normal selected=NVDA
-Use / to filter visible rows, s to track a symbol, l to open issues, Backspace to go back, or Ctrl+C to quit from any mode.
-
-TOP CANDIDATES
-Idx  W  Symbol  Price      Fair       Gap      Confidence
->  0  *  NVDA     $890.00    $980.00   9.18%   provisional
-   1     AAPL     $190.00    $205.00   7.31%   high
-   2     TSLA     $229.00    $246.00   6.91%   low
-
-DETAIL
-Symbol: NVDA
-Watched: yes
-Qualification: qualified
-Price: $890.00
-Fair value: $980.00
-Gap: 9.18%
-Confidence: provisional
-External: missing
-Seq: 2451
-Updates: 307
-
-ALERTS
-NVDA   kind=entered-qualified seq=2442
-AAPL   kind=confidence-upgraded seq=2437
-
-RECENT TAPE
-NVDA   gap=9.18% qualified=yes confidence=provisional
-AAPL   gap=7.31% qualified=yes confidence=high
+Mode: live  Source: yahoo  Feed: running  Tracked: 503  Loaded: 434  Unavailable: 69  Applied: 71426  Pending: 0  Rate: 4/s
+Health: degraded  Active issues: 1  Resolved: 0  Press l for issue log
 ```
-
-### Callouts
-
-1. Header: command legend for the interactive session
-2. Status line: mode, feed state, tracked universe size, loaded symbol count, pending backlog, and update rate
-3. Health banner: overall operational state
-4. Issue rail: most important active problem, if any
-5. Tracked symbols line: the current live universe
-6. Filter line: active query, watchlist-only mode, input mode, and selected symbol
-7. Prompt line: current input help or status message
-8. Candidate grid: ranked symbol list
-9. Detail panel: explainable state for the selected symbol
-10. Alert panel and recent tape: transition history and latest event-derived snapshots
 
 ## Screen 2: Filter Mode
 
+Representative filter prompt:
+
 ```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
-Mode: live  Source: yahoo  Feed: running  Tracked: 8  Loaded: 8  Applied: 54  Pending: 0  Rate: 1/s
-Health: healthy  Active issues: 0  Resolved: 0  Press l for issue log
-Issue rail: no active operational issues.
-Tracked symbols: AAPL, MSFT, NVDA, AMZN, META, GOOG, TSLA, AMD
 Filter: query='NV' watchlist_only=off input_mode=filter selected=NVDA
 Filter rows: 'NV'  Enter apply  Backspace delete or go back  Esc cancel  Ctrl+C quit
-
-TOP CANDIDATES
-Idx  W  Symbol  Price      Fair       Gap      Confidence
->  0     NVDA     $892.10    $980.00   8.96%   provisional
 ```
 
-### How To Read It
+### Notes
 
-- Filter mode is shown by `input_mode=filter`.
-- The query buffer is displayed immediately in the filter line.
-- Press `Enter` to apply the query.
+- `input_mode=filter` means the row filter is active.
+- Matching is case-insensitive against visible symbol text.
 - Press `Backspace` on an empty buffer to leave filter mode.
-- `Esc` still leaves filter mode.
 
-## Screen 3: Symbol Lookup Mode
+## Screen 3: Symbol Entry Mode
+
+Representative symbol-entry prompt:
 
 ```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
-Mode: live  Source: yahoo  Feed: running  Tracked: 9  Loaded: 8  Applied: 56  Pending: 0  Rate: 1/s
-Health: degraded  Active issues: 1  Resolved: 0  Press l for issue log
-Popup: [warn][feed] Live source partially degraded. Loaded 8 of 9 tracked symbols.
-Tracked symbols: AAPL, MSFT, NVDA, AMZN, META, GOOG, TSLA, AMD, AVGO
 Filter: query='AVGO' watchlist_only=off input_mode=symbol selected=AVGO
 Track symbol: 'AVGO'  Enter add  Backspace delete or go back  Esc cancel  Ctrl+C quit
 ```
 
-### How To Read It
+### Notes
 
-- Symbol lookup mode is shown by `input_mode=symbol`.
+- Symbol entry is available in live mode.
 - Enter one ticker or a comma-separated list.
-- After applying, the new symbol is added to the tracked live universe and focused in the table filter.
+- After applying, the new symbol is added to the tracked live universe and focused in the filter.
 
 ## Screen 4: Ticker Detail View
 
+![Ticker detail view](screenshots/ticker-details.png)
+
+### What You Are Seeing
+
+1. Header: detail controls including chart-range switching
+2. Identity line: symbol, position inside the full filtered set, watchlist state, active chart range
+3. Summary lines: price, mean, median, weighted target, qualification, confidence, external support, threshold, and discount
+4. Price chart pane: Yahoo historical OHLC candles with `EMA20`, `EMA50`, and `EMA200`
+5. Volume pane: volume bars for the active visible range
+6. MACD pane: MACD line, signal line, and histogram
+7. Valuation map: price position versus low, weighted, mean, median, and high target levels
+8. Consensus: analyst breadth, recommendation mean, and rating breakdown
+9. Evidence: compact explanation of why the ticker is qualified and how external support affects confidence
+10. Recent context: recent alerts or qualifying tape for the active ticker
+
+### Current Detail-View Notes
+
+- Use `1` through `6` to jump between `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`.
+- Use `[` and `]` to cycle chart ranges.
+- The chart uses real Yahoo historical candles, not the earlier session-only synthetic price strip.
+- The layout is price-first. On shorter terminals, recent context is dropped first, then secondary sections are compacted before the chart is heavily reduced.
+- Detail navigation uses the full filtered ticker set, not just the main table cap.
+
+Representative current detail header:
+
 ```text
-TICKER DETAIL  |  j/k next ticker  |  w watch  |  l logs  |  Backspace or d or Enter close  |  Ctrl+C quit
-Symbol: NVDA  Position: 1/8 filtered tickers  Watched: no
-Price: $172.70  Mean target: $269.23  Median target: $265.00
-Discount to mean: $96.53  Gap to mean: 35.85%
-Qualification: qualified  Confidence: high  External: supportive  Profitable: yes
-Last sequence: 22  Updates: 4  Visible filter: query='' watchlist_only=off
-
-ANALYST CONSENSUS
-Targets: mean $269.23  median $265.00  low $185.00  high $320.00
-Target range width: $135.00 = $320.00 - $185.00
-Analysts: 42  Recommendation mean: 1.85 (1.00=strong buy, 5.00=strong sell)
-Ratings: strong buy 20  buy 10  hold 8  sell 3  strong sell 1
-
-QUALIFICATION
-Profitability gate: actual=yes  required=yes
-Internal gap: actual=35.85%  required>=20.00%
-Internal discount: $96.53 = $269.23 - $172.70
-Result: qualified because profitable=yes and 35.85% >= 20.00%.
-
-CONFIDENCE
-External status: supportive
-External fair value: $265.00  external gap: 34.83%  support threshold: >=20.00%
-External signal age: 6s  freshness limit: <=30s
-Result: high because internal qualification is qualified and external status is supportive.
-
-RECENT SYMBOL ALERTS
-kind=confidence-upgraded seq=6
-kind=entered-qualified seq=5
-
-RECENT SYMBOL TAPE
-gap=35.85% qualified=yes confidence=high
-gap=35.85% qualified=yes confidence=provisional
+TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  w watch  |  l logs  |  Backspace or d or Enter close  |  Ctrl+C quit
 ```
 
-### How To Read It
-
-- The detail view is opened with `d` or `Enter` from the main table.
-- `j` and `k` move to the previous or next ticker inside the current filtered set.
-- The detail view keeps the operator focused on one symbol while exposing target range, analyst breadth, and recommendation distribution, not just a single aggregate fair value.
-
 ## Screen 5: Issue Log Viewer
+
+Representative current issue-log layout:
 
 ```text
 ISSUE LOG  |  j/k move  |  c clear resolved  |  Backspace or l close  |  Ctrl+C quit
 Health: degraded  Active: 1  Total: 3  Resolved: 2
 Idx  State     Sev      Source       Count  Title
 >  0  active    warn     feed             3  Live source partially degraded
-   1  resolved  error    persistence      1  Journal persistence failed
-   2  resolved  warn     persistence      2  Watchlist persistence failed
-
-DETAIL
-Title: Live source partially degraded  Source: feed  Severity: warn  State: active
-Occurrences: 3  First seen: #5  Last seen: #12
-Detail: Loaded 6 of 8 tracked symbols. 2 symbols returned incomplete coverage.
 ```
 
-### How To Read It
+### Notes
 
-- The issue log viewer is opened with `l`.
-- Active issues appear before resolved ones.
-- The detail section shows the full current issue message and repeat count.
-- Press `c` to remove resolved issues after review.
+- Active issues appear before resolved issues.
+- The detail panel below the table shows full current issue text and occurrence counts.
+- Source and persistence problems surface here even if they were first shown as a popup or issue rail message.
 
 ## Screen 6: Watchlist-Only Mode
 
-```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
-Mode: live  Source: yahoo  Feed: running  Tracked: 8  Loaded: 8  Applied: 61  Pending: 0  Rate: 1/s
-Health: healthy  Active issues: 0  Resolved: 0  Press l for issue log
-Issue rail: no active operational issues.
-Tracked symbols: AAPL, MSFT, NVDA, AMZN, META, GOOG, TSLA, AMD
-Filter: query='' watchlist_only=on input_mode=normal selected=AAPL
+Representative current watchlist filter state:
 
-TOP CANDIDATES
-Idx  W  Symbol  Price      Fair       Gap      Confidence
->  0  *  AAPL     $191.20    $205.00   6.73%   high
-   1  *  NVDA     $891.50    $980.00   9.03%   provisional
+```text
+Filter: query='' watchlist_only=on input_mode=normal selected=AAPL
 ```
 
-### How To Read It
+### Notes
 
 - The `W` column marks watched symbols with `*`.
-- `watchlist_only=on` means only watched symbols are shown.
-- Press `w` on the selected row to add or remove it from the watchlist.
+- `watchlist_only=on` means only watched symbols are shown in the main ranked table.
+- Watchlist toggling is available in both the main view and ticker detail view.
 
 ## Screen 7: Replay Session
 
+Representative replay status:
+
 ```text
 DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit
-Mode: replay  Source: journal  Feed: running  Symbols: 2  Applied: 3  Pending: 0  Rate: 0/s
-Health: healthy  Active issues: 0  Resolved: 0  Press l for issue log
-Issue rail: no active operational issues.
+Mode: replay  Source: journal  Feed: running  Symbols: 138  Applied: 23370  Pending: 0  Rate: 0/s
 Tracked symbols: replay session
-Filter: query='' watchlist_only=off input_mode=normal selected=ALFA
-Use / to filter visible rows, l to open issues, Backspace to go back, or Ctrl+C to quit from any mode.
-
-TOP CANDIDATES
-Idx  W  Symbol  Price      Fair       Gap      Confidence
->  0     ALFA     $70.00     $100.00  30.00%   provisional
-   1     BETA     $80.00     $100.00  20.00%   high
-
-ALERTS
-BETA   kind=confidence-upgraded seq=3
-BETA   kind=entered-qualified seq=1
 ```
 
-### How To Read It
+### Notes
 
 - Replay mode does not start the live feed.
-- The update rate is normally zero unless you add replay stepping later.
-- This mode is for deterministic review of persisted journal history.
+- The main state is restored from journal history.
+- Ticker detail still uses on-demand Yahoo historical chart fetches when you open a symbol.
 
 ## Screen 8: Paused Live Session
 
-```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
-Mode: live  Source: yahoo  Feed: paused  Tracked: 8  Loaded: 8  Applied: 88  Pending: 8  Rate: 0/s
-Health: healthy  Active issues: 0  Resolved: 0  Press l for issue log
-Issue rail: no active operational issues.
-Tracked symbols: AAPL, MSFT, NVDA, AMZN, META, GOOG, TSLA, AMD
-Filter: query='' watchlist_only=off input_mode=normal selected=MSFT
+Representative paused status:
 
-TOP CANDIDATES
-Idx  W  Symbol  Price      Fair       Gap      Confidence
->  0     MSFT     $405.20    $430.00   5.76%   provisional
-   1     AAPL     $191.10    $205.00   6.78%   high
+```text
+Mode: live  Source: yahoo  Feed: paused  Tracked: 503  Loaded: 434  Unavailable: 69  Applied: 71426  Pending: 12  Rate: 0/s
 ```
 
-### How To Read It
+### Notes
 
-- `Feed: paused` means incoming feed events are being buffered, not applied.
-- `Pending` shows how many events are queued for later application.
-- This is the safe mode for reviewing one symbol without the table constantly reshuffling.
+- `Feed: paused` means incoming feed events are being buffered instead of applied.
+- `Pending` shows the backlog waiting to be applied once you resume.
+- This is the safe mode for inspecting one symbol without the table constantly reshuffling.
 
 ## Screen 9: Smoke Output
 
@@ -251,10 +176,11 @@ alert=ACME kind=confidence-upgraded seq=2
 - validating build output
 - confirming journal and alert logic still behave as expected
 
-## Screen Reading Notes
+## Reading Notes
 
-- `Price` and `Fair` are displayed in dollars, but the engine stores integer cents.
-- `Gap` is displayed as a percentage, but internally uses basis points.
-- `Confidence` depends on both live qualification and external signal state.
-- `Seq` is the last event sequence applied to the selected symbol.
-- `Updates` is the number of times the selected symbol state has been touched.
+- Prices and target values are displayed in dollars, but the engine stores integer cents.
+- The main table shows `Upside` as a percentage derived from price versus fair value.
+- Qualification is internal and snapshot-first.
+- Confidence is influenced by external support state.
+- `Sequence` is the last event sequence applied to the selected symbol.
+- `Updates` is the number of times the selected symbol state has been touched in the session.

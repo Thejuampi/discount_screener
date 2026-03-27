@@ -2,7 +2,7 @@
 
 ## Goal
 
-Get the workstation running in under five minutes.
+Get the workstation running in a few minutes and know the minimum controls needed to use it.
 
 ## Disclaimer
 
@@ -12,8 +12,7 @@ This tool is for informational and educational use only. It is not trading or in
 
 - Rust installed
 - a terminal that supports alternate screen mode
-- project dependencies resolved by Cargo
-- outbound HTTPS access to Yahoo Finance public quote pages
+- outbound HTTPS access to Yahoo Finance public endpoints for live mode
 
 ## 1. Verify The Build
 
@@ -43,58 +42,44 @@ Expected result:
 cargo run
 ```
 
-This starts the interactive terminal with live Yahoo Finance public market data for the default symbol set.
+This starts the interactive terminal with the built-in 503-symbol live universe.
 
-The CLI symbol list is only the starting universe. In live mode you can add more symbols from inside the terminal by pressing `s`.
-
-Default symbols:
-
-- `AAPL`
-- `MSFT`
-- `NVDA`
-- `AMZN`
-- `META`
-- `GOOG`
-- `TSLA`
-- `AMD`
-- `CAT`
-- `SPOT`
-- `INTC`
-- `MSTR`
-- `MELI`
-- `UBER`
-- `FISV`
-- `NFLX`
-- `LLY`
-- `WMT`
-- `TMUS`
-- `T`
-- `NKE`
-- `XOM`
-- `TIGR`
-
-To seed a custom initial symbol set:
+Use a custom initial symbol set:
 
 ```bash
 cargo run -- --symbols AAPL,MSFT,NVDA
 ```
 
+The CLI list only seeds the initial live universe. During a live session you can add more symbols from inside the terminal with `s`.
+
 ## 4. Learn The Minimum Controls
+
+Main view:
 
 - `j` or Down: move down
 - `k` or Up: move up
-- `d` or `Enter`: open the detailed screen for the selected ticker
+- `d` or `Enter`: open ticker detail
 - `w`: toggle watchlist on the selected symbol
-- `Space`: pause or resume live updates while keeping the current screen stable
-- `/`: filter the visible rows by symbol text
-- `s`: add one or more live symbols from the terminal UI
-- `l`: open the operational issue log viewer
-- `Enter`: apply the active filter or symbol input
-- `Backspace`: go back in every mode; in text entry it deletes characters until the buffer is empty, then goes back
-- `f`: show watched symbols only
+- `Space`: pause or resume live updates
+- `/`: filter the visible rows
+- `s`: add live symbols from the terminal UI
+- `l`: open the issue log viewer
+- `f`: toggle watchlist-only mode
+- `Backspace`: go back; in text entry it deletes characters until the buffer is empty, then goes back
 - `Esc`: clear filters or leave the active input mode
 - `q`: quit from normal mode
 - `Ctrl+C`: quit from any mode
+
+Ticker detail view:
+
+- `j` or `k`: move through the full filtered ticker set
+- `1` through `6`: switch chart range between `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`
+- `[` or `]`: cycle chart range backward or forward
+- `w`: toggle watchlist for the active ticker
+- `l`: open the issue log
+- `Backspace`, `d`, `Enter`, or `Esc`: close the detail view
+
+The detail view is chart-first. It shows real Yahoo OHLC candles plus `EMA20`, `EMA50`, `EMA200`, volume, MACD, valuation context, and analyst consensus.
 
 ## 5. Run With Persistence
 
@@ -106,8 +91,9 @@ cargo run -- --journal-file data/session.journal --watchlist-file data/watchlist
 
 Behavior:
 
-- existing journal file is replayed at startup if present
-- new events are appended during the session
+- an existing journal file is replayed at startup if present
+- an existing watchlist file is loaded at startup if present
+- new journal events are appended during the session
 - watchlist changes are saved to disk
 
 ## 6. Replay A Prior Session
@@ -122,30 +108,26 @@ Use replay mode for:
 - debugging ranking behavior
 - demos
 
+Replay mode is journal-backed for workstation state. The ticker detail screen can still fetch Yahoo historical chart data on demand.
+
 ## 7. Know What You Are Looking At
 
-The main terminal is split into:
+The main terminal is organized into:
 
 1. command legend and status
 2. health banner and issue rail
 3. top candidates table
-4. selected symbol detail
+4. selected symbol summary
 5. recent alerts
 6. recent tape
 
-For screen examples, see [SCREENS.md](SCREENS.md).
+The live status line includes tracked count, loaded count, unavailable count, applied event count, pending backlog, and rate.
+
+The main table is capped for readability. The detail view still navigates the full filtered ticker set.
 
 If the live source or persistence path has problems, the main view shows them in the health banner and issue rail. Press `l` to open the full issue log viewer.
 
 If the live feed is moving too fast, press `Space` to pause application of incoming updates. The screen stays stable and the pending backlog count continues to increase until you resume.
-
-Only symbols with a live price, trailing EPS, and analyst target coverage from Yahoo Finance will appear in the ranked table.
-
-Use `s` and enter a ticker such as `NVDA` or a comma-separated list such as `AAPL,MSFT,NVDA` to add symbols without restarting the app.
-
-Press `d` or `Enter` on a selected row to open the dedicated ticker detail screen. Inside that screen, use `j` and `k` to step through the filtered ticker set.
-
-New warnings and errors also appear in a temporary popup-style banner near the top of the screen so operators do not miss them.
 
 ## 8. Next Documents
 
