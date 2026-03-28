@@ -19,6 +19,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crossterm::cursor::Hide;
 use crossterm::cursor::MoveTo;
@@ -82,6 +84,7 @@ const DETAIL_MIN_MACD_HEIGHT: usize = 4;
 const DETAIL_CHART_AXIS_WIDTH: usize = 12;
 const DETAIL_CHART_ROW_PADDING: usize = 2;
 const INLINE_STYLE_MARKER: char = '\u{001f}';
+const DEFAULT_FEED_ERROR_LOG_FILE: &str = "feed-errors.log";
 const ISSUE_TOAST_DURATION: Duration = Duration::from_secs(6);
 const EVENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 const ISSUE_KEY_FEED_UNAVAILABLE: &str = "feed-unavailable";
@@ -427,12 +430,21 @@ impl LiveSymbolState {
         }
     }
 
+    fn read_symbols<T>(&self, read: impl FnOnce(&[String]) -> T) -> T {
+        let symbols = match self.symbols.lock() {
+            Ok(symbols) => symbols,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        read(&symbols)
+    }
+
     fn snapshot(&self) -> Vec<String> {
-        self.with_symbols(|symbols| symbols.clone())
+        self.read_symbols(|symbols| symbols.to_vec())
     }
 
     fn count(&self) -> usize {
-        self.with_symbols(|symbols| symbols.len())
+        self.read_symbols(|symbols| symbols.len())
     }
 
     fn add_symbols(&self, new_symbols: Vec<String>) -> Vec<String> {
@@ -467,6 +479,97 @@ struct RuntimeOptions {
     journal_file: Option<PathBuf>,
     watchlist_file: Option<PathBuf>,
     symbols: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeedFailureKind {
+    IncompleteCoverage,
+    ProviderError,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FeedErrorLogger {
+    path: PathBuf,
+}
+
+impl FeedErrorLogger {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn log_client_initialization_failure(
+        &self,
+        tracked_symbols: usize,
+        error: &io::Error,
+    ) -> io::Result<()> {
+        self.append_line(format!(
+            "ts={} kind=client_init_error tracked={} detail=\"{}\"",
+            unix_timestamp_seconds(),
+            tracked_symbols,
+            sanitize_feed_log_text(&error.to_string()),
+        ))
+    }
+
+    fn log_symbol_failure(
+        &self,
+        symbol: &str,
+        kind: FeedFailureKind,
+        detail: &str,
+    ) -> io::Result<()> {
+        self.append_line(format!(
+            "ts={} kind={} symbol={} detail=\"{}\"",
+            unix_timestamp_seconds(),
+            match kind {
+                FeedFailureKind::IncompleteCoverage => "incomplete_coverage",
+                FeedFailureKind::ProviderError => "provider_error",
+            },
+            symbol,
+            sanitize_feed_log_text(detail),
+        ))
+    }
+
+    fn log_refresh_summary(
+        &self,
+        tracked_symbols: usize,
+        loaded_symbols: usize,
+        unsupported_symbols: usize,
+        error_symbols: usize,
+        last_error: Option<&str>,
+    ) -> io::Result<()> {
+        let mut line = format!(
+            "ts={} kind=refresh_summary tracked={} loaded={} incomplete={} errors={}",
+            unix_timestamp_seconds(),
+            tracked_symbols,
+            loaded_symbols,
+            unsupported_symbols,
+            error_symbols,
+        );
+
+        if let Some(last_error) = last_error {
+            line.push_str(&format!(
+                " last_error=\"{}\"",
+                sanitize_feed_log_text(last_error),
+            ));
+        }
+
+        self.append_line(line)
+    }
+
+    fn append_line(&self, line: String) -> io::Result<()> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        writeln!(file, "{line}")
+    }
 }
 
 enum InputMode {
@@ -1019,6 +1122,17 @@ fn with_path_context(error: io::Error, action: &str, path: &Path) -> io::Error {
     with_io_context(error, format!("{action}: {}", path.display()))
 }
 
+fn unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn sanitize_feed_log_text(text: &str) -> String {
+    text.replace('\r', " ").replace('\n', " ").replace('"', "'")
+}
+
 fn apply_startup_issues(issue_center: &mut IssueCenter, startup_issues: Vec<StartupIssue>) {
     for startup_issue in startup_issues {
         issue_center.raise(
@@ -1100,6 +1214,8 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
     apply_startup_issues(&mut app.issue_center, startup_issues);
     let mut last_persisted_sequence = state.latest_sequence();
     let live_symbols = live_mode.then(|| LiveSymbolState::new(options.symbols.clone()));
+    let feed_error_logger =
+        live_mode.then(|| FeedErrorLogger::new(PathBuf::from(DEFAULT_FEED_ERROR_LOG_FILE)));
     let (app_event_sender, app_event_receiver) = mpsc::channel();
     let app_event_publisher = AppEventPublisher::new(app_event_sender);
     install_shutdown_publisher(app_event_publisher.clone())
@@ -1122,6 +1238,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
         Some(spawn_feed_publisher(
             app_event_publisher.clone(),
             live_symbols.clone(),
+            feed_error_logger.clone(),
         ))
     } else {
         None
@@ -1302,11 +1419,12 @@ where
 fn spawn_feed_publisher(
     publisher: AppEventPublisher,
     live_symbols: LiveSymbolState,
+    feed_error_logger: Option<FeedErrorLogger>,
 ) -> mpsc::Sender<FeedControl> {
     let (control_sender, control_receiver) = mpsc::channel();
     let scheduler_sender = control_sender.clone();
     let initial_sender = control_sender.clone();
-    thread::spawn(move || feed_loop(publisher, control_receiver, live_symbols));
+    thread::spawn(move || feed_loop(publisher, control_receiver, live_symbols, feed_error_logger));
     thread::spawn(move || feed_schedule_loop(scheduler_sender));
     let _ = initial_sender.send(FeedControl::RefreshNow);
     control_sender
@@ -1682,8 +1800,6 @@ fn build_screen_lines_for_viewport(
 
     let selected_row = rows.get(selected_index);
     let selected_detail = selected_row.and_then(|row| state.detail(&row.symbol));
-    let alerts = state.alerts();
-    let tape = state.recent_tape();
     let mut lines = Vec::new();
     let tracked_count = live_symbols.map(|symbols| symbols.count()).unwrap_or(0);
     let health_status = app.issue_center.health_status();
@@ -1765,10 +1881,7 @@ fn build_screen_lines_for_viewport(
     if let Some(live_symbols) = live_symbols {
         lines.push(RenderLine {
             color: Some(Color::DarkGrey),
-            text: format!(
-                "Tracked symbols: {}",
-                format_symbol_list(&live_symbols.snapshot())
-            ),
+            text: format!("Tracked symbols: {}", live_symbols.read_symbols(format_symbol_list)),
         });
     } else {
         lines.push(RenderLine {
@@ -1906,7 +2019,7 @@ fn build_screen_lines_for_viewport(
         text: "ALERTS".to_string(),
     });
 
-    for alert in alerts.iter().rev().take(MAX_VISIBLE_ALERTS) {
+    for alert in state.alerts_iter().rev().take(MAX_VISIBLE_ALERTS) {
         lines.push(RenderLine {
             color: Some(alert_kind_color(alert.kind)),
             text: format!(
@@ -1927,7 +2040,7 @@ fn build_screen_lines_for_viewport(
         text: "RECENT TAPE".to_string(),
     });
 
-    for tape_event in tape.iter().rev().take(MAX_VISIBLE_TAPE) {
+    for tape_event in state.recent_tape_iter().rev().take(MAX_VISIBLE_TAPE) {
         lines.push(RenderLine {
             color: Some(confidence_color(tape_event.confidence)),
             text: format!(
@@ -2070,16 +2183,6 @@ fn build_ticker_detail_lines_for_viewport(
         .map(|index| index + 1)
         .unwrap_or(1);
     let symbol_count = detail_rows.len().max(1);
-    let filtered_alerts = state
-        .alerts()
-        .into_iter()
-        .filter(|alert| alert.symbol == symbol)
-        .collect::<Vec<_>>();
-    let filtered_tape = state
-        .recent_tape()
-        .into_iter()
-        .filter(|tape_event| tape_event.symbol == symbol)
-        .collect::<Vec<_>>();
     let layout = detail_layout(viewport_width, viewport_height);
     let mut lines = Vec::new();
 
@@ -2357,11 +2460,11 @@ fn build_ticker_detail_lines_for_viewport(
         });
         lines.push(RenderLine {
             color: Some(Color::Magenta),
-            text: summarize_recent_alerts(&filtered_alerts),
+            text: summarize_recent_alerts(state.alerts_for_symbol(symbol)),
         });
         lines.push(RenderLine {
             color: Some(Color::Cyan),
-            text: summarize_recent_tape(&filtered_tape),
+            text: summarize_recent_tape(state.recent_tape_for_symbol(symbol)),
         });
     }
 
@@ -3472,27 +3575,22 @@ fn evidence_line_color(detail: &SymbolDetail, line_text: &str) -> Color {
     }
 }
 
-fn summarize_recent_alerts(alerts: &[AlertEvent]) -> String {
-    if alerts.is_empty() {
-        return "Alerts: none in the current session.".to_string();
-    }
-
+fn summarize_recent_alerts<'a>(alerts: impl DoubleEndedIterator<Item = &'a AlertEvent>) -> String {
     let recent = alerts
-        .iter()
         .rev()
         .take(DETAIL_RECENT_SUMMARY_COUNT)
         .map(|alert| format!("{} #{}", alert_label(alert.kind), alert.sequence))
         .collect::<Vec<_>>();
+
+    if recent.is_empty() {
+        return "Alerts: none in the current session.".to_string();
+    }
+
     format!("Alerts: {}", recent.join("  |  "))
 }
 
-fn summarize_recent_tape(tape: &[TapeEvent]) -> String {
-    if tape.is_empty() {
-        return "Tape: no recent qualifying state changes yet.".to_string();
-    }
-
+fn summarize_recent_tape<'a>(tape: impl DoubleEndedIterator<Item = &'a TapeEvent>) -> String {
     let recent = tape
-        .iter()
         .rev()
         .take(DETAIL_RECENT_SUMMARY_COUNT)
         .map(|event| {
@@ -3508,6 +3606,11 @@ fn summarize_recent_tape(tape: &[TapeEvent]) -> String {
             )
         })
         .collect::<Vec<_>>();
+
+    if recent.is_empty() {
+        return "Tape: no recent qualifying state changes yet.".to_string();
+    }
+
     format!("Tape: {}", recent.join("  |  "))
 }
 
@@ -3956,11 +4059,13 @@ fn feed_loop(
     publisher: AppEventPublisher,
     control_receiver: mpsc::Receiver<FeedControl>,
     live_symbols: LiveSymbolState,
+    feed_error_logger: Option<FeedErrorLogger>,
 ) {
     feed_loop_with_client_factory(
         publisher,
         control_receiver,
         live_symbols,
+        feed_error_logger,
         MarketDataClient::new,
     );
 }
@@ -3969,6 +4074,7 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
     publisher: AppEventPublisher,
     control_receiver: mpsc::Receiver<FeedControl>,
     live_symbols: LiveSymbolState,
+    feed_error_logger: Option<FeedErrorLogger>,
     mut build_client: BuildClient,
 ) where
     Client: LiveFeedClient,
@@ -3982,6 +4088,10 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
             match build_client() {
                 Ok(created_client) => client = Some(created_client),
                 Err(error) => {
+                    if let Some(feed_error_logger) = feed_error_logger.as_ref() {
+                        let _ = feed_error_logger
+                            .log_client_initialization_failure(live_symbols.count(), &error);
+                    }
                     let _ = publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
                         LiveSourceStatus {
                             tracked_symbols: live_symbols.count(),
@@ -4006,17 +4116,22 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
         let weighted_target_refresh_budget =
             symbols.len().min(WEIGHTED_TARGET_REFRESH_BUDGET_PER_CYCLE);
 
-        if !publish_feed_refresh(&publisher, &symbols, |index, symbol| {
-            client.fetch_symbol_with_options(
-                symbol,
-                should_refresh_weighted_target(
-                    index,
-                    weighted_target_refresh_cursor,
-                    symbols.len(),
-                    weighted_target_refresh_budget,
-                ),
-            )
-        }) {
+        if !publish_feed_refresh(
+            &publisher,
+            &symbols,
+            feed_error_logger.as_ref(),
+            |index, symbol| {
+                client.fetch_symbol_with_options(
+                    symbol,
+                    should_refresh_weighted_target(
+                        index,
+                        weighted_target_refresh_cursor,
+                        symbols.len(),
+                        weighted_target_refresh_budget,
+                    ),
+                )
+            },
+        ) {
             return;
         }
 
@@ -4031,6 +4146,7 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
 fn publish_feed_refresh<F>(
     publisher: &AppEventPublisher,
     symbols: &[String],
+    feed_error_logger: Option<&FeedErrorLogger>,
     mut fetch_symbol: F,
 ) -> bool
 where
@@ -4049,17 +4165,43 @@ where
             }
             Ok(None) => {
                 unsupported_symbols += 1;
+                if let Some(feed_error_logger) = feed_error_logger {
+                    let _ = feed_error_logger.log_symbol_failure(
+                        symbol,
+                        FeedFailureKind::IncompleteCoverage,
+                        "provider returned incomplete coverage for required quote fields",
+                    );
+                }
                 continue;
             }
             Err(error) => {
                 error_symbols += 1;
                 last_error = Some(error.to_string());
+                if let Some(feed_error_logger) = feed_error_logger {
+                    let _ = feed_error_logger.log_symbol_failure(
+                        symbol,
+                        FeedFailureKind::ProviderError,
+                        &error.to_string(),
+                    );
+                }
                 continue;
             }
         };
 
         if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(live_feed))) {
             return false;
+        }
+    }
+
+    if unsupported_symbols > 0 || error_symbols > 0 || last_error.is_some() {
+        if let Some(feed_error_logger) = feed_error_logger {
+            let _ = feed_error_logger.log_refresh_summary(
+                symbols.len(),
+                loaded_symbols,
+                unsupported_symbols,
+                error_symbols,
+                last_error.as_deref(),
+            );
         }
     }
 
@@ -4300,17 +4442,59 @@ fn format_symbol_list(symbols: &[String]) -> String {
 fn format_symbol_with_company(symbol: &str, company_name: Option<&str>) -> String {
     match company_name {
         Some(company_name) if !company_name.trim().is_empty() => {
-            format!("{} {}", symbol, company_name.trim())
+            let company_name = company_name.trim();
+            let mut label = String::with_capacity(symbol.len() + 1 + company_name.len());
+            label.push_str(symbol);
+            label.push(' ');
+            label.push_str(company_name);
+            label
         }
         _ => symbol.to_string(),
     }
 }
 
 fn candidate_company_label(symbol: &str, company_name: Option<&str>) -> String {
-    truncate_text(
-        &format_symbol_with_company(symbol, company_name),
-        CANDIDATE_COMPANY_COLUMN_WIDTH,
-    )
+    let company_name = company_name.map(str::trim).filter(|name| !name.is_empty());
+    let total_chars =
+        symbol.chars().count() + company_name.map_or(0, |name| 1 + name.chars().count());
+
+    if total_chars <= CANDIDATE_COMPANY_COLUMN_WIDTH {
+        return format_symbol_with_company(symbol, company_name);
+    }
+
+    if CANDIDATE_COMPANY_COLUMN_WIDTH <= 3 {
+        return ".".repeat(CANDIDATE_COMPANY_COLUMN_WIDTH);
+    }
+
+    let mut label = String::with_capacity(CANDIDATE_COMPANY_COLUMN_WIDTH);
+    let mut remaining = CANDIDATE_COMPANY_COLUMN_WIDTH - 3;
+
+    push_prefix_chars(&mut label, symbol, &mut remaining);
+    if let Some(company_name) = company_name {
+        if remaining > 0 {
+            label.push(' ');
+            remaining -= 1;
+            push_prefix_chars(&mut label, company_name, &mut remaining);
+        }
+    }
+    label.push_str("...");
+
+    label
+}
+
+fn push_prefix_chars(output: &mut String, text: &str, remaining: &mut usize) {
+    if *remaining == 0 {
+        return;
+    }
+
+    for character in text.chars() {
+        if *remaining == 0 {
+            break;
+        }
+
+        output.push(character);
+        *remaining -= 1;
+    }
 }
 
 fn chart_ranges() -> [ChartRange; 6] {
@@ -5091,6 +5275,7 @@ mod tests {
     use super::CANDIDATE_COMPANY_COLUMN_WIDTH;
     use super::Color;
     use super::Event;
+    use super::FeedErrorLogger;
     use super::FeedEvent;
     use super::ISSUE_KEY_JOURNAL_RESTORE;
     use super::ISSUE_KEY_WATCHLIST_RESTORE;
@@ -5512,7 +5697,7 @@ mod tests {
         ]
         .into_iter();
 
-        assert!(publish_feed_refresh(&publisher, &symbols, |_, _| {
+        assert!(publish_feed_refresh(&publisher, &symbols, None, |_, _| {
             fetch_results
                 .next()
                 .expect("each symbol should have one fetch result")
@@ -5726,7 +5911,7 @@ mod tests {
         ]
         .into_iter();
 
-        assert!(publish_feed_refresh(&publisher, &symbols, |_, _| {
+        assert!(publish_feed_refresh(&publisher, &symbols, None, |_, _| {
             fetch_results
                 .next()
                 .expect("each symbol should have one fetch result")
@@ -5765,6 +5950,45 @@ mod tests {
     }
 
     #[test]
+    fn feed_refresh_appends_symbol_failures_to_feed_error_log() {
+        let (sender, receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let symbols = vec!["AAPL".to_string(), "MSFT".to_string(), "AMD".to_string()];
+        let log_path = unique_test_path("feed-errors.log");
+        let logger = FeedErrorLogger::new(log_path.clone());
+        let mut fetch_results = vec![
+            Ok(Some(live_feed("AAPL"))),
+            Ok(None),
+            Err(io::Error::other("provider timeout")),
+        ]
+        .into_iter();
+
+        assert!(publish_feed_refresh(
+            &publisher,
+            &symbols,
+            Some(&logger),
+            |_, _| {
+                fetch_results
+                    .next()
+                    .expect("each symbol should have one fetch result")
+            }
+        ));
+
+        drop(publisher);
+        while receiver.try_recv().is_ok() {}
+
+        let log_contents =
+            fs::read_to_string(&log_path).expect("feed error log should be readable after refresh");
+        let _ = fs::remove_file(&log_path);
+
+        assert!(log_contents.contains("kind=incomplete_coverage symbol=MSFT"));
+        assert!(log_contents.contains("kind=provider_error symbol=AMD"));
+        assert!(
+            log_contents.contains("kind=refresh_summary tracked=3 loaded=1 incomplete=1 errors=1")
+        );
+    }
+
+    #[test]
     fn feed_loop_retries_client_initialization_on_the_next_refresh() {
         let (sender, receiver) = mpsc::channel();
         let publisher = AppEventPublisher::new(sender);
@@ -5780,7 +6004,7 @@ mod tests {
             .expect("second refresh should queue");
         drop(control_sender);
 
-        feed_loop_with_client_factory(publisher, control_receiver, live_symbols, move || {
+        feed_loop_with_client_factory(publisher, control_receiver, live_symbols, None, move || {
             build_attempts += 1;
             if build_attempts == 1 {
                 Err(io::Error::other("boot failed"))
@@ -5834,6 +6058,37 @@ mod tests {
     }
 
     #[test]
+    fn feed_loop_logs_client_initialization_failures() {
+        let (sender, receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let live_symbols = LiveSymbolState::new(vec!["AAPL".to_string()]);
+        let (control_sender, control_receiver) = mpsc::channel();
+        let log_path = unique_test_path("feed-errors-init.log");
+
+        control_sender
+            .send(super::FeedControl::RefreshNow)
+            .expect("refresh should queue");
+        drop(control_sender);
+
+        feed_loop_with_client_factory(
+            publisher,
+            control_receiver,
+            live_symbols,
+            Some(FeedErrorLogger::new(log_path.clone())),
+            || -> io::Result<FakeFeedClient> { Err(io::Error::other("boot failed")) },
+        );
+
+        while receiver.try_recv().is_ok() {}
+
+        let log_contents = fs::read_to_string(&log_path)
+            .expect("feed error log should be readable after init failure");
+        let _ = fs::remove_file(&log_path);
+
+        assert!(log_contents.contains("kind=client_init_error tracked=1"));
+        assert!(log_contents.contains("detail=\"boot failed\""));
+    }
+
+    #[test]
     fn feed_loop_can_be_tested_with_an_injected_client_factory() {
         let (sender, receiver) = mpsc::channel();
         let publisher = AppEventPublisher::new(sender);
@@ -5859,7 +6114,7 @@ mod tests {
 
         let calls_for_factory = Arc::clone(&calls);
         let results = Arc::new(Mutex::new(results));
-        feed_loop_with_client_factory(publisher, control_receiver, live_symbols, move || {
+        feed_loop_with_client_factory(publisher, control_receiver, live_symbols, None, move || {
             Ok(FakeFeedClient {
                 calls: Arc::clone(&calls_for_factory),
                 results: Arc::clone(&results),

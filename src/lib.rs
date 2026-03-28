@@ -277,9 +277,8 @@ impl TerminalState {
         }
 
         let previous_detail = self.detail(&snapshot.symbol);
-        let symbol = snapshot.symbol.clone();
         let sequence = self.next_sequence();
-        let state = self.symbols.entry(symbol.clone()).or_default();
+        let state = self.symbols.entry(snapshot.symbol.clone()).or_default();
         state.snapshot = Some(snapshot.clone());
         state.last_sequence = sequence;
         state.update_count += 1;
@@ -291,12 +290,12 @@ impl TerminalState {
             market_price_cents: snapshot.market_price_cents,
         });
         self.total_events += 1;
+        self.push_tape(&snapshot.symbol);
+        self.push_alerts(&snapshot.symbol, previous_detail);
         self.journal.push(JournalEntry {
             sequence,
             payload: JournalPayload::Snapshot(snapshot),
         });
-        self.push_tape(&symbol);
-        self.push_alerts(&symbol, previous_detail);
     }
 
     pub fn ingest_external(&mut self, signal: ExternalValuationSignal) {
@@ -308,19 +307,18 @@ impl TerminalState {
         sanitize_external_signal(&mut signal);
 
         let previous_detail = self.detail(&signal.symbol);
-        let symbol = signal.symbol.clone();
         let sequence = self.next_sequence();
-        let state = self.symbols.entry(symbol.clone()).or_default();
+        let state = self.symbols.entry(signal.symbol.clone()).or_default();
         state.external_signal = Some(signal.clone());
         state.last_sequence = sequence;
         state.update_count += 1;
         self.total_events += 1;
+        self.push_tape(&signal.symbol);
+        self.push_alerts(&signal.symbol, previous_detail);
         self.journal.push(JournalEntry {
             sequence,
             payload: JournalPayload::External(signal),
         });
-        self.push_tape(&symbol);
-        self.push_alerts(&symbol, previous_detail);
     }
 
     pub fn candidate(&self, symbol: &str) -> Option<CandidateRow> {
@@ -358,28 +356,53 @@ impl TerminalState {
     }
 
     pub fn filtered_rows(&self, limit: usize, filter: &ViewFilter) -> Vec<CandidateRow> {
-        let query = filter.query.trim().to_ascii_uppercase();
+        let query = filter.query.trim();
         let mut rows = self
-            .sorted_rows()
-            .into_iter()
-            .filter(|row| {
+            .symbols
+            .iter()
+            .filter(|(symbol, _)| {
                 let query_matches =
-                    query.is_empty() || row.symbol.to_ascii_uppercase().contains(&query);
-                let watchlist_matches =
-                    !filter.watchlist_only || self.watchlist.contains(&row.symbol);
+                    query.is_empty() || ascii_contains_ignore_case(symbol.as_str(), query);
+                let watchlist_matches = !filter.watchlist_only || self.watchlist.contains(*symbol);
                 query_matches && watchlist_matches
             })
+            .filter_map(|(_, state)| self.build_candidate(state))
             .collect::<Vec<_>>();
+        self.sort_rows(&mut rows);
         rows.truncate(limit);
         rows
     }
 
+    pub fn recent_tape_iter(&self) -> impl DoubleEndedIterator<Item = &TapeEvent> + '_ {
+        self.recent_tape.iter()
+    }
+
     pub fn recent_tape(&self) -> Vec<TapeEvent> {
-        self.recent_tape.iter().cloned().collect()
+        self.recent_tape_iter().cloned().collect()
+    }
+
+    pub fn recent_tape_for_symbol<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> impl DoubleEndedIterator<Item = &'a TapeEvent> + 'a {
+        self.recent_tape.iter().filter(move |event| event.symbol == symbol)
+    }
+
+    pub fn alerts_iter(&self) -> impl DoubleEndedIterator<Item = &AlertEvent> + '_ {
+        self.recent_alerts.iter()
     }
 
     pub fn alerts(&self) -> Vec<AlertEvent> {
-        self.recent_alerts.iter().cloned().collect()
+        self.alerts_iter().cloned().collect()
+    }
+
+    pub fn alerts_for_symbol<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> impl DoubleEndedIterator<Item = &'a AlertEvent> + 'a {
+        self.recent_alerts
+            .iter()
+            .filter(move |alert| alert.symbol == symbol)
     }
 
     pub fn journal(&self) -> Vec<JournalEntry> {
@@ -761,6 +784,12 @@ impl TerminalState {
             .filter_map(|state| self.build_candidate(state))
             .collect::<Vec<_>>();
 
+        self.sort_rows(&mut rows);
+
+        rows
+    }
+
+    fn sort_rows(&self, rows: &mut [CandidateRow]) {
         rows.sort_by(|left, right| {
             right
                 .is_qualified
@@ -772,13 +801,24 @@ impl TerminalState {
                 })
                 .then_with(|| left.symbol.cmp(&right.symbol))
         });
-        rows
     }
 
     fn next_sequence(&mut self) -> usize {
         self.sequence += 1;
         self.sequence
     }
+}
+
+fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn read_journal_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<JournalEntry>> {
