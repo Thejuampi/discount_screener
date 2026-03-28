@@ -1,5 +1,8 @@
 mod market_data;
+mod profiles;
 
+use std::backtrace::Backtrace;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -9,6 +12,7 @@ use std::io::ErrorKind;
 use std::io::Stdout;
 use std::io::Write;
 use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::panic::PanicHookInfo;
 use std::path::Path;
 use std::path::PathBuf;
@@ -50,6 +54,7 @@ use discount_screener::CandidateRow;
 use discount_screener::ConfidenceBand;
 use discount_screener::ExternalSignalStatus;
 use discount_screener::ExternalValuationSignal;
+use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
 use discount_screener::QualificationStatus;
 use discount_screener::SymbolDetail;
@@ -58,9 +63,12 @@ use discount_screener::TerminalState;
 use discount_screener::ViewFilter;
 use market_data::ChartRange;
 use market_data::DEFAULT_POLL_INTERVAL;
+use market_data::FundamentalTimeseries;
 use market_data::HistoricalCandle;
 use market_data::MarketDataClient;
 use market_data::default_live_symbols;
+use profiles::profile_definitions;
+use profiles::profile_symbols;
 
 const MAX_VISIBLE_ALERTS: usize = 6;
 const MAX_VISIBLE_TAPE: usize = 8;
@@ -85,6 +93,7 @@ const DETAIL_CHART_AXIS_WIDTH: usize = 12;
 const DETAIL_CHART_ROW_PADDING: usize = 2;
 const INLINE_STYLE_MARKER: char = '\u{001f}';
 const DEFAULT_FEED_ERROR_LOG_FILE: &str = "feed-errors.log";
+const DEFAULT_CRASH_REPORT_LOG_FILE: &str = "crash-report.log";
 const ISSUE_TOAST_DURATION: Duration = Duration::from_secs(6);
 const EVENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 const ISSUE_KEY_FEED_UNAVAILABLE: &str = "feed-unavailable";
@@ -93,11 +102,45 @@ const ISSUE_KEY_JOURNAL_PERSISTENCE: &str = "journal-persistence";
 const ISSUE_KEY_WATCHLIST_PERSISTENCE: &str = "watchlist-persistence";
 const ISSUE_KEY_JOURNAL_RESTORE: &str = "journal-restore";
 const ISSUE_KEY_WATCHLIST_RESTORE: &str = "watchlist-restore";
+const RISK_FREE_RATE_BPS: i32 = 400;
+const EQUITY_RISK_PREMIUM_BPS: i32 = 500;
+const DEFAULT_TAX_RATE_BPS: i32 = 2_100;
+const DEFAULT_COST_OF_DEBT_BPS: i32 = 550;
+const MIN_COST_OF_DEBT_BPS: i32 = 200;
+const MAX_COST_OF_DEBT_BPS: i32 = 1_200;
+const MIN_WACC_BPS: i32 = 500;
+const MAX_WACC_BPS: i32 = 1_800;
+const DCF_PROJECTION_YEARS: usize = 5;
+const BASE_GROWTH_MIN_BPS: i32 = -1_000;
+const BASE_GROWTH_MAX_BPS: i32 = 1_800;
+const SCENARIO_GROWTH_SPREAD_BPS: i32 = 400;
+const BEAR_GROWTH_MIN_BPS: i32 = -1_200;
+const BEAR_GROWTH_MAX_BPS: i32 = 1_400;
+const BULL_GROWTH_MIN_BPS: i32 = -400;
+const BULL_GROWTH_MAX_BPS: i32 = 2_400;
+const BEAR_TERMINAL_GROWTH_BPS: i32 = 200;
+const BASE_TERMINAL_GROWTH_BPS: i32 = 250;
+const BULL_TERMINAL_GROWTH_BPS: i32 = 300;
+const DCF_OPPORTUNITY_THRESHOLD_BPS: i32 = 2_000;
+const DCF_EXPENSIVE_THRESHOLD_BPS: i32 = -1_000;
+const MIN_RELATIVE_PEERS: usize = 5;
+const STRONG_RELATIVE_SCORE: u8 = 67;
+const WEAK_RELATIVE_SCORE: u8 = 34;
+const MIN_FEED_FETCH_CONCURRENCY: usize = 1;
+const START_FEED_FETCH_CONCURRENCY: usize = 2;
+const MAX_FEED_FETCH_CONCURRENCY: usize = 4;
+const INITIAL_FEED_REFRESH_BUDGET: usize = 32;
+const MIN_STEADY_FEED_REFRESH_BUDGET: usize = 16;
+const START_STEADY_FEED_REFRESH_BUDGET: usize = 32;
+const MAX_STEADY_FEED_REFRESH_BUDGET: usize = 64;
+const MAX_RETRY_SYMBOLS_PER_CYCLE: usize = 16;
+const FEED_RECOVERY_COOLDOWN_CYCLES: usize = 3;
 
 #[derive(Clone)]
 enum FeedEvent {
     Snapshot(MarketSnapshot),
     External(ExternalValuationSignal),
+    Fundamentals(FundamentalSnapshot),
     SourceStatus(LiveSourceStatus),
 }
 
@@ -108,6 +151,12 @@ struct LiveSourceStatus {
     unsupported_symbols: usize,
     error_symbols: usize,
     last_error: Option<String>,
+}
+
+#[derive(Clone)]
+struct FeedProgressStatus {
+    message: String,
+    color: Color,
 }
 
 enum FeedControl {
@@ -129,11 +178,27 @@ struct ChartDataEvent {
     result: io::Result<Vec<HistoricalCandle>>,
 }
 
+enum AnalysisControl {
+    Load {
+        symbol: String,
+        request_id: u64,
+        fundamentals: FundamentalSnapshot,
+    },
+}
+
+struct AnalysisDataEvent {
+    symbol: String,
+    request_id: u64,
+    result: io::Result<DcfAnalysis>,
+}
+
 enum AppEvent {
     Input(KeyEvent),
     Resize,
     FeedBatch(Vec<FeedEvent>),
+    FeedStatus(FeedProgressStatus),
     ChartData(ChartDataEvent),
+    AnalysisData(AnalysisDataEvent),
     Fatal(io::Error),
     Shutdown,
 }
@@ -472,7 +537,7 @@ impl LiveSymbolState {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RuntimeOptions {
     smoke: bool,
     replay_file: Option<PathBuf>,
@@ -555,6 +620,14 @@ impl FeedErrorLogger {
         self.append_line(line)
     }
 
+    fn log_debug(&self, detail: &str) -> io::Result<()> {
+        self.append_line(format!(
+            "ts={} kind=debug detail=\"{}\"",
+            unix_timestamp_seconds(),
+            sanitize_feed_log_text(detail),
+        ))
+    }
+
     fn append_line(&self, line: String) -> io::Result<()> {
         if let Some(parent) = self
             .path
@@ -584,6 +657,7 @@ struct AppState {
     view_filter: ViewFilter,
     input_mode: InputMode,
     pending_feed: VecDeque<FeedEvent>,
+    live_feed_status: Option<FeedProgressStatus>,
     status_message: Option<String>,
     issue_center: IssueCenter,
     overlay_mode: OverlayMode,
@@ -591,6 +665,8 @@ struct AppState {
     detail_chart_range: ChartRange,
     chart_cache: HashMap<ChartCacheKey, ChartCacheEntry>,
     next_chart_request_id: u64,
+    analysis_cache: HashMap<String, AnalysisCacheEntry>,
+    next_analysis_request_id: u64,
 }
 
 impl Default for AppState {
@@ -601,6 +677,7 @@ impl Default for AppState {
             view_filter: ViewFilter::default(),
             input_mode: InputMode::Normal,
             pending_feed: VecDeque::new(),
+            live_feed_status: None,
             status_message: None,
             issue_center: IssueCenter::default(),
             overlay_mode: OverlayMode::None,
@@ -608,6 +685,8 @@ impl Default for AppState {
             detail_chart_range: ChartRange::Year,
             chart_cache: HashMap::new(),
             next_chart_request_id: 1,
+            analysis_cache: HashMap::new(),
+            next_analysis_request_id: 1,
         }
     }
 }
@@ -792,6 +871,61 @@ impl AppState {
         }
     }
 
+    fn queue_detail_analysis_request(
+        &mut self,
+        state: &TerminalState,
+        analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
+    ) {
+        let Some(symbol) = self.detail_symbol().map(str::to_string) else {
+            return;
+        };
+        let Some(detail) = state.detail(&symbol) else {
+            return;
+        };
+        let Some(fundamentals) = detail.fundamentals.clone() else {
+            return;
+        };
+        let Some(analysis_control_sender) = analysis_control_sender else {
+            return;
+        };
+        let analysis_input = analysis_input_key(&fundamentals);
+
+        if matches!(
+            self.analysis_cache.get(&symbol),
+            Some(AnalysisCacheEntry::Loading { input, .. } | AnalysisCacheEntry::Ready { input, .. })
+                if *input == analysis_input
+        ) {
+            return;
+        }
+
+        let request_id = self.next_analysis_request_id;
+        self.next_analysis_request_id = self.next_analysis_request_id.saturating_add(1);
+        self.analysis_cache.insert(
+            symbol.clone(),
+            AnalysisCacheEntry::Loading {
+                request_id,
+                input: analysis_input.clone(),
+            },
+        );
+
+        if analysis_control_sender
+            .send(AnalysisControl::Load {
+                symbol: symbol.clone(),
+                request_id,
+                fundamentals: fundamentals.clone(),
+            })
+            .is_err()
+        {
+            self.analysis_cache.insert(
+                symbol,
+                AnalysisCacheEntry::Failed {
+                    input: analysis_input,
+                    message: "analysis worker channel disconnected".to_string(),
+                },
+            );
+        }
+    }
+
     fn apply_chart_data(&mut self, event: ChartDataEvent) {
         let key = ChartCacheKey::new(&event.symbol, event.range);
         let Some(current_entry) = self.chart_cache.get(&key) else {
@@ -822,6 +956,32 @@ impl AppState {
     fn detail_chart_entry(&self, symbol: &str) -> Option<&ChartCacheEntry> {
         self.chart_cache
             .get(&ChartCacheKey::new(symbol, self.detail_chart_range))
+    }
+
+    fn apply_analysis_data(&mut self, event: AnalysisDataEvent) {
+        let Some(current_entry) = self.analysis_cache.get(&event.symbol) else {
+            return;
+        };
+        let AnalysisCacheEntry::Loading { request_id, input } = current_entry else {
+            return;
+        };
+        if *request_id != event.request_id {
+            return;
+        }
+
+        let input = input.clone();
+        let next_entry = match event.result {
+            Ok(analysis) => AnalysisCacheEntry::Ready { input, analysis },
+            Err(error) => AnalysisCacheEntry::Failed {
+                input,
+                message: error.to_string(),
+            },
+        };
+        self.analysis_cache.insert(event.symbol, next_entry);
+    }
+
+    fn detail_analysis_entry(&self, symbol: &str) -> Option<&AnalysisCacheEntry> {
+        self.analysis_cache.get(symbol)
     }
 
     fn move_issue_log_selection(&mut self, delta: isize) {
@@ -897,6 +1057,635 @@ impl ChartCacheEntry {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+enum AnalysisCacheEntry {
+    Loading {
+        request_id: u64,
+        input: AnalysisInputKey,
+    },
+    Ready {
+        input: AnalysisInputKey,
+        analysis: DcfAnalysis,
+    },
+    Failed {
+        input: AnalysisInputKey,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnalysisInputKey {
+    symbol: String,
+    shares_outstanding: Option<u64>,
+    total_debt_dollars: Option<i64>,
+    total_cash_dollars: Option<i64>,
+    beta_millis: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DcfSignal {
+    Opportunity,
+    Fair,
+    Expensive,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DcfAnalysis {
+    bear_intrinsic_value_cents: i64,
+    base_intrinsic_value_cents: i64,
+    bull_intrinsic_value_cents: i64,
+    wacc_bps: i32,
+    base_growth_bps: i32,
+    net_debt_dollars: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelativeStrengthBand {
+    Strong,
+    Mixed,
+    Weak,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RelativeMetricScore {
+    label: &'static str,
+    percentile: u8,
+    band: RelativeStrengthBand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SectorRelativeScore {
+    group_kind: &'static str,
+    group_label: String,
+    peer_count: usize,
+    composite_percentile: u8,
+    composite_band: RelativeStrengthBand,
+    metrics: Vec<RelativeMetricScore>,
+}
+
+struct DetailAnalysisSnapshot<'a> {
+    analysis: Option<&'a DcfAnalysis>,
+    status: String,
+    note: Option<String>,
+    color: Color,
+}
+
+fn compute_dcf_analysis(
+    fundamentals: &FundamentalSnapshot,
+    timeseries: &FundamentalTimeseries,
+) -> io::Result<DcfAnalysis> {
+    if timeseries.free_cash_flow.len() < 3 {
+        return Err(io::Error::other(
+            "DCF unavailable: need at least 3 annual free cash flow points.",
+        ));
+    }
+
+    let latest_fcf = timeseries
+        .free_cash_flow
+        .last()
+        .map(|point| point.value)
+        .filter(|value| *value > 0.0)
+        .ok_or_else(|| {
+            io::Error::other("DCF unavailable: latest annual free cash flow is not positive.")
+        })?;
+    let current_shares = latest_share_count(fundamentals, timeseries)
+        .ok_or_else(|| io::Error::other("DCF unavailable: share count is missing."))?;
+    let fcf_per_share = free_cash_flow_per_share_series(fundamentals, timeseries, current_shares);
+    let base_growth_bps = derive_base_growth_bps(&fcf_per_share).ok_or_else(|| {
+        io::Error::other("DCF unavailable: insufficient positive free cash flow per share history.")
+    })?;
+    let wacc_bps = derive_wacc_bps(fundamentals, timeseries)?;
+    let net_debt_dollars = fundamentals
+        .total_debt_dollars
+        .unwrap_or(0)
+        .saturating_sub(fundamentals.total_cash_dollars.unwrap_or(0));
+
+    let bear_growth_bps = (base_growth_bps - SCENARIO_GROWTH_SPREAD_BPS)
+        .clamp(BEAR_GROWTH_MIN_BPS, BEAR_GROWTH_MAX_BPS);
+    let base_growth_bps = base_growth_bps.clamp(BASE_GROWTH_MIN_BPS, BASE_GROWTH_MAX_BPS);
+    let bull_growth_bps = (base_growth_bps + SCENARIO_GROWTH_SPREAD_BPS)
+        .clamp(BULL_GROWTH_MIN_BPS, BULL_GROWTH_MAX_BPS);
+
+    let bear_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+        latest_fcf,
+        current_shares,
+        net_debt_dollars,
+        bear_growth_bps,
+        clamp_terminal_growth_bps(BEAR_TERMINAL_GROWTH_BPS, wacc_bps),
+        wacc_bps,
+    )
+    .ok_or_else(|| io::Error::other("DCF unavailable: bear scenario produced an invalid value."))?;
+    let base_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+        latest_fcf,
+        current_shares,
+        net_debt_dollars,
+        base_growth_bps,
+        clamp_terminal_growth_bps(BASE_TERMINAL_GROWTH_BPS, wacc_bps),
+        wacc_bps,
+    )
+    .ok_or_else(|| io::Error::other("DCF unavailable: base scenario produced an invalid value."))?;
+    let bull_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+        latest_fcf,
+        current_shares,
+        net_debt_dollars,
+        bull_growth_bps,
+        clamp_terminal_growth_bps(BULL_TERMINAL_GROWTH_BPS, wacc_bps),
+        wacc_bps,
+    )
+    .ok_or_else(|| io::Error::other("DCF unavailable: bull scenario produced an invalid value."))?;
+
+    Ok(DcfAnalysis {
+        bear_intrinsic_value_cents,
+        base_intrinsic_value_cents,
+        bull_intrinsic_value_cents,
+        wacc_bps,
+        base_growth_bps,
+        net_debt_dollars,
+    })
+}
+
+fn latest_share_count(
+    fundamentals: &FundamentalSnapshot,
+    timeseries: &FundamentalTimeseries,
+) -> Option<f64> {
+    timeseries
+        .diluted_average_shares
+        .last()
+        .map(|point| point.value)
+        .filter(|value| *value > 0.0)
+        .or_else(|| fundamentals.shares_outstanding.map(|shares| shares as f64))
+}
+
+fn free_cash_flow_per_share_series(
+    fundamentals: &FundamentalSnapshot,
+    timeseries: &FundamentalTimeseries,
+    current_shares: f64,
+) -> Vec<(String, f64)> {
+    timeseries
+        .free_cash_flow
+        .iter()
+        .filter_map(|fcf_point| {
+            let shares = share_count_for_date(timeseries, &fcf_point.as_of_date)
+                .or_else(|| fundamentals.shares_outstanding.map(|shares| shares as f64))
+                .unwrap_or(current_shares);
+            if shares <= 0.0 {
+                return None;
+            }
+
+            Some((fcf_point.as_of_date.clone(), fcf_point.value / shares))
+        })
+        .collect()
+}
+
+fn share_count_for_date(timeseries: &FundamentalTimeseries, as_of_date: &str) -> Option<f64> {
+    timeseries
+        .diluted_average_shares
+        .iter()
+        .rev()
+        .find(|point| point.as_of_date.as_str() <= as_of_date)
+        .map(|point| point.value)
+        .filter(|value| *value > 0.0)
+}
+
+fn derive_base_growth_bps(fcf_per_share: &[(String, f64)]) -> Option<i32> {
+    let latest_index = fcf_per_share.iter().rposition(|(_, value)| *value > 0.0)?;
+    let latest = fcf_per_share.get(latest_index)?;
+    let first_index = fcf_per_share.iter().position(|(_, value)| *value > 0.0)?;
+    let first = fcf_per_share.get(first_index)?;
+    let years = year_distance(&first.0, &latest.0).max((latest_index - first_index) as i32);
+    if years <= 0 {
+        return None;
+    }
+
+    let cagr = (latest.1 / first.1).powf(1.0 / years as f64) - 1.0;
+    if !cagr.is_finite() {
+        return None;
+    }
+
+    Some((cagr * 10_000.0).round() as i32)
+}
+
+fn year_distance(start: &str, end: &str) -> i32 {
+    let parse_year = |date: &str| date.get(0..4).and_then(|value| value.parse::<i32>().ok());
+    parse_year(end)
+        .zip(parse_year(start))
+        .map(|(end_year, start_year)| end_year - start_year)
+        .unwrap_or(0)
+}
+
+fn derive_wacc_bps(
+    fundamentals: &FundamentalSnapshot,
+    timeseries: &FundamentalTimeseries,
+) -> io::Result<i32> {
+    let market_cap = fundamentals
+        .market_cap_dollars
+        .filter(|value| *value > 0)
+        .ok_or_else(|| io::Error::other("DCF unavailable: market cap is missing."))?
+        as f64;
+    let beta = fundamentals.beta_millis.unwrap_or(1_000) as f64 / 1_000.0;
+    let cost_of_equity_bps =
+        RISK_FREE_RATE_BPS + (beta * EQUITY_RISK_PREMIUM_BPS as f64).round() as i32;
+    let total_debt = fundamentals.total_debt_dollars.unwrap_or(0).max(0) as f64;
+    let total_cash = fundamentals.total_cash_dollars.unwrap_or(0).max(0) as f64;
+    let net_debt = (total_debt - total_cash).max(0.0);
+    let debt_weight_base = market_cap + net_debt;
+    let equity_weight = if debt_weight_base > 0.0 {
+        market_cap / debt_weight_base
+    } else {
+        1.0
+    };
+    let debt_weight = if debt_weight_base > 0.0 {
+        net_debt / debt_weight_base
+    } else {
+        0.0
+    };
+
+    let latest_interest_expense = timeseries
+        .interest_expense
+        .last()
+        .map(|point| point.value.abs());
+    let cost_of_debt_bps = if total_debt > 0.0 {
+        latest_interest_expense
+            .map(|interest| ((interest / total_debt) * 10_000.0).round() as i32)
+            .unwrap_or(DEFAULT_COST_OF_DEBT_BPS)
+            .clamp(MIN_COST_OF_DEBT_BPS, MAX_COST_OF_DEBT_BPS)
+    } else {
+        DEFAULT_COST_OF_DEBT_BPS
+    };
+    let tax_rate_bps = timeseries
+        .tax_rate_for_calcs
+        .last()
+        .map(|point| (point.value * 10_000.0).round() as i32)
+        .unwrap_or(DEFAULT_TAX_RATE_BPS)
+        .clamp(0, 3_500);
+
+    let after_tax_cost_of_debt_bps =
+        ((cost_of_debt_bps as f64) * (1.0 - tax_rate_bps as f64 / 10_000.0)).round() as i32;
+    let weighted = (equity_weight * cost_of_equity_bps as f64)
+        + (debt_weight * after_tax_cost_of_debt_bps as f64);
+    Ok((weighted.round() as i32).clamp(MIN_WACC_BPS, MAX_WACC_BPS))
+}
+
+fn clamp_terminal_growth_bps(terminal_growth_bps: i32, wacc_bps: i32) -> i32 {
+    terminal_growth_bps.min(wacc_bps.saturating_sub(50)).max(50)
+}
+
+fn discounted_intrinsic_value_per_share_cents(
+    latest_fcf_dollars: f64,
+    current_shares: f64,
+    net_debt_dollars: i64,
+    growth_bps: i32,
+    terminal_growth_bps: i32,
+    wacc_bps: i32,
+) -> Option<i64> {
+    if latest_fcf_dollars <= 0.0 || current_shares <= 0.0 || terminal_growth_bps >= wacc_bps {
+        return None;
+    }
+
+    let growth = growth_bps as f64 / 10_000.0;
+    let terminal_growth = terminal_growth_bps as f64 / 10_000.0;
+    let wacc = wacc_bps as f64 / 10_000.0;
+    let mut projected_fcf = latest_fcf_dollars;
+    let mut present_value = 0.0f64;
+
+    for year in 1..=DCF_PROJECTION_YEARS {
+        projected_fcf *= 1.0 + growth;
+        present_value += projected_fcf / (1.0 + wacc).powi(year as i32);
+    }
+
+    let terminal_cash_flow = projected_fcf * (1.0 + terminal_growth);
+    let terminal_value = terminal_cash_flow / (wacc - terminal_growth);
+    let enterprise_value =
+        present_value + terminal_value / (1.0 + wacc).powi(DCF_PROJECTION_YEARS as i32);
+    let equity_value = enterprise_value - net_debt_dollars as f64;
+    if !equity_value.is_finite() || equity_value <= 0.0 {
+        return None;
+    }
+
+    Some(((equity_value / current_shares) * 100.0).round() as i64)
+}
+
+fn dcf_margin_of_safety_bps(analysis: &DcfAnalysis, market_price_cents: i64) -> Option<i32> {
+    if analysis.base_intrinsic_value_cents <= 0 || market_price_cents <= 0 {
+        return None;
+    }
+
+    Some(
+        (((analysis.base_intrinsic_value_cents - market_price_cents) as f64
+            / analysis.base_intrinsic_value_cents as f64)
+            * 10_000.0)
+            .round() as i32,
+    )
+}
+
+fn dcf_signal(analysis: &DcfAnalysis, market_price_cents: i64) -> DcfSignal {
+    match dcf_margin_of_safety_bps(analysis, market_price_cents).unwrap_or(i32::MIN) {
+        value if value >= DCF_OPPORTUNITY_THRESHOLD_BPS => DcfSignal::Opportunity,
+        value if value < DCF_EXPENSIVE_THRESHOLD_BPS => DcfSignal::Expensive,
+        _ => DcfSignal::Fair,
+    }
+}
+
+fn compute_sector_relative_score(
+    state: &TerminalState,
+    fundamentals: &FundamentalSnapshot,
+) -> Option<SectorRelativeScore> {
+    let subject_symbol = fundamentals.symbol.as_str();
+    let industry_key = fundamentals.industry_key.as_deref();
+    let sector_key = fundamentals.sector_key.as_deref();
+    let industry_name = fundamentals.industry_name.as_deref();
+    let sector_name = fundamentals.sector_name.as_deref();
+
+    let industry_peers = industry_key
+        .map(|key| {
+            state
+                .fundamentals_iter()
+                .filter(|(symbol, peer)| {
+                    *symbol != subject_symbol && peer.industry_key.as_deref() == Some(key)
+                })
+                .map(|(_, peer)| peer.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (group_kind, group_label, peers) = if industry_peers.len() >= MIN_RELATIVE_PEERS {
+        (
+            "industry",
+            industry_name.unwrap_or("unknown industry").to_string(),
+            industry_peers,
+        )
+    } else {
+        let sector_peers = sector_key
+            .map(|key| {
+                state
+                    .fundamentals_iter()
+                    .filter(|(symbol, peer)| {
+                        *symbol != subject_symbol && peer.sector_key.as_deref() == Some(key)
+                    })
+                    .map(|(_, peer)| peer.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if sector_peers.len() < MIN_RELATIVE_PEERS {
+            return None;
+        }
+        (
+            "sector",
+            sector_name.unwrap_or("unknown sector").to_string(),
+            sector_peers,
+        )
+    };
+
+    let metric_scores = [
+        relative_metric_score("P/E", fundamental_trailing_pe, true, fundamentals, &peers),
+        relative_metric_score("PEG", fundamental_peg, true, fundamentals, &peers),
+        relative_metric_score("ROE", fundamental_roe, false, fundamentals, &peers),
+        relative_metric_score(
+            "Net debt/EBITDA",
+            fundamental_net_debt_to_ebitda,
+            true,
+            fundamentals,
+            &peers,
+        ),
+        relative_metric_score(
+            "FCF yield",
+            fundamental_fcf_yield,
+            false,
+            fundamentals,
+            &peers,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if metric_scores.len() < 3 {
+        return None;
+    }
+
+    let composite_percentile = robust_composite_percentile(&metric_scores)?;
+
+    Some(SectorRelativeScore {
+        group_kind,
+        group_label,
+        peer_count: peers.len(),
+        composite_percentile,
+        composite_band: relative_strength_band(composite_percentile),
+        metrics: metric_scores,
+    })
+}
+
+fn relative_metric_score(
+    label: &'static str,
+    metric: fn(&FundamentalSnapshot) -> Option<f64>,
+    lower_is_better: bool,
+    subject: &FundamentalSnapshot,
+    peers: &[FundamentalSnapshot],
+) -> Option<RelativeMetricScore> {
+    let subject_value = metric(subject)?;
+    let peer_values = peers
+        .iter()
+        .filter_map(metric)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if peer_values.len() < MIN_RELATIVE_PEERS {
+        return None;
+    }
+
+    let percentile = empirical_percentile_score(subject_value, &peer_values, lower_is_better)?;
+
+    Some(RelativeMetricScore {
+        label,
+        percentile,
+        band: relative_strength_band(percentile),
+    })
+}
+
+fn empirical_percentile_score(
+    subject_value: f64,
+    peer_values: &[f64],
+    lower_is_better: bool,
+) -> Option<u8> {
+    if !subject_value.is_finite() {
+        return None;
+    }
+
+    let mut less_count = 0usize;
+    let mut equal_count = 0usize;
+    let mut total_count = 0usize;
+
+    for peer_value in peer_values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+    {
+        total_count += 1;
+        match compare_with_tolerance(peer_value, subject_value) {
+            Ordering::Less => less_count += 1,
+            Ordering::Equal => equal_count += 1,
+            Ordering::Greater => {}
+        }
+    }
+
+    if total_count == 0 {
+        return None;
+    }
+
+    let mut percentile = (less_count as f64 + (equal_count as f64 / 2.0)) / total_count as f64;
+    if lower_is_better {
+        percentile = 1.0 - percentile;
+    }
+
+    Some((percentile * 100.0).round().clamp(0.0, 100.0) as u8)
+}
+
+fn compare_with_tolerance(left: f64, right: f64) -> Ordering {
+    if approximately_equal(left, right) {
+        Ordering::Equal
+    } else {
+        left.total_cmp(&right)
+    }
+}
+
+fn approximately_equal(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= scale * 1e-9
+}
+
+fn robust_composite_percentile(metric_scores: &[RelativeMetricScore]) -> Option<u8> {
+    let mut percentiles = metric_scores
+        .iter()
+        .map(|score| score.percentile)
+        .collect::<Vec<_>>();
+    if percentiles.is_empty() {
+        return None;
+    }
+
+    percentiles.sort_unstable();
+    if percentiles.len() < 5 {
+        return Some(median_percentile(&percentiles));
+    }
+
+    let trim_count = (percentiles.len() / 5).max(1);
+    if percentiles.len() <= trim_count * 2 + 1 {
+        return Some(median_percentile(&percentiles));
+    }
+
+    let trimmed = &percentiles[trim_count..percentiles.len() - trim_count];
+    let composite =
+        trimmed.iter().map(|value| *value as u32).sum::<u32>() as f64 / trimmed.len() as f64;
+    Some(composite.round().clamp(0.0, 100.0) as u8)
+}
+
+fn median_percentile(percentiles: &[u8]) -> u8 {
+    debug_assert!(!percentiles.is_empty());
+    let mid = percentiles.len() / 2;
+    if percentiles.len() % 2 == 1 {
+        percentiles[mid]
+    } else {
+        let left = percentiles[mid - 1] as u32;
+        let right = percentiles[mid] as u32;
+        ((left + right) as f64 / 2.0).round() as u8
+    }
+}
+
+fn relative_strength_band(percentile: u8) -> RelativeStrengthBand {
+    if percentile >= STRONG_RELATIVE_SCORE {
+        RelativeStrengthBand::Strong
+    } else if percentile < WEAK_RELATIVE_SCORE {
+        RelativeStrengthBand::Weak
+    } else {
+        RelativeStrengthBand::Mixed
+    }
+}
+
+fn fundamental_trailing_pe(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .trailing_pe_hundredths
+        .map(|value| value as f64 / 100.0)
+        .filter(|value| *value >= 0.0)
+}
+
+fn fundamental_forward_pe(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .forward_pe_hundredths
+        .map(|value| value as f64 / 100.0)
+        .filter(|value| *value >= 0.0)
+}
+
+fn fundamental_price_to_book(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .price_to_book_hundredths
+        .map(|value| value as f64 / 100.0)
+        .filter(|value| *value >= 0.0)
+}
+
+fn fundamental_roe(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .return_on_equity_bps
+        .map(|value| value as f64 / 100.0)
+}
+
+fn fundamental_debt_to_equity(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .debt_to_equity_hundredths
+        .map(|value| value as f64 / 100.0)
+}
+
+fn fundamental_ev_to_ebitda(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .enterprise_to_ebitda_hundredths
+        .map(|value| value as f64 / 100.0)
+}
+
+fn fundamental_beta(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals.beta_millis.map(|value| value as f64 / 1_000.0)
+}
+
+fn fundamental_earnings_growth_percent(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    fundamentals
+        .earnings_growth_bps
+        .map(|value| value as f64 / 100.0)
+}
+
+fn fundamental_peg(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    let pe = fundamental_trailing_pe(fundamentals)?;
+    let growth_percent = fundamental_earnings_growth_percent(fundamentals)?;
+    (growth_percent > 0.0).then_some(pe / growth_percent)
+}
+
+fn fundamental_net_debt_to_ebitda(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    let ebitda = fundamentals.ebitda_dollars? as f64;
+    if ebitda <= 0.0 {
+        return None;
+    }
+
+    let debt = fundamentals.total_debt_dollars.unwrap_or(0) as f64;
+    let cash = fundamentals.total_cash_dollars.unwrap_or(0) as f64;
+    Some((debt - cash) / ebitda)
+}
+
+fn fundamental_debt_or_net_debt_to_ebitda(
+    fundamentals: &FundamentalSnapshot,
+) -> Option<(&'static str, f64)> {
+    let ebitda = fundamentals.ebitda_dollars? as f64;
+    if ebitda <= 0.0 {
+        return None;
+    }
+
+    let debt = fundamentals.total_debt_dollars.unwrap_or(0) as f64;
+    if let Some(cash) = fundamentals.total_cash_dollars {
+        return Some(("Net debt/EBITDA", (debt - cash as f64) / ebitda));
+    }
+
+    Some(("Debt/EBITDA", debt / ebitda))
+}
+
+fn fundamental_fcf_yield(fundamentals: &FundamentalSnapshot) -> Option<f64> {
+    let market_cap = fundamentals.market_cap_dollars? as f64;
+    let fcf = fundamentals.free_cash_flow_dollars? as f64;
+    (market_cap > 0.0).then_some(fcf / market_cap)
 }
 
 #[derive(Debug)]
@@ -1038,9 +1827,11 @@ fn main() {
         Err(_) => {
             eprintln!(
                 "{}",
-                take_panic_report()
-                    .unwrap_or_else(|| "panic: application aborted without details".to_string())
+                take_panic_report().unwrap_or_else(|| {
+                    "panic: application aborted without details".to_string()
+                })
             );
+            eprintln!("crash report: {}", crash_report_log_path().display());
             std::process::exit(101);
         }
     }
@@ -1055,12 +1846,16 @@ fn install_panic_reporter() {
             *slot = Some(report.clone());
         }
 
+        let crash_report_path =
+            append_crash_report(&report).unwrap_or_else(|_| crash_report_log_path());
+
         if MAIN_THREAD_ID
             .get()
             .map(|thread_id| *thread_id != thread::current().id())
             .unwrap_or(true)
         {
             eprintln!("{report}");
+            eprintln!("crash report: {}", crash_report_path.display());
         }
     }));
 }
@@ -1085,8 +1880,14 @@ fn format_panic_report(panic_info: &PanicHookInfo<'_>) -> String {
             )
         })
         .unwrap_or_else(|| "unknown location".to_string());
+    let current_thread = thread::current();
+    let thread_label = current_thread.name().unwrap_or("unnamed");
+    let backtrace = Backtrace::force_capture();
 
-    format!("panic: {payload}\nlocation: {location}")
+    format!(
+        "panic: {payload}\nlocation: {location}\nthread: {thread_label} ({:?})\nbacktrace:\n{backtrace}",
+        current_thread.id()
+    )
 }
 
 fn take_panic_report() -> Option<String> {
@@ -1095,6 +1896,62 @@ fn take_panic_report() -> Option<String> {
         .lock()
         .ok()
         .and_then(|mut slot| slot.take())
+}
+
+fn crash_report_log_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CRASH_REPORT_LOG_FILE)
+}
+
+fn append_crash_report(report: &str) -> io::Result<PathBuf> {
+    let path = crash_report_log_path();
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(
+        file,
+        "=== ts={} pid={} ===\n{}\n",
+        unix_timestamp_seconds(),
+        std::process::id(),
+        report
+    )?;
+    Ok(path)
+}
+
+fn spawn_guarded_thread<F>(name: &'static str, publisher: AppEventPublisher, task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let panic_publisher = publisher.clone();
+    let spawn_result = thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = panic::catch_unwind(AssertUnwindSafe(task));
+            if result.is_err() {
+                publish_background_panic(&panic_publisher, name);
+            }
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = publisher.publish(AppEvent::Fatal(with_io_context(
+            io::Error::other(error),
+            format!("spawn {name} worker thread"),
+        )));
+    }
+}
+
+fn publish_background_panic(publisher: &AppEventPublisher, worker_name: &str) {
+    let report = take_panic_report().unwrap_or_else(|| {
+        format!("panic: background worker '{worker_name}' aborted without details")
+    });
+    let _ = publisher.publish(AppEvent::Fatal(io::Error::other(format!(
+        "background worker '{worker_name}' panicked\n{report}\ncrash report: {}",
+        crash_report_log_path().display()
+    ))));
 }
 
 fn print_error_report(error: &io::Error) {
@@ -1234,6 +2091,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
 
     spawn_input_publisher(app_event_publisher.clone());
     let chart_control_sender = spawn_chart_publisher(app_event_publisher.clone());
+    let analysis_control_sender = spawn_analysis_publisher(app_event_publisher.clone());
     let feed_control_sender = if let Some(live_symbols) = live_symbols.as_ref() {
         Some(spawn_feed_publisher(
             app_event_publisher.clone(),
@@ -1289,6 +2147,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     live_symbols.as_ref(),
                     feed_control_sender.as_ref(),
                     Some(&chart_control_sender),
+                    Some(&analysis_control_sender),
                     options.watchlist_file.as_ref(),
                 )? {
                     break;
@@ -1301,6 +2160,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     if applied_events > 0 {
                         rate_tracker.record_batch(applied_events, Instant::now());
                     }
+                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
                     reconcile_journal_persistence(
                         &state,
                         options.journal_file.as_ref(),
@@ -1319,6 +2179,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     if applied_events > 0 {
                         rate_tracker.record_batch(applied_events, Instant::now());
                     }
+                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
                     reconcile_journal_persistence(
                         &state,
                         options.journal_file.as_ref(),
@@ -1327,8 +2188,14 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     );
                 }
             }
+            AppEvent::FeedStatus(status) => {
+                app.live_feed_status = Some(status);
+            }
             AppEvent::ChartData(event) => {
                 app.apply_chart_data(event);
+            }
+            AppEvent::AnalysisData(event) => {
+                app.apply_analysis_data(event);
             }
             AppEvent::Fatal(error) => {
                 runtime_error = Some(error);
@@ -1381,7 +2248,10 @@ fn install_shutdown_publisher(publisher: AppEventPublisher) -> io::Result<()> {
 }
 
 fn spawn_input_publisher(publisher: AppEventPublisher) {
-    thread::spawn(move || publish_input_events(publisher, event::read));
+    let thread_publisher = publisher.clone();
+    spawn_guarded_thread("input", publisher, move || {
+        publish_input_events(thread_publisher, event::read)
+    });
 }
 
 fn publish_input_events<ReadEvent>(publisher: AppEventPublisher, mut read_event: ReadEvent)
@@ -1424,15 +2294,38 @@ fn spawn_feed_publisher(
     let (control_sender, control_receiver) = mpsc::channel();
     let scheduler_sender = control_sender.clone();
     let initial_sender = control_sender.clone();
-    thread::spawn(move || feed_loop(publisher, control_receiver, live_symbols, feed_error_logger));
-    thread::spawn(move || feed_schedule_loop(scheduler_sender));
+    let feed_thread_publisher = publisher.clone();
+    let scheduler_panic_publisher = publisher.clone();
+    spawn_guarded_thread("feed", publisher, move || {
+        feed_loop(
+            feed_thread_publisher,
+            control_receiver,
+            live_symbols,
+            feed_error_logger,
+        )
+    });
+    spawn_guarded_thread("feed-scheduler", scheduler_panic_publisher, move || {
+        feed_schedule_loop(scheduler_sender)
+    });
     let _ = initial_sender.send(FeedControl::RefreshNow);
     control_sender
 }
 
 fn spawn_chart_publisher(publisher: AppEventPublisher) -> mpsc::Sender<ChartControl> {
     let (control_sender, control_receiver) = mpsc::channel();
-    thread::spawn(move || chart_loop(publisher, control_receiver));
+    let thread_publisher = publisher.clone();
+    spawn_guarded_thread("chart", publisher, move || {
+        chart_loop(thread_publisher, control_receiver)
+    });
+    control_sender
+}
+
+fn spawn_analysis_publisher(publisher: AppEventPublisher) -> mpsc::Sender<AnalysisControl> {
+    let (control_sender, control_receiver) = mpsc::channel();
+    let thread_publisher = publisher.clone();
+    spawn_guarded_thread("analysis", publisher, move || {
+        analysis_loop(thread_publisher, control_receiver)
+    });
     control_sender
 }
 
@@ -1482,8 +2375,22 @@ impl HistoricalChartClient for MarketDataClient {
     }
 }
 
+trait FundamentalTimeseriesClient {
+    fn fetch_fundamental_timeseries(&self, symbol: &str) -> io::Result<FundamentalTimeseries>;
+}
+
+impl FundamentalTimeseriesClient for MarketDataClient {
+    fn fetch_fundamental_timeseries(&self, symbol: &str) -> io::Result<FundamentalTimeseries> {
+        MarketDataClient::fetch_fundamental_timeseries(self, symbol)
+    }
+}
+
 fn chart_loop(publisher: AppEventPublisher, control_receiver: mpsc::Receiver<ChartControl>) {
     chart_loop_with_client_factory(publisher, control_receiver, MarketDataClient::new);
+}
+
+fn analysis_loop(publisher: AppEventPublisher, control_receiver: mpsc::Receiver<AnalysisControl>) {
+    analysis_loop_with_client_factory(publisher, control_receiver, MarketDataClient::new);
 }
 
 fn chart_loop_with_client_factory<Client, BuildClient>(
@@ -1534,6 +2441,56 @@ fn chart_loop_with_client_factory<Client, BuildClient>(
     }
 }
 
+fn analysis_loop_with_client_factory<Client, BuildClient>(
+    publisher: AppEventPublisher,
+    control_receiver: mpsc::Receiver<AnalysisControl>,
+    mut build_client: BuildClient,
+) where
+    Client: FundamentalTimeseriesClient,
+    BuildClient: FnMut() -> io::Result<Client>,
+{
+    let mut client = None;
+
+    while let Ok(AnalysisControl::Load {
+        symbol,
+        request_id,
+        fundamentals,
+    }) = control_receiver.recv()
+    {
+        if client.is_none() {
+            match build_client() {
+                Ok(created_client) => client = Some(created_client),
+                Err(error) => {
+                    let _ = publisher.publish(AppEvent::AnalysisData(AnalysisDataEvent {
+                        symbol,
+                        request_id,
+                        result: Err(io::Error::other(format!(
+                            "fundamental analysis client initialization failed: {error}"
+                        ))),
+                    }));
+                    continue;
+                }
+            }
+        }
+
+        let Some(client) = client.as_ref() else {
+            continue;
+        };
+
+        let result = client
+            .fetch_fundamental_timeseries(&symbol)
+            .and_then(|timeseries| compute_dcf_analysis(&fundamentals, &timeseries));
+
+        if !publisher.publish(AppEvent::AnalysisData(AnalysisDataEvent {
+            symbol,
+            request_id,
+            result,
+        })) {
+            return;
+        }
+    }
+}
+
 fn apply_feed_events(
     state: &mut TerminalState,
     issue_center: &mut IssueCenter,
@@ -1549,6 +2506,10 @@ fn apply_feed_events(
             }
             FeedEvent::External(signal) => {
                 state.ingest_external(signal);
+                applied_events += 1;
+            }
+            FeedEvent::Fundamentals(fundamentals) => {
+                state.ingest_fundamentals(fundamentals);
                 applied_events += 1;
             }
             FeedEvent::SourceStatus(source_status) => {
@@ -1605,13 +2566,30 @@ fn handle_input_event(
     live_symbols: Option<&LiveSymbolState>,
     feed_control_sender: Option<&mpsc::Sender<FeedControl>>,
     chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
+    analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
     watchlist_file: Option<&PathBuf>,
 ) -> io::Result<LoopControl> {
     if is_force_quit_key(&key_event) {
         return Ok(LoopControl::Exit);
     }
 
-    if handle_overlay_key(app, state, &key_event, chart_control_sender, watchlist_file)? {
+    if matches!(key_event.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+        && !matches!(
+            app.input_mode,
+            InputMode::FilterSearch(_) | InputMode::SymbolSearch(_)
+        )
+    {
+        return Ok(LoopControl::Exit);
+    }
+
+    if handle_overlay_key(
+        app,
+        state,
+        &key_event,
+        chart_control_sender,
+        analysis_control_sender,
+        watchlist_file,
+    )? {
         return Ok(LoopControl::Continue);
     }
 
@@ -1628,6 +2606,7 @@ fn handle_input_event(
                 if let Some(row) = rows.get(selected_index) {
                     app.open_ticker_detail(&row.symbol);
                     app.queue_detail_chart_request(chart_control_sender);
+                    app.queue_detail_analysis_request(state, analysis_control_sender);
                 } else {
                     app.set_status_message("Select a ticker to open the detail screen.");
                 }
@@ -1841,6 +2820,23 @@ fn build_screen_lines_for_viewport(
             )
         },
     });
+    if live_mode {
+        lines.push(RenderLine {
+            color: Some(
+                app.live_feed_status
+                    .as_ref()
+                    .map(|status| status.color)
+                    .unwrap_or(Color::DarkGrey),
+            ),
+            text: app
+                .live_feed_status
+                .as_ref()
+                .map(|status| format!("Feed status: {}", status.message))
+                .unwrap_or_else(|| {
+                    "Feed status: waiting for the first live refresh window...".to_string()
+                }),
+        });
+    }
     lines.push(RenderLine {
         color: Some(health_status_color(health_status)),
         text: format!(
@@ -1881,7 +2877,10 @@ fn build_screen_lines_for_viewport(
     if let Some(live_symbols) = live_symbols {
         lines.push(RenderLine {
             color: Some(Color::DarkGrey),
-            text: format!("Tracked symbols: {}", live_symbols.read_symbols(format_symbol_list)),
+            text: format!(
+                "Tracked symbols: {}",
+                live_symbols.read_symbols(format_symbol_list)
+            ),
         });
     } else {
         lines.push(RenderLine {
@@ -2066,7 +3065,7 @@ fn build_issue_log_lines(app: &AppState) -> Vec<RenderLine> {
     lines.push(RenderLine {
         color: Some(Color::Yellow),
         text:
-            "ISSUE LOG  |  j/k move  |  c clear resolved  |  Backspace or l close  |  Ctrl+C quit"
+            "ISSUE LOG  |  j/k move  |  c clear resolved  |  Backspace or l close  |  q quit  |  Ctrl+C quit"
                 .to_string(),
     });
     lines.push(RenderLine {
@@ -2188,7 +3187,7 @@ fn build_ticker_detail_lines_for_viewport(
 
     lines.push(RenderLine {
         color: Some(Color::Yellow),
-        text: "TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  w watch  |  l logs  |  Backspace or d or Enter close  |  Ctrl+C quit".to_string(),
+        text: "TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  w watch  |  l logs  |  Backspace or d or Enter close  |  q quit  |  Ctrl+C quit".to_string(),
     });
 
     let Some(detail) = state.detail(symbol) else {
@@ -2215,6 +3214,11 @@ fn build_ticker_detail_lines_for_viewport(
                 checked_upside_bps(detail.market_price_cents, weighted_target_cents)
             });
     let chart_snapshot = detail_chart_snapshot(app, symbol);
+    let analysis_snapshot = detail_analysis_snapshot(app, &detail);
+    let relative_score = detail
+        .fundamentals
+        .as_ref()
+        .and_then(|fundamentals| compute_sector_relative_score(state, fundamentals));
     let aggregated_candles =
         aggregate_historical_candles(chart_snapshot.candles, layout.candle_slots);
 
@@ -2417,6 +3421,22 @@ fn build_ticker_detail_lines_for_viewport(
     });
     lines.push(RenderLine {
         color: Some(Color::Yellow),
+        text: "FUNDAMENTALS".to_string(),
+    });
+    for line in build_fundamentals_lines(
+        &detail,
+        &analysis_snapshot,
+        relative_score.as_ref(),
+        layout.compact_fundamentals,
+    ) {
+        lines.push(line);
+    }
+    lines.push(RenderLine {
+        color: None,
+        text: String::new(),
+    });
+    lines.push(RenderLine {
+        color: Some(Color::Yellow),
         text: "CONSENSUS".to_string(),
     });
     if layout.compact_consensus {
@@ -2482,6 +3502,7 @@ struct DetailLayout {
     show_overlay_legend: bool,
     show_macd_legend: bool,
     show_recent_context: bool,
+    compact_fundamentals: bool,
     compact_consensus: bool,
     compact_evidence: bool,
 }
@@ -2498,6 +3519,7 @@ fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout 
         ((viewport_width.saturating_sub(DETAIL_CHART_AXIS_WIDTH + DETAIL_CHART_ROW_PADDING)) / 2)
             .max(DETAIL_MIN_VISIBLE_CANDLES);
     let mut show_recent_context = viewport_height >= 30 && viewport_width >= 88;
+    let mut compact_fundamentals = viewport_height < 36 || viewport_width < 104;
     let mut compact_consensus = viewport_height < 34 || viewport_width < 96;
     let mut compact_evidence = viewport_height < 28 || viewport_width < 90;
     let preferred_chart_stack_height = (viewport_height.saturating_mul(11) / 20)
@@ -2505,12 +3527,23 @@ fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout 
 
     let mut non_chart_lines = 22usize
         + if show_recent_context { 4 } else { 0 }
+        + if compact_fundamentals {
+            2
+        } else if viewport_height < 72 {
+            9
+        } else {
+            5
+        }
         + if compact_consensus { 1 } else { 6 }
         + if compact_evidence { 2 } else { 3 };
 
     if non_chart_lines + preferred_chart_stack_height > viewport_height && show_recent_context {
         show_recent_context = false;
         non_chart_lines = non_chart_lines.saturating_sub(4);
+    }
+    if non_chart_lines + preferred_chart_stack_height > viewport_height && !compact_fundamentals {
+        compact_fundamentals = true;
+        non_chart_lines = non_chart_lines.saturating_sub(3);
     }
     if non_chart_lines + preferred_chart_stack_height > viewport_height && !compact_evidence {
         compact_evidence = true;
@@ -2544,6 +3577,7 @@ fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout 
         show_overlay_legend,
         show_macd_legend,
         show_recent_context,
+        compact_fundamentals,
         compact_consensus,
         compact_evidence,
     }
@@ -2642,6 +3676,231 @@ fn detail_chart_snapshot<'a>(app: &'a AppState, symbol: &str) -> DetailChartSnap
             color: Color::DarkGrey,
         },
     }
+}
+
+fn detail_analysis_snapshot<'a>(
+    app: &'a AppState,
+    detail: &'a SymbolDetail,
+) -> DetailAnalysisSnapshot<'a> {
+    let Some(fundamentals) = detail.fundamentals.as_ref() else {
+        return DetailAnalysisSnapshot {
+            analysis: None,
+            status: "unavailable".to_string(),
+            note: Some(
+                "Yahoo quote fundamentals are not available for this ticker yet.".to_string(),
+            ),
+            color: Color::DarkGrey,
+        };
+    };
+    let analysis_input = analysis_input_key(fundamentals);
+
+    match app.detail_analysis_entry(&detail.symbol) {
+        Some(AnalysisCacheEntry::Loading { input, .. }) if *input == analysis_input => {
+            DetailAnalysisSnapshot {
+                analysis: None,
+                status: "loading".to_string(),
+                note: Some("Loading annual Yahoo cash flow history for DCF...".to_string()),
+                color: Color::DarkGrey,
+            }
+        }
+        Some(AnalysisCacheEntry::Ready { input, analysis }) if *input == analysis_input => {
+            DetailAnalysisSnapshot {
+                analysis: Some(analysis),
+                status: "ready".to_string(),
+                note: None,
+                color: Color::DarkGrey,
+            }
+        }
+        Some(AnalysisCacheEntry::Failed { input, message }) if *input == analysis_input => {
+            DetailAnalysisSnapshot {
+                analysis: None,
+                status: "error".to_string(),
+                note: Some(message.clone()),
+                color: Color::DarkYellow,
+            }
+        }
+        Some(_) | None => DetailAnalysisSnapshot {
+            analysis: None,
+            status: "idle".to_string(),
+            note: Some("DCF analysis has not been requested yet.".to_string()),
+            color: Color::DarkGrey,
+        },
+    }
+}
+
+fn build_fundamentals_lines(
+    detail: &SymbolDetail,
+    analysis_snapshot: &DetailAnalysisSnapshot<'_>,
+    relative_score: Option<&SectorRelativeScore>,
+    compact: bool,
+) -> Vec<RenderLine> {
+    let Some(fundamentals) = detail.fundamentals.as_ref() else {
+        return vec![RenderLine {
+            color: Some(Color::DarkGrey),
+            text: "Yahoo quote fundamentals are not available for this ticker.".to_string(),
+        }];
+    };
+
+    let mut lines = Vec::new();
+    let debt_ebitda = fundamental_debt_or_net_debt_to_ebitda(fundamentals);
+    let compact_line = format!(
+        "DCF {}  P/E {}  PEG {}  ROE {}  {} {}  FCF yield {}",
+        analysis_snapshot
+            .analysis
+            .map(|analysis| format!(
+                "{} ({})",
+                dcf_signal_label(dcf_signal(analysis, detail.market_price_cents)),
+                dcf_margin_of_safety_bps(analysis, detail.market_price_cents)
+                    .map(format_bps)
+                    .unwrap_or_else(|| "n/a".to_string())
+            ))
+            .unwrap_or_else(|| analysis_snapshot.status.clone()),
+        format_optional_decimal(fundamental_trailing_pe(fundamentals), 2),
+        format_optional_decimal(fundamental_peg(fundamentals), 2),
+        format_optional_percent(fundamental_roe(fundamentals)),
+        debt_ebitda.map(|(label, _)| label).unwrap_or("Debt/EBITDA"),
+        format_optional_decimal(debt_ebitda.map(|(_, value)| value), 2),
+        format_optional_percent_ratio(fundamental_fcf_yield(fundamentals)),
+    );
+
+    lines.push(RenderLine {
+        color: Some(match analysis_snapshot.analysis {
+            Some(analysis) => dcf_signal_color(dcf_signal(analysis, detail.market_price_cents)),
+            None => analysis_snapshot.color,
+        }),
+        text: compact_line,
+    });
+
+    if compact {
+        if let Some(note) = analysis_snapshot.note.as_ref() {
+            lines.push(RenderLine {
+                color: Some(analysis_snapshot.color),
+                text: format!("DCF note: {note}"),
+            });
+        }
+        return lines;
+    }
+
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "Yahoo analyst fair value {} remains external. Proprietary DCF value {} drives the DCF signal.",
+            format_money(detail.intrinsic_value_cents),
+            analysis_snapshot
+                .analysis
+                .map(|analysis| format_money(analysis.base_intrinsic_value_cents))
+                .unwrap_or_else(|| "n/a".to_string()),
+        ),
+    });
+
+    if let Some(analysis) = analysis_snapshot.analysis {
+        lines.push(RenderLine {
+            color: Some(dcf_signal_color(dcf_signal(
+                analysis,
+                detail.market_price_cents,
+            ))),
+            text: format!(
+                "DCF bear {}  base {}  bull {}  signal {}  margin {}",
+                format_money(analysis.bear_intrinsic_value_cents),
+                format_money(analysis.base_intrinsic_value_cents),
+                format_money(analysis.bull_intrinsic_value_cents),
+                dcf_signal_label(dcf_signal(analysis, detail.market_price_cents)),
+                dcf_margin_of_safety_bps(analysis, detail.market_price_cents)
+                    .map(format_bps)
+                    .unwrap_or_else(|| "n/a".to_string()),
+            ),
+        });
+        lines.push(RenderLine {
+            color: Some(Color::DarkGrey),
+            text: format!(
+                "WACC {}  FCF/share CAGR {}  Net debt {}",
+                format_bps(analysis.wacc_bps),
+                format_bps(analysis.base_growth_bps),
+                format_money_from_dollars(analysis.net_debt_dollars),
+            ),
+        });
+    } else if let Some(note) = analysis_snapshot.note.as_ref() {
+        lines.push(RenderLine {
+            color: Some(analysis_snapshot.color),
+            text: format!("DCF {}: {}", analysis_snapshot.status, note),
+        });
+    }
+
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "P/E {}  Forward P/E {}  PEG {}  P/B {}",
+            format_optional_decimal(fundamental_trailing_pe(fundamentals), 2),
+            format_optional_decimal(fundamental_forward_pe(fundamentals), 2),
+            format_optional_decimal(fundamental_peg(fundamentals), 2),
+            format_optional_decimal(fundamental_price_to_book(fundamentals), 2),
+        ),
+    });
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "ROE {}  Debt/Equity {}  EV/EBITDA {}  Beta {}",
+            format_optional_percent(fundamental_roe(fundamentals)),
+            format_optional_decimal(fundamental_debt_to_equity(fundamentals), 2),
+            format_optional_decimal(fundamental_ev_to_ebitda(fundamentals), 2),
+            format_optional_decimal(fundamental_beta(fundamentals), 2),
+        ),
+    });
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "{} {}  FCF yield {}  OCF {}  FCF {}",
+            debt_ebitda.map(|(label, _)| label).unwrap_or("Debt/EBITDA"),
+            format_optional_decimal(debt_ebitda.map(|(_, value)| value), 2),
+            format_optional_percent_ratio(fundamental_fcf_yield(fundamentals)),
+            fundamentals
+                .operating_cash_flow_dollars
+                .map(format_money_from_dollars)
+                .unwrap_or_else(|| "n/a".to_string()),
+            fundamentals
+                .free_cash_flow_dollars
+                .map(format_money_from_dollars)
+                .unwrap_or_else(|| "n/a".to_string()),
+        ),
+    });
+
+    match relative_score {
+        Some(relative_score) => {
+            lines.push(RenderLine {
+                color: Some(relative_strength_color(relative_score.composite_band)),
+                text: format!(
+            "Relative vs {} {} peers={} percentile={} ({})",
+                    relative_score.group_kind,
+                    relative_score.group_label,
+                    relative_score.peer_count,
+                    relative_score.composite_percentile,
+                    relative_strength_label(relative_score.composite_band),
+                ),
+            });
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: relative_score
+                    .metrics
+                    .iter()
+                    .map(|metric| {
+                        format!(
+                            "{} pctl {} ({})",
+                            metric.label,
+                            metric.percentile,
+                            relative_strength_label(metric.band)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  |  "),
+            });
+        }
+        None => lines.push(RenderLine {
+            color: Some(Color::DarkGrey),
+            text: "Relative percentile scoring unavailable: need at least 5 tracked peers sharing industry or sector with enough ratio coverage.".to_string(),
+        }),
+    }
+
+    lines
 }
 
 fn aggregate_historical_candles(
@@ -3964,8 +5223,18 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
 }
 
 fn parse_runtime_options() -> io::Result<RuntimeOptions> {
+    parse_runtime_options_from(std::env::args().skip(1))
+}
+
+fn parse_runtime_options_from<I, S>(args: I) -> io::Result<RuntimeOptions>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut options = RuntimeOptions::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter().map(Into::into);
+    let mut selected_profile: Option<String> = None;
+    let mut explicit_symbols = Vec::new();
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -4004,7 +5273,25 @@ fn parse_runtime_options() -> io::Result<RuntimeOptions> {
                         "--symbols requires a comma-separated list",
                     ));
                 };
-                options.symbols = parse_symbols_argument(&symbols)?;
+                explicit_symbols = parse_symbols_argument(&symbols)?;
+            }
+            "--profile" => {
+                let Some(profile_name) = args.next() else {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "--profile requires a profile name",
+                    ));
+                };
+                if profile_symbols(&profile_name).is_none() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "unknown profile: {profile_name}. Available profiles: {}",
+                            available_profile_names()
+                        ),
+                    ));
+                }
+                selected_profile = Some(profile_name);
             }
             "--help" | "-h" => {
                 print_usage();
@@ -4019,9 +5306,15 @@ fn parse_runtime_options() -> io::Result<RuntimeOptions> {
         }
     }
 
-    if options.symbols.is_empty() {
-        options.symbols = default_live_symbols();
-    }
+    options.symbols = match selected_profile.as_deref() {
+        Some(profile_name) => {
+            let mut symbols = profile_symbols(profile_name).expect("validated profile should load");
+            append_unique_symbols(&mut symbols, explicit_symbols);
+            symbols
+        }
+        None if explicit_symbols.is_empty() => default_live_symbols(),
+        None => explicit_symbols,
+    };
 
     Ok(options)
 }
@@ -4050,9 +5343,50 @@ fn parse_symbols_argument(raw_symbols: &str) -> io::Result<Vec<String>> {
 }
 
 fn print_usage() {
-    println!(
-        "discount_screener [--smoke] [--symbols CSV] [--replay-file PATH] [--journal-file PATH] [--watchlist-file PATH]"
-    );
+    print!("{}", usage_text());
+}
+
+fn usage_text() -> String {
+    let profiles = profile_definitions()
+        .iter()
+        .map(|profile| format!("  {:<8} {}", profile.name, profile.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        concat!(
+            "discount_screener [--smoke] [--profile NAME] [--symbols CSV] [--replay-file PATH] [--journal-file PATH] [--watchlist-file PATH]\n",
+            "\n",
+            "Options:\n",
+            "  --smoke                 Run the static smoke path without live Yahoo requests\n",
+            "  --profile NAME          Load a predefined starting universe\n",
+            "  --symbols CSV           Use a custom symbol list; when combined with --profile these symbols are appended\n",
+            "  --replay-file PATH      Replay a prior journal-backed session\n",
+            "  --journal-file PATH     Persist live session events to a journal file\n",
+            "  --watchlist-file PATH   Persist the watchlist to a text file\n",
+            "  -h, --help              Show this help text\n",
+            "\n",
+            "Profiles:\n",
+            "{profiles}\n"
+        ),
+        profiles = profiles,
+    )
+}
+
+fn available_profile_names() -> String {
+    profile_definitions()
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn append_unique_symbols(symbols: &mut Vec<String>, extra_symbols: Vec<String>) {
+    for symbol in extra_symbols {
+        if !symbols.contains(&symbol) {
+            symbols.push(symbol);
+        }
+    }
 }
 
 fn feed_loop(
@@ -4077,11 +5411,16 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
     feed_error_logger: Option<FeedErrorLogger>,
     mut build_client: BuildClient,
 ) where
-    Client: LiveFeedClient,
+    Client: LiveFeedClient + Sync,
     BuildClient: FnMut() -> io::Result<Client>,
 {
     let mut client = None;
-    let mut weighted_target_refresh_cursor = 0usize;
+    let mut symbol_refresh_cursor = 0usize;
+    let mut steady_refresh_budget = START_STEADY_FEED_REFRESH_BUDGET;
+    let mut fetch_concurrency = START_FEED_FETCH_CONCURRENCY;
+    let mut retry_symbols = VecDeque::<String>::new();
+    let mut refresh_cycle = 0usize;
+    let mut recovery_cooldown_cycles = 0usize;
 
     while let Ok(FeedControl::RefreshNow) = control_receiver.recv() {
         if client.is_none() {
@@ -4113,36 +5452,159 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
         };
 
         let symbols = live_symbols.snapshot();
-        let weighted_target_refresh_budget =
-            symbols.len().min(WEIGHTED_TARGET_REFRESH_BUDGET_PER_CYCLE);
-
-        if !publish_feed_refresh(
-            &publisher,
+        let refresh_plan = plan_feed_refresh(
             &symbols,
+            &mut retry_symbols,
+            symbol_refresh_cursor,
+            refresh_cycle,
+            steady_refresh_budget,
+            fetch_concurrency,
+        );
+        if refresh_plan.symbols.is_empty() {
+            let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+                message: "Waiting for symbols to refresh...".to_string(),
+                color: Color::DarkGrey,
+            }));
+            continue;
+        }
+        let weighted_target_refresh_budget = refresh_plan
+            .symbols
+            .len()
+            .min(WEIGHTED_TARGET_REFRESH_BUDGET_PER_CYCLE);
+        if let Some(feed_error_logger) = feed_error_logger.as_ref() {
+            let _ = feed_error_logger.log_debug(&format!(
+                "refresh_plan cycle={} mode={} tracked={} batch={} retry_batch={} cursor={} concurrency={} steady_budget={}",
+                refresh_cycle,
+                refresh_plan.phase_label,
+                refresh_plan.total_tracked_symbols,
+                refresh_plan.symbols.len(),
+                refresh_plan.retry_symbols,
+                symbol_refresh_cursor,
+                refresh_plan.concurrency,
+                steady_refresh_budget,
+            ));
+        }
+        let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+            message: format!(
+                "{}: fetching {} of {} tracked symbols, retry queue {}, concurrency {}",
+                refresh_plan.phase_label,
+                refresh_plan.symbols.len(),
+                refresh_plan.total_tracked_symbols,
+                retry_symbols.len(),
+                refresh_plan.concurrency,
+            ),
+            color: Color::DarkCyan,
+        }));
+
+        let Some(outcome) = publish_feed_refresh_concurrently(
+            &publisher,
+            &refresh_plan,
             feed_error_logger.as_ref(),
-            |index, symbol| {
+            |symbol_index, symbol| {
                 client.fetch_symbol_with_options(
                     symbol,
                     should_refresh_weighted_target(
-                        index,
-                        weighted_target_refresh_cursor,
-                        symbols.len(),
+                        symbol_index,
+                        symbol_refresh_cursor,
+                        refresh_plan.total_tracked_symbols,
                         weighted_target_refresh_budget,
                     ),
                 )
             },
-        ) {
+        ) else {
             return;
+        };
+
+        symbol_refresh_cursor = refresh_plan.next_symbol_cursor;
+        refresh_cycle = refresh_cycle.saturating_add(1);
+
+        for symbol in outcome.retry_symbols {
+            if !retry_symbols.contains(&symbol) {
+                retry_symbols.push_back(symbol);
+            }
         }
 
-        weighted_target_refresh_cursor = next_weighted_target_refresh_cursor(
-            weighted_target_refresh_cursor,
-            symbols.len(),
-            weighted_target_refresh_budget,
-        );
+        if outcome.throttled_errors > 0 {
+            fetch_concurrency = fetch_concurrency
+                .saturating_sub(1)
+                .max(MIN_FEED_FETCH_CONCURRENCY);
+            steady_refresh_budget = (steady_refresh_budget / 2).max(MIN_STEADY_FEED_REFRESH_BUDGET);
+            recovery_cooldown_cycles = FEED_RECOVERY_COOLDOWN_CYCLES;
+            let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+                message: format!(
+                    "Backoff active: Yahoo returned {} throttle errors, next window {} symbols at concurrency {} (retry queue {}).",
+                    outcome.throttled_errors,
+                    steady_refresh_budget,
+                    fetch_concurrency,
+                    retry_symbols.len(),
+                ),
+                color: Color::Yellow,
+            }));
+            if let Some(feed_error_logger) = feed_error_logger.as_ref() {
+                let _ = feed_error_logger.log_debug(&format!(
+                    "refresh_backoff throttled={} next_budget={} next_concurrency={} retry_queue={}",
+                    outcome.throttled_errors,
+                    steady_refresh_budget,
+                    fetch_concurrency,
+                    retry_symbols.len(),
+                ));
+            }
+        } else {
+            if recovery_cooldown_cycles > 0 {
+                recovery_cooldown_cycles = recovery_cooldown_cycles.saturating_sub(1);
+            } else {
+                let next_concurrency = (fetch_concurrency + 1).min(MAX_FEED_FETCH_CONCURRENCY);
+                let next_budget = (steady_refresh_budget + 8).min(MAX_STEADY_FEED_REFRESH_BUDGET);
+                if next_concurrency != fetch_concurrency || next_budget != steady_refresh_budget {
+                    fetch_concurrency = next_concurrency;
+                    steady_refresh_budget = next_budget;
+                    if let Some(feed_error_logger) = feed_error_logger.as_ref() {
+                        let _ = feed_error_logger.log_debug(&format!(
+                            "refresh_recovery next_budget={} next_concurrency={} retry_queue={}",
+                            steady_refresh_budget,
+                            fetch_concurrency,
+                            retry_symbols.len(),
+                        ));
+                    }
+                }
+            }
+
+            let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+                message: format!(
+                    "{} complete: loaded {} of {}, incomplete {}, errors {}, retry queue {}.",
+                    refresh_plan.phase_label,
+                    outcome.loaded_symbols,
+                    refresh_plan.symbols.len(),
+                    outcome.unsupported_symbols,
+                    outcome.error_symbols,
+                    retry_symbols.len(),
+                ),
+                color: if outcome.error_symbols > 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGreen
+                },
+            }));
+        }
+
+        let dropped_refreshes = drain_pending_feed_refreshes(&control_receiver);
+        if dropped_refreshes > 0 {
+            if let Some(feed_error_logger) = feed_error_logger.as_ref() {
+                let _ = feed_error_logger.log_debug(&format!(
+                    "refresh_coalesced dropped_pending={dropped_refreshes}"
+                ));
+            }
+            let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+                message: format!(
+                    "Feed caught up: coalesced {dropped_refreshes} pending refresh ticks."
+                ),
+                color: Color::DarkGrey,
+            }));
+        }
     }
 }
 
+#[cfg(test)]
 fn publish_feed_refresh<F>(
     publisher: &AppEventPublisher,
     symbols: &[String],
@@ -4216,6 +5678,296 @@ where
     )]))
 }
 
+struct FeedRefreshPlan {
+    phase_label: &'static str,
+    total_tracked_symbols: usize,
+    retry_symbols: usize,
+    concurrency: usize,
+    symbols: Vec<(usize, String)>,
+    next_symbol_cursor: usize,
+}
+
+struct FeedRefreshOutcome {
+    loaded_symbols: usize,
+    unsupported_symbols: usize,
+    error_symbols: usize,
+    throttled_errors: usize,
+    retry_symbols: Vec<String>,
+}
+
+enum FeedFetchOutcome {
+    Live(market_data::LiveSymbolFeed),
+    Unsupported,
+    Error {
+        detail: String,
+        retryable: bool,
+        throttled: bool,
+    },
+}
+
+fn plan_feed_refresh(
+    symbols: &[String],
+    retry_symbols: &mut VecDeque<String>,
+    symbol_refresh_cursor: usize,
+    refresh_cycle: usize,
+    steady_refresh_budget: usize,
+    fetch_concurrency: usize,
+) -> FeedRefreshPlan {
+    if symbols.is_empty() {
+        return FeedRefreshPlan {
+            phase_label: "idle",
+            total_tracked_symbols: 0,
+            retry_symbols: 0,
+            concurrency: fetch_concurrency,
+            symbols: Vec::new(),
+            next_symbol_cursor: 0,
+        };
+    }
+
+    let phase_label = if refresh_cycle == 0 {
+        "bootstrap"
+    } else {
+        "steady"
+    };
+    let refresh_budget = if refresh_cycle == 0 {
+        INITIAL_FEED_REFRESH_BUDGET
+    } else {
+        steady_refresh_budget
+    }
+    .min(symbols.len());
+
+    let mut selected_symbols = Vec::with_capacity(refresh_budget);
+    let mut retry_count = 0usize;
+    while retry_count < MAX_RETRY_SYMBOLS_PER_CYCLE && selected_symbols.len() < refresh_budget {
+        let Some(symbol) = retry_symbols.pop_front() else {
+            break;
+        };
+        let Some(symbol_index) = symbols.iter().position(|candidate| candidate == &symbol) else {
+            continue;
+        };
+        if selected_symbols
+            .iter()
+            .any(|(selected_index, _)| *selected_index == symbol_index)
+        {
+            continue;
+        }
+        selected_symbols.push((symbol_index, symbol));
+        retry_count += 1;
+    }
+
+    let mut normal_selected = 0usize;
+    let mut offset = 0usize;
+    while selected_symbols.len() < refresh_budget && offset < symbols.len() {
+        let symbol_index = (symbol_refresh_cursor + offset) % symbols.len();
+        if !selected_symbols
+            .iter()
+            .any(|(selected_index, _)| *selected_index == symbol_index)
+        {
+            selected_symbols.push((symbol_index, symbols[symbol_index].clone()));
+            normal_selected += 1;
+        }
+        offset += 1;
+    }
+
+    FeedRefreshPlan {
+        phase_label,
+        total_tracked_symbols: symbols.len(),
+        retry_symbols: retry_count,
+        concurrency: fetch_concurrency.min(selected_symbols.len()).max(1),
+        next_symbol_cursor: next_weighted_target_refresh_cursor(
+            symbol_refresh_cursor,
+            symbols.len(),
+            normal_selected,
+        ),
+        symbols: selected_symbols,
+    }
+}
+
+fn publish_feed_refresh_concurrently<F>(
+    publisher: &AppEventPublisher,
+    refresh_plan: &FeedRefreshPlan,
+    feed_error_logger: Option<&FeedErrorLogger>,
+    fetch_symbol: F,
+) -> Option<FeedRefreshOutcome>
+where
+    F: Fn(usize, &str) -> io::Result<Option<market_data::LiveSymbolFeed>> + Sync,
+{
+    if refresh_plan.symbols.is_empty() {
+        return Some(FeedRefreshOutcome {
+            loaded_symbols: 0,
+            unsupported_symbols: 0,
+            error_symbols: 0,
+            throttled_errors: 0,
+            retry_symbols: Vec::new(),
+        });
+    }
+
+    let worker_count = refresh_plan
+        .concurrency
+        .min(refresh_plan.symbols.len())
+        .max(1);
+    let (result_sender, result_receiver) = mpsc::channel();
+
+    thread::scope(|scope| {
+        for worker_index in 0..worker_count {
+            let result_sender = result_sender.clone();
+            let fetch_symbol = &fetch_symbol;
+            let planned_symbols = &refresh_plan.symbols;
+            scope.spawn(move || {
+                for planned_index in (worker_index..planned_symbols.len()).step_by(worker_count) {
+                    let (symbol_index, symbol) = &planned_symbols[planned_index];
+                    let outcome = match fetch_symbol(*symbol_index, symbol) {
+                        Ok(Some(live_feed)) => FeedFetchOutcome::Live(live_feed),
+                        Ok(None) => FeedFetchOutcome::Unsupported,
+                        Err(error) => {
+                            let detail = error.to_string();
+                            FeedFetchOutcome::Error {
+                                retryable: is_retryable_feed_error(&detail),
+                                throttled: is_provider_throttle_error(&detail),
+                                detail,
+                            }
+                        }
+                    };
+                    let _ = result_sender.send((symbol.clone(), outcome));
+                }
+            });
+        }
+        drop(result_sender);
+
+        let mut loaded_symbols = 0usize;
+        let mut unsupported_symbols = 0usize;
+        let mut error_symbols = 0usize;
+        let mut throttled_errors = 0usize;
+        let mut completed_symbols = 0usize;
+        let mut last_error = None::<String>;
+        let mut retry_symbols = Vec::new();
+
+        for (symbol, outcome) in result_receiver {
+            completed_symbols += 1;
+            match outcome {
+                FeedFetchOutcome::Live(live_feed) => {
+                    loaded_symbols += 1;
+                    if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(live_feed))) {
+                        return None;
+                    }
+                }
+                FeedFetchOutcome::Unsupported => {
+                    unsupported_symbols += 1;
+                    if let Some(feed_error_logger) = feed_error_logger {
+                        let _ = feed_error_logger.log_symbol_failure(
+                            &symbol,
+                            FeedFailureKind::IncompleteCoverage,
+                            "provider returned incomplete coverage for required quote fields",
+                        );
+                    }
+                }
+                FeedFetchOutcome::Error {
+                    detail,
+                    retryable,
+                    throttled,
+                } => {
+                    error_symbols += 1;
+                    if throttled {
+                        throttled_errors += 1;
+                    }
+                    if retryable {
+                        retry_symbols.push(symbol.clone());
+                    }
+                    last_error = Some(detail.clone());
+                    if let Some(feed_error_logger) = feed_error_logger {
+                        let _ = feed_error_logger.log_symbol_failure(
+                            &symbol,
+                            FeedFailureKind::ProviderError,
+                            &detail,
+                        );
+                        if !retryable {
+                            let _ = feed_error_logger.log_debug(&format!(
+                                "non_retryable_symbol_error symbol={} detail={}",
+                                symbol, detail
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if completed_symbols == 1
+                || completed_symbols == refresh_plan.symbols.len()
+                || completed_symbols % 4 == 0
+            {
+                if !publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
+                    message: format!(
+                        "{}: fetched {}/{} in current window, loaded {}, retries queued {}.",
+                        refresh_plan.phase_label,
+                        completed_symbols,
+                        refresh_plan.symbols.len(),
+                        loaded_symbols,
+                        retry_symbols.len(),
+                    ),
+                    color: if error_symbols > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkCyan
+                    },
+                })) {
+                    return None;
+                }
+            }
+        }
+
+        if let Some(feed_error_logger) = feed_error_logger {
+            let _ = feed_error_logger.log_refresh_summary(
+                refresh_plan.total_tracked_symbols,
+                loaded_symbols,
+                unsupported_symbols,
+                error_symbols,
+                last_error.as_deref(),
+            );
+        }
+
+        if !publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
+            LiveSourceStatus {
+                tracked_symbols: refresh_plan.symbols.len(),
+                loaded_symbols,
+                unsupported_symbols,
+                error_symbols,
+                last_error,
+            },
+        )])) {
+            return None;
+        }
+
+        Some(FeedRefreshOutcome {
+            loaded_symbols,
+            unsupported_symbols,
+            error_symbols,
+            throttled_errors,
+            retry_symbols,
+        })
+    })
+}
+
+fn drain_pending_feed_refreshes(control_receiver: &mpsc::Receiver<FeedControl>) -> usize {
+    let mut dropped = 0usize;
+    while matches!(control_receiver.try_recv(), Ok(FeedControl::RefreshNow)) {
+        dropped += 1;
+    }
+    dropped
+}
+
+fn is_provider_throttle_error(detail: &str) -> bool {
+    detail.contains("429")
+}
+
+fn is_retryable_feed_error(detail: &str) -> bool {
+    is_provider_throttle_error(detail)
+        || detail.contains("502")
+        || detail.contains("503")
+        || detail.contains("504")
+        || detail.contains("timed out")
+        || detail.contains("connection reset")
+        || detail.contains("Broken pipe")
+}
+
 fn should_refresh_weighted_target(
     symbol_index: usize,
     refresh_cursor: usize,
@@ -4250,7 +6002,22 @@ fn build_symbol_feed_batch(live_feed: market_data::LiveSymbolFeed) -> Vec<FeedEv
         events.push(FeedEvent::External(signal));
     }
 
+    if let Some(fundamentals) = live_feed.fundamentals {
+        events.push(FeedEvent::Fundamentals(fundamentals));
+    }
+
     events
+}
+
+fn analysis_input_key(fundamentals: &FundamentalSnapshot) -> AnalysisInputKey {
+    // Quote-driven market-cap drift would otherwise invalidate the DCF cache on every refresh.
+    AnalysisInputKey {
+        symbol: fundamentals.symbol.clone(),
+        shares_outstanding: fundamentals.shares_outstanding,
+        total_debt_dollars: fundamentals.total_debt_dollars,
+        total_cash_dollars: fundamentals.total_cash_dollars,
+        beta_millis: fundamentals.beta_millis,
+    }
 }
 
 fn confidence_label(confidence: ConfidenceBand) -> &'static str {
@@ -4533,13 +6300,14 @@ fn handle_overlay_key(
     state: &mut TerminalState,
     key_event: &KeyEvent,
     chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
+    analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
     watchlist_file: Option<&PathBuf>,
 ) -> io::Result<bool> {
     match &app.overlay_mode {
         OverlayMode::None => Ok(false),
         OverlayMode::IssueLog => {
             match key_event.code {
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('l') | KeyCode::Char('q') => {
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('l') => {
                     app.close_overlay();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -4560,11 +6328,7 @@ fn handle_overlay_key(
         }
         OverlayMode::TickerDetail(_) => {
             match key_event.code {
-                KeyCode::Esc
-                | KeyCode::Backspace
-                | KeyCode::Enter
-                | KeyCode::Char('d')
-                | KeyCode::Char('q') => {
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter | KeyCode::Char('d') => {
                     app.close_overlay();
                 }
                 KeyCode::Char('l') => {
@@ -4574,11 +6338,13 @@ fn handle_overlay_key(
                     let rows = filtered_symbol_rows(state, &app.view_filter);
                     app.move_ticker_detail_selection(&rows, 1);
                     app.queue_detail_chart_request(chart_control_sender);
+                    app.queue_detail_analysis_request(state, analysis_control_sender);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     let rows = filtered_symbol_rows(state, &app.view_filter);
                     app.move_ticker_detail_selection(&rows, -1);
                     app.queue_detail_chart_request(chart_control_sender);
+                    app.queue_detail_analysis_request(state, analysis_control_sender);
                 }
                 KeyCode::Char('1') => {
                     if app.set_detail_chart_range(ChartRange::Day) {
@@ -5180,12 +6946,66 @@ fn format_money(value_cents: i64) -> String {
     format!("{sign}${dollars}.{cents:02}")
 }
 
+fn format_money_from_dollars(value_dollars: i64) -> String {
+    format_money(value_dollars.saturating_mul(100))
+}
+
 fn format_bps(value_bps: i32) -> String {
     let sign = if value_bps < 0 { "-" } else { "" };
     let absolute_bps = value_bps.unsigned_abs();
     let whole = absolute_bps / 100;
     let fraction = absolute_bps % 100;
     format!("{sign}{whole}.{fraction:02}%")
+}
+
+fn format_optional_decimal(value: Option<f64>, decimals: usize) -> String {
+    value
+        .map(|value| format!("{value:.decimals$}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_optional_percent(value_percent: Option<f64>) -> String {
+    value_percent
+        .map(|value| format!("{value:.2}%"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_optional_percent_ratio(value_ratio: Option<f64>) -> String {
+    value_ratio
+        .map(|value| format!("{:.2}%", value * 100.0))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn dcf_signal_label(signal: DcfSignal) -> &'static str {
+    match signal {
+        DcfSignal::Opportunity => "OPPORTUNITY",
+        DcfSignal::Fair => "FAIR",
+        DcfSignal::Expensive => "EXPENSIVE",
+    }
+}
+
+fn dcf_signal_color(signal: DcfSignal) -> Color {
+    match signal {
+        DcfSignal::Opportunity => Color::Green,
+        DcfSignal::Fair => Color::Yellow,
+        DcfSignal::Expensive => Color::Red,
+    }
+}
+
+fn relative_strength_label(band: RelativeStrengthBand) -> &'static str {
+    match band {
+        RelativeStrengthBand::Strong => "strong",
+        RelativeStrengthBand::Mixed => "mixed",
+        RelativeStrengthBand::Weak => "weak",
+    }
+}
+
+fn relative_strength_color(band: RelativeStrengthBand) -> Color {
+    match band {
+        RelativeStrengthBand::Strong => Color::Green,
+        RelativeStrengthBand::Mixed => Color::Yellow,
+        RelativeStrengthBand::Weak => Color::Red,
+    }
 }
 
 fn format_upside_percent(market_price_cents: i64, fair_value_cents: i64) -> String {
@@ -5269,14 +7089,19 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
+    use super::AnalysisCacheEntry;
+    use super::AnalysisControl;
     use super::AppEvent;
     use super::AppEventPublisher;
     use super::AppState;
     use super::CANDIDATE_COMPANY_COLUMN_WIDTH;
     use super::Color;
+    use super::DcfAnalysis;
+    use super::DcfSignal;
     use super::Event;
     use super::FeedErrorLogger;
     use super::FeedEvent;
+    use super::FeedRefreshPlan;
     use super::ISSUE_KEY_JOURNAL_RESTORE;
     use super::ISSUE_KEY_WATCHLIST_RESTORE;
     use super::InputMode;
@@ -5289,13 +7114,19 @@ mod tests {
     use super::KeyModifiers;
     use super::LiveSourceStatus;
     use super::LiveSymbolState;
+    use super::LoopControl;
     use super::MAX_VISIBLE_ROWS;
     use super::OverlayMode;
+    use super::RelativeMetricScore;
+    use super::RelativeStrengthBand;
     use super::RenderLine;
     use super::RuntimeOptions;
     use super::aggregate_historical_candles;
+    use super::analysis_input_key;
     use super::analyst_consensus_lines;
+    use super::apply_feed_events;
     use super::apply_live_source_status;
+    use super::build_symbol_feed_batch;
     use super::build_screen_lines;
     use super::build_ticker_detail_lines;
     use super::build_ticker_detail_lines_for_viewport;
@@ -5305,40 +7136,58 @@ mod tests {
     use super::clip_text_to_width;
     use super::collect_clear_rows;
     use super::collect_dirty_rows;
+    use super::compute_dcf_analysis;
     use super::compute_ema_series;
     use super::compute_macd_series;
+    use super::compute_sector_relative_score;
     use super::confidence_justification_lines;
+    use super::dcf_margin_of_safety_bps;
+    use super::dcf_signal;
+    use super::derive_base_growth_bps;
+    use super::detail_analysis_snapshot;
     use super::feed_loop_with_client_factory;
     use super::filtered_symbol_rows;
     use super::format_bps;
     use super::format_money;
     use super::format_symbol_list;
     use super::gap_meter;
+    use super::handle_input_event;
     use super::health_status_label;
+    use super::is_provider_throttle_error;
+    use super::is_retryable_feed_error;
     use super::load_initial_state;
+    use super::market_data::AnnualReportedValue;
     use super::market_data::ChartRange;
+    use super::market_data::FundamentalTimeseries;
     use super::market_data::HistoricalCandle;
     use super::next_weighted_target_refresh_cursor;
     use super::normalize_frame;
+    use super::parse_runtime_options_from;
     use super::parse_symbols_argument;
     use super::publish_feed_refresh;
+    use super::publish_feed_refresh_concurrently;
     use super::publish_input_events;
     use super::qualification_justification_lines;
     use super::reconcile_journal_persistence;
+    use super::relative_metric_score;
+    use super::robust_composite_percentile;
     use super::should_handle_key_event;
     use super::should_leave_input_mode_on_backspace;
     use super::should_refresh_weighted_target;
+    use super::usage_text;
     use super::visible_text;
     use discount_screener::CandidateRow;
     use discount_screener::ConfidenceBand;
     use discount_screener::ExternalSignalStatus;
     use discount_screener::ExternalValuationSignal;
+    use discount_screener::FundamentalSnapshot;
     use discount_screener::MarketSnapshot;
     use discount_screener::QualificationStatus;
     use discount_screener::SymbolDetail;
     use discount_screener::TerminalState;
     use discount_screener::ViewFilter;
     use discount_screener::checked_gap_bps;
+    use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::env::temp_dir;
     use std::error::Error as _;
@@ -5359,6 +7208,19 @@ mod tests {
             gap_bps,
             is_qualified: true,
             confidence: ConfidenceBand::Provisional,
+        }
+    }
+
+    fn recv_feed_batch(receiver: &mpsc::Receiver<AppEvent>, label: &str) -> Vec<FeedEvent> {
+        loop {
+            match receiver
+                .recv()
+                .unwrap_or_else(|_| panic!("{label} should arrive"))
+            {
+                AppEvent::FeedBatch(feed_events) => return feed_events,
+                AppEvent::FeedStatus(_) => continue,
+                _ => panic!("expected {label}"),
+            }
         }
     }
 
@@ -5406,6 +7268,7 @@ mod tests {
             hold_count: Some(8),
             sell_count: Some(3),
             strong_sell_count: Some(1),
+            fundamentals: None,
             confidence: ConfidenceBand::High,
             last_sequence: 6,
             update_count: 2,
@@ -5475,6 +7338,91 @@ mod tests {
                 weighted_fair_value_cents: None,
                 weighted_analyst_count: None,
             }),
+            fundamentals: None,
+        }
+    }
+
+    fn annual_value(as_of_date: &str, value: f64) -> AnnualReportedValue {
+        AnnualReportedValue {
+            as_of_date: as_of_date.to_string(),
+            value,
+        }
+    }
+
+    fn sample_fundamentals(
+        symbol: &str,
+        sector_key: &str,
+        sector_name: &str,
+        industry_key: &str,
+        industry_name: &str,
+    ) -> FundamentalSnapshot {
+        FundamentalSnapshot {
+            symbol: symbol.to_string(),
+            sector_key: Some(sector_key.to_string()),
+            sector_name: Some(sector_name.to_string()),
+            industry_key: Some(industry_key.to_string()),
+            industry_name: Some(industry_name.to_string()),
+            market_cap_dollars: Some(1_200_000_000),
+            shares_outstanding: Some(100_000_000),
+            trailing_pe_hundredths: Some(1_500),
+            forward_pe_hundredths: Some(1_300),
+            price_to_book_hundredths: Some(320),
+            return_on_equity_bps: Some(1_900),
+            ebitda_dollars: Some(220_000_000),
+            enterprise_value_dollars: Some(1_300_000_000),
+            enterprise_to_ebitda_hundredths: Some(590),
+            total_debt_dollars: Some(120_000_000),
+            total_cash_dollars: Some(20_000_000),
+            debt_to_equity_hundredths: Some(6_000),
+            free_cash_flow_dollars: Some(86_000_000),
+            operating_cash_flow_dollars: Some(105_000_000),
+            beta_millis: Some(1_100),
+            trailing_eps_cents: Some(425),
+            earnings_growth_bps: Some(1_500),
+        }
+    }
+
+    fn sample_dcf_timeseries() -> FundamentalTimeseries {
+        FundamentalTimeseries {
+            free_cash_flow: vec![
+                annual_value("2021-12-31", 50_000_000.0),
+                annual_value("2022-12-31", 60_000_000.0),
+                annual_value("2023-12-31", 72_000_000.0),
+                annual_value("2024-12-31", 86_000_000.0),
+            ],
+            operating_cash_flow: vec![
+                annual_value("2021-12-31", 66_000_000.0),
+                annual_value("2022-12-31", 80_000_000.0),
+                annual_value("2023-12-31", 93_000_000.0),
+                annual_value("2024-12-31", 105_000_000.0),
+            ],
+            capital_expenditure: vec![
+                annual_value("2021-12-31", -16_000_000.0),
+                annual_value("2022-12-31", -20_000_000.0),
+                annual_value("2023-12-31", -21_000_000.0),
+                annual_value("2024-12-31", -19_000_000.0),
+            ],
+            diluted_average_shares: vec![
+                annual_value("2021-12-31", 100_000_000.0),
+                annual_value("2022-12-31", 100_000_000.0),
+                annual_value("2023-12-31", 100_000_000.0),
+                annual_value("2024-12-31", 100_000_000.0),
+            ],
+            interest_expense: vec![annual_value("2024-12-31", 8_000_000.0)],
+            pretax_income: vec![annual_value("2024-12-31", 120_000_000.0)],
+            tax_rate_for_calcs: vec![annual_value("2024-12-31", 0.21)],
+            net_income: vec![annual_value("2024-12-31", 97_000_000.0)],
+        }
+    }
+
+    fn sample_ready_analysis() -> DcfAnalysis {
+        DcfAnalysis {
+            bear_intrinsic_value_cents: 1_450,
+            base_intrinsic_value_cents: 1_800,
+            bull_intrinsic_value_cents: 2_250,
+            wacc_bps: 850,
+            base_growth_bps: 1_350,
+            net_debt_dollars: 100_000_000,
         }
     }
 
@@ -5571,6 +7519,753 @@ mod tests {
                 .expect("symbols should parse and deduplicate"),
             vec!["MSFT".to_string(), "AAPL".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_runtime_options_defaults_to_sp500_profile() {
+        let options = parse_runtime_options_from(Vec::<String>::new())
+            .expect("empty args should resolve to the default universe");
+
+        assert!(
+            options.symbols.len() == 503 && options.symbols.iter().any(|symbol| symbol == "AAPL")
+        );
+    }
+
+    #[test]
+    fn parse_runtime_options_loads_named_profile_symbols() {
+        let options = parse_runtime_options_from(["--profile", "dow-jones"])
+            .expect("named profiles should resolve through aliases");
+
+        assert_eq!(
+            options.symbols,
+            vec![
+                "MMM", "AXP", "AMGN", "AMZN", "AAPL", "BA", "CAT", "CVX", "CSCO", "KO", "DIS",
+                "GS", "HD", "HON", "IBM", "JNJ", "JPM", "MCD", "MRK", "MSFT", "NVDA", "NKE", "PG",
+                "CRM", "SHW", "TRV", "UNH", "VZ", "V", "WMT",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn compute_dcf_analysis_builds_three_scenarios_and_signal_thresholds() {
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        let analysis =
+            compute_dcf_analysis(&fundamentals, &sample_dcf_timeseries()).expect("DCF should work");
+
+        assert!(analysis.bear_intrinsic_value_cents < analysis.base_intrinsic_value_cents);
+        assert!(analysis.base_intrinsic_value_cents < analysis.bull_intrinsic_value_cents);
+        assert_eq!(analysis.net_debt_dollars, 100_000_000);
+        assert!((500..=1_800).contains(&analysis.wacc_bps));
+        assert!(analysis.base_growth_bps >= -1_000);
+        assert_eq!(
+            dcf_signal(
+                &analysis,
+                ((analysis.base_intrinsic_value_cents as f64) * 0.75).round() as i64
+            ),
+            DcfSignal::Opportunity
+        );
+        assert_eq!(
+            dcf_signal(&analysis, analysis.base_intrinsic_value_cents),
+            DcfSignal::Fair
+        );
+        assert_eq!(
+            dcf_signal(
+                &analysis,
+                ((analysis.base_intrinsic_value_cents as f64) * 1.20).round() as i64
+            ),
+            DcfSignal::Expensive
+        );
+        assert_eq!(
+            dcf_margin_of_safety_bps(&analysis, analysis.base_intrinsic_value_cents),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn compute_dcf_analysis_preserves_net_cash_companies() {
+        let mut fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        fundamentals.total_debt_dollars = Some(100_000_000);
+        fundamentals.total_cash_dollars = Some(250_000_000);
+
+        let analysis =
+            compute_dcf_analysis(&fundamentals, &sample_dcf_timeseries()).expect("DCF should work");
+
+        assert_eq!(analysis.net_debt_dollars, -150_000_000);
+    }
+
+    #[test]
+    fn compute_dcf_analysis_rejects_insufficient_and_non_positive_fcf_history() {
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        let insufficient = FundamentalTimeseries {
+            free_cash_flow: vec![
+                annual_value("2023-12-31", 72_000_000.0),
+                annual_value("2024-12-31", 86_000_000.0),
+            ],
+            diluted_average_shares: vec![
+                annual_value("2023-12-31", 100_000_000.0),
+                annual_value("2024-12-31", 100_000_000.0),
+            ],
+            ..FundamentalTimeseries::default()
+        };
+        let non_positive = FundamentalTimeseries {
+            free_cash_flow: vec![
+                annual_value("2022-12-31", 50_000_000.0),
+                annual_value("2023-12-31", 25_000_000.0),
+                annual_value("2024-12-31", 0.0),
+            ],
+            diluted_average_shares: vec![
+                annual_value("2022-12-31", 100_000_000.0),
+                annual_value("2023-12-31", 100_000_000.0),
+                annual_value("2024-12-31", 100_000_000.0),
+            ],
+            ..FundamentalTimeseries::default()
+        };
+
+        assert!(
+            compute_dcf_analysis(&fundamentals, &insufficient)
+                .expect_err("two points should fail")
+                .to_string()
+                .contains("at least 3 annual free cash flow points")
+        );
+        assert!(
+            compute_dcf_analysis(&fundamentals, &non_positive)
+                .expect_err("non-positive latest FCF should fail")
+                .to_string()
+                .contains("latest annual free cash flow is not positive")
+        );
+    }
+
+    #[test]
+    fn derive_base_growth_uses_the_earliest_positive_history_point() {
+        let declining_then_partial_recovery = vec![
+            ("2021-12-31".to_string(), 10.0),
+            ("2022-12-31".to_string(), 5.0),
+            ("2023-12-31".to_string(), 6.0),
+        ];
+
+        assert_eq!(
+            derive_base_growth_bps(&declining_then_partial_recovery),
+            Some(-2254)
+        );
+    }
+
+    #[test]
+    fn sector_relative_score_prefers_industry_peers_when_available() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_fundamentals(subject.clone());
+
+        for (index, pe, growth, roe, debt, cash, ebitda, fcf) in [
+            (
+                1,
+                2_100,
+                900,
+                1_500,
+                180_000_000,
+                10_000_000,
+                200_000_000,
+                55_000_000,
+            ),
+            (
+                2,
+                2_300,
+                1_000,
+                1_600,
+                170_000_000,
+                15_000_000,
+                210_000_000,
+                58_000_000,
+            ),
+            (
+                3,
+                2_500,
+                1_100,
+                1_700,
+                160_000_000,
+                20_000_000,
+                205_000_000,
+                60_000_000,
+            ),
+            (
+                4,
+                2_700,
+                1_200,
+                1_800,
+                150_000_000,
+                20_000_000,
+                215_000_000,
+                63_000_000,
+            ),
+            (
+                5,
+                2_900,
+                1_300,
+                1_900,
+                145_000_000,
+                25_000_000,
+                220_000_000,
+                66_000_000,
+            ),
+        ] {
+            let mut peer = sample_fundamentals(
+                &format!("I{index}"),
+                "technology",
+                "Technology",
+                "software",
+                "Software",
+            );
+            peer.trailing_pe_hundredths = Some(pe);
+            peer.earnings_growth_bps = Some(growth);
+            peer.return_on_equity_bps = Some(roe);
+            peer.total_debt_dollars = Some(debt);
+            peer.total_cash_dollars = Some(cash);
+            peer.ebitda_dollars = Some(ebitda);
+            peer.free_cash_flow_dollars = Some(fcf);
+            state.ingest_fundamentals(peer);
+        }
+
+        for index in 1..=2 {
+            let peer = sample_fundamentals(
+                &format!("S{index}"),
+                "technology",
+                "Technology",
+                "hardware",
+                "Hardware",
+            );
+            state.ingest_fundamentals(peer);
+        }
+
+        let score = compute_sector_relative_score(&state, &subject)
+            .expect("industry peers should produce a relative score");
+
+        assert_eq!(score.group_kind, "industry");
+        assert_eq!(score.group_label, "Software");
+        assert_eq!(score.peer_count, 5);
+        assert_eq!(score.composite_band, super::RelativeStrengthBand::Strong);
+    }
+
+    #[test]
+    fn sector_relative_score_falls_back_to_sector_when_industry_is_too_small() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_fundamentals(subject.clone());
+
+        for index in 1..=3 {
+            let peer = sample_fundamentals(
+                &format!("I{index}"),
+                "technology",
+                "Technology",
+                "software",
+                "Software",
+            );
+            state.ingest_fundamentals(peer);
+        }
+        for index in 1..=2 {
+            let mut peer = sample_fundamentals(
+                &format!("H{index}"),
+                "technology",
+                "Technology",
+                "hardware",
+                "Hardware",
+            );
+            peer.trailing_pe_hundredths = Some(2_400 + (index as u32 * 100));
+            state.ingest_fundamentals(peer);
+        }
+
+        let score = compute_sector_relative_score(&state, &subject)
+            .expect("sector fallback should produce a relative score");
+
+        assert_eq!(score.group_kind, "sector");
+        assert_eq!(score.group_label, "Technology");
+        assert_eq!(score.peer_count, 5);
+    }
+
+    #[test]
+    fn sector_relative_score_treats_a_single_outlier_as_a_small_shift() {
+        let subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+
+        let mut baseline_state = TerminalState::new(2_000, 30, 8);
+        baseline_state.ingest_fundamentals(subject.clone());
+        for index in 1..=5 {
+            let mut peer = subject.clone();
+            peer.symbol = format!("B{index}");
+            baseline_state.ingest_fundamentals(peer);
+        }
+
+        let baseline_score = compute_sector_relative_score(&baseline_state, &subject)
+            .expect("baseline peers should produce a relative score");
+        assert_eq!(baseline_score.composite_percentile, 50);
+
+        let mut outlier_state = TerminalState::new(2_000, 30, 8);
+        outlier_state.ingest_fundamentals(subject.clone());
+        for index in 1..=4 {
+            let mut peer = subject.clone();
+            peer.symbol = format!("N{index}");
+            outlier_state.ingest_fundamentals(peer);
+        }
+        let mut outlier = subject.clone();
+        outlier.symbol = "OUTLIER".to_string();
+        outlier.trailing_pe_hundredths = Some(100_000);
+        outlier.earnings_growth_bps = Some(100);
+        outlier.return_on_equity_bps = Some(-500);
+        outlier.total_debt_dollars = Some(800_000_000);
+        outlier.total_cash_dollars = Some(0);
+        outlier.ebitda_dollars = Some(100_000_000);
+        outlier.free_cash_flow_dollars = Some(10_000_000);
+        outlier_state.ingest_fundamentals(outlier);
+
+        let outlier_score = compute_sector_relative_score(&outlier_state, &subject)
+            .expect("outlier peers should still produce a relative score");
+
+        assert_eq!(outlier_score.composite_percentile, 60);
+        assert_eq!(outlier_score.composite_band, RelativeStrengthBand::Mixed);
+        assert!(
+            (outlier_score.composite_percentile as i16
+                - baseline_score.composite_percentile as i16)
+                .abs()
+                <= 10
+        );
+    }
+
+    #[test]
+    fn sector_relative_score_requires_five_external_peers() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_fundamentals(subject.clone());
+
+        for index in 1..=4 {
+            let mut peer = subject.clone();
+            peer.symbol = format!("P{index}");
+            state.ingest_fundamentals(peer);
+        }
+
+        assert!(compute_sector_relative_score(&state, &subject).is_none());
+    }
+
+    #[test]
+    fn relative_metric_score_uses_midrank_for_ties() {
+        let mut subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        subject.trailing_pe_hundredths = Some(2_000);
+
+        let mut peers = Vec::new();
+        for index in 1..=5 {
+            let mut peer = subject.clone();
+            peer.symbol = format!("T{index}");
+            peers.push(peer);
+        }
+
+        let score = relative_metric_score(
+            "P/E",
+            super::fundamental_trailing_pe,
+            true,
+            &subject,
+            &peers,
+        )
+        .expect("tied peers should still score");
+
+        assert_eq!(score.percentile, 50);
+        assert_eq!(score.band, RelativeStrengthBand::Mixed);
+    }
+
+    #[test]
+    fn robust_composite_percentile_uses_median_for_small_metric_sets() {
+        let scores = vec![
+            RelativeMetricScore {
+                label: "A",
+                percentile: 10,
+                band: RelativeStrengthBand::Weak,
+            },
+            RelativeMetricScore {
+                label: "B",
+                percentile: 50,
+                band: RelativeStrengthBand::Mixed,
+            },
+            RelativeMetricScore {
+                label: "C",
+                percentile: 90,
+                band: RelativeStrengthBand::Strong,
+            },
+        ];
+
+        assert_eq!(robust_composite_percentile(&scores), Some(50));
+    }
+
+    #[test]
+    fn robust_composite_percentile_trims_extreme_outliers() {
+        let scores = vec![
+            RelativeMetricScore {
+                label: "A",
+                percentile: 5,
+                band: RelativeStrengthBand::Weak,
+            },
+            RelativeMetricScore {
+                label: "B",
+                percentile: 45,
+                band: RelativeStrengthBand::Mixed,
+            },
+            RelativeMetricScore {
+                label: "C",
+                percentile: 50,
+                band: RelativeStrengthBand::Mixed,
+            },
+            RelativeMetricScore {
+                label: "D",
+                percentile: 55,
+                band: RelativeStrengthBand::Mixed,
+            },
+            RelativeMetricScore {
+                label: "E",
+                percentile: 95,
+                band: RelativeStrengthBand::Strong,
+            },
+        ];
+
+        assert_eq!(robust_composite_percentile(&scores), Some(50));
+    }
+
+    #[test]
+    fn queue_detail_analysis_request_enqueues_once_per_fundamental_input() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+        app.queue_detail_analysis_request(&state, Some(&sender));
+
+        let first = receiver.recv().expect("analysis request should be queued");
+        let request_id = match first {
+            AnalysisControl::Load {
+                symbol,
+                request_id,
+                fundamentals: payload,
+            } => {
+                assert_eq!(symbol, "NVDA");
+                assert_eq!(payload, fundamentals);
+                request_id
+            }
+        };
+
+        assert!(matches!(
+            app.detail_analysis_entry("NVDA"),
+            Some(AnalysisCacheEntry::Loading { request_id: cached_id, .. }) if *cached_id == request_id
+        ));
+
+        app.queue_detail_analysis_request(&state, Some(&sender));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_detail_analysis_request_retries_after_a_failed_attempt() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Failed {
+                input: analysis_input_key(&fundamentals),
+                message: "temporary Yahoo timeout".to_string(),
+            },
+        );
+
+        app.queue_detail_analysis_request(&state, Some(&sender));
+
+        let queued = receiver.recv().expect("failed analysis should be retried");
+        match queued {
+            AnalysisControl::Load {
+                symbol,
+                fundamentals: payload,
+                ..
+            } => {
+                assert_eq!(symbol, "NVDA");
+                assert_eq!(payload, fundamentals);
+            }
+        }
+        assert!(matches!(
+            app.detail_analysis_entry("NVDA"),
+            Some(AnalysisCacheEntry::Loading { .. })
+        ));
+    }
+
+    #[test]
+    fn queue_detail_analysis_request_ignores_market_cap_only_changes() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+        app.queue_detail_analysis_request(&state, Some(&sender));
+        let _ = receiver
+            .recv()
+            .expect("initial analysis request should be queued");
+
+        let mut refreshed = fundamentals.clone();
+        refreshed.market_cap_dollars = Some(1_350_000_000);
+        state.ingest_fundamentals(refreshed);
+
+        app.queue_detail_analysis_request(&state, Some(&sender));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn detail_analysis_snapshot_reuses_cached_results_when_only_market_cap_changes() {
+        let fresh = sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        let mut stale = fresh.clone();
+        stale.market_cap_dollars = Some(900_000_000);
+
+        let detail = SymbolDetail {
+            symbol: "NVDA".to_string(),
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+            gap_bps: 5_000,
+            minimum_gap_bps: 2_000,
+            qualification: QualificationStatus::Qualified,
+            external_status: ExternalSignalStatus::Supportive,
+            external_signal_fair_value_cents: None,
+            external_signal_low_fair_value_cents: None,
+            external_signal_high_fair_value_cents: None,
+            weighted_external_signal_fair_value_cents: None,
+            weighted_analyst_count: None,
+            external_signal_gap_bps: None,
+            external_signal_age_seconds: None,
+            external_signal_max_age_seconds: 30,
+            analyst_opinion_count: None,
+            recommendation_mean_hundredths: None,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            fundamentals: Some(fresh),
+            confidence: ConfidenceBand::High,
+            last_sequence: 1,
+            update_count: 1,
+            is_watched: false,
+        };
+        let mut app = AppState::default();
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&stale),
+                analysis: sample_ready_analysis(),
+            },
+        );
+
+        let snapshot = detail_analysis_snapshot(&app, &detail);
+
+        assert_eq!(snapshot.status, "ready");
+        assert!(snapshot.analysis.is_some());
+    }
+
+    #[test]
+    fn detail_analysis_snapshot_ignores_cached_results_for_changed_analysis_inputs() {
+        let fresh = sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        let mut stale = fresh.clone();
+        stale.beta_millis = Some(1_450);
+
+        let detail = SymbolDetail {
+            symbol: "NVDA".to_string(),
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+            gap_bps: 5_000,
+            minimum_gap_bps: 2_000,
+            qualification: QualificationStatus::Qualified,
+            external_status: ExternalSignalStatus::Supportive,
+            external_signal_fair_value_cents: None,
+            external_signal_low_fair_value_cents: None,
+            external_signal_high_fair_value_cents: None,
+            weighted_external_signal_fair_value_cents: None,
+            weighted_analyst_count: None,
+            external_signal_gap_bps: None,
+            external_signal_age_seconds: None,
+            external_signal_max_age_seconds: 30,
+            analyst_opinion_count: None,
+            recommendation_mean_hundredths: None,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            fundamentals: Some(fresh),
+            confidence: ConfidenceBand::High,
+            last_sequence: 1,
+            update_count: 1,
+            is_watched: false,
+        };
+        let mut app = AppState::default();
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&stale),
+                analysis: sample_ready_analysis(),
+            },
+        );
+
+        let snapshot = detail_analysis_snapshot(&app, &detail);
+
+        assert_eq!(snapshot.status, "idle");
+        assert!(snapshot.analysis.is_none());
+    }
+
+    #[test]
+    fn ticker_detail_renders_fundamentals_section_with_dcf_and_relative_score() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let subject =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: Some("NVIDIA Corporation".to_string()),
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_950,
+        });
+        state.ingest_external(ExternalValuationSignal {
+            symbol: "NVDA".to_string(),
+            fair_value_cents: 2_000,
+            age_seconds: 0,
+            low_fair_value_cents: Some(1_600),
+            high_fair_value_cents: Some(2_300),
+            analyst_opinion_count: Some(24),
+            recommendation_mean_hundredths: Some(180),
+            strong_buy_count: Some(10),
+            buy_count: Some(8),
+            hold_count: Some(6),
+            sell_count: Some(0),
+            strong_sell_count: Some(0),
+            weighted_fair_value_cents: Some(1_980),
+            weighted_analyst_count: Some(12),
+        });
+        state.ingest_fundamentals(subject.clone());
+
+        for (index, pe) in [(1, 2_000), (2, 2_200), (3, 2_400), (4, 2_600), (5, 2_800)] {
+            let mut peer = sample_fundamentals(
+                &format!("P{index}"),
+                "technology",
+                "Technology",
+                "software",
+                "Software",
+            );
+            peer.trailing_pe_hundredths = Some(pe);
+            state.ingest_fundamentals(peer);
+        }
+
+        let mut app = AppState::default();
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&subject),
+                analysis: sample_ready_analysis(),
+            },
+        );
+
+        let lines = build_ticker_detail_lines_for_viewport(&state, &app, "NVDA", 140, 80);
+        let visible_lines = lines
+            .iter()
+            .map(|line| visible_text(&line.text))
+            .collect::<Vec<_>>();
+
+        assert!(visible_lines.iter().any(|line| line == "FUNDAMENTALS"));
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("Proprietary DCF value"))
+        );
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("DCF bear $14.50  base $18.00  bull $22.50"))
+        );
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("Relative vs industry Software peers=5"))
+        );
+    }
+
+    #[test]
+    fn parse_runtime_options_appends_custom_symbols_to_a_profile() {
+        let options = parse_runtime_options_from(["--profile", "merval", "--symbols", "AAPL,YPF"])
+            .expect("profiles should accept extra custom symbols");
+
+        assert_eq!(options.symbols.last().map(String::as_str), Some("YPF"));
+        assert!(options.symbols.iter().any(|symbol| symbol == "AAPL"));
+        assert_eq!(
+            options
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.as_str() == "YPF")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn parse_runtime_options_rejects_unknown_profiles() {
+        let error = parse_runtime_options_from(["--profile", "unknown-profile"])
+            .expect_err("unknown profiles should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("Available profiles: sp500, dow, russell")
+        );
+    }
+
+    #[test]
+    fn usage_text_mentions_profile_flag_and_profiles() {
+        let usage = usage_text();
+
+        assert!(usage.contains("--profile NAME"));
+        assert!(usage.contains("sp500"));
+        assert!(usage.contains("merval"));
+        assert!(usage.contains("nikkei"));
+        assert!(usage.contains("europe"));
+        assert!(usage.contains("asia"));
     }
 
     #[test]
@@ -5686,6 +8381,25 @@ mod tests {
     }
 
     #[test]
+    fn live_source_status_resolves_partial_issue_for_a_healthy_window() {
+        let mut issue_center = IssueCenter::default();
+
+        apply_live_source_status(
+            &mut issue_center,
+            LiveSourceStatus {
+                tracked_symbols: 32,
+                loaded_symbols: 32,
+                unsupported_symbols: 0,
+                error_symbols: 0,
+                last_error: None,
+            },
+        );
+
+        assert_eq!(issue_center.active_issue_count(), 0);
+        assert_eq!(health_status_label(issue_center.health_status()), "healthy");
+    }
+
+    #[test]
     fn feed_refresh_publishes_symbol_updates_before_final_source_status() {
         let (sender, receiver) = mpsc::channel();
         let publisher = AppEventPublisher::new(sender);
@@ -5703,18 +8417,9 @@ mod tests {
                 .expect("each symbol should have one fetch result")
         }));
 
-        let first_batch = match receiver.recv().expect("first batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected first feed batch"),
-        };
-        let second_batch = match receiver.recv().expect("second batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected second feed batch"),
-        };
-        let final_batch = match receiver.recv().expect("final status batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected final feed batch"),
-        };
+        let first_batch = recv_feed_batch(&receiver, "first feed batch");
+        let second_batch = recv_feed_batch(&receiver, "second feed batch");
+        let final_batch = recv_feed_batch(&receiver, "final feed batch");
 
         assert_eq!(first_batch.len(), 2);
         assert!(
@@ -5748,6 +8453,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_feed_events_keeps_existing_fundamentals_when_refresh_omits_them() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut issue_center = IssueCenter::default();
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let refresh_without_fundamentals = build_symbol_feed_batch(super::market_data::LiveSymbolFeed {
+            snapshot: MarketSnapshot {
+                symbol: "NVDA".to_string(),
+                company_name: None,
+                profitable: true,
+                market_price_cents: 1_250,
+                intrinsic_value_cents: 1_850,
+            },
+            external_signal: None,
+            fundamentals: None,
+        });
+
+        apply_feed_events(&mut state, &mut issue_center, refresh_without_fundamentals);
+
+        assert_eq!(
+            state
+                .detail("NVDA")
+                .and_then(|detail| detail.fundamentals),
+            Some(fundamentals)
+        );
+    }
+
+    #[test]
     fn weighted_target_refresh_window_rotates_across_symbols() {
         let refreshed = (0..5)
             .filter(|index| should_refresh_weighted_target(*index, 4, 5, 2))
@@ -5757,6 +8499,139 @@ mod tests {
             (refreshed, next_weighted_target_refresh_cursor(4, 5, 2)),
             (vec![0, 4], 1)
         );
+    }
+
+    #[test]
+    fn weighted_target_refresh_covers_every_symbol_across_windows() {
+        let symbol_count = 100usize;
+        let refresh_window = 32usize;
+        let refresh_budget = 8usize;
+        let mut symbol_refresh_cursor = 0usize;
+        let mut refreshed_symbols = HashSet::new();
+
+        for _ in 0..25 {
+            let window_symbols = (0..refresh_window)
+                .map(|offset| (symbol_refresh_cursor + offset) % symbol_count)
+                .collect::<Vec<_>>();
+            let refreshed_in_window = window_symbols
+                .iter()
+                .copied()
+                .filter(|symbol_index| {
+                    should_refresh_weighted_target(
+                        *symbol_index,
+                        symbol_refresh_cursor,
+                        symbol_count,
+                        refresh_budget,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(refreshed_in_window.len(), refresh_budget);
+            refreshed_symbols.extend(refreshed_in_window);
+            symbol_refresh_cursor = next_weighted_target_refresh_cursor(
+                symbol_refresh_cursor,
+                symbol_count,
+                refresh_window,
+            );
+        }
+
+        assert_eq!(refreshed_symbols.len(), symbol_count);
+    }
+
+    #[test]
+    fn concurrent_refresh_uses_global_indexes_and_window_source_status() {
+        let (sender, receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let refresh_plan = FeedRefreshPlan {
+            phase_label: "steady",
+            total_tracked_symbols: 40,
+            retry_symbols: 0,
+            concurrency: 1,
+            symbols: vec![
+                (32, "AAPL".to_string()),
+                (33, "MSFT".to_string()),
+                (34, "AMD".to_string()),
+            ],
+            next_symbol_cursor: 35,
+        };
+        let window_indexes = Arc::new(Mutex::new(Vec::new()));
+        let indexes_for_fetch = Arc::clone(&window_indexes);
+
+        let outcome = publish_feed_refresh_concurrently(
+            &publisher,
+            &refresh_plan,
+            None,
+            move |symbol_index, symbol| {
+                indexes_for_fetch
+                    .lock()
+                    .expect("symbol indexes should be lockable")
+                    .push((symbol_index, symbol.to_string()));
+                Ok(Some(live_feed(symbol)))
+            },
+        );
+        drop(publisher);
+
+        let first_batch = recv_feed_batch(&receiver, "first feed batch");
+        let second_batch = recv_feed_batch(&receiver, "second feed batch");
+        let third_batch = recv_feed_batch(&receiver, "third feed batch");
+
+        assert_eq!(
+            window_indexes
+                .lock()
+                .expect("symbol indexes should be readable")
+                .clone(),
+            vec![
+                (32, "AAPL".to_string()),
+                (33, "MSFT".to_string()),
+                (34, "AMD".to_string()),
+            ]
+        );
+        assert!(matches!(
+            outcome,
+            Some(super::FeedRefreshOutcome {
+                loaded_symbols: 3,
+                unsupported_symbols: 0,
+                error_symbols: 0,
+                throttled_errors: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            first_batch.first(),
+            Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AAPL"
+        ));
+        assert!(matches!(
+            second_batch.first(),
+            Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "MSFT"
+        ));
+        assert!(matches!(
+            third_batch.first(),
+            Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AMD"
+        ));
+        let final_batch = recv_feed_batch(&receiver, "final source status batch");
+        assert!(matches!(
+            final_batch.first(),
+            Some(FeedEvent::SourceStatus(LiveSourceStatus {
+                tracked_symbols: 3,
+                loaded_symbols: 3,
+                unsupported_symbols: 0,
+                error_symbols: 0,
+                last_error: None,
+            }))
+        ));
+    }
+
+    #[test]
+    fn retry_classifier_distinguishes_throttle_from_hard_not_found() {
+        assert!(is_provider_throttle_error(
+            "HTTP status client error (429 Too Many Requests) for url (...)"
+        ));
+        assert!(is_retryable_feed_error(
+            "HTTP status client error (429 Too Many Requests) for url (...)"
+        ));
+        assert!(!is_retryable_feed_error(
+            "HTTP status client error (404 Not Found) for url (...)"
+        ));
     }
 
     #[test]
@@ -5917,18 +8792,9 @@ mod tests {
                 .expect("each symbol should have one fetch result")
         }));
 
-        let first_batch = match receiver.recv().expect("first batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected first feed batch"),
-        };
-        let second_batch = match receiver.recv().expect("second batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected second feed batch"),
-        };
-        let final_batch = match receiver.recv().expect("final status batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected final feed batch"),
-        };
+        let first_batch = recv_feed_batch(&receiver, "first feed batch");
+        let second_batch = recv_feed_batch(&receiver, "second feed batch");
+        let final_batch = recv_feed_batch(&receiver, "final feed batch");
 
         assert_eq!(
             (
@@ -6018,18 +8884,9 @@ mod tests {
             }
         });
 
-        let first_batch = match receiver.recv().expect("first batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected first feed batch"),
-        };
-        let second_batch = match receiver.recv().expect("second batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected second feed batch"),
-        };
-        let third_batch = match receiver.recv().expect("third batch should arrive") {
-            AppEvent::FeedBatch(feed_events) => feed_events,
-            _ => panic!("expected third feed batch"),
-        };
+        let first_batch = recv_feed_batch(&receiver, "first feed batch");
+        let second_batch = recv_feed_batch(&receiver, "second feed batch");
+        let third_batch = recv_feed_batch(&receiver, "third feed batch");
 
         assert!(matches!(
             first_batch.first(),
@@ -6133,25 +8990,24 @@ mod tests {
             .lock()
             .expect("fake client calls should be readable")
             .clone();
+        let mut called_symbols = calls
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        let mut expected_symbols = symbols.clone();
+        called_symbols.sort();
+        expected_symbols.sort();
 
-        assert_eq!(source_status_batches, 2);
-        assert_eq!(calls.len(), 20);
+        assert_eq!(source_status_batches, 1);
+        assert_eq!(calls.len(), 10);
         assert_eq!(
             calls
                 .iter()
-                .take(10)
-                .map(|(_, refresh_weighted_target)| *refresh_weighted_target)
-                .collect::<Vec<_>>(),
-            vec![true, true, true, true, true, true, true, true, false, false]
+                .filter(|(_, refresh_weighted_target)| *refresh_weighted_target)
+                .count(),
+            8
         );
-        assert_eq!(
-            calls
-                .iter()
-                .skip(10)
-                .map(|(_, refresh_weighted_target)| *refresh_weighted_target)
-                .collect::<Vec<_>>(),
-            vec![true, true, true, true, true, true, false, false, true, true]
-        );
+        assert_eq!(called_symbols, expected_symbols);
     }
 
     #[test]
@@ -6314,6 +9170,79 @@ mod tests {
             (should_leave_input_mode_on_backspace(&mut buffer), buffer),
             (false, "N".to_string())
         );
+    }
+
+    #[test]
+    fn q_exits_from_ticker_detail_overlay() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &[],
+            0,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("q should be handled");
+
+        assert!(matches!(result, LoopControl::Exit));
+    }
+
+    #[test]
+    fn q_exits_from_issue_log_overlay() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.open_issue_log();
+
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &[],
+            0,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("q should be handled");
+
+        assert!(matches!(result, LoopControl::Exit));
+    }
+
+    #[test]
+    fn q_is_still_treated_as_text_while_filtering() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.input_mode = InputMode::FilterSearch(String::new());
+
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &[],
+            0,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("q should be handled");
+
+        assert!(matches!(result, LoopControl::Continue));
+        assert!(matches!(app.input_mode, InputMode::FilterSearch(ref buffer) if buffer == "q"));
     }
 
     #[test]

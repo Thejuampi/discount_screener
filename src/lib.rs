@@ -75,6 +75,58 @@ pub struct ExternalValuationSignal {
     pub weighted_analyst_count: Option<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundamentalSnapshot {
+    pub symbol: String,
+    pub sector_key: Option<String>,
+    pub sector_name: Option<String>,
+    pub industry_key: Option<String>,
+    pub industry_name: Option<String>,
+    pub market_cap_dollars: Option<u64>,
+    pub shares_outstanding: Option<u64>,
+    pub trailing_pe_hundredths: Option<u32>,
+    pub forward_pe_hundredths: Option<u32>,
+    pub price_to_book_hundredths: Option<u32>,
+    pub return_on_equity_bps: Option<i32>,
+    pub ebitda_dollars: Option<i64>,
+    pub enterprise_value_dollars: Option<i64>,
+    pub enterprise_to_ebitda_hundredths: Option<i32>,
+    pub total_debt_dollars: Option<i64>,
+    pub total_cash_dollars: Option<i64>,
+    pub debt_to_equity_hundredths: Option<i32>,
+    pub free_cash_flow_dollars: Option<i64>,
+    pub operating_cash_flow_dollars: Option<i64>,
+    pub beta_millis: Option<i32>,
+    pub trailing_eps_cents: Option<i64>,
+    pub earnings_growth_bps: Option<i32>,
+}
+
+impl FundamentalSnapshot {
+    pub fn has_any_values(&self) -> bool {
+        self.sector_key.is_some()
+            || self.sector_name.is_some()
+            || self.industry_key.is_some()
+            || self.industry_name.is_some()
+            || self.market_cap_dollars.is_some()
+            || self.shares_outstanding.is_some()
+            || self.trailing_pe_hundredths.is_some()
+            || self.forward_pe_hundredths.is_some()
+            || self.price_to_book_hundredths.is_some()
+            || self.return_on_equity_bps.is_some()
+            || self.ebitda_dollars.is_some()
+            || self.enterprise_value_dollars.is_some()
+            || self.enterprise_to_ebitda_hundredths.is_some()
+            || self.total_debt_dollars.is_some()
+            || self.total_cash_dollars.is_some()
+            || self.debt_to_equity_hundredths.is_some()
+            || self.free_cash_flow_dollars.is_some()
+            || self.operating_cash_flow_dollars.is_some()
+            || self.beta_millis.is_some()
+            || self.trailing_eps_cents.is_some()
+            || self.earnings_growth_bps.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnalystOutcomeSample {
     pub target_error_bps: u32,
@@ -204,6 +256,7 @@ pub struct SymbolDetail {
     pub hold_count: Option<u32>,
     pub sell_count: Option<u32>,
     pub strong_sell_count: Option<u32>,
+    pub fundamentals: Option<FundamentalSnapshot>,
     pub confidence: ConfidenceBand,
     pub last_sequence: usize,
     pub update_count: usize,
@@ -221,6 +274,8 @@ pub struct AlertEvent {
 pub enum JournalPayload {
     Snapshot(MarketSnapshot),
     External(ExternalValuationSignal),
+    Fundamentals(FundamentalSnapshot),
+    FundamentalsCleared(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +288,7 @@ pub struct JournalEntry {
 struct SymbolState {
     snapshot: Option<MarketSnapshot>,
     external_signal: Option<ExternalValuationSignal>,
+    fundamentals: Option<FundamentalSnapshot>,
     last_sequence: usize,
     update_count: usize,
     price_history: VecDeque<PriceHistoryPoint>,
@@ -321,6 +377,48 @@ impl TerminalState {
         });
     }
 
+    pub fn ingest_fundamentals(&mut self, fundamentals: FundamentalSnapshot) {
+        if !fundamentals.has_any_values() {
+            return;
+        }
+
+        let sequence = self.next_sequence();
+        let state = self.symbols.entry(fundamentals.symbol.clone()).or_default();
+        state.fundamentals = Some(fundamentals.clone());
+        state.last_sequence = sequence;
+        state.update_count += 1;
+        self.total_events += 1;
+        self.journal.push(JournalEntry {
+            sequence,
+            payload: JournalPayload::Fundamentals(fundamentals),
+        });
+    }
+
+    pub fn clear_fundamentals(&mut self, symbol: &str) {
+        let should_clear = self
+            .symbols
+            .get(symbol)
+            .and_then(|state| state.fundamentals.as_ref())
+            .is_some();
+        if !should_clear {
+            return;
+        }
+
+        let sequence = self.next_sequence();
+        let state = self
+            .symbols
+            .get_mut(symbol)
+            .expect("existing symbol state should still be present");
+        state.fundamentals = None;
+        state.last_sequence = sequence;
+        state.update_count += 1;
+        self.total_events += 1;
+        self.journal.push(JournalEntry {
+            sequence,
+            payload: JournalPayload::FundamentalsCleared(symbol.to_string()),
+        });
+    }
+
     pub fn candidate(&self, symbol: &str) -> Option<CandidateRow> {
         self.symbols
             .get(symbol)
@@ -338,6 +436,15 @@ impl TerminalState {
             .get(symbol)
             .and_then(|state| state.snapshot.as_ref())
             .and_then(|snapshot| snapshot.company_name.as_deref())
+    }
+
+    pub fn fundamentals_iter(&self) -> impl Iterator<Item = (&str, &FundamentalSnapshot)> + '_ {
+        self.symbols.iter().filter_map(|(symbol, state)| {
+            state
+                .fundamentals
+                .as_ref()
+                .map(|fundamentals| (symbol.as_str(), fundamentals))
+        })
     }
 
     pub fn price_history(&self, symbol: &str, limit: usize) -> Vec<PriceHistoryPoint> {
@@ -385,7 +492,9 @@ impl TerminalState {
         &'a self,
         symbol: &'a str,
     ) -> impl DoubleEndedIterator<Item = &'a TapeEvent> + 'a {
-        self.recent_tape.iter().filter(move |event| event.symbol == symbol)
+        self.recent_tape
+            .iter()
+            .filter(move |event| event.symbol == symbol)
     }
 
     pub fn alerts_iter(&self) -> impl DoubleEndedIterator<Item = &AlertEvent> + '_ {
@@ -504,6 +613,10 @@ impl TerminalState {
             match &entry.payload {
                 JournalPayload::Snapshot(snapshot) => state.ingest_snapshot(snapshot.clone()),
                 JournalPayload::External(signal) => state.ingest_external(signal.clone()),
+                JournalPayload::Fundamentals(fundamentals) => {
+                    state.ingest_fundamentals(fundamentals.clone())
+                }
+                JournalPayload::FundamentalsCleared(symbol) => state.clear_fundamentals(symbol),
             }
         }
         state
@@ -706,6 +819,7 @@ impl TerminalState {
             hold_count,
             sell_count,
             strong_sell_count,
+            fundamentals: state.fundamentals.clone(),
             confidence,
             last_sequence: state.last_sequence,
             update_count: state.update_count,
@@ -924,6 +1038,35 @@ fn encode_journal_entry(entry: &JournalEntry) -> String {
                 optional_number_field(signal.weighted_analyst_count),
             )
         }
+        JournalPayload::Fundamentals(fundamentals) => format!(
+            "F|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            entry.sequence,
+            fundamentals.symbol,
+            optional_string_field(fundamentals.sector_key.as_deref()),
+            optional_string_field(fundamentals.sector_name.as_deref()),
+            optional_string_field(fundamentals.industry_key.as_deref()),
+            optional_string_field(fundamentals.industry_name.as_deref()),
+            optional_number_field(fundamentals.market_cap_dollars),
+            optional_number_field(fundamentals.shares_outstanding),
+            optional_number_field(fundamentals.trailing_pe_hundredths),
+            optional_number_field(fundamentals.forward_pe_hundredths),
+            optional_number_field(fundamentals.price_to_book_hundredths),
+            optional_number_field(fundamentals.return_on_equity_bps),
+            optional_number_field(fundamentals.ebitda_dollars),
+            optional_number_field(fundamentals.enterprise_value_dollars),
+            optional_number_field(fundamentals.enterprise_to_ebitda_hundredths),
+            optional_number_field(fundamentals.total_debt_dollars),
+            optional_number_field(fundamentals.total_cash_dollars),
+            optional_number_field(fundamentals.debt_to_equity_hundredths),
+            optional_number_field(fundamentals.free_cash_flow_dollars),
+            optional_number_field(fundamentals.operating_cash_flow_dollars),
+            optional_number_field(fundamentals.beta_millis),
+            optional_number_field(fundamentals.trailing_eps_cents),
+            optional_number_field(fundamentals.earnings_growth_bps)
+        ),
+        JournalPayload::FundamentalsCleared(symbol) => {
+            format!("FC|{}|{}", entry.sequence, symbol)
+        }
     }
 }
 
@@ -936,6 +1079,8 @@ fn decode_journal_entry(line: &str) -> Result<JournalEntry, String> {
     match *kind {
         "S" => decode_snapshot_entry(&parts),
         "E" => decode_external_entry(&parts),
+        "F" => decode_fundamentals_entry(&parts),
+        "FC" => decode_fundamentals_cleared_entry(&parts),
         _ => Err("unknown event kind".to_string()),
     }
 }
@@ -1023,11 +1168,87 @@ fn decode_external_entry(parts: &[&str]) -> Result<JournalEntry, String> {
     })
 }
 
+fn decode_fundamentals_entry(parts: &[&str]) -> Result<JournalEntry, String> {
+    if parts.len() != 24 {
+        return Err("fundamentals entry should have 24 fields".to_string());
+    }
+
+    Ok(JournalEntry {
+        sequence: parse_number(parts[1], "fundamentals sequence")?,
+        payload: JournalPayload::Fundamentals(FundamentalSnapshot {
+            symbol: parts[2].to_string(),
+            sector_key: parse_optional_string(parts.get(3)),
+            sector_name: parse_optional_string(parts.get(4)),
+            industry_key: parse_optional_string(parts.get(5)),
+            industry_name: parse_optional_string(parts.get(6)),
+            market_cap_dollars: parse_optional_number(parts.get(7), "fundamentals market_cap")?,
+            shares_outstanding: parse_optional_number(parts.get(8), "fundamentals shares")?,
+            trailing_pe_hundredths: parse_optional_number(
+                parts.get(9),
+                "fundamentals trailing_pe",
+            )?,
+            forward_pe_hundredths: parse_optional_number(parts.get(10), "fundamentals forward_pe")?,
+            price_to_book_hundredths: parse_optional_number(
+                parts.get(11),
+                "fundamentals price_to_book",
+            )?,
+            return_on_equity_bps: parse_optional_number(
+                parts.get(12),
+                "fundamentals return_on_equity",
+            )?,
+            ebitda_dollars: parse_optional_number(parts.get(13), "fundamentals ebitda")?,
+            enterprise_value_dollars: parse_optional_number(
+                parts.get(14),
+                "fundamentals enterprise_value",
+            )?,
+            enterprise_to_ebitda_hundredths: parse_optional_number(
+                parts.get(15),
+                "fundamentals enterprise_to_ebitda",
+            )?,
+            total_debt_dollars: parse_optional_number(parts.get(16), "fundamentals total_debt")?,
+            total_cash_dollars: parse_optional_number(parts.get(17), "fundamentals total_cash")?,
+            debt_to_equity_hundredths: parse_optional_number(
+                parts.get(18),
+                "fundamentals debt_to_equity",
+            )?,
+            free_cash_flow_dollars: parse_optional_number(
+                parts.get(19),
+                "fundamentals free_cash_flow",
+            )?,
+            operating_cash_flow_dollars: parse_optional_number(
+                parts.get(20),
+                "fundamentals operating_cash_flow",
+            )?,
+            beta_millis: parse_optional_number(parts.get(21), "fundamentals beta")?,
+            trailing_eps_cents: parse_optional_number(parts.get(22), "fundamentals trailing_eps")?,
+            earnings_growth_bps: parse_optional_number(
+                parts.get(23),
+                "fundamentals earnings_growth",
+            )?,
+        }),
+    })
+}
+
+fn decode_fundamentals_cleared_entry(parts: &[&str]) -> Result<JournalEntry, String> {
+    if parts.len() != 3 {
+        return Err("fundamentals clear entry should have 3 fields".to_string());
+    }
+
+    Ok(JournalEntry {
+        sequence: parse_number(parts[1], "fundamentals clear sequence")?,
+        payload: JournalPayload::FundamentalsCleared(parts[2].to_string()),
+    })
+}
+
 fn optional_number_field<T>(value: Option<T>) -> String
 where
     T: ToString,
 {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn optional_string_field(value: Option<&str>) -> String {
+    value.unwrap_or_default().to_string()
 }
 
 fn parse_optional_number<T>(raw: Option<&&str>, field_name: &str) -> Result<Option<T>, String>
@@ -1045,6 +1266,12 @@ where
     raw.parse::<T>()
         .map(Some)
         .map_err(|_| format!("invalid {}", field_name))
+}
+
+fn parse_optional_string(raw: Option<&&str>) -> Option<String> {
+    raw.map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn parse_number<T>(raw: &str, field_name: &str) -> Result<T, String>
@@ -1309,6 +1536,7 @@ mod tests {
                     weighted_fair_value_cents: Some(40_000),
                     weighted_analyst_count: Some(12),
                 }),
+                fundamentals: None,
                 last_sequence: 1,
                 update_count: 1,
                 price_history: VecDeque::new(),
@@ -1341,6 +1569,7 @@ mod tests {
                     weighted_fair_value_cents: Some(10_000),
                     weighted_analyst_count: Some(12),
                 }),
+                fundamentals: None,
                 last_sequence: 1,
                 update_count: 1,
                 price_history: VecDeque::new(),

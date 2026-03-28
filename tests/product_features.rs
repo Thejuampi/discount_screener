@@ -7,6 +7,7 @@ use discount_screener::ExternalValuationSignal;
 use discount_screener::TerminalState;
 use discount_screener::ViewFilter;
 use support::external_signal;
+use support::fundamental_snapshot;
 use support::market_snapshot;
 use support::temp_file_path;
 
@@ -105,6 +106,55 @@ fn persists_and_restores_state_from_a_journal_file() {
                 .map(|alert| (alert.symbol, alert.kind))
                 .collect::<Vec<_>>(),
         )
+    );
+}
+
+#[test]
+fn replays_fundamental_snapshots_from_the_journal() {
+    let journal_path = temp_file_path("fundamentals_round_trip");
+    let mut state = TerminalState::new(2_000, 30, 8);
+
+    state.ingest_snapshot(market_snapshot("NVDA", true, 17_270, 26_923));
+    state.ingest_fundamentals(fundamental_snapshot("NVDA"));
+    state
+        .save_journal_file(&journal_path)
+        .expect("journal should be written");
+
+    let replayed =
+        TerminalState::replay_file(2_000, 30, 8, &journal_path).expect("journal should replay");
+
+    fs::remove_file(&journal_path).ok();
+
+    assert_eq!(
+        replayed
+            .detail("NVDA")
+            .and_then(|detail| detail.fundamentals),
+        Some(fundamental_snapshot("NVDA"))
+    );
+}
+
+#[test]
+fn replays_fundamental_clears_from_the_journal() {
+    let journal_path = temp_file_path("fundamentals_clear_round_trip");
+    let mut state = TerminalState::new(2_000, 30, 8);
+
+    state.ingest_snapshot(market_snapshot("NVDA", true, 17_270, 26_923));
+    state.ingest_fundamentals(fundamental_snapshot("NVDA"));
+    state.clear_fundamentals("NVDA");
+    state
+        .save_journal_file(&journal_path)
+        .expect("journal should be written");
+
+    let replayed =
+        TerminalState::replay_file(2_000, 30, 8, &journal_path).expect("journal should replay");
+
+    fs::remove_file(&journal_path).ok();
+
+    assert_eq!(
+        replayed
+            .detail("NVDA")
+            .and_then(|detail| detail.fundamentals),
+        None
     );
 }
 

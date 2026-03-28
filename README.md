@@ -46,13 +46,21 @@ Live mode requires outbound HTTPS access to Yahoo Finance public endpoints.
 
 By default the workstation starts with the built-in 503-symbol live universe.
 
+Use a predefined startup profile:
+
+```bash
+cargo run -- --profile sp500
+cargo run -- --profile dow
+cargo run -- --profile merval
+```
+
 Use a custom initial symbol list:
 
 ```bash
 cargo run -- --symbols AAPL,MSFT,NVDA
 ```
 
-The CLI symbol list only seeds the initial live universe. During a live session you can add more tracked symbols directly in the terminal with `s`.
+The CLI symbol list only seeds the initial live universe. When `--profile` and `--symbols` are used together, the custom symbols are appended to the selected profile. During a live session you can add more tracked symbols directly in the terminal with `s`.
 
 Smoke mode:
 

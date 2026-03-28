@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use discount_screener::ExternalValuationSignal;
+use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
 
 pub fn market_snapshot(
@@ -41,6 +42,34 @@ pub fn external_signal(
         strong_sell_count: None,
         weighted_fair_value_cents: None,
         weighted_analyst_count: None,
+    }
+}
+
+#[allow(dead_code)]
+pub fn fundamental_snapshot(symbol: &str) -> FundamentalSnapshot {
+    FundamentalSnapshot {
+        symbol: symbol.to_string(),
+        sector_key: Some("technology".to_string()),
+        sector_name: Some("Technology".to_string()),
+        industry_key: Some("software".to_string()),
+        industry_name: Some("Software".to_string()),
+        market_cap_dollars: Some(500_000_000_000),
+        shares_outstanding: Some(10_000_000_000),
+        trailing_pe_hundredths: Some(2_500),
+        forward_pe_hundredths: Some(2_000),
+        price_to_book_hundredths: Some(500),
+        return_on_equity_bps: Some(2_200),
+        ebitda_dollars: Some(80_000_000_000),
+        enterprise_value_dollars: Some(520_000_000_000),
+        enterprise_to_ebitda_hundredths: Some(650),
+        total_debt_dollars: Some(60_000_000_000),
+        total_cash_dollars: Some(20_000_000_000),
+        debt_to_equity_hundredths: Some(80_00),
+        free_cash_flow_dollars: Some(25_000_000_000),
+        operating_cash_flow_dollars: Some(32_000_000_000),
+        beta_millis: Some(1_100),
+        trailing_eps_cents: Some(800),
+        earnings_growth_bps: Some(1_500),
     }
 }
 

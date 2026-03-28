@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use discount_screener::AnalystOutcomeSample;
 use discount_screener::ExternalValuationSignal;
+use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
 use discount_screener::build_analyst_score;
 use reqwest::Url;
@@ -18,9 +19,13 @@ use serde_json::Value;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const QUOTE_PAGE_URL: &str = "https://finance.yahoo.com/quote/";
 const CHART_API_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
+const FUNDAMENTALS_TIMESERIES_URL: &str =
+    "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/";
 const QUOTE_PAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const PRICE_MARKER: &str = r#"\"price\":"#;
 const FINANCIAL_DATA_MARKER: &str = r#"\"financialData\":"#;
 const DEFAULT_KEY_STATISTICS_MARKER: &str = r#"\"defaultKeyStatistics\":"#;
+const ASSET_PROFILE_MARKER: &str = r#"\"assetProfile\":"#;
 const RECOMMENDATION_TREND_MARKER: &str = r#"\"recommendationTrend\":"#;
 const UPGRADE_DOWNGRADE_HISTORY_MARKER: &str = r#"\"upgradeDowngradeHistory\":"#;
 const ANALYST_EVALUATION_HORIZON_DAYS: u32 = 90;
@@ -78,6 +83,7 @@ pub struct MarketDataClient {
 pub struct LiveSymbolFeed {
     pub snapshot: MarketSnapshot,
     pub external_signal: Option<ExternalValuationSignal>,
+    pub fundamentals: Option<FundamentalSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +104,24 @@ pub struct HistoricalCandle {
     pub low_cents: i64,
     pub close_cents: i64,
     pub volume: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnnualReportedValue {
+    pub as_of_date: String,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FundamentalTimeseries {
+    pub free_cash_flow: Vec<AnnualReportedValue>,
+    pub operating_cash_flow: Vec<AnnualReportedValue>,
+    pub capital_expenditure: Vec<AnnualReportedValue>,
+    pub diluted_average_shares: Vec<AnnualReportedValue>,
+    pub interest_expense: Vec<AnnualReportedValue>,
+    pub pretax_income: Vec<AnnualReportedValue>,
+    pub tax_rate_for_calcs: Vec<AnnualReportedValue>,
+    pub net_income: Vec<AnnualReportedValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +240,29 @@ impl MarketDataClient {
             .map(YahooChartResponse::historical_candles)
     }
 
+    pub fn fetch_fundamental_timeseries(&self, symbol: &str) -> io::Result<FundamentalTimeseries> {
+        let response = self
+            .client
+            .get(fundamentals_timeseries_url(symbol)?)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(io::Error::other)?;
+
+        let body = response.text().map_err(io::Error::other)?;
+        let root = serde_json::from_str::<Value>(&body).map_err(io::Error::other)?;
+
+        Ok(FundamentalTimeseries {
+            free_cash_flow: parse_timeseries_metric(&root, "annualFreeCashFlow"),
+            operating_cash_flow: parse_timeseries_metric(&root, "annualOperatingCashFlow"),
+            capital_expenditure: parse_timeseries_metric(&root, "annualCapitalExpenditure"),
+            diluted_average_shares: parse_timeseries_metric(&root, "annualDilutedAverageShares"),
+            interest_expense: parse_timeseries_metric(&root, "annualInterestExpense"),
+            pretax_income: parse_timeseries_metric(&root, "annualPretaxIncome"),
+            tax_rate_for_calcs: parse_timeseries_metric(&root, "annualTaxRateForCalcs"),
+            net_income: parse_timeseries_metric(&root, "annualNetIncome"),
+        })
+    }
+
     fn fetch_price_history(
         &self,
         symbol: &str,
@@ -322,6 +369,22 @@ fn quote_page_url(symbol: &str) -> io::Result<Url> {
     Ok(url)
 }
 
+fn fundamentals_timeseries_url(symbol: &str) -> io::Result<Url> {
+    let mut url = Url::parse(FUNDAMENTALS_TIMESERIES_URL).map_err(io::Error::other)?;
+    url.path_segments_mut()
+        .map_err(|_| io::Error::other("invalid fundamentals timeseries base url"))?
+        .pop_if_empty()
+        .push(symbol);
+    url.query_pairs_mut()
+        .append_pair(
+            "type",
+            "annualFreeCashFlow,annualOperatingCashFlow,annualCapitalExpenditure,annualDilutedAverageShares,annualInterestExpense,annualPretaxIncome,annualTaxRateForCalcs,annualNetIncome",
+        )
+        .append_pair("period1", "1262304000")
+        .append_pair("period2", "2524608000");
+    Ok(url)
+}
+
 fn chart_api_url(
     symbol: &str,
     period1_epoch_seconds: u64,
@@ -400,6 +463,9 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
     let current_recommendation = recommendation_trend
         .as_ref()
         .and_then(YahooRecommendationTrend::current_period);
+    let price = parse_quote_summary_price(body)?;
+    let asset_profile =
+        parse_embedded_json_object::<YahooAssetProfile>(body, ASSET_PROFILE_MARKER)?;
 
     let market_price_cents = money_from_field(financial_data.current_price.as_ref());
     let intrinsic_value_cents = money_from_field(financial_data.target_mean_price.as_ref());
@@ -423,6 +489,13 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
         .as_ref()
         .map(|value| value.raw > 0.0);
     let company_name = parse_company_name(body, symbol);
+    let fundamentals = build_fundamental_snapshot(
+        symbol,
+        &financial_data,
+        &statistics,
+        price.as_ref(),
+        asset_profile.as_ref(),
+    );
 
     let (Some(market_price_cents), Some(intrinsic_value_cents), Some(profitable)) =
         (market_price_cents, intrinsic_value_cents, profitable)
@@ -464,7 +537,103 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
             intrinsic_value_cents,
         },
         external_signal,
+        fundamentals,
     }))
+}
+
+fn build_fundamental_snapshot(
+    symbol: &str,
+    financial_data: &YahooFinancialData,
+    statistics: &YahooDefaultKeyStatistics,
+    price: Option<&YahooPrice>,
+    asset_profile: Option<&YahooAssetProfile>,
+) -> Option<FundamentalSnapshot> {
+    let snapshot = FundamentalSnapshot {
+        symbol: symbol.to_string(),
+        sector_key: asset_profile.and_then(|profile| profile.sector_key.clone()),
+        sector_name: asset_profile.and_then(|profile| {
+            profile
+                .sector_disp
+                .clone()
+                .or_else(|| profile.sector.clone())
+        }),
+        industry_key: asset_profile.and_then(|profile| profile.industry_key.clone()),
+        industry_name: asset_profile.and_then(|profile| {
+            profile
+                .industry_disp
+                .clone()
+                .or_else(|| profile.industry.clone())
+        }),
+        market_cap_dollars: price
+            .and_then(|price| price.market_cap.as_ref())
+            .and_then(|value| non_negative_f64_to_u64(value.raw)),
+        shares_outstanding: statistics
+            .shares_outstanding
+            .as_ref()
+            .and_then(|value| non_negative_f64_to_u64(value.raw)),
+        trailing_pe_hundredths: statistics
+            .trailing_pe
+            .as_ref()
+            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+        forward_pe_hundredths: statistics
+            .forward_pe
+            .as_ref()
+            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+        price_to_book_hundredths: statistics
+            .price_to_book
+            .as_ref()
+            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+        return_on_equity_bps: financial_data
+            .return_on_equity
+            .as_ref()
+            .and_then(|value| scale_ratio_to_bps(value.raw)),
+        ebitda_dollars: financial_data
+            .ebitda
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        enterprise_value_dollars: statistics
+            .enterprise_value
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        enterprise_to_ebitda_hundredths: statistics
+            .enterprise_to_ebitda
+            .as_ref()
+            .and_then(|value| scale_ratio_to_hundredths_signed(value.raw)),
+        total_debt_dollars: financial_data
+            .total_debt
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        total_cash_dollars: financial_data
+            .total_cash
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        debt_to_equity_hundredths: financial_data
+            .debt_to_equity
+            .as_ref()
+            .and_then(|value| scale_ratio_to_hundredths_signed(value.raw)),
+        free_cash_flow_dollars: financial_data
+            .free_cashflow
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        operating_cash_flow_dollars: financial_data
+            .operating_cashflow
+            .as_ref()
+            .and_then(|value| finite_f64_to_i64(value.raw)),
+        beta_millis: statistics
+            .beta
+            .as_ref()
+            .and_then(|value| scale_ratio_to_millis(value.raw)),
+        trailing_eps_cents: statistics
+            .trailing_eps
+            .as_ref()
+            .and_then(|value| scale_money_to_cents_signed(value.raw)),
+        earnings_growth_bps: financial_data
+            .earnings_growth
+            .as_ref()
+            .and_then(|value| scale_ratio_to_bps(value.raw)),
+    };
+
+    snapshot.has_any_values().then_some(snapshot)
 }
 
 fn populate_weighted_target<F>(
@@ -537,6 +706,111 @@ fn sanitize_weighted_target(signal: &mut ExternalValuationSignal) {
     signal.weighted_fair_value_cents = Some(weighted_fair_value_cents);
 }
 
+fn non_negative_f64_to_u64(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+
+    Some(value.round() as u64)
+}
+
+fn finite_f64_to_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some(value.round() as i64)
+}
+
+fn scale_money_to_cents_signed(value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some((value * 100.0).round() as i64)
+}
+
+fn scale_non_negative_ratio_to_hundredths(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+
+    Some((value * 100.0).round() as u32)
+}
+
+fn scale_ratio_to_hundredths_signed(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some((value * 100.0).round() as i32)
+}
+
+fn scale_ratio_to_bps(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some((value * 10_000.0).round() as i32)
+}
+
+fn scale_ratio_to_millis(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some((value * 1_000.0).round() as i32)
+}
+
+fn parse_timeseries_metric(root: &Value, metric_name: &str) -> Vec<AnnualReportedValue> {
+    let Some(results) = root
+        .get("timeseries")
+        .and_then(|value| value.get("result"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut values = results
+        .iter()
+        .find_map(|entry| entry.get(metric_name).and_then(Value::as_array))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(AnnualReportedValue {
+                as_of_date: entry.get("asOfDate")?.as_str()?.to_string(),
+                value: entry.get("reportedValue")?.get("raw")?.as_f64()?,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    values.sort_by(|left, right| left.as_of_date.cmp(&right.as_of_date));
+    values
+}
+
+fn parse_quote_summary_price(body: &str) -> io::Result<Option<YahooPrice>> {
+    let mut search_start = 0usize;
+
+    while let Some(relative_index) = body[search_start..].find(PRICE_MARKER) {
+        let marker_index = search_start + relative_index;
+        let Some(fragment) = extract_embedded_json_object_at(body, marker_index, PRICE_MARKER)
+        else {
+            search_start = marker_index + PRICE_MARKER.len();
+            continue;
+        };
+
+        let decoded = fragment.replace(r#"\""#, r#"""#);
+        let price = serde_json::from_str::<YahooPrice>(&decoded).map_err(io::Error::other)?;
+        if price.market_cap.is_some() {
+            return Ok(Some(price));
+        }
+
+        search_start = marker_index + PRICE_MARKER.len();
+    }
+
+    Ok(None)
+}
+
 fn parse_embedded_json_object<T>(body: &str, marker: &str) -> io::Result<Option<T>>
 where
     T: DeserializeOwned,
@@ -552,6 +826,14 @@ where
 
 fn extract_embedded_json_object<'a>(body: &'a str, marker: &str) -> Option<&'a str> {
     let marker_index = body.find(marker)?;
+    extract_embedded_json_object_at(body, marker_index, marker)
+}
+
+fn extract_embedded_json_object_at<'a>(
+    body: &'a str,
+    marker_index: usize,
+    marker: &str,
+) -> Option<&'a str> {
     let object_start =
         marker_index + marker.len() + body[marker_index + marker.len()..].find('{')?;
     let bytes = body.as_bytes();
@@ -636,12 +918,60 @@ struct YahooFinancialData {
     number_of_analyst_opinions: Option<YahooRawValue<u32>>,
     #[serde(rename = "recommendationMean")]
     recommendation_mean: Option<YahooRawValue<f64>>,
+    #[serde(rename = "returnOnEquity")]
+    return_on_equity: Option<YahooRawValue<f64>>,
+    ebitda: Option<YahooRawValue<f64>>,
+    #[serde(rename = "totalDebt")]
+    total_debt: Option<YahooRawValue<f64>>,
+    #[serde(rename = "totalCash")]
+    total_cash: Option<YahooRawValue<f64>>,
+    #[serde(rename = "debtToEquity")]
+    debt_to_equity: Option<YahooRawValue<f64>>,
+    #[serde(rename = "freeCashflow")]
+    free_cashflow: Option<YahooRawValue<f64>>,
+    #[serde(rename = "operatingCashflow")]
+    operating_cashflow: Option<YahooRawValue<f64>>,
+    #[serde(rename = "earningsGrowth")]
+    earnings_growth: Option<YahooRawValue<f64>>,
 }
 
 #[derive(Deserialize)]
 struct YahooDefaultKeyStatistics {
+    #[serde(rename = "sharesOutstanding")]
+    shares_outstanding: Option<YahooRawValue<f64>>,
+    #[serde(rename = "trailingPE")]
+    trailing_pe: Option<YahooRawValue<f64>>,
+    #[serde(rename = "forwardPE")]
+    forward_pe: Option<YahooRawValue<f64>>,
+    #[serde(rename = "priceToBook")]
+    price_to_book: Option<YahooRawValue<f64>>,
+    #[serde(rename = "enterpriseValue")]
+    enterprise_value: Option<YahooRawValue<f64>>,
+    #[serde(rename = "enterpriseToEbitda")]
+    enterprise_to_ebitda: Option<YahooRawValue<f64>>,
+    beta: Option<YahooRawValue<f64>>,
     #[serde(rename = "trailingEps")]
     trailing_eps: Option<YahooRawValue<f64>>,
+}
+
+#[derive(Deserialize)]
+struct YahooPrice {
+    #[serde(rename = "marketCap")]
+    market_cap: Option<YahooRawValue<f64>>,
+}
+
+#[derive(Deserialize)]
+struct YahooAssetProfile {
+    #[serde(rename = "sectorKey")]
+    sector_key: Option<String>,
+    #[serde(rename = "sectorDisp")]
+    sector_disp: Option<String>,
+    sector: Option<String>,
+    #[serde(rename = "industryKey")]
+    industry_key: Option<String>,
+    #[serde(rename = "industryDisp")]
+    industry_disp: Option<String>,
+    industry: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -975,6 +1305,7 @@ fn closing_price_cents_on_or_after(
 
 #[cfg(test)]
 mod tests {
+    use super::AnnualReportedValue;
     use super::ChartRange;
     use super::HistoricalCandle;
     use super::HistoricalPricePoint;
@@ -993,10 +1324,12 @@ mod tests {
     use super::default_live_symbols;
     use super::extract_embedded_json_object;
     use super::parse_quote_page;
+    use super::parse_timeseries_metric;
     use super::populate_weighted_target;
     use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
+    use serde_json::json;
     use std::collections::HashSet;
     use std::io;
 
@@ -1028,7 +1361,13 @@ mod tests {
     fn encodes_symbols_when_building_provider_urls() {
         assert_eq!(
             (
+                quote_page_url("AAPL")
+                    .expect("quote page url should build")
+                    .to_string(),
                 quote_page_url("BRK/B?")
+                    .expect("quote page url should build")
+                    .to_string(),
+                quote_page_url("YPFD.BA")
                     .expect("quote page url should build")
                     .to_string(),
                 chart_api_url("BRK/B?", 1, 2)
@@ -1036,7 +1375,9 @@ mod tests {
                     .to_string(),
             ),
             (
+                "https://finance.yahoo.com/quote/AAPL".to_string(),
                 "https://finance.yahoo.com/quote/BRK%2FB%3F".to_string(),
+                "https://finance.yahoo.com/quote/YPFD.BA".to_string(),
                 "https://query1.finance.yahoo.com/v8/finance/chart/BRK%2FB%3F?period1=1&period2=2&interval=1d&includePrePost=false".to_string(),
             )
         );
@@ -1074,8 +1415,139 @@ mod tests {
                     weighted_fair_value_cents: None,
                     weighted_analyst_count: None,
                 }),
+                fundamentals: Some(discount_screener::FundamentalSnapshot {
+                    symbol: "AAPL".to_string(),
+                    sector_key: None,
+                    sector_name: None,
+                    industry_key: None,
+                    industry_name: None,
+                    market_cap_dollars: None,
+                    shares_outstanding: None,
+                    trailing_pe_hundredths: None,
+                    forward_pe_hundredths: None,
+                    price_to_book_hundredths: None,
+                    return_on_equity_bps: None,
+                    ebitda_dollars: None,
+                    enterprise_value_dollars: None,
+                    enterprise_to_ebitda_hundredths: None,
+                    total_debt_dollars: None,
+                    total_cash_dollars: None,
+                    debt_to_equity_hundredths: None,
+                    free_cash_flow_dollars: None,
+                    operating_cash_flow_dollars: None,
+                    beta_millis: None,
+                    trailing_eps_cents: Some(642),
+                    earnings_growth_bps: None,
+                }),
             })
         );
+    }
+
+    #[test]
+    fn parses_extended_fundamental_fields_from_quote_page() {
+        let body = r#"<!doctype html><html><head><meta property="og:title" content="NVIDIA Corporation (NVDA) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+        window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":912.34},\"targetMeanPrice\":{\"raw\":1050.00},\"targetMedianPrice\":{\"raw\":1040.00},\"returnOnEquity\":{\"raw\":0.44},\"ebitda\":{\"raw\":145000000000},\"totalDebt\":{\"raw\":120000000000},\"totalCash\":{\"raw\":70000000000},\"debtToEquity\":{\"raw\":180.55},\"freeCashflow\":{\"raw\":99500000000},\"operatingCashflow\":{\"raw\":118000000000},\"earningsGrowth\":{\"raw\":0.153}},\"defaultKeyStatistics\":{\"sharesOutstanding\":{\"raw\":15550000000},\"trailingPE\":{\"raw\":31.27},\"forwardPE\":{\"raw\":28.10},\"priceToBook\":{\"raw\":42.65},\"enterpriseValue\":{\"raw\":3075000000000},\"enterpriseToEbitda\":{\"raw\":21.21},\"beta\":{\"raw\":1.24},\"trailingEps\":{\"raw\":12.34}},\"assetProfile\":{\"sectorKey\":\"technology\",\"sectorDisp\":\"Technology\",\"industryKey\":\"semiconductors\",\"industryDisp\":\"Semiconductors\"}}";
+        </script></body></html>"#;
+
+        let live_feed = parse_quote_page("NVDA", body)
+            .expect("extended quote page should parse")
+            .expect("quote page should produce a live feed");
+        let fundamentals = live_feed
+            .fundamentals
+            .expect("extended quote page should expose fundamentals");
+
+        assert_eq!(
+            fundamentals,
+            discount_screener::FundamentalSnapshot {
+                symbol: "NVDA".to_string(),
+                sector_key: Some("technology".to_string()),
+                sector_name: Some("Technology".to_string()),
+                industry_key: Some("semiconductors".to_string()),
+                industry_name: Some("Semiconductors".to_string()),
+                market_cap_dollars: None,
+                shares_outstanding: Some(15_550_000_000),
+                trailing_pe_hundredths: Some(3_127),
+                forward_pe_hundredths: Some(2_810),
+                price_to_book_hundredths: Some(4_265),
+                return_on_equity_bps: Some(4_400),
+                ebitda_dollars: Some(145_000_000_000),
+                enterprise_value_dollars: Some(3_075_000_000_000),
+                enterprise_to_ebitda_hundredths: Some(2_121),
+                total_debt_dollars: Some(120_000_000_000),
+                total_cash_dollars: Some(70_000_000_000),
+                debt_to_equity_hundredths: Some(18_055),
+                free_cash_flow_dollars: Some(99_500_000_000),
+                operating_cash_flow_dollars: Some(118_000_000_000),
+                beta_millis: Some(1_240),
+                trailing_eps_cents: Some(1_234),
+                earnings_growth_bps: Some(1_530),
+            }
+        );
+    }
+
+    #[test]
+    fn prefers_quote_summary_price_block_when_earlier_price_objects_exist() {
+        let body = r#"<!doctype html><html><head><meta property="og:title" content="A. O. Smith Corporation (AOS) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+        window.__TEST__ = "{\"screener\":{\"records\":[{\"ticker\":\"ADC\",\"price\":{\"raw\":74.41,\"fmt\":\"74.41\"}}]},\"financialData\":{\"currentPrice\":{\"raw\":64.42},\"targetMeanPrice\":{\"raw\":79.91},\"targetMedianPrice\":{\"raw\":77.00},\"returnOnEquity\":{\"raw\":0.29197},\"ebitda\":{\"raw\":813100032},\"totalDebt\":{\"raw\":203900000},\"totalCash\":{\"raw\":193200000},\"debtToEquity\":{\"raw\":10.974},\"freeCashflow\":{\"raw\":426162496},\"operatingCashflow\":{\"raw\":616800000},\"earningsGrowth\":{\"raw\":0.191}},\"defaultKeyStatistics\":{\"sharesOutstanding\":{\"raw\":138300000},\"trailingPE\":{\"raw\":15.16},\"forwardPE\":{\"raw\":13.84},\"priceToBook\":{\"raw\":4.63},\"enterpriseValue\":{\"raw\":8919335936},\"enterpriseToEbitda\":{\"raw\":10.97},\"beta\":{\"raw\":1.18},\"trailingEps\":{\"raw\":4.25}},\"pageViews\":{\"shortTermTrend\":\"DOWN\"},\"price\":{\"maxAge\":1,\"marketCap\":{\"raw\":8908636160},\"symbol\":\"AOS\"},\"assetProfile\":{\"sectorKey\":\"industrials\",\"sectorDisp\":\"Industrials\",\"industryKey\":\"specialtyindustrialmachinery\",\"industryDisp\":\"Specialty Industrial Machinery\"}}";
+        </script></body></html>"#;
+
+        let live_feed = parse_quote_page("AOS", body)
+            .expect("quote page should parse")
+            .expect("quote page should produce a live feed");
+        let fundamentals = live_feed
+            .fundamentals
+            .expect("fundamentals should be available");
+
+        assert_eq!(fundamentals.market_cap_dollars, Some(8_908_636_160));
+    }
+
+    #[test]
+    fn parses_fundamental_timeseries_metrics_and_sorts_by_date() {
+        let root = json!({
+            "timeseries": {
+                "result": [
+                    {
+                        "annualFreeCashFlow": [
+                            {"asOfDate": "2024-12-31", "reportedValue": {"raw": 120.0}},
+                            {"asOfDate": "2022-12-31", "reportedValue": {"raw": 80.0}},
+                            {"asOfDate": "2023-12-31", "reportedValue": {"raw": 100.0}},
+                            {"asOfDate": "2021-12-31", "reportedValue": {}}
+                        ]
+                    },
+                    {
+                        "annualOperatingCashFlow": [
+                            {"asOfDate": "2023-12-31", "reportedValue": {"raw": 140.0}}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(
+            parse_timeseries_metric(&root, "annualFreeCashFlow"),
+            vec![
+                AnnualReportedValue {
+                    as_of_date: "2022-12-31".to_string(),
+                    value: 80.0,
+                },
+                AnnualReportedValue {
+                    as_of_date: "2023-12-31".to_string(),
+                    value: 100.0,
+                },
+                AnnualReportedValue {
+                    as_of_date: "2024-12-31".to_string(),
+                    value: 120.0,
+                },
+            ]
+        );
+        assert_eq!(
+            parse_timeseries_metric(&root, "annualOperatingCashFlow"),
+            vec![AnnualReportedValue {
+                as_of_date: "2023-12-31".to_string(),
+                value: 140.0,
+            }]
+        );
+        assert!(parse_timeseries_metric(&root, "annualPretaxIncome").is_empty());
     }
 
     #[test]
