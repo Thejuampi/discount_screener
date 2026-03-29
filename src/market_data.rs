@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -80,11 +81,72 @@ pub struct MarketDataClient {
     weighted_target_cache: Mutex<HashMap<String, CachedWeightedTarget>>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveSymbolFeed {
     pub snapshot: MarketSnapshot,
     pub external_signal: Option<ExternalValuationSignal>,
     pub fundamentals: Option<FundamentalSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderComponentState {
+    Fresh,
+    Missing,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderComponent {
+    Chart,
+    QuoteHtml,
+    Core,
+    External,
+    Fundamentals,
+    WeightedTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderDiagnosticKind {
+    Missing,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderDiagnostic {
+    pub component: ProviderComponent,
+    pub kind: ProviderDiagnosticKind,
+    pub detail: String,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderCoverage {
+    pub core: ProviderComponentState,
+    pub external: ProviderComponentState,
+    pub fundamentals: ProviderComponentState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderFetchResult {
+    pub symbol: String,
+    pub snapshot: Option<MarketSnapshot>,
+    pub external_signal: Option<ExternalValuationSignal>,
+    pub fundamentals: Option<FundamentalSnapshot>,
+    pub coverage: ProviderCoverage,
+    pub diagnostics: Vec<ProviderDiagnostic>,
+}
+
+impl ProviderFetchResult {
+    pub fn all_components_fresh(&self) -> bool {
+        self.coverage.core == ProviderComponentState::Fresh
+            && self.coverage.external == ProviderComponentState::Fresh
+            && self.coverage.fundamentals == ProviderComponentState::Fresh
+    }
+
+    pub fn has_any_payload(&self) -> bool {
+        self.snapshot.is_some() || self.external_signal.is_some() || self.fundamentals.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -166,45 +228,128 @@ impl MarketDataClient {
         &self,
         symbol: &str,
         refresh_weighted_target: bool,
-    ) -> io::Result<Option<LiveSymbolFeed>> {
-        let response = self
+    ) -> io::Result<ProviderFetchResult> {
+        let mut diagnostics = Vec::new();
+        let quote_body = match self
             .client
             .get(quote_page_url(symbol)?)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(io::Error::other)?;
-
-        let body = response.text().map_err(io::Error::other)?;
-        let Some(mut live_feed) = parse_quote_page(symbol, &body)? else {
-            return Ok(None);
+        {
+            Ok(response) => match response.text().map_err(io::Error::other) {
+                Ok(body) => Some(body),
+                Err(error) => {
+                    diagnostics.push(ProviderDiagnostic {
+                        component: ProviderComponent::QuoteHtml,
+                        kind: ProviderDiagnosticKind::Error,
+                        detail: error.to_string(),
+                        retryable: false,
+                    });
+                    None
+                }
+            },
+            Err(error) => {
+                diagnostics.push(ProviderDiagnostic {
+                    component: ProviderComponent::QuoteHtml,
+                    kind: ProviderDiagnosticKind::Error,
+                    detail: error.to_string(),
+                    retryable: is_retryable_http_error(&error),
+                });
+                None
+            }
         };
 
-        if let Some(external_signal) = live_feed.external_signal.as_mut() {
+        let quote_market_price_cents = quote_body.as_deref().and_then(|body| {
+            parse_provider_embedded_json_object::<YahooFinancialData>(
+                body,
+                FINANCIAL_DATA_MARKER,
+                ProviderComponent::QuoteHtml,
+                &mut diagnostics,
+            )
+            .unwrap_or_default()
+            .current_price
+            .as_ref()
+            .and_then(|value| value.raw)
+            .and_then(dollars_to_cents)
+        });
+
+        let chart_market_price_cents = if quote_market_price_cents.is_some() && quote_body.is_some() {
+            None
+        } else {
+            match self.fetch_live_chart_probe(symbol) {
+                Ok(Some(market_price_cents)) => Some(market_price_cents),
+                Ok(None) => {
+                    diagnostics.push(ProviderDiagnostic {
+                        component: ProviderComponent::Chart,
+                        kind: ProviderDiagnosticKind::Missing,
+                        detail: "chart API returned no recent price candles".to_string(),
+                        retryable: false,
+                    });
+                    None
+                }
+                Err(error) => {
+                    diagnostics.push(ProviderDiagnostic {
+                        component: ProviderComponent::Chart,
+                        kind: ProviderDiagnosticKind::Error,
+                        detail: error.to_string(),
+                        retryable: is_retryable_provider_io_error(&error),
+                    });
+                    None
+                }
+            }
+        };
+
+        let quote_context = quote_body
+            .as_deref()
+            .map(|body| {
+                parse_quote_context(
+                    symbol,
+                    body,
+                    quote_market_price_cents.or(chart_market_price_cents),
+                    &mut diagnostics,
+                )
+            })
+            .unwrap_or_default();
+
+        let mut external_signal = quote_context.external_signal;
+        if let Some(signal) = external_signal.as_mut() {
             let now_epoch_seconds = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(io::Error::other)?
                 .as_secs();
 
             if !refresh_weighted_target {
-                self.apply_cached_weighted_target(symbol, external_signal);
-                return Ok(Some(live_feed));
+                self.apply_cached_weighted_target(symbol, signal);
+            } else if !self.apply_fresh_cached_weighted_target(symbol, signal, now_epoch_seconds) {
+                if let Some(body) = quote_body.as_deref() {
+                    if let Err(error) = populate_weighted_target(
+                        body,
+                        signal,
+                        ANALYST_EVALUATION_HORIZON_DAYS,
+                        now_epoch_seconds,
+                        |period1_epoch_seconds| self.fetch_price_history(symbol, period1_epoch_seconds),
+                    ) {
+                        diagnostics.push(ProviderDiagnostic {
+                            component: ProviderComponent::WeightedTarget,
+                            kind: ProviderDiagnosticKind::Error,
+                            detail: error.to_string(),
+                            retryable: false,
+                        });
+                    }
+                } else {
+                    diagnostics.push(ProviderDiagnostic {
+                        component: ProviderComponent::WeightedTarget,
+                        kind: ProviderDiagnosticKind::Missing,
+                        detail: "quote HTML was unavailable, so weighted target enrichment was skipped"
+                            .to_string(),
+                        retryable: false,
+                    });
+                }
             }
-
-            if self.apply_fresh_cached_weighted_target(symbol, external_signal, now_epoch_seconds) {
-                return Ok(Some(live_feed));
-            }
-
-            populate_weighted_target(
-                &body,
-                external_signal,
-                ANALYST_EVALUATION_HORIZON_DAYS,
-                now_epoch_seconds,
-                |period1_epoch_seconds| self.fetch_price_history(symbol, period1_epoch_seconds),
-            )?;
 
             if let (Some(weighted_fair_value_cents), Some(weighted_analyst_count)) = (
-                external_signal.weighted_fair_value_cents,
-                external_signal.weighted_analyst_count,
+                signal.weighted_fair_value_cents,
+                signal.weighted_analyst_count,
             ) {
                 self.cache_weighted_target(
                     symbol,
@@ -219,7 +364,28 @@ impl MarketDataClient {
             }
         }
 
-        Ok(Some(live_feed))
+        let coverage = ProviderCoverage {
+            core: component_state_for(quote_context.snapshot.is_some(), &diagnostics, ProviderComponent::Core),
+            external: component_state_for(
+                external_signal.is_some(),
+                &diagnostics,
+                ProviderComponent::External,
+            ),
+            fundamentals: component_state_for(
+                quote_context.fundamentals.is_some(),
+                &diagnostics,
+                ProviderComponent::Fundamentals,
+            ),
+        };
+
+        Ok(ProviderFetchResult {
+            symbol: symbol.to_string(),
+            snapshot: quote_context.snapshot,
+            external_signal,
+            fundamentals: quote_context.fundamentals,
+            coverage,
+            diagnostics,
+        })
     }
 
     pub fn fetch_historical_candles(
@@ -352,6 +518,21 @@ impl MarketDataClient {
             cache.insert(symbol.to_string(), cached_weighted_target);
         }
     }
+
+    fn fetch_live_chart_probe(&self, symbol: &str) -> io::Result<Option<i64>> {
+        let spec = chart_range_spec(ChartRange::Day);
+        let response = self
+            .client
+            .get(chart_range_api_url(symbol, spec.range, spec.interval)?)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(io::Error::other)?;
+        let candles = response
+            .json::<YahooChartResponse>()
+            .map_err(io::Error::other)?
+            .historical_candles();
+        Ok(candles.last().map(|candle| candle.close_cents))
+    }
 }
 
 pub fn default_live_symbols() -> Vec<String> {
@@ -446,36 +627,59 @@ fn chart_range_spec(range: ChartRange) -> ChartRangeSpec {
     }
 }
 
-fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFeed>> {
-    let Some(financial_data) =
-        parse_embedded_json_object::<YahooFinancialData>(body, FINANCIAL_DATA_MARKER)?
-    else {
-        return Ok(None);
-    };
-    let Some(statistics) = parse_embedded_json_object::<YahooDefaultKeyStatistics>(
+#[derive(Default)]
+struct QuoteContext {
+    snapshot: Option<MarketSnapshot>,
+    external_signal: Option<ExternalValuationSignal>,
+    fundamentals: Option<FundamentalSnapshot>,
+}
+
+fn parse_quote_context(
+    symbol: &str,
+    body: &str,
+    chart_market_price_cents: Option<i64>,
+    diagnostics: &mut Vec<ProviderDiagnostic>,
+) -> QuoteContext {
+    let financial_data = parse_provider_embedded_json_object::<YahooFinancialData>(
+        body,
+        FINANCIAL_DATA_MARKER,
+        ProviderComponent::QuoteHtml,
+        diagnostics,
+    )
+    .unwrap_or_default();
+    let statistics = parse_provider_embedded_json_object::<YahooDefaultKeyStatistics>(
         body,
         DEFAULT_KEY_STATISTICS_MARKER,
-    )?
-    else {
-        return Ok(None);
-    };
-    let recommendation_trend =
-        parse_embedded_json_object::<YahooRecommendationTrend>(body, RECOMMENDATION_TREND_MARKER)?;
+        ProviderComponent::QuoteHtml,
+        diagnostics,
+    )
+    .unwrap_or_default();
+    let recommendation_trend = parse_provider_embedded_json_object::<YahooRecommendationTrend>(
+        body,
+        RECOMMENDATION_TREND_MARKER,
+        ProviderComponent::QuoteHtml,
+        diagnostics,
+    );
     let current_recommendation = recommendation_trend
         .as_ref()
         .and_then(YahooRecommendationTrend::current_period);
-    let price = parse_quote_summary_price(body)?;
-    let asset_profile =
-        parse_embedded_json_object::<YahooAssetProfile>(body, ASSET_PROFILE_MARKER)?;
+    let price = parse_provider_quote_summary_price(body, diagnostics);
+    let asset_profile = parse_provider_embedded_json_object::<YahooAssetProfile>(
+        body,
+        ASSET_PROFILE_MARKER,
+        ProviderComponent::QuoteHtml,
+        diagnostics,
+    );
 
-    let market_price_cents = money_from_field(financial_data.current_price.as_ref());
+    let market_price_cents =
+        money_from_field(financial_data.current_price.as_ref()).or(chart_market_price_cents);
     let intrinsic_value_cents = money_from_field(financial_data.target_mean_price.as_ref());
     let low_fair_value_cents = money_from_field(financial_data.target_low_price.as_ref());
     let high_fair_value_cents = money_from_field(financial_data.target_high_price.as_ref());
     let analyst_opinion_count = financial_data
         .number_of_analyst_opinions
         .as_ref()
-        .map(|value| value.raw)
+        .and_then(|value| value.raw)
         .or_else(|| {
             current_recommendation
                 .as_ref()
@@ -484,11 +688,13 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
     let recommendation_mean_hundredths = financial_data
         .recommendation_mean
         .as_ref()
-        .and_then(|value| decimal_to_hundredths(value.raw));
+        .and_then(|value| value.raw)
+        .and_then(decimal_to_hundredths);
     let profitable = statistics
         .trailing_eps
         .as_ref()
-        .map(|value| value.raw > 0.0);
+        .and_then(|value| value.raw)
+        .map(|value| value > 0.0);
     let company_name = parse_company_name(body, symbol);
     let fundamentals = build_fundamental_snapshot(
         symbol,
@@ -498,16 +704,45 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
         asset_profile.as_ref(),
     );
 
-    let (Some(market_price_cents), Some(intrinsic_value_cents), Some(profitable)) =
-        (market_price_cents, intrinsic_value_cents, profitable)
-    else {
-        return Ok(None);
+    let snapshot = match (market_price_cents, intrinsic_value_cents, profitable) {
+        (Some(market_price_cents), Some(intrinsic_value_cents), Some(profitable)) => {
+            Some(MarketSnapshot {
+                symbol: symbol.to_string(),
+                company_name,
+                profitable,
+                market_price_cents,
+                intrinsic_value_cents,
+            })
+        }
+        _ => {
+            let mut missing_fields = Vec::new();
+            if market_price_cents.is_none() {
+                missing_fields.push("market price");
+            }
+            if intrinsic_value_cents.is_none() {
+                missing_fields.push("target mean price");
+            }
+            if profitable.is_none() {
+                missing_fields.push("profitability");
+            }
+            diagnostics.push(ProviderDiagnostic {
+                component: ProviderComponent::Core,
+                kind: ProviderDiagnosticKind::Missing,
+                detail: format!(
+                    "core snapshot is missing {}",
+                    missing_fields.join(", ")
+                ),
+                retryable: false,
+            });
+            None
+        }
     };
 
     let external_signal = financial_data
         .target_median_price
         .as_ref()
-        .and_then(|value| dollars_to_cents(value.raw))
+        .and_then(|value| value.raw)
+        .and_then(dollars_to_cents)
         .map(|fair_value_cents| ExternalValuationSignal {
             symbol: symbol.to_string(),
             fair_value_cents,
@@ -528,17 +763,41 @@ fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFee
             weighted_fair_value_cents: None,
             weighted_analyst_count: None,
         });
+    if external_signal.is_none() {
+        diagnostics.push(ProviderDiagnostic {
+            component: ProviderComponent::External,
+            kind: ProviderDiagnosticKind::Missing,
+            detail: "external signal is missing target median price".to_string(),
+            retryable: false,
+        });
+    }
+    if fundamentals.is_none() {
+        diagnostics.push(ProviderDiagnostic {
+            component: ProviderComponent::Fundamentals,
+            kind: ProviderDiagnosticKind::Missing,
+            detail: "fundamentals snapshot is missing all supported quote fields".to_string(),
+            retryable: false,
+        });
+    }
 
-    Ok(Some(LiveSymbolFeed {
-        snapshot: MarketSnapshot {
-            symbol: symbol.to_string(),
-            company_name,
-            profitable,
-            market_price_cents,
-            intrinsic_value_cents,
-        },
+    QuoteContext {
+        snapshot,
         external_signal,
         fundamentals,
+    }
+}
+
+#[cfg(test)]
+fn parse_quote_page(symbol: &str, body: &str) -> io::Result<Option<LiveSymbolFeed>> {
+    let mut diagnostics = Vec::new();
+    let quote_context = parse_quote_context(symbol, body, None, &mut diagnostics);
+    let Some(snapshot) = quote_context.snapshot else {
+        return Ok(None);
+    };
+    Ok(Some(LiveSymbolFeed {
+        snapshot,
+        external_signal: quote_context.external_signal,
+        fundamentals: quote_context.fundamentals,
     }))
 }
 
@@ -567,71 +826,88 @@ fn build_fundamental_snapshot(
         }),
         market_cap_dollars: price
             .and_then(|price| price.market_cap.as_ref())
-            .and_then(|value| non_negative_f64_to_u64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(non_negative_f64_to_u64),
         shares_outstanding: statistics
             .shares_outstanding
             .as_ref()
-            .and_then(|value| non_negative_f64_to_u64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(non_negative_f64_to_u64),
         trailing_pe_hundredths: statistics
             .trailing_pe
             .as_ref()
-            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_non_negative_ratio_to_hundredths),
         forward_pe_hundredths: statistics
             .forward_pe
             .as_ref()
-            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_non_negative_ratio_to_hundredths),
         price_to_book_hundredths: statistics
             .price_to_book
             .as_ref()
-            .and_then(|value| scale_non_negative_ratio_to_hundredths(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_non_negative_ratio_to_hundredths),
         return_on_equity_bps: financial_data
             .return_on_equity
             .as_ref()
-            .and_then(|value| scale_ratio_to_bps(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_ratio_to_bps),
         ebitda_dollars: financial_data
             .ebitda
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         enterprise_value_dollars: statistics
             .enterprise_value
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         enterprise_to_ebitda_hundredths: statistics
             .enterprise_to_ebitda
             .as_ref()
-            .and_then(|value| scale_ratio_to_hundredths_signed(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_ratio_to_hundredths_signed),
         total_debt_dollars: financial_data
             .total_debt
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         total_cash_dollars: financial_data
             .total_cash
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         debt_to_equity_hundredths: financial_data
             .debt_to_equity
             .as_ref()
-            .and_then(|value| scale_ratio_to_hundredths_signed(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_ratio_to_hundredths_signed),
         free_cash_flow_dollars: financial_data
             .free_cashflow
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         operating_cash_flow_dollars: financial_data
             .operating_cashflow
             .as_ref()
-            .and_then(|value| finite_f64_to_i64(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(finite_f64_to_i64),
         beta_millis: statistics
             .beta
             .as_ref()
-            .and_then(|value| scale_ratio_to_millis(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_ratio_to_millis),
         trailing_eps_cents: statistics
             .trailing_eps
             .as_ref()
-            .and_then(|value| scale_money_to_cents_signed(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_money_to_cents_signed),
         earnings_growth_bps: financial_data
             .earnings_growth
             .as_ref()
-            .and_then(|value| scale_ratio_to_bps(value.raw)),
+            .and_then(|value| value.raw)
+            .and_then(scale_ratio_to_bps),
     };
 
     snapshot.has_any_values().then_some(snapshot)
@@ -837,6 +1113,24 @@ fn parse_quote_summary_price(body: &str) -> io::Result<Option<YahooPrice>> {
     Ok(None)
 }
 
+fn parse_provider_quote_summary_price(
+    body: &str,
+    diagnostics: &mut Vec<ProviderDiagnostic>,
+) -> Option<YahooPrice> {
+    match parse_quote_summary_price(body) {
+        Ok(price) => price,
+        Err(error) => {
+            diagnostics.push(ProviderDiagnostic {
+                component: ProviderComponent::QuoteHtml,
+                kind: ProviderDiagnosticKind::Error,
+                detail: error.to_string(),
+                retryable: false,
+            });
+            None
+        }
+    }
+}
+
 fn parse_embedded_json_object<T>(body: &str, marker: &str) -> io::Result<Option<T>>
 where
     T: DeserializeOwned,
@@ -848,6 +1142,61 @@ where
     let decoded = fragment.replace(r#"\""#, r#"""#);
     let value = serde_json::from_str(&decoded).map_err(io::Error::other)?;
     Ok(Some(value))
+}
+
+fn parse_provider_embedded_json_object<T>(
+    body: &str,
+    marker: &str,
+    component: ProviderComponent,
+    diagnostics: &mut Vec<ProviderDiagnostic>,
+) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    match parse_embedded_json_object(body, marker) {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics.push(ProviderDiagnostic {
+                component,
+                kind: ProviderDiagnosticKind::Error,
+                detail: error.to_string(),
+                retryable: false,
+            });
+            None
+        }
+    }
+}
+
+fn component_state_for(
+    has_value: bool,
+    diagnostics: &[ProviderDiagnostic],
+    component: ProviderComponent,
+) -> ProviderComponentState {
+    if has_value {
+        return ProviderComponentState::Fresh;
+    }
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.component == component && diagnostic.kind == ProviderDiagnosticKind::Error)
+    {
+        return ProviderComponentState::Error;
+    }
+    ProviderComponentState::Missing
+}
+
+fn is_retryable_http_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || matches!(error.status(), Some(status) if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+}
+
+fn is_retryable_provider_io_error(error: &io::Error) -> bool {
+    error.source()
+        .and_then(|source: &(dyn std::error::Error + 'static)| {
+            source.downcast_ref::<reqwest::Error>()
+        })
+        .map(is_retryable_http_error)
+        .unwrap_or(false)
 }
 
 fn extract_embedded_json_object<'a>(body: &'a str, marker: &str) -> Option<&'a str> {
@@ -909,7 +1258,7 @@ fn html_unescape_basic(text: &str) -> String {
 }
 
 fn money_from_field(field: Option<&YahooRawValue<f64>>) -> Option<i64> {
-    field.and_then(|value| dollars_to_cents(value.raw))
+    field.and_then(|value| value.raw).and_then(dollars_to_cents)
 }
 
 fn dollars_to_cents(value: f64) -> Option<i64> {
@@ -928,7 +1277,7 @@ fn decimal_to_hundredths(value: f64) -> Option<u16> {
     rounded_f64_to_u16(value * 100.0)
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct YahooFinancialData {
     #[serde(rename = "currentPrice")]
     current_price: Option<YahooRawValue<f64>>,
@@ -961,7 +1310,7 @@ struct YahooFinancialData {
     earnings_growth: Option<YahooRawValue<f64>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct YahooDefaultKeyStatistics {
     #[serde(rename = "sharesOutstanding")]
     shares_outstanding: Option<YahooRawValue<f64>>,
@@ -980,13 +1329,13 @@ struct YahooDefaultKeyStatistics {
     trailing_eps: Option<YahooRawValue<f64>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct YahooPrice {
     #[serde(rename = "marketCap")]
     market_cap: Option<YahooRawValue<f64>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct YahooAssetProfile {
     #[serde(rename = "sectorKey")]
     sector_key: Option<String>,
@@ -1000,9 +1349,10 @@ struct YahooAssetProfile {
     industry: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 struct YahooRawValue<T> {
-    raw: T,
+    #[serde(default)]
+    raw: Option<T>,
 }
 
 #[derive(Deserialize)]

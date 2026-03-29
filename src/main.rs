@@ -155,16 +155,25 @@ enum FeedEvent {
     Snapshot(MarketSnapshot),
     External(ExternalValuationSignal),
     Fundamentals(FundamentalSnapshot),
+    Coverage(SymbolCoverageEvent),
     SourceStatus(LiveSourceStatus),
 }
 
 #[derive(Clone)]
 struct LiveSourceStatus {
     tracked_symbols: usize,
-    loaded_symbols: usize,
-    unsupported_symbols: usize,
-    error_symbols: usize,
+    fresh_symbols: usize,
+    stale_symbols: usize,
+    degraded_symbols: usize,
+    unavailable_symbols: usize,
     last_error: Option<String>,
+}
+
+#[derive(Clone)]
+struct SymbolCoverageEvent {
+    symbol: String,
+    coverage: market_data::ProviderCoverage,
+    diagnostics: Vec<market_data::ProviderDiagnostic>,
 }
 
 #[derive(Clone)]
@@ -700,7 +709,6 @@ impl Default for RuntimeOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FeedFailureKind {
-    IncompleteCoverage,
     ProviderError,
 }
 
@@ -737,7 +745,6 @@ impl FeedErrorLogger {
             "ts={} kind={} symbol={} detail=\"{}\"",
             unix_timestamp_seconds(),
             match kind {
-                FeedFailureKind::IncompleteCoverage => "incomplete_coverage",
                 FeedFailureKind::ProviderError => "provider_error",
             },
             symbol,
@@ -745,21 +752,41 @@ impl FeedErrorLogger {
         ))
     }
 
+    fn log_provider_diagnostic(
+        &self,
+        symbol: &str,
+        diagnostic: &market_data::ProviderDiagnostic,
+        action: &str,
+    ) -> io::Result<()> {
+        self.append_line(format!(
+            "ts={} kind=provider_coverage symbol={} component={} classification={} retryable={} action={} detail=\"{}\"",
+            unix_timestamp_seconds(),
+            symbol,
+            provider_component_label(diagnostic.component),
+            provider_diagnostic_kind_label(diagnostic.kind),
+            if diagnostic.retryable { "true" } else { "false" },
+            action,
+            sanitize_feed_log_text(&diagnostic.detail),
+        ))
+    }
+
     fn log_refresh_summary(
         &self,
         tracked_symbols: usize,
-        loaded_symbols: usize,
-        unsupported_symbols: usize,
-        error_symbols: usize,
+        fresh_symbols: usize,
+        stale_symbols: usize,
+        degraded_symbols: usize,
+        unavailable_symbols: usize,
         last_error: Option<&str>,
     ) -> io::Result<()> {
         let mut line = format!(
-            "ts={} kind=refresh_summary tracked={} loaded={} incomplete={} errors={}",
+            "ts={} kind=refresh_summary tracked={} fresh={} stale={} degraded={} unavailable={}",
             unix_timestamp_seconds(),
             tracked_symbols,
-            loaded_symbols,
-            unsupported_symbols,
-            error_symbols,
+            fresh_symbols,
+            stale_symbols,
+            degraded_symbols,
+            unavailable_symbols,
         );
 
         if let Some(last_error) = last_error {
@@ -821,6 +848,9 @@ struct AppState {
     chart_summary_cache: HashMap<ChartCacheKey, ChartRangeSummary>,
     background_chart_requests: HashMap<ChartCacheKey, u64>,
     stale_symbols: HashSet<String>,
+    degraded_symbols: HashSet<String>,
+    provider_coverage: HashMap<String, SymbolCoverageEvent>,
+    live_source_status: Option<LiveSourceStatus>,
     stale_chart_cache: HashSet<ChartCacheKey>,
     warm_start_loaded_at: Option<u64>,
     next_chart_request_id: u64,
@@ -850,6 +880,9 @@ impl Default for AppState {
             chart_summary_cache: HashMap::new(),
             background_chart_requests: HashMap::new(),
             stale_symbols: HashSet::new(),
+            degraded_symbols: HashSet::new(),
+            provider_coverage: HashMap::new(),
+            live_source_status: None,
             stale_chart_cache: HashSet::new(),
             warm_start_loaded_at: None,
             next_chart_request_id: 1,
@@ -1469,6 +1502,39 @@ impl AppState {
         self.stale_symbols.remove(symbol);
     }
 
+    fn apply_symbol_coverage(
+        &mut self,
+        state: &TerminalState,
+        coverage_event: SymbolCoverageEvent,
+    ) {
+        let is_degraded = coverage_event.coverage.core != market_data::ProviderComponentState::Fresh
+            || coverage_event.coverage.external != market_data::ProviderComponentState::Fresh
+            || coverage_event.coverage.fundamentals != market_data::ProviderComponentState::Fresh;
+
+        if coverage_event.coverage.core == market_data::ProviderComponentState::Fresh {
+            self.mark_symbol_fresh(&coverage_event.symbol);
+        } else if state.detail(&coverage_event.symbol).is_some() {
+            self.stale_symbols.insert(coverage_event.symbol.clone());
+        }
+
+        if is_degraded {
+            self.degraded_symbols.insert(coverage_event.symbol.clone());
+            self.provider_coverage
+                .insert(coverage_event.symbol.clone(), coverage_event);
+        } else {
+            self.degraded_symbols.remove(&coverage_event.symbol);
+            self.provider_coverage.remove(&coverage_event.symbol);
+        }
+    }
+
+    fn symbol_coverage(&self, symbol: &str) -> Option<&SymbolCoverageEvent> {
+        self.provider_coverage.get(symbol)
+    }
+
+    fn set_live_source_status(&mut self, status: LiveSourceStatus) {
+        self.live_source_status = Some(status);
+    }
+
     fn is_symbol_stale(&self, symbol: &str) -> bool {
         self.stale_symbols.contains(symbol)
     }
@@ -1489,6 +1555,10 @@ impl AppState {
             stale_symbol_count,
             cached_chart_count,
         ))
+    }
+
+    fn live_source_status(&self) -> Option<&LiveSourceStatus> {
+        self.live_source_status.as_ref()
     }
 }
 
@@ -2737,8 +2807,12 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                 if was_paused && !app.paused && !app.pending_feed.is_empty() {
                     let pending_feed = std::mem::take(&mut app.pending_feed);
                     let applied_feed_batch =
-                        apply_feed_events(&mut state, &mut app.issue_center, pending_feed);
-                    for symbol in &applied_feed_batch.refreshed_symbols {
+                        apply_feed_events(&mut state, &mut app, feed_error_logger.as_ref(), pending_feed);
+                    if applied_feed_batch.saw_source_status {
+                        synthesize_live_source_status(&state, &mut app, live_symbols.as_ref());
+                        log_live_source_summary(feed_error_logger.as_ref(), app.live_source_status());
+                    }
+                    for symbol in &applied_feed_batch.fresh_core_symbols {
                         app.mark_symbol_fresh(symbol);
                     }
                     if applied_feed_batch.applied_events > 0 {
@@ -2746,12 +2820,12 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     }
                     app.queue_background_chart_requests(
                         Some(&chart_control_sender),
-                        &applied_feed_batch.refreshed_symbols,
+                        &applied_feed_batch.updated_symbols,
                     );
                     app.queue_background_analysis_requests(
                         &state,
                         Some(&analysis_control_sender),
-                        &applied_feed_batch.refreshed_symbols,
+                        &applied_feed_batch.updated_symbols,
                     );
                     app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
                     match reconcile_sqlite_persistence(
@@ -2783,8 +2857,12 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     }
                 } else {
                     let applied_feed_batch =
-                        apply_feed_events(&mut state, &mut app.issue_center, feed_events);
-                    for symbol in &applied_feed_batch.refreshed_symbols {
+                        apply_feed_events(&mut state, &mut app, feed_error_logger.as_ref(), feed_events);
+                    if applied_feed_batch.saw_source_status {
+                        synthesize_live_source_status(&state, &mut app, live_symbols.as_ref());
+                        log_live_source_summary(feed_error_logger.as_ref(), app.live_source_status());
+                    }
+                    for symbol in &applied_feed_batch.fresh_core_symbols {
                         app.mark_symbol_fresh(symbol);
                     }
                     if applied_feed_batch.applied_events > 0 {
@@ -2792,12 +2870,12 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     }
                     app.queue_background_chart_requests(
                         Some(&chart_control_sender),
-                        &applied_feed_batch.refreshed_symbols,
+                        &applied_feed_batch.updated_symbols,
                     );
                     app.queue_background_analysis_requests(
                         &state,
                         Some(&analysis_control_sender),
-                        &applied_feed_batch.refreshed_symbols,
+                        &applied_feed_batch.updated_symbols,
                     );
                     app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
                     match reconcile_sqlite_persistence(
@@ -3027,7 +3105,7 @@ trait LiveFeedClient {
         &self,
         symbol: &str,
         refresh_weighted_target: bool,
-    ) -> io::Result<Option<market_data::LiveSymbolFeed>>;
+    ) -> io::Result<market_data::ProviderFetchResult>;
 }
 
 impl LiveFeedClient for MarketDataClient {
@@ -3035,7 +3113,7 @@ impl LiveFeedClient for MarketDataClient {
         &self,
         symbol: &str,
         refresh_weighted_target: bool,
-    ) -> io::Result<Option<market_data::LiveSymbolFeed>> {
+    ) -> io::Result<market_data::ProviderFetchResult> {
         MarketDataClient::fetch_symbol_with_options(self, symbol, refresh_weighted_target)
     }
 }
@@ -3186,45 +3264,77 @@ fn analysis_loop_with_client_factory<Client, BuildClient>(
 
 struct AppliedFeedBatch {
     applied_events: usize,
-    refreshed_symbols: Vec<String>,
+    updated_symbols: Vec<String>,
+    fresh_core_symbols: Vec<String>,
+    saw_source_status: bool,
 }
 
 fn apply_feed_events(
     state: &mut TerminalState,
-    issue_center: &mut IssueCenter,
+    app: &mut AppState,
+    feed_error_logger: Option<&FeedErrorLogger>,
     feed_events: impl IntoIterator<Item = FeedEvent>,
 ) -> AppliedFeedBatch {
     let mut applied_events = 0usize;
-    let mut refreshed_symbols = HashSet::new();
+    let mut updated_symbols = HashSet::new();
+    let mut fresh_core_symbols = HashSet::new();
+    let mut external_symbols = HashSet::new();
+    let mut fundamentals_symbols = HashSet::new();
+    let mut coverage_symbols = HashSet::new();
+    let mut saw_source_status = false;
 
     for feed_event in feed_events {
         match feed_event {
             FeedEvent::Snapshot(snapshot) => {
-                refreshed_symbols.insert(snapshot.symbol.clone());
+                updated_symbols.insert(snapshot.symbol.clone());
+                fresh_core_symbols.insert(snapshot.symbol.clone());
                 state.ingest_snapshot(snapshot);
                 applied_events += 1;
             }
             FeedEvent::External(signal) => {
-                refreshed_symbols.insert(signal.symbol.clone());
+                updated_symbols.insert(signal.symbol.clone());
+                external_symbols.insert(signal.symbol.clone());
                 state.ingest_external(signal);
                 applied_events += 1;
             }
             FeedEvent::Fundamentals(fundamentals) => {
-                refreshed_symbols.insert(fundamentals.symbol.clone());
+                updated_symbols.insert(fundamentals.symbol.clone());
+                fundamentals_symbols.insert(fundamentals.symbol.clone());
                 state.ingest_fundamentals(fundamentals);
                 applied_events += 1;
             }
+            FeedEvent::Coverage(coverage) => {
+                coverage_symbols.insert(coverage.symbol.clone());
+                log_symbol_coverage_event(feed_error_logger, state, &coverage);
+                app.apply_symbol_coverage(state, coverage);
+            }
             FeedEvent::SourceStatus(source_status) => {
-                apply_live_source_status(issue_center, source_status);
+                saw_source_status = true;
+                app.set_live_source_status(source_status);
             }
         }
     }
 
-    let mut refreshed_symbols = refreshed_symbols.into_iter().collect::<Vec<_>>();
-    refreshed_symbols.sort();
+    for symbol in updated_symbols.iter().filter(|symbol| {
+        fresh_core_symbols.contains(*symbol)
+            && external_symbols.contains(*symbol)
+            && fundamentals_symbols.contains(*symbol)
+            && !coverage_symbols.contains(*symbol)
+    }) {
+        app.mark_symbol_fresh(symbol);
+        app.degraded_symbols.remove(symbol);
+        app.provider_coverage.remove(symbol);
+    }
+
+    let mut updated_symbols = updated_symbols.into_iter().collect::<Vec<_>>();
+    updated_symbols.sort();
+    let mut fresh_core_symbols = fresh_core_symbols.into_iter().collect::<Vec<_>>();
+    fresh_core_symbols.sort();
     AppliedFeedBatch {
         applied_events,
-        refreshed_symbols,
+        updated_symbols,
+        fresh_core_symbols,
+        saw_source_status,
     }
 }
 
@@ -3232,7 +3342,8 @@ fn enqueue_paused_feed_batch(app: &mut AppState, feed_events: Vec<FeedEvent>) {
     for feed_event in feed_events {
         match feed_event {
             FeedEvent::SourceStatus(source_status) => {
-                apply_live_source_status(&mut app.issue_center, source_status);
+                app.set_live_source_status(source_status.clone());
+                apply_live_source_status(&mut app.issue_center, &source_status);
             }
             other_event => {
                 app.pending_feed.push_back(other_event);
@@ -3767,6 +3878,7 @@ fn build_screen_lines_for_viewport(
     let selected_detail = selected_row.and_then(|row| state.detail(&row.symbol));
     let mut lines = Vec::new();
     let tracked_count = live_symbols.map(|symbols| symbols.count()).unwrap_or(0);
+    let source_status = app.live_source_status();
     let health_status = app.issue_center.health_status();
     let active_issue_count = app.issue_center.active_issue_count();
 
@@ -3785,12 +3897,26 @@ fn build_screen_lines_for_viewport(
             Color::DarkCyan
         }),
         text: if live_mode {
+            let fresh_symbols = source_status
+                .map(|status| status.fresh_symbols)
+                .unwrap_or_else(|| state.symbol_count().saturating_sub(app.stale_symbols.len()));
+            let stale_symbols = source_status
+                .map(|status| status.stale_symbols)
+                .unwrap_or_else(|| app.stale_symbols.len());
+            let degraded_symbols = source_status
+                .map(|status| status.degraded_symbols)
+                .unwrap_or_else(|| app.degraded_symbols.len());
+            let unavailable_symbols = source_status
+                .map(|status| status.unavailable_symbols)
+                .unwrap_or_else(|| tracked_count.saturating_sub(state.symbol_count()));
             format!(
-                "Mode: live  Source: yahoo  Feed: {}  Tracked: {}  Loaded: {}  Unavailable: {}  Applied: {}  Pending: {}  Rate: {}/s",
+                "Mode: live  Source: yahoo  Feed: {}  Tracked: {}  Fresh: {}  Stale: {}  Degraded: {}  Unavailable: {}  Applied: {}  Pending: {}  Rate: {}/s",
                 if app.paused { "paused" } else { "running" },
                 tracked_count,
-                state.symbol_count(),
-                tracked_count.saturating_sub(state.symbol_count()),
+                fresh_symbols,
+                stale_symbols,
+                degraded_symbols,
+                unavailable_symbols,
                 state.total_events(),
                 app.pending_count(),
                 updates_per_second,
@@ -4578,6 +4704,15 @@ fn build_ticker_detail_lines_for_viewport(
             color: Some(Color::DarkYellow),
             text: "Data source: warm-start cache from SQLite. Live Yahoo refresh has not replaced this symbol yet.".to_string(),
         });
+    }
+    if let Some(coverage) = app.symbol_coverage(symbol) {
+        let summary = format_symbol_coverage_summary(coverage);
+        if !summary.is_empty() {
+            lines.push(RenderLine {
+                color: Some(Color::DarkYellow),
+                text: format!("Live coverage: {summary}"),
+            });
+        }
     }
     lines.push(RenderLine {
         color: None,
@@ -6858,9 +6993,10 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
                     let _ = publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
                         LiveSourceStatus {
                             tracked_symbols: live_symbols.count(),
-                            loaded_symbols: 0,
-                            unsupported_symbols: 0,
-                            error_symbols: 0,
+                            fresh_symbols: 0,
+                            stale_symbols: 0,
+                            degraded_symbols: 0,
+                            unavailable_symbols: live_symbols.count(),
                             last_error: Some(format!(
                                 "market data client initialization failed: {error}"
                             )),
@@ -6995,15 +7131,14 @@ fn feed_loop_with_client_factory<Client, BuildClient>(
 
             let _ = publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
                 message: format!(
-                    "{} complete: loaded {} of {}, incomplete {}, errors {}, retry queue {}.",
+                    "{} complete: fresh {}, degraded {}, unavailable {}, retry queue {}.",
                     refresh_plan.phase_label,
-                    outcome.loaded_symbols,
-                    refresh_plan.symbols.len(),
-                    outcome.unsupported_symbols,
-                    outcome.error_symbols,
+                    outcome.fresh_symbols,
+                    outcome.degraded_symbols,
+                    outcome.unavailable_symbols,
                     retry_symbols.len(),
                 ),
-                color: if outcome.error_symbols > 0 {
+                color: if outcome.unavailable_symbols > 0 {
                     Color::Yellow
                 } else {
                     Color::DarkGreen
@@ -7036,32 +7171,18 @@ fn publish_feed_refresh<F>(
     mut fetch_symbol: F,
 ) -> bool
 where
-    F: FnMut(usize, &str) -> io::Result<Option<market_data::LiveSymbolFeed>>,
+    F: FnMut(usize, &str) -> io::Result<market_data::ProviderFetchResult>,
 {
-    let mut loaded_symbols = 0usize;
-    let mut unsupported_symbols = 0usize;
-    let mut error_symbols = 0usize;
+    let mut fresh_symbols = 0usize;
+    let mut degraded_symbols = 0usize;
+    let mut unavailable_symbols = 0usize;
     let mut last_error = None;
 
     for (index, symbol) in symbols.iter().enumerate() {
-        let live_feed = match fetch_symbol(index, symbol) {
-            Ok(Some(live_feed)) => {
-                loaded_symbols += 1;
-                live_feed
-            }
-            Ok(None) => {
-                unsupported_symbols += 1;
-                if let Some(feed_error_logger) = feed_error_logger {
-                    let _ = feed_error_logger.log_symbol_failure(
-                        symbol,
-                        FeedFailureKind::IncompleteCoverage,
-                        "provider returned incomplete coverage for required quote fields",
-                    );
-                }
-                continue;
-            }
+        let provider_result = match fetch_symbol(index, symbol) {
+            Ok(provider_result) => provider_result,
             Err(error) => {
-                error_symbols += 1;
+                unavailable_symbols += 1;
                 last_error = Some(error.to_string());
                 if let Some(feed_error_logger) = feed_error_logger {
                     let _ = feed_error_logger.log_symbol_failure(
@@ -7074,29 +7195,29 @@ where
             }
         };
 
-        if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(live_feed))) {
-            return false;
+        if provider_result.coverage.core == market_data::ProviderComponentState::Fresh {
+            fresh_symbols += 1;
         }
-    }
+        if !provider_result.all_components_fresh()
+            && (provider_result.has_any_payload() || !provider_result.diagnostics.is_empty())
+        {
+            degraded_symbols += 1;
+        } else if !provider_result.has_any_payload() {
+            unavailable_symbols += 1;
+        }
 
-    if unsupported_symbols > 0 || error_symbols > 0 || last_error.is_some() {
-        if let Some(feed_error_logger) = feed_error_logger {
-            let _ = feed_error_logger.log_refresh_summary(
-                symbols.len(),
-                loaded_symbols,
-                unsupported_symbols,
-                error_symbols,
-                last_error.as_deref(),
-            );
+        if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(provider_result))) {
+            return false;
         }
     }
 
     publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
         LiveSourceStatus {
             tracked_symbols: symbols.len(),
-            loaded_symbols,
-            unsupported_symbols,
-            error_symbols,
+            fresh_symbols,
+            stale_symbols: 0,
+            degraded_symbols,
+            unavailable_symbols,
             last_error,
         },
     )]))
@@ -7112,16 +7233,15 @@ struct FeedRefreshPlan {
 }
 
 struct FeedRefreshOutcome {
-    loaded_symbols: usize,
-    unsupported_symbols: usize,
-    error_symbols: usize,
+    fresh_symbols: usize,
+    degraded_symbols: usize,
+    unavailable_symbols: usize,
     throttled_errors: usize,
     retry_symbols: Vec<String>,
 }
 
 enum FeedFetchOutcome {
-    Live(market_data::LiveSymbolFeed),
-    Unsupported,
+    Provider(market_data::ProviderFetchResult),
     Error {
         detail: String,
         retryable: bool,
@@ -7214,13 +7334,13 @@ fn publish_feed_refresh_concurrently<F>(
     fetch_symbol: F,
 ) -> Option<FeedRefreshOutcome>
 where
-    F: Fn(usize, &str) -> io::Result<Option<market_data::LiveSymbolFeed>> + Sync,
+    F: Fn(usize, &str) -> io::Result<market_data::ProviderFetchResult> + Sync,
 {
     if refresh_plan.symbols.is_empty() {
         return Some(FeedRefreshOutcome {
-            loaded_symbols: 0,
-            unsupported_symbols: 0,
-            error_symbols: 0,
+            fresh_symbols: 0,
+            degraded_symbols: 0,
+            unavailable_symbols: 0,
             throttled_errors: 0,
             retry_symbols: Vec::new(),
         });
@@ -7241,8 +7361,7 @@ where
                 for planned_index in (worker_index..planned_symbols.len()).step_by(worker_count) {
                     let (symbol_index, symbol) = &planned_symbols[planned_index];
                     let outcome = match fetch_symbol(*symbol_index, symbol) {
-                        Ok(Some(live_feed)) => FeedFetchOutcome::Live(live_feed),
-                        Ok(None) => FeedFetchOutcome::Unsupported,
+                        Ok(provider_result) => FeedFetchOutcome::Provider(provider_result),
                         Err(error) => {
                             let detail = error.to_string();
                             FeedFetchOutcome::Error {
@@ -7258,9 +7377,9 @@ where
         }
         drop(result_sender);
 
-        let mut loaded_symbols = 0usize;
-        let mut unsupported_symbols = 0usize;
-        let mut error_symbols = 0usize;
+        let mut fresh_symbols = 0usize;
+        let mut degraded_symbols = 0usize;
+        let mut unavailable_symbols = 0usize;
         let mut throttled_errors = 0usize;
         let mut completed_symbols = 0usize;
         let mut last_error = None::<String>;
@@ -7269,20 +7388,22 @@ where
         for (symbol, outcome) in result_receiver {
             completed_symbols += 1;
             match outcome {
-                FeedFetchOutcome::Live(live_feed) => {
-                    loaded_symbols += 1;
-                    if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(live_feed))) {
-                        return None;
+                FeedFetchOutcome::Provider(provider_result) => {
+                    if provider_result.coverage.core == market_data::ProviderComponentState::Fresh {
+                        fresh_symbols += 1;
                     }
-                }
-                FeedFetchOutcome::Unsupported => {
-                    unsupported_symbols += 1;
-                    if let Some(feed_error_logger) = feed_error_logger {
-                        let _ = feed_error_logger.log_symbol_failure(
-                            &symbol,
-                            FeedFailureKind::IncompleteCoverage,
-                            "provider returned incomplete coverage for required quote fields",
-                        );
+                    if !provider_result.all_components_fresh()
+                        && (provider_result.has_any_payload()
+                            || !provider_result.diagnostics.is_empty())
+                    {
+                        degraded_symbols += 1;
+                    } else if !provider_result.has_any_payload() {
+                        unavailable_symbols += 1;
+                    }
+                    if !publisher
+                        .publish(AppEvent::FeedBatch(build_symbol_feed_batch(provider_result)))
+                    {
+                        return None;
                     }
                 }
                 FeedFetchOutcome::Error {
@@ -7290,7 +7411,7 @@ where
                     retryable,
                     throttled,
                 } => {
-                    error_symbols += 1;
+                    unavailable_symbols += 1;
                     if throttled {
                         throttled_errors += 1;
                     }
@@ -7320,14 +7441,16 @@ where
             {
                 if !publisher.publish(AppEvent::FeedStatus(FeedProgressStatus {
                     message: format!(
-                        "{}: fetched {}/{} in current window, loaded {}, retries queued {}.",
+                        "{}: fetched {}/{} in current window, fresh {}, degraded {}, unavailable {}, retries queued {}.",
                         refresh_plan.phase_label,
                         completed_symbols,
                         refresh_plan.symbols.len(),
-                        loaded_symbols,
+                        fresh_symbols,
+                        degraded_symbols,
+                        unavailable_symbols,
                         retry_symbols.len(),
                     ),
-                    color: if error_symbols > 0 {
+                    color: if unavailable_symbols > 0 {
                         Color::Yellow
                     } else {
                         Color::DarkCyan
@@ -7338,22 +7461,13 @@ where
             }
         }
 
-        if let Some(feed_error_logger) = feed_error_logger {
-            let _ = feed_error_logger.log_refresh_summary(
-                refresh_plan.total_tracked_symbols,
-                loaded_symbols,
-                unsupported_symbols,
-                error_symbols,
-                last_error.as_deref(),
-            );
-        }
-
         if !publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
             LiveSourceStatus {
                 tracked_symbols: refresh_plan.total_tracked_symbols,
-                loaded_symbols,
-                unsupported_symbols,
-                error_symbols,
+                fresh_symbols,
+                stale_symbols: 0,
+                degraded_symbols,
+                unavailable_symbols,
                 last_error,
             },
         )])) {
@@ -7361,9 +7475,9 @@ where
         }
 
         Some(FeedRefreshOutcome {
-            loaded_symbols,
-            unsupported_symbols,
-            error_symbols,
+            fresh_symbols,
+            degraded_symbols,
+            unavailable_symbols,
             throttled_errors,
             retry_symbols,
         })
@@ -7419,15 +7533,29 @@ fn next_weighted_target_refresh_cursor(
     (refresh_cursor + refresh_budget.min(symbol_count)) % symbol_count
 }
 
-fn build_symbol_feed_batch(live_feed: market_data::LiveSymbolFeed) -> Vec<FeedEvent> {
-    let mut events = vec![FeedEvent::Snapshot(live_feed.snapshot)];
+fn build_symbol_feed_batch(provider_result: market_data::ProviderFetchResult) -> Vec<FeedEvent> {
+    let emit_coverage =
+        !provider_result.all_components_fresh() || !provider_result.diagnostics.is_empty();
+    let mut events = Vec::new();
 
-    if let Some(signal) = live_feed.external_signal {
+    if let Some(snapshot) = provider_result.snapshot {
+        events.push(FeedEvent::Snapshot(snapshot));
+    }
+
+    if let Some(signal) = provider_result.external_signal {
         events.push(FeedEvent::External(signal));
     }
 
-    if let Some(fundamentals) = live_feed.fundamentals {
+    if let Some(fundamentals) = provider_result.fundamentals {
         events.push(FeedEvent::Fundamentals(fundamentals));
+    }
+
+    if emit_coverage {
+        events.push(FeedEvent::Coverage(SymbolCoverageEvent {
+            symbol: provider_result.symbol,
+            coverage: provider_result.coverage,
+            diagnostics: provider_result.diagnostics,
+        }));
     }
 
     events
@@ -7523,7 +7651,7 @@ fn should_leave_input_mode_on_backspace(buffer: &mut String) -> bool {
     false
 }
 
-fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: LiveSourceStatus) {
+fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: &LiveSourceStatus) {
     if source_status.tracked_symbols == 0 {
         issue_center.resolve(ISSUE_KEY_FEED_UNAVAILABLE);
         issue_center.resolve(ISSUE_KEY_FEED_PARTIAL);
@@ -7532,23 +7660,13 @@ fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: LiveS
 
     let build_partial_feed_detail = |source_status: &LiveSourceStatus| {
         let mut detail = format!(
-            "Loaded {} of {} tracked symbols.",
-            source_status.loaded_symbols, source_status.tracked_symbols
+            "Fresh {}  Stale {}  Degraded {}  Unavailable {} of {} tracked symbols.",
+            source_status.fresh_symbols,
+            source_status.stale_symbols,
+            source_status.degraded_symbols,
+            source_status.unavailable_symbols,
+            source_status.tracked_symbols
         );
-
-        if source_status.unsupported_symbols > 0 {
-            detail.push_str(&format!(
-                " {} symbols returned incomplete coverage.",
-                source_status.unsupported_symbols
-            ));
-        }
-
-        if source_status.error_symbols > 0 {
-            detail.push_str(&format!(
-                " {} symbols failed provider requests.",
-                source_status.error_symbols
-            ));
-        }
 
         if let Some(last_error) = &source_status.last_error {
             detail.push_str(&format!(" Last provider error: {}", last_error));
@@ -7557,12 +7675,12 @@ fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: LiveS
         detail
     };
 
-    if source_status.loaded_symbols == 0 {
-        let detail = if source_status.unsupported_symbols > 0
-            || source_status.error_symbols > 0
+    if source_status.fresh_symbols == 0 && source_status.stale_symbols == 0 {
+        let detail = if source_status.degraded_symbols > 0
+            || source_status.unavailable_symbols > 0
             || source_status.last_error.is_some()
         {
-            build_partial_feed_detail(&source_status)
+            build_partial_feed_detail(source_status)
         } else {
             format!(
                 "Loaded 0 of {} tracked symbols and no provider detail was returned.",
@@ -7583,9 +7701,8 @@ fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: LiveS
 
     issue_center.resolve(ISSUE_KEY_FEED_UNAVAILABLE);
 
-    if source_status.loaded_symbols < source_status.tracked_symbols
-        || source_status.unsupported_symbols > 0
-        || source_status.error_symbols > 0
+    if source_status.degraded_symbols > 0
+        || source_status.unavailable_symbols > 0
         || source_status.last_error.is_some()
     {
         issue_center.raise(
@@ -7593,10 +7710,119 @@ fn apply_live_source_status(issue_center: &mut IssueCenter, source_status: LiveS
             IssueSource::Feed,
             IssueSeverity::Warning,
             "Live source partially degraded",
-            build_partial_feed_detail(&source_status),
+            build_partial_feed_detail(source_status),
         );
     } else {
         issue_center.resolve(ISSUE_KEY_FEED_PARTIAL);
+    }
+}
+
+fn synthesize_live_source_status(
+    state: &TerminalState,
+    app: &mut AppState,
+    live_symbols: Option<&LiveSymbolState>,
+) {
+    let tracked_symbols = live_symbols.map(|symbols| symbols.count()).unwrap_or(0);
+    let visible_symbols = state.symbol_count();
+    let stale_symbols = app.stale_symbols.len().min(visible_symbols);
+    let fresh_symbols = visible_symbols.saturating_sub(stale_symbols);
+    let degraded_symbols = app.degraded_symbols.len().min(visible_symbols);
+    let unavailable_symbols = tracked_symbols.saturating_sub(visible_symbols);
+    let last_error = app
+        .provider_coverage
+        .values()
+        .flat_map(|coverage| coverage.diagnostics.iter())
+        .find(|diagnostic| diagnostic.kind == market_data::ProviderDiagnosticKind::Error)
+        .map(|diagnostic| diagnostic.detail.clone());
+
+    let source_status = LiveSourceStatus {
+        tracked_symbols,
+        fresh_symbols,
+        stale_symbols,
+        degraded_symbols,
+        unavailable_symbols,
+        last_error,
+    };
+    app.set_live_source_status(source_status.clone());
+    apply_live_source_status(&mut app.issue_center, &source_status);
+}
+
+fn log_live_source_summary(
+    feed_error_logger: Option<&FeedErrorLogger>,
+    source_status: Option<&LiveSourceStatus>,
+) {
+    let (Some(feed_error_logger), Some(source_status)) = (feed_error_logger, source_status) else {
+        return;
+    };
+    let _ = feed_error_logger.log_refresh_summary(
+        source_status.tracked_symbols,
+        source_status.fresh_symbols,
+        source_status.stale_symbols,
+        source_status.degraded_symbols,
+        source_status.unavailable_symbols,
+        source_status.last_error.as_deref(),
+    );
+}
+
+fn log_symbol_coverage_event(
+    feed_error_logger: Option<&FeedErrorLogger>,
+    state: &TerminalState,
+    coverage: &SymbolCoverageEvent,
+) {
+    let Some(feed_error_logger) = feed_error_logger else {
+        return;
+    };
+    let has_fresh_components = coverage.coverage.core == market_data::ProviderComponentState::Fresh
+        || coverage.coverage.external == market_data::ProviderComponentState::Fresh
+        || coverage.coverage.fundamentals == market_data::ProviderComponentState::Fresh;
+    let action = if has_fresh_components {
+        "published_partial"
+    } else if state.detail(&coverage.symbol).is_some() {
+        "kept_stale"
+    } else {
+        "dropped"
+    };
+
+    for diagnostic in &coverage.diagnostics {
+        let _ = feed_error_logger.log_provider_diagnostic(&coverage.symbol, diagnostic, action);
+    }
+}
+
+fn format_symbol_coverage_summary(coverage: &SymbolCoverageEvent) -> String {
+    if coverage.diagnostics.is_empty() {
+        return String::new();
+    }
+
+    coverage
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{} {}: {}",
+                provider_component_label(diagnostic.component),
+                provider_diagnostic_kind_label(diagnostic.kind),
+                diagnostic.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  |  ")
+}
+
+fn provider_component_label(component: market_data::ProviderComponent) -> &'static str {
+    match component {
+        market_data::ProviderComponent::Chart => "chart",
+        market_data::ProviderComponent::QuoteHtml => "quote_html",
+        market_data::ProviderComponent::Core => "core",
+        market_data::ProviderComponent::External => "external",
+        market_data::ProviderComponent::Fundamentals => "fundamentals",
+        market_data::ProviderComponent::WeightedTarget => "weighted_target",
+    }
+}
+
+fn provider_diagnostic_kind_label(kind: market_data::ProviderDiagnosticKind) -> &'static str {
+    match kind {
+        market_data::ProviderDiagnosticKind::Missing => "missing",
+        market_data::ProviderDiagnosticKind::Error => "error",
     }
 }
 
@@ -9964,15 +10190,16 @@ mod tests {
         ]
     }
 
-    fn live_feed(symbol: &str) -> super::market_data::LiveSymbolFeed {
-        super::market_data::LiveSymbolFeed {
-            snapshot: MarketSnapshot {
+    fn live_feed(symbol: &str) -> super::market_data::ProviderFetchResult {
+        super::market_data::ProviderFetchResult {
+            symbol: symbol.to_string(),
+            snapshot: Some(MarketSnapshot {
                 symbol: symbol.to_string(),
                 company_name: None,
                 profitable: true,
                 market_price_cents: 10_000,
                 intrinsic_value_cents: 12_500,
-            },
+            }),
             external_signal: Some(ExternalValuationSignal {
                 symbol: symbol.to_string(),
                 fair_value_cents: 12_000,
@@ -9989,7 +10216,19 @@ mod tests {
                 weighted_fair_value_cents: None,
                 weighted_analyst_count: None,
             }),
-            fundamentals: None,
+            fundamentals: Some(sample_fundamentals(
+                symbol,
+                "technology",
+                "Technology",
+                "software",
+                "Software",
+            )),
+            coverage: super::market_data::ProviderCoverage {
+                core: super::market_data::ProviderComponentState::Fresh,
+                external: super::market_data::ProviderComponentState::Fresh,
+                fundamentals: super::market_data::ProviderComponentState::Fresh,
+            },
+            diagnostics: Vec::new(),
         }
     }
 
@@ -10277,7 +10516,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeFeedClient {
         calls: Arc<Mutex<Vec<(String, bool)>>>,
-        results: Arc<Mutex<VecDeque<io::Result<Option<super::market_data::LiveSymbolFeed>>>>>,
+        results: Arc<Mutex<VecDeque<io::Result<super::market_data::ProviderFetchResult>>>>,
     }
 
     impl super::LiveFeedClient for FakeFeedClient {
@@ -10285,7 +10524,7 @@ mod tests {
             &self,
             symbol: &str,
             refresh_weighted_target: bool,
-        ) -> io::Result<Option<super::market_data::LiveSymbolFeed>> {
+        ) -> io::Result<super::market_data::ProviderFetchResult> {
             self.calls
                 .lock()
                 .expect("fake client calls should be lockable")
@@ -11252,11 +11491,12 @@ mod tests {
 
         apply_live_source_status(
             &mut issue_center,
-            LiveSourceStatus {
+            &LiveSourceStatus {
                 tracked_symbols: 8,
-                loaded_symbols: 6,
-                unsupported_symbols: 2,
-                error_symbols: 1,
+                fresh_symbols: 6,
+                stale_symbols: 0,
+                degraded_symbols: 2,
+                unavailable_symbols: 2,
                 last_error: Some("provider timeout".to_string()),
             },
         );
@@ -11268,10 +11508,8 @@ mod tests {
                 health_status_label(issue_center.health_status()),
                 issue.title,
                 issue.active,
-                issue
-                    .detail
-                    .contains("2 symbols returned incomplete coverage."),
-                issue.detail.contains("1 symbols failed provider requests."),
+                issue.detail.contains("Degraded 2"),
+                issue.detail.contains("Unavailable 2"),
             ),
             (
                 "degraded",
@@ -11289,11 +11527,12 @@ mod tests {
 
         apply_live_source_status(
             &mut issue_center,
-            LiveSourceStatus {
+            &LiveSourceStatus {
                 tracked_symbols: 32,
-                loaded_symbols: 32,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 32,
+                stale_symbols: 0,
+                degraded_symbols: 0,
+                unavailable_symbols: 0,
                 last_error: None,
             },
         );
@@ -11308,11 +11547,12 @@ mod tests {
 
         apply_live_source_status(
             &mut issue_center,
-            LiveSourceStatus {
+            &LiveSourceStatus {
                 tracked_symbols: 503,
-                loaded_symbols: 64,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 64,
+                stale_symbols: 0,
+                degraded_symbols: 0,
+                unavailable_symbols: 439,
                 last_error: None,
             },
         );
@@ -11320,7 +11560,7 @@ mod tests {
         let issue = issue_center.sorted_entries()[0].clone();
         assert_eq!(health_status_label(issue_center.health_status()), "degraded");
         assert_eq!(issue.title, "Live source partially degraded");
-        assert!(issue.detail.contains("Loaded 64 of 503 tracked symbols."));
+        assert!(issue.detail.contains("Fresh 64"));
     }
 
     #[test]
@@ -11329,9 +11569,25 @@ mod tests {
         let publisher = AppEventPublisher::new(sender);
         let symbols = vec!["AAPL".to_string(), "MSFT".to_string(), "AMD".to_string()];
         let mut fetch_results = vec![
-            Ok(Some(live_feed("AAPL"))),
-            Ok(None),
-            Ok(Some(live_feed("AMD"))),
+            Ok(live_feed("AAPL")),
+            Ok(super::market_data::ProviderFetchResult {
+                symbol: "MSFT".to_string(),
+                snapshot: None,
+                external_signal: None,
+                fundamentals: None,
+                coverage: super::market_data::ProviderCoverage {
+                    core: super::market_data::ProviderComponentState::Missing,
+                    external: super::market_data::ProviderComponentState::Missing,
+                    fundamentals: super::market_data::ProviderComponentState::Missing,
+                },
+                diagnostics: vec![super::market_data::ProviderDiagnostic {
+                    component: super::market_data::ProviderComponent::Core,
+                    kind: super::market_data::ProviderDiagnosticKind::Missing,
+                    detail: "core snapshot is missing target mean price".to_string(),
+                    retryable: false,
+                }],
+            }),
+            Ok(live_feed("AMD")),
         ]
         .into_iter();
 
@@ -11343,22 +11599,34 @@ mod tests {
 
         let first_batch = recv_feed_batch(&receiver, "first feed batch");
         let second_batch = recv_feed_batch(&receiver, "second feed batch");
+        let third_batch = recv_feed_batch(&receiver, "third feed batch");
         let final_batch = recv_feed_batch(&receiver, "final feed batch");
 
-        assert_eq!(first_batch.len(), 2);
+        assert_eq!(first_batch.len(), 3);
         assert!(
             matches!(first_batch.first(), Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AAPL")
         );
         assert!(
             matches!(first_batch.get(1), Some(FeedEvent::External(signal)) if signal.symbol == "AAPL")
         );
-
-        assert_eq!(second_batch.len(), 2);
         assert!(
-            matches!(second_batch.first(), Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AMD")
+            matches!(first_batch.get(2), Some(FeedEvent::Fundamentals(fundamentals)) if fundamentals.symbol == "AAPL")
+        );
+
+        assert_eq!(second_batch.len(), 1);
+        assert!(
+            matches!(second_batch.first(), Some(FeedEvent::Coverage(coverage)) if coverage.symbol == "MSFT")
+        );
+
+        assert_eq!(third_batch.len(), 3);
+        assert!(
+            matches!(third_batch.first(), Some(FeedEvent::Snapshot(snapshot)) if snapshot.symbol == "AMD")
         );
         assert!(
-            matches!(second_batch.get(1), Some(FeedEvent::External(signal)) if signal.symbol == "AMD")
+            matches!(third_batch.get(1), Some(FeedEvent::External(signal)) if signal.symbol == "AMD")
+        );
+        assert!(
+            matches!(third_batch.get(2), Some(FeedEvent::Fundamentals(fundamentals)) if fundamentals.symbol == "AMD")
         );
 
         assert_eq!(final_batch.len(), 1);
@@ -11366,9 +11634,10 @@ mod tests {
             final_batch.first(),
             Some(FeedEvent::SourceStatus(super::LiveSourceStatus {
                 tracked_symbols: 3,
-                loaded_symbols: 2,
-                unsupported_symbols: 1,
-                error_symbols: 0,
+                fresh_symbols: 2,
+                stale_symbols: 0,
+                degraded_symbols: 1,
+                unavailable_symbols: 0,
                 last_error: None,
             }))
         ));
@@ -11379,7 +11648,6 @@ mod tests {
     #[test]
     fn apply_feed_events_keeps_existing_fundamentals_when_refresh_omits_them() {
         let mut state = TerminalState::new(2_000, 30, 8);
-        let mut issue_center = IssueCenter::default();
         let fundamentals =
             sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
         state.ingest_snapshot(MarketSnapshot {
@@ -11391,19 +11659,27 @@ mod tests {
         });
         state.ingest_fundamentals(fundamentals.clone());
 
-        let refresh_without_fundamentals = build_symbol_feed_batch(super::market_data::LiveSymbolFeed {
-            snapshot: MarketSnapshot {
+        let refresh_without_fundamentals = build_symbol_feed_batch(super::market_data::ProviderFetchResult {
+            symbol: "NVDA".to_string(),
+            snapshot: Some(MarketSnapshot {
                 symbol: "NVDA".to_string(),
                 company_name: None,
                 profitable: true,
                 market_price_cents: 1_250,
                 intrinsic_value_cents: 1_850,
-            },
+            }),
             external_signal: None,
             fundamentals: None,
+            coverage: super::market_data::ProviderCoverage {
+                core: super::market_data::ProviderComponentState::Fresh,
+                external: super::market_data::ProviderComponentState::Missing,
+                fundamentals: super::market_data::ProviderComponentState::Missing,
+            },
+            diagnostics: vec![],
         });
 
-        apply_feed_events(&mut state, &mut issue_center, refresh_without_fundamentals);
+        let mut app = AppState::default();
+        apply_feed_events(&mut state, &mut app, None, refresh_without_fundamentals);
 
         assert_eq!(
             state
@@ -11490,7 +11766,7 @@ mod tests {
                     .lock()
                     .expect("symbol indexes should be lockable")
                     .push((symbol_index, symbol.to_string()));
-                Ok(Some(live_feed(symbol)))
+                Ok(live_feed(symbol))
             },
         );
         drop(publisher);
@@ -11513,9 +11789,9 @@ mod tests {
         assert!(matches!(
             outcome,
             Some(super::FeedRefreshOutcome {
-                loaded_symbols: 3,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 3,
+                degraded_symbols: 0,
+                unavailable_symbols: 0,
                 throttled_errors: 0,
                 ..
             })
@@ -11537,9 +11813,10 @@ mod tests {
             final_batch.first(),
             Some(FeedEvent::SourceStatus(LiveSourceStatus {
                 tracked_symbols: 40,
-                loaded_symbols: 3,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 3,
+                stale_symbols: 0,
+                degraded_symbols: 0,
+                unavailable_symbols: 0,
                 last_error: None,
             }))
         ));
@@ -12285,9 +12562,9 @@ mod tests {
         let publisher = AppEventPublisher::new(sender);
         let symbols = vec!["AAPL".to_string(), "MSFT".to_string(), "AMD".to_string()];
         let mut fetch_results = vec![
-            Ok(Some(live_feed("AAPL"))),
+            Ok(live_feed("AAPL")),
             Err(io::Error::other("provider timeout")),
-            Ok(Some(live_feed("AMD"))),
+            Ok(live_feed("AMD")),
         ]
         .into_iter();
 
@@ -12309,14 +12586,15 @@ mod tests {
                     final_batch.first(),
                     Some(FeedEvent::SourceStatus(LiveSourceStatus {
                         tracked_symbols: 3,
-                        loaded_symbols: 2,
-                        unsupported_symbols: 0,
-                        error_symbols: 1,
+                        fresh_symbols: 2,
+                        stale_symbols: 0,
+                        degraded_symbols: 0,
+                        unavailable_symbols: 1,
                         last_error: Some(last_error),
                     })) if last_error == "provider timeout"
                 ),
             ),
-            (2, 2, true)
+            (3, 3, true)
         );
     }
 
@@ -12328,8 +12606,24 @@ mod tests {
         let log_path = unique_test_path("feed-errors.log");
         let logger = FeedErrorLogger::new(log_path.clone());
         let mut fetch_results = vec![
-            Ok(Some(live_feed("AAPL"))),
-            Ok(None),
+            Ok(live_feed("AAPL")),
+            Ok(super::market_data::ProviderFetchResult {
+                symbol: "MSFT".to_string(),
+                snapshot: None,
+                external_signal: None,
+                fundamentals: None,
+                coverage: super::market_data::ProviderCoverage {
+                    core: super::market_data::ProviderComponentState::Missing,
+                    external: super::market_data::ProviderComponentState::Missing,
+                    fundamentals: super::market_data::ProviderComponentState::Missing,
+                },
+                diagnostics: vec![super::market_data::ProviderDiagnostic {
+                    component: super::market_data::ProviderComponent::Core,
+                    kind: super::market_data::ProviderDiagnosticKind::Missing,
+                    detail: "core snapshot is missing target mean price".to_string(),
+                    retryable: false,
+                }],
+            }),
             Err(io::Error::other("provider timeout")),
         ]
         .into_iter();
@@ -12346,16 +12640,30 @@ mod tests {
         ));
 
         drop(publisher);
-        while receiver.try_recv().is_ok() {}
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        while let Ok(app_event) = receiver.try_recv() {
+            if let AppEvent::FeedBatch(feed_events) = app_event {
+                let applied = apply_feed_events(&mut state, &mut app, Some(&logger), feed_events);
+                if applied.saw_source_status {
+                    super::synthesize_live_source_status(
+                        &state,
+                        &mut app,
+                        Some(&LiveSymbolState::new(symbols.clone())),
+                    );
+                    super::log_live_source_summary(Some(&logger), app.live_source_status());
+                }
+            }
+        }
 
         let log_contents =
             fs::read_to_string(&log_path).expect("feed error log should be readable after refresh");
         let _ = fs::remove_file(&log_path);
 
-        assert!(log_contents.contains("kind=incomplete_coverage symbol=MSFT"));
+        assert!(log_contents.contains("kind=provider_coverage symbol=MSFT component=core classification=missing"));
         assert!(log_contents.contains("kind=provider_error symbol=AMD"));
         assert!(
-            log_contents.contains("kind=refresh_summary tracked=3 loaded=1 incomplete=1 errors=1")
+            log_contents.contains("kind=refresh_summary tracked=3 fresh=1 stale=0 degraded=1 unavailable=2")
         );
     }
 
@@ -12382,9 +12690,9 @@ mod tests {
             } else {
                 Ok(FakeFeedClient {
                     calls: Arc::new(Mutex::new(Vec::new())),
-                    results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(Some(live_feed(
+                    results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(live_feed(
                         "AAPL",
-                    )))]))),
+                    ))]))),
                 })
             }
         });
@@ -12397,9 +12705,10 @@ mod tests {
             first_batch.first(),
             Some(FeedEvent::SourceStatus(LiveSourceStatus {
                 tracked_symbols: 1,
-                loaded_symbols: 0,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 0,
+                stale_symbols: 0,
+                degraded_symbols: 0,
+                unavailable_symbols: 1,
                 last_error: Some(last_error),
             })) if last_error == "market data client initialization failed: boot failed"
         ));
@@ -12411,9 +12720,10 @@ mod tests {
             third_batch.first(),
             Some(FeedEvent::SourceStatus(LiveSourceStatus {
                 tracked_symbols: 1,
-                loaded_symbols: 1,
-                unsupported_symbols: 0,
-                error_symbols: 0,
+                fresh_symbols: 1,
+                stale_symbols: 0,
+                degraded_symbols: 0,
+                unavailable_symbols: 0,
                 last_error: None,
             }))
         ));
@@ -12463,7 +12773,7 @@ mod tests {
         let results = symbols
             .iter()
             .chain(symbols.iter())
-            .map(|symbol| Ok(Some(live_feed(symbol))))
+            .map(|symbol| Ok(live_feed(symbol)))
             .collect::<VecDeque<_>>();
 
         control_sender
