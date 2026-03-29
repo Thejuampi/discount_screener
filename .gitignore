@@ -1,5 +1,12 @@
 /target/
 /target_agent_test/
+/target-review/
+/target_agent_test2/
+.claude/
+feed-errors.log
+help-output.txt
+help-output-direct.txt
+aos.html
 **/__pycache__/
 *.pyc
 *.pyo
