@@ -6,6 +6,9 @@ use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 const ANALYST_TARGET_ACCURACY_WEIGHT: f32 = 0.65;
 const ANALYST_DIRECTION_ACCURACY_WEIGHT: f32 = 0.35;
 const ANALYST_ERROR_SCALE_BPS: f32 = 1_000.0;
@@ -13,21 +16,21 @@ const ANALYST_RECENCY_DECAY_DAYS: f32 = 180.0;
 const ANALYST_SAMPLE_SIZE_REGULARIZATION: f32 = 3.0;
 const MAX_PRICE_HISTORY_PER_SYMBOL: usize = 240;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ConfidenceBand {
     Low,
     Provisional,
     High,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QualificationStatus {
     Qualified,
     Unprofitable,
     GapTooSmall,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExternalSignalStatus {
     Missing,
     Stale,
@@ -35,7 +38,7 @@ pub enum ExternalSignalStatus {
     Divergent,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertKind {
     EnteredQualified,
     ExitedQualified,
@@ -48,7 +51,7 @@ pub struct ViewFilter {
     pub watchlist_only: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketSnapshot {
     pub symbol: String,
     pub company_name: Option<String>,
@@ -57,7 +60,7 @@ pub struct MarketSnapshot {
     pub intrinsic_value_cents: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalValuationSignal {
     pub symbol: String,
     pub fair_value_cents: i64,
@@ -75,7 +78,7 @@ pub struct ExternalValuationSignal {
     pub weighted_analyst_count: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundamentalSnapshot {
     pub symbol: String,
     pub sector_key: Option<String>,
@@ -225,13 +228,13 @@ pub struct TapeEvent {
     pub confidence: ConfidenceBand,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceHistoryPoint {
     pub sequence: usize,
     pub market_price_cents: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolDetail {
     pub symbol: String,
     pub profitable: bool,
@@ -263,14 +266,14 @@ pub struct SymbolDetail {
     pub is_watched: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlertEvent {
     pub symbol: String,
     pub kind: AlertKind,
     pub sequence: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalPayload {
     Snapshot(MarketSnapshot),
     External(ExternalValuationSignal),
@@ -278,10 +281,21 @@ pub enum JournalPayload {
     FundamentalsCleared(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub sequence: usize,
     pub payload: JournalPayload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedSymbolState {
+    pub symbol: String,
+    pub snapshot: Option<MarketSnapshot>,
+    pub external_signal: Option<ExternalValuationSignal>,
+    pub fundamentals: Option<FundamentalSnapshot>,
+    pub last_sequence: usize,
+    pub update_count: usize,
+    pub price_history: Vec<PriceHistoryPoint>,
 }
 
 #[derive(Default)]
@@ -526,6 +540,72 @@ impl TerminalState {
             .collect()
     }
 
+    pub fn persisted_symbol_state(&self, symbol: &str) -> Option<PersistedSymbolState> {
+        self.symbols
+            .get(symbol)
+            .map(|state| self.persisted_symbol_state_for(symbol, state))
+    }
+
+    pub fn persisted_symbol_states(&self) -> Vec<PersistedSymbolState> {
+        let mut records = self
+            .symbols
+            .iter()
+            .map(|(symbol, state)| self.persisted_symbol_state_for(symbol, state))
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+        records
+    }
+
+    pub fn replace_watchlist(&mut self, symbols: &[String]) {
+        self.watchlist.clear();
+        for symbol in symbols {
+            self.watchlist.insert(symbol.clone());
+        }
+    }
+
+    pub fn watchlist_symbols(&self) -> Vec<String> {
+        let mut symbols = self.watchlist.iter().cloned().collect::<Vec<_>>();
+        symbols.sort();
+        symbols
+    }
+
+    pub fn hydrate_from_persisted(
+        &mut self,
+        symbol_states: &[PersistedSymbolState],
+        watchlist: &[String],
+    ) {
+        self.total_events = 0;
+        self.sequence = 0;
+        self.symbols.clear();
+        self.watchlist.clear();
+        self.recent_tape.clear();
+        self.recent_alerts.clear();
+        self.journal.clear();
+
+        for record in symbol_states {
+            self.sequence = self.sequence.max(record.last_sequence);
+            self.total_events = self.total_events.saturating_add(record.update_count);
+            self.symbols.insert(
+                record.symbol.clone(),
+                SymbolState {
+                    snapshot: record.snapshot.clone(),
+                    external_signal: record.external_signal.clone(),
+                    fundamentals: record.fundamentals.clone(),
+                    last_sequence: record.last_sequence,
+                    update_count: record.update_count,
+                    price_history: record
+                        .price_history
+                        .iter()
+                        .take(MAX_PRICE_HISTORY_PER_SYMBOL)
+                        .cloned()
+                        .collect(),
+                },
+            );
+        }
+
+        self.replace_watchlist(watchlist);
+    }
+
     pub fn save_journal_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         let mut output = String::new();
         for entry in &self.journal {
@@ -700,6 +780,18 @@ impl TerminalState {
                 AlertKind::ConfidenceUpgraded,
                 current_detail.last_sequence,
             );
+        }
+    }
+
+    fn persisted_symbol_state_for(&self, symbol: &str, state: &SymbolState) -> PersistedSymbolState {
+        PersistedSymbolState {
+            symbol: symbol.to_string(),
+            snapshot: state.snapshot.clone(),
+            external_signal: state.external_signal.clone(),
+            fundamentals: state.fundamentals.clone(),
+            last_sequence: state.last_sequence,
+            update_count: state.update_count,
+            price_history: state.price_history.iter().cloned().collect(),
         }
     }
 

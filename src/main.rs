@@ -1,9 +1,11 @@
 mod market_data;
+mod persistence;
 mod profiles;
 
 use std::backtrace::Backtrace;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
@@ -51,6 +53,7 @@ use crossterm::terminal::LeaveAlternateScreen;
 use discount_screener::AlertEvent;
 use discount_screener::AlertKind;
 use discount_screener::CandidateRow;
+use discount_screener::checked_gap_bps;
 use discount_screener::ConfidenceBand;
 use discount_screener::ExternalSignalStatus;
 use discount_screener::ExternalValuationSignal;
@@ -67,6 +70,13 @@ use market_data::FundamentalTimeseries;
 use market_data::HistoricalCandle;
 use market_data::MarketDataClient;
 use market_data::default_live_symbols;
+use serde::Deserialize;
+use serde::Serialize;
+use persistence::PersistedChartRecord;
+use persistence::PersistedIssueRecord;
+use persistence::PersistenceBootstrap;
+use persistence::PersistenceHandle;
+use persistence::PersistenceStatusEvent;
 use profiles::profile_definitions;
 use profiles::profile_symbols;
 
@@ -91,6 +101,7 @@ const DETAIL_MIN_VOLUME_HEIGHT: usize = 3;
 const DETAIL_MIN_MACD_HEIGHT: usize = 4;
 const DETAIL_CHART_AXIS_WIDTH: usize = 12;
 const DETAIL_CHART_ROW_PADDING: usize = 2;
+const BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE: usize = 6;
 const INLINE_STYLE_MARKER: char = '\u{001f}';
 const DEFAULT_FEED_ERROR_LOG_FILE: &str = "feed-errors.log";
 const DEFAULT_CRASH_REPORT_LOG_FILE: &str = "crash-report.log";
@@ -98,10 +109,13 @@ const ISSUE_TOAST_DURATION: Duration = Duration::from_secs(6);
 const EVENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 const ISSUE_KEY_FEED_UNAVAILABLE: &str = "feed-unavailable";
 const ISSUE_KEY_FEED_PARTIAL: &str = "feed-partial";
-const ISSUE_KEY_JOURNAL_PERSISTENCE: &str = "journal-persistence";
-const ISSUE_KEY_WATCHLIST_PERSISTENCE: &str = "watchlist-persistence";
-const ISSUE_KEY_JOURNAL_RESTORE: &str = "journal-restore";
-const ISSUE_KEY_WATCHLIST_RESTORE: &str = "watchlist-restore";
+const ISSUE_KEY_SQLITE_PERSISTENCE: &str = "sqlite-persistence";
+const ISSUE_KEY_SQLITE_RESTORE: &str = "sqlite-restore";
+const ISSUE_KEY_HISTORY_EXPORT: &str = "history-export";
+#[cfg(test)]
+const ISSUE_KEY_JOURNAL_RESTORE: &str = ISSUE_KEY_SQLITE_RESTORE;
+#[cfg(test)]
+const ISSUE_KEY_WATCHLIST_RESTORE: &str = ISSUE_KEY_SQLITE_RESTORE;
 const RISK_FREE_RATE_BPS: i32 = 400;
 const EQUITY_RISK_PREMIUM_BPS: i32 = 500;
 const DEFAULT_TAX_RATE_BPS: i32 = 2_100;
@@ -163,11 +177,18 @@ enum FeedControl {
     RefreshNow,
 }
 
+#[derive(Clone, Copy)]
+enum ChartRequestKind {
+    Detail,
+    Background,
+}
+
 enum ChartControl {
     Load {
         symbol: String,
         range: ChartRange,
         request_id: u64,
+        kind: ChartRequestKind,
     },
 }
 
@@ -175,13 +196,22 @@ struct ChartDataEvent {
     symbol: String,
     range: ChartRange,
     request_id: u64,
+    kind: ChartRequestKind,
+    fetched_at: u64,
     result: io::Result<Vec<HistoricalCandle>>,
+}
+
+#[derive(Clone, Copy)]
+enum AnalysisRequestKind {
+    Detail,
+    Background,
 }
 
 enum AnalysisControl {
     Load {
         symbol: String,
         request_id: u64,
+        kind: AnalysisRequestKind,
         fundamentals: FundamentalSnapshot,
     },
 }
@@ -189,7 +219,10 @@ enum AnalysisControl {
 struct AnalysisDataEvent {
     symbol: String,
     request_id: u64,
-    result: io::Result<DcfAnalysis>,
+    kind: AnalysisRequestKind,
+    fundamentals: FundamentalSnapshot,
+    fetched_at: u64,
+    result: io::Result<FundamentalTimeseries>,
 }
 
 enum AppEvent {
@@ -199,6 +232,11 @@ enum AppEvent {
     FeedStatus(FeedProgressStatus),
     ChartData(ChartDataEvent),
     AnalysisData(AnalysisDataEvent),
+    HistoryLoaded {
+        symbol: String,
+        result: io::Result<Vec<persistence::PersistedRevisionRecord>>,
+    },
+    PersistenceStatus(PersistenceStatusEvent),
     Fatal(io::Error),
     Shutdown,
 }
@@ -279,6 +317,56 @@ enum OverlayMode {
     None,
     IssueLog,
     TickerDetail(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetailTab {
+    Snapshot,
+    History,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistorySubview {
+    Graphs,
+    Table,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryMetricGroup {
+    Core,
+    Fundamentals,
+    Relative,
+    Dcf,
+    Chart,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryWindow {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+    All,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryViewState {
+    subview: HistorySubview,
+    group: HistoryMetricGroup,
+    window: HistoryWindow,
+    scroll: usize,
+}
+
+impl Default for HistoryViewState {
+    fn default() -> Self {
+        Self {
+            subview: HistorySubview::Graphs,
+            group: HistoryMetricGroup::Core,
+            window: HistoryWindow::Month,
+            scroll: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +569,46 @@ impl IssueCenter {
             expires_at: Instant::now() + ISSUE_TOAST_DURATION,
         });
     }
+
+    fn export_state(&self) -> Vec<PersistedIssueRecord> {
+        self.issues
+            .iter()
+            .map(|issue| PersistedIssueRecord {
+                key: issue.key.clone(),
+                source: issue.source,
+                severity: issue.severity,
+                title: issue.title.clone(),
+                detail: issue.detail.clone(),
+                count: issue.count,
+                first_seen_event: issue.first_seen_event,
+                last_seen_event: issue.last_seen_event,
+                active: issue.active,
+            })
+            .collect()
+    }
+
+    fn hydrate_from_persisted(&mut self, issues: &[PersistedIssueRecord]) {
+        self.issues = issues
+            .iter()
+            .map(|issue| OperationalIssue {
+                key: issue.key.clone(),
+                source: issue.source,
+                severity: issue.severity,
+                title: issue.title.clone(),
+                detail: issue.detail.clone(),
+                count: issue.count,
+                first_seen_event: issue.first_seen_event,
+                last_seen_event: issue.last_seen_event,
+                active: issue.active,
+            })
+            .collect();
+        self.next_event = issues
+            .iter()
+            .map(|issue| issue.last_seen_event)
+            .max()
+            .unwrap_or(0);
+        self.toast = None;
+    }
 }
 
 #[derive(Clone)]
@@ -537,13 +665,37 @@ impl LiveSymbolState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RuntimeOptions {
     smoke: bool,
-    replay_file: Option<PathBuf>,
-    journal_file: Option<PathBuf>,
-    watchlist_file: Option<PathBuf>,
+    state_db: Option<PathBuf>,
+    persist_enabled: bool,
     symbols: Vec<String>,
+    symbols_explicit: bool,
+    #[cfg(test)]
+    replay_file: Option<PathBuf>,
+    #[cfg(test)]
+    journal_file: Option<PathBuf>,
+    #[cfg(test)]
+    watchlist_file: Option<PathBuf>,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            smoke: false,
+            state_db: None,
+            persist_enabled: true,
+            symbols: Vec::new(),
+            symbols_explicit: false,
+            #[cfg(test)]
+            replay_file: None,
+            #[cfg(test)]
+            journal_file: None,
+            #[cfg(test)]
+            watchlist_file: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -662,11 +814,20 @@ struct AppState {
     issue_center: IssueCenter,
     overlay_mode: OverlayMode,
     issue_log_selected: usize,
+    detail_tab: DetailTab,
+    history_view: HistoryViewState,
     detail_chart_range: ChartRange,
     chart_cache: HashMap<ChartCacheKey, ChartCacheEntry>,
+    chart_summary_cache: HashMap<ChartCacheKey, ChartRangeSummary>,
+    background_chart_requests: HashMap<ChartCacheKey, u64>,
+    stale_symbols: HashSet<String>,
+    stale_chart_cache: HashSet<ChartCacheKey>,
+    warm_start_loaded_at: Option<u64>,
     next_chart_request_id: u64,
     analysis_cache: HashMap<String, AnalysisCacheEntry>,
     next_analysis_request_id: u64,
+    history_cache: HashMap<String, Vec<persistence::PersistedRevisionRecord>>,
+    history_export_root: Option<PathBuf>,
 }
 
 impl Default for AppState {
@@ -682,11 +843,20 @@ impl Default for AppState {
             issue_center: IssueCenter::default(),
             overlay_mode: OverlayMode::None,
             issue_log_selected: 0,
+            detail_tab: DetailTab::Snapshot,
+            history_view: HistoryViewState::default(),
             detail_chart_range: ChartRange::Year,
             chart_cache: HashMap::new(),
+            chart_summary_cache: HashMap::new(),
+            background_chart_requests: HashMap::new(),
+            stale_symbols: HashSet::new(),
+            stale_chart_cache: HashSet::new(),
+            warm_start_loaded_at: None,
             next_chart_request_id: 1,
             analysis_cache: HashMap::new(),
             next_analysis_request_id: 1,
+            history_cache: HashMap::new(),
+            history_export_root: None,
         }
     }
 }
@@ -745,6 +915,10 @@ impl AppState {
         self.status_message = None;
     }
 
+    fn set_history_export_root(&mut self, root: PathBuf) {
+        self.history_export_root = Some(root);
+    }
+
     fn open_issue_log(&mut self) {
         self.overlay_mode = OverlayMode::IssueLog;
         self.clamp_issue_log_selection();
@@ -753,10 +927,13 @@ impl AppState {
     fn open_ticker_detail(&mut self, symbol: &str) {
         self.overlay_mode = OverlayMode::TickerDetail(symbol.to_string());
         self.selected_symbol = Some(symbol.to_string());
+        self.detail_tab = DetailTab::Snapshot;
+        self.history_view = HistoryViewState::default();
     }
 
     fn close_overlay(&mut self) {
         self.overlay_mode = OverlayMode::None;
+        self.detail_tab = DetailTab::Snapshot;
     }
 
     fn detail_symbol(&self) -> Option<&str> {
@@ -781,6 +958,48 @@ impl AppState {
         let next_symbol = rows[next_index].symbol.clone();
         self.selected_symbol = Some(next_symbol.clone());
         self.overlay_mode = OverlayMode::TickerDetail(next_symbol);
+        self.history_view.scroll = 0;
+    }
+
+    fn toggle_detail_tab(&mut self) {
+        self.detail_tab = match self.detail_tab {
+            DetailTab::Snapshot => DetailTab::History,
+            DetailTab::History => DetailTab::Snapshot,
+        };
+        if self.detail_tab == DetailTab::History {
+            self.history_view.subview = HistorySubview::Graphs;
+        }
+        self.history_view.scroll = 0;
+    }
+
+    fn toggle_history_subview(&mut self) {
+        self.history_view.subview = match self.history_view.subview {
+            HistorySubview::Graphs => HistorySubview::Table,
+            HistorySubview::Table => HistorySubview::Graphs,
+        };
+        self.history_view.scroll = 0;
+    }
+
+    fn select_history_group(&mut self, group: HistoryMetricGroup) {
+        self.history_view.group = group;
+        self.history_view.scroll = 0;
+    }
+
+    fn cycle_history_window(&mut self, delta: isize) {
+        let windows = history_windows();
+        let current_index = windows
+            .iter()
+            .position(|window| *window == self.history_view.window)
+            .unwrap_or(2);
+        let next_index = current_index
+            .saturating_add_signed(delta)
+            .clamp(0, windows.len().saturating_sub(1));
+        self.history_view.window = windows[next_index];
+        self.history_view.scroll = 0;
+    }
+
+    fn scroll_history(&mut self, delta: isize) {
+        self.history_view.scroll = self.history_view.scroll.saturating_add_signed(delta);
     }
 
     fn detail_chart_range(&self) -> ChartRange {
@@ -817,7 +1036,12 @@ impl AppState {
             return;
         };
 
-        self.queue_chart_request(chart_control_sender, &symbol, self.detail_chart_range);
+        self.queue_chart_request(
+            chart_control_sender,
+            &symbol,
+            self.detail_chart_range,
+            ChartRequestKind::Detail,
+        );
     }
 
     fn queue_chart_request(
@@ -825,49 +1049,106 @@ impl AppState {
         chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
         symbol: &str,
         range: ChartRange,
-    ) {
+        kind: ChartRequestKind,
+    ) -> bool {
         let Some(chart_control_sender) = chart_control_sender else {
-            return;
+            return false;
         };
         let key = ChartCacheKey::new(symbol, range);
-
-        if matches!(
-            self.chart_cache.get(&key),
-            Some(ChartCacheEntry::Ready { .. } | ChartCacheEntry::Loading { .. })
-        ) {
-            return;
-        }
-
-        let previous = self
-            .chart_cache
-            .get(&key)
-            .and_then(ChartCacheEntry::cached_candles)
-            .map(|candles| candles.to_vec());
         let request_id = self.next_chart_request_id;
         self.next_chart_request_id = self.next_chart_request_id.saturating_add(1);
-        self.chart_cache.insert(
-            key,
-            ChartCacheEntry::Loading {
-                request_id,
-                previous,
-            },
-        );
+        match kind {
+            ChartRequestKind::Detail => {
+                if matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Loading { .. })) {
+                    return false;
+                }
+
+                if matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Ready { .. }))
+                    && !self.stale_chart_cache.contains(&key)
+                {
+                    return false;
+                }
+
+                let previous = self
+                    .chart_cache
+                    .get(&key)
+                    .and_then(ChartCacheEntry::cached_candles)
+                    .map(|candles| candles.to_vec());
+                self.chart_cache.insert(
+                    key.clone(),
+                    ChartCacheEntry::Loading {
+                        request_id,
+                        previous,
+                    },
+                );
+            }
+            ChartRequestKind::Background => {
+                if self.background_chart_requests.contains_key(&key)
+                    || matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Loading { .. }))
+                {
+                    return false;
+                }
+
+                if !self.stale_chart_cache.contains(&key)
+                    && (self.chart_summary_cache.contains_key(&key)
+                        || matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Ready { .. })))
+                {
+                    return false;
+                }
+                self.background_chart_requests.insert(key.clone(), request_id);
+            }
+        }
 
         if chart_control_sender
             .send(ChartControl::Load {
                 symbol: symbol.to_string(),
                 range,
                 request_id,
+                kind,
             })
             .is_err()
         {
-            self.chart_cache.insert(
-                ChartCacheKey::new(symbol, range),
-                ChartCacheEntry::Failed {
-                    message: "chart worker channel disconnected".to_string(),
-                    previous: None,
-                },
-            );
+            match kind {
+                ChartRequestKind::Detail => {
+                    self.chart_cache.insert(
+                        ChartCacheKey::new(symbol, range),
+                        ChartCacheEntry::Failed {
+                            message: "chart worker channel disconnected".to_string(),
+                            previous: None,
+                        },
+                    );
+                }
+                ChartRequestKind::Background => {
+                    self.background_chart_requests
+                        .remove(&ChartCacheKey::new(symbol, range));
+                }
+            }
+            return false;
+        }
+
+        true
+    }
+
+    fn queue_background_chart_requests(
+        &mut self,
+        chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
+        symbols: &[String],
+    ) {
+        let mut queued = 0usize;
+        for symbol in symbols {
+            for range in chart_ranges() {
+                if queued >= BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE {
+                    return;
+                }
+                if self.queue_chart_request(
+                    chart_control_sender,
+                    symbol,
+                    range,
+                    ChartRequestKind::Background,
+                ) {
+                    queued += 1;
+                }
+            }
         }
     }
 
@@ -885,13 +1166,50 @@ impl AppState {
         let Some(fundamentals) = detail.fundamentals.clone() else {
             return;
         };
+        self.queue_analysis_request(
+            analysis_control_sender,
+            &symbol,
+            fundamentals,
+            AnalysisRequestKind::Detail,
+        );
+    }
+
+    fn queue_background_analysis_requests(
+        &mut self,
+        state: &TerminalState,
+        analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
+        symbols: &[String],
+    ) {
+        for symbol in symbols {
+            let Some(detail) = state.detail(symbol) else {
+                continue;
+            };
+            let Some(fundamentals) = detail.fundamentals else {
+                continue;
+            };
+            self.queue_analysis_request(
+                analysis_control_sender,
+                symbol,
+                fundamentals,
+                AnalysisRequestKind::Background,
+            );
+        }
+    }
+
+    fn queue_analysis_request(
+        &mut self,
+        analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
+        symbol: &str,
+        fundamentals: FundamentalSnapshot,
+        kind: AnalysisRequestKind,
+    ) {
         let Some(analysis_control_sender) = analysis_control_sender else {
             return;
         };
         let analysis_input = analysis_input_key(&fundamentals);
 
         if matches!(
-            self.analysis_cache.get(&symbol),
+            self.analysis_cache.get(symbol),
             Some(AnalysisCacheEntry::Loading { input, .. } | AnalysisCacheEntry::Ready { input, .. })
                 if *input == analysis_input
         ) {
@@ -901,7 +1219,7 @@ impl AppState {
         let request_id = self.next_analysis_request_id;
         self.next_analysis_request_id = self.next_analysis_request_id.saturating_add(1);
         self.analysis_cache.insert(
-            symbol.clone(),
+            symbol.to_string(),
             AnalysisCacheEntry::Loading {
                 request_id,
                 input: analysis_input.clone(),
@@ -910,14 +1228,15 @@ impl AppState {
 
         if analysis_control_sender
             .send(AnalysisControl::Load {
-                symbol: symbol.clone(),
+                symbol: symbol.to_string(),
                 request_id,
+                kind,
                 fundamentals: fundamentals.clone(),
             })
             .is_err()
         {
             self.analysis_cache.insert(
-                symbol,
+                symbol.to_string(),
                 AnalysisCacheEntry::Failed {
                     input: analysis_input,
                     message: "analysis worker channel disconnected".to_string(),
@@ -926,31 +1245,87 @@ impl AppState {
         }
     }
 
-    fn apply_chart_data(&mut self, event: ChartDataEvent) {
+    fn apply_chart_data(&mut self, event: ChartDataEvent) -> Option<PersistedChartRecord> {
         let key = ChartCacheKey::new(&event.symbol, event.range);
-        let Some(current_entry) = self.chart_cache.get(&key) else {
-            return;
-        };
-        let ChartCacheEntry::Loading {
-            request_id,
-            previous,
-        } = current_entry
-        else {
-            return;
-        };
-        if *request_id != event.request_id {
-            return;
-        }
+        match event.kind {
+            ChartRequestKind::Detail => {
+                let Some(current_entry) = self.chart_cache.get(&key) else {
+                    return None;
+                };
+                let ChartCacheEntry::Loading {
+                    request_id,
+                    previous,
+                } = current_entry
+                else {
+                    return None;
+                };
+                if *request_id != event.request_id {
+                    return None;
+                }
 
-        let previous = previous.clone();
-        let next_entry = match event.result {
-            Ok(candles) => ChartCacheEntry::Ready { candles },
-            Err(error) => ChartCacheEntry::Failed {
-                message: error.to_string(),
-                previous,
-            },
-        };
-        self.chart_cache.insert(key, next_entry);
+                let persisted_chart = match &event.result {
+                    Ok(candles) => {
+                        self.chart_summary_cache.insert(
+                            key.clone(),
+                            summarize_chart_range(event.range, event.fetched_at, candles),
+                        );
+                        Some(PersistedChartRecord {
+                            symbol: event.symbol.clone(),
+                            range: event.range,
+                            candles: candles.clone(),
+                            fetched_at: event.fetched_at,
+                        })
+                    }
+                    Err(_) => None,
+                };
+                let previous = previous.clone();
+                let next_entry = match event.result {
+                    Ok(candles) => {
+                        self.stale_chart_cache.remove(&key);
+                        ChartCacheEntry::Ready { candles }
+                    }
+                    Err(error) => ChartCacheEntry::Failed {
+                        message: error.to_string(),
+                        previous,
+                    },
+                };
+                self.chart_cache.insert(key, next_entry);
+                persisted_chart
+            }
+            ChartRequestKind::Background => {
+                let Some(request_id) = self.background_chart_requests.get(&key).copied() else {
+                    return None;
+                };
+                if request_id != event.request_id {
+                    return None;
+                }
+                self.background_chart_requests.remove(&key);
+                match &event.result {
+                    Ok(candles) => {
+                        if self.chart_cache.contains_key(&key) {
+                            self.chart_cache.insert(
+                                key.clone(),
+                                ChartCacheEntry::Ready {
+                                    candles: candles.clone(),
+                                },
+                            );
+                        }
+                        self.chart_summary_cache.insert(
+                            key.clone(),
+                            summarize_chart_range(event.range, event.fetched_at, candles),
+                        );
+                        self.stale_chart_cache.remove(&key);
+                        Some(PersistedChartRecord {
+                            symbol: event.symbol.clone(),
+                            range: event.range,
+                            candles: candles.clone(),
+                            fetched_at: event.fetched_at,
+                        })
+                    }
+                    Err(_) => None,
+                }
+            }
+        }
     }
 
     fn detail_chart_entry(&self, symbol: &str) -> Option<&ChartCacheEntry> {
@@ -958,30 +1333,80 @@ impl AppState {
             .get(&ChartCacheKey::new(symbol, self.detail_chart_range))
     }
 
-    fn apply_analysis_data(&mut self, event: AnalysisDataEvent) {
+    fn chart_summary(&self, symbol: &str, range: ChartRange) -> Option<&ChartRangeSummary> {
+        self.chart_summary_cache.get(&ChartCacheKey::new(symbol, range))
+    }
+
+    fn apply_analysis_data(
+        &mut self,
+        event: AnalysisDataEvent,
+    ) -> (Option<FundamentalTimeseries>, Option<DcfAnalysis>) {
         let Some(current_entry) = self.analysis_cache.get(&event.symbol) else {
-            return;
+            return (None, None);
         };
         let AnalysisCacheEntry::Loading { request_id, input } = current_entry else {
-            return;
+            return (None, None);
         };
         if *request_id != event.request_id {
-            return;
+            return (None, None);
+        }
+        match event.kind {
+            AnalysisRequestKind::Detail | AnalysisRequestKind::Background => {}
         }
 
         let input = input.clone();
-        let next_entry = match event.result {
-            Ok(analysis) => AnalysisCacheEntry::Ready { input, analysis },
-            Err(error) => AnalysisCacheEntry::Failed {
-                input,
-                message: error.to_string(),
-            },
-        };
-        self.analysis_cache.insert(event.symbol, next_entry);
+        match event.result {
+            Ok(timeseries) => {
+                let dcf_result = compute_dcf_analysis(&event.fundamentals, &timeseries);
+                let next_entry = match dcf_result {
+                    Ok(analysis) => {
+                        let next_entry = AnalysisCacheEntry::Ready {
+                            input,
+                            analysis: analysis.clone(),
+                        };
+                        self.analysis_cache.insert(event.symbol, next_entry);
+                        return (Some(timeseries), Some(analysis));
+                    }
+                    Err(error) => AnalysisCacheEntry::Failed {
+                        input,
+                        message: error.to_string(),
+                    },
+                };
+                self.analysis_cache.insert(event.symbol, next_entry);
+                (Some(timeseries), None)
+            }
+            Err(error) => {
+                self.analysis_cache.insert(
+                    event.symbol,
+                    AnalysisCacheEntry::Failed {
+                        input,
+                        message: error.to_string(),
+                    },
+                );
+                (None, None)
+            }
+        }
     }
 
     fn detail_analysis_entry(&self, symbol: &str) -> Option<&AnalysisCacheEntry> {
         self.analysis_cache.get(symbol)
+    }
+
+    fn load_detail_history(&mut self, persistence_handle: Option<&PersistenceHandle>) {
+        let Some(symbol) = self.detail_symbol().map(str::to_string) else {
+            return;
+        };
+        let Some(persistence_handle) = persistence_handle else {
+            return;
+        };
+        persistence_handle.request_symbol_history(symbol);
+    }
+
+    fn detail_history(&self, symbol: &str) -> &[persistence::PersistedRevisionRecord] {
+        self.history_cache
+            .get(symbol)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn move_issue_log_selection(&mut self, delta: isize) {
@@ -1009,6 +1434,61 @@ impl AppState {
 
     fn pending_count(&self) -> usize {
         self.pending_feed.len()
+    }
+
+    fn load_warm_start(
+        &mut self,
+        chart_cache: &[PersistedChartRecord],
+        last_persisted_at: Option<u64>,
+        stale_symbols: &[String],
+    ) {
+        self.warm_start_loaded_at = last_persisted_at;
+        self.stale_symbols = stale_symbols.iter().cloned().collect();
+        self.chart_cache.clear();
+        self.chart_summary_cache.clear();
+        self.background_chart_requests.clear();
+        self.stale_chart_cache.clear();
+
+        for chart in chart_cache {
+            let key = ChartCacheKey::new(&chart.symbol, chart.range);
+            self.chart_cache.insert(
+                key.clone(),
+                ChartCacheEntry::Ready {
+                    candles: chart.candles.clone(),
+                },
+            );
+            self.chart_summary_cache.insert(
+                key.clone(),
+                summarize_chart_range(chart.range, chart.fetched_at, &chart.candles),
+            );
+            self.stale_chart_cache.insert(key);
+        }
+    }
+
+    fn mark_symbol_fresh(&mut self, symbol: &str) {
+        self.stale_symbols.remove(symbol);
+    }
+
+    fn is_symbol_stale(&self, symbol: &str) -> bool {
+        self.stale_symbols.contains(symbol)
+    }
+
+    fn is_chart_stale(&self, symbol: &str, range: ChartRange) -> bool {
+        self.stale_chart_cache
+            .contains(&ChartCacheKey::new(symbol, range))
+    }
+
+    fn warm_start_summary(&self) -> Option<String> {
+        let loaded_at = self.warm_start_loaded_at?;
+        let age_seconds = crate::unix_timestamp_seconds().saturating_sub(loaded_at);
+        let stale_symbol_count = self.stale_symbols.len();
+        let cached_chart_count = self.chart_cache.len();
+        Some(format!(
+            "Warm start: cached SQLite state from {} ago. Stale symbols: {}  Cached charts: {}",
+            format_age_seconds(age_seconds),
+            stale_symbol_count,
+            cached_chart_count,
+        ))
     }
 }
 
@@ -1084,15 +1564,15 @@ struct AnalysisInputKey {
     beta_millis: Option<i32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DcfSignal {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum DcfSignal {
     Opportunity,
     Fair,
     Expensive,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct DcfAnalysis {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DcfAnalysis {
     bear_intrinsic_value_cents: i64,
     base_intrinsic_value_cents: i64,
     bull_intrinsic_value_cents: i64,
@@ -1101,28 +1581,42 @@ struct DcfAnalysis {
     net_debt_dollars: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RelativeStrengthBand {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum RelativeStrengthBand {
     Strong,
     Mixed,
     Weak,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RelativeMetricScore {
-    label: &'static str,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RelativeMetricScore {
+    label: String,
     percentile: u8,
     band: RelativeStrengthBand,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SectorRelativeScore {
-    group_kind: &'static str,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SectorRelativeScore {
+    group_kind: String,
     group_label: String,
     peer_count: usize,
     composite_percentile: u8,
     composite_band: RelativeStrengthBand,
     metrics: Vec<RelativeMetricScore>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ChartRangeSummary {
+    pub range: ChartRange,
+    pub captured_at: u64,
+    pub candle_count: usize,
+    pub latest_close_cents: Option<i64>,
+    pub ema20_cents: Option<i64>,
+    pub ema50_cents: Option<i64>,
+    pub ema200_cents: Option<i64>,
+    pub macd_cents: Option<i64>,
+    pub signal_cents: Option<i64>,
+    pub histogram_cents: Option<i64>,
 }
 
 struct DetailAnalysisSnapshot<'a> {
@@ -1254,25 +1748,75 @@ fn derive_base_growth_bps(fcf_per_share: &[(String, f64)]) -> Option<i32> {
     let latest = fcf_per_share.get(latest_index)?;
     let first_index = fcf_per_share.iter().position(|(_, value)| *value > 0.0)?;
     let first = fcf_per_share.get(first_index)?;
-    let years = year_distance(&first.0, &latest.0).max((latest_index - first_index) as i32);
-    if years <= 0 {
+    let years = elapsed_years_between(&first.0, &latest.0)
+        .filter(|years| *years > 0.0)
+        .unwrap_or((latest_index - first_index) as f64);
+    if years <= 0.0 {
         return None;
     }
 
-    let cagr = (latest.1 / first.1).powf(1.0 / years as f64) - 1.0;
+    let cagr = (latest.1 / first.1).powf(1.0 / years) - 1.0;
     if !cagr.is_finite() {
         return None;
     }
 
-    Some((cagr * 10_000.0).round() as i32)
+    rounded_f64_to_i32(cagr * 10_000.0)
 }
 
-fn year_distance(start: &str, end: &str) -> i32 {
-    let parse_year = |date: &str| date.get(0..4).and_then(|value| value.parse::<i32>().ok());
-    parse_year(end)
-        .zip(parse_year(start))
-        .map(|(end_year, start_year)| end_year - start_year)
-        .unwrap_or(0)
+fn elapsed_years_between(start: &str, end: &str) -> Option<f64> {
+    let start_days =
+        parse_ymd(start).and_then(|(year, month, day)| days_from_civil(year, month, day))?;
+    let end_days = parse_ymd(end).and_then(|(year, month, day)| days_from_civil(year, month, day))?;
+    let elapsed_days = end_days - start_days;
+    (elapsed_days > 0).then_some(elapsed_days as f64 / 365.2425)
+}
+
+fn parse_ymd(date: &str) -> Option<(i32, u32, u32)> {
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+    if !(1..=days_in_month(year, month)?).contains(&day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn days_in_month(year: i32, month: u32) -> Option<u32> {
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    Some(days)
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = month as i32;
+    let day = day as i32;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some((era * 146_097 + day_of_era - 719_468) as i64)
+}
+
+fn rounded_f64_to_i32(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = value.round();
+    (rounded >= i32::MIN as f64 && rounded <= i32::MAX as f64).then_some(rounded as i32)
 }
 
 fn derive_wacc_bps(
@@ -1372,12 +1916,10 @@ fn dcf_margin_of_safety_bps(analysis: &DcfAnalysis, market_price_cents: i64) -> 
         return None;
     }
 
-    Some(
-        (((analysis.base_intrinsic_value_cents - market_price_cents) as f64
-            / analysis.base_intrinsic_value_cents as f64)
-            * 10_000.0)
-            .round() as i32,
-    )
+    let scaled_gap_bps = ((analysis.base_intrinsic_value_cents as i128 - market_price_cents as i128)
+        * 10_000)
+        / analysis.base_intrinsic_value_cents as i128;
+    i32::try_from(scaled_gap_bps).ok()
 }
 
 fn dcf_signal(analysis: &DcfAnalysis, market_price_cents: i64) -> DcfSignal {
@@ -1411,7 +1953,7 @@ fn compute_sector_relative_score(
         .unwrap_or_default();
     let (group_kind, group_label, peers) = if industry_peers.len() >= MIN_RELATIVE_PEERS {
         (
-            "industry",
+            "industry".to_string(),
             industry_name.unwrap_or("unknown industry").to_string(),
             industry_peers,
         )
@@ -1431,7 +1973,7 @@ fn compute_sector_relative_score(
             return None;
         }
         (
-            "sector",
+            "sector".to_string(),
             sector_name.unwrap_or("unknown sector").to_string(),
             sector_peers,
         )
@@ -1496,7 +2038,7 @@ fn relative_metric_score(
     let percentile = empirical_percentile_score(subject_value, &peer_values, lower_is_better)?;
 
     Some(RelativeMetricScore {
-        label,
+        label: label.to_string(),
         percentile,
         band: relative_strength_band(percentile),
     })
@@ -1715,6 +2257,9 @@ struct StartupIssue {
 
 struct LoadedState {
     state: TerminalState,
+    app: AppState,
+    tracked_symbols: Vec<String>,
+    persistence_db_path: Option<PathBuf>,
     startup_issues: Vec<StartupIssue>,
 }
 
@@ -2062,21 +2607,52 @@ fn run_smoke() {
 }
 
 fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
-    let live_mode = options.replay_file.is_none();
+    let live_mode = true;
     let LoadedState {
         mut state,
+        mut app,
+        tracked_symbols,
+        persistence_db_path,
         startup_issues,
     } = load_initial_state(&options)?;
-    let mut app = AppState::default();
-    apply_startup_issues(&mut app.issue_center, startup_issues);
     let mut last_persisted_sequence = state.latest_sequence();
-    let live_symbols = live_mode.then(|| LiveSymbolState::new(options.symbols.clone()));
-    let feed_error_logger =
-        live_mode.then(|| FeedErrorLogger::new(PathBuf::from(DEFAULT_FEED_ERROR_LOG_FILE)));
+    let live_symbols = Some(LiveSymbolState::new(tracked_symbols));
+    let feed_error_logger = Some(FeedErrorLogger::new(PathBuf::from(DEFAULT_FEED_ERROR_LOG_FILE)));
     let (app_event_sender, app_event_receiver) = mpsc::channel();
     let app_event_publisher = AppEventPublisher::new(app_event_sender);
     install_shutdown_publisher(app_event_publisher.clone())
         .map_err(|error| with_io_context(error, "install shutdown signal handler"))?;
+    let persistence_handle = if let Some(state_db) = persistence_db_path {
+        match persistence::spawn_worker(state_db.clone(), app_event_publisher.clone()) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                app.issue_center.raise(
+                    ISSUE_KEY_SQLITE_PERSISTENCE,
+                    IssueSource::Persistence,
+                    IssueSeverity::Warning,
+                    "SQLite persistence worker failed",
+                    with_path_context(error, "spawn sqlite persistence worker", &state_db)
+                        .to_string(),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    apply_startup_issues(&mut app.issue_center, startup_issues);
+    if let Some(persistence_handle) = persistence_handle.as_ref() {
+        if !options.symbols_explicit {
+            persistence_handle.replace_tracked_symbols(
+                live_symbols
+                    .as_ref()
+                    .map(LiveSymbolState::snapshot)
+                    .unwrap_or_default(),
+            );
+        }
+        persistence_handle.replace_watchlist(state.watchlist_symbols());
+        persistence_handle.replace_issues(app.issue_center.export_state());
+    }
 
     let mut stdout = io::stdout();
     let mut terminal_guard = TerminalGuard::default();
@@ -2104,6 +2680,11 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
 
     let initial_rows = app.visible_rows(&state);
     let initial_selected_index = app.selected_index(&initial_rows);
+    if let Some(live_symbols) = live_symbols.as_ref() {
+        let tracked = live_symbols.snapshot();
+        app.queue_background_chart_requests(Some(&chart_control_sender), &tracked);
+        app.queue_background_analysis_requests(&state, Some(&analysis_control_sender), &tracked);
+    }
     render(
         &mut stdout,
         &state,
@@ -2148,54 +2729,161 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                     feed_control_sender.as_ref(),
                     Some(&chart_control_sender),
                     Some(&analysis_control_sender),
-                    options.watchlist_file.as_ref(),
+                    persistence_handle.as_ref(),
                 )? {
                     break;
                 }
 
                 if was_paused && !app.paused && !app.pending_feed.is_empty() {
                     let pending_feed = std::mem::take(&mut app.pending_feed);
-                    let applied_events =
+                    let applied_feed_batch =
                         apply_feed_events(&mut state, &mut app.issue_center, pending_feed);
-                    if applied_events > 0 {
-                        rate_tracker.record_batch(applied_events, Instant::now());
+                    for symbol in &applied_feed_batch.refreshed_symbols {
+                        app.mark_symbol_fresh(symbol);
                     }
-                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
-                    reconcile_journal_persistence(
-                        &state,
-                        options.journal_file.as_ref(),
-                        &mut last_persisted_sequence,
-                        &mut app.issue_center,
+                    if applied_feed_batch.applied_events > 0 {
+                        rate_tracker.record_batch(applied_feed_batch.applied_events, Instant::now());
+                    }
+                    app.queue_background_chart_requests(
+                        Some(&chart_control_sender),
+                        &applied_feed_batch.refreshed_symbols,
                     );
+                    app.queue_background_analysis_requests(
+                        &state,
+                        Some(&analysis_control_sender),
+                        &applied_feed_batch.refreshed_symbols,
+                    );
+                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
+                    match reconcile_sqlite_persistence(
+                        &state,
+                        &app,
+                        persistence_handle.as_ref(),
+                        &mut last_persisted_sequence,
+                    ) {
+                        Ok(()) => app.issue_center.resolve(ISSUE_KEY_SQLITE_PERSISTENCE),
+                        Err(error) => app.issue_center.raise(
+                            ISSUE_KEY_SQLITE_PERSISTENCE,
+                            IssueSource::Persistence,
+                            IssueSeverity::Warning,
+                            "SQLite persistence failed",
+                            error.to_string(),
+                        ),
+                    }
+                    if let Some(persistence_handle) = persistence_handle.as_ref() {
+                        persistence_handle.replace_issues(app.issue_center.export_state());
+                    }
                 }
             }
             AppEvent::Resize => {}
             AppEvent::FeedBatch(feed_events) => {
                 if app.paused {
                     enqueue_paused_feed_batch(&mut app, feed_events);
-                } else {
-                    let applied_events =
-                        apply_feed_events(&mut state, &mut app.issue_center, feed_events);
-                    if applied_events > 0 {
-                        rate_tracker.record_batch(applied_events, Instant::now());
+                    if let Some(persistence_handle) = persistence_handle.as_ref() {
+                        persistence_handle.replace_issues(app.issue_center.export_state());
                     }
-                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
-                    reconcile_journal_persistence(
-                        &state,
-                        options.journal_file.as_ref(),
-                        &mut last_persisted_sequence,
-                        &mut app.issue_center,
+                } else {
+                    let applied_feed_batch =
+                        apply_feed_events(&mut state, &mut app.issue_center, feed_events);
+                    for symbol in &applied_feed_batch.refreshed_symbols {
+                        app.mark_symbol_fresh(symbol);
+                    }
+                    if applied_feed_batch.applied_events > 0 {
+                        rate_tracker.record_batch(applied_feed_batch.applied_events, Instant::now());
+                    }
+                    app.queue_background_chart_requests(
+                        Some(&chart_control_sender),
+                        &applied_feed_batch.refreshed_symbols,
                     );
+                    app.queue_background_analysis_requests(
+                        &state,
+                        Some(&analysis_control_sender),
+                        &applied_feed_batch.refreshed_symbols,
+                    );
+                    app.queue_detail_analysis_request(&state, Some(&analysis_control_sender));
+                    match reconcile_sqlite_persistence(
+                        &state,
+                        &app,
+                        persistence_handle.as_ref(),
+                        &mut last_persisted_sequence,
+                    ) {
+                        Ok(()) => app.issue_center.resolve(ISSUE_KEY_SQLITE_PERSISTENCE),
+                        Err(error) => app.issue_center.raise(
+                            ISSUE_KEY_SQLITE_PERSISTENCE,
+                            IssueSource::Persistence,
+                            IssueSeverity::Warning,
+                            "SQLite persistence failed",
+                            error.to_string(),
+                        ),
+                    }
+                    if let Some(persistence_handle) = persistence_handle.as_ref() {
+                        persistence_handle.replace_issues(app.issue_center.export_state());
+                    }
                 }
             }
             AppEvent::FeedStatus(status) => {
                 app.live_feed_status = Some(status);
             }
             AppEvent::ChartData(event) => {
-                app.apply_chart_data(event);
+                if let Some(chart) = app.apply_chart_data(event) {
+                    if let Some(persistence_handle) = persistence_handle.as_ref() {
+                        let revisions = build_symbol_revisions(
+                            &state,
+                            &app,
+                            &[chart.symbol.clone()],
+                            chart.fetched_at,
+                        );
+                        let capture = persistence::RawCapture {
+                            symbol: chart.symbol.clone(),
+                            capture_kind: persistence::CaptureKind::ChartCandles,
+                            scope_key: Some(chart_range_label(chart.range).to_string()),
+                            captured_at: chart.fetched_at,
+                            payload: persistence::RawCapturePayload::Chart {
+                                range: chart.range,
+                                candles: chart.candles.clone(),
+                            },
+                        };
+                        reconcile_capture_persistence(
+                            &mut app,
+                            persistence_handle,
+                            "persist chart capture",
+                            vec![capture],
+                            revisions,
+                        );
+                    }
+                }
             }
             AppEvent::AnalysisData(event) => {
-                app.apply_analysis_data(event);
+                let symbol = event.symbol.clone();
+                let fetched_at = event.fetched_at;
+                let (timeseries, _analysis) = app.apply_analysis_data(event);
+                if let (Some(timeseries), Some(persistence_handle)) =
+                    (timeseries, persistence_handle.as_ref())
+                {
+                    let revisions =
+                        build_symbol_revisions(&state, &app, &[symbol.clone()], fetched_at);
+                    let capture = persistence::RawCapture {
+                        symbol,
+                        capture_kind: persistence::CaptureKind::FundamentalTimeseries,
+                        scope_key: None,
+                        captured_at: fetched_at,
+                        payload: persistence::RawCapturePayload::FundamentalTimeseries(timeseries),
+                    };
+                    reconcile_capture_persistence(
+                        &mut app,
+                        persistence_handle,
+                        "persist fundamental timeseries",
+                        vec![capture],
+                        revisions,
+                    );
+                }
+            }
+            AppEvent::HistoryLoaded { symbol, result } => {
+                if let Ok(history) = result {
+                    app.history_cache.insert(symbol, history);
+                }
+            }
+            AppEvent::PersistenceStatus(status) => {
+                apply_persistence_status(&mut app.issue_center, status);
             }
             AppEvent::Fatal(error) => {
                 runtime_error = Some(error);
@@ -2222,22 +2910,17 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
 
     if let Some(runtime_error) = runtime_error {
         drop(terminal_guard);
+        if let Some(persistence_handle) = persistence_handle {
+            persistence_handle.shutdown(unix_timestamp_seconds());
+        }
         return Err(runtime_error);
     }
 
-    let save_result = if let Some(journal_file) = options.journal_file.as_ref() {
-        let journal_result = state
-            .save_journal_file(journal_file)
-            .map_err(|error| with_path_context(error, "save journal file", journal_file));
-        let watchlist_result =
-            save_watchlist_if_configured(&state, options.watchlist_file.as_ref());
-        journal_result.and(watchlist_result)
-    } else {
-        save_watchlist_if_configured(&state, options.watchlist_file.as_ref())
-    };
-
     drop(terminal_guard);
-    save_result
+    if let Some(persistence_handle) = persistence_handle {
+        persistence_handle.shutdown(unix_timestamp_seconds());
+    }
+    Ok(())
 }
 
 fn install_shutdown_publisher(publisher: AppEventPublisher) -> io::Result<()> {
@@ -2407,6 +3090,7 @@ fn chart_loop_with_client_factory<Client, BuildClient>(
         symbol,
         range,
         request_id,
+        kind,
     }) = control_receiver.recv()
     {
         if client.is_none() {
@@ -2417,6 +3101,8 @@ fn chart_loop_with_client_factory<Client, BuildClient>(
                         symbol,
                         range,
                         request_id,
+                        kind,
+                        fetched_at: unix_timestamp_seconds(),
                         result: Err(io::Error::other(format!(
                             "historical chart client initialization failed: {error}"
                         ))),
@@ -2434,6 +3120,8 @@ fn chart_loop_with_client_factory<Client, BuildClient>(
             symbol: symbol.clone(),
             range,
             request_id,
+            kind,
+            fetched_at: unix_timestamp_seconds(),
             result: client.fetch_historical_candles(&symbol, range),
         })) {
             return;
@@ -2454,6 +3142,7 @@ fn analysis_loop_with_client_factory<Client, BuildClient>(
     while let Ok(AnalysisControl::Load {
         symbol,
         request_id,
+        kind,
         fundamentals,
     }) = control_receiver.recv()
     {
@@ -2464,6 +3153,9 @@ fn analysis_loop_with_client_factory<Client, BuildClient>(
                     let _ = publisher.publish(AppEvent::AnalysisData(AnalysisDataEvent {
                         symbol,
                         request_id,
+                        kind,
+                        fundamentals,
+                        fetched_at: unix_timestamp_seconds(),
                         result: Err(io::Error::other(format!(
                             "fundamental analysis client initialization failed: {error}"
                         ))),
@@ -2477,13 +3169,14 @@ fn analysis_loop_with_client_factory<Client, BuildClient>(
             continue;
         };
 
-        let result = client
-            .fetch_fundamental_timeseries(&symbol)
-            .and_then(|timeseries| compute_dcf_analysis(&fundamentals, &timeseries));
+        let result = client.fetch_fundamental_timeseries(&symbol);
 
         if !publisher.publish(AppEvent::AnalysisData(AnalysisDataEvent {
             symbol,
             request_id,
+            kind,
+            fundamentals,
+            fetched_at: unix_timestamp_seconds(),
             result,
         })) {
             return;
@@ -2491,24 +3184,33 @@ fn analysis_loop_with_client_factory<Client, BuildClient>(
     }
 }
 
+struct AppliedFeedBatch {
+    applied_events: usize,
+    refreshed_symbols: Vec<String>,
+}
+
 fn apply_feed_events(
     state: &mut TerminalState,
     issue_center: &mut IssueCenter,
     feed_events: impl IntoIterator<Item = FeedEvent>,
-) -> usize {
+) -> AppliedFeedBatch {
     let mut applied_events = 0usize;
+    let mut refreshed_symbols = HashSet::new();
 
     for feed_event in feed_events {
         match feed_event {
             FeedEvent::Snapshot(snapshot) => {
+                refreshed_symbols.insert(snapshot.symbol.clone());
                 state.ingest_snapshot(snapshot);
                 applied_events += 1;
             }
             FeedEvent::External(signal) => {
+                refreshed_symbols.insert(signal.symbol.clone());
                 state.ingest_external(signal);
                 applied_events += 1;
             }
             FeedEvent::Fundamentals(fundamentals) => {
+                refreshed_symbols.insert(fundamentals.symbol.clone());
                 state.ingest_fundamentals(fundamentals);
                 applied_events += 1;
             }
@@ -2518,7 +3220,12 @@ fn apply_feed_events(
         }
     }
 
-    applied_events
+    let mut refreshed_symbols = refreshed_symbols.into_iter().collect::<Vec<_>>();
+    refreshed_symbols.sort();
+    AppliedFeedBatch {
+        applied_events,
+        refreshed_symbols,
+    }
 }
 
 fn enqueue_paused_feed_batch(app: &mut AppState, feed_events: Vec<FeedEvent>) {
@@ -2534,6 +3241,282 @@ fn enqueue_paused_feed_batch(app: &mut AppState, feed_events: Vec<FeedEvent>) {
     }
 }
 
+fn reconcile_sqlite_persistence(
+    state: &TerminalState,
+    app: &AppState,
+    persistence_handle: Option<&PersistenceHandle>,
+    last_persisted_sequence: &mut usize,
+) -> io::Result<()> {
+    let Some(persistence_handle) = persistence_handle else {
+        *last_persisted_sequence = state.latest_sequence();
+        return Ok(());
+    };
+
+    let delta = state.journal_since(*last_persisted_sequence);
+    if delta.is_empty() {
+        return Ok(());
+    }
+
+    let symbols = delta_symbols(&delta);
+    if symbols.is_empty() {
+        *last_persisted_sequence = state.latest_sequence();
+        return Ok(());
+    }
+
+    let recorded_at = unix_timestamp_seconds();
+    let revisions = build_symbol_revisions(state, app, &symbols, recorded_at);
+    let max_sequence = delta
+        .iter()
+        .map(|entry| entry.sequence)
+        .max()
+        .unwrap_or(*last_persisted_sequence);
+    persistence_handle.persist_batch(
+        raw_captures_from_journal(&delta, recorded_at),
+        revisions,
+    )?;
+    *last_persisted_sequence = max_sequence;
+    Ok(())
+}
+
+fn delta_symbols(delta: &[discount_screener::JournalEntry]) -> Vec<String> {
+    let mut symbols = HashSet::new();
+    for entry in delta {
+        match &entry.payload {
+            discount_screener::JournalPayload::Snapshot(snapshot) => {
+                symbols.insert(snapshot.symbol.clone());
+            }
+            discount_screener::JournalPayload::External(signal) => {
+                symbols.insert(signal.symbol.clone());
+            }
+            discount_screener::JournalPayload::Fundamentals(fundamentals) => {
+                symbols.insert(fundamentals.symbol.clone());
+            }
+            discount_screener::JournalPayload::FundamentalsCleared(symbol) => {
+                symbols.insert(symbol.clone());
+            }
+        }
+    }
+
+    let mut symbols = symbols.into_iter().collect::<Vec<_>>();
+    symbols.sort();
+    symbols
+}
+
+fn raw_captures_from_journal(
+    delta: &[discount_screener::JournalEntry],
+    recorded_at: u64,
+) -> Vec<persistence::RawCapture> {
+    delta.iter()
+        .map(|entry| match &entry.payload {
+            discount_screener::JournalPayload::Snapshot(snapshot) => persistence::RawCapture {
+                symbol: snapshot.symbol.clone(),
+                capture_kind: persistence::CaptureKind::Snapshot,
+                scope_key: None,
+                captured_at: recorded_at,
+                payload: persistence::RawCapturePayload::Snapshot(snapshot.clone()),
+            },
+            discount_screener::JournalPayload::External(signal) => persistence::RawCapture {
+                symbol: signal.symbol.clone(),
+                capture_kind: persistence::CaptureKind::External,
+                scope_key: None,
+                captured_at: recorded_at,
+                payload: persistence::RawCapturePayload::External(signal.clone()),
+            },
+            discount_screener::JournalPayload::Fundamentals(fundamentals) => {
+                persistence::RawCapture {
+                    symbol: fundamentals.symbol.clone(),
+                    capture_kind: persistence::CaptureKind::Fundamentals,
+                    scope_key: None,
+                    captured_at: recorded_at,
+                    payload: persistence::RawCapturePayload::Fundamentals(fundamentals.clone()),
+                }
+            }
+            discount_screener::JournalPayload::FundamentalsCleared(symbol) => {
+                persistence::RawCapture {
+                    symbol: symbol.clone(),
+                    capture_kind: persistence::CaptureKind::Fundamentals,
+                    scope_key: Some("cleared".to_string()),
+                    captured_at: recorded_at,
+                    payload: persistence::RawCapturePayload::Fundamentals(FundamentalSnapshot {
+                        symbol: symbol.clone(),
+                        sector_key: None,
+                        sector_name: None,
+                        industry_key: None,
+                        industry_name: None,
+                        market_cap_dollars: None,
+                        shares_outstanding: None,
+                        trailing_pe_hundredths: None,
+                        forward_pe_hundredths: None,
+                        price_to_book_hundredths: None,
+                        return_on_equity_bps: None,
+                        ebitda_dollars: None,
+                        enterprise_value_dollars: None,
+                        enterprise_to_ebitda_hundredths: None,
+                        total_debt_dollars: None,
+                        total_cash_dollars: None,
+                        debt_to_equity_hundredths: None,
+                        free_cash_flow_dollars: None,
+                        operating_cash_flow_dollars: None,
+                        beta_millis: None,
+                        trailing_eps_cents: None,
+                        earnings_growth_bps: None,
+                    }),
+                }
+            }
+        })
+        .collect()
+}
+
+fn build_symbol_revisions(
+    state: &TerminalState,
+    app: &AppState,
+    symbols: &[String],
+    evaluated_at: u64,
+) -> Vec<persistence::SymbolRevisionInput> {
+    let mut revisions = symbols
+        .iter()
+        .filter_map(|symbol| build_symbol_revision(state, app, symbol, evaluated_at))
+        .collect::<Vec<_>>();
+    revisions.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+    revisions
+}
+
+fn build_symbol_revision(
+    state: &TerminalState,
+    app: &AppState,
+    symbol: &str,
+    evaluated_at: u64,
+) -> Option<persistence::SymbolRevisionInput> {
+    let detail = state.detail(symbol)?;
+    let relative_score = detail
+        .fundamentals
+        .as_ref()
+        .and_then(|fundamentals| compute_sector_relative_score(state, fundamentals));
+    let has_relative = relative_score.is_some();
+    let dcf_analysis = match app.detail_analysis_entry(symbol) {
+        Some(AnalysisCacheEntry::Ready { analysis, .. }) => Some(analysis.clone()),
+        _ => None,
+    };
+    let chart_summaries = chart_ranges()
+        .iter()
+        .filter_map(|range| app.chart_summary(symbol, *range).cloned())
+        .collect::<Vec<_>>();
+    Some(persistence::SymbolRevisionInput {
+        symbol: symbol.to_string(),
+        evaluated_at,
+        last_sequence: detail.last_sequence,
+        update_count: detail.update_count,
+        price_history: state.price_history(symbol, usize::MAX),
+        payload: persistence::EvaluatedSymbolState {
+            snapshot: Some(MarketSnapshot {
+                symbol: detail.symbol.clone(),
+                company_name: state.company_name(symbol).map(str::to_string),
+                profitable: detail.profitable,
+                market_price_cents: detail.market_price_cents,
+                intrinsic_value_cents: detail.intrinsic_value_cents,
+            }),
+            external_signal: detail.external_signal_fair_value_cents.map(|fair_value_cents| {
+                ExternalValuationSignal {
+                    symbol: detail.symbol.clone(),
+                    fair_value_cents,
+                    age_seconds: detail.external_signal_age_seconds.unwrap_or(0),
+                    low_fair_value_cents: detail.external_signal_low_fair_value_cents,
+                    high_fair_value_cents: detail.external_signal_high_fair_value_cents,
+                    analyst_opinion_count: detail.analyst_opinion_count,
+                    recommendation_mean_hundredths: detail.recommendation_mean_hundredths,
+                    strong_buy_count: detail.strong_buy_count,
+                    buy_count: detail.buy_count,
+                    hold_count: detail.hold_count,
+                    sell_count: detail.sell_count,
+                    strong_sell_count: detail.strong_sell_count,
+                    weighted_fair_value_cents: detail.weighted_external_signal_fair_value_cents,
+                    weighted_analyst_count: detail.weighted_analyst_count,
+                }
+            }),
+            fundamentals: detail.fundamentals.clone(),
+            gap_bps: Some(detail.gap_bps),
+            qualification: Some(detail.qualification),
+            external_status: Some(detail.external_status),
+            confidence: Some(detail.confidence),
+            external_gap_bps: detail.external_signal_gap_bps,
+            weighted_gap_bps: detail
+                .weighted_external_signal_fair_value_cents
+                .and_then(|fair_value_cents| checked_gap_bps(detail.market_price_cents, fair_value_cents)),
+            dcf_signal: dcf_analysis
+                .as_ref()
+                .map(|analysis| dcf_signal(analysis, detail.market_price_cents)),
+            dcf_margin_of_safety_bps: dcf_analysis
+                .as_ref()
+                .and_then(|analysis| dcf_margin_of_safety_bps(analysis, detail.market_price_cents)),
+            dcf_analysis,
+            relative_score,
+            chart_summaries: chart_summaries.clone(),
+            core_status: persistence::MetricGroupStatus {
+                available: true,
+                stale: app.is_symbol_stale(symbol),
+            },
+            fundamentals_status: persistence::MetricGroupStatus {
+                available: detail.fundamentals.is_some(),
+                stale: false,
+            },
+            relative_status: persistence::MetricGroupStatus {
+                available: has_relative,
+                stale: false,
+            },
+            dcf_status: persistence::MetricGroupStatus {
+                available: match app.detail_analysis_entry(symbol) {
+                    Some(AnalysisCacheEntry::Ready { .. }) => true,
+                    Some(AnalysisCacheEntry::Failed { .. }) | Some(AnalysisCacheEntry::Loading { .. }) | None => false,
+                },
+                stale: false,
+            },
+            chart_status: persistence::MetricGroupStatus {
+                available: !chart_summaries.is_empty(),
+                stale: chart_summaries.len() < chart_ranges().len(),
+            },
+            is_watched: detail.is_watched,
+        },
+    })
+}
+
+fn apply_persistence_status(
+    issue_center: &mut IssueCenter,
+    status: PersistenceStatusEvent,
+) {
+    if let Some(error) = status.error {
+        issue_center.raise(
+            ISSUE_KEY_SQLITE_PERSISTENCE,
+            IssueSource::Persistence,
+            IssueSeverity::Warning,
+            "SQLite persistence failed",
+            format!("{}: {error}", status.operation),
+        );
+    } else {
+        issue_center.resolve(ISSUE_KEY_SQLITE_PERSISTENCE);
+    }
+}
+
+fn reconcile_capture_persistence(
+    app: &mut AppState,
+    persistence_handle: &PersistenceHandle,
+    operation: &str,
+    raw_captures: Vec<persistence::RawCapture>,
+    revisions: Vec<persistence::SymbolRevisionInput>,
+) {
+    match persistence_handle.persist_batch(raw_captures, revisions) {
+        Ok(()) => app.issue_center.resolve(ISSUE_KEY_SQLITE_PERSISTENCE),
+        Err(error) => app.issue_center.raise(
+            ISSUE_KEY_SQLITE_PERSISTENCE,
+            IssueSource::Persistence,
+            IssueSeverity::Warning,
+            "SQLite persistence failed",
+            format!("{operation}: {error}"),
+        ),
+    }
+    persistence_handle.replace_issues(app.issue_center.export_state());
+}
+
+#[cfg(test)]
 fn reconcile_journal_persistence(
     state: &TerminalState,
     journal_file: Option<&PathBuf>,
@@ -2542,11 +3525,11 @@ fn reconcile_journal_persistence(
 ) {
     match persist_new_journal_entries(state, journal_file, last_persisted_sequence) {
         Ok(()) => {
-            issue_center.resolve(ISSUE_KEY_JOURNAL_PERSISTENCE);
+            issue_center.resolve(ISSUE_KEY_SQLITE_PERSISTENCE);
         }
         Err(error) => {
             issue_center.raise(
-                ISSUE_KEY_JOURNAL_PERSISTENCE,
+                ISSUE_KEY_SQLITE_PERSISTENCE,
                 IssueSource::Persistence,
                 IssueSeverity::Error,
                 "Journal persistence failed",
@@ -2567,7 +3550,7 @@ fn handle_input_event(
     feed_control_sender: Option<&mpsc::Sender<FeedControl>>,
     chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
     analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
-    watchlist_file: Option<&PathBuf>,
+    persistence_handle: Option<&PersistenceHandle>,
 ) -> io::Result<LoopControl> {
     if is_force_quit_key(&key_event) {
         return Ok(LoopControl::Exit);
@@ -2588,7 +3571,7 @@ fn handle_input_event(
         &key_event,
         chart_control_sender,
         analysis_control_sender,
-        watchlist_file,
+        persistence_handle,
     )? {
         return Ok(LoopControl::Continue);
     }
@@ -2614,19 +3597,8 @@ fn handle_input_event(
             KeyCode::Char('w') => {
                 if let Some(row) = rows.get(selected_index) {
                     state.toggle_watchlist(&row.symbol);
-                    match save_watchlist_if_configured(state, watchlist_file) {
-                        Ok(()) => {
-                            app.issue_center.resolve(ISSUE_KEY_WATCHLIST_PERSISTENCE);
-                        }
-                        Err(error) => {
-                            app.issue_center.raise(
-                                ISSUE_KEY_WATCHLIST_PERSISTENCE,
-                                IssueSource::Persistence,
-                                IssueSeverity::Warning,
-                                "Watchlist persistence failed",
-                                error.to_string(),
-                            );
-                        }
+                    if let Some(persistence_handle) = persistence_handle {
+                        persistence_handle.replace_watchlist(state.watchlist_symbols());
                     }
                     app.set_selection(&row.symbol);
                 }
@@ -2682,7 +3654,13 @@ fn handle_input_event(
             KeyCode::Enter => {
                 let symbol_query = buffer.clone();
                 app.input_mode = InputMode::Normal;
-                track_symbols_from_query(&symbol_query, app, live_symbols, feed_control_sender);
+                track_symbols_from_query(
+                    &symbol_query,
+                    app,
+                    live_symbols,
+                    feed_control_sender,
+                    persistence_handle,
+                );
             }
             KeyCode::Esc => {
                 app.input_mode = InputMode::Normal;
@@ -2766,13 +3744,21 @@ fn build_screen_lines_for_viewport(
     match &app.overlay_mode {
         OverlayMode::IssueLog => return build_issue_log_lines(app),
         OverlayMode::TickerDetail(symbol) => {
-            return build_ticker_detail_lines_for_viewport(
-                state,
-                app,
-                symbol,
-                viewport_width,
-                viewport_height,
-            );
+            return match app.detail_tab {
+                DetailTab::Snapshot => build_ticker_detail_lines_for_viewport(
+                    state,
+                    app,
+                    symbol,
+                    viewport_width,
+                    viewport_height,
+                ),
+                DetailTab::History => build_ticker_history_lines_for_viewport(
+                    app,
+                    symbol,
+                    viewport_width,
+                    viewport_height,
+                ),
+            };
         }
         OverlayMode::None => {}
     }
@@ -2835,6 +3821,16 @@ fn build_screen_lines_for_viewport(
                 .unwrap_or_else(|| {
                     "Feed status: waiting for the first live refresh window...".to_string()
                 }),
+        });
+    }
+    if let Some(warm_start_summary) = app.warm_start_summary() {
+        lines.push(RenderLine {
+            color: Some(if app.stale_symbols.is_empty() {
+                Color::DarkGreen
+            } else {
+                Color::DarkYellow
+            }),
+            text: warm_start_summary,
         });
     }
     lines.push(RenderLine {
@@ -3168,6 +4164,295 @@ fn build_ticker_detail_lines(
     )
 }
 
+#[derive(Clone, Debug)]
+struct HistoryMetricRow {
+    label: String,
+    latest: String,
+    previous: String,
+    delta: String,
+    sparkline: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryUnit {
+    Usd,
+    Percent,
+    Count,
+    Ratio,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChartMetricKind {
+    Close,
+    Ema20,
+    Ema50,
+    Ema200,
+    Macd,
+    Signal,
+    Histogram,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryMetricDef {
+    key: &'static str,
+    label: String,
+    range_key: Option<&'static str>,
+    unit: HistoryUnit,
+    extractor: HistoryValueExtractor,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HistoryValueExtractor {
+    MarketPrice,
+    IntrinsicValue,
+    GapPct,
+    ExternalGapPct,
+    WeightedGapPct,
+    AnalystCount,
+    ConfidenceRank,
+    QualificationRank,
+    ExternalStatusRank,
+    WatchedCount,
+    ProfitableCount,
+    MarketCapUsd,
+    SharesOutstanding,
+    TrailingPe,
+    ForwardPe,
+    PriceToBook,
+    ReturnOnEquityPct,
+    EbitdaUsd,
+    EnterpriseValueUsd,
+    EnterpriseToEbitda,
+    TotalDebtUsd,
+    TotalCashUsd,
+    DebtToEquity,
+    FreeCashFlowUsd,
+    OperatingCashFlowUsd,
+    Beta,
+    TrailingEpsUsd,
+    EarningsGrowthPct,
+    RelativeCompositePercentile,
+    RelativePeerCount,
+    RelativeMetricPercentile(&'static str),
+    DcfBearIntrinsicUsd,
+    DcfBaseIntrinsicUsd,
+    DcfBullIntrinsicUsd,
+    DcfWaccPct,
+    DcfBaseGrowthPct,
+    DcfNetDebtUsd,
+    DcfMarginSafetyPct,
+    DcfSignalRank,
+    ChartMetric(ChartRange, ChartMetricKind),
+}
+
+#[derive(Clone, Debug)]
+struct HistorySeriesPoint {
+    evaluated_at: u64,
+    revision_id: i64,
+    value: f64,
+    available: bool,
+    stale: bool,
+}
+
+#[derive(Clone, Debug)]
+struct HistorySeries {
+    group: HistoryMetricGroup,
+    metric_key: &'static str,
+    label: String,
+    range_key: Option<&'static str>,
+    unit: HistoryUnit,
+    points: Vec<HistorySeriesPoint>,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryGraphTile {
+    label: String,
+    latest: String,
+    previous: String,
+    delta: String,
+    points: Vec<f64>,
+    min_label: String,
+    max_label: String,
+    footer_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CsvExportMetadata {
+    symbol: String,
+    exported_at: u64,
+    revision_count: usize,
+    export_dir: PathBuf,
+}
+
+fn build_ticker_history_lines_for_viewport(
+    app: &AppState,
+    symbol: &str,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> Vec<RenderLine> {
+    let history = app.detail_history(symbol);
+    let mut lines = Vec::new();
+    lines.push(RenderLine {
+        color: Some(Color::Yellow),
+        text: format!(
+            "{}  |  History tab  |  view={}  |  group={}  |  window={}  |  h snapshot  g toggle  e export  1-5 group  [/ ] window  j/k nav  n/p symbol",
+            symbol,
+            history_subview_label(app.history_view.subview),
+            history_group_label(app.history_view.group),
+            history_window_label(app.history_view.window),
+        ),
+    });
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "Canonical revisions loaded: {}  |  viewport {}x{}",
+            history.len(),
+            viewport_width,
+            viewport_height,
+        ),
+    });
+
+    lines.extend(match app.history_view.subview {
+        HistorySubview::Graphs => build_ticker_history_graph_lines(
+            history,
+            app.history_view.group,
+            app.history_view.window,
+            app.history_view.scroll,
+            viewport_width,
+            viewport_height.saturating_sub(lines.len()),
+        ),
+        HistorySubview::Table => build_ticker_history_table_lines(
+            history,
+            app.history_view.group,
+            app.history_view.window,
+            app.history_view.scroll,
+            viewport_height.saturating_sub(lines.len()),
+        ),
+    });
+    lines
+}
+
+fn build_ticker_history_graph_lines(
+    history: &[persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+    window: HistoryWindow,
+    scroll: usize,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> Vec<RenderLine> {
+    let filtered = filter_history_window(history, window);
+    let tiles = history_graph_tiles(&filtered, group);
+    if tiles.is_empty() {
+        return vec![RenderLine {
+            color: Some(Color::DarkGrey),
+            text: "No graph tiles are available for the selected group and window yet.".to_string(),
+        }];
+    }
+
+    let columns = if viewport_width >= 120 && viewport_height >= 18 {
+        2
+    } else {
+        1
+    };
+    let tile_height = 9usize;
+    let gap = 3usize;
+    let page_rows = (viewport_height.max(tile_height) / tile_height).max(1);
+    let total_tile_rows = tiles.len().div_ceil(columns);
+    let start_row = scroll.min(total_tile_rows.saturating_sub(page_rows));
+    let visible_start = start_row * columns;
+    let visible_end = ((start_row + page_rows) * columns).min(tiles.len());
+    let tile_width = if columns == 1 {
+        viewport_width.max(40)
+    } else {
+        viewport_width
+            .saturating_sub(gap * (columns - 1))
+            .checked_div(columns)
+            .unwrap_or(viewport_width.max(40))
+            .max(40)
+    };
+
+    let mut lines = vec![RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "Graphs {}-{}/{}  |  layout={}col  |  j/k page tile rows",
+            visible_start.saturating_add(1).min(tiles.len()),
+            visible_end,
+            tiles.len(),
+            columns
+        ),
+    }];
+
+    let mut rendered_tiles = tiles[visible_start..visible_end]
+        .iter()
+        .map(|tile| render_history_graph_tile(tile, tile_width))
+        .collect::<Vec<_>>();
+    while rendered_tiles.len() % columns != 0 {
+        rendered_tiles.push(blank_tile_lines(tile_width, tile_height));
+    }
+
+    for chunk in rendered_tiles.chunks(columns) {
+        for line_index in 0..tile_height {
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: chunk
+                    .iter()
+                    .map(|tile| tile.get(line_index).cloned().unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("   "),
+            });
+        }
+    }
+
+    lines
+}
+
+fn build_ticker_history_table_lines(
+    history: &[persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+    window: HistoryWindow,
+    scroll: usize,
+    viewport_height: usize,
+) -> Vec<RenderLine> {
+    let rows = history_rows(history, group, window);
+    let visible_capacity = viewport_height.saturating_sub(2).max(1);
+    let start = scroll.min(rows.len().saturating_sub(visible_capacity));
+    let end = (start + visible_capacity).min(rows.len());
+
+    let mut lines = Vec::new();
+    if rows.is_empty() {
+        lines.push(RenderLine {
+            color: Some(Color::DarkGrey),
+            text: "No history rows are available for the selected group and window yet.".to_string(),
+        });
+        return lines;
+    }
+
+    lines.push(RenderLine {
+        color: Some(Color::DarkGrey),
+        text: format!(
+            "Table rows {}-{}/{}  |  Metric                          Latest            Prev              Delta             Trend",
+            start.saturating_add(1).min(rows.len()),
+            end,
+            rows.len(),
+        ),
+    });
+    for row in &rows[start..end] {
+        lines.push(RenderLine {
+            color: Some(Color::DarkGrey),
+            text: format!(
+                "{:<30} {:<17} {:<17} {:<17} {}",
+                clip_plain_text(&row.label, 30),
+                clip_plain_text(&row.latest, 17),
+                clip_plain_text(&row.previous, 17),
+                clip_plain_text(&row.delta, 17),
+                row.sparkline
+            ),
+        });
+    }
+
+    lines
+}
+
 fn build_ticker_detail_lines_for_viewport(
     state: &TerminalState,
     app: &AppState,
@@ -3288,6 +4573,12 @@ fn build_ticker_detail_lines_for_viewport(
             },
         ),
     });
+    if app.is_symbol_stale(symbol) {
+        lines.push(RenderLine {
+            color: Some(Color::DarkYellow),
+            text: "Data source: warm-start cache from SQLite. Live Yahoo refresh has not replaced this symbol yet.".to_string(),
+        });
+    }
     lines.push(RenderLine {
         color: None,
         text: String::new(),
@@ -3645,9 +4936,20 @@ fn detail_chart_snapshot<'a>(app: &'a AppState, symbol: &str) -> DetailChartSnap
         },
         Some(ChartCacheEntry::Ready { candles }) => DetailChartSnapshot {
             candles,
-            status: format!("ready ({})", candles.len()),
-            note: None,
-            color: Color::DarkGrey,
+            status: if app.is_chart_stale(symbol, app.detail_chart_range()) {
+                format!("cached ({})", candles.len())
+            } else {
+                format!("ready ({})", candles.len())
+            },
+            note: app.is_chart_stale(symbol, app.detail_chart_range()).then_some(
+                "Showing persisted candles from SQLite while Yahoo refreshes this range."
+                    .to_string(),
+            ),
+            color: if app.is_chart_stale(symbol, app.detail_chart_range()) {
+                Color::DarkYellow
+            } else {
+                Color::DarkGrey
+            },
         },
         Some(ChartCacheEntry::Failed {
             message,
@@ -4028,6 +5330,39 @@ fn compute_macd_series(
         .collect::<Vec<_>>();
 
     (macd_series, signal_series, histogram_series)
+}
+
+fn summarize_chart_range(
+    range: ChartRange,
+    captured_at: u64,
+    candles: &[HistoricalCandle],
+) -> ChartRangeSummary {
+    let closes = candles
+        .iter()
+        .map(|candle| candle.close_cents)
+        .collect::<Vec<_>>();
+    let ema20 = compute_ema_series(&closes, 20);
+    let ema50 = compute_ema_series(&closes, 50);
+    let ema200 = compute_ema_series(&closes, 200);
+    let (macd, signal, histogram) = compute_macd_series(&closes);
+    ChartRangeSummary {
+        range,
+        captured_at,
+        candle_count: candles.len(),
+        latest_close_cents: closes.last().copied(),
+        ema20_cents: ema20.last().and_then(|value| value.map(|value| value.round() as i64)),
+        ema50_cents: ema50.last().and_then(|value| value.map(|value| value.round() as i64)),
+        ema200_cents: ema200
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
+        macd_cents: macd.last().and_then(|value| value.map(|value| value.round() as i64)),
+        signal_cents: signal
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
+        histogram_cents: histogram
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
+    }
 }
 
 fn chart_bucket_size(point_count: usize, max_candles: usize) -> usize {
@@ -5174,50 +6509,143 @@ fn paint_row(stdout: &mut Stdout, row_index: usize, line: Option<&RenderLine>) -
 fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
     let mut startup_issues = Vec::new();
 
-    let mut state = if let Some(replay_file) = options.replay_file.as_ref() {
-        TerminalState::replay_file(2_000, 30, 32, replay_file)
-            .map_err(|error| with_path_context(error, "load replay file", replay_file))?
-    } else if let Some(journal_file) = options.journal_file.as_ref() {
-        if journal_file.exists() {
-            match TerminalState::replay_file(2_000, 30, 32, journal_file)
-                .map_err(|error| with_path_context(error, "load journal file", journal_file))
-            {
-                Ok(state) => state,
-                Err(error) => {
-                    startup_issues.push(StartupIssue {
-                        key: ISSUE_KEY_JOURNAL_RESTORE,
-                        severity: IssueSeverity::Warning,
-                        title: "Journal restore failed",
-                        detail: format!("{error}. Starting with an empty session instead."),
-                    });
-                    TerminalState::new(2_000, 30, 32)
+    #[cfg(test)]
+    if options.replay_file.is_some()
+        || options.journal_file.is_some()
+        || options.watchlist_file.is_some()
+    {
+        let mut state = if let Some(replay_file) = options.replay_file.as_ref() {
+            TerminalState::replay_file(2_000, 30, 32, replay_file)
+                .map_err(|error| with_path_context(error, "load replay file", replay_file))?
+        } else if let Some(journal_file) = options.journal_file.as_ref() {
+            if journal_file.exists() {
+                match TerminalState::replay_file(2_000, 30, 32, journal_file)
+                    .map_err(|error| with_path_context(error, "load journal file", journal_file))
+                {
+                    Ok(state) => state,
+                    Err(error) => {
+                        startup_issues.push(StartupIssue {
+                            key: ISSUE_KEY_JOURNAL_RESTORE,
+                            severity: IssueSeverity::Warning,
+                            title: "Journal restore failed",
+                            detail: format!("{error}. Starting with an empty session instead."),
+                        });
+                        TerminalState::new(2_000, 30, 32)
+                    }
                 }
+            } else {
+                TerminalState::new(2_000, 30, 32)
             }
         } else {
             TerminalState::new(2_000, 30, 32)
-        }
-    } else {
-        TerminalState::new(2_000, 30, 32)
-    };
+        };
 
-    if let Some(watchlist_file) = options.watchlist_file.as_ref() {
-        if watchlist_file.exists() {
-            if let Err(error) = state
-                .load_watchlist_file(watchlist_file)
-                .map_err(|error| with_path_context(error, "load watchlist file", watchlist_file))
-            {
+        if let Some(watchlist_file) = options.watchlist_file.as_ref() {
+            if watchlist_file.exists() {
+                if let Err(error) = state.load_watchlist_file(watchlist_file).map_err(|error| {
+                    with_path_context(error, "load watchlist file", watchlist_file)
+                }) {
+                    startup_issues.push(StartupIssue {
+                        key: ISSUE_KEY_WATCHLIST_RESTORE,
+                        severity: IssueSeverity::Warning,
+                        title: "Watchlist restore failed",
+                        detail: format!(
+                            "{error}. Starting without the saved watchlist instead."
+                        ),
+                    });
+                }
+            }
+        }
+
+        return Ok(LoadedState {
+            state,
+            app: AppState::default(),
+            tracked_symbols: if options.symbols.is_empty() {
+                default_live_symbols()
+            } else {
+                options.symbols.clone()
+            },
+            persistence_db_path: None,
+            startup_issues,
+        });
+    }
+
+    let mut state = TerminalState::new(2_000, 30, 32);
+    let mut app = AppState::default();
+    let mut tracked_symbols = if options.symbols_explicit {
+        options.symbols.clone()
+    } else {
+        default_live_symbols()
+    };
+    let mut persistence_db_path = None;
+
+    if options.persist_enabled {
+        let state_db = options
+            .state_db
+            .clone()
+            .unwrap_or_else(persistence::default_state_db_path);
+
+        match persistence::load_warm_start(&state_db) {
+            Ok(PersistenceBootstrap {
+                tracked_symbols: _persisted_tracked_symbols,
+                watchlist,
+                symbol_states,
+                chart_cache,
+                issues,
+                last_persisted_at,
+            }) => {
+                let tracked_symbol_set = tracked_symbols.iter().cloned().collect::<HashSet<_>>();
+                let hydrated_symbol_states = symbol_states
+                    .into_iter()
+                    .filter(|symbol_state| tracked_symbol_set.contains(&symbol_state.symbol))
+                    .collect::<Vec<_>>();
+                let stale_symbols = hydrated_symbol_states
+                    .iter()
+                    .map(|symbol_state| symbol_state.symbol.clone())
+                    .collect::<Vec<_>>();
+                let hydrated_chart_cache = chart_cache
+                    .into_iter()
+                    .filter(|chart| tracked_symbol_set.contains(&chart.symbol))
+                    .collect::<Vec<_>>();
+
+                state.hydrate_from_persisted(&hydrated_symbol_states, &watchlist);
+                app.issue_center.hydrate_from_persisted(&issues);
+                app.load_warm_start(&hydrated_chart_cache, last_persisted_at, &stale_symbols);
+                persistence_db_path = Some(state_db);
+            }
+            Err(error) => {
                 startup_issues.push(StartupIssue {
-                    key: ISSUE_KEY_WATCHLIST_RESTORE,
+                    key: ISSUE_KEY_SQLITE_RESTORE,
                     severity: IssueSeverity::Warning,
-                    title: "Watchlist restore failed",
-                    detail: format!("{error}. Starting without the saved watchlist instead."),
+                    title: "SQLite warm-start restore failed",
+                    detail: format!(
+                        "{}. Starting with an empty live session instead.",
+                        with_path_context(error, "load sqlite state database", &state_db)
+                    ),
                 });
+                if persistence::reset_warm_start_state(&state_db).is_ok() {
+                    persistence_db_path = Some(state_db);
+                }
             }
         }
     }
 
+    if tracked_symbols.is_empty() {
+        tracked_symbols = default_live_symbols();
+    }
+
+    let history_export_root = persistence_db_path
+        .as_ref()
+        .and_then(|path| path.parent().map(|parent| parent.join("exports")))
+        .or_else(|| std::env::current_dir().ok().map(|dir| dir.join("exports")))
+        .unwrap_or_else(|| PathBuf::from("exports"));
+    app.set_history_export_root(history_export_root);
+
     Ok(LoadedState {
         state,
+        app,
+        tracked_symbols,
+        persistence_db_path,
         startup_issues,
     })
 }
@@ -5239,33 +6667,16 @@ where
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--smoke" => options.smoke = true,
-            "--replay-file" => {
+            "--state-db" => {
                 let Some(path) = args.next() else {
                     return Err(io::Error::new(
                         ErrorKind::InvalidInput,
-                        "--replay-file requires a path",
+                        "--state-db requires a path",
                     ));
                 };
-                options.replay_file = Some(PathBuf::from(path));
+                options.state_db = Some(PathBuf::from(path));
             }
-            "--journal-file" => {
-                let Some(path) = args.next() else {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "--journal-file requires a path",
-                    ));
-                };
-                options.journal_file = Some(PathBuf::from(path));
-            }
-            "--watchlist-file" => {
-                let Some(path) = args.next() else {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "--watchlist-file requires a path",
-                    ));
-                };
-                options.watchlist_file = Some(PathBuf::from(path));
-            }
+            "--no-persist" => options.persist_enabled = false,
             "--symbols" => {
                 let Some(symbols) = args.next() else {
                     return Err(io::Error::new(
@@ -5274,6 +6685,7 @@ where
                     ));
                 };
                 explicit_symbols = parse_symbols_argument(&symbols)?;
+                options.symbols_explicit = true;
             }
             "--profile" => {
                 let Some(profile_name) = args.next() else {
@@ -5292,6 +6704,15 @@ where
                     ));
                 }
                 selected_profile = Some(profile_name);
+                options.symbols_explicit = true;
+            }
+            "--replay-file" | "--journal-file" | "--watchlist-file" => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "{argument} is no longer supported. Use --state-db PATH or --no-persist."
+                    ),
+                ));
             }
             "--help" | "-h" => {
                 print_usage();
@@ -5312,9 +6733,13 @@ where
             append_unique_symbols(&mut symbols, explicit_symbols);
             symbols
         }
-        None if explicit_symbols.is_empty() => default_live_symbols(),
+        None if explicit_symbols.is_empty() => Vec::new(),
         None => explicit_symbols,
     };
+
+    if options.persist_enabled && options.state_db.is_none() {
+        options.state_db = Some(persistence::default_state_db_path());
+    }
 
     Ok(options)
 }
@@ -5355,15 +6780,14 @@ fn usage_text() -> String {
 
     format!(
         concat!(
-            "discount_screener [--smoke] [--profile NAME] [--symbols CSV] [--replay-file PATH] [--journal-file PATH] [--watchlist-file PATH]\n",
+            "discount_screener [--smoke] [--profile NAME] [--symbols CSV] [--state-db PATH] [--no-persist]\n",
             "\n",
             "Options:\n",
             "  --smoke                 Run the static smoke path without live Yahoo requests\n",
-            "  --profile NAME          Load a predefined starting universe\n",
-            "  --symbols CSV           Use a custom symbol list; when combined with --profile these symbols are appended\n",
-            "  --replay-file PATH      Replay a prior journal-backed session\n",
-            "  --journal-file PATH     Persist live session events to a journal file\n",
-            "  --watchlist-file PATH   Persist the watchlist to a text file\n",
+            "  --profile NAME          Load a predefined starting universe for this session\n",
+            "  --symbols CSV           Use a custom symbol list for this session; when combined with --profile these symbols are appended\n",
+            "  --state-db PATH         Override the SQLite warm-start database path\n",
+            "  --no-persist            Disable SQLite persistence and start with a live-only session\n",
             "  -h, --help              Show this help text\n",
             "\n",
             "Profiles:\n",
@@ -5926,7 +7350,7 @@ where
 
         if !publisher.publish(AppEvent::FeedBatch(vec![FeedEvent::SourceStatus(
             LiveSourceStatus {
-                tracked_symbols: refresh_plan.symbols.len(),
+                tracked_symbols: refresh_plan.total_tracked_symbols,
                 loaded_symbols,
                 unsupported_symbols,
                 error_symbols,
@@ -6206,6 +7630,24 @@ fn format_symbol_list(symbols: &[String]) -> String {
     label
 }
 
+fn format_age_seconds(age_seconds: u64) -> String {
+    if age_seconds < 60 {
+        return format!("{age_seconds}s");
+    }
+
+    let age_minutes = age_seconds / 60;
+    if age_minutes < 60 {
+        return format!("{age_minutes}m");
+    }
+
+    let age_hours = age_minutes / 60;
+    if age_hours < 24 {
+        return format!("{age_hours}h");
+    }
+
+    format!("{}d", age_hours / 24)
+}
+
 fn format_symbol_with_company(symbol: &str, company_name: Option<&str>) -> String {
     match company_name {
         Some(company_name) if !company_name.trim().is_empty() => {
@@ -6275,6 +7717,17 @@ fn chart_ranges() -> [ChartRange; 6] {
     ]
 }
 
+fn history_windows() -> [HistoryWindow; 6] {
+    [
+        HistoryWindow::Day,
+        HistoryWindow::Week,
+        HistoryWindow::Month,
+        HistoryWindow::Quarter,
+        HistoryWindow::Year,
+        HistoryWindow::All,
+    ]
+}
+
 fn chart_range_label(range: ChartRange) -> &'static str {
     match range {
         ChartRange::Day => "D",
@@ -6283,6 +7736,1144 @@ fn chart_range_label(range: ChartRange) -> &'static str {
         ChartRange::Year => "1Y",
         ChartRange::FiveYears => "5Y",
         ChartRange::TenYears => "10Y",
+    }
+}
+
+fn history_window_label(window: HistoryWindow) -> &'static str {
+    match window {
+        HistoryWindow::Day => "1D",
+        HistoryWindow::Week => "1W",
+        HistoryWindow::Month => "1M",
+        HistoryWindow::Quarter => "3M",
+        HistoryWindow::Year => "1Y",
+        HistoryWindow::All => "All",
+    }
+}
+
+fn history_group_label(group: HistoryMetricGroup) -> &'static str {
+    match group {
+        HistoryMetricGroup::Core => "Core",
+        HistoryMetricGroup::Fundamentals => "Fundamentals",
+        HistoryMetricGroup::Relative => "Relative",
+        HistoryMetricGroup::Dcf => "DCF",
+        HistoryMetricGroup::Chart => "Chart",
+    }
+}
+
+fn history_subview_label(subview: HistorySubview) -> &'static str {
+    match subview {
+        HistorySubview::Graphs => "Graphs",
+        HistorySubview::Table => "Table",
+    }
+}
+
+fn history_rows(
+    history: &[persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+    window: HistoryWindow,
+) -> Vec<HistoryMetricRow> {
+    history_series(history, group, window)
+        .iter()
+        .filter_map(history_metric_row_from_series)
+        .collect()
+}
+
+fn history_graph_tiles(
+    history: &[&persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+) -> Vec<HistoryGraphTile> {
+    match group {
+        HistoryMetricGroup::Chart => chart_history_graph_tiles(history),
+        _ => history_series_from_filtered(history, group)
+            .into_iter()
+            .filter_map(|series| history_graph_tile_from_series(&series))
+            .collect(),
+    }
+}
+
+fn chart_history_graph_tiles(
+    history: &[&persistence::PersistedRevisionRecord],
+) -> Vec<HistoryGraphTile> {
+    chart_ranges()
+        .iter()
+        .map(|range| {
+            let close_series = build_history_series(
+                history,
+                HistoryMetricGroup::Chart,
+                HistoryMetricDef {
+                    key: chart_metric_key(*range, ChartMetricKind::Close),
+                    label: chart_range_label(*range).to_string(),
+                    range_key: Some(chart_range_export_prefix(*range)),
+                    unit: HistoryUnit::Usd,
+                    extractor: HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Close),
+                },
+            );
+            let latest_summary = history.iter().rev().find_map(|record| {
+                record
+                    .payload
+                    .chart_summaries
+                    .iter()
+                    .find(|summary| summary.range == *range)
+            });
+
+            if let Some(series) = close_series.as_ref() {
+                let mut tile = history_graph_tile_from_series(series)
+                    .unwrap_or_else(|| empty_history_graph_tile(format!("{} range", chart_range_label(*range))));
+                tile.label = format!("{} range", chart_range_label(*range));
+                if let Some(summary) = latest_summary {
+                    tile.footer_lines = vec![
+                        clip_plain_text(
+                            &format!(
+                                "E20 {}  E50 {}  E200 {}",
+                                format_optional_history_money(summary.ema20_cents.map(cents_to_dollars)),
+                                format_optional_history_money(summary.ema50_cents.map(cents_to_dollars)),
+                                format_optional_history_money(summary.ema200_cents.map(cents_to_dollars)),
+                            ),
+                            72,
+                        ),
+                        clip_plain_text(
+                            &format!(
+                                "MACD {}  SIG {}  HIST {}",
+                                format_optional_history_money(summary.macd_cents.map(cents_to_dollars)),
+                                format_optional_history_money(summary.signal_cents.map(cents_to_dollars)),
+                                format_optional_history_money(summary.histogram_cents.map(cents_to_dollars)),
+                            ),
+                            72,
+                        ),
+                    ];
+                }
+                tile
+            } else {
+                empty_history_graph_tile(format!("{} range", chart_range_label(*range)))
+            }
+        })
+        .collect()
+}
+
+fn history_series(
+    history: &[persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+    window: HistoryWindow,
+) -> Vec<HistorySeries> {
+    let filtered = filter_history_window(history, window);
+    history_series_from_filtered(&filtered, group)
+}
+
+fn history_series_from_filtered(
+    history: &[&persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+) -> Vec<HistorySeries> {
+    history_metric_defs(group)
+        .into_iter()
+        .filter_map(|def| build_history_series(history, group, def))
+        .collect()
+}
+
+fn build_history_series(
+    history: &[&persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+    def: HistoryMetricDef,
+) -> Option<HistorySeries> {
+    let points = history
+        .iter()
+        .filter_map(|record| {
+            def.extractor.extract(record).map(|value| HistorySeriesPoint {
+                evaluated_at: record.evaluated_at,
+                revision_id: record.revision_id,
+                value,
+                available: metric_group_status(&record.payload, group).available,
+                stale: metric_group_status(&record.payload, group).stale,
+            })
+        })
+        .collect::<Vec<_>>();
+    if points.is_empty() {
+        return None;
+    }
+
+    Some(HistorySeries {
+        group,
+        metric_key: def.key,
+        label: def.label,
+        range_key: def.range_key,
+        unit: def.unit,
+        points,
+    })
+}
+
+fn history_metric_defs(group: HistoryMetricGroup) -> Vec<HistoryMetricDef> {
+    match group {
+        HistoryMetricGroup::Core => vec![
+            history_metric_def("market_price_usd", "Market price", None, HistoryUnit::Usd, HistoryValueExtractor::MarketPrice),
+            history_metric_def("intrinsic_value_usd", "Intrinsic value", None, HistoryUnit::Usd, HistoryValueExtractor::IntrinsicValue),
+            history_metric_def("gap_pct", "Gap", None, HistoryUnit::Percent, HistoryValueExtractor::GapPct),
+            history_metric_def("external_gap_pct", "External gap", None, HistoryUnit::Percent, HistoryValueExtractor::ExternalGapPct),
+            history_metric_def("weighted_gap_pct", "Weighted gap", None, HistoryUnit::Percent, HistoryValueExtractor::WeightedGapPct),
+            history_metric_def("analyst_count", "Analyst count", None, HistoryUnit::Count, HistoryValueExtractor::AnalystCount),
+            history_metric_def("confidence_rank_count", "Confidence rank", None, HistoryUnit::Count, HistoryValueExtractor::ConfidenceRank),
+            history_metric_def("qualification_rank_count", "Qualification rank", None, HistoryUnit::Count, HistoryValueExtractor::QualificationRank),
+            history_metric_def("external_status_rank_count", "External status rank", None, HistoryUnit::Count, HistoryValueExtractor::ExternalStatusRank),
+            history_metric_def("watched_count", "Watched", None, HistoryUnit::Count, HistoryValueExtractor::WatchedCount),
+            history_metric_def("profitable_count", "Profitable", None, HistoryUnit::Count, HistoryValueExtractor::ProfitableCount),
+        ],
+        HistoryMetricGroup::Fundamentals => vec![
+            history_metric_def("market_cap_usd", "Market cap", None, HistoryUnit::Usd, HistoryValueExtractor::MarketCapUsd),
+            history_metric_def("shares_outstanding_count", "Shares", None, HistoryUnit::Count, HistoryValueExtractor::SharesOutstanding),
+            history_metric_def("trailing_pe_ratio", "Trailing P/E", None, HistoryUnit::Ratio, HistoryValueExtractor::TrailingPe),
+            history_metric_def("forward_pe_ratio", "Forward P/E", None, HistoryUnit::Ratio, HistoryValueExtractor::ForwardPe),
+            history_metric_def("price_to_book_ratio", "P/B", None, HistoryUnit::Ratio, HistoryValueExtractor::PriceToBook),
+            history_metric_def("return_on_equity_pct", "ROE", None, HistoryUnit::Percent, HistoryValueExtractor::ReturnOnEquityPct),
+            history_metric_def("ebitda_usd", "EBITDA", None, HistoryUnit::Usd, HistoryValueExtractor::EbitdaUsd),
+            history_metric_def("enterprise_value_usd", "Enterprise value", None, HistoryUnit::Usd, HistoryValueExtractor::EnterpriseValueUsd),
+            history_metric_def("enterprise_to_ebitda_ratio", "EV/EBITDA", None, HistoryUnit::Ratio, HistoryValueExtractor::EnterpriseToEbitda),
+            history_metric_def("total_debt_usd", "Total debt", None, HistoryUnit::Usd, HistoryValueExtractor::TotalDebtUsd),
+            history_metric_def("total_cash_usd", "Total cash", None, HistoryUnit::Usd, HistoryValueExtractor::TotalCashUsd),
+            history_metric_def("debt_to_equity_ratio", "Debt/Equity", None, HistoryUnit::Ratio, HistoryValueExtractor::DebtToEquity),
+            history_metric_def("free_cash_flow_usd", "Free cash flow", None, HistoryUnit::Usd, HistoryValueExtractor::FreeCashFlowUsd),
+            history_metric_def("operating_cash_flow_usd", "Operating cash flow", None, HistoryUnit::Usd, HistoryValueExtractor::OperatingCashFlowUsd),
+            history_metric_def("beta_ratio", "Beta", None, HistoryUnit::Ratio, HistoryValueExtractor::Beta),
+            history_metric_def("trailing_eps_usd", "EPS", None, HistoryUnit::Usd, HistoryValueExtractor::TrailingEpsUsd),
+            history_metric_def("earnings_growth_pct", "Earnings growth", None, HistoryUnit::Percent, HistoryValueExtractor::EarningsGrowthPct),
+        ],
+        HistoryMetricGroup::Relative => {
+            let mut defs = vec![
+                history_metric_def("composite_percentile_pct", "Composite percentile", None, HistoryUnit::Percent, HistoryValueExtractor::RelativeCompositePercentile),
+                history_metric_def("peer_count", "Peer count", None, HistoryUnit::Count, HistoryValueExtractor::RelativePeerCount),
+            ];
+            for (key, label) in [
+                ("relative_pe_percentile_pct", "P/E"),
+                ("relative_peg_percentile_pct", "PEG"),
+                ("relative_roe_percentile_pct", "ROE"),
+                ("relative_net_debt_ebitda_percentile_pct", "Net debt/EBITDA"),
+                ("relative_fcf_yield_percentile_pct", "FCF yield"),
+            ] {
+                defs.push(history_metric_def(
+                    key,
+                    label,
+                    None,
+                    HistoryUnit::Percent,
+                    HistoryValueExtractor::RelativeMetricPercentile(label),
+                ));
+            }
+            defs
+        }
+        HistoryMetricGroup::Dcf => vec![
+            history_metric_def("bear_intrinsic_usd", "Bear intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBearIntrinsicUsd),
+            history_metric_def("base_intrinsic_usd", "Base intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBaseIntrinsicUsd),
+            history_metric_def("bull_intrinsic_usd", "Bull intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBullIntrinsicUsd),
+            history_metric_def("wacc_pct", "WACC", None, HistoryUnit::Percent, HistoryValueExtractor::DcfWaccPct),
+            history_metric_def("base_growth_pct", "Base growth", None, HistoryUnit::Percent, HistoryValueExtractor::DcfBaseGrowthPct),
+            history_metric_def("net_debt_usd", "Net debt", None, HistoryUnit::Usd, HistoryValueExtractor::DcfNetDebtUsd),
+            history_metric_def("margin_of_safety_pct", "Margin of safety", None, HistoryUnit::Percent, HistoryValueExtractor::DcfMarginSafetyPct),
+            history_metric_def("signal_rank_count", "Signal rank", None, HistoryUnit::Count, HistoryValueExtractor::DcfSignalRank),
+        ],
+        HistoryMetricGroup::Chart => chart_ranges()
+            .iter()
+            .flat_map(|range| {
+                let prefix = chart_range_label(*range);
+                let range_key = chart_range_export_prefix(*range);
+                [
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Close), format!("{prefix} Close"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Close)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema20), format!("{prefix} EMA20"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema20)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema50), format!("{prefix} EMA50"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema50)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema200), format!("{prefix} EMA200"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema200)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Macd), format!("{prefix} MACD"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Macd)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Signal), format!("{prefix} Signal"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Signal)),
+                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Histogram), format!("{prefix} Histogram"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Histogram)),
+                ]
+            })
+            .collect(),
+    }
+}
+
+fn history_metric_def(
+    key: &'static str,
+    label: impl Into<String>,
+    range_key: Option<&'static str>,
+    unit: HistoryUnit,
+    extractor: HistoryValueExtractor,
+) -> HistoryMetricDef {
+    HistoryMetricDef {
+        key,
+        label: label.into(),
+        range_key,
+        unit,
+        extractor,
+    }
+}
+
+fn metric_group_status(
+    payload: &persistence::EvaluatedSymbolState,
+    group: HistoryMetricGroup,
+) -> &persistence::MetricGroupStatus {
+    match group {
+        HistoryMetricGroup::Core => &payload.core_status,
+        HistoryMetricGroup::Fundamentals => &payload.fundamentals_status,
+        HistoryMetricGroup::Relative => &payload.relative_status,
+        HistoryMetricGroup::Dcf => &payload.dcf_status,
+        HistoryMetricGroup::Chart => &payload.chart_status,
+    }
+}
+
+impl HistoryValueExtractor {
+    fn extract(&self, record: &persistence::PersistedRevisionRecord) -> Option<f64> {
+        match self {
+            HistoryValueExtractor::MarketPrice => record
+                .payload
+                .snapshot
+                .as_ref()
+                .map(|value| cents_to_dollars(value.market_price_cents)),
+            HistoryValueExtractor::IntrinsicValue => record
+                .payload
+                .snapshot
+                .as_ref()
+                .map(|value| cents_to_dollars(value.intrinsic_value_cents)),
+            HistoryValueExtractor::GapPct => record.payload.gap_bps.map(bps_to_percent),
+            HistoryValueExtractor::ExternalGapPct => {
+                record.payload.external_gap_bps.map(bps_to_percent)
+            }
+            HistoryValueExtractor::WeightedGapPct => {
+                record.payload.weighted_gap_bps.map(bps_to_percent)
+            }
+            HistoryValueExtractor::AnalystCount => record
+                .payload
+                .external_signal
+                .as_ref()
+                .and_then(|value| value.analyst_opinion_count)
+                .map(|value| value as f64),
+            HistoryValueExtractor::ConfidenceRank => {
+                record.payload.confidence.map(confidence_rank_value)
+            }
+            HistoryValueExtractor::QualificationRank => {
+                record.payload.qualification.map(qualification_rank_value)
+            }
+            HistoryValueExtractor::ExternalStatusRank => {
+                record.payload.external_status.map(external_status_rank_value)
+            }
+            HistoryValueExtractor::WatchedCount => {
+                Some(if record.payload.is_watched { 1.0 } else { 0.0 })
+            }
+            HistoryValueExtractor::ProfitableCount => record
+                .payload
+                .snapshot
+                .as_ref()
+                .map(|value| if value.profitable { 1.0 } else { 0.0 }),
+            HistoryValueExtractor::MarketCapUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.market_cap_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::SharesOutstanding => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.shares_outstanding)
+                .map(|value| value as f64),
+            HistoryValueExtractor::TrailingPe => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.trailing_pe_hundredths)
+                .map(hundredths_to_ratio),
+            HistoryValueExtractor::ForwardPe => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.forward_pe_hundredths)
+                .map(hundredths_to_ratio),
+            HistoryValueExtractor::PriceToBook => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.price_to_book_hundredths)
+                .map(hundredths_to_ratio),
+            HistoryValueExtractor::ReturnOnEquityPct => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.return_on_equity_bps)
+                .map(bps_to_percent),
+            HistoryValueExtractor::EbitdaUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.ebitda_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::EnterpriseValueUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.enterprise_value_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::EnterpriseToEbitda => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.enterprise_to_ebitda_hundredths)
+                .map(hundredths_to_ratio),
+            HistoryValueExtractor::TotalDebtUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.total_debt_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::TotalCashUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.total_cash_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::DebtToEquity => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.debt_to_equity_hundredths)
+                .map(hundredths_to_ratio),
+            HistoryValueExtractor::FreeCashFlowUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.free_cash_flow_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::OperatingCashFlowUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.operating_cash_flow_dollars)
+                .map(|value| value as f64),
+            HistoryValueExtractor::Beta => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.beta_millis)
+                .map(|value| value as f64 / 1_000.0),
+            HistoryValueExtractor::TrailingEpsUsd => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.trailing_eps_cents)
+                .map(cents_to_dollars),
+            HistoryValueExtractor::EarningsGrowthPct => record
+                .payload
+                .fundamentals
+                .as_ref()
+                .and_then(|value| value.earnings_growth_bps)
+                .map(bps_to_percent),
+            HistoryValueExtractor::RelativeCompositePercentile => record
+                .payload
+                .relative_score
+                .as_ref()
+                .map(|value| value.composite_percentile as f64),
+            HistoryValueExtractor::RelativePeerCount => record
+                .payload
+                .relative_score
+                .as_ref()
+                .map(|value| value.peer_count as f64),
+            HistoryValueExtractor::RelativeMetricPercentile(label) => record
+                .payload
+                .relative_score
+                .as_ref()
+                .and_then(|value| value.metrics.iter().find(|metric| metric.label == *label))
+                .map(|metric| metric.percentile as f64),
+            HistoryValueExtractor::DcfBearIntrinsicUsd => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| cents_to_dollars(value.bear_intrinsic_value_cents)),
+            HistoryValueExtractor::DcfBaseIntrinsicUsd => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| cents_to_dollars(value.base_intrinsic_value_cents)),
+            HistoryValueExtractor::DcfBullIntrinsicUsd => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| cents_to_dollars(value.bull_intrinsic_value_cents)),
+            HistoryValueExtractor::DcfWaccPct => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| bps_to_percent(value.wacc_bps)),
+            HistoryValueExtractor::DcfBaseGrowthPct => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| bps_to_percent(value.base_growth_bps)),
+            HistoryValueExtractor::DcfNetDebtUsd => record
+                .payload
+                .dcf_analysis
+                .as_ref()
+                .map(|value| value.net_debt_dollars as f64),
+            HistoryValueExtractor::DcfMarginSafetyPct => {
+                record.payload.dcf_margin_of_safety_bps.map(bps_to_percent)
+            }
+            HistoryValueExtractor::DcfSignalRank => {
+                record.payload.dcf_signal.map(dcf_signal_rank_value)
+            }
+            HistoryValueExtractor::ChartMetric(range, kind) => record
+                .payload
+                .chart_summaries
+                .iter()
+                .find(|summary| summary.range == *range)
+                .and_then(|summary| chart_metric_value(summary, *kind)),
+        }
+    }
+}
+
+fn history_metric_row_from_series(series: &HistorySeries) -> Option<HistoryMetricRow> {
+    let latest = series.points.last()?;
+    let previous = series.points.iter().rev().nth(1);
+    Some(HistoryMetricRow {
+        label: series.label.clone(),
+        latest: format_history_value(latest.value, series.unit),
+        previous: previous
+            .map(|point| format_history_value(point.value, series.unit))
+            .unwrap_or_else(|| "n/a".to_string()),
+        delta: previous
+            .map(|point| format_history_delta(latest.value - point.value, series.unit))
+            .unwrap_or_else(|| "n/a".to_string()),
+        sparkline: sparkline(
+            &series
+                .points
+                .iter()
+                .map(|point| point.value)
+                .collect::<Vec<_>>(),
+        ),
+    })
+}
+
+fn history_graph_tile_from_series(series: &HistorySeries) -> Option<HistoryGraphTile> {
+    let latest = series.points.last()?;
+    let previous = series.points.iter().rev().nth(1);
+    let values = series.points.iter().map(|point| point.value).collect::<Vec<_>>();
+    let min = values.iter().fold(f64::INFINITY, |left, right| left.min(*right));
+    let max = values
+        .iter()
+        .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
+
+    Some(HistoryGraphTile {
+        label: series.label.clone(),
+        latest: format_history_value(latest.value, series.unit),
+        previous: previous
+            .map(|point| format_history_value(point.value, series.unit))
+            .unwrap_or_else(|| "n/a".to_string()),
+        delta: previous
+            .map(|point| format_history_delta(latest.value - point.value, series.unit))
+            .unwrap_or_else(|| "n/a".to_string()),
+        points: values,
+        min_label: if min.is_finite() {
+            format_history_value(min, series.unit)
+        } else {
+            "n/a".to_string()
+        },
+        max_label: if max.is_finite() {
+            format_history_value(max, series.unit)
+        } else {
+            "n/a".to_string()
+        },
+        footer_lines: vec![
+            clip_plain_text(
+                &format!(
+                    "Points {}  rev {}  {}{}{}",
+                    series.points.len(),
+                    latest.revision_id,
+                    format_timestamp_utc(latest.evaluated_at),
+                    if latest.stale { "  stale" } else { "" },
+                    if latest.available { "" } else { "  unavailable" }
+                ),
+                72,
+            ),
+            clip_plain_text(
+                &format!(
+                    "Metric {}{}  group {}",
+                    series.metric_key,
+                    series
+                        .range_key
+                        .map(|value| format!("  range {value}"))
+                        .unwrap_or_default(),
+                    history_group_label(series.group)
+                ),
+                72,
+            ),
+        ],
+    })
+}
+
+fn empty_history_graph_tile(label: String) -> HistoryGraphTile {
+    HistoryGraphTile {
+        label,
+        latest: "n/a".to_string(),
+        previous: "n/a".to_string(),
+        delta: "n/a".to_string(),
+        points: Vec::new(),
+        min_label: "n/a".to_string(),
+        max_label: "n/a".to_string(),
+        footer_lines: vec!["No series points available yet.".to_string()],
+    }
+}
+
+fn render_history_graph_tile(tile: &HistoryGraphTile, width: usize) -> Vec<String> {
+    let inner_width = width.max(24);
+    let chart_rows = render_ascii_line_chart(&tile.points, inner_width.max(8), 4);
+    let mut lines = vec![
+        clip_plain_text(&tile.label, inner_width),
+        clip_plain_text(
+            &format!("L {}  P {}  D {}", tile.latest, tile.previous, tile.delta),
+            inner_width,
+        ),
+        clip_plain_text(&format!("max {}", tile.max_label), inner_width),
+    ];
+    lines.extend(chart_rows.into_iter().map(|row| clip_plain_text(&row, inner_width)));
+    lines.push(clip_plain_text(&format!("min {}", tile.min_label), inner_width));
+    lines.push(clip_plain_text(
+        tile.footer_lines.first().map(String::as_str).unwrap_or(""),
+        inner_width,
+    ));
+    lines.push(clip_plain_text(
+        tile.footer_lines.get(1).map(String::as_str).unwrap_or(""),
+        inner_width,
+    ));
+    while lines.len() < 9 {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn blank_tile_lines(width: usize, height: usize) -> Vec<String> {
+    vec![" ".repeat(width); height]
+}
+
+fn render_ascii_line_chart(values: &[f64], width: usize, height: usize) -> Vec<String> {
+    if values.is_empty() {
+        return vec!["(no data)".to_string(); height.max(1)];
+    }
+
+    let sampled = sample_series(values, width.max(1));
+    let min = sampled.iter().fold(f64::INFINITY, |left, right| left.min(*right));
+    let max = sampled
+        .iter()
+        .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
+    let scale = (max - min).max(1.0);
+    let mut grid = vec![vec![' '; sampled.len()]; height.max(1)];
+
+    for (x, value) in sampled.iter().enumerate() {
+        let normalized = ((*value - min) / scale).clamp(0.0, 1.0);
+        let row = ((1.0 - normalized) * (height.saturating_sub(1) as f64)).round() as usize;
+        let row = row.min(height.saturating_sub(1));
+        grid[row][x] = '*';
+
+        if x > 0 {
+            let prev_value = sampled[x - 1];
+            let prev_normalized = ((prev_value - min) / scale).clamp(0.0, 1.0);
+            let prev_row =
+                ((1.0 - prev_normalized) * (height.saturating_sub(1) as f64)).round() as usize;
+            let low = row.min(prev_row);
+            let high = row.max(prev_row);
+            for row_index in low..=high {
+                if grid[row_index][x] == ' ' {
+                    grid[row_index][x] = '|';
+                }
+            }
+        }
+    }
+
+    grid.into_iter()
+        .map(|row| row.into_iter().collect::<String>())
+        .collect()
+}
+
+fn sample_series(values: &[f64], width: usize) -> Vec<f64> {
+    if values.len() <= width {
+        return values.to_vec();
+    }
+
+    (0..width)
+        .map(|index| {
+            let start = index * values.len() / width;
+            let end = ((index + 1) * values.len() / width).max(start + 1);
+            let slice = &values[start..end.min(values.len())];
+            slice.iter().copied().sum::<f64>() / slice.len() as f64
+        })
+        .collect()
+}
+
+fn filter_history_window(
+    history: &[persistence::PersistedRevisionRecord],
+    window: HistoryWindow,
+) -> Vec<&persistence::PersistedRevisionRecord> {
+    let Some(cutoff) = history_window_cutoff(window) else {
+        return history.iter().collect();
+    };
+    history
+        .iter()
+        .filter(|record| record.evaluated_at >= cutoff)
+        .collect()
+}
+
+fn history_window_cutoff(window: HistoryWindow) -> Option<u64> {
+    let seconds = match window {
+        HistoryWindow::Day => 24 * 60 * 60,
+        HistoryWindow::Week => 7 * 24 * 60 * 60,
+        HistoryWindow::Month => 30 * 24 * 60 * 60,
+        HistoryWindow::Quarter => 90 * 24 * 60 * 60,
+        HistoryWindow::Year => 365 * 24 * 60 * 60,
+        HistoryWindow::All => return None,
+    };
+    Some(unix_timestamp_seconds().saturating_sub(seconds))
+}
+
+fn sparkline(values: &[f64]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    const BLOCKS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    let min = values.iter().fold(f64::INFINITY, |left, right| left.min(*right));
+    let max = values.iter().fold(f64::NEG_INFINITY, |left, right| left.max(*right));
+    if !min.is_finite() || !max.is_finite() {
+        return String::new();
+    }
+    let scale = (max - min).max(1.0);
+    values
+        .iter()
+        .map(|value| {
+            let normalized = ((*value - min) / scale).clamp(0.0, 0.9999);
+            let index = (normalized * BLOCKS.len() as f64).floor() as usize;
+            BLOCKS[index.min(BLOCKS.len().saturating_sub(1))]
+        })
+        .collect()
+}
+
+fn clip_plain_text(text: &str, width: usize) -> String {
+    if text.len() <= width {
+        return text.to_string();
+    }
+    let clip_width = width.saturating_sub(3);
+    text.chars().take(clip_width).collect::<String>() + "..."
+}
+
+fn format_history_value(value: f64, unit: HistoryUnit) -> String {
+    match unit {
+        HistoryUnit::Usd => format_history_money(value),
+        HistoryUnit::Percent => format_history_percent(value),
+        HistoryUnit::Count => format_history_count(value),
+        HistoryUnit::Ratio => format_history_decimal_2(value),
+    }
+}
+
+fn format_history_delta(value: f64, unit: HistoryUnit) -> String {
+    match unit {
+        HistoryUnit::Usd => format!("{:+.2}", value),
+        HistoryUnit::Percent => format!("{:+.2}%", value),
+        HistoryUnit::Count => format!("{:+.0}", value),
+        HistoryUnit::Ratio => format!("{:+.2}", value),
+    }
+}
+
+fn format_history_money(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_history_percent(value: f64) -> String {
+    format!("{value:.2}%")
+}
+
+fn format_history_count(value: f64) -> String {
+    format!("{}", value.round() as i64)
+}
+
+fn format_history_decimal_2(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+fn confidence_rank_value(confidence: ConfidenceBand) -> f64 {
+    match confidence {
+        ConfidenceBand::Low => 0.0,
+        ConfidenceBand::Provisional => 1.0,
+        ConfidenceBand::High => 2.0,
+    }
+}
+
+fn qualification_rank_value(status: QualificationStatus) -> f64 {
+    match status {
+        QualificationStatus::Qualified => 2.0,
+        QualificationStatus::GapTooSmall => 1.0,
+        QualificationStatus::Unprofitable => 0.0,
+    }
+}
+
+fn external_status_rank_value(status: ExternalSignalStatus) -> f64 {
+    match status {
+        ExternalSignalStatus::Supportive => 3.0,
+        ExternalSignalStatus::Stale => 2.0,
+        ExternalSignalStatus::Divergent => 1.0,
+        ExternalSignalStatus::Missing => 0.0,
+    }
+}
+
+fn dcf_signal_rank_value(signal: DcfSignal) -> f64 {
+    match signal {
+        DcfSignal::Opportunity => 2.0,
+        DcfSignal::Fair => 1.0,
+        DcfSignal::Expensive => 0.0,
+    }
+}
+
+fn cents_to_dollars(value: i64) -> f64 {
+    value as f64 / 100.0
+}
+
+fn bps_to_percent<T>(value: T) -> f64
+where
+    T: Into<f64>,
+{
+    value.into() / 100.0
+}
+
+fn hundredths_to_ratio<T>(value: T) -> f64
+where
+    T: Into<f64>,
+{
+    value.into() / 100.0
+}
+
+fn chart_metric_value(summary: &ChartRangeSummary, kind: ChartMetricKind) -> Option<f64> {
+    match kind {
+        ChartMetricKind::Close => summary.latest_close_cents.map(cents_to_dollars),
+        ChartMetricKind::Ema20 => summary.ema20_cents.map(cents_to_dollars),
+        ChartMetricKind::Ema50 => summary.ema50_cents.map(cents_to_dollars),
+        ChartMetricKind::Ema200 => summary.ema200_cents.map(cents_to_dollars),
+        ChartMetricKind::Macd => summary.macd_cents.map(cents_to_dollars),
+        ChartMetricKind::Signal => summary.signal_cents.map(cents_to_dollars),
+        ChartMetricKind::Histogram => summary.histogram_cents.map(cents_to_dollars),
+    }
+}
+
+fn chart_metric_key(range: ChartRange, kind: ChartMetricKind) -> &'static str {
+    match (range, kind) {
+        (ChartRange::Day, ChartMetricKind::Close) => "d_close_usd",
+        (ChartRange::Day, ChartMetricKind::Ema20) => "d_ema20_usd",
+        (ChartRange::Day, ChartMetricKind::Ema50) => "d_ema50_usd",
+        (ChartRange::Day, ChartMetricKind::Ema200) => "d_ema200_usd",
+        (ChartRange::Day, ChartMetricKind::Macd) => "d_macd_usd",
+        (ChartRange::Day, ChartMetricKind::Signal) => "d_signal_usd",
+        (ChartRange::Day, ChartMetricKind::Histogram) => "d_histogram_usd",
+        (ChartRange::Week, ChartMetricKind::Close) => "w_close_usd",
+        (ChartRange::Week, ChartMetricKind::Ema20) => "w_ema20_usd",
+        (ChartRange::Week, ChartMetricKind::Ema50) => "w_ema50_usd",
+        (ChartRange::Week, ChartMetricKind::Ema200) => "w_ema200_usd",
+        (ChartRange::Week, ChartMetricKind::Macd) => "w_macd_usd",
+        (ChartRange::Week, ChartMetricKind::Signal) => "w_signal_usd",
+        (ChartRange::Week, ChartMetricKind::Histogram) => "w_histogram_usd",
+        (ChartRange::Month, ChartMetricKind::Close) => "m_close_usd",
+        (ChartRange::Month, ChartMetricKind::Ema20) => "m_ema20_usd",
+        (ChartRange::Month, ChartMetricKind::Ema50) => "m_ema50_usd",
+        (ChartRange::Month, ChartMetricKind::Ema200) => "m_ema200_usd",
+        (ChartRange::Month, ChartMetricKind::Macd) => "m_macd_usd",
+        (ChartRange::Month, ChartMetricKind::Signal) => "m_signal_usd",
+        (ChartRange::Month, ChartMetricKind::Histogram) => "m_histogram_usd",
+        (ChartRange::Year, ChartMetricKind::Close) => "y1_close_usd",
+        (ChartRange::Year, ChartMetricKind::Ema20) => "y1_ema20_usd",
+        (ChartRange::Year, ChartMetricKind::Ema50) => "y1_ema50_usd",
+        (ChartRange::Year, ChartMetricKind::Ema200) => "y1_ema200_usd",
+        (ChartRange::Year, ChartMetricKind::Macd) => "y1_macd_usd",
+        (ChartRange::Year, ChartMetricKind::Signal) => "y1_signal_usd",
+        (ChartRange::Year, ChartMetricKind::Histogram) => "y1_histogram_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Close) => "y5_close_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Ema20) => "y5_ema20_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Ema50) => "y5_ema50_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Ema200) => "y5_ema200_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Macd) => "y5_macd_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Signal) => "y5_signal_usd",
+        (ChartRange::FiveYears, ChartMetricKind::Histogram) => "y5_histogram_usd",
+        (ChartRange::TenYears, ChartMetricKind::Close) => "y10_close_usd",
+        (ChartRange::TenYears, ChartMetricKind::Ema20) => "y10_ema20_usd",
+        (ChartRange::TenYears, ChartMetricKind::Ema50) => "y10_ema50_usd",
+        (ChartRange::TenYears, ChartMetricKind::Ema200) => "y10_ema200_usd",
+        (ChartRange::TenYears, ChartMetricKind::Macd) => "y10_macd_usd",
+        (ChartRange::TenYears, ChartMetricKind::Signal) => "y10_signal_usd",
+        (ChartRange::TenYears, ChartMetricKind::Histogram) => "y10_histogram_usd",
+    }
+}
+
+fn chart_range_export_prefix(range: ChartRange) -> &'static str {
+    match range {
+        ChartRange::Day => "d",
+        ChartRange::Week => "w",
+        ChartRange::Month => "m",
+        ChartRange::Year => "y1",
+        ChartRange::FiveYears => "y5",
+        ChartRange::TenYears => "y10",
+    }
+}
+
+fn format_optional_history_money(value: Option<f64>) -> String {
+    value
+        .map(format_history_money)
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_timestamp_utc(epoch_seconds: u64) -> String {
+    let (year, month, day, hour, minute, second) = timestamp_utc_parts(epoch_seconds);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn format_timestamp_compact_utc(epoch_seconds: u64) -> String {
+    let (year, month, day, hour, minute, second) = timestamp_utc_parts(epoch_seconds);
+    format!("{year:04}{month:02}{day:02}_{hour:02}{minute:02}{second:02}Z")
+}
+
+fn timestamp_utc_parts(epoch_seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (epoch_seconds / 86_400) as i64;
+    let seconds_of_day = (epoch_seconds % 86_400) as u32;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let (year, month, day) = civil_from_days(days);
+    (year, month, day, hour, minute, second)
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = (yoe + era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
+    year += if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
+fn export_selected_history_bundle(
+    app: &mut AppState,
+    persistence_handle: Option<&PersistenceHandle>,
+) -> io::Result<CsvExportMetadata> {
+    let Some(symbol) = app.detail_symbol().map(str::to_string) else {
+        return Err(io::Error::other("no symbol is selected for history export"));
+    };
+
+    if !app.history_cache.contains_key(&symbol) {
+        let Some(persistence_handle) = persistence_handle else {
+            return Err(io::Error::other(
+                "no canonical revision history is loaded for the selected symbol",
+            ));
+        };
+        let history = persistence_handle.load_symbol_history(symbol.clone())?;
+        app.history_cache.insert(symbol.clone(), history);
+    }
+
+    let history = app.detail_history(&symbol).to_vec();
+    if history.is_empty() {
+        return Err(io::Error::other(
+            "no canonical revision history is loaded for the selected symbol",
+        ));
+    }
+
+    let exported_at = unix_timestamp_seconds();
+    let export_root = app
+        .history_export_root
+        .clone()
+        .or_else(|| std::env::current_dir().ok().map(|dir| dir.join("exports")))
+        .unwrap_or_else(|| PathBuf::from("exports"));
+    let export_dir = export_root
+        .join(&symbol)
+        .join(format_timestamp_compact_utc(exported_at));
+    std::fs::create_dir_all(&export_dir)?;
+
+    let metadata = CsvExportMetadata {
+        symbol: symbol.clone(),
+        exported_at,
+        revision_count: history.len(),
+        export_dir: export_dir.clone(),
+    };
+
+    write_export_metadata_csv(&metadata)?;
+    write_group_wide_csv(&export_dir.join("core_wide.csv"), &symbol, &history, HistoryMetricGroup::Core)?;
+    write_group_wide_csv(
+        &export_dir.join("fundamentals_wide.csv"),
+        &symbol,
+        &history,
+        HistoryMetricGroup::Fundamentals,
+    )?;
+    write_group_wide_csv(
+        &export_dir.join("relative_wide.csv"),
+        &symbol,
+        &history,
+        HistoryMetricGroup::Relative,
+    )?;
+    write_group_wide_csv(&export_dir.join("dcf_wide.csv"), &symbol, &history, HistoryMetricGroup::Dcf)?;
+    write_group_wide_csv(
+        &export_dir.join("chart_wide.csv"),
+        &symbol,
+        &history,
+        HistoryMetricGroup::Chart,
+    )?;
+    write_all_tidy_csv(&export_dir.join("all_tidy.csv"), &symbol, &history)?;
+
+    Ok(metadata)
+}
+
+fn write_export_metadata_csv(metadata: &CsvExportMetadata) -> io::Result<()> {
+    write_csv_file(
+        &metadata.export_dir.join("export_metadata.csv"),
+        &["key", "value"],
+        vec![
+            vec!["symbol".to_string(), metadata.symbol.clone()],
+            vec![
+                "exported_at_utc".to_string(),
+                format_timestamp_utc(metadata.exported_at),
+            ],
+            vec![
+                "exported_at_epoch".to_string(),
+                metadata.exported_at.to_string(),
+            ],
+            vec![
+                "revision_count".to_string(),
+                metadata.revision_count.to_string(),
+            ],
+            vec![
+                "export_dir".to_string(),
+                metadata.export_dir.display().to_string(),
+            ],
+        ],
+    )
+}
+
+fn write_group_wide_csv(
+    path: &Path,
+    symbol: &str,
+    history: &[persistence::PersistedRevisionRecord],
+    group: HistoryMetricGroup,
+) -> io::Result<()> {
+    let defs = history_metric_defs(group);
+    let mut headers = vec![
+        "timestamp_utc".to_string(),
+        "timestamp_epoch".to_string(),
+        "revision_id".to_string(),
+        "symbol".to_string(),
+    ];
+    headers.extend(defs.iter().map(|def| def.key.to_string()));
+
+    let mut rows = Vec::new();
+    for record in history {
+        let mut row = vec![
+            format_timestamp_utc(record.evaluated_at),
+            record.evaluated_at.to_string(),
+            record.revision_id.to_string(),
+            symbol.to_string(),
+        ];
+        row.extend(defs.iter().map(|def| {
+            def.extractor
+                .extract(record)
+                .map(csv_numeric_value)
+                .unwrap_or_default()
+        }));
+        rows.push(row);
+    }
+
+    let header_refs = headers.iter().map(String::as_str).collect::<Vec<_>>();
+    write_csv_file(path, &header_refs, rows)
+}
+
+fn write_all_tidy_csv(
+    path: &Path,
+    symbol: &str,
+    history: &[persistence::PersistedRevisionRecord],
+) -> io::Result<()> {
+    let mut rows = Vec::new();
+    for record in history {
+        for group in [
+            HistoryMetricGroup::Core,
+            HistoryMetricGroup::Fundamentals,
+            HistoryMetricGroup::Relative,
+            HistoryMetricGroup::Dcf,
+            HistoryMetricGroup::Chart,
+        ] {
+            let status = metric_group_status(&record.payload, group);
+            for def in history_metric_defs(group) {
+                if let Some(value) = def.extractor.extract(record) {
+                    rows.push(vec![
+                        format_timestamp_utc(record.evaluated_at),
+                        record.evaluated_at.to_string(),
+                        record.revision_id.to_string(),
+                        symbol.to_string(),
+                        history_group_label(group).to_ascii_lowercase(),
+                        def.key.to_string(),
+                        def.label,
+                        def.range_key.unwrap_or("").to_string(),
+                        history_unit_label(def.unit).to_string(),
+                        csv_numeric_value(value),
+                        if status.available { "true" } else { "false" }.to_string(),
+                        if status.stale { "true" } else { "false" }.to_string(),
+                    ]);
+                }
+            }
+        }
+    }
+
+    write_csv_file(
+        path,
+        &[
+            "timestamp_utc",
+            "timestamp_epoch",
+            "revision_id",
+            "symbol",
+            "group_key",
+            "metric_key",
+            "metric_label",
+            "range_key",
+            "unit",
+            "value",
+            "available",
+            "stale",
+        ],
+        rows,
+    )
+}
+
+fn history_unit_label(unit: HistoryUnit) -> &'static str {
+    match unit {
+        HistoryUnit::Usd => "usd",
+        HistoryUnit::Percent => "pct",
+        HistoryUnit::Count => "count",
+        HistoryUnit::Ratio => "ratio",
+    }
+}
+
+fn csv_numeric_value(value: f64) -> String {
+    format!("{value:.6}")
+}
+
+fn write_csv_file(path: &Path, headers: &[&str], rows: Vec<Vec<String>>) -> io::Result<()> {
+    let mut buffer = String::new();
+    buffer.push_str(
+        &headers
+            .iter()
+            .map(|header| csv_escape_field(header))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    buffer.push('\n');
+    for row in rows {
+        buffer.push_str(
+            &row.iter()
+                .map(|value| csv_escape_field(value))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        buffer.push('\n');
+    }
+    std::fs::write(path, buffer)
+}
+
+fn csv_escape_field(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
@@ -6301,7 +8892,7 @@ fn handle_overlay_key(
     key_event: &KeyEvent,
     chart_control_sender: Option<&mpsc::Sender<ChartControl>>,
     analysis_control_sender: Option<&mpsc::Sender<AnalysisControl>>,
-    watchlist_file: Option<&PathBuf>,
+    persistence_handle: Option<&PersistenceHandle>,
 ) -> io::Result<bool> {
     match &app.overlay_mode {
         OverlayMode::None => Ok(false),
@@ -6327,85 +8918,136 @@ fn handle_overlay_key(
             Ok(true)
         }
         OverlayMode::TickerDetail(_) => {
-            match key_event.code {
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter | KeyCode::Char('d') => {
-                    app.close_overlay();
-                }
-                KeyCode::Char('l') => {
-                    app.open_issue_log();
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let rows = filtered_symbol_rows(state, &app.view_filter);
-                    app.move_ticker_detail_selection(&rows, 1);
-                    app.queue_detail_chart_request(chart_control_sender);
-                    app.queue_detail_analysis_request(state, analysis_control_sender);
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    let rows = filtered_symbol_rows(state, &app.view_filter);
-                    app.move_ticker_detail_selection(&rows, -1);
-                    app.queue_detail_chart_request(chart_control_sender);
-                    app.queue_detail_analysis_request(state, analysis_control_sender);
-                }
-                KeyCode::Char('1') => {
-                    if app.set_detail_chart_range(ChartRange::Day) {
-                        app.queue_detail_chart_request(chart_control_sender);
+            match app.detail_tab {
+                DetailTab::Snapshot => match key_event.code {
+                    KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter | KeyCode::Char('d') => {
+                        app.close_overlay();
                     }
-                }
-                KeyCode::Char('2') => {
-                    if app.set_detail_chart_range(ChartRange::Week) {
-                        app.queue_detail_chart_request(chart_control_sender);
+                    KeyCode::Char('h') => {
+                        app.toggle_detail_tab();
+                        app.load_detail_history(persistence_handle);
                     }
-                }
-                KeyCode::Char('3') => {
-                    if app.set_detail_chart_range(ChartRange::Month) {
-                        app.queue_detail_chart_request(chart_control_sender);
+                    KeyCode::Char('l') => {
+                        app.open_issue_log();
                     }
-                }
-                KeyCode::Char('4') => {
-                    if app.set_detail_chart_range(ChartRange::Year) {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let rows = filtered_symbol_rows(state, &app.view_filter);
+                        app.move_ticker_detail_selection(&rows, 1);
                         app.queue_detail_chart_request(chart_control_sender);
+                        app.queue_detail_analysis_request(state, analysis_control_sender);
                     }
-                }
-                KeyCode::Char('5') => {
-                    if app.set_detail_chart_range(ChartRange::FiveYears) {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        let rows = filtered_symbol_rows(state, &app.view_filter);
+                        app.move_ticker_detail_selection(&rows, -1);
                         app.queue_detail_chart_request(chart_control_sender);
+                        app.queue_detail_analysis_request(state, analysis_control_sender);
                     }
-                }
-                KeyCode::Char('6') => {
-                    if app.set_detail_chart_range(ChartRange::TenYears) {
-                        app.queue_detail_chart_request(chart_control_sender);
+                    KeyCode::Char('1') => {
+                        if app.set_detail_chart_range(ChartRange::Day) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
                     }
-                }
-                KeyCode::Char('[') => {
-                    if app.cycle_detail_chart_range(-1) {
-                        app.queue_detail_chart_request(chart_control_sender);
+                    KeyCode::Char('2') => {
+                        if app.set_detail_chart_range(ChartRange::Week) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
                     }
-                }
-                KeyCode::Char(']') => {
-                    if app.cycle_detail_chart_range(1) {
-                        app.queue_detail_chart_request(chart_control_sender);
+                    KeyCode::Char('3') => {
+                        if app.set_detail_chart_range(ChartRange::Month) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
                     }
-                }
-                KeyCode::Char('w') => {
-                    if let Some(symbol) = app.detail_symbol().map(str::to_string) {
-                        state.toggle_watchlist(&symbol);
-                        match save_watchlist_if_configured(state, watchlist_file) {
-                            Ok(()) => {
-                                app.issue_center.resolve(ISSUE_KEY_WATCHLIST_PERSISTENCE);
-                            }
-                            Err(error) => {
-                                app.issue_center.raise(
-                                    ISSUE_KEY_WATCHLIST_PERSISTENCE,
-                                    IssueSource::Persistence,
-                                    IssueSeverity::Warning,
-                                    "Watchlist persistence failed",
-                                    error.to_string(),
-                                );
+                    KeyCode::Char('4') => {
+                        if app.set_detail_chart_range(ChartRange::Year) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
+                    }
+                    KeyCode::Char('5') => {
+                        if app.set_detail_chart_range(ChartRange::FiveYears) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
+                    }
+                    KeyCode::Char('6') => {
+                        if app.set_detail_chart_range(ChartRange::TenYears) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
+                    }
+                    KeyCode::Char('[') => {
+                        if app.cycle_detail_chart_range(-1) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
+                    }
+                    KeyCode::Char(']') => {
+                        if app.cycle_detail_chart_range(1) {
+                            app.queue_detail_chart_request(chart_control_sender);
+                        }
+                    }
+                    KeyCode::Char('w') => {
+                        if let Some(symbol) = app.detail_symbol().map(str::to_string) {
+                            state.toggle_watchlist(&symbol);
+                            if let Some(persistence_handle) = persistence_handle {
+                                persistence_handle.replace_watchlist(state.watchlist_symbols());
                             }
                         }
                     }
-                }
-                _ => {}
+                    _ => {}
+                },
+                DetailTab::History => match key_event.code {
+                    KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter | KeyCode::Char('d') => {
+                        app.close_overlay();
+                    }
+                    KeyCode::Char('h') => {
+                        app.toggle_detail_tab();
+                    }
+                    KeyCode::Char('g') => app.toggle_history_subview(),
+                    KeyCode::Char('1') => app.select_history_group(HistoryMetricGroup::Core),
+                    KeyCode::Char('2') => {
+                        app.select_history_group(HistoryMetricGroup::Fundamentals)
+                    }
+                    KeyCode::Char('3') => app.select_history_group(HistoryMetricGroup::Relative),
+                    KeyCode::Char('4') => app.select_history_group(HistoryMetricGroup::Dcf),
+                    KeyCode::Char('5') => app.select_history_group(HistoryMetricGroup::Chart),
+                    KeyCode::Char('e') => match export_selected_history_bundle(app, persistence_handle)
+                    {
+                        Ok(metadata) => {
+                            app.issue_center.resolve(ISSUE_KEY_HISTORY_EXPORT);
+                            app.set_status_message(format!(
+                                "Exported {} revisions for {} to {}.",
+                                metadata.revision_count,
+                                metadata.symbol,
+                                metadata.export_dir.display()
+                            ));
+                        }
+                        Err(error) => {
+                            app.issue_center.raise(
+                                ISSUE_KEY_HISTORY_EXPORT,
+                                IssueSource::Persistence,
+                                IssueSeverity::Warning,
+                                "History export failed",
+                                error.to_string(),
+                            );
+                            app.set_status_message(format!(
+                                "History export failed: {}",
+                                error
+                            ));
+                        }
+                    },
+                    KeyCode::Char('[') => app.cycle_history_window(-1),
+                    KeyCode::Char(']') => app.cycle_history_window(1),
+                    KeyCode::Down | KeyCode::Char('j') => app.scroll_history(1),
+                    KeyCode::Up | KeyCode::Char('k') => app.scroll_history(-1),
+                    KeyCode::Char('n') => {
+                        let rows = filtered_symbol_rows(state, &app.view_filter);
+                        app.move_ticker_detail_selection(&rows, 1);
+                        app.load_detail_history(persistence_handle);
+                    }
+                    KeyCode::Char('p') => {
+                        let rows = filtered_symbol_rows(state, &app.view_filter);
+                        app.move_ticker_detail_selection(&rows, -1);
+                        app.load_detail_history(persistence_handle);
+                    }
+                    _ => {}
+                },
             }
 
             Ok(true)
@@ -6871,6 +9513,7 @@ fn track_symbols_from_query(
     app: &mut AppState,
     live_symbols: Option<&LiveSymbolState>,
     feed_control_sender: Option<&mpsc::Sender<FeedControl>>,
+    persistence_handle: Option<&PersistenceHandle>,
 ) {
     let Some(live_symbols) = live_symbols else {
         app.set_status_message("Symbol lookup is only available in live mode.");
@@ -6890,6 +9533,9 @@ fn track_symbols_from_query(
     let added_symbols = live_symbols.add_symbols(symbols);
 
     if !added_symbols.is_empty() {
+        if let Some(persistence_handle) = persistence_handle {
+            persistence_handle.replace_tracked_symbols(live_symbols.snapshot());
+        }
         if let Some(feed_control_sender) = feed_control_sender {
             let _ = feed_control_sender.send(FeedControl::RefreshNow);
         }
@@ -6904,6 +9550,7 @@ fn track_symbols_from_query(
     app.selected_symbol = Some(focus_symbol);
 }
 
+#[cfg(test)]
 fn persist_new_journal_entries(
     state: &TerminalState,
     journal_file: Option<&PathBuf>,
@@ -6923,19 +9570,6 @@ fn persist_new_journal_entries(
         .map_err(|error| with_path_context(error, "append journal file", journal_file))?;
     *last_persisted_sequence = latest_sequence;
     Ok(())
-}
-
-fn save_watchlist_if_configured(
-    state: &TerminalState,
-    watchlist_file: Option<&PathBuf>,
-) -> io::Result<()> {
-    let Some(watchlist_file) = watchlist_file else {
-        return Ok(());
-    };
-
-    state
-        .save_watchlist_file(watchlist_file)
-        .map_err(|error| with_path_context(error, "save watchlist file", watchlist_file))
 }
 
 fn format_money(value_cents: i64) -> String {
@@ -7089,6 +9723,7 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
+    use super::apply_persistence_status;
     use super::AnalysisCacheEntry;
     use super::AnalysisControl;
     use super::AppEvent;
@@ -7102,6 +9737,9 @@ mod tests {
     use super::FeedErrorLogger;
     use super::FeedEvent;
     use super::FeedRefreshPlan;
+    use super::HistoryMetricGroup;
+    use super::HistorySubview;
+    use super::HistoryWindow;
     use super::ISSUE_KEY_JOURNAL_RESTORE;
     use super::ISSUE_KEY_WATCHLIST_RESTORE;
     use super::InputMode;
@@ -7117,6 +9755,7 @@ mod tests {
     use super::LoopControl;
     use super::MAX_VISIBLE_ROWS;
     use super::OverlayMode;
+    use super::PersistenceStatusEvent;
     use super::RelativeMetricScore;
     use super::RelativeStrengthBand;
     use super::RenderLine;
@@ -7130,6 +9769,8 @@ mod tests {
     use super::build_screen_lines;
     use super::build_ticker_detail_lines;
     use super::build_ticker_detail_lines_for_viewport;
+    use super::build_ticker_history_lines_for_viewport;
+    use super::chart_ranges;
     use super::candidate_company_label;
     use super::chart_loop_with_client_factory;
     use super::chart_range_label;
@@ -7145,6 +9786,7 @@ mod tests {
     use super::dcf_signal;
     use super::derive_base_growth_bps;
     use super::detail_analysis_snapshot;
+    use super::export_selected_history_bundle;
     use super::feed_loop_with_client_factory;
     use super::filtered_symbol_rows;
     use super::format_bps;
@@ -7164,18 +9806,26 @@ mod tests {
     use super::normalize_frame;
     use super::parse_runtime_options_from;
     use super::parse_symbols_argument;
+    use super::persistence;
     use super::publish_feed_refresh;
     use super::publish_feed_refresh_concurrently;
     use super::publish_input_events;
     use super::qualification_justification_lines;
+    use super::reconcile_capture_persistence;
     use super::reconcile_journal_persistence;
+    use super::reconcile_sqlite_persistence;
     use super::relative_metric_score;
     use super::robust_composite_percentile;
     use super::should_handle_key_event;
     use super::should_leave_input_mode_on_backspace;
     use super::should_refresh_weighted_target;
+    use super::summarize_chart_range;
     use super::usage_text;
     use super::visible_text;
+    use crate::BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE;
+    use crate::ChartRangeSummary;
+    use crate::SectorRelativeScore;
+    use crate::unix_timestamp_seconds;
     use discount_screener::CandidateRow;
     use discount_screener::ConfidenceBand;
     use discount_screener::ExternalSignalStatus;
@@ -7187,6 +9837,7 @@ mod tests {
     use discount_screener::TerminalState;
     use discount_screener::ViewFilter;
     use discount_screener::checked_gap_bps;
+    use rusqlite::Connection;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::env::temp_dir;
@@ -7426,6 +10077,203 @@ mod tests {
         }
     }
 
+    fn sample_metric_group_status(available: bool) -> persistence::MetricGroupStatus {
+        persistence::MetricGroupStatus {
+            available,
+            stale: false,
+        }
+    }
+
+    fn sample_relative_score() -> SectorRelativeScore {
+        SectorRelativeScore {
+            group_kind: "industry".to_string(),
+            group_label: "Software".to_string(),
+            peer_count: 12,
+            composite_percentile: 72,
+            composite_band: RelativeStrengthBand::Strong,
+            metrics: vec![
+                RelativeMetricScore {
+                    label: "P/E".to_string(),
+                    percentile: 70,
+                    band: RelativeStrengthBand::Strong,
+                },
+                RelativeMetricScore {
+                    label: "PEG".to_string(),
+                    percentile: 68,
+                    band: RelativeStrengthBand::Mixed,
+                },
+                RelativeMetricScore {
+                    label: "ROE".to_string(),
+                    percentile: 82,
+                    band: RelativeStrengthBand::Strong,
+                },
+                RelativeMetricScore {
+                    label: "Net debt/EBITDA".to_string(),
+                    percentile: 55,
+                    band: RelativeStrengthBand::Mixed,
+                },
+                RelativeMetricScore {
+                    label: "FCF yield".to_string(),
+                    percentile: 77,
+                    band: RelativeStrengthBand::Strong,
+                },
+            ],
+        }
+    }
+
+    fn sample_chart_summary(range: ChartRange, close_cents: i64) -> ChartRangeSummary {
+        ChartRangeSummary {
+            range,
+            captured_at: 1_700_000_000,
+            candle_count: 120,
+            latest_close_cents: Some(close_cents),
+            ema20_cents: Some(close_cents - 50),
+            ema50_cents: Some(close_cents - 100),
+            ema200_cents: Some(close_cents - 250),
+            macd_cents: Some(45),
+            signal_cents: Some(31),
+            histogram_cents: Some(14),
+        }
+    }
+
+    fn sample_history_records(symbol: &str, include_relative: bool) -> Vec<persistence::PersistedRevisionRecord> {
+        let base_time = unix_timestamp_seconds().saturating_sub(2 * 86_400);
+        (0..3)
+            .map(|index| {
+                let market_price_cents = 18_500 + index as i64 * 75;
+                let intrinsic_value_cents = 24_500 + index as i64 * 90;
+                let external_fair_value_cents = 23_800 + index as i64 * 80;
+                let mut fundamentals = sample_fundamentals(
+                    symbol,
+                    "technology",
+                    "Technology",
+                    "software",
+                    "Software",
+                );
+                fundamentals.market_cap_dollars =
+                    Some(1_200_000_000_u64 + index as u64 * 50_000_000);
+                fundamentals.free_cash_flow_dollars = Some(86_000_000 + index as i64 * 5_000_000);
+                fundamentals.operating_cash_flow_dollars =
+                    Some(105_000_000 + index as i64 * 6_000_000);
+                fundamentals.trailing_pe_hundredths = Some(1_500_u32 + index as u32 * 20);
+                fundamentals.earnings_growth_bps = Some(1_500 + index as i32 * 40);
+
+                let mut dcf_analysis = sample_ready_analysis();
+                dcf_analysis.base_intrinsic_value_cents += index as i64 * 110;
+                dcf_analysis.bear_intrinsic_value_cents += index as i64 * 80;
+                dcf_analysis.bull_intrinsic_value_cents += index as i64 * 140;
+
+                persistence::PersistedRevisionRecord {
+                    revision_id: index as i64 + 1,
+                    symbol: symbol.to_string(),
+                    evaluated_at: base_time + index as u64 * 86_400,
+                    last_sequence: index + 1,
+                    update_count: index + 1,
+                    payload: persistence::EvaluatedSymbolState {
+                        snapshot: Some(MarketSnapshot {
+                            symbol: symbol.to_string(),
+                            company_name: Some("Example Corp".to_string()),
+                            profitable: true,
+                            market_price_cents,
+                            intrinsic_value_cents,
+                        }),
+                        external_signal: Some(ExternalValuationSignal {
+                            symbol: symbol.to_string(),
+                            fair_value_cents: external_fair_value_cents,
+                            age_seconds: 120,
+                            low_fair_value_cents: Some(22_000),
+                            high_fair_value_cents: Some(26_500),
+                            analyst_opinion_count: Some(10 + index as u32),
+                            recommendation_mean_hundredths: Some(180),
+                            strong_buy_count: Some(5),
+                            buy_count: Some(4),
+                            hold_count: Some(1),
+                            sell_count: Some(0),
+                            strong_sell_count: Some(0),
+                            weighted_fair_value_cents: Some(24_100 + index as i64 * 75),
+                            weighted_analyst_count: Some(8),
+                        }),
+                        fundamentals: Some(fundamentals),
+                        gap_bps: Some(3_200 + index as i32 * 45),
+                        qualification: Some(QualificationStatus::Qualified),
+                        external_status: Some(ExternalSignalStatus::Supportive),
+                        confidence: Some(ConfidenceBand::High),
+                        external_gap_bps: Some(2_800 + index as i32 * 30),
+                        weighted_gap_bps: Some(2_950 + index as i32 * 25),
+                        dcf_analysis: Some(dcf_analysis),
+                        dcf_signal: Some(DcfSignal::Opportunity),
+                        dcf_margin_of_safety_bps: Some(2_100 + index as i32 * 35),
+                        relative_score: include_relative.then(sample_relative_score),
+                        chart_summaries: chart_ranges()
+                            .iter()
+                            .enumerate()
+                            .map(|(range_index, range)| {
+                                sample_chart_summary(*range, market_price_cents + range_index as i64 * 25)
+                            })
+                            .collect(),
+                        core_status: sample_metric_group_status(true),
+                        fundamentals_status: sample_metric_group_status(true),
+                        relative_status: sample_metric_group_status(include_relative),
+                        dcf_status: sample_metric_group_status(true),
+                        chart_status: sample_metric_group_status(true),
+                        is_watched: index % 2 == 0,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn persist_sample_symbol_revision(
+        persistence_handle: &persistence::PersistenceHandle,
+        symbol: &str,
+        market_price_cents: i64,
+        intrinsic_value_cents: i64,
+    ) {
+        persistence_handle
+            .persist_batch(
+                Vec::new(),
+                vec![persistence::SymbolRevisionInput {
+                    symbol: symbol.to_string(),
+                    evaluated_at: 1_700_000_000,
+                    last_sequence: 1,
+                    update_count: 1,
+                    price_history: vec![discount_screener::PriceHistoryPoint {
+                        sequence: 1,
+                        market_price_cents,
+                    }],
+                    payload: persistence::EvaluatedSymbolState {
+                        snapshot: Some(MarketSnapshot {
+                            symbol: symbol.to_string(),
+                            company_name: None,
+                            profitable: true,
+                            market_price_cents,
+                            intrinsic_value_cents,
+                        }),
+                        external_signal: None,
+                        fundamentals: None,
+                        gap_bps: checked_gap_bps(market_price_cents, intrinsic_value_cents),
+                        qualification: Some(QualificationStatus::Qualified),
+                        external_status: Some(ExternalSignalStatus::Missing),
+                        confidence: Some(ConfidenceBand::Low),
+                        external_gap_bps: None,
+                        weighted_gap_bps: None,
+                        dcf_analysis: None,
+                        dcf_signal: None,
+                        dcf_margin_of_safety_bps: None,
+                        relative_score: None,
+                        chart_summaries: Vec::new(),
+                        core_status: sample_metric_group_status(true),
+                        fundamentals_status: sample_metric_group_status(false),
+                        relative_status: sample_metric_group_status(false),
+                        dcf_status: sample_metric_group_status(false),
+                        chart_status: sample_metric_group_status(false),
+                        is_watched: false,
+                    },
+                }],
+            )
+            .expect("symbol revision should persist");
+    }
+
     #[derive(Clone)]
     struct FakeFeedClient {
         calls: Arc<Mutex<Vec<(String, bool)>>>,
@@ -7526,9 +10374,9 @@ mod tests {
         let options = parse_runtime_options_from(Vec::<String>::new())
             .expect("empty args should resolve to the default universe");
 
-        assert!(
-            options.symbols.len() == 503 && options.symbols.iter().any(|symbol| symbol == "AAPL")
-        );
+        assert!(options.symbols.is_empty());
+        assert!(options.persist_enabled);
+        assert!(options.state_db.is_some());
     }
 
     #[test]
@@ -7651,8 +10499,38 @@ mod tests {
 
         assert_eq!(
             derive_base_growth_bps(&declining_then_partial_recovery),
-            Some(-2254)
+            Some(-2255)
         );
+    }
+
+    #[test]
+    fn derive_base_growth_uses_fractional_years_for_stub_periods() {
+        let stub_period = vec![
+            ("2022-12-28".to_string(), 10.0),
+            ("2024-01-05".to_string(), 15.0),
+        ];
+        let expected_years = 373.0 / 365.2425;
+        let expected_cagr_bps = (((15.0_f64 / 10.0_f64).powf(1.0 / expected_years) - 1.0)
+            * 10_000.0)
+            .round() as i32;
+
+        assert_eq!(derive_base_growth_bps(&stub_period), Some(expected_cagr_bps));
+        assert!(expected_cagr_bps > 4_000);
+    }
+
+    #[test]
+    fn dcf_margin_of_safety_returns_none_instead_of_saturating() {
+        let analysis = DcfAnalysis {
+            bear_intrinsic_value_cents: 1,
+            base_intrinsic_value_cents: 1,
+            bull_intrinsic_value_cents: 1,
+            wacc_bps: 1_000,
+            base_growth_bps: 500,
+            net_debt_dollars: 0,
+        };
+
+        assert_eq!(dcf_margin_of_safety_bps(&analysis, i64::MAX), None);
+        assert_eq!(dcf_signal(&analysis, i64::MAX), DcfSignal::Expensive);
     }
 
     #[test]
@@ -7882,17 +10760,17 @@ mod tests {
     fn robust_composite_percentile_uses_median_for_small_metric_sets() {
         let scores = vec![
             RelativeMetricScore {
-                label: "A",
+                label: "A".to_string(),
                 percentile: 10,
                 band: RelativeStrengthBand::Weak,
             },
             RelativeMetricScore {
-                label: "B",
+                label: "B".to_string(),
                 percentile: 50,
                 band: RelativeStrengthBand::Mixed,
             },
             RelativeMetricScore {
-                label: "C",
+                label: "C".to_string(),
                 percentile: 90,
                 band: RelativeStrengthBand::Strong,
             },
@@ -7905,27 +10783,27 @@ mod tests {
     fn robust_composite_percentile_trims_extreme_outliers() {
         let scores = vec![
             RelativeMetricScore {
-                label: "A",
+                label: "A".to_string(),
                 percentile: 5,
                 band: RelativeStrengthBand::Weak,
             },
             RelativeMetricScore {
-                label: "B",
+                label: "B".to_string(),
                 percentile: 45,
                 band: RelativeStrengthBand::Mixed,
             },
             RelativeMetricScore {
-                label: "C",
+                label: "C".to_string(),
                 percentile: 50,
                 band: RelativeStrengthBand::Mixed,
             },
             RelativeMetricScore {
-                label: "D",
+                label: "D".to_string(),
                 percentile: 55,
                 band: RelativeStrengthBand::Mixed,
             },
             RelativeMetricScore {
-                label: "E",
+                label: "E".to_string(),
                 percentile: 95,
                 band: RelativeStrengthBand::Strong,
             },
@@ -7959,6 +10837,7 @@ mod tests {
                 symbol,
                 request_id,
                 fundamentals: payload,
+                ..
             } => {
                 assert_eq!(symbol, "NVDA");
                 assert_eq!(payload, fundamentals);
@@ -8261,6 +11140,7 @@ mod tests {
         let usage = usage_text();
 
         assert!(usage.contains("--profile NAME"));
+        assert!(usage.contains("starting universe for this session"));
         assert!(usage.contains("sp500"));
         assert!(usage.contains("merval"));
         assert!(usage.contains("nikkei"));
@@ -8344,6 +11224,29 @@ mod tests {
     }
 
     #[test]
+    fn persistence_status_success_clears_prior_issue() {
+        let mut issue_center = IssueCenter::default();
+
+        apply_persistence_status(
+            &mut issue_center,
+            PersistenceStatusEvent {
+                operation: "persist-watchlist",
+                error: Some("database is locked".to_string()),
+            },
+        );
+        apply_persistence_status(
+            &mut issue_center,
+            PersistenceStatusEvent {
+                operation: "persist-watchlist",
+                error: None,
+            },
+        );
+
+        assert_eq!(issue_center.active_issue_count(), 0);
+        assert_eq!(issue_center.resolved_issue_count(), 1);
+    }
+
+    #[test]
     fn live_source_status_raises_a_partial_feed_issue() {
         let mut issue_center = IssueCenter::default();
 
@@ -8397,6 +11300,27 @@ mod tests {
 
         assert_eq!(issue_center.active_issue_count(), 0);
         assert_eq!(health_status_label(issue_center.health_status()), "healthy");
+    }
+
+    #[test]
+    fn live_source_status_keeps_partial_issue_for_a_partial_refresh_window() {
+        let mut issue_center = IssueCenter::default();
+
+        apply_live_source_status(
+            &mut issue_center,
+            LiveSourceStatus {
+                tracked_symbols: 503,
+                loaded_symbols: 64,
+                unsupported_symbols: 0,
+                error_symbols: 0,
+                last_error: None,
+            },
+        );
+
+        let issue = issue_center.sorted_entries()[0].clone();
+        assert_eq!(health_status_label(issue_center.health_status()), "degraded");
+        assert_eq!(issue.title, "Live source partially degraded");
+        assert!(issue.detail.contains("Loaded 64 of 503 tracked symbols."));
     }
 
     #[test]
@@ -8612,7 +11536,7 @@ mod tests {
         assert!(matches!(
             final_batch.first(),
             Some(FeedEvent::SourceStatus(LiveSourceStatus {
-                tracked_symbols: 3,
+                tracked_symbols: 40,
                 loaded_symbols: 3,
                 unsupported_symbols: 0,
                 error_symbols: 0,
@@ -8718,6 +11642,587 @@ mod tests {
                 Some(true),
             )
         );
+    }
+
+    #[test]
+    fn load_initial_state_restores_sqlite_warm_start_state() {
+        let state_db = unique_test_path("warm-start.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+
+        persistence_handle
+            .replace_tracked_symbols(vec!["AAPL".to_string(), "MSFT".to_string()]);
+        persistence_handle.replace_watchlist(vec!["AAPL".to_string()]);
+        persistence_handle.replace_issues(vec![persistence::PersistedIssueRecord {
+            key: "feed-partial".to_string(),
+            source: IssueSource::Feed,
+            severity: IssueSeverity::Warning,
+            title: "Warm-start issue".to_string(),
+            detail: "Restored from sqlite".to_string(),
+            count: 1,
+            first_seen_event: 1,
+            last_seen_event: 1,
+            active: true,
+        }]);
+        let snapshot = MarketSnapshot {
+            symbol: "AAPL".to_string(),
+            company_name: Some("Apple Inc.".to_string()),
+            profitable: true,
+            market_price_cents: 18_000,
+            intrinsic_value_cents: 24_000,
+        };
+        let external_signal = ExternalValuationSignal {
+            symbol: "AAPL".to_string(),
+            fair_value_cents: 23_500,
+            age_seconds: 60,
+            low_fair_value_cents: Some(21_000),
+            high_fair_value_cents: Some(26_000),
+            analyst_opinion_count: Some(12),
+            recommendation_mean_hundredths: Some(180),
+            strong_buy_count: Some(6),
+            buy_count: Some(4),
+            hold_count: Some(2),
+            sell_count: Some(0),
+            strong_sell_count: Some(0),
+            weighted_fair_value_cents: Some(24_200),
+            weighted_analyst_count: Some(10),
+        };
+        let fundamentals = FundamentalSnapshot {
+            symbol: "AAPL".to_string(),
+            sector_key: Some("technology".to_string()),
+            sector_name: Some("Technology".to_string()),
+            industry_key: Some("consumer-electronics".to_string()),
+            industry_name: Some("Consumer Electronics".to_string()),
+            market_cap_dollars: Some(3_000_000_000_000),
+            shares_outstanding: Some(15_000_000_000),
+            trailing_pe_hundredths: Some(2850),
+            forward_pe_hundredths: Some(2600),
+            price_to_book_hundredths: Some(4800),
+            return_on_equity_bps: Some(12_000),
+            ebitda_dollars: Some(140_000_000_000),
+            enterprise_value_dollars: Some(2_950_000_000_000),
+            enterprise_to_ebitda_hundredths: Some(2_100),
+            total_debt_dollars: Some(110_000_000_000),
+            total_cash_dollars: Some(70_000_000_000),
+            debt_to_equity_hundredths: Some(180),
+            free_cash_flow_dollars: Some(100_000_000_000),
+            operating_cash_flow_dollars: Some(120_000_000_000),
+            beta_millis: Some(1200),
+            trailing_eps_cents: Some(630),
+            earnings_growth_bps: Some(900),
+        };
+        persistence_handle
+            .persist_batch(
+                Vec::new(),
+                vec![persistence::SymbolRevisionInput {
+                    symbol: "AAPL".to_string(),
+                    evaluated_at: 1_700_000_000,
+                    last_sequence: 3,
+                    update_count: 3,
+                    price_history: vec![
+                        discount_screener::PriceHistoryPoint {
+                            sequence: 1,
+                            market_price_cents: 17_500,
+                        },
+                        discount_screener::PriceHistoryPoint {
+                            sequence: 2,
+                            market_price_cents: 17_800,
+                        },
+                        discount_screener::PriceHistoryPoint {
+                            sequence: 3,
+                            market_price_cents: 18_000,
+                        },
+                    ],
+                    payload: persistence::EvaluatedSymbolState {
+                        snapshot: Some(snapshot),
+                        external_signal: Some(external_signal),
+                        fundamentals: Some(fundamentals),
+                        gap_bps: Some(checked_gap_bps(18_000, 24_000).expect("gap should compute")),
+                        qualification: Some(QualificationStatus::Qualified),
+                        external_status: Some(ExternalSignalStatus::Supportive),
+                        confidence: Some(ConfidenceBand::High),
+                        external_gap_bps: Some(
+                            checked_gap_bps(18_000, 23_500).expect("external gap should compute"),
+                        ),
+                        weighted_gap_bps: Some(
+                            checked_gap_bps(18_000, 24_200).expect("weighted gap should compute"),
+                        ),
+                        dcf_analysis: None,
+                        dcf_signal: None,
+                        dcf_margin_of_safety_bps: None,
+                        relative_score: None,
+                        chart_summaries: Vec::new(),
+                        core_status: sample_metric_group_status(true),
+                        fundamentals_status: sample_metric_group_status(true),
+                        relative_status: sample_metric_group_status(false),
+                        dcf_status: sample_metric_group_status(false),
+                        chart_status: sample_metric_group_status(false),
+                        is_watched: true,
+                    },
+                }],
+            )
+            .expect("symbol revision should persist");
+        persistence_handle
+            .persist_batch(
+                vec![persistence::RawCapture {
+                    symbol: "AAPL".to_string(),
+                    capture_kind: persistence::CaptureKind::ChartCandles,
+                    scope_key: Some(chart_range_label(ChartRange::Year).to_string()),
+                    captured_at: 1_700_000_000,
+                    payload: persistence::RawCapturePayload::Chart {
+                        range: ChartRange::Year,
+                        candles: historical_candles(),
+                    },
+                }],
+                Vec::new(),
+            )
+            .expect("chart capture should persist");
+        persistence_handle.shutdown(1_700_000_100);
+
+        let loaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("sqlite warm-start should load");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert!(loaded.startup_issues.is_empty());
+        assert_eq!(loaded.tracked_symbols, super::default_live_symbols());
+        assert!(loaded.state.detail("AAPL").is_some());
+        assert_eq!(
+            loaded.state.price_history("AAPL", 10),
+            vec![
+                discount_screener::PriceHistoryPoint {
+                    sequence: 1,
+                    market_price_cents: 17_500,
+                },
+                discount_screener::PriceHistoryPoint {
+                    sequence: 2,
+                    market_price_cents: 17_800,
+                },
+                discount_screener::PriceHistoryPoint {
+                    sequence: 3,
+                    market_price_cents: 18_000,
+                },
+            ]
+        );
+        assert!(loaded.app.is_symbol_stale("AAPL"));
+        assert_eq!(loaded.app.issue_center.active_issue_count(), 1);
+        assert!(matches!(
+            loaded.app.detail_chart_entry("AAPL"),
+            Some(super::ChartCacheEntry::Ready { candles }) if candles == &historical_candles()
+        ));
+        assert!(loaded.app.is_chart_stale("AAPL", ChartRange::Year));
+        assert!(loaded.app.chart_summary("AAPL", ChartRange::Year).is_some());
+    }
+
+    #[test]
+    fn load_initial_state_uses_explicit_symbols_for_the_current_session_only() {
+        let state_db = unique_test_path("session-symbols.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(vec!["MSTR".to_string()]);
+        persist_sample_symbol_revision(&persistence_handle, "MSTR", 18_000, 24_000);
+        persistence_handle.shutdown(1_700_000_100);
+
+        let loaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            symbols: vec!["JPM".to_string()],
+            symbols_explicit: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("explicit symbols should define the session universe");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert_eq!(loaded.tracked_symbols, vec!["JPM".to_string()]);
+        assert!(loaded.state.detail("MSTR").is_none());
+    }
+
+    #[test]
+    fn no_arg_startup_uses_sp500_instead_of_a_single_remembered_symbol() {
+        let state_db = unique_test_path("default-sp500.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(vec!["MSTR".to_string()]);
+        persist_sample_symbol_revision(&persistence_handle, "MSTR", 18_000, 24_000);
+        persistence_handle.shutdown(1_700_000_100);
+
+        let reloaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("no-arg startup should restore the default sp500 universe");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert_eq!(reloaded.tracked_symbols, super::default_live_symbols());
+        assert!(!reloaded.tracked_symbols.iter().any(|symbol| symbol == "MSTR"));
+        assert!(reloaded.state.detail("MSTR").is_none());
+    }
+
+    #[test]
+    fn load_initial_state_uses_profile_symbols_for_the_current_session_only() {
+        let state_db = unique_test_path("session-profile.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(vec!["MSTR".to_string()]);
+        persist_sample_symbol_revision(&persistence_handle, "MSTR", 18_000, 24_000);
+        persistence_handle.shutdown(1_700_000_100);
+
+        let mut options =
+            parse_runtime_options_from(["--profile", "dow-jones"]).expect("profile should parse");
+        options.state_db = Some(state_db.clone());
+
+        let loaded =
+            load_initial_state(&options).expect("profile symbols should define the session universe");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert!(loaded.tracked_symbols.iter().any(|symbol| symbol == "JPM"));
+        assert!(!loaded.tracked_symbols.iter().any(|symbol| symbol == "MSTR"));
+        assert!(loaded.state.detail("MSTR").is_none());
+    }
+
+    #[test]
+    fn load_initial_state_migrates_v2_sqlite_without_losing_rows() {
+        let state_db = unique_test_path("warm-start-v2.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        let connection = Connection::open(&state_db).expect("sqlite db should open");
+        connection
+            .execute_batch(
+                "\
+                PRAGMA user_version = 2;
+                CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE tracked_symbol (
+                    position INTEGER NOT NULL,
+                    symbol TEXT PRIMARY KEY
+                );
+                CREATE TABLE watchlist (
+                    symbol TEXT PRIMARY KEY
+                );
+                CREATE TABLE raw_capture (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    capture_kind TEXT NOT NULL,
+                    scope_key TEXT,
+                    captured_at INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX raw_capture_symbol_idx ON raw_capture(symbol, captured_at, id);
+                CREATE TABLE raw_latest (
+                    symbol TEXT NOT NULL,
+                    capture_key TEXT NOT NULL,
+                    capture_id INTEGER NOT NULL,
+                    PRIMARY KEY(symbol, capture_key)
+                );
+                CREATE TABLE symbol_revision (
+                    revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    evaluated_at INTEGER NOT NULL,
+                    last_sequence INTEGER NOT NULL,
+                    update_count INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    snapshot_json TEXT,
+                    external_json TEXT,
+                    fundamentals_json TEXT
+                );
+                CREATE INDEX symbol_revision_symbol_idx
+                    ON symbol_revision(symbol, evaluated_at, revision_id);
+                CREATE TABLE symbol_latest (
+                    symbol TEXT PRIMARY KEY,
+                    revision_id INTEGER NOT NULL,
+                    evaluated_at INTEGER NOT NULL,
+                    last_sequence INTEGER NOT NULL,
+                    update_count INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    snapshot_json TEXT,
+                    external_json TEXT,
+                    fundamentals_json TEXT
+                );
+                CREATE TABLE issue_state (
+                    key TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    issue_count INTEGER NOT NULL,
+                    first_seen_event INTEGER NOT NULL,
+                    last_seen_event INTEGER NOT NULL,
+                    active INTEGER NOT NULL
+                );",
+            )
+            .expect("v2 schema should be created");
+        connection
+            .execute(
+                "INSERT INTO tracked_symbol(position, symbol) VALUES (0, 'AAPL')",
+                [],
+            )
+            .expect("tracked symbol should be inserted");
+        connection
+            .execute(
+                "INSERT INTO symbol_latest(
+                    symbol, revision_id, evaluated_at, last_sequence, update_count, payload_json, snapshot_json, external_json, fundamentals_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    "AAPL",
+                    1_i64,
+                    1_700_000_000_i64,
+                    1_i64,
+                    1_i64,
+                    "{}",
+                    serde_json::to_string(&MarketSnapshot {
+                        symbol: "AAPL".to_string(),
+                        company_name: None,
+                        profitable: true,
+                        market_price_cents: 18_000,
+                        intrinsic_value_cents: 24_000,
+                    })
+                    .expect("snapshot should serialize"),
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("latest symbol row should be inserted");
+        drop(connection);
+
+        let loaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("v2 sqlite state should migrate and load");
+
+        let connection = Connection::open(&state_db).expect("sqlite db should reopen");
+        let has_price_history_json = connection
+            .prepare("PRAGMA table_info(symbol_latest)")
+            .expect("table info should prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table info should query")
+            .filter_map(Result::ok)
+            .any(|name| name == "price_history_json");
+        let _ = fs::remove_file(&state_db);
+
+        assert!(loaded.state.detail("AAPL").is_some());
+        assert!(has_price_history_json);
+    }
+
+    #[test]
+    fn load_initial_state_resets_bad_sqlite_cache_and_keeps_persistence_enabled() {
+        let state_db = unique_test_path("broken-warm-start.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let connection = Connection::open(&state_db).expect("sqlite db should open");
+        connection
+            .execute(
+                "INSERT INTO symbol_latest(
+                    symbol, revision_id, evaluated_at, last_sequence, update_count, payload_json, snapshot_json, external_json, fundamentals_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    "AAPL",
+                    1_i64,
+                    1_i64,
+                    1_i64,
+                    1_i64,
+                    "{}",
+                    "{not-json",
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("corrupt revision row should be written");
+
+        let loaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("warm-start restore failures should fall back");
+
+        assert_eq!(loaded.startup_issues.len(), 1);
+        assert!(loaded.persistence_db_path.is_some());
+        assert!(loaded.state.detail("AAPL").is_none());
+
+        let reset = persistence::load_warm_start(&state_db).expect("reset sqlite db should load");
+        let _ = fs::remove_file(&state_db);
+
+        assert!(reset.chart_cache.is_empty());
+        assert!(reset.symbol_states.is_empty());
+        assert!(reset.last_persisted_at.is_none());
+    }
+
+    #[test]
+    fn reconcile_sqlite_persistence_retries_after_a_busy_write() {
+        let state_db = unique_test_path("busy-warm-start.sqlite3");
+        let _ = fs::remove_file(&state_db);
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+
+        let lock_connection = Connection::open(&state_db).expect("sqlite db should open");
+        lock_connection
+            .execute_batch("BEGIN EXCLUSIVE TRANSACTION;")
+            .expect("exclusive lock should be acquired");
+
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+
+        let mut state = TerminalState::new(2_000, 30, 8);
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 17_270,
+            intrinsic_value_cents: 26_923,
+        });
+
+        let mut last_persisted_sequence = 0;
+        let app = AppState::default();
+        let first_result = reconcile_sqlite_persistence(
+            &state,
+            &app,
+            Some(&persistence_handle),
+            &mut last_persisted_sequence,
+        );
+
+        assert!(first_result.is_err());
+        assert_eq!(last_persisted_sequence, 0);
+
+        lock_connection
+            .execute_batch("COMMIT;")
+            .expect("exclusive lock should be released");
+
+        let second_result = reconcile_sqlite_persistence(
+            &state,
+            &app,
+            Some(&persistence_handle),
+            &mut last_persisted_sequence,
+        );
+        assert!(second_result.is_ok());
+        persistence_handle.shutdown(1_700_000_000);
+
+        let reloaded = persistence::load_warm_start(&state_db).expect("sqlite db should load");
+        let _ = fs::remove_file(&state_db);
+
+        assert_eq!(last_persisted_sequence, state.latest_sequence());
+        assert!(reloaded.symbol_states.iter().any(|record| record.symbol == "NVDA"));
+    }
+
+    #[test]
+    fn metadata_only_sqlite_updates_do_not_refresh_warm_start_age() {
+        let state_db = unique_test_path("metadata-only.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(vec!["AAPL".to_string()]);
+        persistence_handle.replace_watchlist(vec!["AAPL".to_string()]);
+        persistence_handle.replace_issues(vec![persistence::PersistedIssueRecord {
+            key: "feed-partial".to_string(),
+            source: IssueSource::Feed,
+            severity: IssueSeverity::Warning,
+            title: "Warm-start issue".to_string(),
+            detail: "Restored from sqlite".to_string(),
+            count: 1,
+            first_seen_event: 1,
+            last_seen_event: 1,
+            active: true,
+        }]);
+        persistence_handle.shutdown(1_700_000_000);
+
+        let loaded = persistence::load_warm_start(&state_db).expect("sqlite db should load");
+        let _ = fs::remove_file(&state_db);
+
+        assert_eq!(loaded.last_persisted_at, None);
+        assert_eq!(loaded.tracked_symbols, vec!["AAPL".to_string()]);
+        assert_eq!(loaded.watchlist, vec!["AAPL".to_string()]);
+        assert_eq!(loaded.issues.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_capture_persistence_raises_and_resolves_sqlite_issue() {
+        let state_db = unique_test_path("capture-persist.sqlite3");
+        let _ = fs::remove_file(&state_db);
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+
+        let lock_connection = Connection::open(&state_db).expect("sqlite db should open");
+        lock_connection
+            .execute_batch("BEGIN EXCLUSIVE TRANSACTION;")
+            .expect("exclusive lock should be acquired");
+
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        let mut app = AppState::default();
+        let capture = persistence::RawCapture {
+            symbol: "AAPL".to_string(),
+            capture_kind: persistence::CaptureKind::ChartCandles,
+            scope_key: Some(chart_range_label(ChartRange::Year).to_string()),
+            captured_at: 1_700_000_000,
+            payload: persistence::RawCapturePayload::Chart {
+                range: ChartRange::Year,
+                candles: historical_candles(),
+            },
+        };
+
+        reconcile_capture_persistence(
+            &mut app,
+            &persistence_handle,
+            "persist chart capture",
+            vec![capture.clone()],
+            Vec::new(),
+        );
+
+        assert_eq!(app.issue_center.active_issue_count(), 1);
+
+        lock_connection
+            .execute_batch("COMMIT;")
+            .expect("exclusive lock should be released");
+
+        reconcile_capture_persistence(
+            &mut app,
+            &persistence_handle,
+            "persist chart capture",
+            vec![capture],
+            Vec::new(),
+        );
+
+        assert_eq!(app.issue_center.active_issue_count(), 0);
+        persistence_handle.shutdown(1_700_000_000);
+        let _ = fs::remove_file(&state_db);
     }
 
     #[test]
@@ -9282,6 +12787,7 @@ mod tests {
                 symbol,
                 range: ChartRange::Year,
                 request_id: 1,
+                ..
             } if symbol == "NVDA"
         ));
     }
@@ -9304,6 +12810,137 @@ mod tests {
     }
 
     #[test]
+    fn queue_detail_chart_request_refreshes_stale_persisted_cache_entries() {
+        let mut app = AppState::default();
+        let (sender, receiver) = mpsc::channel();
+        let stale_symbols = Vec::<String>::new();
+        app.load_warm_start(
+            &[persistence::PersistedChartRecord {
+                symbol: "NVDA".to_string(),
+                range: ChartRange::Year,
+                candles: historical_candles(),
+                fetched_at: 1_700_000_000,
+            }],
+            Some(1_700_000_000),
+            &stale_symbols,
+        );
+        app.open_ticker_detail("NVDA");
+
+        app.queue_detail_chart_request(Some(&sender));
+
+        assert!(matches!(
+            receiver.recv().expect("stale chart should trigger a refresh"),
+            super::ChartControl::Load {
+                symbol,
+                range: ChartRange::Year,
+                request_id: 1,
+                ..
+            } if symbol == "NVDA"
+        ));
+        assert!(matches!(
+            app.detail_chart_entry("NVDA"),
+            Some(super::ChartCacheEntry::Loading {
+                previous: Some(candles),
+                ..
+            }) if !candles.is_empty()
+        ));
+    }
+
+    #[test]
+    fn queue_background_chart_requests_skip_cached_ranges_and_limit_batch_size() {
+        let mut app = AppState::default();
+        let (sender, receiver) = mpsc::channel();
+        let symbols = ["SYM0", "SYM1", "SYM2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for range in chart_ranges() {
+            let key = super::ChartCacheKey::new("SYM0", range);
+            let candles = historical_candles();
+            app.chart_cache.insert(
+                key.clone(),
+                super::ChartCacheEntry::Ready {
+                    candles: candles.clone(),
+                },
+            );
+            app.chart_summary_cache.insert(
+                key,
+                summarize_chart_range(range, 1_700_000_000, &candles),
+            );
+        }
+
+        app.queue_background_chart_requests(Some(&sender), &symbols);
+
+        let mut queued = Vec::new();
+        while let Ok(request) = receiver.try_recv() {
+            queued.push(request);
+        }
+
+        assert_eq!(queued.len(), BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE);
+        assert!(queued.iter().all(|request| {
+            matches!(
+                request,
+                super::ChartControl::Load {
+                    symbol,
+                    kind: super::ChartRequestKind::Background,
+                    ..
+                } if symbol != "SYM0"
+            )
+        }));
+    }
+
+    #[test]
+    fn background_chart_refresh_replaces_warm_start_cache_entry() {
+        let mut app = AppState::default();
+        let stale_symbols = Vec::<String>::new();
+        let stale_candles = historical_candles();
+        let refreshed_candles = vec![HistoricalCandle {
+            epoch_seconds: 42,
+            open_cents: 500,
+            high_cents: 575,
+            low_cents: 490,
+            close_cents: 560,
+            volume: 10,
+        }];
+        let key = super::ChartCacheKey::new("NVDA", ChartRange::Year);
+        app.load_warm_start(
+            &[persistence::PersistedChartRecord {
+                symbol: "NVDA".to_string(),
+                range: ChartRange::Year,
+                candles: stale_candles.clone(),
+                fetched_at: 1_700_000_000,
+            }],
+            Some(1_700_000_000),
+            &stale_symbols,
+        );
+        app.background_chart_requests.insert(key.clone(), 7);
+
+        let persisted = app.apply_chart_data(super::ChartDataEvent {
+            symbol: "NVDA".to_string(),
+            range: ChartRange::Year,
+            request_id: 7,
+            kind: super::ChartRequestKind::Background,
+            fetched_at: 1_700_000_100,
+            result: Ok(refreshed_candles.clone()),
+        });
+
+        assert!(matches!(
+            persisted,
+            Some(persistence::PersistedChartRecord {
+                symbol,
+                range: ChartRange::Year,
+                candles,
+                fetched_at: 1_700_000_100,
+            }) if symbol == "NVDA" && candles == refreshed_candles
+        ));
+        assert!(matches!(
+            app.chart_cache.get(&key),
+            Some(super::ChartCacheEntry::Ready { candles }) if candles == &refreshed_candles
+        ));
+        assert!(!app.is_chart_stale("NVDA", ChartRange::Year));
+    }
+
+    #[test]
     fn stale_chart_response_does_not_replace_newer_request() {
         let mut app = AppState::default();
         let (sender, _receiver) = mpsc::channel();
@@ -9314,10 +12951,12 @@ mod tests {
             .remove(&super::ChartCacheKey::new("NVDA", ChartRange::Year));
         app.queue_detail_chart_request(Some(&sender));
 
-        app.apply_chart_data(super::ChartDataEvent {
+        let persisted = app.apply_chart_data(super::ChartDataEvent {
             symbol: "NVDA".to_string(),
             range: ChartRange::Year,
             request_id: 1,
+            kind: super::ChartRequestKind::Detail,
+            fetched_at: 1_700_000_000,
             result: Ok(vec![HistoricalCandle {
                 epoch_seconds: 1,
                 open_cents: 1,
@@ -9328,10 +12967,12 @@ mod tests {
             }]),
         });
 
+        assert!(persisted.is_none());
         assert!(matches!(
             app.detail_chart_entry("NVDA"),
             Some(super::ChartCacheEntry::Loading { request_id: 2, .. })
         ));
+        assert!(app.chart_summary("NVDA", ChartRange::Year).is_none());
     }
 
     #[test]
@@ -9346,6 +12987,7 @@ mod tests {
                 symbol: "AMD".to_string(),
                 range: ChartRange::Month,
                 request_id: 7,
+                kind: super::ChartRequestKind::Detail,
             })
             .expect("chart control should accept the request");
         drop(control_sender);
@@ -9371,6 +13013,7 @@ mod tests {
                 range,
                 request_id,
                 result,
+                ..
             }) => {
                 assert_eq!(symbol, "AMD");
                 assert_eq!(range, ChartRange::Month);
@@ -9382,6 +13025,160 @@ mod tests {
             }
             _ => panic!("expected chart data event"),
         }
+    }
+
+    #[test]
+    fn history_graph_mode_renders_core_tiles() {
+        let mut app = AppState::default();
+        app.history_cache
+            .insert("AAPL".to_string(), sample_history_records("AAPL", true));
+
+        let lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 140, 28);
+
+        assert!(lines.iter().any(|line| line.text.contains("view=Graphs")));
+        assert!(lines.iter().any(|line| line.text.contains("Market price")));
+        assert!(lines.iter().any(|line| line.text.contains("Intrinsic value")));
+    }
+
+    #[test]
+    fn history_relative_graph_mode_handles_empty_state() {
+        let mut app = AppState::default();
+        app.history_view.group = HistoryMetricGroup::Relative;
+        app.history_cache
+            .insert("AAPL".to_string(), sample_history_records("AAPL", false));
+
+        let lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 140, 24);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("No graph tiles are available")));
+    }
+
+    #[test]
+    fn history_graph_layout_switches_between_two_and_one_column_modes() {
+        let mut app = AppState::default();
+        app.history_cache
+            .insert("AAPL".to_string(), sample_history_records("AAPL", true));
+
+        let wide_lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 140, 28);
+        let narrow_lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 90, 28);
+
+        assert!(wide_lines.iter().any(|line| {
+            line.text.contains("Market price") && line.text.contains("Intrinsic value")
+        }));
+        assert!(!narrow_lines.iter().any(|line| {
+            line.text.contains("Market price") && line.text.contains("Intrinsic value")
+        }));
+    }
+
+    #[test]
+    fn toggle_history_subview_preserves_group_and_window() {
+        let mut app = AppState::default();
+        app.open_ticker_detail("AAPL");
+        app.toggle_detail_tab();
+        app.history_view.group = HistoryMetricGroup::Dcf;
+        app.history_view.window = HistoryWindow::Year;
+
+        app.toggle_history_subview();
+
+        assert_eq!(app.history_view.subview, HistorySubview::Table);
+        assert_eq!(app.history_view.group, HistoryMetricGroup::Dcf);
+        assert_eq!(app.history_view.window, HistoryWindow::Year);
+    }
+
+    #[test]
+    fn export_selected_history_bundle_writes_expected_csv_files() {
+        let export_root = unique_test_path("history-export");
+        let _ = fs::remove_dir_all(&export_root);
+
+        let mut app = AppState::default();
+        app.open_ticker_detail("AAPL");
+        app.toggle_detail_tab();
+        app.set_history_export_root(export_root.clone());
+        app.history_cache
+            .insert("AAPL".to_string(), sample_history_records("AAPL", true));
+
+        let metadata =
+            export_selected_history_bundle(&mut app, None).expect("history export should succeed");
+
+        let expected_files = [
+            "export_metadata.csv",
+            "core_wide.csv",
+            "fundamentals_wide.csv",
+            "relative_wide.csv",
+            "dcf_wide.csv",
+            "chart_wide.csv",
+            "all_tidy.csv",
+        ];
+        for filename in expected_files {
+            assert!(metadata.export_dir.join(filename).exists(), "{filename} should exist");
+        }
+
+        let core_csv =
+            fs::read_to_string(metadata.export_dir.join("core_wide.csv")).expect("core csv");
+        assert!(core_csv.contains("market_price_usd"));
+        assert!(core_csv.contains("intrinsic_value_usd"));
+        assert!(core_csv.contains("185.000000"));
+
+        let chart_csv =
+            fs::read_to_string(metadata.export_dir.join("chart_wide.csv")).expect("chart csv");
+        assert!(chart_csv.contains("d_close_usd"));
+        assert!(chart_csv.contains("y10_histogram_usd"));
+
+        let tidy_csv =
+            fs::read_to_string(metadata.export_dir.join("all_tidy.csv")).expect("tidy csv");
+        assert!(tidy_csv.contains("group_key,metric_key,metric_label,range_key,unit,value"));
+        assert!(tidy_csv.contains("core,market_price_usd,Market price,,usd"));
+        assert!(tidy_csv.contains("chart,d_close_usd,D Close,d,usd"));
+
+        let _ = fs::remove_dir_all(&export_root);
+    }
+
+    #[test]
+    fn export_selected_history_bundle_loads_missing_history_from_sqlite() {
+        let state_db = unique_test_path("history-export.sqlite3");
+        let export_root = unique_test_path("history-export-on-demand");
+        let _ = fs::remove_file(&state_db);
+        let _ = fs::remove_dir_all(&export_root);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        let record = sample_history_records("AAPL", true)
+            .into_iter()
+            .next()
+            .expect("sample history should exist");
+        persistence_handle
+            .persist_batch(
+                Vec::new(),
+                vec![persistence::SymbolRevisionInput {
+                    symbol: record.symbol.clone(),
+                    evaluated_at: record.evaluated_at,
+                    last_sequence: record.last_sequence,
+                    update_count: record.update_count,
+                    price_history: Vec::new(),
+                    payload: record.payload.clone(),
+                }],
+            )
+            .expect("history revision should persist");
+
+        let mut app = AppState::default();
+        app.open_ticker_detail("AAPL");
+        app.toggle_detail_tab();
+        app.set_history_export_root(export_root.clone());
+
+        let metadata = export_selected_history_bundle(&mut app, Some(&persistence_handle))
+            .expect("history export should load missing history");
+
+        assert_eq!(metadata.revision_count, 1);
+        assert_eq!(app.detail_history("AAPL").len(), 1);
+        assert!(metadata.export_dir.join("export_metadata.csv").exists());
+
+        persistence_handle.shutdown(1_700_000_000);
+        let _ = fs::remove_file(&state_db);
+        let _ = fs::remove_dir_all(&export_root);
     }
 
     #[test]

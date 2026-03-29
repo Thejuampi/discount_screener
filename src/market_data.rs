@@ -5,15 +5,16 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use discount_screener::build_analyst_score;
 use discount_screener::AnalystOutcomeSample;
 use discount_screener::ExternalValuationSignal;
 use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
-use discount_screener::build_analyst_score;
-use reqwest::Url;
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use reqwest::Url;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -86,7 +87,7 @@ pub struct LiveSymbolFeed {
     pub fundamentals: Option<FundamentalSnapshot>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChartRange {
     Day,
     Week,
@@ -96,7 +97,7 @@ pub enum ChartRange {
     TenYears,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoricalCandle {
     pub epoch_seconds: u64,
     pub open_cents: i64,
@@ -106,13 +107,13 @@ pub struct HistoricalCandle {
     pub volume: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnualReportedValue {
     pub as_of_date: String,
     pub value: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct FundamentalTimeseries {
     pub free_cash_flow: Vec<AnnualReportedValue>,
     pub operating_cash_flow: Vec<AnnualReportedValue>,
@@ -711,7 +712,7 @@ fn non_negative_f64_to_u64(value: f64) -> Option<u64> {
         return None;
     }
 
-    Some(value.round() as u64)
+    rounded_f64_to_u64(value)
 }
 
 fn finite_f64_to_i64(value: f64) -> Option<i64> {
@@ -719,7 +720,7 @@ fn finite_f64_to_i64(value: f64) -> Option<i64> {
         return None;
     }
 
-    Some(value.round() as i64)
+    rounded_f64_to_i64(value)
 }
 
 fn scale_money_to_cents_signed(value: f64) -> Option<i64> {
@@ -727,7 +728,7 @@ fn scale_money_to_cents_signed(value: f64) -> Option<i64> {
         return None;
     }
 
-    Some((value * 100.0).round() as i64)
+    rounded_f64_to_i64(value * 100.0)
 }
 
 fn scale_non_negative_ratio_to_hundredths(value: f64) -> Option<u32> {
@@ -735,7 +736,7 @@ fn scale_non_negative_ratio_to_hundredths(value: f64) -> Option<u32> {
         return None;
     }
 
-    Some((value * 100.0).round() as u32)
+    rounded_f64_to_u32(value * 100.0)
 }
 
 fn scale_ratio_to_hundredths_signed(value: f64) -> Option<i32> {
@@ -743,7 +744,7 @@ fn scale_ratio_to_hundredths_signed(value: f64) -> Option<i32> {
         return None;
     }
 
-    Some((value * 100.0).round() as i32)
+    rounded_f64_to_i32(value * 100.0)
 }
 
 fn scale_ratio_to_bps(value: f64) -> Option<i32> {
@@ -751,7 +752,7 @@ fn scale_ratio_to_bps(value: f64) -> Option<i32> {
         return None;
     }
 
-    Some((value * 10_000.0).round() as i32)
+    rounded_f64_to_i32(value * 10_000.0)
 }
 
 fn scale_ratio_to_millis(value: f64) -> Option<i32> {
@@ -759,7 +760,32 @@ fn scale_ratio_to_millis(value: f64) -> Option<i32> {
         return None;
     }
 
-    Some((value * 1_000.0).round() as i32)
+    rounded_f64_to_i32(value * 1_000.0)
+}
+
+fn rounded_f64_to_u64(value: f64) -> Option<u64> {
+    let rounded = value.round();
+    (rounded >= 0.0 && rounded <= u64::MAX as f64).then_some(rounded as u64)
+}
+
+fn rounded_f64_to_u32(value: f64) -> Option<u32> {
+    let rounded = value.round();
+    (rounded >= 0.0 && rounded <= u32::MAX as f64).then_some(rounded as u32)
+}
+
+fn rounded_f64_to_i64(value: f64) -> Option<i64> {
+    let rounded = value.round();
+    (rounded >= i64::MIN as f64 && rounded <= i64::MAX as f64).then_some(rounded as i64)
+}
+
+fn rounded_f64_to_u16(value: f64) -> Option<u16> {
+    let rounded = value.round();
+    (rounded >= 0.0 && rounded <= u16::MAX as f64).then_some(rounded as u16)
+}
+
+fn rounded_f64_to_i32(value: f64) -> Option<i32> {
+    let rounded = value.round();
+    (rounded >= i32::MIN as f64 && rounded <= i32::MAX as f64).then_some(rounded as i32)
 }
 
 fn parse_timeseries_metric(root: &Value, metric_name: &str) -> Vec<AnnualReportedValue> {
@@ -891,7 +917,7 @@ fn dollars_to_cents(value: f64) -> Option<i64> {
         return None;
     }
 
-    Some((value * 100.0).round() as i64)
+    rounded_f64_to_i64(value * 100.0)
 }
 
 fn decimal_to_hundredths(value: f64) -> Option<u16> {
@@ -899,7 +925,7 @@ fn decimal_to_hundredths(value: f64) -> Option<u16> {
         return None;
     }
 
-    Some((value * 100.0).round() as u16)
+    rounded_f64_to_u16(value * 100.0)
 }
 
 #[derive(Deserialize)]
@@ -1305,6 +1331,16 @@ fn closing_price_cents_on_or_after(
 
 #[cfg(test)]
 mod tests {
+    use super::chart_api_url;
+    use super::chart_range_api_url;
+    use super::chart_range_spec;
+    use super::compute_weighted_analyst_target;
+    use super::default_live_symbols;
+    use super::extract_embedded_json_object;
+    use super::parse_quote_page;
+    use super::parse_timeseries_metric;
+    use super::populate_weighted_target;
+    use super::quote_page_url;
     use super::AnnualReportedValue;
     use super::ChartRange;
     use super::HistoricalCandle;
@@ -1317,16 +1353,6 @@ mod tests {
     use super::YahooChartResponse;
     use super::YahooChartResult;
     use super::YahooUpgradeDowngradeEntry;
-    use super::chart_api_url;
-    use super::chart_range_api_url;
-    use super::chart_range_spec;
-    use super::compute_weighted_analyst_target;
-    use super::default_live_symbols;
-    use super::extract_embedded_json_object;
-    use super::parse_quote_page;
-    use super::parse_timeseries_metric;
-    use super::populate_weighted_target;
-    use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
     use serde_json::json;
@@ -1560,6 +1586,17 @@ mod tests {
             parse_quote_page("AAPL", body).expect("sample response should parse"),
             None
         );
+    }
+
+    #[test]
+    fn out_of_range_numeric_conversions_fail_closed() {
+        assert_eq!(super::non_negative_f64_to_u64(1.0e20), None);
+        assert_eq!(super::finite_f64_to_i64(1.0e20), None);
+        assert_eq!(super::scale_money_to_cents_signed(1.0e20), None);
+        assert_eq!(super::scale_non_negative_ratio_to_hundredths(1.0e20), None);
+        assert_eq!(super::scale_ratio_to_hundredths_signed(1.0e20), None);
+        assert_eq!(super::scale_ratio_to_bps(1.0e20), None);
+        assert_eq!(super::scale_ratio_to_millis(1.0e20), None);
     }
 
     #[test]
