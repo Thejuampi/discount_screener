@@ -2,6 +2,7 @@
 /target_agent_test/
 /target-review/
 /target_agent_test2/
+mutants.out*/
 .claude/
 feed-errors.log
 help-output.txt

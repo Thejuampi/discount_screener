@@ -7,10 +7,52 @@
 - Prefer extending the existing module that owns a concern rather than adding cross-cutting logic to the terminal entrypoint.
 - Integration tests live in `tests/` and commonly share setup helpers from `tests/support/mod.rs`.
 
+### Event Loop
+
+The main loop (`src/main.rs:~2790`) is an `mpsc::Receiver<AppEvent>` that processes a single event then calls `render()`. The `AppEvent` enum is the central dispatch:
+
+| Variant | Source thread | Purpose |
+|---|---|---|
+| `Input(KeyEvent)` | crossterm reader thread | User keypresses |
+| `Resize` | crossterm reader thread | Terminal resize |
+| `FeedBatch(Vec<FeedEvent>)` | feed loop thread | Yahoo quote/fundamentals/coverage updates |
+| `ChartData(ChartDataEvent)` | chart loop thread | Historical OHLC candles |
+| `AnalysisData(AnalysisDataEvent)` | analysis worker thread | DCF computation results |
+| `HistoryLoaded { .. }` | persistence thread | SQLite warm-start restore |
+
+Each thread receives commands via its own `mpsc::Sender<*Control>` channel and publishes results back on the shared `AppEvent` channel. The main thread owns all mutable state (`AppState`, `TerminalState`) — no locking needed.
+
+### Rendering
+
+The `render()` function builds a full `Vec<RenderLine>` every call, then `ScreenRenderer` compares against the previous frame row-by-row. Only dirty rows are written to the terminal, bracketed by `BeginSynchronizedUpdate`/`EndSynchronizedUpdate` to prevent tearing. The ticker detail layout (`detail_layout()`) dynamically switches between compact and full modes based on viewport dimensions.
+
+### Data Flow
+
+```
+Yahoo Finance HTML pages
+    → MarketDataClient (src/market_data.rs) parses quote pages into FeedEvent
+    → feed loop publishes AppEvent::FeedBatch
+    → main loop updates TerminalState (src/lib.rs)
+    → render() reads TerminalState + AppState to produce RenderLines
+    → ScreenRenderer writes only changed rows via crossterm
+```
+
+DCF analysis is a second async path: `AppState` queues `AnalysisCacheEntry::Loading`, the analysis worker fetches Yahoo cash-flow history, computes bear/base/bull scenarios, and publishes `AppEvent::AnalysisData`.
+
+### Key Types
+
+- `TerminalState` (lib.rs) — the authoritative state for all tracked symbols, rankings, and alerts
+- `AppState` (main.rs) — UI-specific state: selection, input modes, analysis/chart caches, issue center
+- `SymbolDetail` (lib.rs) — per-ticker aggregate used by all render functions
+- `FundamentalSnapshot` (lib.rs) — Yahoo fundamentals with fixed-point fields (`*_cents`, `*_bps`, `*_hundredths`, `*_millis`)
+- `AnalysisCacheEntry` (main.rs) — per-symbol DCF state machine: `Loading → Ready | Failed`
+
 ## Build And Test
 
 - Use strict TDD for behavior changes: write the failing test first, implement the smallest change to reach GREEN, then REFACTOR only while the test suite stays green.
 - Run `cargo test` for the main verification pass.
+- Run `cargo test --bin discount_screener -- <test_name>` to run a single unit test.
+- Run `cargo test --bin discount_screener -- <substring>` to run tests matching a substring.
 - Run `cargo run -- --smoke` for a non-interactive smoke check; it is the quickest way to verify the binary and does not require live network access.
 - Run `cargo run` for the full workstation. Live mode needs a terminal that supports alternate screen mode and outbound HTTPS access to Yahoo Finance public endpoints.
 - After finishing a task, do mutation testing locally around the changed behavior.

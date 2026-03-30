@@ -1253,12 +1253,12 @@ impl AppState {
         };
         let analysis_input = analysis_input_key(&fundamentals);
 
-        if matches!(
-            self.analysis_cache.get(symbol),
-            Some(AnalysisCacheEntry::Loading { input, .. } | AnalysisCacheEntry::Ready { input, .. })
-                if *input == analysis_input
-        ) {
-            return;
+        match self.analysis_cache.get(symbol) {
+            Some(
+                AnalysisCacheEntry::Loading { input, .. } | AnalysisCacheEntry::Ready { input, .. },
+            ) if *input == analysis_input => return,
+            Some(AnalysisCacheEntry::Failed { input, .. }) if *input == analysis_input => return,
+            _ => {}
         }
 
         let request_id = self.next_analysis_request_id;
@@ -2388,7 +2388,9 @@ static PANIC_REPORT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 #[derive(Default)]
 struct ScreenRenderer {
-    previous_frame: Vec<RenderLine>,
+    displayed: Vec<RenderLine>,
+    scratch: Vec<RenderLine>,
+    dirty_rows: Vec<usize>,
     last_painted_rows: usize,
 }
 
@@ -2400,15 +2402,18 @@ impl ScreenRenderer {
         viewport_width: usize,
         viewport_height: usize,
     ) -> io::Result<()> {
-        let next_frame = normalize_frame(lines, viewport_width, viewport_height);
-        let dirty_rows = collect_dirty_rows(&self.previous_frame, &next_frame, viewport_height);
-        let clear_rows =
-            collect_clear_rows(next_frame.len(), self.last_painted_rows, viewport_height);
+        self.scratch.clear();
+        normalize_frame_into(lines, viewport_width, viewport_height, &mut self.scratch);
 
-        if dirty_rows.is_empty() && clear_rows.is_empty() {
-            self.previous_frame = next_frame;
+        self.dirty_rows.clear();
+        collect_dirty_rows_into(&self.displayed, &self.scratch, viewport_height, &mut self.dirty_rows);
+        let clear_rows =
+            collect_clear_rows(self.scratch.len(), self.last_painted_rows, viewport_height);
+
+        if self.dirty_rows.is_empty() && clear_rows.is_empty() {
+            std::mem::swap(&mut self.displayed, &mut self.scratch);
             if viewport_height >= self.last_painted_rows {
-                self.last_painted_rows = self.previous_frame.len();
+                self.last_painted_rows = self.displayed.len();
             }
             return Ok(());
         }
@@ -2416,8 +2421,8 @@ impl ScreenRenderer {
         queue!(stdout, BeginSynchronizedUpdate)
             .map_err(|error| with_io_context(error, "begin synchronized terminal update"))?;
 
-        for row_index in dirty_rows {
-            paint_row(stdout, row_index, next_frame.get(row_index))?;
+        for &row_index in &self.dirty_rows {
+            paint_row(stdout, row_index, self.scratch.get(row_index))?;
         }
 
         for row_index in clear_rows {
@@ -2430,9 +2435,9 @@ impl ScreenRenderer {
             .flush()
             .map_err(|error| with_io_context(error, "flush terminal output"))?;
 
-        self.previous_frame = next_frame;
+        std::mem::swap(&mut self.displayed, &mut self.scratch);
         if viewport_height >= self.last_painted_rows {
-            self.last_painted_rows = self.previous_frame.len();
+            self.last_painted_rows = self.displayed.len();
         }
 
         Ok(())
@@ -3906,7 +3911,7 @@ fn build_screen_lines_for_viewport(
 
     let selected_row = rows.get(selected_index);
     let selected_detail = selected_row.and_then(|row| state.detail(&row.symbol));
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(viewport_height);
     let tracked_count = live_symbols.map(|symbols| symbols.count()).unwrap_or(0);
     let source_status = app.live_source_status();
     let health_status = app.issue_center.health_status();
@@ -4595,7 +4600,7 @@ fn build_ticker_detail_lines_for_viewport(
         .unwrap_or(1);
     let symbol_count = detail_rows.len().max(1);
     let layout = detail_layout(viewport_width, viewport_height);
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(viewport_height);
 
     lines.push(RenderLine {
         color: Some(Color::Yellow),
@@ -5256,7 +5261,7 @@ fn build_fundamentals_lines(
                 "WACC {}  FCF/share CAGR {}  Net debt {}",
                 format_bps(analysis.wacc_bps),
                 format_bps(analysis.base_growth_bps),
-                format_money_from_dollars(analysis.net_debt_dollars),
+                format_compact_dollars(analysis.net_debt_dollars),
             ),
         });
     } else if let Some(note) = analysis_snapshot.note.as_ref() {
@@ -5295,11 +5300,11 @@ fn build_fundamentals_lines(
             format_optional_percent_ratio(fundamental_fcf_yield(fundamentals)),
             fundamentals
                 .operating_cash_flow_dollars
-                .map(format_money_from_dollars)
+                .map(format_compact_dollars)
                 .unwrap_or_else(|| "n/a".to_string()),
             fundamentals
                 .free_cash_flow_dollars
-                .map(format_money_from_dollars)
+                .map(format_compact_dollars)
                 .unwrap_or_else(|| "n/a".to_string()),
         ),
     });
@@ -6176,6 +6181,18 @@ fn format_compact_quantity(value: u64) -> String {
     }
 }
 
+fn format_compact_dollars(value_dollars: i64) -> String {
+    let sign = if value_dollars < 0 { "-" } else { "" };
+    let absolute = value_dollars.unsigned_abs();
+    match absolute {
+        1_000_000_000_000.. => format!("{sign}${:.2}T", absolute as f64 / 1_000_000_000_000.0),
+        1_000_000_000.. => format!("{sign}${:.2}B", absolute as f64 / 1_000_000_000.0),
+        1_000_000.. => format!("{sign}${:.2}M", absolute as f64 / 1_000_000.0),
+        1_000.. => format!("{sign}${:.1}K", absolute as f64 / 1_000.0),
+        _ => format!("{sign}${absolute}"),
+    }
+}
+
 fn build_consensus_graph_lines(detail: &SymbolDetail) -> Vec<RenderLine> {
     let rating_rows = vec![
         (
@@ -6412,19 +6429,31 @@ fn analyst_consensus_lines(detail: &SymbolDetail) -> Vec<String> {
     lines
 }
 
+fn normalize_frame_into(
+    lines: &[RenderLine],
+    viewport_width: usize,
+    viewport_height: usize,
+    output: &mut Vec<RenderLine>,
+) {
+    output.clear();
+    output.reserve(viewport_height.saturating_sub(output.capacity()));
+    for line in lines.iter().take(viewport_height) {
+        output.push(RenderLine {
+            color: line.color,
+            text: clip_text_to_width(&line.text, viewport_width),
+        });
+    }
+}
+
+#[cfg(test)]
 fn normalize_frame(
     lines: &[RenderLine],
     viewport_width: usize,
     viewport_height: usize,
 ) -> Vec<RenderLine> {
-    lines
-        .iter()
-        .take(viewport_height)
-        .map(|line| RenderLine {
-            color: line.color,
-            text: clip_text_to_width(&line.text, viewport_width),
-        })
-        .collect()
+    let mut output = Vec::with_capacity(viewport_height);
+    normalize_frame_into(lines, viewport_width, viewport_height, &mut output);
+    output
 }
 
 fn encode_color_marker(color: Option<Color>) -> char {
@@ -6525,24 +6554,33 @@ fn styled_cells_line(cells: &[StyledCell]) -> RenderLine {
     styled_segments_line(segments)
 }
 
+#[cfg(test)]
 fn collect_dirty_rows(
     previous_frame: &[RenderLine],
     next_frame: &[RenderLine],
     viewport_height: usize,
 ) -> Vec<usize> {
+    let mut dirty_rows = Vec::new();
+    collect_dirty_rows_into(previous_frame, next_frame, viewport_height, &mut dirty_rows);
+    dirty_rows
+}
+
+fn collect_dirty_rows_into(
+    previous_frame: &[RenderLine],
+    next_frame: &[RenderLine],
+    viewport_height: usize,
+    output: &mut Vec<usize>,
+) {
+    output.clear();
     let visible_rows = previous_frame
         .len()
         .max(next_frame.len())
         .min(viewport_height);
-    let mut dirty_rows = Vec::new();
-
     for row_index in 0..visible_rows {
         if previous_frame.get(row_index) != next_frame.get(row_index) {
-            dirty_rows.push(row_index);
+            output.push(row_index);
         }
     }
-
-    dirty_rows
 }
 
 fn collect_clear_rows(
@@ -10258,10 +10296,6 @@ fn format_money(value_cents: i64) -> String {
     format!("{sign}${dollars}.{cents:02}")
 }
 
-fn format_money_from_dollars(value_dollars: i64) -> String {
-    format_money(value_dollars.saturating_mul(100))
-}
-
 fn format_bps(value_bps: i32) -> String {
     let sign = if value_bps < 0 { "-" } else { "" };
     let absolute_bps = value_bps.unsigned_abs();
@@ -10469,6 +10503,7 @@ mod tests {
     use super::feed_loop_with_client_factory;
     use super::filtered_symbol_rows;
     use super::format_bps;
+    use super::format_compact_dollars;
     use super::format_money;
     use super::format_symbol_list;
     use super::gap_meter;
@@ -10528,6 +10563,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::mpsc;
+    use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
@@ -10613,6 +10649,12 @@ mod tests {
                 _ => panic!("expected {label}"),
             }
         }
+    }
+
+    fn recv_with_timeout<T>(receiver: &mpsc::Receiver<T>, message: &str) -> T {
+        receiver
+            .recv_timeout(Duration::from_millis(250))
+            .expect(message)
     }
 
     fn unique_test_path(label: &str) -> PathBuf {
@@ -11587,7 +11629,7 @@ mod tests {
         app.open_ticker_detail("NVDA");
         app.queue_detail_analysis_request(&state, Some(&sender));
 
-        let first = receiver.recv().expect("analysis request should be queued");
+        let first = recv_with_timeout(&receiver, "analysis request should be queued");
         let request_id = match first {
             AnalysisControl::Load {
                 symbol,
@@ -11611,7 +11653,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_detail_analysis_request_retries_after_a_failed_attempt() {
+    fn queue_detail_analysis_request_skips_failed_entries_with_matching_input() {
         let mut state = TerminalState::new(2_000, 30, 8);
         let fundamentals =
             sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
@@ -11637,7 +11679,92 @@ mod tests {
 
         app.queue_detail_analysis_request(&state, Some(&sender));
 
-        let queued = receiver.recv().expect("failed analysis should be retried");
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            app.detail_analysis_entry("NVDA"),
+            Some(AnalysisCacheEntry::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn queue_detail_analysis_request_retries_failed_when_input_changes() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+
+        let mut stale_fundamentals = fundamentals.clone();
+        stale_fundamentals.beta_millis = Some(1_450);
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Failed {
+                input: analysis_input_key(&stale_fundamentals),
+                message: "temporary Yahoo timeout".to_string(),
+            },
+        );
+
+        app.queue_detail_analysis_request(&state, Some(&sender));
+
+        let queued =
+            recv_with_timeout(&receiver, "failed analysis should retry when inputs change");
+        match queued {
+            AnalysisControl::Load {
+                symbol,
+                fundamentals: payload,
+                ..
+            } => {
+                assert_eq!(symbol, "NVDA");
+                assert_eq!(payload, fundamentals);
+            }
+        }
+        assert!(matches!(
+            app.detail_analysis_entry("NVDA"),
+            Some(AnalysisCacheEntry::Loading { .. })
+        ));
+    }
+
+    #[test]
+    fn queue_detail_analysis_request_retries_ready_when_input_changes() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.open_ticker_detail("NVDA");
+
+        let mut stale_fundamentals = fundamentals.clone();
+        stale_fundamentals.total_cash_dollars = Some(35_000_000);
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&stale_fundamentals),
+                analysis: sample_ready_analysis(),
+            },
+        );
+
+        app.queue_detail_analysis_request(&state, Some(&sender));
+
+        let queued = recv_with_timeout(&receiver, "stale ready analysis should be refreshed");
         match queued {
             AnalysisControl::Load {
                 symbol,
@@ -11672,9 +11799,7 @@ mod tests {
         let mut app = AppState::default();
         app.open_ticker_detail("NVDA");
         app.queue_detail_analysis_request(&state, Some(&sender));
-        let _ = receiver
-            .recv()
-            .expect("initial analysis request should be queued");
+        let _ = recv_with_timeout(&receiver, "initial analysis request should be queued");
 
         let mut refreshed = fundamentals.clone();
         refreshed.market_cap_dollars = Some(1_350_000_000);
@@ -11682,6 +11807,80 @@ mod tests {
 
         app.queue_detail_analysis_request(&state, Some(&sender));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn background_analysis_skips_failed_entries_with_matching_input() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Failed {
+                input: analysis_input_key(&fundamentals),
+                message: "DCF unavailable: latest annual free cash flow is not positive."
+                    .to_string(),
+            },
+        );
+
+        app.queue_background_analysis_requests(&state, Some(&sender), &["NVDA".to_string()]);
+
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            app.detail_analysis_entry("NVDA"),
+            Some(AnalysisCacheEntry::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn background_analysis_retries_failed_when_input_changes() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NVDA".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_200,
+            intrinsic_value_cents: 1_800,
+        });
+        state.ingest_fundamentals(fundamentals.clone());
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = AppState::default();
+
+        let mut stale_fundamentals = fundamentals.clone();
+        stale_fundamentals.total_debt_dollars = Some(999_000_000);
+        app.analysis_cache.insert(
+            "NVDA".to_string(),
+            AnalysisCacheEntry::Failed {
+                input: analysis_input_key(&stale_fundamentals),
+                message: "transient failure".to_string(),
+            },
+        );
+
+        app.queue_background_analysis_requests(&state, Some(&sender), &["NVDA".to_string()]);
+
+        let queued = recv_with_timeout(
+            &receiver,
+            "background should retry when input key has changed",
+        );
+        match queued {
+            AnalysisControl::Load { symbol, .. } => {
+                assert_eq!(symbol, "NVDA");
+            }
+        }
     }
 
     #[test]
@@ -14066,6 +14265,17 @@ mod tests {
             (format_money(-50), format_bps(-50)),
             ("-$0.50".to_string(), "-0.50%".to_string())
         );
+    }
+
+    #[test]
+    fn compact_dollars_uses_m_b_t_suffixes() {
+        assert_eq!(format_compact_dollars(500), "$500");
+        assert_eq!(format_compact_dollars(1_500), "$1.5K");
+        assert_eq!(format_compact_dollars(86_000_000), "$86.00M");
+        assert_eq!(format_compact_dollars(1_500_000_000), "$1.50B");
+        assert_eq!(format_compact_dollars(2_500_000_000_000), "$2.50T");
+        assert_eq!(format_compact_dollars(-76_326_000), "-$76.33M");
+        assert_eq!(format_compact_dollars(-1_200_000_000), "-$1.20B");
     }
 
     #[test]
