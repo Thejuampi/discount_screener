@@ -53,7 +53,6 @@ use crossterm::terminal::LeaveAlternateScreen;
 use discount_screener::AlertEvent;
 use discount_screener::AlertKind;
 use discount_screener::CandidateRow;
-use discount_screener::checked_gap_bps;
 use discount_screener::ConfidenceBand;
 use discount_screener::ExternalSignalStatus;
 use discount_screener::ExternalValuationSignal;
@@ -64,14 +63,13 @@ use discount_screener::SymbolDetail;
 use discount_screener::TapeEvent;
 use discount_screener::TerminalState;
 use discount_screener::ViewFilter;
+use discount_screener::checked_gap_bps;
 use market_data::ChartRange;
 use market_data::DEFAULT_POLL_INTERVAL;
 use market_data::FundamentalTimeseries;
 use market_data::HistoricalCandle;
 use market_data::MarketDataClient;
 use market_data::default_live_symbols;
-use serde::Deserialize;
-use serde::Serialize;
 use persistence::PersistedChartRecord;
 use persistence::PersistedIssueRecord;
 use persistence::PersistenceBootstrap;
@@ -79,6 +77,8 @@ use persistence::PersistenceHandle;
 use persistence::PersistenceStatusEvent;
 use profiles::profile_definitions;
 use profiles::profile_symbols;
+use serde::Deserialize;
+use serde::Serialize;
 
 const MAX_VISIBLE_ALERTS: usize = 6;
 const MAX_VISIBLE_TAPE: usize = 8;
@@ -1092,12 +1092,17 @@ impl AppState {
         self.next_chart_request_id = self.next_chart_request_id.saturating_add(1);
         match kind {
             ChartRequestKind::Detail => {
-                if matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Loading { .. })) {
+                if matches!(
+                    self.chart_cache.get(&key),
+                    Some(ChartCacheEntry::Loading { .. })
+                ) {
                     return false;
                 }
 
-                if matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Ready { .. }))
-                    && !self.stale_chart_cache.contains(&key)
+                if matches!(
+                    self.chart_cache.get(&key),
+                    Some(ChartCacheEntry::Ready { .. })
+                ) && !self.stale_chart_cache.contains(&key)
                 {
                     return false;
                 }
@@ -1117,18 +1122,25 @@ impl AppState {
             }
             ChartRequestKind::Background => {
                 if self.background_chart_requests.contains_key(&key)
-                    || matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Loading { .. }))
+                    || matches!(
+                        self.chart_cache.get(&key),
+                        Some(ChartCacheEntry::Loading { .. })
+                    )
                 {
                     return false;
                 }
 
                 if !self.stale_chart_cache.contains(&key)
                     && (self.chart_summary_cache.contains_key(&key)
-                        || matches!(self.chart_cache.get(&key), Some(ChartCacheEntry::Ready { .. })))
+                        || matches!(
+                            self.chart_cache.get(&key),
+                            Some(ChartCacheEntry::Ready { .. })
+                        ))
                 {
                     return false;
                 }
-                self.background_chart_requests.insert(key.clone(), request_id);
+                self.background_chart_requests
+                    .insert(key.clone(), request_id);
             }
         }
 
@@ -1367,7 +1379,8 @@ impl AppState {
     }
 
     fn chart_summary(&self, symbol: &str, range: ChartRange) -> Option<&ChartRangeSummary> {
-        self.chart_summary_cache.get(&ChartCacheKey::new(symbol, range))
+        self.chart_summary_cache
+            .get(&ChartCacheKey::new(symbol, range))
     }
 
     fn apply_analysis_data(
@@ -1507,7 +1520,8 @@ impl AppState {
         state: &TerminalState,
         coverage_event: SymbolCoverageEvent,
     ) {
-        let is_degraded = coverage_event.coverage.core != market_data::ProviderComponentState::Fresh
+        let is_degraded = coverage_event.coverage.core
+            != market_data::ProviderComponentState::Fresh
             || coverage_event.coverage.external != market_data::ProviderComponentState::Fresh
             || coverage_event.coverage.fundamentals != market_data::ProviderComponentState::Fresh;
 
@@ -1836,7 +1850,8 @@ fn derive_base_growth_bps(fcf_per_share: &[(String, f64)]) -> Option<i32> {
 fn elapsed_years_between(start: &str, end: &str) -> Option<f64> {
     let start_days =
         parse_ymd(start).and_then(|(year, month, day)| days_from_civil(year, month, day))?;
-    let end_days = parse_ymd(end).and_then(|(year, month, day)| days_from_civil(year, month, day))?;
+    let end_days =
+        parse_ymd(end).and_then(|(year, month, day)| days_from_civil(year, month, day))?;
     let elapsed_days = end_days - start_days;
     (elapsed_days > 0).then_some(elapsed_days as f64 / 365.2425)
 }
@@ -1986,9 +2001,9 @@ fn dcf_margin_of_safety_bps(analysis: &DcfAnalysis, market_price_cents: i64) -> 
         return None;
     }
 
-    let scaled_gap_bps = ((analysis.base_intrinsic_value_cents as i128 - market_price_cents as i128)
-        * 10_000)
-        / analysis.base_intrinsic_value_cents as i128;
+    let scaled_gap_bps =
+        ((analysis.base_intrinsic_value_cents as i128 - market_price_cents as i128) * 10_000)
+            / analysis.base_intrinsic_value_cents as i128;
     i32::try_from(scaled_gap_bps).ok()
 }
 
@@ -2687,7 +2702,9 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
     } = load_initial_state(&options)?;
     let mut last_persisted_sequence = state.latest_sequence();
     let live_symbols = Some(LiveSymbolState::new(tracked_symbols));
-    let feed_error_logger = Some(FeedErrorLogger::new(PathBuf::from(DEFAULT_FEED_ERROR_LOG_FILE)));
+    let feed_error_logger = Some(FeedErrorLogger::new(PathBuf::from(
+        DEFAULT_FEED_ERROR_LOG_FILE,
+    )));
     let (app_event_sender, app_event_receiver) = mpsc::channel();
     let app_event_publisher = AppEventPublisher::new(app_event_sender);
     install_shutdown_publisher(app_event_publisher.clone())
@@ -2806,17 +2823,25 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
 
                 if was_paused && !app.paused && !app.pending_feed.is_empty() {
                     let pending_feed = std::mem::take(&mut app.pending_feed);
-                    let applied_feed_batch =
-                        apply_feed_events(&mut state, &mut app, feed_error_logger.as_ref(), pending_feed);
+                    let applied_feed_batch = apply_feed_events(
+                        &mut state,
+                        &mut app,
+                        feed_error_logger.as_ref(),
+                        pending_feed,
+                    );
                     if applied_feed_batch.saw_source_status {
                         synthesize_live_source_status(&state, &mut app, live_symbols.as_ref());
-                        log_live_source_summary(feed_error_logger.as_ref(), app.live_source_status());
+                        log_live_source_summary(
+                            feed_error_logger.as_ref(),
+                            app.live_source_status(),
+                        );
                     }
                     for symbol in &applied_feed_batch.fresh_core_symbols {
                         app.mark_symbol_fresh(symbol);
                     }
                     if applied_feed_batch.applied_events > 0 {
-                        rate_tracker.record_batch(applied_feed_batch.applied_events, Instant::now());
+                        rate_tracker
+                            .record_batch(applied_feed_batch.applied_events, Instant::now());
                     }
                     app.queue_background_chart_requests(
                         Some(&chart_control_sender),
@@ -2856,17 +2881,25 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
                         persistence_handle.replace_issues(app.issue_center.export_state());
                     }
                 } else {
-                    let applied_feed_batch =
-                        apply_feed_events(&mut state, &mut app, feed_error_logger.as_ref(), feed_events);
+                    let applied_feed_batch = apply_feed_events(
+                        &mut state,
+                        &mut app,
+                        feed_error_logger.as_ref(),
+                        feed_events,
+                    );
                     if applied_feed_batch.saw_source_status {
                         synthesize_live_source_status(&state, &mut app, live_symbols.as_ref());
-                        log_live_source_summary(feed_error_logger.as_ref(), app.live_source_status());
+                        log_live_source_summary(
+                            feed_error_logger.as_ref(),
+                            app.live_source_status(),
+                        );
                     }
                     for symbol in &applied_feed_batch.fresh_core_symbols {
                         app.mark_symbol_fresh(symbol);
                     }
                     if applied_feed_batch.applied_events > 0 {
-                        rate_tracker.record_batch(applied_feed_batch.applied_events, Instant::now());
+                        rate_tracker
+                            .record_batch(applied_feed_batch.applied_events, Instant::now());
                     }
                     app.queue_background_chart_requests(
                         Some(&chart_control_sender),
@@ -3381,10 +3414,7 @@ fn reconcile_sqlite_persistence(
         .map(|entry| entry.sequence)
         .max()
         .unwrap_or(*last_persisted_sequence);
-    persistence_handle.persist_batch(
-        raw_captures_from_journal(&delta, recorded_at),
-        revisions,
-    )?;
+    persistence_handle.persist_batch(raw_captures_from_journal(&delta, recorded_at), revisions)?;
     *last_persisted_sequence = max_sequence;
     Ok(())
 }
@@ -3417,7 +3447,8 @@ fn raw_captures_from_journal(
     delta: &[discount_screener::JournalEntry],
     recorded_at: u64,
 ) -> Vec<persistence::RawCapture> {
-    delta.iter()
+    delta
+        .iter()
         .map(|entry| match &entry.payload {
             discount_screener::JournalPayload::Snapshot(snapshot) => persistence::RawCapture {
                 symbol: snapshot.symbol.clone(),
@@ -3526,8 +3557,9 @@ fn build_symbol_revision(
                 market_price_cents: detail.market_price_cents,
                 intrinsic_value_cents: detail.intrinsic_value_cents,
             }),
-            external_signal: detail.external_signal_fair_value_cents.map(|fair_value_cents| {
-                ExternalValuationSignal {
+            external_signal: detail
+                .external_signal_fair_value_cents
+                .map(|fair_value_cents| ExternalValuationSignal {
                     symbol: detail.symbol.clone(),
                     fair_value_cents,
                     age_seconds: detail.external_signal_age_seconds.unwrap_or(0),
@@ -3542,17 +3574,16 @@ fn build_symbol_revision(
                     strong_sell_count: detail.strong_sell_count,
                     weighted_fair_value_cents: detail.weighted_external_signal_fair_value_cents,
                     weighted_analyst_count: detail.weighted_analyst_count,
-                }
-            }),
+                }),
             fundamentals: detail.fundamentals.clone(),
             gap_bps: Some(detail.gap_bps),
             qualification: Some(detail.qualification),
             external_status: Some(detail.external_status),
             confidence: Some(detail.confidence),
             external_gap_bps: detail.external_signal_gap_bps,
-            weighted_gap_bps: detail
-                .weighted_external_signal_fair_value_cents
-                .and_then(|fair_value_cents| checked_gap_bps(detail.market_price_cents, fair_value_cents)),
+            weighted_gap_bps: detail.weighted_external_signal_fair_value_cents.and_then(
+                |fair_value_cents| checked_gap_bps(detail.market_price_cents, fair_value_cents),
+            ),
             dcf_signal: dcf_analysis
                 .as_ref()
                 .map(|analysis| dcf_signal(analysis, detail.market_price_cents)),
@@ -3577,7 +3608,9 @@ fn build_symbol_revision(
             dcf_status: persistence::MetricGroupStatus {
                 available: match app.detail_analysis_entry(symbol) {
                     Some(AnalysisCacheEntry::Ready { .. }) => true,
-                    Some(AnalysisCacheEntry::Failed { .. }) | Some(AnalysisCacheEntry::Loading { .. }) | None => false,
+                    Some(AnalysisCacheEntry::Failed { .. })
+                    | Some(AnalysisCacheEntry::Loading { .. })
+                    | None => false,
                 },
                 stale: false,
             },
@@ -3590,10 +3623,7 @@ fn build_symbol_revision(
     })
 }
 
-fn apply_persistence_status(
-    issue_center: &mut IssueCenter,
-    status: PersistenceStatusEvent,
-) {
+fn apply_persistence_status(issue_center: &mut IssueCenter, status: PersistenceStatusEvent) {
     if let Some(error) = status.error {
         issue_center.raise(
             ISSUE_KEY_SQLITE_PERSISTENCE,
@@ -3884,11 +3914,7 @@ fn build_screen_lines_for_viewport(
 
     lines.push(RenderLine {
         color: Some(Color::Yellow),
-        text: if live_mode {
-            "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit".to_string()
-        } else {
-            "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit".to_string()
-        },
+        text: main_screen_header(viewport_width, live_mode),
     });
     lines.push(RenderLine {
         color: Some(if app.paused {
@@ -3896,41 +3922,15 @@ fn build_screen_lines_for_viewport(
         } else {
             Color::DarkCyan
         }),
-        text: if live_mode {
-            let fresh_symbols = source_status
-                .map(|status| status.fresh_symbols)
-                .unwrap_or_else(|| state.symbol_count().saturating_sub(app.stale_symbols.len()));
-            let stale_symbols = source_status
-                .map(|status| status.stale_symbols)
-                .unwrap_or_else(|| app.stale_symbols.len());
-            let degraded_symbols = source_status
-                .map(|status| status.degraded_symbols)
-                .unwrap_or_else(|| app.degraded_symbols.len());
-            let unavailable_symbols = source_status
-                .map(|status| status.unavailable_symbols)
-                .unwrap_or_else(|| tracked_count.saturating_sub(state.symbol_count()));
-            format!(
-                "Mode: live  Source: yahoo  Feed: {}  Tracked: {}  Fresh: {}  Stale: {}  Degraded: {}  Unavailable: {}  Applied: {}  Pending: {}  Rate: {}/s",
-                if app.paused { "paused" } else { "running" },
-                tracked_count,
-                fresh_symbols,
-                stale_symbols,
-                degraded_symbols,
-                unavailable_symbols,
-                state.total_events(),
-                app.pending_count(),
-                updates_per_second,
-            )
-        } else {
-            format!(
-                "Mode: replay  Source: journal  Feed: {}  Symbols: {}  Applied: {}  Pending: {}  Rate: {}/s",
-                if app.paused { "paused" } else { "running" },
-                state.symbol_count(),
-                state.total_events(),
-                app.pending_count(),
-                updates_per_second,
-            )
-        },
+        text: main_screen_status_line(
+            viewport_width,
+            state,
+            app,
+            source_status,
+            tracked_count,
+            updates_per_second,
+            live_mode,
+        ),
     });
     if live_mode {
         lines.push(RenderLine {
@@ -4028,7 +4028,7 @@ fn build_screen_lines_for_viewport(
     });
     lines.push(RenderLine {
         color: Some(Color::DarkGrey),
-        text: input_prompt(app, live_mode),
+        text: input_prompt(app, live_mode, viewport_width),
     });
     lines.push(RenderLine {
         color: Some(Color::Cyan),
@@ -4548,7 +4548,8 @@ fn build_ticker_history_table_lines(
     if rows.is_empty() {
         lines.push(RenderLine {
             color: Some(Color::DarkGrey),
-            text: "No history rows are available for the selected group and window yet.".to_string(),
+            text: "No history rows are available for the selected group and window yet."
+                .to_string(),
         });
         return lines;
     }
@@ -5076,10 +5077,12 @@ fn detail_chart_snapshot<'a>(app: &'a AppState, symbol: &str) -> DetailChartSnap
             } else {
                 format!("ready ({})", candles.len())
             },
-            note: app.is_chart_stale(symbol, app.detail_chart_range()).then_some(
-                "Showing persisted candles from SQLite while Yahoo refreshes this range."
-                    .to_string(),
-            ),
+            note: app
+                .is_chart_stale(symbol, app.detail_chart_range())
+                .then_some(
+                    "Showing persisted candles from SQLite while Yahoo refreshes this range."
+                        .to_string(),
+                ),
             color: if app.is_chart_stale(symbol, app.detail_chart_range()) {
                 Color::DarkYellow
             } else {
@@ -5485,12 +5488,18 @@ fn summarize_chart_range(
         captured_at,
         candle_count: candles.len(),
         latest_close_cents: closes.last().copied(),
-        ema20_cents: ema20.last().and_then(|value| value.map(|value| value.round() as i64)),
-        ema50_cents: ema50.last().and_then(|value| value.map(|value| value.round() as i64)),
+        ema20_cents: ema20
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
+        ema50_cents: ema50
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
         ema200_cents: ema200
             .last()
             .and_then(|value| value.map(|value| value.round() as i64)),
-        macd_cents: macd.last().and_then(|value| value.map(|value| value.round() as i64)),
+        macd_cents: macd
+            .last()
+            .and_then(|value| value.map(|value| value.round() as i64)),
         signal_cents: signal
             .last()
             .and_then(|value| value.map(|value| value.round() as i64)),
@@ -6684,9 +6693,7 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
                         key: ISSUE_KEY_WATCHLIST_RESTORE,
                         severity: IssueSeverity::Warning,
                         title: "Watchlist restore failed",
-                        detail: format!(
-                            "{error}. Starting without the saved watchlist instead."
-                        ),
+                        detail: format!("{error}. Starting without the saved watchlist instead."),
                     });
                 }
             }
@@ -7206,7 +7213,9 @@ where
             unavailable_symbols += 1;
         }
 
-        if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(provider_result))) {
+        if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(
+            provider_result,
+        ))) {
             return false;
         }
     }
@@ -7400,9 +7409,9 @@ where
                     } else if !provider_result.has_any_payload() {
                         unavailable_symbols += 1;
                     }
-                    if !publisher
-                        .publish(AppEvent::FeedBatch(build_symbol_feed_batch(provider_result)))
-                    {
+                    if !publisher.publish(AppEvent::FeedBatch(build_symbol_feed_batch(
+                        provider_result,
+                    ))) {
                         return None;
                     }
                 }
@@ -7620,24 +7629,150 @@ fn active_filter_query<'a>(view_filter: &'a ViewFilter, input_mode: &'a InputMod
     }
 }
 
-fn input_prompt(app: &AppState, live_mode: bool) -> String {
+fn plain_text_fits_viewport(text: &str, viewport_width: usize) -> bool {
+    text.chars().count() <= viewport_width
+}
+
+fn main_screen_header(viewport_width: usize, live_mode: bool) -> String {
+    let compact = if live_mode {
+        "DISCOUNT TERMINAL  |  d detail  / filter  s symbol  space pause  q quit"
+    } else {
+        "DISCOUNT TERMINAL  |  d detail  / filter  l logs  q quit"
+    };
+    let full = if live_mode {
+        "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit"
+    } else {
+        "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit"
+    };
+
+    if plain_text_fits_viewport(full, viewport_width) {
+        full.to_string()
+    } else {
+        compact.to_string()
+    }
+}
+
+fn main_screen_status_line(
+    viewport_width: usize,
+    state: &TerminalState,
+    app: &AppState,
+    source_status: Option<&LiveSourceStatus>,
+    tracked_count: usize,
+    updates_per_second: usize,
+    live_mode: bool,
+) -> String {
+    if live_mode {
+        let compact = format!(
+            "Mode: live  Feed: {}  Tracked: {}  Loaded: {}  Pending: {}  Rate: {}/s",
+            if app.paused { "paused" } else { "running" },
+            tracked_count,
+            state.symbol_count(),
+            app.pending_count(),
+            updates_per_second,
+        );
+        let fresh_symbols = source_status
+            .map(|status| status.fresh_symbols)
+            .unwrap_or_else(|| state.symbol_count().saturating_sub(app.stale_symbols.len()));
+        let stale_symbols = source_status
+            .map(|status| status.stale_symbols)
+            .unwrap_or_else(|| app.stale_symbols.len());
+        let degraded_symbols = source_status
+            .map(|status| status.degraded_symbols)
+            .unwrap_or_else(|| app.degraded_symbols.len());
+        let unavailable_symbols = source_status
+            .map(|status| status.unavailable_symbols)
+            .unwrap_or_else(|| tracked_count.saturating_sub(state.symbol_count()));
+
+        let full = format!(
+            "Mode: live  Source: yahoo  Feed: {}  Tracked: {}  Fresh: {}  Stale: {}  Degraded: {}  Unavailable: {}  Applied: {}  Pending: {}  Rate: {}/s",
+            if app.paused { "paused" } else { "running" },
+            tracked_count,
+            fresh_symbols,
+            stale_symbols,
+            degraded_symbols,
+            unavailable_symbols,
+            state.total_events(),
+            app.pending_count(),
+            updates_per_second,
+        );
+
+        return if plain_text_fits_viewport(&full, viewport_width) {
+            full
+        } else {
+            compact
+        };
+    }
+
+    let compact = format!(
+        "Mode: replay  Feed: {}  Symbols: {}  Pending: {}  Rate: {}/s",
+        if app.paused { "paused" } else { "running" },
+        state.symbol_count(),
+        app.pending_count(),
+        updates_per_second,
+    );
+    let full = format!(
+        "Mode: replay  Source: journal  Feed: {}  Symbols: {}  Applied: {}  Pending: {}  Rate: {}/s",
+        if app.paused { "paused" } else { "running" },
+        state.symbol_count(),
+        state.total_events(),
+        app.pending_count(),
+        updates_per_second,
+    );
+
+    if plain_text_fits_viewport(&full, viewport_width) {
+        full
+    } else {
+        compact
+    }
+}
+
+fn input_prompt(app: &AppState, live_mode: bool, viewport_width: usize) -> String {
     match &app.input_mode {
         InputMode::Normal => app.status_message.clone().unwrap_or_else(|| {
-            if live_mode {
-                "Use d or Enter for ticker detail, / to filter, s to track a symbol, l to open issues, Backspace to go back, or Ctrl+C to quit.".to_string()
+            let compact = if live_mode {
+                "d detail  / filter  s symbol  l logs  Backspace back  Ctrl+C quit"
             } else {
-                "Use d or Enter for ticker detail, / to filter, l to open issues, Backspace to go back, or Ctrl+C to quit.".to_string()
+                "d detail  / filter  l logs  Backspace back  Ctrl+C quit"
+            };
+            let full = if live_mode {
+                "Use d or Enter for ticker detail, / to filter, s to track a symbol, l to open issues, Backspace to go back, or Ctrl+C to quit."
+            } else {
+                "Use d or Enter for ticker detail, / to filter, l to open issues, Backspace to go back, or Ctrl+C to quit."
+            };
+
+            if plain_text_fits_viewport(full, viewport_width) {
+                full.to_string()
+            } else {
+                compact.to_string()
             }
         }),
         InputMode::FilterSearch(buffer) => {
-            format!(
+            let full = format!(
                 "Filter rows: '{buffer}'  Enter apply  Backspace delete or go back  Esc cancel  Ctrl+C quit"
-            )
+            );
+            let compact = format!(
+                "Filter: '{buffer}'  Enter apply  Esc cancel  Backspace edit/back"
+            );
+
+            if plain_text_fits_viewport(&full, viewport_width) {
+                full
+            } else {
+                compact
+            }
         }
         InputMode::SymbolSearch(buffer) => {
-            format!(
+            let full = format!(
                 "Track symbol: '{buffer}'  Enter add  Backspace delete or go back  Esc cancel  Ctrl+C quit"
-            )
+            );
+            let compact = format!(
+                "Symbol: '{buffer}'  Enter add  Esc cancel  Backspace edit/back"
+            );
+
+            if plain_text_fits_viewport(&full, viewport_width) {
+                full
+            } else {
+                compact
+            }
         }
     }
 }
@@ -8043,26 +8178,39 @@ fn chart_history_graph_tiles(
             });
 
             if let Some(series) = close_series.as_ref() {
-                let mut tile = history_graph_tile_from_series(series)
-                    .unwrap_or_else(|| empty_history_graph_tile(format!("{} range", chart_range_label(*range))));
+                let mut tile = history_graph_tile_from_series(series).unwrap_or_else(|| {
+                    empty_history_graph_tile(format!("{} range", chart_range_label(*range)))
+                });
                 tile.label = format!("{} range", chart_range_label(*range));
                 if let Some(summary) = latest_summary {
                     tile.footer_lines = vec![
                         clip_plain_text(
                             &format!(
                                 "E20 {}  E50 {}  E200 {}",
-                                format_optional_history_money(summary.ema20_cents.map(cents_to_dollars)),
-                                format_optional_history_money(summary.ema50_cents.map(cents_to_dollars)),
-                                format_optional_history_money(summary.ema200_cents.map(cents_to_dollars)),
+                                format_optional_history_money(
+                                    summary.ema20_cents.map(cents_to_dollars)
+                                ),
+                                format_optional_history_money(
+                                    summary.ema50_cents.map(cents_to_dollars)
+                                ),
+                                format_optional_history_money(
+                                    summary.ema200_cents.map(cents_to_dollars)
+                                ),
                             ),
                             72,
                         ),
                         clip_plain_text(
                             &format!(
                                 "MACD {}  SIG {}  HIST {}",
-                                format_optional_history_money(summary.macd_cents.map(cents_to_dollars)),
-                                format_optional_history_money(summary.signal_cents.map(cents_to_dollars)),
-                                format_optional_history_money(summary.histogram_cents.map(cents_to_dollars)),
+                                format_optional_history_money(
+                                    summary.macd_cents.map(cents_to_dollars)
+                                ),
+                                format_optional_history_money(
+                                    summary.signal_cents.map(cents_to_dollars)
+                                ),
+                                format_optional_history_money(
+                                    summary.histogram_cents.map(cents_to_dollars)
+                                ),
                             ),
                             72,
                         ),
@@ -8103,13 +8251,15 @@ fn build_history_series(
     let points = history
         .iter()
         .filter_map(|record| {
-            def.extractor.extract(record).map(|value| HistorySeriesPoint {
-                evaluated_at: record.evaluated_at,
-                revision_id: record.revision_id,
-                value,
-                available: metric_group_status(&record.payload, group).available,
-                stale: metric_group_status(&record.payload, group).stale,
-            })
+            def.extractor
+                .extract(record)
+                .map(|value| HistorySeriesPoint {
+                    evaluated_at: record.evaluated_at,
+                    revision_id: record.revision_id,
+                    value,
+                    available: metric_group_status(&record.payload, group).available,
+                    stale: metric_group_status(&record.payload, group).stale,
+                })
         })
         .collect::<Vec<_>>();
     if points.is_empty() {
@@ -8129,41 +8279,221 @@ fn build_history_series(
 fn history_metric_defs(group: HistoryMetricGroup) -> Vec<HistoryMetricDef> {
     match group {
         HistoryMetricGroup::Core => vec![
-            history_metric_def("market_price_usd", "Market price", None, HistoryUnit::Usd, HistoryValueExtractor::MarketPrice),
-            history_metric_def("intrinsic_value_usd", "Intrinsic value", None, HistoryUnit::Usd, HistoryValueExtractor::IntrinsicValue),
-            history_metric_def("gap_pct", "Gap", None, HistoryUnit::Percent, HistoryValueExtractor::GapPct),
-            history_metric_def("external_gap_pct", "External gap", None, HistoryUnit::Percent, HistoryValueExtractor::ExternalGapPct),
-            history_metric_def("weighted_gap_pct", "Weighted gap", None, HistoryUnit::Percent, HistoryValueExtractor::WeightedGapPct),
-            history_metric_def("analyst_count", "Analyst count", None, HistoryUnit::Count, HistoryValueExtractor::AnalystCount),
-            history_metric_def("confidence_rank_count", "Confidence rank", None, HistoryUnit::Count, HistoryValueExtractor::ConfidenceRank),
-            history_metric_def("qualification_rank_count", "Qualification rank", None, HistoryUnit::Count, HistoryValueExtractor::QualificationRank),
-            history_metric_def("external_status_rank_count", "External status rank", None, HistoryUnit::Count, HistoryValueExtractor::ExternalStatusRank),
-            history_metric_def("watched_count", "Watched", None, HistoryUnit::Count, HistoryValueExtractor::WatchedCount),
-            history_metric_def("profitable_count", "Profitable", None, HistoryUnit::Count, HistoryValueExtractor::ProfitableCount),
+            history_metric_def(
+                "market_price_usd",
+                "Market price",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::MarketPrice,
+            ),
+            history_metric_def(
+                "intrinsic_value_usd",
+                "Intrinsic value",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::IntrinsicValue,
+            ),
+            history_metric_def(
+                "gap_pct",
+                "Gap",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::GapPct,
+            ),
+            history_metric_def(
+                "external_gap_pct",
+                "External gap",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::ExternalGapPct,
+            ),
+            history_metric_def(
+                "weighted_gap_pct",
+                "Weighted gap",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::WeightedGapPct,
+            ),
+            history_metric_def(
+                "analyst_count",
+                "Analyst count",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::AnalystCount,
+            ),
+            history_metric_def(
+                "confidence_rank_count",
+                "Confidence rank",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::ConfidenceRank,
+            ),
+            history_metric_def(
+                "qualification_rank_count",
+                "Qualification rank",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::QualificationRank,
+            ),
+            history_metric_def(
+                "external_status_rank_count",
+                "External status rank",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::ExternalStatusRank,
+            ),
+            history_metric_def(
+                "watched_count",
+                "Watched",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::WatchedCount,
+            ),
+            history_metric_def(
+                "profitable_count",
+                "Profitable",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::ProfitableCount,
+            ),
         ],
         HistoryMetricGroup::Fundamentals => vec![
-            history_metric_def("market_cap_usd", "Market cap", None, HistoryUnit::Usd, HistoryValueExtractor::MarketCapUsd),
-            history_metric_def("shares_outstanding_count", "Shares", None, HistoryUnit::Count, HistoryValueExtractor::SharesOutstanding),
-            history_metric_def("trailing_pe_ratio", "Trailing P/E", None, HistoryUnit::Ratio, HistoryValueExtractor::TrailingPe),
-            history_metric_def("forward_pe_ratio", "Forward P/E", None, HistoryUnit::Ratio, HistoryValueExtractor::ForwardPe),
-            history_metric_def("price_to_book_ratio", "P/B", None, HistoryUnit::Ratio, HistoryValueExtractor::PriceToBook),
-            history_metric_def("return_on_equity_pct", "ROE", None, HistoryUnit::Percent, HistoryValueExtractor::ReturnOnEquityPct),
-            history_metric_def("ebitda_usd", "EBITDA", None, HistoryUnit::Usd, HistoryValueExtractor::EbitdaUsd),
-            history_metric_def("enterprise_value_usd", "Enterprise value", None, HistoryUnit::Usd, HistoryValueExtractor::EnterpriseValueUsd),
-            history_metric_def("enterprise_to_ebitda_ratio", "EV/EBITDA", None, HistoryUnit::Ratio, HistoryValueExtractor::EnterpriseToEbitda),
-            history_metric_def("total_debt_usd", "Total debt", None, HistoryUnit::Usd, HistoryValueExtractor::TotalDebtUsd),
-            history_metric_def("total_cash_usd", "Total cash", None, HistoryUnit::Usd, HistoryValueExtractor::TotalCashUsd),
-            history_metric_def("debt_to_equity_ratio", "Debt/Equity", None, HistoryUnit::Ratio, HistoryValueExtractor::DebtToEquity),
-            history_metric_def("free_cash_flow_usd", "Free cash flow", None, HistoryUnit::Usd, HistoryValueExtractor::FreeCashFlowUsd),
-            history_metric_def("operating_cash_flow_usd", "Operating cash flow", None, HistoryUnit::Usd, HistoryValueExtractor::OperatingCashFlowUsd),
-            history_metric_def("beta_ratio", "Beta", None, HistoryUnit::Ratio, HistoryValueExtractor::Beta),
-            history_metric_def("trailing_eps_usd", "EPS", None, HistoryUnit::Usd, HistoryValueExtractor::TrailingEpsUsd),
-            history_metric_def("earnings_growth_pct", "Earnings growth", None, HistoryUnit::Percent, HistoryValueExtractor::EarningsGrowthPct),
+            history_metric_def(
+                "market_cap_usd",
+                "Market cap",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::MarketCapUsd,
+            ),
+            history_metric_def(
+                "shares_outstanding_count",
+                "Shares",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::SharesOutstanding,
+            ),
+            history_metric_def(
+                "trailing_pe_ratio",
+                "Trailing P/E",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::TrailingPe,
+            ),
+            history_metric_def(
+                "forward_pe_ratio",
+                "Forward P/E",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::ForwardPe,
+            ),
+            history_metric_def(
+                "price_to_book_ratio",
+                "P/B",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::PriceToBook,
+            ),
+            history_metric_def(
+                "return_on_equity_pct",
+                "ROE",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::ReturnOnEquityPct,
+            ),
+            history_metric_def(
+                "ebitda_usd",
+                "EBITDA",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::EbitdaUsd,
+            ),
+            history_metric_def(
+                "enterprise_value_usd",
+                "Enterprise value",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::EnterpriseValueUsd,
+            ),
+            history_metric_def(
+                "enterprise_to_ebitda_ratio",
+                "EV/EBITDA",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::EnterpriseToEbitda,
+            ),
+            history_metric_def(
+                "total_debt_usd",
+                "Total debt",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::TotalDebtUsd,
+            ),
+            history_metric_def(
+                "total_cash_usd",
+                "Total cash",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::TotalCashUsd,
+            ),
+            history_metric_def(
+                "debt_to_equity_ratio",
+                "Debt/Equity",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::DebtToEquity,
+            ),
+            history_metric_def(
+                "free_cash_flow_usd",
+                "Free cash flow",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::FreeCashFlowUsd,
+            ),
+            history_metric_def(
+                "operating_cash_flow_usd",
+                "Operating cash flow",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::OperatingCashFlowUsd,
+            ),
+            history_metric_def(
+                "beta_ratio",
+                "Beta",
+                None,
+                HistoryUnit::Ratio,
+                HistoryValueExtractor::Beta,
+            ),
+            history_metric_def(
+                "trailing_eps_usd",
+                "EPS",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::TrailingEpsUsd,
+            ),
+            history_metric_def(
+                "earnings_growth_pct",
+                "Earnings growth",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::EarningsGrowthPct,
+            ),
         ],
         HistoryMetricGroup::Relative => {
             let mut defs = vec![
-                history_metric_def("composite_percentile_pct", "Composite percentile", None, HistoryUnit::Percent, HistoryValueExtractor::RelativeCompositePercentile),
-                history_metric_def("peer_count", "Peer count", None, HistoryUnit::Count, HistoryValueExtractor::RelativePeerCount),
+                history_metric_def(
+                    "composite_percentile_pct",
+                    "Composite percentile",
+                    None,
+                    HistoryUnit::Percent,
+                    HistoryValueExtractor::RelativeCompositePercentile,
+                ),
+                history_metric_def(
+                    "peer_count",
+                    "Peer count",
+                    None,
+                    HistoryUnit::Count,
+                    HistoryValueExtractor::RelativePeerCount,
+                ),
             ];
             for (key, label) in [
                 ("relative_pe_percentile_pct", "P/E"),
@@ -8183,14 +8513,62 @@ fn history_metric_defs(group: HistoryMetricGroup) -> Vec<HistoryMetricDef> {
             defs
         }
         HistoryMetricGroup::Dcf => vec![
-            history_metric_def("bear_intrinsic_usd", "Bear intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBearIntrinsicUsd),
-            history_metric_def("base_intrinsic_usd", "Base intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBaseIntrinsicUsd),
-            history_metric_def("bull_intrinsic_usd", "Bull intrinsic", None, HistoryUnit::Usd, HistoryValueExtractor::DcfBullIntrinsicUsd),
-            history_metric_def("wacc_pct", "WACC", None, HistoryUnit::Percent, HistoryValueExtractor::DcfWaccPct),
-            history_metric_def("base_growth_pct", "Base growth", None, HistoryUnit::Percent, HistoryValueExtractor::DcfBaseGrowthPct),
-            history_metric_def("net_debt_usd", "Net debt", None, HistoryUnit::Usd, HistoryValueExtractor::DcfNetDebtUsd),
-            history_metric_def("margin_of_safety_pct", "Margin of safety", None, HistoryUnit::Percent, HistoryValueExtractor::DcfMarginSafetyPct),
-            history_metric_def("signal_rank_count", "Signal rank", None, HistoryUnit::Count, HistoryValueExtractor::DcfSignalRank),
+            history_metric_def(
+                "bear_intrinsic_usd",
+                "Bear intrinsic",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::DcfBearIntrinsicUsd,
+            ),
+            history_metric_def(
+                "base_intrinsic_usd",
+                "Base intrinsic",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::DcfBaseIntrinsicUsd,
+            ),
+            history_metric_def(
+                "bull_intrinsic_usd",
+                "Bull intrinsic",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::DcfBullIntrinsicUsd,
+            ),
+            history_metric_def(
+                "wacc_pct",
+                "WACC",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::DcfWaccPct,
+            ),
+            history_metric_def(
+                "base_growth_pct",
+                "Base growth",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::DcfBaseGrowthPct,
+            ),
+            history_metric_def(
+                "net_debt_usd",
+                "Net debt",
+                None,
+                HistoryUnit::Usd,
+                HistoryValueExtractor::DcfNetDebtUsd,
+            ),
+            history_metric_def(
+                "margin_of_safety_pct",
+                "Margin of safety",
+                None,
+                HistoryUnit::Percent,
+                HistoryValueExtractor::DcfMarginSafetyPct,
+            ),
+            history_metric_def(
+                "signal_rank_count",
+                "Signal rank",
+                None,
+                HistoryUnit::Count,
+                HistoryValueExtractor::DcfSignalRank,
+            ),
         ],
         HistoryMetricGroup::Chart => chart_ranges()
             .iter()
@@ -8198,13 +8576,55 @@ fn history_metric_defs(group: HistoryMetricGroup) -> Vec<HistoryMetricDef> {
                 let prefix = chart_range_label(*range);
                 let range_key = chart_range_export_prefix(*range);
                 [
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Close), format!("{prefix} Close"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Close)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema20), format!("{prefix} EMA20"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema20)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema50), format!("{prefix} EMA50"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema50)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Ema200), format!("{prefix} EMA200"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema200)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Macd), format!("{prefix} MACD"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Macd)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Signal), format!("{prefix} Signal"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Signal)),
-                    history_metric_def(chart_metric_key(*range, ChartMetricKind::Histogram), format!("{prefix} Histogram"), Some(range_key), HistoryUnit::Usd, HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Histogram)),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Close),
+                        format!("{prefix} Close"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Close),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Ema20),
+                        format!("{prefix} EMA20"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema20),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Ema50),
+                        format!("{prefix} EMA50"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema50),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Ema200),
+                        format!("{prefix} EMA200"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Ema200),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Macd),
+                        format!("{prefix} MACD"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Macd),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Signal),
+                        format!("{prefix} Signal"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Signal),
+                    ),
+                    history_metric_def(
+                        chart_metric_key(*range, ChartMetricKind::Histogram),
+                        format!("{prefix} Histogram"),
+                        Some(range_key),
+                        HistoryUnit::Usd,
+                        HistoryValueExtractor::ChartMetric(*range, ChartMetricKind::Histogram),
+                    ),
                 ]
             })
             .collect(),
@@ -8272,9 +8692,10 @@ impl HistoryValueExtractor {
             HistoryValueExtractor::QualificationRank => {
                 record.payload.qualification.map(qualification_rank_value)
             }
-            HistoryValueExtractor::ExternalStatusRank => {
-                record.payload.external_status.map(external_status_rank_value)
-            }
+            HistoryValueExtractor::ExternalStatusRank => record
+                .payload
+                .external_status
+                .map(external_status_rank_value),
             HistoryValueExtractor::WatchedCount => {
                 Some(if record.payload.is_watched { 1.0 } else { 0.0 })
             }
@@ -8472,8 +8893,14 @@ fn history_metric_row_from_series(series: &HistorySeries) -> Option<HistoryMetri
 fn history_graph_tile_from_series(series: &HistorySeries) -> Option<HistoryGraphTile> {
     let latest = series.points.last()?;
     let previous = series.points.iter().rev().nth(1);
-    let values = series.points.iter().map(|point| point.value).collect::<Vec<_>>();
-    let min = values.iter().fold(f64::INFINITY, |left, right| left.min(*right));
+    let values = series
+        .points
+        .iter()
+        .map(|point| point.value)
+        .collect::<Vec<_>>();
+    let min = values
+        .iter()
+        .fold(f64::INFINITY, |left, right| left.min(*right));
     let max = values
         .iter()
         .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
@@ -8506,7 +8933,11 @@ fn history_graph_tile_from_series(series: &HistorySeries) -> Option<HistoryGraph
                     latest.revision_id,
                     format_timestamp_utc(latest.evaluated_at),
                     if latest.stale { "  stale" } else { "" },
-                    if latest.available { "" } else { "  unavailable" }
+                    if latest.available {
+                        ""
+                    } else {
+                        "  unavailable"
+                    }
                 ),
                 72,
             ),
@@ -8550,8 +8981,15 @@ fn render_history_graph_tile(tile: &HistoryGraphTile, width: usize) -> Vec<Strin
         ),
         clip_plain_text(&format!("max {}", tile.max_label), inner_width),
     ];
-    lines.extend(chart_rows.into_iter().map(|row| clip_plain_text(&row, inner_width)));
-    lines.push(clip_plain_text(&format!("min {}", tile.min_label), inner_width));
+    lines.extend(
+        chart_rows
+            .into_iter()
+            .map(|row| clip_plain_text(&row, inner_width)),
+    );
+    lines.push(clip_plain_text(
+        &format!("min {}", tile.min_label),
+        inner_width,
+    ));
     lines.push(clip_plain_text(
         tile.footer_lines.first().map(String::as_str).unwrap_or(""),
         inner_width,
@@ -8576,7 +9014,9 @@ fn render_ascii_line_chart(values: &[f64], width: usize, height: usize) -> Vec<S
     }
 
     let sampled = sample_series(values, width.max(1));
-    let min = sampled.iter().fold(f64::INFINITY, |left, right| left.min(*right));
+    let min = sampled
+        .iter()
+        .fold(f64::INFINITY, |left, right| left.min(*right));
     let max = sampled
         .iter()
         .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
@@ -8654,8 +9094,12 @@ fn sparkline(values: &[f64]) -> String {
         return String::new();
     }
     const BLOCKS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-    let min = values.iter().fold(f64::INFINITY, |left, right| left.min(*right));
-    let max = values.iter().fold(f64::NEG_INFINITY, |left, right| left.max(*right));
+    let min = values
+        .iter()
+        .fold(f64::INFINITY, |left, right| left.min(*right));
+    let max = values
+        .iter()
+        .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
     if !min.is_finite() || !max.is_finite() {
         return String::new();
     }
@@ -8917,7 +9361,12 @@ fn export_selected_history_bundle(
     };
 
     write_export_metadata_csv(&metadata)?;
-    write_group_wide_csv(&export_dir.join("core_wide.csv"), &symbol, &history, HistoryMetricGroup::Core)?;
+    write_group_wide_csv(
+        &export_dir.join("core_wide.csv"),
+        &symbol,
+        &history,
+        HistoryMetricGroup::Core,
+    )?;
     write_group_wide_csv(
         &export_dir.join("fundamentals_wide.csv"),
         &symbol,
@@ -8930,7 +9379,12 @@ fn export_selected_history_bundle(
         &history,
         HistoryMetricGroup::Relative,
     )?;
-    write_group_wide_csv(&export_dir.join("dcf_wide.csv"), &symbol, &history, HistoryMetricGroup::Dcf)?;
+    write_group_wide_csv(
+        &export_dir.join("dcf_wide.csv"),
+        &symbol,
+        &history,
+        HistoryMetricGroup::Dcf,
+    )?;
     write_group_wide_csv(
         &export_dir.join("chart_wide.csv"),
         &symbol,
@@ -9233,31 +9687,29 @@ fn handle_overlay_key(
                     KeyCode::Char('3') => app.select_history_group(HistoryMetricGroup::Relative),
                     KeyCode::Char('4') => app.select_history_group(HistoryMetricGroup::Dcf),
                     KeyCode::Char('5') => app.select_history_group(HistoryMetricGroup::Chart),
-                    KeyCode::Char('e') => match export_selected_history_bundle(app, persistence_handle)
-                    {
-                        Ok(metadata) => {
-                            app.issue_center.resolve(ISSUE_KEY_HISTORY_EXPORT);
-                            app.set_status_message(format!(
-                                "Exported {} revisions for {} to {}.",
-                                metadata.revision_count,
-                                metadata.symbol,
-                                metadata.export_dir.display()
-                            ));
+                    KeyCode::Char('e') => {
+                        match export_selected_history_bundle(app, persistence_handle) {
+                            Ok(metadata) => {
+                                app.issue_center.resolve(ISSUE_KEY_HISTORY_EXPORT);
+                                app.set_status_message(format!(
+                                    "Exported {} revisions for {} to {}.",
+                                    metadata.revision_count,
+                                    metadata.symbol,
+                                    metadata.export_dir.display()
+                                ));
+                            }
+                            Err(error) => {
+                                app.issue_center.raise(
+                                    ISSUE_KEY_HISTORY_EXPORT,
+                                    IssueSource::Persistence,
+                                    IssueSeverity::Warning,
+                                    "History export failed",
+                                    error.to_string(),
+                                );
+                                app.set_status_message(format!("History export failed: {}", error));
+                            }
                         }
-                        Err(error) => {
-                            app.issue_center.raise(
-                                ISSUE_KEY_HISTORY_EXPORT,
-                                IssueSource::Persistence,
-                                IssueSeverity::Warning,
-                                "History export failed",
-                                error.to_string(),
-                            );
-                            app.set_status_message(format!(
-                                "History export failed: {}",
-                                error
-                            ));
-                        }
-                    },
+                    }
                     KeyCode::Char('[') => app.cycle_history_window(-1),
                     KeyCode::Char(']') => app.cycle_history_window(1),
                     KeyCode::Down | KeyCode::Char('j') => app.scroll_history(1),
@@ -9949,7 +10401,6 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_persistence_status;
     use super::AnalysisCacheEntry;
     use super::AnalysisControl;
     use super::AppEvent;
@@ -9991,15 +10442,17 @@ mod tests {
     use super::analyst_consensus_lines;
     use super::apply_feed_events;
     use super::apply_live_source_status;
-    use super::build_symbol_feed_batch;
+    use super::apply_persistence_status;
     use super::build_screen_lines;
+    use super::build_screen_lines_for_viewport;
+    use super::build_symbol_feed_batch;
     use super::build_ticker_detail_lines;
     use super::build_ticker_detail_lines_for_viewport;
     use super::build_ticker_history_lines_for_viewport;
-    use super::chart_ranges;
     use super::candidate_company_label;
     use super::chart_loop_with_client_factory;
     use super::chart_range_label;
+    use super::chart_ranges;
     use super::clip_text_to_width;
     use super::collect_clear_rows;
     use super::collect_dirty_rows;
@@ -10021,6 +10474,7 @@ mod tests {
     use super::gap_meter;
     use super::handle_input_event;
     use super::health_status_label;
+    use super::input_prompt;
     use super::is_provider_throttle_error;
     use super::is_retryable_feed_error;
     use super::load_initial_state;
@@ -10086,6 +10540,66 @@ mod tests {
             is_qualified: true,
             confidence: ConfidenceBand::Provisional,
         }
+    }
+
+    fn ranked_main_view_lines_for_viewport(
+        viewport_width: usize,
+        viewport_height: usize,
+    ) -> Vec<String> {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let live_symbols = LiveSymbolState::new(
+            (0..25)
+                .map(|index| format!("H{index:02}"))
+                .collect::<Vec<_>>(),
+        );
+
+        for index in 0..25 {
+            let symbol = format!("H{index:02}");
+            state.ingest_snapshot(MarketSnapshot {
+                symbol: symbol.clone(),
+                company_name: Some(format!("Holding {index} Incorporated")),
+                profitable: true,
+                market_price_cents: 10_000 + index as i64 * 100,
+                intrinsic_value_cents: 15_000 + index as i64 * 100,
+            });
+            state.ingest_external(ExternalValuationSignal {
+                symbol,
+                fair_value_cents: 13_000,
+                age_seconds: 0,
+                low_fair_value_cents: None,
+                high_fair_value_cents: None,
+                analyst_opinion_count: None,
+                recommendation_mean_hundredths: None,
+                strong_buy_count: None,
+                buy_count: None,
+                hold_count: None,
+                sell_count: None,
+                strong_sell_count: None,
+                weighted_fair_value_cents: None,
+                weighted_analyst_count: None,
+            });
+        }
+
+        let app = AppState::default();
+        let rows = app.visible_rows(&state);
+        normalize_frame(
+            &build_screen_lines_for_viewport(
+                &state,
+                &rows,
+                0,
+                0,
+                true,
+                &app,
+                Some(&live_symbols),
+                viewport_width,
+                viewport_height,
+            ),
+            viewport_width,
+            viewport_height,
+        )
+        .iter()
+        .map(|line| visible_text(&line.text))
+        .collect()
     }
 
     fn recv_feed_batch(receiver: &mpsc::Receiver<AppEvent>, label: &str) -> Vec<FeedEvent> {
@@ -10375,20 +10889,18 @@ mod tests {
         }
     }
 
-    fn sample_history_records(symbol: &str, include_relative: bool) -> Vec<persistence::PersistedRevisionRecord> {
+    fn sample_history_records(
+        symbol: &str,
+        include_relative: bool,
+    ) -> Vec<persistence::PersistedRevisionRecord> {
         let base_time = unix_timestamp_seconds().saturating_sub(2 * 86_400);
         (0..3)
             .map(|index| {
                 let market_price_cents = 18_500 + index as i64 * 75;
                 let intrinsic_value_cents = 24_500 + index as i64 * 90;
                 let external_fair_value_cents = 23_800 + index as i64 * 80;
-                let mut fundamentals = sample_fundamentals(
-                    symbol,
-                    "technology",
-                    "Technology",
-                    "software",
-                    "Software",
-                );
+                let mut fundamentals =
+                    sample_fundamentals(symbol, "technology", "Technology", "software", "Software");
                 fundamentals.market_cap_dollars =
                     Some(1_200_000_000_u64 + index as u64 * 50_000_000);
                 fundamentals.free_cash_flow_dollars = Some(86_000_000 + index as i64 * 5_000_000);
@@ -10447,7 +10959,10 @@ mod tests {
                             .iter()
                             .enumerate()
                             .map(|(range_index, range)| {
-                                sample_chart_summary(*range, market_price_cents + range_index as i64 * 25)
+                                sample_chart_summary(
+                                    *range,
+                                    market_price_cents + range_index as i64 * 25,
+                                )
                             })
                             .collect(),
                         core_status: sample_metric_group_status(true),
@@ -10749,11 +11264,13 @@ mod tests {
             ("2024-01-05".to_string(), 15.0),
         ];
         let expected_years = 373.0 / 365.2425;
-        let expected_cagr_bps = (((15.0_f64 / 10.0_f64).powf(1.0 / expected_years) - 1.0)
-            * 10_000.0)
-            .round() as i32;
+        let expected_cagr_bps =
+            (((15.0_f64 / 10.0_f64).powf(1.0 / expected_years) - 1.0) * 10_000.0).round() as i32;
 
-        assert_eq!(derive_base_growth_bps(&stub_period), Some(expected_cagr_bps));
+        assert_eq!(
+            derive_base_growth_bps(&stub_period),
+            Some(expected_cagr_bps)
+        );
         assert!(expected_cagr_bps > 4_000);
     }
 
@@ -11558,7 +12075,10 @@ mod tests {
         );
 
         let issue = issue_center.sorted_entries()[0].clone();
-        assert_eq!(health_status_label(issue_center.health_status()), "degraded");
+        assert_eq!(
+            health_status_label(issue_center.health_status()),
+            "degraded"
+        );
         assert_eq!(issue.title, "Live source partially degraded");
         assert!(issue.detail.contains("Fresh 64"));
     }
@@ -11659,32 +12179,31 @@ mod tests {
         });
         state.ingest_fundamentals(fundamentals.clone());
 
-        let refresh_without_fundamentals = build_symbol_feed_batch(super::market_data::ProviderFetchResult {
-            symbol: "NVDA".to_string(),
-            snapshot: Some(MarketSnapshot {
+        let refresh_without_fundamentals =
+            build_symbol_feed_batch(super::market_data::ProviderFetchResult {
                 symbol: "NVDA".to_string(),
-                company_name: None,
-                profitable: true,
-                market_price_cents: 1_250,
-                intrinsic_value_cents: 1_850,
-            }),
-            external_signal: None,
-            fundamentals: None,
-            coverage: super::market_data::ProviderCoverage {
-                core: super::market_data::ProviderComponentState::Fresh,
-                external: super::market_data::ProviderComponentState::Missing,
-                fundamentals: super::market_data::ProviderComponentState::Missing,
-            },
-            diagnostics: vec![],
-        });
+                snapshot: Some(MarketSnapshot {
+                    symbol: "NVDA".to_string(),
+                    company_name: None,
+                    profitable: true,
+                    market_price_cents: 1_250,
+                    intrinsic_value_cents: 1_850,
+                }),
+                external_signal: None,
+                fundamentals: None,
+                coverage: super::market_data::ProviderCoverage {
+                    core: super::market_data::ProviderComponentState::Fresh,
+                    external: super::market_data::ProviderComponentState::Missing,
+                    fundamentals: super::market_data::ProviderComponentState::Missing,
+                },
+                diagnostics: vec![],
+            });
 
         let mut app = AppState::default();
         apply_feed_events(&mut state, &mut app, None, refresh_without_fundamentals);
 
         assert_eq!(
-            state
-                .detail("NVDA")
-                .and_then(|detail| detail.fundamentals),
+            state.detail("NVDA").and_then(|detail| detail.fundamentals),
             Some(fundamentals)
         );
     }
@@ -11932,8 +12451,7 @@ mod tests {
         let persistence_handle =
             persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
 
-        persistence_handle
-            .replace_tracked_symbols(vec!["AAPL".to_string(), "MSFT".to_string()]);
+        persistence_handle.replace_tracked_symbols(vec!["AAPL".to_string(), "MSFT".to_string()]);
         persistence_handle.replace_watchlist(vec!["AAPL".to_string()]);
         persistence_handle.replace_issues(vec![persistence::PersistedIssueRecord {
             key: "feed-partial".to_string(),
@@ -12153,7 +12671,12 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert_eq!(reloaded.tracked_symbols, super::default_live_symbols());
-        assert!(!reloaded.tracked_symbols.iter().any(|symbol| symbol == "MSTR"));
+        assert!(
+            !reloaded
+                .tracked_symbols
+                .iter()
+                .any(|symbol| symbol == "MSTR")
+        );
         assert!(reloaded.state.detail("MSTR").is_none());
     }
 
@@ -12175,8 +12698,8 @@ mod tests {
             parse_runtime_options_from(["--profile", "dow-jones"]).expect("profile should parse");
         options.state_db = Some(state_db.clone());
 
-        let loaded =
-            load_initial_state(&options).expect("profile symbols should define the session universe");
+        let loaded = load_initial_state(&options)
+            .expect("profile symbols should define the session universe");
 
         let _ = fs::remove_file(&state_db);
 
@@ -12411,7 +12934,12 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert_eq!(last_persisted_sequence, state.latest_sequence());
-        assert!(reloaded.symbol_states.iter().any(|record| record.symbol == "NVDA"));
+        assert!(
+            reloaded
+                .symbol_states
+                .iter()
+                .any(|record| record.symbol == "NVDA")
+        );
     }
 
     #[test]
@@ -12660,10 +13188,16 @@ mod tests {
             fs::read_to_string(&log_path).expect("feed error log should be readable after refresh");
         let _ = fs::remove_file(&log_path);
 
-        assert!(log_contents.contains("kind=provider_coverage symbol=MSFT component=core classification=missing"));
+        assert!(
+            log_contents.contains(
+                "kind=provider_coverage symbol=MSFT component=core classification=missing"
+            )
+        );
         assert!(log_contents.contains("kind=provider_error symbol=AMD"));
         assert!(
-            log_contents.contains("kind=refresh_summary tracked=3 fresh=1 stale=0 degraded=1 unavailable=2")
+            log_contents.contains(
+                "kind=refresh_summary tracked=3 fresh=1 stale=0 degraded=1 unavailable=2"
+            )
         );
     }
 
@@ -12690,9 +13224,7 @@ mod tests {
             } else {
                 Ok(FakeFeedClient {
                     calls: Arc::new(Mutex::new(Vec::new())),
-                    results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(live_feed(
-                        "AAPL",
-                    ))]))),
+                    results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(live_feed("AAPL"))]))),
                 })
             }
         });
@@ -13173,10 +13705,8 @@ mod tests {
                     candles: candles.clone(),
                 },
             );
-            app.chart_summary_cache.insert(
-                key,
-                summarize_chart_range(range, 1_700_000_000, &candles),
-            );
+            app.chart_summary_cache
+                .insert(key, summarize_chart_range(range, 1_700_000_000, &candles));
         }
 
         app.queue_background_chart_requests(Some(&sender), &symbols);
@@ -13347,7 +13877,11 @@ mod tests {
 
         assert!(lines.iter().any(|line| line.text.contains("view=Graphs")));
         assert!(lines.iter().any(|line| line.text.contains("Market price")));
-        assert!(lines.iter().any(|line| line.text.contains("Intrinsic value")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.text.contains("Intrinsic value"))
+        );
     }
 
     #[test]
@@ -13359,9 +13893,11 @@ mod tests {
 
         let lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 140, 24);
 
-        assert!(lines
-            .iter()
-            .any(|line| line.text.contains("No graph tiles are available")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.text.contains("No graph tiles are available"))
+        );
     }
 
     #[test]
@@ -13421,7 +13957,10 @@ mod tests {
             "all_tidy.csv",
         ];
         for filename in expected_files {
-            assert!(metadata.export_dir.join(filename).exists(), "{filename} should exist");
+            assert!(
+                metadata.export_dir.join(filename).exists(),
+                "{filename} should exist"
+            );
         }
 
         let core_csv =
@@ -13988,6 +14527,105 @@ mod tests {
         let rows = app.visible_rows(&state);
 
         assert_eq!(rows.len(), MAX_VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn main_screen_preserves_selected_detail_on_short_viewports() {
+        let visible_lines = ranked_main_view_lines_for_viewport(96, 18);
+
+        assert_eq!(
+            (
+                visible_lines.iter().any(|line| line == "TOP CANDIDATES"),
+                visible_lines.iter().any(|line| line == "DETAIL"),
+                visible_lines.iter().any(|line| line.starts_with("Symbol:")),
+            ),
+            (true, true, true)
+        );
+    }
+
+    #[test]
+    fn main_screen_drops_alerts_and_tape_before_selected_detail() {
+        let visible_lines = ranked_main_view_lines_for_viewport(96, 20);
+
+        assert_eq!(
+            (
+                visible_lines.iter().any(|line| line == "DETAIL"),
+                visible_lines.iter().any(|line| line == "ALERTS"),
+                visible_lines.iter().any(|line| line == "RECENT TAPE"),
+            ),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn main_screen_uses_a_compact_header_on_narrow_viewports() {
+        let visible_lines = ranked_main_view_lines_for_viewport(96, 20);
+
+        assert_eq!(
+            (
+                visible_lines
+                    .first()
+                    .map(|line| line.contains("q quit"))
+                    .unwrap_or(false),
+                visible_lines
+                    .first()
+                    .map(|line| line.contains("space pause"))
+                    .unwrap_or(false),
+            ),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn main_screen_uses_compact_status_and_prompt_on_narrow_viewports() {
+        let visible_lines = ranked_main_view_lines_for_viewport(96, 20);
+
+        assert_eq!(
+            (
+                visible_lines
+                    .iter()
+                    .any(|line| line.contains("Pending:") && line.contains("Rate:")),
+                visible_lines
+                    .iter()
+                    .any(|line| line.contains("Ctrl+C quit")),
+            ),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn main_screen_switches_to_compact_live_strings_before_mid_width_clipping() {
+        let visible_lines = ranked_main_view_lines_for_viewport(120, 20);
+
+        assert_eq!(
+            (
+                visible_lines.first().map(String::as_str),
+                visible_lines.get(1).map(String::as_str),
+            ),
+            (
+                Some("DISCOUNT TERMINAL  |  d detail  / filter  s symbol  space pause  q quit",),
+                Some("Mode: live  Feed: running  Tracked: 25  Loaded: 25  Pending: 0  Rate: 0/s"),
+            )
+        );
+    }
+
+    #[test]
+    fn narrow_filter_and_symbol_prompts_use_compact_variants() {
+        let mut filter_app = AppState::default();
+        filter_app.input_mode = InputMode::FilterSearch("NVDA".to_string());
+        let mut symbol_app = AppState::default();
+        symbol_app.input_mode = InputMode::SymbolSearch("AMD".to_string());
+
+        assert_eq!(
+            (
+                input_prompt(&filter_app, true, 80),
+                input_prompt(&symbol_app, true, 80)
+            ),
+            (
+                "Filter: 'NVDA'  Enter apply  Esc cancel  Backspace edit/back".to_string(),
+                "Symbol: 'AMD'  Enter add  Esc cancel  Backspace edit/back".to_string(),
+            )
+        );
     }
 
     #[test]

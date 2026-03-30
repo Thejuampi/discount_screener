@@ -6,16 +6,16 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use discount_screener::build_analyst_score;
 use discount_screener::AnalystOutcomeSample;
 use discount_screener::ExternalValuationSignal;
 use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
-use reqwest::blocking::Client;
+use discount_screener::build_analyst_score;
 use reqwest::Url;
-use serde::de::DeserializeOwned;
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -273,7 +273,8 @@ impl MarketDataClient {
             .and_then(dollars_to_cents)
         });
 
-        let chart_market_price_cents = if quote_market_price_cents.is_some() && quote_body.is_some() {
+        let chart_market_price_cents = if quote_market_price_cents.is_some() && quote_body.is_some()
+        {
             None
         } else {
             match self.fetch_live_chart_probe(symbol) {
@@ -327,7 +328,9 @@ impl MarketDataClient {
                         signal,
                         ANALYST_EVALUATION_HORIZON_DAYS,
                         now_epoch_seconds,
-                        |period1_epoch_seconds| self.fetch_price_history(symbol, period1_epoch_seconds),
+                        |period1_epoch_seconds| {
+                            self.fetch_price_history(symbol, period1_epoch_seconds)
+                        },
                     ) {
                         diagnostics.push(ProviderDiagnostic {
                             component: ProviderComponent::WeightedTarget,
@@ -340,8 +343,9 @@ impl MarketDataClient {
                     diagnostics.push(ProviderDiagnostic {
                         component: ProviderComponent::WeightedTarget,
                         kind: ProviderDiagnosticKind::Missing,
-                        detail: "quote HTML was unavailable, so weighted target enrichment was skipped"
-                            .to_string(),
+                        detail:
+                            "quote HTML was unavailable, so weighted target enrichment was skipped"
+                                .to_string(),
                         retryable: false,
                     });
                 }
@@ -365,7 +369,11 @@ impl MarketDataClient {
         }
 
         let coverage = ProviderCoverage {
-            core: component_state_for(quote_context.snapshot.is_some(), &diagnostics, ProviderComponent::Core),
+            core: component_state_for(
+                quote_context.snapshot.is_some(),
+                &diagnostics,
+                ProviderComponent::Core,
+            ),
             external: component_state_for(
                 external_signal.is_some(),
                 &diagnostics,
@@ -728,10 +736,7 @@ fn parse_quote_context(
             diagnostics.push(ProviderDiagnostic {
                 component: ProviderComponent::Core,
                 kind: ProviderDiagnosticKind::Missing,
-                detail: format!(
-                    "core snapshot is missing {}",
-                    missing_fields.join(", ")
-                ),
+                detail: format!("core snapshot is missing {}", missing_fields.join(", ")),
                 retryable: false,
             });
             None
@@ -1175,10 +1180,9 @@ fn component_state_for(
     if has_value {
         return ProviderComponentState::Fresh;
     }
-    if diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.component == component && diagnostic.kind == ProviderDiagnosticKind::Error)
-    {
+    if diagnostics.iter().any(|diagnostic| {
+        diagnostic.component == component && diagnostic.kind == ProviderDiagnosticKind::Error
+    }) {
         return ProviderComponentState::Error;
     }
     ProviderComponentState::Missing
@@ -1191,7 +1195,8 @@ fn is_retryable_http_error(error: &reqwest::Error) -> bool {
 }
 
 fn is_retryable_provider_io_error(error: &io::Error) -> bool {
-    error.source()
+    error
+        .source()
         .and_then(|source: &(dyn std::error::Error + 'static)| {
             source.downcast_ref::<reqwest::Error>()
         })
@@ -1681,16 +1686,6 @@ fn closing_price_cents_on_or_after(
 
 #[cfg(test)]
 mod tests {
-    use super::chart_api_url;
-    use super::chart_range_api_url;
-    use super::chart_range_spec;
-    use super::compute_weighted_analyst_target;
-    use super::default_live_symbols;
-    use super::extract_embedded_json_object;
-    use super::parse_quote_page;
-    use super::parse_timeseries_metric;
-    use super::populate_weighted_target;
-    use super::quote_page_url;
     use super::AnnualReportedValue;
     use super::ChartRange;
     use super::HistoricalCandle;
@@ -1703,6 +1698,16 @@ mod tests {
     use super::YahooChartResponse;
     use super::YahooChartResult;
     use super::YahooUpgradeDowngradeEntry;
+    use super::chart_api_url;
+    use super::chart_range_api_url;
+    use super::chart_range_spec;
+    use super::compute_weighted_analyst_target;
+    use super::default_live_symbols;
+    use super::extract_embedded_json_object;
+    use super::parse_quote_page;
+    use super::parse_timeseries_metric;
+    use super::populate_weighted_target;
+    use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
     use serde_json::json;

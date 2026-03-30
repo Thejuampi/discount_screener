@@ -272,7 +272,9 @@ impl PersistenceHandle {
     }
 
     pub(crate) fn replace_issues(&self, issues: Vec<PersistedIssueRecord>) {
-        let _ = self.sender.send(PersistenceCommand::ReplaceIssues { issues });
+        let _ = self
+            .sender
+            .send(PersistenceCommand::ReplaceIssues { issues });
     }
 
     pub(crate) fn shutdown(mut self, timestamp: u64) {
@@ -280,7 +282,9 @@ impl PersistenceHandle {
         let _ = self
             .sender
             .send(PersistenceCommand::MarkCleanShutdown { timestamp });
-        let _ = self.sender.send(PersistenceCommand::Flush { ack: ack_sender });
+        let _ = self
+            .sender
+            .send(PersistenceCommand::Flush { ack: ack_sender });
         let _ = ack_receiver.recv_timeout(Duration::from_secs(2));
         let _ = self.sender.send(PersistenceCommand::Shutdown);
 
@@ -339,7 +343,9 @@ pub(crate) fn load_warm_start(path: &Path) -> io::Result<PersistenceBootstrap> {
 pub(crate) fn reset_warm_start_state(path: &Path) -> io::Result<()> {
     let connection = open_connection(path)?;
     run_migrations(&connection)?;
-    let transaction = connection.unchecked_transaction().map_err(io::Error::other)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(io::Error::other)?;
     transaction
         .execute_batch(
             "\
@@ -415,7 +421,8 @@ fn worker_loop(
                 let _ = ack.send(ack_result);
             }
             PersistenceCommand::LoadHistory { symbol, ack } => {
-                let result = load_revision_history(&connection, &symbol).map_err(|error| error.to_string());
+                let result =
+                    load_revision_history(&connection, &symbol).map_err(|error| error.to_string());
                 let _ = ack.send(result);
             }
             PersistenceCommand::RequestHistory { symbol } => {
@@ -509,7 +516,10 @@ fn run_migrations(connection: &Connection) -> io::Result<()> {
     if version == 2 {
         if !table_has_column(connection, "symbol_latest", "price_history_json")? {
             connection
-                .execute("ALTER TABLE symbol_latest ADD COLUMN price_history_json TEXT", [])
+                .execute(
+                    "ALTER TABLE symbol_latest ADD COLUMN price_history_json TEXT",
+                    [],
+                )
                 .map_err(io::Error::other)?;
         }
         connection
@@ -599,7 +609,11 @@ fn create_schema(connection: &Connection) -> io::Result<()> {
     Ok(())
 }
 
-fn table_has_column(connection: &Connection, table_name: &str, column_name: &str) -> io::Result<bool> {
+fn table_has_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> io::Result<bool> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table_name})"))
         .map_err(io::Error::other)?;
@@ -1010,7 +1024,9 @@ fn set_meta_value_tx(
 
 fn load_meta_value(connection: &Connection, key: &str) -> io::Result<Option<String>> {
     connection
-        .query_row("SELECT value FROM meta WHERE key = ?", [key], |row| row.get(0))
+        .query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
+            row.get(0)
+        })
         .optional()
         .map_err(io::Error::other)
 }

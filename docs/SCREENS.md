@@ -28,6 +28,7 @@ The layouts are viewport-aware. Exact spacing, pane height, and how much seconda
 - `Upside` is the table percentage column shown in the current UI.
 - `w` toggles watchlist membership and `f` toggles watchlist-only mode.
 - `Space` pauses live application of feed updates without leaving the main screen.
+- On narrower terminals, the header, status line, and prompt switch to compact variants before the right edge is clipped.
 
 Representative current header and status strings:
 

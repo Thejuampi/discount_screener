@@ -783,7 +783,11 @@ impl TerminalState {
         }
     }
 
-    fn persisted_symbol_state_for(&self, symbol: &str, state: &SymbolState) -> PersistedSymbolState {
+    fn persisted_symbol_state_for(
+        &self,
+        symbol: &str,
+        state: &SymbolState,
+    ) -> PersistedSymbolState {
         PersistedSymbolState {
             symbol: symbol.to_string(),
             snapshot: state.snapshot.clone(),

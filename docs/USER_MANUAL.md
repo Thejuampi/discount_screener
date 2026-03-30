@@ -195,6 +195,8 @@ The terminal is organized into these operator areas:
 6. Selected ticker summary in the main view
 7. Alerts and recent tape panels
 
+On narrower terminals, the main-view header, status line, and prompt compress before the screen falls back to simple right-edge clipping.
+
 For annotated layouts and screenshots, see [SCREENS.md](SCREENS.md).
 
 ## How Ranking Works
