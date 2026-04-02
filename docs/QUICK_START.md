@@ -58,6 +58,11 @@ Main view:
 
 - `j` or Down: move down
 - `k` or Up: move up
+- `Home`: jump to the first row in the current list view
+- `End`: jump to the last row in the current list view
+- `PageDown`: move down by one visible page in the current list view
+- `PageUp`: move up by one visible page in the current list view
+- `o`: toggle between the `Top Candidates` and `Top Opportunities` list views
 - `d` or `Enter`: open ticker detail
 - `w`: toggle watchlist on the selected symbol
 - `Space`: pause or resume live updates
@@ -116,14 +121,16 @@ The main terminal is organized into:
 
 1. command legend and status
 2. health banner and issue rail
-3. top candidates table
-4. selected symbol summary
+3. top candidates or top opportunities table
+4. selected symbol summary or opportunity rationale
 5. recent alerts
 6. recent tape
 
 The live status line includes tracked count, loaded count, unavailable count, applied event count, pending backlog, and rate.
 
-The main table is capped for readability. The detail view still navigates the full filtered ticker set.
+The main table is capped for readability. In `Top Opportunities`, `j` and `k` now scroll that 20-row viewport through the full active opportunity ranking. The detail view still navigates the full active ranked set for the current list view.
+
+Selection is remembered per list view by ticker. The first time you enter `Top Opportunities`, the selection starts at the first ranked symbol; after that, toggling with `o` restores the last ticker you had selected in each list.
 
 If the live source or persistence path has problems, the main view shows them in the health banner and issue rail. Press `l` to open the full issue log viewer.
 

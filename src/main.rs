@@ -1,6 +1,8 @@
 mod market_data;
 mod persistence;
 mod profiles;
+mod tui;
+mod tui_graphs;
 
 use std::backtrace::Backtrace;
 use std::cmp::Ordering;
@@ -29,7 +31,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use crossterm::cursor::Hide;
-use crossterm::cursor::MoveTo;
 use crossterm::cursor::Show;
 use crossterm::event;
 use crossterm::event::Event;
@@ -38,16 +39,8 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use crossterm::execute;
-use crossterm::queue;
 use crossterm::style::Color;
-use crossterm::style::Print;
-use crossterm::style::ResetColor;
-use crossterm::style::SetForegroundColor;
 use crossterm::terminal;
-use crossterm::terminal::BeginSynchronizedUpdate;
-use crossterm::terminal::Clear;
-use crossterm::terminal::ClearType;
-use crossterm::terminal::EndSynchronizedUpdate;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use discount_screener::AlertEvent;
@@ -77,6 +70,8 @@ use persistence::PersistenceHandle;
 use persistence::PersistenceStatusEvent;
 use profiles::profile_definitions;
 use profiles::profile_symbols;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -101,6 +96,7 @@ const DETAIL_MIN_VOLUME_HEIGHT: usize = 3;
 const DETAIL_MIN_MACD_HEIGHT: usize = 4;
 const DETAIL_CHART_AXIS_WIDTH: usize = 12;
 const DETAIL_CHART_ROW_PADDING: usize = 2;
+const DETAIL_VOLUME_PROFILE_WIDTH: usize = 20;
 const BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE: usize = 6;
 const INLINE_STYLE_MARKER: char = '\u{001f}';
 const DEFAULT_FEED_ERROR_LOG_FILE: &str = "feed-errors.log";
@@ -830,9 +826,18 @@ enum InputMode {
     SymbolSearch(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimaryViewMode {
+    Candidates,
+    Opportunities,
+}
+
 struct AppState {
     paused: bool,
+    primary_view: PrimaryViewMode,
     selected_symbol: Option<String>,
+    candidate_selected_symbol: Option<String>,
+    opportunity_selected_symbol: Option<String>,
     view_filter: ViewFilter,
     input_mode: InputMode,
     pending_feed: VecDeque<FeedEvent>,
@@ -858,13 +863,17 @@ struct AppState {
     next_analysis_request_id: u64,
     history_cache: HashMap<String, Vec<persistence::PersistedRevisionRecord>>,
     history_export_root: Option<PathBuf>,
+    replay_offset: usize,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             paused: false,
+            primary_view: PrimaryViewMode::Candidates,
             selected_symbol: None,
+            candidate_selected_symbol: None,
+            opportunity_selected_symbol: None,
             view_filter: ViewFilter::default(),
             input_mode: InputMode::Normal,
             pending_feed: VecDeque::new(),
@@ -890,11 +899,54 @@ impl Default for AppState {
             next_analysis_request_id: 1,
             history_cache: HashMap::new(),
             history_export_root: None,
+            replay_offset: 0,
         }
     }
 }
 
 impl AppState {
+    fn selection_for_view(&self, view: PrimaryViewMode) -> Option<&str> {
+        let stored_selection = match view {
+            PrimaryViewMode::Candidates => self.candidate_selected_symbol.as_deref(),
+            PrimaryViewMode::Opportunities => self.opportunity_selected_symbol.as_deref(),
+        };
+
+        stored_selection.or_else(|| {
+            if self.primary_view == view {
+                self.selected_symbol.as_deref()
+            } else {
+                None
+            }
+        })
+    }
+
+    fn remember_selection_for_view(&mut self, view: PrimaryViewMode, symbol: &str) {
+        let symbol = symbol.to_string();
+        match view {
+            PrimaryViewMode::Candidates => self.candidate_selected_symbol = Some(symbol.clone()),
+            PrimaryViewMode::Opportunities => {
+                self.opportunity_selected_symbol = Some(symbol.clone())
+            }
+        }
+        self.selected_symbol = Some(symbol);
+    }
+
+    fn clear_selection_for_view(&mut self, view: PrimaryViewMode) {
+        match view {
+            PrimaryViewMode::Candidates => self.candidate_selected_symbol = None,
+            PrimaryViewMode::Opportunities => self.opportunity_selected_symbol = None,
+        }
+        if self.primary_view == view {
+            self.selected_symbol = None;
+        }
+    }
+
+    fn clear_all_selections(&mut self) {
+        self.selected_symbol = None;
+        self.candidate_selected_symbol = None;
+        self.opportunity_selected_symbol = None;
+    }
+
     fn visible_rows(&self, state: &TerminalState) -> Vec<CandidateRow> {
         filtered_symbol_rows(state, &self.view_filter)
             .into_iter()
@@ -902,42 +954,176 @@ impl AppState {
             .collect()
     }
 
-    fn selected_index(&mut self, rows: &[CandidateRow]) -> usize {
-        if rows.is_empty() {
-            self.selected_symbol = None;
+    fn visible_opportunity_rows(&self, state: &TerminalState) -> Vec<OpportunityRow> {
+        build_opportunity_rows(state, self)
+    }
+
+    fn ranked_opportunity_symbols(&self, state: &TerminalState) -> Vec<String> {
+        build_opportunity_rows(state, self)
+            .into_iter()
+            .map(|row| row.symbol)
+            .collect()
+    }
+
+    fn active_detail_symbols(&self, state: &TerminalState) -> Vec<String> {
+        match self.primary_view {
+            PrimaryViewMode::Candidates => filtered_symbol_rows(state, &self.view_filter)
+                .into_iter()
+                .map(|row| row.symbol)
+                .collect(),
+            PrimaryViewMode::Opportunities => self.ranked_opportunity_symbols(state),
+        }
+    }
+
+    fn active_base_symbols(
+        &self,
+        state: &TerminalState,
+        candidate_rows: &[CandidateRow],
+    ) -> Vec<String> {
+        match self.primary_view {
+            PrimaryViewMode::Candidates => candidate_rows
+                .iter()
+                .map(|row| row.symbol.clone())
+                .collect(),
+            PrimaryViewMode::Opportunities => self.ranked_opportunity_symbols(state),
+        }
+    }
+
+    fn sync_base_selected_index(
+        &mut self,
+        state: &TerminalState,
+        candidate_rows: &[CandidateRow],
+    ) -> usize {
+        match self.primary_view {
+            PrimaryViewMode::Candidates => self.selected_index(candidate_rows),
+            PrimaryViewMode::Opportunities => {
+                let rows = self.visible_opportunity_rows(state);
+                let symbols = rows
+                    .iter()
+                    .map(|row| row.symbol.as_str())
+                    .collect::<Vec<_>>();
+                self.selected_index_for_symbols(&symbols)
+            }
+        }
+    }
+
+    fn input_selected_index(
+        &mut self,
+        state: &TerminalState,
+        candidate_rows: &[CandidateRow],
+    ) -> usize {
+        self.sync_base_selected_index(state, candidate_rows)
+    }
+
+    fn selected_index_for_symbols(&mut self, symbols: &[&str]) -> usize {
+        let view = self.primary_view;
+        if symbols.is_empty() {
+            self.clear_selection_for_view(view);
             return 0;
         }
 
-        if let Some(selected_symbol) = self.selected_symbol.as_deref() {
-            if let Some(index) = rows.iter().position(|row| row.symbol == selected_symbol) {
+        if let Some(selected_symbol) = self.selection_for_view(view) {
+            if let Some(index) = symbols.iter().position(|symbol| *symbol == selected_symbol) {
+                self.selected_symbol = Some(selected_symbol.to_string());
                 return index;
             }
         }
 
-        self.selected_symbol = Some(rows[0].symbol.clone());
+        self.remember_selection_for_view(view, symbols[0]);
         0
     }
 
-    fn move_selection(&mut self, rows: &[CandidateRow], delta: isize) -> usize {
-        let current_index = self.selected_index(rows);
-        if rows.is_empty() {
+    fn set_selection_for_symbols(&mut self, symbols: &[&str], index: usize) -> usize {
+        let view = self.primary_view;
+        if symbols.is_empty() {
+            self.clear_selection_for_view(view);
+            return 0;
+        }
+
+        let next_index = index.min(symbols.len().saturating_sub(1));
+        self.remember_selection_for_view(view, symbols[next_index]);
+        next_index
+    }
+
+    fn move_selection_for_symbols(&mut self, symbols: &[&str], delta: isize) -> usize {
+        let current_index = self.selected_index_for_symbols(symbols);
+        if symbols.is_empty() {
             return 0;
         }
 
         let next_index = current_index
             .saturating_add_signed(delta)
-            .min(rows.len().saturating_sub(1));
-        self.selected_symbol = Some(rows[next_index].symbol.clone());
-        next_index
+            .min(symbols.len().saturating_sub(1));
+        self.set_selection_for_symbols(symbols, next_index)
+    }
+
+    fn select_first_for_symbols(&mut self, symbols: &[&str]) -> usize {
+        self.set_selection_for_symbols(symbols, 0)
+    }
+
+    fn select_last_for_symbols(&mut self, symbols: &[&str]) -> usize {
+        self.set_selection_for_symbols(symbols, symbols.len().saturating_sub(1))
+    }
+
+    fn move_selection_by_page_for_symbols(
+        &mut self,
+        symbols: &[&str],
+        delta: isize,
+        page_size: usize,
+    ) -> usize {
+        let current_index = self.selected_index_for_symbols(symbols);
+        if symbols.is_empty() {
+            return 0;
+        }
+
+        let page_delta = delta.saturating_mul(page_size.max(1) as isize);
+        let next_index = current_index
+            .saturating_add_signed(page_delta)
+            .min(symbols.len().saturating_sub(1));
+        self.set_selection_for_symbols(symbols, next_index)
+    }
+
+    fn toggle_primary_view(&mut self, state: &TerminalState) {
+        self.primary_view = match self.primary_view {
+            PrimaryViewMode::Candidates => PrimaryViewMode::Opportunities,
+            PrimaryViewMode::Opportunities => PrimaryViewMode::Candidates,
+        };
+        self.selected_symbol = None;
+        self.ensure_primary_view_selection(state);
+    }
+
+    fn ensure_primary_view_selection(&mut self, state: &TerminalState) {
+        match self.primary_view {
+            PrimaryViewMode::Candidates => {
+                let rows = self.visible_rows(state);
+                self.selected_index(&rows);
+            }
+            PrimaryViewMode::Opportunities => {
+                let rows = self.visible_opportunity_rows(state);
+                let symbols = rows
+                    .iter()
+                    .map(|row| row.symbol.as_str())
+                    .collect::<Vec<_>>();
+                self.selected_index_for_symbols(&symbols);
+            }
+        }
+    }
+
+    fn selected_index(&mut self, rows: &[CandidateRow]) -> usize {
+        let symbols = rows
+            .iter()
+            .map(|row| row.symbol.as_str())
+            .collect::<Vec<_>>();
+        self.selected_index_for_symbols(&symbols)
     }
 
     fn set_selection(&mut self, symbol: &str) {
-        self.selected_symbol = Some(symbol.to_string());
+        self.remember_selection_for_view(self.primary_view, symbol);
     }
 
     fn clear_filters(&mut self) {
         self.view_filter = ViewFilter::default();
-        self.selected_symbol = None;
+        self.clear_all_selections();
     }
 
     fn set_status_message(&mut self, message: impl Into<String>) {
@@ -958,15 +1144,19 @@ impl AppState {
     }
 
     fn open_ticker_detail(&mut self, symbol: &str) {
+        self.remember_selection_for_view(self.primary_view, symbol);
         self.overlay_mode = OverlayMode::TickerDetail(symbol.to_string());
-        self.selected_symbol = Some(symbol.to_string());
         self.detail_tab = DetailTab::Snapshot;
         self.history_view = HistoryViewState::default();
+        self.reset_replay();
     }
 
     fn close_overlay(&mut self) {
         self.overlay_mode = OverlayMode::None;
         self.detail_tab = DetailTab::Snapshot;
+        self.selected_symbol = self
+            .selection_for_view(self.primary_view)
+            .map(str::to_string);
     }
 
     fn detail_symbol(&self) -> Option<&str> {
@@ -976,22 +1166,33 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn move_ticker_detail_selection(&mut self, rows: &[CandidateRow], delta: isize) {
+        let symbols = rows
+            .iter()
+            .map(|row| row.symbol.as_str())
+            .collect::<Vec<_>>();
+        self.move_ticker_detail_selection_for_symbols(&symbols, delta);
+    }
+
+    fn move_ticker_detail_selection_for_symbols(&mut self, symbols: &[&str], delta: isize) {
         let Some(current_symbol) = self.detail_symbol() else {
             return;
         };
 
-        let Some(current_index) = rows.iter().position(|row| row.symbol == current_symbol) else {
+        let Some(current_index) = symbols.iter().position(|symbol| *symbol == current_symbol)
+        else {
             return;
         };
 
         let next_index = current_index
             .saturating_add_signed(delta)
-            .min(rows.len().saturating_sub(1));
-        let next_symbol = rows[next_index].symbol.clone();
-        self.selected_symbol = Some(next_symbol.clone());
+            .min(symbols.len().saturating_sub(1));
+        let next_symbol = symbols[next_index].to_string();
+        self.remember_selection_for_view(self.primary_view, &next_symbol);
         self.overlay_mode = OverlayMode::TickerDetail(next_symbol);
         self.history_view.scroll = 0;
+        self.reset_replay();
     }
 
     fn toggle_detail_tab(&mut self) {
@@ -1045,6 +1246,7 @@ impl AppState {
         }
 
         self.detail_chart_range = range;
+        self.reset_replay();
         true
     }
 
@@ -1059,6 +1261,52 @@ impl AppState {
             .min(ranges.len().saturating_sub(1));
 
         self.set_detail_chart_range(ranges[next_index])
+    }
+
+    fn step_replay_back(&mut self, total_candles: usize) -> bool {
+        let max_offset = total_candles.saturating_sub(1);
+        if self.replay_offset >= max_offset {
+            return false;
+        }
+        self.replay_offset += 1;
+        true
+    }
+
+    fn step_replay_forward(&mut self) -> bool {
+        if self.replay_offset == 0 {
+            return false;
+        }
+        self.replay_offset -= 1;
+        true
+    }
+
+    fn reset_replay(&mut self) {
+        self.replay_offset = 0;
+    }
+
+    fn visible_candle_end(&self, total_candles: usize) -> usize {
+        if total_candles == 0 {
+            return 0;
+        }
+        total_candles.saturating_sub(self.replay_offset).max(1)
+    }
+
+    fn detail_replay_candle_count(&self) -> usize {
+        let Some(symbol) = self.detail_symbol() else {
+            return 0;
+        };
+        match self.detail_chart_entry(symbol) {
+            Some(ChartCacheEntry::Ready { candles }) => candles.len(),
+            Some(ChartCacheEntry::Loading {
+                previous: Some(candles),
+                ..
+            }) => candles.len(),
+            Some(ChartCacheEntry::Failed {
+                previous: Some(candles),
+                ..
+            }) => candles.len(),
+            _ => 0,
+        }
     }
 
     fn queue_detail_chart_request(
@@ -1335,6 +1583,7 @@ impl AppState {
                     },
                 };
                 self.chart_cache.insert(key, next_entry);
+                self.reset_replay();
                 persisted_chart
             }
             ChartRequestKind::Background => {
@@ -2357,6 +2606,7 @@ struct RenderLine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StyledSegment {
     color: Option<Color>,
+    bg_color: Option<Color>,
     text: String,
 }
 
@@ -2364,7 +2614,26 @@ struct StyledSegment {
 struct StyledCell {
     ch: char,
     color: Option<Color>,
+    bg_color: Option<Color>,
     priority: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpportunityRow {
+    symbol: String,
+    market_price_cents: i64,
+    intrinsic_value_cents: i64,
+    gap_bps: i32,
+    confidence: ConfidenceBand,
+    is_watched: bool,
+    fundamentals_score: Option<i32>,
+    technical_score: Option<i32>,
+    forecast_score: Option<i32>,
+    composite_score: i32,
+    coverage_count: usize,
+    fundamentals_signals: Vec<&'static str>,
+    technical_signals: Vec<&'static str>,
+    forecast_signals: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2383,64 +2652,47 @@ struct PriceCandle {
     point_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VolumeProfileBin {
+    up_volume: u64,
+    down_volume: u64,
+}
+
 static MAIN_THREAD_ID: OnceLock<thread::ThreadId> = OnceLock::new();
 static PANIC_REPORT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
-#[derive(Default)]
 struct ScreenRenderer {
-    displayed: Vec<RenderLine>,
-    scratch: Vec<RenderLine>,
-    dirty_rows: Vec<usize>,
-    last_painted_rows: usize,
+    terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl ScreenRenderer {
+    fn new(stdout: Stdout) -> io::Result<Self> {
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)
+            .map_err(|error| with_io_context(error, "create ratatui terminal backend"))?;
+        Ok(Self { terminal })
+    }
+
     fn render(
         &mut self,
-        stdout: &mut Stdout,
         lines: &[RenderLine],
         viewport_width: usize,
         viewport_height: usize,
     ) -> io::Result<()> {
-        self.scratch.clear();
-        normalize_frame_into(lines, viewport_width, viewport_height, &mut self.scratch);
-
-        self.dirty_rows.clear();
-        collect_dirty_rows_into(&self.displayed, &self.scratch, viewport_height, &mut self.dirty_rows);
-        let clear_rows =
-            collect_clear_rows(self.scratch.len(), self.last_painted_rows, viewport_height);
-
-        if self.dirty_rows.is_empty() && clear_rows.is_empty() {
-            std::mem::swap(&mut self.displayed, &mut self.scratch);
-            if viewport_height >= self.last_painted_rows {
-                self.last_painted_rows = self.displayed.len();
-            }
-            return Ok(());
-        }
-
-        queue!(stdout, BeginSynchronizedUpdate)
-            .map_err(|error| with_io_context(error, "begin synchronized terminal update"))?;
-
-        for &row_index in &self.dirty_rows {
-            paint_row(stdout, row_index, self.scratch.get(row_index))?;
-        }
-
-        for row_index in clear_rows {
-            paint_row(stdout, row_index, None)?;
-        }
-
-        queue!(stdout, EndSynchronizedUpdate)
-            .map_err(|error| with_io_context(error, "finish synchronized terminal update"))?;
-        stdout
-            .flush()
-            .map_err(|error| with_io_context(error, "flush terminal output"))?;
-
-        std::mem::swap(&mut self.displayed, &mut self.scratch);
-        if viewport_height >= self.last_painted_rows {
-            self.last_painted_rows = self.displayed.len();
-        }
-
-        Ok(())
+        self.terminal
+            .draw(|frame| {
+                let area = frame.area();
+                frame.render_widget(
+                    tui::RenderLineFrame::new(
+                        lines,
+                        viewport_width.min(area.width as usize),
+                        viewport_height.min(area.height as usize),
+                    ),
+                    area,
+                );
+            })
+            .map(|_| ())
+            .map_err(|error| with_io_context(error, "draw ratatui terminal frame"))
     }
 }
 
@@ -2754,7 +3006,8 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
     terminal_guard
         .enter_alternate_screen(&mut stdout)
         .map_err(|error| with_io_context(error, "enter alternate screen"))?;
-    let mut screen_renderer = ScreenRenderer::default();
+    let mut screen_renderer = ScreenRenderer::new(stdout)
+        .map_err(|error| with_io_context(error, "create screen renderer"))?;
     let mut rate_tracker = RateTracker::default();
 
     spawn_input_publisher(app_event_publisher.clone());
@@ -2771,14 +3024,13 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
     };
 
     let initial_rows = app.visible_rows(&state);
-    let initial_selected_index = app.selected_index(&initial_rows);
+    let initial_selected_index = app.sync_base_selected_index(&state, &initial_rows);
     if let Some(live_symbols) = live_symbols.as_ref() {
         let tracked = live_symbols.snapshot();
         app.queue_background_chart_requests(Some(&chart_control_sender), &tracked);
         app.queue_background_analysis_requests(&state, Some(&analysis_control_sender), &tracked);
     }
     render(
-        &mut stdout,
         &state,
         &initial_rows,
         initial_selected_index,
@@ -2807,7 +3059,7 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
         match app_event {
             AppEvent::Input(key_event) => {
                 let rows = app.visible_rows(&state);
-                let selected_index = app.selected_index(&rows);
+                let selected_index = app.input_selected_index(&state, &rows);
                 let was_paused = app.paused;
 
                 if let LoopControl::Exit = handle_input_event(
@@ -3009,9 +3261,8 @@ fn run_terminal(options: RuntimeOptions) -> io::Result<()> {
         }
 
         let rows = app.visible_rows(&state);
-        let selected_index = app.selected_index(&rows);
+        let selected_index = app.sync_base_selected_index(&state, &rows);
         render(
-            &mut stdout,
             &state,
             &rows,
             selected_index,
@@ -3723,63 +3974,94 @@ fn handle_input_event(
     }
 
     match &mut app.input_mode {
-        InputMode::Normal => match key_event.code {
-            KeyCode::Char('q') => return Ok(LoopControl::Exit),
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.move_selection(rows, 1);
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.move_selection(rows, -1);
-            }
-            KeyCode::Enter | KeyCode::Char('d') => {
-                if let Some(row) = rows.get(selected_index) {
-                    app.open_ticker_detail(&row.symbol);
-                    app.queue_detail_chart_request(chart_control_sender);
-                    app.queue_detail_analysis_request(state, analysis_control_sender);
-                } else {
-                    app.set_status_message("Select a ticker to open the detail screen.");
+        InputMode::Normal => {
+            let active_symbols = app.active_base_symbols(state, rows);
+            let active_symbol_refs = active_symbols
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+
+            match key_event.code {
+                KeyCode::Char('q') => return Ok(LoopControl::Exit),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.move_selection_for_symbols(&active_symbol_refs, 1);
                 }
-            }
-            KeyCode::Char('w') => {
-                if let Some(row) = rows.get(selected_index) {
-                    state.toggle_watchlist(&row.symbol);
-                    if let Some(persistence_handle) = persistence_handle {
-                        persistence_handle.replace_watchlist(state.watchlist_symbols());
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.move_selection_for_symbols(&active_symbol_refs, -1);
+                }
+                KeyCode::Home => {
+                    app.select_first_for_symbols(&active_symbol_refs);
+                }
+                KeyCode::End => {
+                    app.select_last_for_symbols(&active_symbol_refs);
+                }
+                KeyCode::PageDown => {
+                    app.move_selection_by_page_for_symbols(
+                        &active_symbol_refs,
+                        1,
+                        MAX_VISIBLE_ROWS,
+                    );
+                }
+                KeyCode::PageUp => {
+                    app.move_selection_by_page_for_symbols(
+                        &active_symbol_refs,
+                        -1,
+                        MAX_VISIBLE_ROWS,
+                    );
+                }
+                KeyCode::Enter | KeyCode::Char('d') => {
+                    if let Some(symbol) = active_symbols.get(selected_index) {
+                        app.open_ticker_detail(symbol);
+                        app.queue_detail_chart_request(chart_control_sender);
+                        app.queue_detail_analysis_request(state, analysis_control_sender);
+                    } else {
+                        app.set_status_message("Select a ticker to open the detail screen.");
                     }
-                    app.set_selection(&row.symbol);
                 }
-            }
-            KeyCode::Char('f') => {
-                app.view_filter.watchlist_only = !app.view_filter.watchlist_only;
-                app.selected_symbol = None;
-            }
-            KeyCode::Char('l') => {
-                app.open_issue_log();
-            }
-            KeyCode::Char('/') => {
-                app.input_mode = InputMode::FilterSearch(app.view_filter.query.clone());
-                app.clear_status_message();
-            }
-            KeyCode::Char('s') => {
-                if live_mode {
-                    app.input_mode = InputMode::SymbolSearch(String::new());
+                KeyCode::Char('w') => {
+                    if let Some(symbol) = active_symbols.get(selected_index) {
+                        state.toggle_watchlist(symbol);
+                        if let Some(persistence_handle) = persistence_handle {
+                            persistence_handle.replace_watchlist(state.watchlist_symbols());
+                        }
+                        app.set_selection(symbol);
+                    }
+                }
+                KeyCode::Char('f') => {
+                    app.view_filter.watchlist_only = !app.view_filter.watchlist_only;
+                    app.clear_all_selections();
+                }
+                KeyCode::Char('o') => {
+                    app.toggle_primary_view(state);
+                }
+                KeyCode::Char('l') => {
+                    app.open_issue_log();
+                }
+                KeyCode::Char('/') => {
+                    app.input_mode = InputMode::FilterSearch(app.view_filter.query.clone());
                     app.clear_status_message();
-                } else {
-                    app.set_status_message("Symbol lookup is only available in live mode.");
                 }
+                KeyCode::Char('s') => {
+                    if live_mode {
+                        app.input_mode = InputMode::SymbolSearch(String::new());
+                        app.clear_status_message();
+                    } else {
+                        app.set_status_message("Symbol lookup is only available in live mode.");
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    app.paused = !app.paused;
+                }
+                KeyCode::Esc | KeyCode::Backspace => {
+                    app.clear_filters();
+                }
+                _ => {}
             }
-            KeyCode::Char(' ') => {
-                app.paused = !app.paused;
-            }
-            KeyCode::Esc | KeyCode::Backspace => {
-                app.clear_filters();
-            }
-            _ => {}
-        },
+        }
         InputMode::FilterSearch(buffer) => match key_event.code {
             KeyCode::Enter => {
                 app.view_filter.query = buffer.clone();
-                app.selected_symbol = None;
+                app.clear_all_selections();
                 app.input_mode = InputMode::Normal;
                 app.clear_status_message();
             }
@@ -3827,7 +4109,6 @@ fn handle_input_event(
 }
 
 fn render(
-    stdout: &mut Stdout,
     state: &TerminalState,
     rows: &[CandidateRow],
     selected_index: usize,
@@ -3850,7 +4131,7 @@ fn render(
         viewport_height,
     );
 
-    screen_renderer.render(stdout, &lines, viewport_width, viewport_height)
+    screen_renderer.render(&lines, viewport_width, viewport_height)
 }
 
 #[cfg(test)]
@@ -3909,8 +4190,15 @@ fn build_screen_lines_for_viewport(
         OverlayMode::None => {}
     }
 
-    let selected_row = rows.get(selected_index);
-    let selected_detail = selected_row.and_then(|row| state.detail(&row.symbol));
+    let opportunity_rows = matches!(app.primary_view, PrimaryViewMode::Opportunities)
+        .then(|| app.visible_opportunity_rows(state));
+    let selected_symbol = opportunity_rows
+        .as_ref()
+        .and_then(|opportunities| opportunities.get(selected_index))
+        .map(|row| row.symbol.as_str())
+        .or_else(|| rows.get(selected_index).map(|row| row.symbol.as_str()))
+        .or(app.selected_symbol.as_deref());
+    let selected_detail = selected_symbol.and_then(|symbol| state.detail(symbol));
     let mut lines = Vec::with_capacity(viewport_height);
     let tracked_count = live_symbols.map(|symbols| symbols.count()).unwrap_or(0);
     let source_status = app.live_source_status();
@@ -4026,114 +4314,195 @@ fn build_screen_lines_for_viewport(
                 "off"
             },
             input_mode_label(&app.input_mode),
-            selected_row
-                .map(|row| row.symbol.as_str())
-                .unwrap_or("none"),
+            selected_symbol.unwrap_or("none"),
         ),
     });
     lines.push(RenderLine {
         color: Some(Color::DarkGrey),
         text: input_prompt(app, live_mode, viewport_width),
     });
-    lines.push(RenderLine {
-        color: Some(Color::Cyan),
-        text: "TOP CANDIDATES".to_string(),
-    });
-    lines.push(RenderLine {
-        color: None,
-        text: format!(
-            "  {:>3}  {}  {:<width$} {:>10} {:>10} {:>8}  {}",
-            "Idx",
-            "W",
-            "Ticker / Company",
-            "Price",
-            "Fair",
-            "Upside",
-            "Confidence",
-            width = CANDIDATE_COMPANY_COLUMN_WIDTH,
-        ),
-    });
-
-    for (index, row) in rows.iter().enumerate() {
-        let marker = if index == selected_index { '>' } else { ' ' };
-        let watched_marker = if state.is_watched(&row.symbol) {
-            '*'
-        } else {
-            ' '
-        };
-        let symbol_label = candidate_company_label(&row.symbol, state.company_name(&row.symbol));
+    if let Some(opportunity_rows) = opportunity_rows.as_ref() {
+        let selected_opportunity = opportunity_rows.get(selected_index);
+        let (opportunity_start, opportunity_end) =
+            opportunity_window_bounds(opportunity_rows.len(), selected_index, MAX_VISIBLE_ROWS);
+        let visible_opportunity_rows = &opportunity_rows[opportunity_start..opportunity_end];
         lines.push(RenderLine {
-            color: Some(candidate_row_color(row, index == selected_index)),
+            color: Some(Color::Cyan),
+            text: "TOP OPPORTUNITIES".to_string(),
+        });
+        lines.push(RenderLine {
+            color: None,
             text: format!(
-                "{} {:>3}  {}  {:<width$} {:>10} {:>10} {:>8}  {}",
-                marker,
-                index,
-                watched_marker,
-                symbol_label,
-                format_money(row.market_price_cents),
-                format_money(row.intrinsic_value_cents),
-                format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
-                confidence_label(row.confidence),
+                "  {:>3}  {}  {:<width$} {:>5} {:>4} {:>4} {:>4} {:>8}  {}",
+                "Idx",
+                "W",
+                "Ticker / Company",
+                "Score",
+                "Fund",
+                "Tech",
+                "Fcst",
+                "Upside",
+                "Confidence",
                 width = CANDIDATE_COMPANY_COLUMN_WIDTH,
             ),
         });
-    }
 
-    lines.push(RenderLine {
-        color: None,
-        text: String::new(),
-    });
-    lines.push(RenderLine {
-        color: Some(Color::Green),
-        text: "DETAIL".to_string(),
-    });
+        for (window_index, row) in visible_opportunity_rows.iter().enumerate() {
+            let rank_index = opportunity_start + window_index;
+            let marker = if rank_index == selected_index {
+                '>'
+            } else {
+                ' '
+            };
+            let watched_marker = if row.is_watched { '*' } else { ' ' };
+            let symbol_label =
+                candidate_company_label(&row.symbol, state.company_name(&row.symbol));
+            lines.push(RenderLine {
+                color: Some(opportunity_row_color(
+                    row,
+                    rank_index == selected_index,
+                    app.is_symbol_stale(&row.symbol),
+                )),
+                text: format!(
+                    "{} {:>3}  {}  {:<width$} {:>5} {:>4} {:>4} {:>4} {:>8}  {}",
+                    marker,
+                    rank_index,
+                    watched_marker,
+                    symbol_label,
+                    row.composite_score,
+                    format_opportunity_bucket(row.fundamentals_score),
+                    format_opportunity_bucket(row.technical_score),
+                    format_opportunity_bucket(row.forecast_score),
+                    format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
+                    confidence_label(row.confidence),
+                    width = CANDIDATE_COMPANY_COLUMN_WIDTH,
+                ),
+            });
+        }
 
-    if let Some(selected_detail) = selected_detail {
-        lines.push(RenderLine {
-            color: Some(status_summary_color(
-                selected_detail.qualification,
-                selected_detail.confidence,
-            )),
-            text: format!(
-                "Symbol: {}  Watched: {}  Qualification: {}  Confidence: {}",
-                format_symbol_with_company(
-                    &selected_detail.symbol,
-                    state.company_name(&selected_detail.symbol),
-                ),
-                if selected_detail.is_watched {
-                    "yes"
-                } else {
-                    "no"
-                },
-                qualification_label(selected_detail.qualification),
-                confidence_label(selected_detail.confidence),
-            ),
-        });
-        lines.push(RenderLine {
-            color: Some(external_status_color(selected_detail.external_status)),
-            text: format!(
-                "Price: {}  Fair value: {}  Upside: {}  External: {}",
-                format_money(selected_detail.market_price_cents),
-                format_money(selected_detail.intrinsic_value_cents),
-                format_upside_percent(
-                    selected_detail.market_price_cents,
-                    selected_detail.intrinsic_value_cents,
-                ),
-                external_status_label(selected_detail.external_status),
-            ),
-        });
-        lines.push(RenderLine {
-            color: Some(Color::DarkGrey),
-            text: format!(
-                "Seq: {}  Updates: {}",
-                selected_detail.last_sequence, selected_detail.update_count,
-            ),
-        });
-    } else {
         lines.push(RenderLine {
             color: None,
-            text: "No active symbols yet.".to_string(),
+            text: String::new(),
         });
+        lines.push(RenderLine {
+            color: Some(Color::Green),
+            text: "DETAIL".to_string(),
+        });
+
+        if let Some(selected_opportunity) = selected_opportunity {
+            lines.extend(build_opportunity_detail_lines(state, selected_opportunity));
+        } else {
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: "No qualified opportunities match the current filter.".to_string(),
+            });
+        }
+    } else {
+        lines.push(RenderLine {
+            color: Some(Color::Cyan),
+            text: "TOP CANDIDATES".to_string(),
+        });
+        lines.push(RenderLine {
+            color: None,
+            text: format!(
+                "  {:>3}  {}  {:<width$} {:>10} {:>10} {:>8}  {}",
+                "Idx",
+                "W",
+                "Ticker / Company",
+                "Price",
+                "Fair",
+                "Upside",
+                "Confidence",
+                width = CANDIDATE_COMPANY_COLUMN_WIDTH,
+            ),
+        });
+
+        for (index, row) in rows.iter().enumerate() {
+            let marker = if index == selected_index { '>' } else { ' ' };
+            let watched_marker = if state.is_watched(&row.symbol) {
+                '*'
+            } else {
+                ' '
+            };
+            let symbol_label =
+                candidate_company_label(&row.symbol, state.company_name(&row.symbol));
+            lines.push(RenderLine {
+                color: Some(candidate_row_color(
+                    row,
+                    index == selected_index,
+                    app.is_symbol_stale(&row.symbol),
+                )),
+                text: format!(
+                    "{} {:>3}  {}  {:<width$} {:>10} {:>10} {:>8}  {}",
+                    marker,
+                    index,
+                    watched_marker,
+                    symbol_label,
+                    format_money(row.market_price_cents),
+                    format_money(row.intrinsic_value_cents),
+                    format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
+                    confidence_label(row.confidence),
+                    width = CANDIDATE_COMPANY_COLUMN_WIDTH,
+                ),
+            });
+        }
+
+        lines.push(RenderLine {
+            color: None,
+            text: String::new(),
+        });
+        lines.push(RenderLine {
+            color: Some(Color::Green),
+            text: "DETAIL".to_string(),
+        });
+
+        if let Some(selected_detail) = selected_detail {
+            lines.push(RenderLine {
+                color: Some(status_summary_color(
+                    selected_detail.qualification,
+                    selected_detail.confidence,
+                )),
+                text: format!(
+                    "Symbol: {}  Watched: {}  Qualification: {}  Confidence: {}",
+                    format_symbol_with_company(
+                        &selected_detail.symbol,
+                        state.company_name(&selected_detail.symbol),
+                    ),
+                    if selected_detail.is_watched {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                    qualification_label(selected_detail.qualification),
+                    confidence_label(selected_detail.confidence),
+                ),
+            });
+            lines.push(RenderLine {
+                color: Some(external_status_color(selected_detail.external_status)),
+                text: format!(
+                    "Price: {}  Fair value: {}  Upside: {}  External: {}",
+                    format_money(selected_detail.market_price_cents),
+                    format_money(selected_detail.intrinsic_value_cents),
+                    format_upside_percent(
+                        selected_detail.market_price_cents,
+                        selected_detail.intrinsic_value_cents,
+                    ),
+                    external_status_label(selected_detail.external_status),
+                ),
+            });
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: format!(
+                    "Seq: {}  Updates: {}",
+                    selected_detail.last_sequence, selected_detail.update_count,
+                ),
+            });
+        } else {
+            lines.push(RenderLine {
+                color: None,
+                text: "No active symbols yet.".to_string(),
+            });
+        }
     }
 
     lines.push(RenderLine {
@@ -4180,6 +4549,346 @@ fn build_screen_lines_for_viewport(
     }
 
     lines
+}
+
+fn opportunity_window_bounds(
+    total_rows: usize,
+    selected_index: usize,
+    visible_capacity: usize,
+) -> (usize, usize) {
+    if total_rows == 0 {
+        return (0, 0);
+    }
+
+    let visible_capacity = visible_capacity.max(1).min(total_rows);
+    let max_start = total_rows.saturating_sub(visible_capacity);
+    let start = selected_index
+        .saturating_sub(visible_capacity.saturating_sub(1))
+        .min(max_start);
+    let end = (start + visible_capacity).min(total_rows);
+    (start, end)
+}
+
+fn build_opportunity_rows(state: &TerminalState, app: &AppState) -> Vec<OpportunityRow> {
+    let mut rows = state
+        .filtered_rows(state.symbol_count().max(1), &app.view_filter)
+        .into_iter()
+        .filter(|row| row.is_qualified)
+        .filter_map(|row| build_opportunity_row(state, app, row))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .composite_score
+            .cmp(&left.composite_score)
+            .then_with(|| right.coverage_count.cmp(&left.coverage_count))
+            .then_with(|| {
+                confidence_rank_value(right.confidence)
+                    .partial_cmp(&confidence_rank_value(left.confidence))
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| right.gap_bps.cmp(&left.gap_bps))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    rows
+}
+
+fn build_opportunity_row(
+    state: &TerminalState,
+    app: &AppState,
+    candidate: CandidateRow,
+) -> Option<OpportunityRow> {
+    let detail = state.detail(&candidate.symbol)?;
+    let (fundamentals_score, fundamentals_signals) = score_opportunity_fundamentals(&detail);
+    let (technical_score, technical_signals) =
+        score_opportunity_technicals(preferred_opportunity_chart_summary(app, &detail.symbol));
+    let (forecast_score, forecast_signals) = score_opportunity_forecasts(app, &detail);
+    let coverage_count = [fundamentals_score, technical_score, forecast_score]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    let composite_score = fundamentals_score.unwrap_or(0)
+        + technical_score.unwrap_or(0)
+        + forecast_score.unwrap_or(0);
+
+    Some(OpportunityRow {
+        symbol: detail.symbol,
+        market_price_cents: detail.market_price_cents,
+        intrinsic_value_cents: detail.intrinsic_value_cents,
+        gap_bps: detail.gap_bps,
+        confidence: detail.confidence,
+        is_watched: detail.is_watched,
+        fundamentals_score,
+        technical_score,
+        forecast_score,
+        composite_score,
+        coverage_count,
+        fundamentals_signals,
+        technical_signals,
+        forecast_signals,
+    })
+}
+
+fn score_opportunity_fundamentals(detail: &SymbolDetail) -> (Option<i32>, Vec<&'static str>) {
+    let Some(fundamentals) = detail.fundamentals.as_ref() else {
+        return (None, Vec::new());
+    };
+
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    if fundamentals.free_cash_flow_dollars.unwrap_or(0) > 0 {
+        score += 1;
+        signals.push("FCF+");
+    }
+    if fundamentals.operating_cash_flow_dollars.unwrap_or(0) > 0 {
+        score += 1;
+        signals.push("OCF+");
+    }
+    if fundamentals.return_on_equity_bps.unwrap_or(i32::MIN) >= 1_000 {
+        score += 1;
+        signals.push("ROE>10");
+    }
+
+    let balance_ok = fundamentals
+        .debt_to_equity_hundredths
+        .map(|value| value <= 100)
+        .unwrap_or(false)
+        || matches!(
+            (
+                fundamentals.total_cash_dollars,
+                fundamentals.total_debt_dollars,
+            ),
+            (Some(total_cash_dollars), Some(total_debt_dollars)) if total_cash_dollars >= total_debt_dollars
+        );
+    if balance_ok {
+        score += 1;
+        signals.push("Balance");
+    }
+
+    if fundamentals.earnings_growth_bps.unwrap_or(0) > 0 {
+        score += 1;
+        signals.push("Growth+");
+    }
+
+    (Some(score), signals)
+}
+
+fn preferred_opportunity_chart_summary<'a>(
+    app: &'a AppState,
+    symbol: &str,
+) -> Option<&'a ChartRangeSummary> {
+    app.chart_summary(symbol, ChartRange::Year).or_else(|| {
+        chart_ranges()
+            .iter()
+            .filter_map(|range| app.chart_summary(symbol, *range))
+            .max_by_key(|summary| summary.candle_count)
+    })
+}
+
+fn score_opportunity_technicals(
+    summary: Option<&ChartRangeSummary>,
+) -> (Option<i32>, Vec<&'static str>) {
+    let Some(summary) = summary else {
+        return (None, Vec::new());
+    };
+    let Some(latest_close_cents) = summary.latest_close_cents else {
+        return (Some(0), Vec::new());
+    };
+
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    if summary
+        .ema20_cents
+        .is_some_and(|ema20_cents| latest_close_cents > ema20_cents)
+    {
+        score += 1;
+        signals.push(">EMA20");
+    }
+    if summary
+        .ema50_cents
+        .is_some_and(|ema50_cents| latest_close_cents > ema50_cents)
+    {
+        score += 1;
+        signals.push(">EMA50");
+    }
+    if summary
+        .ema200_cents
+        .is_some_and(|ema200_cents| latest_close_cents > ema200_cents)
+    {
+        score += 1;
+        signals.push(">EMA200");
+    }
+    if matches!(
+        (summary.ema20_cents, summary.ema50_cents),
+        (Some(ema20_cents), Some(ema50_cents)) if ema20_cents > ema50_cents
+    ) {
+        score += 1;
+        signals.push("EMA20>50");
+    }
+    if matches!(
+        (summary.macd_cents, summary.signal_cents),
+        (Some(macd_cents), Some(signal_cents)) if macd_cents > signal_cents
+    ) || summary
+        .histogram_cents
+        .is_some_and(|histogram_cents| histogram_cents > 0)
+    {
+        score += 1;
+        signals.push("MACD+");
+    }
+
+    (Some(score), signals)
+}
+
+fn score_opportunity_forecasts(
+    app: &AppState,
+    detail: &SymbolDetail,
+) -> (Option<i32>, Vec<&'static str>) {
+    let mut available = false;
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    if detail.external_status == ExternalSignalStatus::Supportive {
+        available = true;
+        score += 1;
+        signals.push("Supportive");
+    }
+    if detail.analyst_opinion_count.unwrap_or(0) >= 5 {
+        available = true;
+        score += 1;
+        signals.push("5+Analysts");
+    }
+    if detail
+        .recommendation_mean_hundredths
+        .is_some_and(|recommendation_mean_hundredths| recommendation_mean_hundredths <= 200)
+    {
+        available = true;
+        score += 1;
+        signals.push("Rec<=2.0");
+    }
+    if let Some(weighted_external_signal_fair_value_cents) =
+        detail.weighted_external_signal_fair_value_cents
+    {
+        available = true;
+        if checked_upside_bps(
+            detail.market_price_cents,
+            weighted_external_signal_fair_value_cents,
+        )
+        .unwrap_or(0)
+            >= 3_000
+        {
+            score += 1;
+            signals.push("Weighted+");
+        }
+    }
+
+    if let Some(AnalysisCacheEntry::Ready { analysis, .. }) =
+        app.detail_analysis_entry(&detail.symbol)
+    {
+        available = true;
+        match dcf_signal(analysis, detail.market_price_cents) {
+            DcfSignal::Opportunity => {
+                score += 1;
+                signals.push("DCF+");
+            }
+            DcfSignal::Fair => {}
+            DcfSignal::Expensive => {
+                score -= 1;
+                signals.push("DCF-");
+            }
+        }
+    }
+
+    if available {
+        (Some(score), signals)
+    } else {
+        (None, Vec::new())
+    }
+}
+
+fn opportunity_row_color(row: &OpportunityRow, is_selected: bool, is_stale: bool) -> Color {
+    if is_selected {
+        return if row.confidence == ConfidenceBand::High {
+            Color::Cyan
+        } else {
+            Color::DarkCyan
+        };
+    }
+    if is_stale {
+        return Color::DarkGrey;
+    }
+
+    confidence_color(row.confidence)
+}
+
+fn format_opportunity_bucket(score: Option<i32>) -> String {
+    score
+        .map(|value| format!("{value}/5"))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn build_opportunity_detail_lines(state: &TerminalState, row: &OpportunityRow) -> Vec<RenderLine> {
+    vec![
+        RenderLine {
+            color: Some(status_summary_color(
+                QualificationStatus::Qualified,
+                row.confidence,
+            )),
+            text: format!(
+                "Symbol: {}  Watched: {}  Opportunity score: {}  Coverage: {}/3  Confidence: {}",
+                format_symbol_with_company(&row.symbol, state.company_name(&row.symbol)),
+                if row.is_watched { "yes" } else { "no" },
+                row.composite_score,
+                row.coverage_count,
+                confidence_label(row.confidence),
+            ),
+        },
+        RenderLine {
+            color: Some(Color::DarkGrey),
+            text: format!(
+                "Price: {}  Fair value: {}  Upside: {}  Fundamentals {}  Technicals {}  Forecasts {}",
+                format_money(row.market_price_cents),
+                format_money(row.intrinsic_value_cents),
+                format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
+                format_opportunity_bucket(row.fundamentals_score),
+                format_opportunity_bucket(row.technical_score),
+                format_opportunity_bucket(row.forecast_score),
+            ),
+        },
+        RenderLine {
+            color: Some(Color::Green),
+            text: format!(
+                "Fundamentals: {}",
+                if row.fundamentals_signals.is_empty() {
+                    "no supporting signals".to_string()
+                } else {
+                    row.fundamentals_signals.join(", ")
+                }
+            ),
+        },
+        RenderLine {
+            color: Some(Color::Blue),
+            text: format!(
+                "Technicals: {}",
+                if row.technical_signals.is_empty() {
+                    "no technical confirmation yet".to_string()
+                } else {
+                    row.technical_signals.join(", ")
+                }
+            ),
+        },
+        RenderLine {
+            color: Some(Color::Magenta),
+            text: format!(
+                "Forecasts: {}",
+                if row.forecast_signals.is_empty() {
+                    "no analyst or DCF confirmation yet".to_string()
+                } else {
+                    row.forecast_signals.join(", ")
+                }
+            ),
+        },
+    ]
 }
 
 fn build_issue_log_lines(app: &AppState) -> Vec<RenderLine> {
@@ -4592,19 +5301,19 @@ fn build_ticker_detail_lines_for_viewport(
     viewport_width: usize,
     viewport_height: usize,
 ) -> Vec<RenderLine> {
-    let detail_rows = filtered_symbol_rows(state, &app.view_filter);
-    let symbol_index = detail_rows
+    let detail_symbols = app.active_detail_symbols(state);
+    let symbol_index = detail_symbols
         .iter()
-        .position(|row| row.symbol == symbol)
+        .position(|candidate_symbol| candidate_symbol == symbol)
         .map(|index| index + 1)
         .unwrap_or(1);
-    let symbol_count = detail_rows.len().max(1);
+    let symbol_count = detail_symbols.len().max(1);
     let layout = detail_layout(viewport_width, viewport_height);
     let mut lines = Vec::with_capacity(viewport_height);
 
     lines.push(RenderLine {
         color: Some(Color::Yellow),
-        text: "TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  w watch  |  l logs  |  Backspace or d or Enter close  |  q quit  |  Ctrl+C quit".to_string(),
+        text: "TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  \u{2190}/\u{2192} replay  |  w watch  |  l logs  |  Backspace or d or Enter close  |  q quit  |  Ctrl+C quit".to_string(),
     });
 
     let Some(detail) = state.detail(symbol) else {
@@ -4636,11 +5345,16 @@ fn build_ticker_detail_lines_for_viewport(
         .fundamentals
         .as_ref()
         .and_then(|fundamentals| compute_sector_relative_score(state, fundamentals));
-    let aggregated_candles =
-        aggregate_historical_candles(chart_snapshot.candles, layout.candle_slots);
+    let visible_end = app.visible_candle_end(chart_snapshot.candles.len());
+    let visible_candles = &chart_snapshot.candles[..visible_end];
+    let aggregated_candles = aggregate_historical_candles(visible_candles, layout.candle_slots);
 
     lines.push(RenderLine {
-        color: Some(Color::Cyan),
+        color: Some(if app.is_symbol_stale(symbol) {
+            Color::DarkGrey
+        } else {
+            Color::Cyan
+        }),
         text: format!(
             "{}  Position: {}/{}  Watched: {}  Chart {}",
             format_symbol_with_company(&detail.symbol, state.company_name(&detail.symbol)),
@@ -4727,9 +5441,14 @@ fn build_ticker_detail_lines_for_viewport(
     lines.push(RenderLine {
         color: Some(Color::Yellow),
         text: format!(
-            "PRICE CHART  |  {}  |  {} candle(s)  |  {}",
+            "PRICE CHART  |  {}  |  {} candle(s){}  |  {}  |  ←/→ replay",
             chart_range_label(app.detail_chart_range()),
-            chart_snapshot.candles.len(),
+            visible_candles.len(),
+            if app.replay_offset > 0 {
+                format!(" / {}", chart_snapshot.candles.len())
+            } else {
+                String::new()
+            },
             chart_snapshot.status
         ),
     });
@@ -4741,14 +5460,18 @@ fn build_ticker_detail_lines_for_viewport(
             }),
         });
     } else {
-        lines.extend(build_chart_stack_lines(&aggregated_candles, &layout));
+        lines.extend(build_chart_stack_lines(
+            &aggregated_candles,
+            visible_candles,
+            &layout,
+        ));
         lines.push(RenderLine {
             color: Some(Color::DarkGrey),
             text: format!(
                 "Showing {} / {} candles  |  ~{} source candle(s) per slot  |  Visible price range {} to {}  |  Volume max {}",
                 aggregated_candles.len(),
-                chart_snapshot.candles.len(),
-                chart_bucket_size(chart_snapshot.candles.len(), aggregated_candles.len()),
+                visible_candles.len(),
+                chart_bucket_size(visible_candles.len(), aggregated_candles.len()),
                 format_money(
                     aggregated_candles
                         .iter()
@@ -4924,6 +5647,7 @@ fn build_ticker_detail_lines_for_viewport(
 }
 
 struct DetailLayout {
+    plot_width: usize,
     candle_slots: usize,
     price_chart_height: usize,
     volume_chart_height: usize,
@@ -4937,6 +5661,7 @@ struct DetailLayout {
     compact_fundamentals: bool,
     compact_consensus: bool,
     compact_evidence: bool,
+    show_volume_profile: bool,
 }
 
 struct DetailChartSnapshot<'a> {
@@ -4947,9 +5672,16 @@ struct DetailChartSnapshot<'a> {
 }
 
 fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout {
-    let candle_slots =
-        ((viewport_width.saturating_sub(DETAIL_CHART_AXIS_WIDTH + DETAIL_CHART_ROW_PADDING)) / 2)
-            .max(DETAIL_MIN_VISIBLE_CANDLES);
+    let show_volume_profile = viewport_width >= 100;
+    let profile_width = if show_volume_profile {
+        DETAIL_VOLUME_PROFILE_WIDTH
+    } else {
+        0
+    };
+    let plot_width = viewport_width
+        .saturating_sub(DETAIL_CHART_AXIS_WIDTH + DETAIL_CHART_ROW_PADDING + profile_width)
+        .max(DETAIL_MIN_VISIBLE_CANDLES);
+    let candle_slots = plot_width;
     let mut show_recent_context = viewport_height >= 30 && viewport_width >= 88;
     let mut compact_fundamentals = viewport_height < 36 || viewport_width < 104;
     let mut compact_consensus = viewport_height < 34 || viewport_width < 96;
@@ -4999,6 +5731,7 @@ fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout 
     let show_macd_legend = show_macd && viewport_width >= 94 && chart_stack_height >= 13;
 
     DetailLayout {
+        plot_width,
         candle_slots,
         price_chart_height,
         volume_chart_height,
@@ -5012,6 +5745,7 @@ fn detail_layout(viewport_width: usize, viewport_height: usize) -> DetailLayout 
         compact_fundamentals,
         compact_consensus,
         compact_evidence,
+        show_volume_profile,
     }
 }
 
@@ -5522,16 +6256,159 @@ fn chart_bucket_size(point_count: usize, max_candles: usize) -> usize {
     point_count.div_ceil(max_candles.max(1))
 }
 
-fn build_chart_stack_lines(candles: &[PriceCandle], layout: &DetailLayout) -> Vec<RenderLine> {
-    let chart_width = candles.len().saturating_mul(2);
-    let separator_width = DETAIL_CHART_AXIS_WIDTH + 2 + chart_width;
+fn compute_volume_profile(
+    candles: &[HistoricalCandle],
+    min_price_cents: i64,
+    max_price_cents: i64,
+    num_bins: usize,
+) -> Vec<VolumeProfileBin> {
+    let price_candles = candles
+        .iter()
+        .map(|candle| PriceCandle {
+            open_cents: candle.open_cents,
+            high_cents: candle.high_cents,
+            low_cents: candle.low_cents,
+            close_cents: candle.close_cents,
+            volume: candle.volume,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        })
+        .collect::<Vec<_>>();
+    compute_volume_profile_from_price_candles(
+        &price_candles,
+        min_price_cents,
+        max_price_cents,
+        num_bins,
+    )
+}
+
+fn compute_volume_profile_from_price_candles(
+    candles: &[PriceCandle],
+    min_price_cents: i64,
+    max_price_cents: i64,
+    num_bins: usize,
+) -> Vec<VolumeProfileBin> {
+    let mut bins = vec![
+        VolumeProfileBin {
+            up_volume: 0,
+            down_volume: 0,
+        };
+        num_bins
+    ];
+    if num_bins == 0 || min_price_cents >= max_price_cents {
+        return bins;
+    }
+    let range = (max_price_cents - min_price_cents) as f64;
+    for candle in candles {
+        let low = candle.low_cents.max(min_price_cents);
+        let high = candle.high_cents.min(max_price_cents);
+        let low_bin =
+            ((low - min_price_cents) as f64 / range * (num_bins - 1) as f64).round() as usize;
+        let high_bin =
+            ((high - min_price_cents) as f64 / range * (num_bins - 1) as f64).round() as usize;
+        let low_bin = low_bin.min(num_bins - 1);
+        let high_bin = high_bin.min(num_bins - 1);
+        let span = (high_bin - low_bin + 1) as u64;
+        let per_bin = candle.volume / span;
+        let remainder = candle.volume % span;
+        let is_up = candle.close_cents >= candle.open_cents;
+        for (i, bin_index) in (low_bin..=high_bin).enumerate() {
+            let row = num_bins - 1 - bin_index;
+            let vol = per_bin + if (i as u64) < remainder { 1 } else { 0 };
+            if is_up {
+                bins[row].up_volume += vol;
+            } else {
+                bins[row].down_volume += vol;
+            }
+        }
+    }
+    bins
+}
+
+fn render_volume_profile_cells(
+    bin: &VolumeProfileBin,
+    max_bin_volume: u64,
+    bar_width: usize,
+) -> Vec<StyledCell> {
+    let mut cells = Vec::with_capacity(bar_width);
+    cells.push(StyledCell {
+        ch: '│',
+        color: Some(Color::DarkGrey),
+        bg_color: None,
+        priority: 255,
+    });
+    let available = bar_width.saturating_sub(1);
+    if max_bin_volume == 0 || available == 0 {
+        for _ in 0..available {
+            cells.push(StyledCell {
+                ch: ' ',
+                color: None,
+                bg_color: None,
+                priority: 0,
+            });
+        }
+        return cells;
+    }
+    let total = bin.up_volume + bin.down_volume;
+    let mut filled = ((total as f64 / max_bin_volume as f64) * available as f64).round() as usize;
+    filled = filled.min(available);
+    let up_chars = if total > 0 {
+        ((bin.up_volume as f64 / total as f64) * filled as f64).round() as usize
+    } else {
+        0
+    };
+    let down_chars = filled.saturating_sub(up_chars);
+    for _ in 0..up_chars {
+        cells.push(StyledCell {
+            ch: '█',
+            color: Some(Color::DarkYellow),
+            bg_color: None,
+            priority: 10,
+        });
+    }
+    for _ in 0..down_chars {
+        cells.push(StyledCell {
+            ch: '█',
+            color: Some(Color::DarkCyan),
+            bg_color: None,
+            priority: 10,
+        });
+    }
+    for _ in 0..(available - filled) {
+        cells.push(StyledCell {
+            ch: ' ',
+            color: None,
+            bg_color: None,
+            priority: 0,
+        });
+    }
+    cells
+}
+
+fn build_chart_stack_lines(
+    candles: &[PriceCandle],
+    profile_source: &[HistoricalCandle],
+    layout: &DetailLayout,
+) -> Vec<RenderLine> {
+    let chart_width = layout.plot_width;
+    let profile_width = if layout.show_volume_profile {
+        DETAIL_VOLUME_PROFILE_WIDTH
+    } else {
+        0
+    };
+    let separator_width = DETAIL_CHART_AXIS_WIDTH + 2 + chart_width + profile_width;
     let mut lines = vec![pane_header_line(
         "PRICE",
         "candles + EMA",
         Some(Color::Yellow),
         Some(Color::DarkGrey),
     )];
-    lines.extend(render_price_chart_lines(candles, layout));
+    lines.extend(render_price_chart_lines(candles, profile_source, layout));
     if layout.show_overlay_legend {
         lines.push(price_legend_line(layout.show_ema_200));
     }
@@ -5543,15 +6420,20 @@ fn build_chart_stack_lines(candles: &[PriceCandle], layout: &DetailLayout) -> Ve
             text: render_compact_volume_line(candles),
         });
     } else {
-        lines.extend(render_volume_chart_lines(
+        lines.extend(render_volume_chart_lines_with_width(
             candles,
             layout.volume_chart_height,
+            layout.plot_width,
         ));
     }
 
     if layout.show_macd {
         lines.push(pane_separator_line("MACD", separator_width));
-        lines.extend(render_macd_chart_lines(candles, layout.macd_chart_height));
+        lines.extend(render_macd_chart_lines_with_width(
+            candles,
+            layout.macd_chart_height,
+            layout.plot_width,
+        ));
         if layout.show_macd_legend {
             lines.push(macd_legend_line());
         }
@@ -5560,7 +6442,25 @@ fn build_chart_stack_lines(candles: &[PriceCandle], layout: &DetailLayout) -> Ve
     lines
 }
 
-fn render_price_chart_lines(candles: &[PriceCandle], layout: &DetailLayout) -> Vec<RenderLine> {
+fn chart_column_positions(point_count: usize, plot_width: usize) -> Vec<usize> {
+    if point_count == 0 || plot_width == 0 {
+        return Vec::new();
+    }
+    if point_count == 1 {
+        return vec![plot_width.saturating_sub(1) / 2];
+    }
+
+    let last_column = plot_width.saturating_sub(1);
+    (0..point_count)
+        .map(|index| index * last_column / (point_count - 1))
+        .collect()
+}
+
+fn render_price_chart_lines(
+    candles: &[PriceCandle],
+    profile_source: &[HistoricalCandle],
+    layout: &DetailLayout,
+) -> Vec<RenderLine> {
     if candles.is_empty() || layout.price_chart_height == 0 {
         return Vec::new();
     }
@@ -5592,36 +6492,19 @@ fn render_price_chart_lines(candles: &[PriceCandle], layout: &DetailLayout) -> V
         }
     }
     let (min_price_cents, max_price_cents) = padded_i64_range(min_price_cents, max_price_cents);
-    let chart_width = candles.len() * 2;
-    let mut canvas = blank_canvas(layout.price_chart_height, chart_width);
+    let plot_columns = chart_column_positions(candles.len(), layout.plot_width);
+    let mut canvas = tui_graphs::BrailleCanvas::new(
+        layout.price_chart_height,
+        layout.plot_width,
+        min_price_cents as f64,
+        max_price_cents as f64,
+    );
 
-    for (index, candle) in candles.iter().enumerate() {
-        let wick_column = index * 2;
-        let body_column = wick_column + 1;
-        let high_row = map_numeric_to_row(
-            candle.high_cents as f64,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-        );
-        let low_row = map_numeric_to_row(
-            candle.low_cents as f64,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-        );
-        let open_row = map_numeric_to_row(
-            candle.open_cents as f64,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-        );
-        let close_row = map_numeric_to_row(
-            candle.close_cents as f64,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-        );
+    for (column, candle) in plot_columns.iter().copied().zip(candles.iter()) {
+        let high_row = canvas.map_to_subrow(candle.high_cents as f64);
+        let low_row = canvas.map_to_subrow(candle.low_cents as f64);
+        let open_row = canvas.map_to_subrow(candle.open_cents as f64);
+        let close_row = canvas.map_to_subrow(candle.close_cents as f64);
 
         let candle_color = if candle.close_cents > candle.open_cents {
             Some(Color::Green)
@@ -5630,102 +6513,88 @@ fn render_price_chart_lines(candles: &[PriceCandle], layout: &DetailLayout) -> V
         } else {
             Some(Color::Grey)
         };
-        let body_char = if candle.close_cents > candle.open_cents {
-            '█'
-        } else if candle.close_cents < candle.open_cents {
-            '▓'
-        } else {
-            '─'
-        };
+        canvas.fill_vertical_half(column, 0, high_row, low_row, candle_color, 1);
+        canvas.fill_vertical_full(column, open_row, close_row, candle_color, 2);
 
-        for row in high_row.min(low_row)..=high_row.max(low_row) {
-            set_canvas_cell(&mut canvas, row, wick_column, '│', candle_color, 4);
+        if let Some(ema_value) = candle.ema_20_cents {
+            let row = canvas.map_to_subrow(ema_value);
+            canvas.fill_dot(row, column, 1, Some(Color::Yellow), 5);
         }
-        for row in open_row.min(close_row)..=open_row.max(close_row) {
-            set_canvas_cell(&mut canvas, row, wick_column, body_char, candle_color, 5);
-            set_canvas_cell(&mut canvas, row, body_column, body_char, candle_color, 5);
+        if let Some(ema_value) = candle.ema_50_cents {
+            let row = canvas.map_to_subrow(ema_value);
+            canvas.fill_dot(row, column, 1, Some(Color::Cyan), 4);
         }
-
-        draw_overlay_point(
-            &mut canvas,
-            wick_column,
-            body_column,
-            candle.ema_20_cents,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-            '.',
-            Some(Color::Yellow),
-            2,
-        );
-        draw_overlay_point(
-            &mut canvas,
-            wick_column,
-            body_column,
-            candle.ema_50_cents,
-            min_price_cents as f64,
-            max_price_cents as f64,
-            layout.price_chart_height,
-            'x',
-            Some(Color::Cyan),
-            2,
-        );
         if layout.show_ema_200 {
-            draw_overlay_point(
-                &mut canvas,
-                wick_column,
-                body_column,
-                candle.ema_200_cents,
-                min_price_cents as f64,
-                max_price_cents as f64,
-                layout.price_chart_height,
-                'o',
-                Some(Color::DarkGrey),
-                1,
-            );
+            if let Some(ema_value) = candle.ema_200_cents {
+                let row = canvas.map_to_subrow(ema_value);
+                canvas.fill_dot(row, column, 1, Some(Color::DarkGrey), 3);
+            }
         }
     }
 
-    render_i64_axis_pane(canvas, min_price_cents, max_price_cents)
+    let cells = canvas.collapse_to_cells();
+    if layout.show_volume_profile {
+        let profile = compute_volume_profile(
+            profile_source,
+            min_price_cents,
+            max_price_cents,
+            layout.price_chart_height,
+        );
+        let max_bin_volume = profile
+            .iter()
+            .map(|b| b.up_volume + b.down_volume)
+            .max()
+            .unwrap_or(0);
+        render_i64_axis_pane_with_profile(
+            cells,
+            min_price_cents,
+            max_price_cents,
+            &profile,
+            max_bin_volume,
+        )
+    } else {
+        render_i64_axis_pane(cells, min_price_cents, max_price_cents)
+    }
 }
 
+#[cfg(test)]
 fn render_volume_chart_lines(candles: &[PriceCandle], chart_height: usize) -> Vec<RenderLine> {
+    render_volume_chart_lines_with_width(candles, chart_height, candles.len().max(1))
+}
+
+fn render_volume_chart_lines_with_width(
+    candles: &[PriceCandle],
+    chart_height: usize,
+    plot_width: usize,
+) -> Vec<RenderLine> {
     if candles.is_empty() || chart_height == 0 {
         return Vec::new();
     }
 
-    let chart_width = candles.len() * 2;
+    let chart_width = plot_width.max(1);
+    let plot_columns = chart_column_positions(candles.len(), chart_width);
     let max_volume = candles
         .iter()
         .map(|candle| candle.volume)
         .max()
         .unwrap_or(0)
         .max(1);
-    let mut canvas = blank_canvas(chart_height, chart_width);
+    let mut canvas =
+        tui_graphs::BrailleCanvas::new(chart_height, chart_width, 0.0, max_volume as f64);
 
-    for (index, candle) in candles.iter().enumerate() {
+    for (column, candle) in plot_columns.iter().copied().zip(candles.iter()) {
         if candle.volume == 0 {
             continue;
         }
 
-        let body_column = index * 2 + 1;
-        let filled_rows = ((candle.volume as usize * chart_height) + max_volume as usize - 1)
-            / max_volume as usize;
-        let filled_rows = filled_rows.max(1).min(chart_height);
-        for row in chart_height.saturating_sub(filled_rows)..chart_height {
-            set_canvas_cell(
-                &mut canvas,
-                row,
-                body_column.saturating_sub(1),
-                '█',
-                Some(Color::DarkBlue),
-                3,
-            );
-            set_canvas_cell(&mut canvas, row, body_column, '█', Some(Color::DarkBlue), 3);
-        }
+        let top_row = canvas.map_to_subrow(candle.volume as f64);
+        let bot_row = canvas.map_to_subrow(0.0);
+        canvas.fill_vertical_full(column, top_row, bot_row, Some(Color::DarkBlue), 3);
     }
 
-    render_u64_axis_pane(canvas, max_volume, 0)
+    render_axis_pane(canvas.collapse_to_cells(), |row_index, h| {
+        format_compact_quantity(value_for_row_u64(row_index, 0, max_volume, h))
+    })
 }
 
 fn render_compact_volume_line(candles: &[PriceCandle]) -> String {
@@ -5742,7 +6611,16 @@ fn render_compact_volume_line(candles: &[PriceCandle]) -> String {
     )
 }
 
+#[cfg(test)]
 fn render_macd_chart_lines(candles: &[PriceCandle], chart_height: usize) -> Vec<RenderLine> {
+    render_macd_chart_lines_with_width(candles, chart_height, candles.len().max(1))
+}
+
+fn render_macd_chart_lines_with_width(
+    candles: &[PriceCandle],
+    chart_height: usize,
+    plot_width: usize,
+) -> Vec<RenderLine> {
     if candles.is_empty() || chart_height == 0 {
         return Vec::new();
     }
@@ -5762,74 +6640,39 @@ fn render_macd_chart_lines(candles: &[PriceCandle], chart_height: usize) -> Vec<
         }
     }
     let (min_value, max_value) = padded_f64_range(min_value, max_value);
-    let chart_width = candles.len() * 2;
-    let zero_row = map_numeric_to_row(0.0, min_value, max_value, chart_height);
-    let mut canvas = blank_canvas(chart_height, chart_width);
+    let chart_width = plot_width.max(1);
+    let plot_columns = chart_column_positions(candles.len(), chart_width);
+    let mut canvas =
+        tui_graphs::BrailleCanvas::new(chart_height, chart_width, min_value, max_value);
 
-    for column in 0..chart_width {
-        set_canvas_cell(&mut canvas, zero_row, column, '-', Some(Color::DarkGrey), 0);
-    }
+    canvas.plot_hline(0.0, Some(Color::DarkGrey), 0);
 
-    for (index, candle) in candles.iter().enumerate() {
-        let wick_column = index * 2;
-        let body_column = wick_column + 1;
-
+    for (column, candle) in plot_columns.iter().copied().zip(candles.iter()) {
         if let Some(histogram_value) = candle.histogram_cents {
-            let histogram_row =
-                map_numeric_to_row(histogram_value, min_value, max_value, chart_height);
+            let zero_row = canvas.map_to_subrow(0.0);
+            let histogram_row = canvas.map_to_subrow(histogram_value);
             let histogram_color = if histogram_value >= 0.0 {
                 Some(Color::DarkGreen)
             } else {
                 Some(Color::DarkRed)
             };
-            let histogram_char = if histogram_value >= 0.0 { '█' } else { '▓' };
-            for row in zero_row.min(histogram_row)..=zero_row.max(histogram_row) {
-                set_canvas_cell(
-                    &mut canvas,
-                    row,
-                    wick_column,
-                    histogram_char,
-                    histogram_color,
-                    1,
-                );
-                set_canvas_cell(
-                    &mut canvas,
-                    row,
-                    body_column,
-                    histogram_char,
-                    histogram_color,
-                    1,
-                );
-            }
+            canvas.fill_vertical_full(column, zero_row, histogram_row, histogram_color, 1);
         }
 
-        draw_overlay_point(
-            &mut canvas,
-            wick_column,
-            body_column,
-            candle.macd_cents,
-            min_value,
-            max_value,
-            chart_height,
-            '+',
-            Some(Color::Cyan),
-            3,
-        );
-        draw_overlay_point(
-            &mut canvas,
-            wick_column,
-            body_column,
-            candle.signal_cents,
-            min_value,
-            max_value,
-            chart_height,
-            '=',
-            Some(Color::Yellow),
-            2,
-        );
+        if let Some(macd_value) = candle.macd_cents {
+            let row = canvas.map_to_subrow(macd_value);
+            canvas.fill_dot(row, column, 0, Some(Color::Cyan), 3);
+        }
+
+        if let Some(signal_value) = candle.signal_cents {
+            let row = canvas.map_to_subrow(signal_value);
+            canvas.fill_dot(row, column, 1, Some(Color::Yellow), 4);
+        }
     }
 
-    render_f64_axis_pane(canvas, min_value, max_value)
+    render_axis_pane(canvas.collapse_to_cells(), |row_index, h| {
+        format_money(value_for_row_f64(row_index, min_value, max_value, h).round() as i64)
+    })
 }
 
 fn compact_consensus_line(detail: &SymbolDetail) -> String {
@@ -5857,10 +6700,12 @@ fn pane_header_line(
     styled_segments_line(vec![
         StyledSegment {
             color: title_color,
+            bg_color: None,
             text: format!("{title:<6}"),
         },
         StyledSegment {
             color: subtitle_color,
+            bg_color: None,
             text: format!(" {subtitle}"),
         },
     ])
@@ -5872,10 +6717,12 @@ fn pane_separator_line(label: &str, width: usize) -> RenderLine {
     styled_segments_line(vec![
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: prefix,
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "-".repeat(rule_width),
         },
     ])
@@ -5885,48 +6732,59 @@ fn price_legend_line(show_ema_200: bool) -> RenderLine {
     let mut segments = vec![
         StyledSegment {
             color: Some(Color::Green),
+            bg_color: None,
             text: "█ up".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::Red),
+            bg_color: None,
             text: "▓ down".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::Grey),
+            bg_color: None,
             text: "─ flat".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::Yellow),
+            bg_color: None,
             text: ". EMA20".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::Cyan),
+            bg_color: None,
             text: "x EMA50".to_string(),
         },
     ];
     if show_ema_200 {
         segments.push(StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         });
         segments.push(StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "o EMA200".to_string(),
         });
     }
@@ -5937,102 +6795,293 @@ fn macd_legend_line() -> RenderLine {
     styled_segments_line(vec![
         StyledSegment {
             color: Some(Color::Cyan),
+            bg_color: None,
             text: "+ MACD".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::Yellow),
+            bg_color: None,
             text: "= signal".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGreen),
+            bg_color: None,
             text: "█ hist+".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkGrey),
+            bg_color: None,
             text: "  ".to_string(),
         },
         StyledSegment {
             color: Some(Color::DarkRed),
+            bg_color: None,
             text: "▓ hist-".to_string(),
         },
     ])
 }
 
-fn blank_canvas(height: usize, width: usize) -> Vec<Vec<StyledCell>> {
-    vec![
-        vec![
-            StyledCell {
-                ch: ' ',
-                color: None,
-                priority: 0,
-            };
-            width
-        ];
-        height
-    ]
-}
-
-fn draw_overlay_point(
-    canvas: &mut [Vec<StyledCell>],
-    wick_column: usize,
-    body_column: usize,
-    value: Option<f64>,
-    min_value: f64,
-    max_value: f64,
-    chart_height: usize,
-    overlay_char: char,
-    overlay_color: Option<Color>,
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+struct HiResPixel {
+    color: Option<Color>,
     priority: u8,
-) {
-    let Some(value) = value else {
-        return;
-    };
-    let row = map_numeric_to_row(value, min_value, max_value, chart_height);
-    set_canvas_cell(
-        canvas,
-        row,
-        wick_column,
-        overlay_char,
-        overlay_color,
-        priority,
-    );
-    set_canvas_cell(
-        canvas,
-        row,
-        body_column,
-        overlay_char,
-        overlay_color,
-        priority,
-    );
 }
 
-fn set_canvas_cell(
-    canvas: &mut [Vec<StyledCell>],
-    row: usize,
-    column: usize,
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GlyphCell {
     ch: char,
     color: Option<Color>,
     priority: u8,
-) {
-    let Some(cell) = canvas.get_mut(row).and_then(|row| row.get_mut(column)) else {
-        return;
-    };
-    if cell.priority > priority && cell.ch != ' ' {
-        return;
+}
+
+#[cfg(test)]
+struct ChartCanvas {
+    pixels: Vec<HiResPixel>,
+    glyphs: Vec<Option<GlyphCell>>,
+    width: usize,
+    terminal_height: usize,
+    min_value: f64,
+    max_value: f64,
+}
+
+#[cfg(test)]
+impl ChartCanvas {
+    fn new(terminal_height: usize, width: usize, min_value: f64, max_value: f64) -> Self {
+        let hires_len = terminal_height * 2 * width;
+        let glyph_len = terminal_height * width;
+        Self {
+            pixels: vec![
+                HiResPixel {
+                    color: None,
+                    priority: 0
+                };
+                hires_len
+            ],
+            glyphs: vec![None; glyph_len],
+            width,
+            terminal_height,
+            min_value,
+            max_value,
+        }
     }
-    *cell = StyledCell {
-        ch,
-        color,
-        priority,
-    };
+
+    fn reset(&mut self, min_value: f64, max_value: f64) {
+        self.pixels.fill(HiResPixel {
+            color: None,
+            priority: 0,
+        });
+        self.glyphs.fill(None);
+        self.min_value = min_value;
+        self.max_value = max_value;
+    }
+
+    fn fill_pixel(&mut self, hires_row: usize, col: usize, color: Option<Color>, priority: u8) {
+        let idx = hires_row * self.width + col;
+        let Some(pixel) = self.pixels.get_mut(idx) else {
+            return;
+        };
+        if pixel.priority > priority && pixel.color.is_some() {
+            return;
+        }
+        *pixel = HiResPixel { color, priority };
+    }
+
+    fn draw_glyph(
+        &mut self,
+        terminal_row: usize,
+        col: usize,
+        ch: char,
+        color: Option<Color>,
+        priority: u8,
+    ) {
+        let idx = terminal_row * self.width + col;
+        let Some(slot) = self.glyphs.get_mut(idx) else {
+            return;
+        };
+        if let Some(existing) = slot {
+            if existing.priority > priority {
+                return;
+            }
+        }
+        *slot = Some(GlyphCell {
+            ch,
+            color,
+            priority,
+        });
+    }
+
+    fn map_to_hires_row(&self, value: f64) -> usize {
+        map_numeric_to_row(
+            value,
+            self.min_value,
+            self.max_value,
+            self.terminal_height * 2,
+        )
+    }
+
+    fn map_to_terminal_row(&self, value: f64) -> usize {
+        map_numeric_to_row(value, self.min_value, self.max_value, self.terminal_height)
+    }
+
+    fn plot_pixel(&mut self, value: f64, col: usize, color: Option<Color>, priority: u8) {
+        let row = self.map_to_hires_row(value);
+        self.fill_pixel(row, col, color, priority);
+    }
+
+    fn plot_glyph(&mut self, value: f64, col: usize, ch: char, color: Option<Color>, priority: u8) {
+        let row = self.map_to_terminal_row(value);
+        self.draw_glyph(row, col, ch, color, priority);
+    }
+
+    fn fill_vertical(
+        &mut self,
+        col: usize,
+        hires_row_lo: usize,
+        hires_row_hi: usize,
+        color: Option<Color>,
+        priority: u8,
+    ) {
+        let lo = hires_row_lo.min(hires_row_hi);
+        let hi = hires_row_lo.max(hires_row_hi);
+        for row in lo..=hi {
+            self.fill_pixel(row, col, color, priority);
+        }
+    }
+
+    fn plot_hline(&mut self, value: f64, color: Option<Color>, priority: u8) {
+        let row = self.map_to_hires_row(value);
+        for col in 0..self.width {
+            self.fill_pixel(row, col, color, priority);
+        }
+    }
+
+    fn collapse_to_cells(&self) -> Vec<Vec<StyledCell>> {
+        let mut result = Vec::with_capacity(self.terminal_height);
+        for trow in 0..self.terminal_height {
+            let mut row_cells = Vec::with_capacity(self.width);
+            for col in 0..self.width {
+                let top_idx = trow * 2 * self.width + col;
+                let bot_idx = (trow * 2 + 1) * self.width + col;
+                let top = &self.pixels[top_idx];
+                let bot = &self.pixels[bot_idx];
+                let glyph_idx = trow * self.width + col;
+                let glyph = &self.glyphs[glyph_idx];
+
+                let cell = if let Some(g) = glyph {
+                    let max_pixel_pri = top.priority.max(bot.priority);
+                    if g.priority >= max_pixel_pri || (top.color.is_none() && bot.color.is_none()) {
+                        let bg = match (top.color, bot.color) {
+                            (Some(tc), Some(bc)) if tc == bc => Some(tc),
+                            (Some(tc), _) => Some(tc),
+                            (_, Some(bc)) => Some(bc),
+                            _ => None,
+                        };
+                        StyledCell {
+                            ch: g.ch,
+                            color: g.color,
+                            bg_color: bg,
+                            priority: g.priority,
+                        }
+                    } else {
+                        Self::pixel_pair_to_cell(top, bot)
+                    }
+                } else {
+                    Self::pixel_pair_to_cell(top, bot)
+                };
+                row_cells.push(cell);
+            }
+            result.push(row_cells);
+        }
+        result
+    }
+
+    fn pixel_pair_to_cell(top: &HiResPixel, bot: &HiResPixel) -> StyledCell {
+        match (top.color, bot.color) {
+            (None, None) => StyledCell {
+                ch: ' ',
+                color: None,
+                bg_color: None,
+                priority: 0,
+            },
+            (Some(tc), Some(bc)) if tc == bc => StyledCell {
+                ch: '█',
+                color: Some(tc),
+                bg_color: None,
+                priority: top.priority.max(bot.priority),
+            },
+            (Some(tc), Some(bc)) => StyledCell {
+                ch: '▄',
+                color: Some(bc),
+                bg_color: Some(tc),
+                priority: top.priority.max(bot.priority),
+            },
+            (Some(tc), None) => StyledCell {
+                ch: '▀',
+                color: Some(tc),
+                bg_color: None,
+                priority: top.priority,
+            },
+            (None, Some(bc)) => StyledCell {
+                ch: '▄',
+                color: Some(bc),
+                bg_color: None,
+                priority: bot.priority,
+            },
+        }
+    }
+
+    fn with_axis(&self, mut label_for_row: impl FnMut(usize, usize) -> String) -> Vec<RenderLine> {
+        let cells = self.collapse_to_cells();
+        let chart_height = cells.len();
+        let mid_row = chart_height / 2;
+        cells
+            .into_iter()
+            .enumerate()
+            .map(|(row_index, row)| {
+                let axis_label =
+                    if row_index == 0 || row_index == mid_row || row_index + 1 == chart_height {
+                        format!("{:>10}", label_for_row(row_index, chart_height))
+                    } else {
+                        " ".repeat(10)
+                    };
+                let mut axis_cells: Vec<StyledCell> = axis_label
+                    .chars()
+                    .map(|ch| StyledCell {
+                        ch,
+                        color: Some(Color::DarkGrey),
+                        bg_color: None,
+                        priority: 255,
+                    })
+                    .collect();
+                axis_cells.push(StyledCell {
+                    ch: ' ',
+                    color: Some(Color::DarkGrey),
+                    bg_color: None,
+                    priority: 255,
+                });
+                axis_cells.push(StyledCell {
+                    ch: '│',
+                    color: Some(Color::DarkGrey),
+                    bg_color: None,
+                    priority: 255,
+                });
+                axis_cells.extend(row);
+                styled_cells_line(&axis_cells)
+            })
+            .collect()
+    }
 }
 
 fn render_i64_axis_pane(
@@ -6050,31 +7099,65 @@ fn render_i64_axis_pane(
     })
 }
 
-fn render_u64_axis_pane(
+fn render_i64_axis_pane_with_profile(
     canvas: Vec<Vec<StyledCell>>,
-    max_value: u64,
-    min_value: u64,
+    min_value: i64,
+    max_value: i64,
+    profile: &[VolumeProfileBin],
+    max_bin_volume: u64,
 ) -> Vec<RenderLine> {
-    render_axis_pane(canvas, |row_index, chart_height| {
-        format_compact_quantity(value_for_row_u64(
-            row_index,
-            min_value,
-            max_value,
-            chart_height,
-        ))
-    })
-}
-
-fn render_f64_axis_pane(
-    canvas: Vec<Vec<StyledCell>>,
-    min_value: f64,
-    max_value: f64,
-) -> Vec<RenderLine> {
-    render_axis_pane(canvas, |row_index, chart_height| {
-        format_money(
-            value_for_row_f64(row_index, min_value, max_value, chart_height).round() as i64,
-        )
-    })
+    let chart_height = canvas.len();
+    let mid_row = chart_height / 2;
+    canvas
+        .into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let axis_label =
+                if row_index == 0 || row_index == mid_row || row_index + 1 == chart_height {
+                    format!(
+                        "{:>10}",
+                        format_money(value_for_row_i64(
+                            row_index,
+                            min_value,
+                            max_value,
+                            chart_height,
+                        ))
+                    )
+                } else {
+                    " ".repeat(10)
+                };
+            let mut cells = axis_label
+                .chars()
+                .map(|ch| StyledCell {
+                    ch,
+                    color: Some(Color::DarkGrey),
+                    bg_color: None,
+                    priority: 255,
+                })
+                .collect::<Vec<_>>();
+            cells.push(StyledCell {
+                ch: ' ',
+                color: Some(Color::DarkGrey),
+                bg_color: None,
+                priority: 255,
+            });
+            cells.push(StyledCell {
+                ch: '│',
+                color: Some(Color::DarkGrey),
+                bg_color: None,
+                priority: 255,
+            });
+            cells.extend(row);
+            if let Some(bin) = profile.get(row_index) {
+                cells.extend(render_volume_profile_cells(
+                    bin,
+                    max_bin_volume,
+                    DETAIL_VOLUME_PROFILE_WIDTH,
+                ));
+            }
+            styled_cells_line(&cells)
+        })
+        .collect()
 }
 
 fn render_axis_pane(
@@ -6098,17 +7181,20 @@ fn render_axis_pane(
                 .map(|ch| StyledCell {
                     ch,
                     color: Some(Color::DarkGrey),
+                    bg_color: None,
                     priority: 255,
                 })
                 .collect::<Vec<_>>();
             cells.push(StyledCell {
                 ch: ' ',
                 color: Some(Color::DarkGrey),
+                bg_color: None,
                 priority: 255,
             });
             cells.push(StyledCell {
                 ch: '│',
                 color: Some(Color::DarkGrey),
+                bg_color: None,
                 priority: 255,
             });
             cells.extend(row);
@@ -6507,21 +7593,25 @@ fn decode_color_marker(code: char) -> Option<Color> {
 fn styled_segments_line(segments: Vec<StyledSegment>) -> RenderLine {
     let mut text = String::new();
     let mut active_color = None;
+    let mut active_bg = None;
 
     for segment in segments {
         if segment.text.is_empty() {
             continue;
         }
-        if segment.color != active_color {
+        if segment.color != active_color || segment.bg_color != active_bg {
             text.push(INLINE_STYLE_MARKER);
             text.push(encode_color_marker(segment.color));
+            text.push(encode_color_marker(segment.bg_color));
             active_color = segment.color;
+            active_bg = segment.bg_color;
         }
         text.push_str(&segment.text);
     }
 
-    if active_color.is_some() {
+    if active_color.is_some() || active_bg.is_some() {
         text.push(INLINE_STYLE_MARKER);
+        text.push(encode_color_marker(None));
         text.push(encode_color_marker(None));
     }
 
@@ -6531,22 +7621,27 @@ fn styled_segments_line(segments: Vec<StyledSegment>) -> RenderLine {
 fn styled_cells_line(cells: &[StyledCell]) -> RenderLine {
     let mut segments = Vec::new();
     let mut current_color = None;
+    let mut current_bg = None;
     let mut current_text = String::new();
 
     for cell in cells {
-        if cell.color != current_color && !current_text.is_empty() {
+        if (cell.color != current_color || cell.bg_color != current_bg) && !current_text.is_empty()
+        {
             segments.push(StyledSegment {
                 color: current_color,
+                bg_color: current_bg,
                 text: std::mem::take(&mut current_text),
             });
         }
         current_color = cell.color;
+        current_bg = cell.bg_color;
         current_text.push(cell.ch);
     }
 
     if !current_text.is_empty() {
         segments.push(StyledSegment {
             color: current_color,
+            bg_color: current_bg,
             text: current_text,
         });
     }
@@ -6565,6 +7660,7 @@ fn collect_dirty_rows(
     dirty_rows
 }
 
+#[cfg(test)]
 fn collect_dirty_rows_into(
     previous_frame: &[RenderLine],
     next_frame: &[RenderLine],
@@ -6583,6 +7679,7 @@ fn collect_dirty_rows_into(
     }
 }
 
+#[cfg(test)]
 fn collect_clear_rows(
     next_frame_len: usize,
     last_painted_rows: usize,
@@ -6603,9 +7700,12 @@ fn clip_text_to_width(text: &str, viewport_width: usize) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == INLINE_STYLE_MARKER {
-            if let Some(code) = chars.next() {
+            if let Some(fg_code) = chars.next() {
                 clipped.push(ch);
-                clipped.push(code);
+                clipped.push(fg_code);
+                if let Some(bg_code) = chars.next() {
+                    clipped.push(bg_code);
+                }
             }
             continue;
         }
@@ -6629,63 +7729,13 @@ fn visible_text(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == INLINE_STYLE_MARKER {
             let _ = chars.next();
+            let _ = chars.next();
             continue;
         }
         visible.push(ch);
     }
 
     visible
-}
-
-fn paint_row(stdout: &mut Stdout, row_index: usize, line: Option<&RenderLine>) -> io::Result<()> {
-    queue!(
-        stdout,
-        MoveTo(0, row_index as u16),
-        Clear(ClearType::CurrentLine)
-    )?;
-
-    if let Some(line) = line {
-        if line.text.contains(INLINE_STYLE_MARKER) {
-            let mut active_color = line.color;
-            if let Some(color) = active_color {
-                queue!(stdout, SetForegroundColor(color))?;
-            }
-
-            let mut buffer = String::new();
-            let mut chars = line.text.chars();
-            while let Some(ch) = chars.next() {
-                if ch == INLINE_STYLE_MARKER {
-                    if !buffer.is_empty() {
-                        queue!(stdout, Print(&buffer))?;
-                        buffer.clear();
-                    }
-                    if let Some(code) = chars.next() {
-                        active_color = decode_color_marker(code);
-                        match active_color {
-                            Some(Color::Reset) | None => queue!(stdout, ResetColor)?,
-                            Some(color) => queue!(stdout, SetForegroundColor(color))?,
-                        }
-                    }
-                    continue;
-                }
-
-                buffer.push(ch);
-            }
-
-            if !buffer.is_empty() {
-                queue!(stdout, Print(&buffer))?;
-            }
-            queue!(stdout, ResetColor)?;
-        } else {
-            if let Some(color) = line.color {
-                queue!(stdout, SetForegroundColor(color))?;
-            }
-
-            queue!(stdout, Print(&line.text), ResetColor)?;
-        }
-    }
-
-    Ok(())
 }
 
 fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
@@ -6791,6 +7841,7 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
                 state.hydrate_from_persisted(&hydrated_symbol_states, &watchlist);
                 app.issue_center.hydrate_from_persisted(&issues);
                 app.load_warm_start(&hydrated_chart_cache, last_persisted_at, &stale_symbols);
+                tracked_symbols = reorder_symbols_by_persisted_ranking(&tracked_symbols, &state);
                 persistence_db_path = Some(state_db);
             }
             Err(error) => {
@@ -6828,6 +7879,24 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
         persistence_db_path,
         startup_issues,
     })
+}
+
+fn reorder_symbols_by_persisted_ranking(symbols: &[String], state: &TerminalState) -> Vec<String> {
+    if symbols.is_empty() {
+        return Vec::new();
+    }
+    let ranked = state.top_rows(state.symbol_count());
+    let mut ranked_symbols: Vec<String> = ranked
+        .into_iter()
+        .map(|row| row.symbol)
+        .filter(|s| symbols.contains(s))
+        .collect();
+    for symbol in symbols {
+        if !ranked_symbols.contains(symbol) {
+            ranked_symbols.push(symbol.clone());
+        }
+    }
+    ranked_symbols
 }
 
 fn parse_runtime_options() -> io::Result<RuntimeOptions> {
@@ -7673,14 +8742,14 @@ fn plain_text_fits_viewport(text: &str, viewport_width: usize) -> bool {
 
 fn main_screen_header(viewport_width: usize, live_mode: bool) -> String {
     let compact = if live_mode {
-        "DISCOUNT TERMINAL  |  d detail  / filter  s symbol  space pause  q quit"
+        "DISCOUNT TERMINAL  |  o view  d detail  / filter  s symbol  space pause  q quit"
     } else {
-        "DISCOUNT TERMINAL  |  d detail  / filter  l logs  q quit"
+        "DISCOUNT TERMINAL  |  o view  d detail  / filter  l logs  q quit"
     };
     let full = if live_mode {
-        "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit"
+        "DISCOUNT TERMINAL  |  j/k move  |  o view  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit"
     } else {
-        "DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit"
+        "DISCOUNT TERMINAL  |  j/k move  |  o view  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit"
     };
 
     if plain_text_fits_viewport(full, viewport_width) {
@@ -7768,14 +8837,14 @@ fn input_prompt(app: &AppState, live_mode: bool, viewport_width: usize) -> Strin
     match &app.input_mode {
         InputMode::Normal => app.status_message.clone().unwrap_or_else(|| {
             let compact = if live_mode {
-                "d detail  / filter  s symbol  l logs  Backspace back  Ctrl+C quit"
+                "o view  d detail  / filter  s symbol  l logs  Backspace back  Ctrl+C quit"
             } else {
-                "d detail  / filter  l logs  Backspace back  Ctrl+C quit"
+                "o view  d detail  / filter  l logs  Backspace back  Ctrl+C quit"
             };
             let full = if live_mode {
-                "Use d or Enter for ticker detail, / to filter, s to track a symbol, l to open issues, Backspace to go back, or Ctrl+C to quit."
+                "Use j/k, Home/End, or PgUp/PgDn to navigate, o to switch list views, d or Enter for ticker detail, / to filter, s to track a symbol, l to open issues, Backspace to go back, or Ctrl+C to quit."
             } else {
-                "Use d or Enter for ticker detail, / to filter, l to open issues, Backspace to go back, or Ctrl+C to quit."
+                "Use j/k, Home/End, or PgUp/PgDn to navigate, o to switch list views, d or Enter for ticker detail, / to filter, l to open issues, Backspace to go back, or Ctrl+C to quit."
             };
 
             if plain_text_fits_viewport(full, viewport_width) {
@@ -9010,7 +10079,7 @@ fn empty_history_graph_tile(label: String) -> HistoryGraphTile {
 
 fn render_history_graph_tile(tile: &HistoryGraphTile, width: usize) -> Vec<String> {
     let inner_width = width.max(24);
-    let chart_rows = render_ascii_line_chart(&tile.points, inner_width.max(8), 4);
+    let chart_rows = tui_graphs::render_line_chart(&tile.points, inner_width.max(8), 4);
     let mut lines = vec![
         clip_plain_text(&tile.label, inner_width),
         clip_plain_text(
@@ -9044,62 +10113,6 @@ fn render_history_graph_tile(tile: &HistoryGraphTile, width: usize) -> Vec<Strin
 
 fn blank_tile_lines(width: usize, height: usize) -> Vec<String> {
     vec![" ".repeat(width); height]
-}
-
-fn render_ascii_line_chart(values: &[f64], width: usize, height: usize) -> Vec<String> {
-    if values.is_empty() {
-        return vec!["(no data)".to_string(); height.max(1)];
-    }
-
-    let sampled = sample_series(values, width.max(1));
-    let min = sampled
-        .iter()
-        .fold(f64::INFINITY, |left, right| left.min(*right));
-    let max = sampled
-        .iter()
-        .fold(f64::NEG_INFINITY, |left, right| left.max(*right));
-    let scale = (max - min).max(1.0);
-    let mut grid = vec![vec![' '; sampled.len()]; height.max(1)];
-
-    for (x, value) in sampled.iter().enumerate() {
-        let normalized = ((*value - min) / scale).clamp(0.0, 1.0);
-        let row = ((1.0 - normalized) * (height.saturating_sub(1) as f64)).round() as usize;
-        let row = row.min(height.saturating_sub(1));
-        grid[row][x] = '*';
-
-        if x > 0 {
-            let prev_value = sampled[x - 1];
-            let prev_normalized = ((prev_value - min) / scale).clamp(0.0, 1.0);
-            let prev_row =
-                ((1.0 - prev_normalized) * (height.saturating_sub(1) as f64)).round() as usize;
-            let low = row.min(prev_row);
-            let high = row.max(prev_row);
-            for row_index in low..=high {
-                if grid[row_index][x] == ' ' {
-                    grid[row_index][x] = '|';
-                }
-            }
-        }
-    }
-
-    grid.into_iter()
-        .map(|row| row.into_iter().collect::<String>())
-        .collect()
-}
-
-fn sample_series(values: &[f64], width: usize) -> Vec<f64> {
-    if values.len() <= width {
-        return values.to_vec();
-    }
-
-    (0..width)
-        .map(|index| {
-            let start = index * values.len() / width;
-            let end = ((index + 1) * values.len() / width).max(start + 1);
-            let slice = &values[start..end.min(values.len())];
-            slice.iter().copied().sum::<f64>() / slice.len() as f64
-        })
-        .collect()
 }
 
 fn filter_history_window(
@@ -9649,14 +10662,16 @@ fn handle_overlay_key(
                         app.open_issue_log();
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let rows = filtered_symbol_rows(state, &app.view_filter);
-                        app.move_ticker_detail_selection(&rows, 1);
+                        let rows = app.active_detail_symbols(state);
+                        let symbols = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                        app.move_ticker_detail_selection_for_symbols(&symbols, 1);
                         app.queue_detail_chart_request(chart_control_sender);
                         app.queue_detail_analysis_request(state, analysis_control_sender);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let rows = filtered_symbol_rows(state, &app.view_filter);
-                        app.move_ticker_detail_selection(&rows, -1);
+                        let rows = app.active_detail_symbols(state);
+                        let symbols = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                        app.move_ticker_detail_selection_for_symbols(&symbols, -1);
                         app.queue_detail_chart_request(chart_control_sender);
                         app.queue_detail_analysis_request(state, analysis_control_sender);
                     }
@@ -9708,6 +10723,13 @@ fn handle_overlay_key(
                             }
                         }
                     }
+                    KeyCode::Left => {
+                        let count = app.detail_replay_candle_count();
+                        app.step_replay_back(count);
+                    }
+                    KeyCode::Right => {
+                        app.step_replay_forward();
+                    }
                     _ => {}
                 },
                 DetailTab::History => match key_event.code {
@@ -9753,13 +10775,15 @@ fn handle_overlay_key(
                     KeyCode::Down | KeyCode::Char('j') => app.scroll_history(1),
                     KeyCode::Up | KeyCode::Char('k') => app.scroll_history(-1),
                     KeyCode::Char('n') => {
-                        let rows = filtered_symbol_rows(state, &app.view_filter);
-                        app.move_ticker_detail_selection(&rows, 1);
+                        let rows = app.active_detail_symbols(state);
+                        let symbols = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                        app.move_ticker_detail_selection_for_symbols(&symbols, 1);
                         app.load_detail_history(persistence_handle);
                     }
                     KeyCode::Char('p') => {
-                        let rows = filtered_symbol_rows(state, &app.view_filter);
-                        app.move_ticker_detail_selection(&rows, -1);
+                        let rows = app.active_detail_symbols(state);
+                        let symbols = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                        app.move_ticker_detail_selection_for_symbols(&symbols, -1);
                         app.load_detail_history(persistence_handle);
                     }
                     _ => {}
@@ -10071,13 +11095,16 @@ fn scaled_gap_index(value_bps: i32, max_gap_bps: i32, width: usize) -> usize {
     (ratio * (width - 1) as f64).round() as usize
 }
 
-fn candidate_row_color(row: &CandidateRow, is_selected: bool) -> Color {
+fn candidate_row_color(row: &CandidateRow, is_selected: bool, is_stale: bool) -> Color {
     if is_selected {
         return if row.is_qualified {
             Color::Cyan
         } else {
             Color::DarkCyan
         };
+    }
+    if is_stale {
+        return Color::DarkGrey;
     }
 
     confidence_color(row.confidence)
@@ -10437,6 +11464,7 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::AnalysisCacheEntry;
     use super::AnalysisControl;
+    use super::AnalysisInputKey;
     use super::AppEvent;
     use super::AppEventPublisher;
     use super::AppState;
@@ -10467,16 +11495,19 @@ mod tests {
     use super::MAX_VISIBLE_ROWS;
     use super::OverlayMode;
     use super::PersistenceStatusEvent;
+    use super::PrimaryViewMode;
     use super::RelativeMetricScore;
     use super::RelativeStrengthBand;
     use super::RenderLine;
     use super::RuntimeOptions;
+    use super::VolumeProfileBin;
     use super::aggregate_historical_candles;
     use super::analysis_input_key;
     use super::analyst_consensus_lines;
     use super::apply_feed_events;
     use super::apply_live_source_status;
     use super::apply_persistence_status;
+    use super::build_opportunity_rows;
     use super::build_screen_lines;
     use super::build_screen_lines_for_viewport;
     use super::build_symbol_feed_batch;
@@ -10484,6 +11515,7 @@ mod tests {
     use super::build_ticker_detail_lines_for_viewport;
     use super::build_ticker_history_lines_for_viewport;
     use super::candidate_company_label;
+    use super::candidate_row_color;
     use super::chart_loop_with_client_factory;
     use super::chart_range_label;
     use super::chart_ranges;
@@ -10494,6 +11526,8 @@ mod tests {
     use super::compute_ema_series;
     use super::compute_macd_series;
     use super::compute_sector_relative_score;
+    use super::compute_volume_profile;
+    use super::compute_volume_profile_from_price_candles;
     use super::confidence_justification_lines;
     use super::dcf_margin_of_safety_bps;
     use super::dcf_signal;
@@ -10508,6 +11542,7 @@ mod tests {
     use super::format_symbol_list;
     use super::gap_meter;
     use super::handle_input_event;
+    use super::handle_overlay_key;
     use super::health_status_label;
     use super::input_prompt;
     use super::is_provider_throttle_error;
@@ -10519,6 +11554,7 @@ mod tests {
     use super::market_data::HistoricalCandle;
     use super::next_weighted_target_refresh_cursor;
     use super::normalize_frame;
+    use super::opportunity_window_bounds;
     use super::parse_runtime_options_from;
     use super::parse_symbols_argument;
     use super::persistence;
@@ -10530,7 +11566,12 @@ mod tests {
     use super::reconcile_journal_persistence;
     use super::reconcile_sqlite_persistence;
     use super::relative_metric_score;
+    use super::render_volume_profile_cells;
+    use super::reorder_symbols_by_persisted_ranking;
     use super::robust_composite_percentile;
+    use super::score_opportunity_forecasts;
+    use super::score_opportunity_fundamentals;
+    use super::score_opportunity_technicals;
     use super::should_handle_key_event;
     use super::should_leave_input_mode_on_backspace;
     use super::should_refresh_weighted_target;
@@ -10539,7 +11580,12 @@ mod tests {
     use super::visible_text;
     use crate::BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE;
     use crate::ChartRangeSummary;
+    use crate::DETAIL_CHART_AXIS_WIDTH;
+    use crate::DETAIL_CHART_ROW_PADDING;
+    use crate::DETAIL_VOLUME_PROFILE_WIDTH;
+    use crate::PriceCandle;
     use crate::SectorRelativeScore;
+    use crate::detail_layout;
     use crate::unix_timestamp_seconds;
     use discount_screener::CandidateRow;
     use discount_screener::ConfidenceBand;
@@ -10576,6 +11622,192 @@ mod tests {
             is_qualified: true,
             confidence: ConfidenceBand::Provisional,
         }
+    }
+
+    fn external_signal(
+        symbol: &str,
+        fair_value_cents: i64,
+        weighted_fair_value_cents: Option<i64>,
+        analyst_opinion_count: Option<u32>,
+        recommendation_mean_hundredths: Option<u16>,
+    ) -> ExternalValuationSignal {
+        ExternalValuationSignal {
+            symbol: symbol.to_string(),
+            fair_value_cents,
+            age_seconds: 0,
+            low_fair_value_cents: None,
+            high_fair_value_cents: None,
+            analyst_opinion_count,
+            recommendation_mean_hundredths,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            weighted_fair_value_cents,
+            weighted_analyst_count: analyst_opinion_count,
+        }
+    }
+
+    fn fundamentals_with(
+        symbol: &str,
+        free_cash_flow_dollars: Option<i64>,
+        operating_cash_flow_dollars: Option<i64>,
+        return_on_equity_bps: Option<i32>,
+        debt_to_equity_hundredths: Option<i32>,
+        total_cash_dollars: Option<i64>,
+        total_debt_dollars: Option<i64>,
+        earnings_growth_bps: Option<i32>,
+    ) -> FundamentalSnapshot {
+        FundamentalSnapshot {
+            symbol: symbol.to_string(),
+            sector_key: Some("tech".to_string()),
+            sector_name: Some("Technology".to_string()),
+            industry_key: Some("software".to_string()),
+            industry_name: Some("Software".to_string()),
+            market_cap_dollars: Some(1_000_000_000),
+            shares_outstanding: Some(100_000_000),
+            trailing_pe_hundredths: None,
+            forward_pe_hundredths: None,
+            price_to_book_hundredths: None,
+            return_on_equity_bps,
+            ebitda_dollars: None,
+            enterprise_value_dollars: None,
+            enterprise_to_ebitda_hundredths: None,
+            total_debt_dollars,
+            total_cash_dollars,
+            debt_to_equity_hundredths,
+            free_cash_flow_dollars,
+            operating_cash_flow_dollars,
+            beta_millis: None,
+            trailing_eps_cents: None,
+            earnings_growth_bps,
+        }
+    }
+
+    fn year_summary(
+        latest_close_cents: i64,
+        ema20_cents: Option<i64>,
+        ema50_cents: Option<i64>,
+        ema200_cents: Option<i64>,
+        macd_cents: Option<i64>,
+        signal_cents: Option<i64>,
+        histogram_cents: Option<i64>,
+    ) -> ChartRangeSummary {
+        ChartRangeSummary {
+            range: ChartRange::Year,
+            captured_at: 1_700_000_000,
+            candle_count: 52,
+            latest_close_cents: Some(latest_close_cents),
+            ema20_cents,
+            ema50_cents,
+            ema200_cents,
+            macd_cents,
+            signal_cents,
+            histogram_cents,
+        }
+    }
+
+    fn dcf_analysis_fixture(base_intrinsic_value_cents: i64) -> DcfAnalysis {
+        DcfAnalysis {
+            bear_intrinsic_value_cents: base_intrinsic_value_cents.saturating_sub(500),
+            base_intrinsic_value_cents,
+            bull_intrinsic_value_cents: base_intrinsic_value_cents.saturating_add(500),
+            wacc_bps: 900,
+            base_growth_bps: 300,
+            net_debt_dollars: 0,
+        }
+    }
+
+    fn opportunities_view_lines_for_viewport(
+        state: &TerminalState,
+        app: &mut AppState,
+        viewport_width: usize,
+        viewport_height: usize,
+    ) -> Vec<String> {
+        let rows = app.visible_rows(state);
+        let selected_index = app.sync_base_selected_index(state, &rows);
+        normalize_frame(
+            &build_screen_lines_for_viewport(
+                state,
+                &rows,
+                selected_index,
+                0,
+                true,
+                app,
+                None,
+                viewport_width,
+                viewport_height,
+            ),
+            viewport_width,
+            viewport_height,
+        )
+        .iter()
+        .map(|line| visible_text(&line.text))
+        .collect()
+    }
+
+    fn opportunities_view_lines_with_selected_index(
+        state: &TerminalState,
+        app: &AppState,
+        selected_index: usize,
+        viewport_width: usize,
+        viewport_height: usize,
+    ) -> Vec<String> {
+        let rows = app.visible_rows(state);
+        normalize_frame(
+            &build_screen_lines_for_viewport(
+                state,
+                &rows,
+                selected_index,
+                0,
+                true,
+                app,
+                None,
+                viewport_width,
+                viewport_height,
+            ),
+            viewport_width,
+            viewport_height,
+        )
+        .iter()
+        .map(|line| visible_text(&line.text))
+        .collect()
+    }
+
+    fn seed_ranked_opportunities(state: &mut TerminalState, count: usize) -> Vec<String> {
+        let mut symbols = Vec::new();
+        for index in 0..count {
+            let symbol = format!("OP{index:02}");
+            state.ingest_snapshot(MarketSnapshot {
+                symbol: symbol.clone(),
+                company_name: Some(format!("Opportunity {index}")),
+                profitable: true,
+                market_price_cents: 1_000,
+                intrinsic_value_cents: 5_000 - index as i64 * 100,
+            });
+            symbols.push(symbol);
+        }
+
+        symbols
+    }
+
+    fn seed_candidates_and_opportunities(state: &mut TerminalState) {
+        seed_ranked_opportunities(state, 30);
+        state.ingest_external(external_signal(
+            "OP00",
+            4_800,
+            Some(4_900),
+            Some(12),
+            Some(140),
+        ));
+        state.ingest_external(external_signal(
+            "OP01",
+            4_700,
+            Some(4_800),
+            Some(10),
+            Some(150),
+        ));
     }
 
     fn ranked_main_view_lines_for_viewport(
@@ -12788,7 +14020,9 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert!(loaded.startup_issues.is_empty());
-        assert_eq!(loaded.tracked_symbols, super::default_live_symbols());
+        let default_symbols = super::default_live_symbols();
+        assert_eq!(loaded.tracked_symbols[0], "AAPL");
+        assert_eq!(loaded.tracked_symbols.len(), default_symbols.len());
         assert!(loaded.state.detail("AAPL").is_some());
         assert_eq!(
             loaded.state.price_history("AAPL", 10),
@@ -14117,6 +15351,31 @@ mod tests {
     }
 
     #[test]
+    fn history_graph_tile_uses_high_definition_graph_glyphs() {
+        let tile = super::HistoryGraphTile {
+            label: "Market price".to_string(),
+            latest: "$13.00".to_string(),
+            previous: "$12.00".to_string(),
+            delta: "+1.00".to_string(),
+            points: vec![10.0, 11.0, 12.5, 11.5, 13.0, 12.0, 13.5],
+            min_label: "$10.00".to_string(),
+            max_label: "$13.50".to_string(),
+            footer_lines: vec!["Points 7".to_string(), "Metric market_price".to_string()],
+        };
+
+        let lines = super::render_history_graph_tile(&tile, 32);
+        let plot_rows = &lines[3..7];
+
+        assert!(
+            plot_rows
+                .iter()
+                .flat_map(|row| row.chars())
+                .any(|ch| !ch.is_ascii() && !ch.is_whitespace()),
+            "expected non-ASCII graph glyphs in plot rows: {plot_rows:?}"
+        );
+    }
+
+    #[test]
     fn toggle_history_subview_preserves_group_and_window() {
         let mut app = AppState::default();
         app.open_ticker_detail("AAPL");
@@ -14486,6 +15745,10 @@ mod tests {
         assert!(visible_lines.iter().any(|line| line.contains("-- MACD ")));
         assert!(visible_lines.iter().any(|line| line.contains("EMA20")));
         assert!(
+            visible_lines.iter().any(|line| contains_braille(line)),
+            "detail chart should contain braille HD glyphs"
+        );
+        assert!(
             visible_lines
                 .iter()
                 .any(|line| line.contains("Ratings: SB"))
@@ -14740,6 +16003,749 @@ mod tests {
     }
 
     #[test]
+    fn o_toggles_opportunities_view_from_normal_mode() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Char('o'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &[],
+            0,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("o should be handled");
+
+        assert!(matches!(result, LoopControl::Continue));
+        assert_eq!(app.primary_view, PrimaryViewMode::Opportunities);
+    }
+
+    #[test]
+    fn opportunities_view_renders_qualified_rows_outside_main_high_confidence_filter() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "TOP".to_string(),
+            company_name: Some("Top Idea".to_string()),
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 4_000,
+        });
+        state.ingest_fundamentals(fundamentals_with(
+            "TOP",
+            Some(120_000_000),
+            Some(150_000_000),
+            Some(2_400),
+            Some(40),
+            Some(500_000_000),
+            Some(100_000_000),
+            Some(1_200),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("TOP", ChartRange::Year),
+            year_summary(
+                4_000,
+                Some(3_200),
+                Some(2_900),
+                None,
+                Some(180),
+                Some(100),
+                Some(80),
+            ),
+        );
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NEXT".to_string(),
+            company_name: Some("Next Idea".to_string()),
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 1_600,
+        });
+        state.ingest_external(external_signal(
+            "NEXT",
+            1_400,
+            Some(1_500),
+            Some(6),
+            Some(180),
+        ));
+        state.ingest_fundamentals(fundamentals_with(
+            "NEXT",
+            Some(20_000_000),
+            Some(30_000_000),
+            Some(600),
+            Some(180),
+            Some(50_000_000),
+            Some(200_000_000),
+            Some(-300),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("NEXT", ChartRange::Year),
+            year_summary(
+                1_100,
+                Some(1_200),
+                Some(1_250),
+                None,
+                Some(-20),
+                Some(10),
+                Some(-30),
+            ),
+        );
+
+        let candidate_rows = app.visible_rows(&state);
+        assert_eq!(
+            candidate_rows.len(),
+            1,
+            "main table should still only show high-confidence rows"
+        );
+
+        app.primary_view = PrimaryViewMode::Opportunities;
+        let lines = opportunities_view_lines_for_viewport(&state, &mut app, 120, 22);
+
+        assert!(lines.iter().any(|line| line == "TOP OPPORTUNITIES"));
+        assert!(lines.iter().any(|line| line.contains("TOP")));
+        assert!(lines.iter().any(|line| line.contains("NEXT")));
+    }
+
+    #[test]
+    fn build_opportunity_rows_ranks_symbols_by_composite_signals() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "STRONG".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 2_500,
+        });
+        state.ingest_external(external_signal(
+            "STRONG",
+            2_300,
+            Some(2_400),
+            Some(12),
+            Some(140),
+        ));
+        let strong_fundamentals = fundamentals_with(
+            "STRONG",
+            Some(200_000_000),
+            Some(250_000_000),
+            Some(2_500),
+            Some(60),
+            Some(800_000_000),
+            Some(100_000_000),
+            Some(1_500),
+        );
+        state.ingest_fundamentals(strong_fundamentals.clone());
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("STRONG", ChartRange::Year),
+            year_summary(
+                2_450,
+                Some(2_100),
+                Some(1_900),
+                Some(1_700),
+                Some(220),
+                Some(120),
+                Some(100),
+            ),
+        );
+        app.analysis_cache.insert(
+            "STRONG".to_string(),
+            super::AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&strong_fundamentals),
+                analysis: dcf_analysis_fixture(2_600),
+            },
+        );
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "WEAK".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 2_700,
+        });
+        state.ingest_external(external_signal(
+            "WEAK",
+            1_200,
+            Some(1_300),
+            Some(3),
+            Some(260),
+        ));
+        let weak_fundamentals = fundamentals_with(
+            "WEAK",
+            Some(-10_000_000),
+            Some(-5_000_000),
+            Some(200),
+            Some(220),
+            Some(20_000_000),
+            Some(200_000_000),
+            Some(-700),
+        );
+        state.ingest_fundamentals(weak_fundamentals.clone());
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("WEAK", ChartRange::Year),
+            year_summary(
+                1_050,
+                Some(1_200),
+                Some(1_250),
+                Some(1_350),
+                Some(-50),
+                Some(20),
+                Some(-70),
+            ),
+        );
+        app.analysis_cache.insert(
+            "WEAK".to_string(),
+            super::AnalysisCacheEntry::Ready {
+                input: analysis_input_key(&weak_fundamentals),
+                analysis: dcf_analysis_fixture(900),
+            },
+        );
+
+        let rows = build_opportunity_rows(&state, &app);
+        let ordered_symbols = rows.into_iter().map(|row| row.symbol).collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_symbols[..2],
+            ["STRONG".to_string(), "WEAK".to_string()]
+        );
+    }
+
+    #[test]
+    fn score_opportunity_fundamentals_counts_each_positive_signal() {
+        let mut selected_detail = detail();
+        selected_detail.fundamentals = Some(fundamentals_with(
+            "NVDA",
+            Some(200_000_000),
+            Some(250_000_000),
+            Some(2_500),
+            Some(40),
+            Some(500_000_000),
+            Some(100_000_000),
+            Some(1_400),
+        ));
+
+        assert_eq!(
+            score_opportunity_fundamentals(&selected_detail),
+            (
+                Some(5),
+                vec!["FCF+", "OCF+", "ROE>10", "Balance", "Growth+"],
+            )
+        );
+    }
+
+    #[test]
+    fn score_opportunity_fundamentals_uses_strict_positive_boundaries() {
+        let mut selected_detail = detail();
+        selected_detail.fundamentals = Some(fundamentals_with(
+            "NVDA",
+            Some(0),
+            Some(0),
+            Some(999),
+            Some(40),
+            Some(50_000_000),
+            Some(100_000_000),
+            Some(0),
+        ));
+
+        assert_eq!(
+            score_opportunity_fundamentals(&selected_detail),
+            (Some(1), vec!["Balance"])
+        );
+    }
+
+    #[test]
+    fn score_opportunity_fundamentals_accepts_cash_cover_when_leverage_is_high() {
+        let mut selected_detail = detail();
+        selected_detail.fundamentals = Some(fundamentals_with(
+            "NVDA",
+            Some(-1),
+            Some(-1),
+            Some(500),
+            Some(250),
+            Some(300_000_000),
+            Some(100_000_000),
+            Some(-100),
+        ));
+
+        assert_eq!(
+            score_opportunity_fundamentals(&selected_detail),
+            (Some(1), vec!["Balance"])
+        );
+    }
+
+    #[test]
+    fn score_opportunity_technicals_counts_each_confirmation_signal() {
+        let summary = year_summary(
+            2_450,
+            Some(2_100),
+            Some(1_900),
+            Some(1_700),
+            Some(220),
+            Some(120),
+            Some(100),
+        );
+
+        assert_eq!(
+            score_opportunity_technicals(Some(&summary)),
+            (
+                Some(5),
+                vec![">EMA20", ">EMA50", ">EMA200", "EMA20>50", "MACD+"],
+            )
+        );
+    }
+
+    #[test]
+    fn score_opportunity_technicals_requires_price_to_clear_emas_not_match_them() {
+        let summary = year_summary(
+            2_000,
+            Some(2_000),
+            Some(2_000),
+            Some(2_000),
+            Some(10),
+            Some(10),
+            Some(0),
+        );
+
+        assert_eq!(
+            score_opportunity_technicals(Some(&summary)),
+            (Some(0), vec![])
+        );
+    }
+
+    #[test]
+    fn score_opportunity_technicals_uses_positive_histogram_without_macd_lines() {
+        let summary = year_summary(2_000, None, None, None, None, None, Some(10));
+
+        assert_eq!(
+            score_opportunity_technicals(Some(&summary)),
+            (Some(1), vec!["MACD+"])
+        );
+    }
+
+    #[test]
+    fn score_opportunity_forecasts_counts_supportive_analyst_weighted_and_dcf_signals() {
+        let mut app = AppState::default();
+        let selected_detail = detail();
+        app.analysis_cache.insert(
+            selected_detail.symbol.clone(),
+            super::AnalysisCacheEntry::Ready {
+                input: AnalysisInputKey {
+                    symbol: selected_detail.symbol.clone(),
+                    shares_outstanding: None,
+                    total_debt_dollars: None,
+                    total_cash_dollars: None,
+                    beta_millis: None,
+                },
+                analysis: dcf_analysis_fixture(32_000),
+            },
+        );
+
+        assert_eq!(
+            score_opportunity_forecasts(&app, &selected_detail),
+            (
+                Some(5),
+                vec!["Supportive", "5+Analysts", "Rec<=2.0", "Weighted+", "DCF+"],
+            )
+        );
+    }
+
+    #[test]
+    fn score_opportunity_forecasts_penalizes_expensive_dcf_without_other_support() {
+        let mut app = AppState::default();
+        let mut selected_detail = detail();
+        selected_detail.external_status = ExternalSignalStatus::Missing;
+        selected_detail.analyst_opinion_count = None;
+        selected_detail.recommendation_mean_hundredths = None;
+        selected_detail.weighted_external_signal_fair_value_cents = None;
+        app.analysis_cache.insert(
+            selected_detail.symbol.clone(),
+            super::AnalysisCacheEntry::Ready {
+                input: AnalysisInputKey {
+                    symbol: selected_detail.symbol.clone(),
+                    shares_outstanding: None,
+                    total_debt_dollars: None,
+                    total_cash_dollars: None,
+                    beta_millis: None,
+                },
+                analysis: dcf_analysis_fixture(10_000),
+            },
+        );
+
+        assert_eq!(
+            score_opportunity_forecasts(&app, &selected_detail),
+            (Some(-1), vec!["DCF-"])
+        );
+    }
+
+    #[test]
+    fn ticker_detail_uses_opportunity_order_for_position_and_navigation() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "TOP".to_string(),
+            company_name: Some("Top Idea".to_string()),
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 4_000,
+        });
+        state.ingest_fundamentals(fundamentals_with(
+            "TOP",
+            Some(120_000_000),
+            Some(150_000_000),
+            Some(2_400),
+            Some(40),
+            Some(500_000_000),
+            Some(100_000_000),
+            Some(1_200),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("TOP", ChartRange::Year),
+            year_summary(
+                4_000,
+                Some(3_200),
+                Some(2_900),
+                None,
+                Some(180),
+                Some(100),
+                Some(80),
+            ),
+        );
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NEXT".to_string(),
+            company_name: Some("Next Idea".to_string()),
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 1_600,
+        });
+        state.ingest_external(external_signal(
+            "NEXT",
+            1_400,
+            Some(1_500),
+            Some(6),
+            Some(180),
+        ));
+        state.ingest_fundamentals(fundamentals_with(
+            "NEXT",
+            Some(20_000_000),
+            Some(30_000_000),
+            Some(600),
+            Some(180),
+            Some(50_000_000),
+            Some(200_000_000),
+            Some(-300),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("NEXT", ChartRange::Year),
+            year_summary(
+                1_100,
+                Some(1_200),
+                Some(1_250),
+                None,
+                Some(-20),
+                Some(10),
+                Some(-30),
+            ),
+        );
+
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.open_ticker_detail("TOP");
+
+        let detail_lines = build_ticker_detail_lines_for_viewport(&state, &app, "TOP", 140, 32)
+            .into_iter()
+            .map(|line| visible_text(&line.text))
+            .collect::<Vec<_>>();
+        assert!(
+            detail_lines
+                .iter()
+                .any(|line| line.contains("Position: 1/2"))
+        );
+
+        let handled = handle_overlay_key(
+            &mut app,
+            &mut state,
+            &KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Press),
+            None,
+            None,
+            None,
+        )
+        .expect("detail j should be handled");
+
+        assert!(handled);
+        assert_eq!(app.detail_symbol(), Some("NEXT"));
+    }
+
+    #[test]
+    fn move_ticker_detail_selection_for_symbols_uses_the_current_symbol_position() {
+        let mut app = AppState::default();
+        app.open_ticker_detail("MID");
+        let symbols = vec!["LOW", "MID", "HIGH"];
+
+        app.move_ticker_detail_selection_for_symbols(&symbols, 1);
+
+        assert_eq!(app.detail_symbol(), Some("HIGH"));
+    }
+
+    #[test]
+    fn input_selected_index_preserves_opportunity_selection_when_candidates_are_empty() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 30);
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.selected_symbol = Some("OP20".to_string());
+        let rows = app.visible_rows(&state);
+
+        assert_eq!(rows.len(), 0);
+        assert_eq!(app.input_selected_index(&state, &rows), 20);
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP20"));
+    }
+
+    #[test]
+    fn clear_selection_for_view_clears_the_active_selected_symbol() {
+        let mut app = AppState::default();
+
+        app.set_selection("OP01");
+        app.clear_selection_for_view(PrimaryViewMode::Candidates);
+
+        assert_eq!(app.selected_symbol, None);
+        assert_eq!(app.candidate_selected_symbol, None);
+    }
+
+    #[test]
+    fn clear_selection_for_view_does_not_clear_the_other_view_selection() {
+        let mut app = AppState::default();
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.set_selection("OP20");
+
+        app.clear_selection_for_view(PrimaryViewMode::Candidates);
+
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP20"));
+        assert_eq!(app.opportunity_selected_symbol.as_deref(), Some("OP20"));
+    }
+
+    #[test]
+    fn first_entry_into_opportunities_selects_the_first_ranked_symbol() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_candidates_and_opportunities(&mut state);
+
+        app.set_selection("OP01");
+        app.toggle_primary_view(&state);
+
+        assert_eq!(app.primary_view, PrimaryViewMode::Opportunities);
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP00"));
+    }
+
+    #[test]
+    fn toggling_between_views_restores_the_last_ticker_selection_per_view() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_candidates_and_opportunities(&mut state);
+
+        app.set_selection("OP01");
+        app.toggle_primary_view(&state);
+        app.set_selection("OP20");
+
+        app.toggle_primary_view(&state);
+        assert_eq!(app.primary_view, PrimaryViewMode::Candidates);
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP01"));
+
+        app.toggle_primary_view(&state);
+        assert_eq!(app.primary_view, PrimaryViewMode::Opportunities);
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP20"));
+    }
+
+    #[test]
+    fn opportunities_view_navigation_can_move_beyond_the_initial_twenty_rows() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 30);
+        app.primary_view = PrimaryViewMode::Opportunities;
+
+        let rows = app.visible_rows(&state);
+        for _ in 0..20 {
+            let selected_index = app.sync_base_selected_index(&state, &rows);
+            handle_input_event(
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('j'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Press,
+                ),
+                &mut state,
+                &mut app,
+                &rows,
+                selected_index,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("j should be handled");
+        }
+
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP20"));
+    }
+
+    #[test]
+    fn home_and_end_select_the_first_and_last_opportunity() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 30);
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.selected_symbol = Some("OP20".to_string());
+
+        let rows = app.visible_rows(&state);
+        let selected_index = app.input_selected_index(&state, &rows);
+        handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Home, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &rows,
+            selected_index,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("Home should be handled");
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP00"));
+
+        let selected_index = app.input_selected_index(&state, &rows);
+        handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::End, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &rows,
+            selected_index,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("End should be handled");
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP29"));
+    }
+
+    #[test]
+    fn page_up_and_page_down_move_by_one_visible_page() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 45);
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.selected_symbol = Some("OP00".to_string());
+
+        let rows = app.visible_rows(&state);
+        let selected_index = app.input_selected_index(&state, &rows);
+        handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::PageDown, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &rows,
+            selected_index,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("PageDown should be handled");
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP20"));
+
+        let selected_index = app.input_selected_index(&state, &rows);
+        handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::PageUp, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &rows,
+            selected_index,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("PageUp should be handled");
+        assert_eq!(app.selected_symbol.as_deref(), Some("OP00"));
+    }
+
+    #[test]
+    fn opportunities_view_renders_scrolled_rows_with_absolute_rank_numbers() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 30);
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.selected_symbol = Some("OP20".to_string());
+
+        let visible_lines = opportunities_view_lines_with_selected_index(&state, &app, 20, 120, 40);
+
+        assert!(visible_lines.iter().any(|line| line.contains("OP20")));
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains(">  20") && line.contains("OP20"))
+        );
+        assert!(!visible_lines.iter().any(|line| line.contains("OP00")));
+    }
+
+    #[test]
+    fn enter_opens_detail_for_a_scrolled_opportunity_selection() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        seed_ranked_opportunities(&mut state, 30);
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.selected_symbol = Some("OP20".to_string());
+
+        let rows = app.visible_rows(&state);
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &rows,
+            20,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("Enter should be handled");
+
+        assert!(matches!(result, LoopControl::Continue));
+        assert_eq!(app.detail_symbol(), Some("OP20"));
+    }
+
+    #[test]
+    fn opportunity_window_bounds_keeps_the_first_page_for_early_selection() {
+        assert_eq!(opportunity_window_bounds(30, 5, MAX_VISIBLE_ROWS), (0, 20));
+    }
+
+    #[test]
+    fn opportunity_window_bounds_trails_the_selected_row_after_the_first_page() {
+        assert_eq!(opportunity_window_bounds(30, 20, MAX_VISIBLE_ROWS), (1, 21));
+        assert_eq!(
+            opportunity_window_bounds(30, 29, MAX_VISIBLE_ROWS),
+            (10, 30)
+        );
+    }
+
+    #[test]
     fn main_screen_preserves_selected_detail_on_short_viewports() {
         let visible_lines = ranked_main_view_lines_for_viewport(96, 18);
 
@@ -14813,7 +16819,9 @@ mod tests {
                 visible_lines.get(1).map(String::as_str),
             ),
             (
-                Some("DISCOUNT TERMINAL  |  d detail  / filter  s symbol  space pause  q quit",),
+                Some(
+                    "DISCOUNT TERMINAL  |  o view  d detail  / filter  s symbol  space pause  q quit",
+                ),
                 Some("Mode: live  Feed: running  Tracked: 25  Loaded: 25  Pending: 0  Rate: 0/s"),
             )
         );
@@ -14992,6 +17000,1430 @@ mod tests {
         assert_eq!(
             lines[2],
             "Ratings: strong buy 20  buy 10  hold 8  sell 3  strong sell 1"
+        );
+    }
+
+    // ── Volume Profile ──────────────────────────────────────────────
+
+    fn make_candle(open: i64, high: i64, low: i64, close: i64, volume: u64) -> PriceCandle {
+        PriceCandle {
+            open_cents: open,
+            high_cents: high,
+            low_cents: low,
+            close_cents: close,
+            volume,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        }
+    }
+
+    fn make_historical_candle(
+        epoch_seconds: u64,
+        open: i64,
+        high: i64,
+        low: i64,
+        close: i64,
+        volume: u64,
+    ) -> HistoricalCandle {
+        HistoricalCandle {
+            epoch_seconds,
+            open_cents: open,
+            high_cents: high,
+            low_cents: low,
+            close_cents: close,
+            volume,
+        }
+    }
+
+    #[test]
+    fn volume_profile_single_candle_distributes_across_all_bins() {
+        let candles = vec![make_historical_candle(1, 1000, 5000, 1000, 5000, 1000)];
+        let bins = compute_volume_profile(&candles, 1000, 5000, 4);
+
+        assert_eq!(bins.len(), 4);
+        let total: u64 = bins.iter().map(|b| b.up_volume + b.down_volume).sum();
+        assert_eq!(total, 1000);
+    }
+
+    #[test]
+    fn volume_profile_classifies_up_and_down_candles() {
+        let up_candle = make_historical_candle(1, 2000, 4000, 2000, 4000, 600);
+        let down_candle = make_historical_candle(2, 4000, 4000, 2000, 2000, 400);
+        let candles = vec![up_candle, down_candle];
+        let bins = compute_volume_profile(&candles, 2000, 4000, 2);
+
+        let total_up: u64 = bins.iter().map(|b| b.up_volume).sum();
+        let total_down: u64 = bins.iter().map(|b| b.down_volume).sum();
+        assert_eq!(total_up, 600);
+        assert_eq!(total_down, 400);
+    }
+
+    #[test]
+    fn volume_profile_flat_candle_concentrates_in_one_bin() {
+        let candles = vec![make_historical_candle(1, 3000, 3000, 3000, 3000, 500)];
+        let bins = compute_volume_profile(&candles, 1000, 5000, 4);
+
+        let nonzero_bins: Vec<_> = bins
+            .iter()
+            .filter(|b| b.up_volume + b.down_volume > 0)
+            .collect();
+        assert_eq!(nonzero_bins.len(), 1);
+        assert_eq!(nonzero_bins[0].up_volume, 500);
+    }
+
+    #[test]
+    fn volume_profile_empty_candles_returns_empty_bins() {
+        let bins = compute_volume_profile(&[], 1000, 5000, 4);
+
+        assert_eq!(bins.len(), 4);
+        assert!(bins.iter().all(|b| b.up_volume == 0 && b.down_volume == 0));
+    }
+
+    #[test]
+    fn render_volume_profile_cells_proportional_bar_width() {
+        let bin = VolumeProfileBin {
+            up_volume: 80,
+            down_volume: 20,
+        };
+        let cells = render_volume_profile_cells(&bin, 100, 10);
+
+        // 1 separator + 9 bar chars (total volume 100 / max 100 * 9 = 9)
+        assert_eq!(cells.len(), 10);
+        assert_eq!(cells[0].ch, '│');
+    }
+
+    #[test]
+    fn render_volume_profile_cells_empty_bin_only_separator() {
+        let bin = VolumeProfileBin {
+            up_volume: 0,
+            down_volume: 0,
+        };
+        let cells = render_volume_profile_cells(&bin, 100, 10);
+
+        assert_eq!(cells[0].ch, '│');
+        assert!(cells[1..].iter().all(|c| c.ch == ' '));
+    }
+
+    #[test]
+    fn render_volume_profile_cells_up_down_color_split() {
+        let bin = VolumeProfileBin {
+            up_volume: 60,
+            down_volume: 40,
+        };
+        let cells = render_volume_profile_cells(&bin, 100, 11);
+
+        // 1 separator + 10 bar slots. Total = 100/100 * 10 = 10 bar chars.
+        // Up portion: 60/100 * 10 = 6 chars yellow
+        // Down portion: 40/100 * 10 = 4 chars cyan
+        let bar_cells = &cells[1..];
+        let up_count = bar_cells
+            .iter()
+            .filter(|c| c.color == Some(Color::DarkYellow))
+            .count();
+        let down_count = bar_cells
+            .iter()
+            .filter(|c| c.color == Some(Color::DarkCyan))
+            .count();
+        assert_eq!(up_count, 6);
+        assert_eq!(down_count, 4);
+    }
+
+    #[test]
+    fn layout_enables_volume_profile_for_wide_viewport() {
+        let layout = detail_layout(120, 40);
+
+        assert!(layout.show_volume_profile);
+    }
+
+    #[test]
+    fn layout_disables_volume_profile_for_narrow_viewport() {
+        let layout = detail_layout(80, 40);
+
+        assert!(!layout.show_volume_profile);
+    }
+
+    #[test]
+    fn layout_uses_full_plot_width_for_hd_candle_slots() {
+        let wide = detail_layout(120, 40);
+        let narrow = detail_layout(80, 40);
+
+        let expected_wide_slots =
+            120 - DETAIL_CHART_AXIS_WIDTH - DETAIL_CHART_ROW_PADDING - DETAIL_VOLUME_PROFILE_WIDTH;
+        assert_eq!(wide.candle_slots, expected_wide_slots);
+
+        let expected_narrow_slots = 80 - DETAIL_CHART_AXIS_WIDTH - DETAIL_CHART_ROW_PADDING;
+        assert_eq!(narrow.candle_slots, expected_narrow_slots);
+    }
+
+    #[test]
+    fn volume_profile_min_equals_max_returns_zero_bins() {
+        let candles = vec![make_historical_candle(1, 3000, 3000, 3000, 3000, 500)];
+        let bins = compute_volume_profile(&candles, 3000, 3000, 4);
+
+        assert!(bins.iter().all(|b| b.up_volume == 0 && b.down_volume == 0));
+    }
+
+    #[test]
+    fn volume_profile_per_bin_distribution_is_correct() {
+        // One candle spanning the full range with 10 volume across 4 bins.
+        // Each bin should get 10/4 = 2, remainder 2 → first 2 bins get 3.
+        let candles = vec![make_historical_candle(1, 1000, 5000, 1000, 5000, 10)];
+        let bins = compute_volume_profile(&candles, 1000, 5000, 4);
+
+        // Bins are ordered top-down (row 0 = highest price).
+        // Bin indices 0..3 map to price bins 3..0 (high→low).
+        let volumes: Vec<u64> = bins.iter().map(|b| b.up_volume).collect();
+        // Each bin gets at least 2; first 2 enumeration indices get +1.
+        // bin_index 0 → row 3, bin_index 1 → row 2, bin_index 2 → row 1, bin_index 3 → row 0.
+        assert_eq!(volumes, vec![2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn volume_profile_candle_partially_within_range() {
+        // Candle high extends beyond max_price_cents — should be clamped.
+        let candles = vec![make_historical_candle(1, 2000, 8000, 2000, 4000, 100)];
+        let bins = compute_volume_profile(&candles, 2000, 4000, 2);
+
+        let total: u64 = bins.iter().map(|b| b.up_volume + b.down_volume).sum();
+        assert_eq!(total, 100);
+        // Both bins should have volume (candle spans entire clipped range).
+        assert!(bins[0].up_volume > 0);
+        assert!(bins[1].up_volume > 0);
+    }
+
+    #[test]
+    fn volume_profile_uses_raw_candles_instead_of_aggregated_ranges() {
+        let raw = vec![
+            make_historical_candle(1, 1000, 1000, 1000, 1000, 100),
+            make_historical_candle(2, 5000, 5000, 5000, 5000, 100),
+        ];
+        let aggregated = vec![make_candle(1000, 5000, 1000, 5000, 200)];
+
+        let raw_bins = compute_volume_profile(&raw, 1000, 5000, 4);
+        let aggregated_bins = compute_volume_profile_from_price_candles(&aggregated, 1000, 5000, 4);
+
+        let raw_volumes: Vec<u64> = raw_bins
+            .iter()
+            .map(|b| b.up_volume + b.down_volume)
+            .collect();
+        let aggregated_volumes: Vec<u64> = aggregated_bins
+            .iter()
+            .map(|b| b.up_volume + b.down_volume)
+            .collect();
+
+        assert_eq!(raw_volumes, vec![100, 0, 0, 100]);
+        assert_eq!(aggregated_volumes, vec![50, 50, 50, 50]);
+    }
+
+    #[test]
+    fn render_volume_profile_cells_partial_fill() {
+        // Half-filled bar: 50 out of 100 max → 5 out of 10 available.
+        let bin = VolumeProfileBin {
+            up_volume: 50,
+            down_volume: 0,
+        };
+        let cells = render_volume_profile_cells(&bin, 100, 11);
+
+        let filled_count = cells[1..].iter().filter(|c| c.ch == '█').count();
+        let space_count = cells[1..].iter().filter(|c| c.ch == ' ').count();
+        assert_eq!(filled_count, 5);
+        assert_eq!(space_count, 5);
+    }
+
+    #[test]
+    fn render_volume_profile_cells_bar_width_one_only_separator() {
+        let bin = VolumeProfileBin {
+            up_volume: 100,
+            down_volume: 0,
+        };
+        let cells = render_volume_profile_cells(&bin, 100, 1);
+
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].ch, '│');
+    }
+
+    // ── Stale symbol colors ─────────────────────────────────────────
+
+    #[test]
+    fn stale_candidate_row_uses_dark_grey_color() {
+        let row = CandidateRow {
+            symbol: "AAPL".to_string(),
+            market_price_cents: 15000,
+            intrinsic_value_cents: 20000,
+            gap_bps: 2500,
+            is_qualified: true,
+            confidence: ConfidenceBand::High,
+        };
+
+        assert_eq!(candidate_row_color(&row, false, true), Color::DarkGrey);
+    }
+
+    #[test]
+    fn non_stale_candidate_row_uses_confidence_color() {
+        let row = CandidateRow {
+            symbol: "AAPL".to_string(),
+            market_price_cents: 15000,
+            intrinsic_value_cents: 20000,
+            gap_bps: 2500,
+            is_qualified: true,
+            confidence: ConfidenceBand::High,
+        };
+
+        assert_eq!(candidate_row_color(&row, false, false), Color::Green);
+    }
+
+    #[test]
+    fn selected_stale_row_still_uses_selection_color() {
+        let row = CandidateRow {
+            symbol: "AAPL".to_string(),
+            market_price_cents: 15000,
+            intrinsic_value_cents: 20000,
+            gap_bps: 2500,
+            is_qualified: true,
+            confidence: ConfidenceBand::High,
+        };
+
+        assert_eq!(candidate_row_color(&row, true, true), Color::Cyan);
+    }
+
+    // ── Feed loading order by persisted upside ──────────────────────
+
+    #[test]
+    fn reorder_symbols_by_persisted_upside_puts_highest_first() {
+        let symbols = vec!["LOW".to_string(), "MID".to_string(), "HIGH".to_string()];
+        let mut state = TerminalState::new(2_000, 30, 8);
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "HIGH".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 5000,
+            intrinsic_value_cents: 10000,
+        });
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "MID".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 10000,
+            intrinsic_value_cents: 15000,
+        });
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "LOW".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 8000,
+            intrinsic_value_cents: 10000,
+        });
+
+        let reordered = reorder_symbols_by_persisted_ranking(&symbols, &state);
+
+        assert_eq!(reordered, vec!["HIGH", "MID", "LOW"]);
+    }
+
+    #[test]
+    fn reorder_symbols_puts_unknown_symbols_at_end() {
+        let symbols = vec!["NEW".to_string(), "KNOWN".to_string()];
+        let mut state = TerminalState::new(2_000, 30, 8);
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "KNOWN".to_string(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 5000,
+            intrinsic_value_cents: 10000,
+        });
+
+        let reordered = reorder_symbols_by_persisted_ranking(&symbols, &state);
+
+        assert_eq!(reordered, vec!["KNOWN", "NEW"]);
+    }
+
+    #[test]
+    fn reorder_symbols_preserves_original_order_for_equal_unknowns() {
+        let symbols = vec!["ALPHA".to_string(), "BETA".to_string(), "GAMMA".to_string()];
+        let state = TerminalState::new(2_000, 30, 8);
+
+        let reordered = reorder_symbols_by_persisted_ranking(&symbols, &state);
+
+        assert_eq!(reordered, vec!["ALPHA", "BETA", "GAMMA"]);
+    }
+
+    #[test]
+    fn reorder_symbols_empty_input_returns_empty() {
+        let symbols: Vec<String> = vec![];
+        let state = TerminalState::new(2_000, 30, 8);
+
+        let reordered = reorder_symbols_by_persisted_ranking(&symbols, &state);
+
+        assert!(reordered.is_empty());
+    }
+
+    // ── Chart replay (bar-by-bar) ────────────────────────────────
+
+    #[test]
+    fn replay_offset_defaults_to_zero() {
+        let app = AppState::default();
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn step_replay_back_increments_offset() {
+        let mut app = AppState::default();
+
+        assert!(app.step_replay_back(10));
+        assert_eq!(app.replay_offset, 1);
+    }
+
+    #[test]
+    fn step_replay_back_clamps_to_total_minus_one() {
+        let mut app = AppState::default();
+        app.replay_offset = 4;
+
+        assert!(!app.step_replay_back(5));
+        assert_eq!(app.replay_offset, 4);
+    }
+
+    #[test]
+    fn step_replay_back_is_noop_for_zero_candles() {
+        let mut app = AppState::default();
+
+        assert!(!app.step_replay_back(0));
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn step_replay_back_is_noop_for_one_candle() {
+        let mut app = AppState::default();
+
+        assert!(!app.step_replay_back(1));
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn step_replay_forward_decrements_offset() {
+        let mut app = AppState::default();
+        app.replay_offset = 3;
+
+        assert!(app.step_replay_forward());
+        assert_eq!(app.replay_offset, 2);
+    }
+
+    #[test]
+    fn step_replay_forward_is_noop_at_zero() {
+        let mut app = AppState::default();
+
+        assert!(!app.step_replay_forward());
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn reset_replay_clears_offset() {
+        let mut app = AppState::default();
+        app.replay_offset = 5;
+
+        app.reset_replay();
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn set_detail_chart_range_resets_replay() {
+        let mut app = AppState::default();
+        app.replay_offset = 3;
+
+        app.set_detail_chart_range(ChartRange::Month);
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn cycle_detail_chart_range_resets_replay() {
+        let mut app = AppState::default();
+        app.set_detail_chart_range(ChartRange::Month);
+        app.replay_offset = 3;
+
+        app.cycle_detail_chart_range(1);
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn move_ticker_detail_selection_resets_replay() {
+        let mut app = AppState::default();
+        app.open_ticker_detail("AAPL");
+        app.replay_offset = 5;
+        let rows = vec![candidate("AAPL", 3_000), candidate("MSFT", 2_000)];
+
+        app.move_ticker_detail_selection(&rows, 1);
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn open_ticker_detail_resets_replay() {
+        let mut app = AppState::default();
+        app.replay_offset = 4;
+
+        app.open_ticker_detail("AAPL");
+
+        assert_eq!(app.replay_offset, 0);
+    }
+
+    #[test]
+    fn visible_candle_count_respects_replay_offset() {
+        let app = AppState::default();
+
+        assert_eq!(app.visible_candle_end(100), 100);
+    }
+
+    #[test]
+    fn visible_candle_count_subtracts_offset() {
+        let mut app = AppState::default();
+        app.replay_offset = 10;
+
+        assert_eq!(app.visible_candle_end(100), 90);
+    }
+
+    #[test]
+    fn visible_candle_count_clamps_to_at_least_one() {
+        let mut app = AppState::default();
+        app.replay_offset = 200;
+
+        assert_eq!(app.visible_candle_end(50), 1);
+    }
+
+    #[test]
+    fn visible_candle_count_returns_zero_for_empty() {
+        let mut app = AppState::default();
+        app.replay_offset = 5;
+
+        assert_eq!(app.visible_candle_end(0), 0);
+    }
+
+    #[test]
+    fn styled_cell_default_bg_is_none() {
+        let cell = super::StyledCell {
+            ch: ' ',
+            color: None,
+            bg_color: None,
+            priority: 0,
+        };
+        assert_eq!(cell.bg_color, None);
+    }
+
+    #[test]
+    fn styled_cell_stores_bg_color() {
+        let cell = super::StyledCell {
+            ch: '█',
+            color: Some(Color::Green),
+            bg_color: Some(Color::Red),
+            priority: 5,
+        };
+        assert_eq!(cell.bg_color, Some(Color::Red));
+    }
+
+    #[test]
+    fn styled_cells_line_encodes_bg_color() {
+        let cells = vec![
+            super::StyledCell {
+                ch: 'A',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 5,
+            },
+            super::StyledCell {
+                ch: 'B',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 5,
+            },
+        ];
+        let line = super::styled_cells_line(&cells);
+        let text = &line.text;
+        // The encoded text should contain INLINE_STYLE_MARKER followed by two chars (fg + bg)
+        let marker = super::INLINE_STYLE_MARKER;
+        let marker_positions: Vec<usize> = text
+            .char_indices()
+            .filter(|(_, ch)| *ch == marker)
+            .map(|(i, _)| i)
+            .collect();
+        // At least one style marker at start, one reset at end
+        assert!(
+            marker_positions.len() >= 2,
+            "expected at least 2 markers (set + reset), got {}",
+            marker_positions.len()
+        );
+        // After first marker: 2 chars (fg code + bg code), then visible text
+        let after_first = &text[marker_positions[0] + marker.len_utf8()..];
+        let mut chars = after_first.chars();
+        let fg_code = chars.next().unwrap();
+        let bg_code = chars.next().unwrap();
+        assert_eq!(
+            super::decode_color_marker(fg_code),
+            Some(Color::Green),
+            "fg code should decode to Green"
+        );
+        assert_eq!(
+            super::decode_color_marker(bg_code),
+            Some(Color::Red),
+            "bg code should decode to Red"
+        );
+    }
+
+    #[test]
+    fn styled_cells_line_no_bg_produces_none_bg_marker() {
+        let cells = vec![super::StyledCell {
+            ch: 'X',
+            color: Some(Color::Yellow),
+            bg_color: None,
+            priority: 1,
+        }];
+        let line = super::styled_cells_line(&cells);
+        let text = &line.text;
+        let marker = super::INLINE_STYLE_MARKER;
+        let after_first = text
+            .find(marker)
+            .map(|pos| &text[pos + marker.len_utf8()..])
+            .unwrap();
+        let mut chars = after_first.chars();
+        let fg_code = chars.next().unwrap();
+        let bg_code = chars.next().unwrap();
+        assert_eq!(super::decode_color_marker(fg_code), Some(Color::Yellow));
+        assert_eq!(
+            super::decode_color_marker(bg_code),
+            None,
+            "bg_color: None should encode as None"
+        );
+    }
+
+    #[test]
+    fn visible_text_strips_two_char_markers() {
+        // Build a styled line with bg, then visible_text should strip all markers
+        let cells = vec![super::StyledCell {
+            ch: 'H',
+            color: Some(Color::Green),
+            bg_color: Some(Color::Red),
+            priority: 1,
+        }];
+        let line = super::styled_cells_line(&cells);
+        assert_eq!(visible_text(&line.text), "H");
+    }
+
+    #[test]
+    fn styled_segments_line_same_color_no_extra_markers() {
+        // Two segments with same color+bg → only one marker emitted (not two)
+        let line = super::styled_segments_line(vec![
+            super::StyledSegment {
+                color: Some(Color::Green),
+                bg_color: None,
+                text: "AB".to_string(),
+            },
+            super::StyledSegment {
+                color: Some(Color::Green),
+                bg_color: None,
+                text: "CD".to_string(),
+            },
+        ]);
+        let marker = super::INLINE_STYLE_MARKER;
+        let marker_count = line.text.chars().filter(|c| *c == marker).count();
+        // Should be exactly 2 markers: one "set Green" + one "reset"
+        assert_eq!(
+            marker_count, 2,
+            "same-color segments should share one marker pair"
+        );
+        assert_eq!(visible_text(&line.text), "ABCD");
+    }
+
+    #[test]
+    fn styled_segments_line_fg_only_resets() {
+        // A single fg-only segment should still have a reset marker at end
+        let line = super::styled_segments_line(vec![super::StyledSegment {
+            color: Some(Color::Red),
+            bg_color: None,
+            text: "X".to_string(),
+        }]);
+        let marker = super::INLINE_STYLE_MARKER;
+        let marker_count = line.text.chars().filter(|c| *c == marker).count();
+        assert_eq!(marker_count, 2, "should have set + reset markers");
+    }
+
+    #[test]
+    fn styled_cells_line_bg_change_breaks_segment() {
+        // Two cells with same fg but different bg → should produce separate segments
+        let cells = vec![
+            super::StyledCell {
+                ch: 'A',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 1,
+            },
+            super::StyledCell {
+                ch: 'B',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Blue),
+                priority: 1,
+            },
+        ];
+        let line = super::styled_cells_line(&cells);
+        let marker = super::INLINE_STYLE_MARKER;
+        // Should have 3 markers: set(Green,Red), set(Green,Blue), reset
+        let marker_count = line.text.chars().filter(|c| *c == marker).count();
+        assert_eq!(marker_count, 3, "bg change should produce a new marker");
+        assert_eq!(visible_text(&line.text), "AB");
+    }
+
+    #[test]
+    fn styled_cells_line_fg_change_breaks_segment() {
+        let cells = vec![
+            super::StyledCell {
+                ch: 'A',
+                color: Some(Color::Green),
+                bg_color: None,
+                priority: 1,
+            },
+            super::StyledCell {
+                ch: 'B',
+                color: Some(Color::Red),
+                bg_color: None,
+                priority: 1,
+            },
+        ];
+        let line = super::styled_cells_line(&cells);
+        let marker = super::INLINE_STYLE_MARKER;
+        // Should have 3 markers: set(Green), set(Red), reset
+        let marker_count = line.text.chars().filter(|c| *c == marker).count();
+        assert_eq!(marker_count, 3, "fg change should produce a new marker");
+        assert_eq!(visible_text(&line.text), "AB");
+    }
+
+    fn contains_braille(text: &str) -> bool {
+        text.chars()
+            .any(|ch| (0x2801..=0x28ff).contains(&(ch as u32)))
+    }
+
+    #[test]
+    fn clip_text_to_width_preserves_two_char_markers() {
+        let cells = vec![
+            super::StyledCell {
+                ch: 'A',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 1,
+            },
+            super::StyledCell {
+                ch: 'B',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 1,
+            },
+            super::StyledCell {
+                ch: 'C',
+                color: Some(Color::Green),
+                bg_color: Some(Color::Red),
+                priority: 1,
+            },
+        ];
+        let line = super::styled_cells_line(&cells);
+        let clipped = super::clip_text_to_width(&line.text, 2);
+        assert_eq!(visible_text(&clipped), "AB");
+    }
+
+    #[test]
+    fn price_chart_uses_real_candle_characters() {
+        // Two candles at different heights to produce wick and body regions.
+        let candles = vec![
+            super::PriceCandle {
+                open_cents: 100,
+                high_cents: 200,
+                low_cents: 50,
+                close_cents: 150,
+                volume: 1000,
+                ema_20_cents: None,
+                ema_50_cents: None,
+                ema_200_cents: None,
+                macd_cents: None,
+                signal_cents: None,
+                histogram_cents: None,
+                point_count: 1,
+            },
+            super::PriceCandle {
+                open_cents: 120,
+                high_cents: 140,
+                low_cents: 110,
+                close_cents: 130,
+                volume: 500,
+                ema_20_cents: None,
+                ema_50_cents: None,
+                ema_200_cents: None,
+                macd_cents: None,
+                signal_cents: None,
+                histogram_cents: None,
+                point_count: 1,
+            },
+        ];
+        let layout = super::DetailLayout {
+            plot_width: 2,
+            candle_slots: 2,
+            price_chart_height: 10,
+            volume_chart_height: 0,
+            macd_chart_height: 0,
+            compact_volume: false,
+            show_macd: false,
+            show_ema_200: false,
+            show_overlay_legend: false,
+            show_macd_legend: false,
+            show_recent_context: false,
+            compact_fundamentals: false,
+            compact_consensus: false,
+            compact_evidence: false,
+            show_volume_profile: false,
+        };
+        let lines = super::render_price_chart_lines(&candles, &[], &layout);
+        assert!(!lines.is_empty(), "should produce chart lines");
+        let has_braille = lines
+            .iter()
+            .map(|line| visible_text(&line.text))
+            .any(|line| contains_braille(&line));
+        assert!(has_braille, "price chart should contain braille HD glyphs");
+    }
+
+    #[test]
+    fn price_chart_line_count_matches_height() {
+        let candles = vec![super::PriceCandle {
+            open_cents: 100,
+            high_cents: 200,
+            low_cents: 50,
+            close_cents: 150,
+            volume: 0,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        }];
+        let layout = super::DetailLayout {
+            plot_width: 1,
+            candle_slots: 1,
+            price_chart_height: 6,
+            volume_chart_height: 0,
+            macd_chart_height: 0,
+            compact_volume: false,
+            show_macd: false,
+            show_ema_200: false,
+            show_overlay_legend: false,
+            show_macd_legend: false,
+            show_recent_context: false,
+            compact_fundamentals: false,
+            compact_consensus: false,
+            compact_evidence: false,
+            show_volume_profile: false,
+        };
+        let lines = super::render_price_chart_lines(&candles, &[], &layout);
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn price_chart_empty_candles_returns_empty() {
+        let layout = super::DetailLayout {
+            plot_width: 1,
+            candle_slots: 1,
+            price_chart_height: 6,
+            volume_chart_height: 0,
+            macd_chart_height: 0,
+            compact_volume: false,
+            show_macd: false,
+            show_ema_200: false,
+            show_overlay_legend: false,
+            show_macd_legend: false,
+            show_recent_context: false,
+            compact_fundamentals: false,
+            compact_consensus: false,
+            compact_evidence: false,
+            show_volume_profile: false,
+        };
+        let lines = super::render_price_chart_lines(&[], &[], &layout);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn price_chart_contains_separator() {
+        let candles = vec![super::PriceCandle {
+            open_cents: 100,
+            high_cents: 200,
+            low_cents: 50,
+            close_cents: 150,
+            volume: 0,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        }];
+        let layout = super::DetailLayout {
+            plot_width: 1,
+            candle_slots: 1,
+            price_chart_height: 3,
+            volume_chart_height: 0,
+            macd_chart_height: 0,
+            compact_volume: false,
+            show_macd: false,
+            show_ema_200: false,
+            show_overlay_legend: false,
+            show_macd_legend: false,
+            show_recent_context: false,
+            compact_fundamentals: false,
+            compact_consensus: false,
+            compact_evidence: false,
+            show_volume_profile: false,
+        };
+        let lines = super::render_price_chart_lines(&candles, &[], &layout);
+        for line in &lines {
+            let text = visible_text(&line.text);
+            assert!(text.contains('│'), "expected separator in: {text}");
+        }
+    }
+
+    #[test]
+    fn price_chart_down_candle_renders_hd_braille_body() {
+        let candles = vec![super::PriceCandle {
+            open_cents: 200,
+            high_cents: 250,
+            low_cents: 50,
+            close_cents: 100,
+            volume: 0,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        }];
+        let layout = super::DetailLayout {
+            plot_width: 1,
+            candle_slots: 1,
+            price_chart_height: 10,
+            volume_chart_height: 0,
+            macd_chart_height: 0,
+            compact_volume: false,
+            show_macd: false,
+            show_ema_200: false,
+            show_overlay_legend: false,
+            show_macd_legend: false,
+            show_recent_context: false,
+            compact_fundamentals: false,
+            compact_consensus: false,
+            compact_evidence: false,
+            show_volume_profile: false,
+        };
+        let lines = super::render_price_chart_lines(&candles, &[], &layout);
+        let has_braille = lines
+            .iter()
+            .map(|line| visible_text(&line.text))
+            .any(|line| contains_braille(&line));
+        assert!(has_braille, "down candle should render braille HD glyphs");
+    }
+
+    // ── ChartCanvas tests ──────────────────────────────────────────
+
+    #[test]
+    fn chart_canvas_new_correct_dimensions() {
+        let canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        assert_eq!(canvas.pixels.len(), 4 * 2 * 10);
+        assert_eq!(canvas.glyphs.len(), 4 * 10);
+        assert_eq!(canvas.width, 10);
+        assert_eq!(canvas.terminal_height, 4);
+    }
+
+    #[test]
+    fn chart_canvas_new_zero_dimensions() {
+        let canvas = super::ChartCanvas::new(0, 5, 0.0, 100.0);
+        assert_eq!(canvas.pixels.len(), 0);
+        assert_eq!(canvas.glyphs.len(), 0);
+    }
+
+    #[test]
+    fn chart_canvas_reset_clears_and_updates_range() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 100.0);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        canvas.draw_glyph(0, 0, 'X', Some(Color::Green), 5);
+        canvas.reset(50.0, 200.0);
+        assert_eq!(canvas.min_value, 50.0);
+        assert_eq!(canvas.max_value, 200.0);
+        assert!(canvas.pixels.iter().all(|p| p.color.is_none()));
+        assert!(canvas.glyphs.iter().all(|g| g.is_none()));
+    }
+
+    #[test]
+    fn chart_canvas_reset_preserves_capacity() {
+        let mut canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        let pixel_cap = canvas.pixels.capacity();
+        let glyph_cap = canvas.glyphs.capacity();
+        canvas.reset(0.0, 50.0);
+        assert!(canvas.pixels.capacity() >= pixel_cap);
+        assert!(canvas.glyphs.capacity() >= glyph_cap);
+    }
+
+    #[test]
+    fn chart_canvas_fill_pixel_writes() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        canvas.fill_pixel(1, 2, Some(Color::Green), 5);
+        let idx = 1 * 3 + 2;
+        assert_eq!(canvas.pixels[idx].color, Some(Color::Green));
+        assert_eq!(canvas.pixels[idx].priority, 5);
+    }
+
+    #[test]
+    fn chart_canvas_fill_pixel_higher_priority_wins() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Green), 5);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 3);
+        assert_eq!(canvas.pixels[0].color, Some(Color::Green));
+    }
+
+    #[test]
+    fn chart_canvas_fill_pixel_equal_priority_overwrites() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Green), 5);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        assert_eq!(canvas.pixels[0].color, Some(Color::Red));
+    }
+
+    #[test]
+    fn chart_canvas_fill_pixel_oob_is_noop() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        canvas.fill_pixel(999, 999, Some(Color::Red), 5);
+    }
+
+    #[test]
+    fn chart_canvas_draw_glyph_writes() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        canvas.draw_glyph(1, 2, 'X', Some(Color::Cyan), 5);
+        let idx = 1 * 3 + 2;
+        let glyph = canvas.glyphs[idx].unwrap();
+        assert_eq!(glyph.ch, 'X');
+        assert_eq!(glyph.color, Some(Color::Cyan));
+        assert_eq!(glyph.priority, 5);
+    }
+
+    #[test]
+    fn chart_canvas_draw_glyph_higher_priority_wins() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.draw_glyph(0, 0, 'A', Some(Color::Green), 5);
+        canvas.draw_glyph(0, 0, 'B', Some(Color::Red), 3);
+        assert_eq!(canvas.glyphs[0].unwrap().ch, 'A');
+    }
+
+    #[test]
+    fn chart_canvas_draw_glyph_oob_is_noop() {
+        let mut canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        canvas.draw_glyph(999, 999, 'X', Some(Color::Red), 5);
+    }
+
+    #[test]
+    fn chart_canvas_map_to_hires_row_boundaries() {
+        let canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        assert_eq!(canvas.map_to_hires_row(100.0), 0);
+        assert_eq!(canvas.map_to_hires_row(0.0), 7);
+    }
+
+    #[test]
+    fn chart_canvas_map_to_terminal_row_boundaries() {
+        let canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        assert_eq!(canvas.map_to_terminal_row(100.0), 0);
+        assert_eq!(canvas.map_to_terminal_row(0.0), 3);
+    }
+
+    #[test]
+    fn chart_canvas_plot_pixel_maps_value() {
+        let mut canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        canvas.plot_pixel(100.0, 5, Some(Color::Red), 5);
+        let expected_row = canvas.map_to_hires_row(100.0);
+        let idx = expected_row * 10 + 5;
+        assert_eq!(canvas.pixels[idx].color, Some(Color::Red));
+    }
+
+    #[test]
+    fn chart_canvas_plot_glyph_maps_value() {
+        let mut canvas = super::ChartCanvas::new(4, 10, 0.0, 100.0);
+        canvas.plot_glyph(100.0, 5, '.', Some(Color::Yellow), 2);
+        let expected_row = canvas.map_to_terminal_row(100.0);
+        let idx = expected_row * 10 + 5;
+        assert_eq!(canvas.glyphs[idx].unwrap().ch, '.');
+    }
+
+    #[test]
+    fn chart_canvas_fill_vertical_fills_range() {
+        let mut canvas = super::ChartCanvas::new(3, 1, 0.0, 10.0);
+        canvas.fill_vertical(0, 2, 4, Some(Color::Blue), 3);
+        assert_eq!(canvas.pixels[2].color, Some(Color::Blue));
+        assert_eq!(canvas.pixels[3].color, Some(Color::Blue));
+        assert_eq!(canvas.pixels[4].color, Some(Color::Blue));
+        assert!(canvas.pixels[0].color.is_none());
+        assert!(canvas.pixels[1].color.is_none());
+        assert!(canvas.pixels[5].color.is_none());
+    }
+
+    #[test]
+    fn chart_canvas_fill_vertical_swapped_bounds() {
+        let mut canvas = super::ChartCanvas::new(3, 1, 0.0, 10.0);
+        canvas.fill_vertical(0, 4, 2, Some(Color::Blue), 3);
+        assert_eq!(canvas.pixels[2].color, Some(Color::Blue));
+        assert_eq!(canvas.pixels[3].color, Some(Color::Blue));
+        assert_eq!(canvas.pixels[4].color, Some(Color::Blue));
+    }
+
+    #[test]
+    fn chart_canvas_plot_hline_full_width() {
+        let mut canvas = super::ChartCanvas::new(4, 5, 0.0, 100.0);
+        canvas.plot_hline(50.0, Some(Color::DarkGrey), 1);
+        let expected_row = canvas.map_to_hires_row(50.0);
+        for col in 0..5 {
+            let idx = expected_row * 5 + col;
+            assert_eq!(canvas.pixels[idx].color, Some(Color::DarkGrey));
+        }
+    }
+
+    #[test]
+    fn chart_canvas_collapse_empty() {
+        let canvas = super::ChartCanvas::new(2, 3, 0.0, 10.0);
+        let cells = canvas.collapse_to_cells();
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].len(), 3);
+        for row in &cells {
+            for cell in row {
+                assert_eq!(cell.ch, ' ');
+                assert_eq!(cell.color, None);
+            }
+        }
+    }
+
+    #[test]
+    fn chart_canvas_collapse_same_color_pair() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Green), 5);
+        canvas.fill_pixel(1, 0, Some(Color::Green), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '█');
+        assert_eq!(cell.color, Some(Color::Green));
+        assert_eq!(cell.bg_color, None);
+    }
+
+    #[test]
+    fn chart_canvas_collapse_different_colors() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        canvas.fill_pixel(1, 0, Some(Color::Green), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '▄');
+        assert_eq!(cell.color, Some(Color::Green));
+        assert_eq!(cell.bg_color, Some(Color::Red));
+    }
+
+    #[test]
+    fn chart_canvas_collapse_top_only() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '▀');
+        assert_eq!(cell.color, Some(Color::Red));
+        assert_eq!(cell.bg_color, None);
+    }
+
+    #[test]
+    fn chart_canvas_collapse_bottom_only() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(1, 0, Some(Color::Blue), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '▄');
+        assert_eq!(cell.color, Some(Color::Blue));
+        assert_eq!(cell.bg_color, None);
+    }
+
+    #[test]
+    fn chart_canvas_collapse_glyph_overrides_when_priority_wins() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Green), 3);
+        canvas.fill_pixel(1, 0, Some(Color::Green), 3);
+        canvas.draw_glyph(0, 0, '█', Some(Color::Red), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '█');
+        assert_eq!(cell.color, Some(Color::Red));
+        assert_eq!(cell.bg_color, Some(Color::Green));
+    }
+
+    #[test]
+    fn chart_canvas_collapse_pixel_wins_when_glyph_lower_priority() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        canvas.fill_pixel(1, 0, Some(Color::Green), 5);
+        canvas.draw_glyph(0, 0, 'X', Some(Color::Yellow), 1);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, '▄');
+        assert_eq!(cell.color, Some(Color::Green));
+        assert_eq!(cell.bg_color, Some(Color::Red));
+    }
+
+    #[test]
+    fn chart_canvas_collapse_glyph_no_pixels() {
+        let mut canvas = super::ChartCanvas::new(1, 1, 0.0, 10.0);
+        canvas.draw_glyph(0, 0, 'X', Some(Color::Cyan), 5);
+        let cells = canvas.collapse_to_cells();
+        let cell = &cells[0][0];
+        assert_eq!(cell.ch, 'X');
+        assert_eq!(cell.color, Some(Color::Cyan));
+        assert_eq!(cell.bg_color, None);
+    }
+
+    #[test]
+    fn chart_canvas_collapse_zero_height() {
+        let canvas = super::ChartCanvas::new(0, 3, 0.0, 10.0);
+        let cells = canvas.collapse_to_cells();
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn chart_canvas_with_axis_correct_row_count() {
+        let canvas = super::ChartCanvas::new(5, 10, 0.0, 100.0);
+        let lines = canvas.with_axis(|_row, _height| "label".to_string());
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn chart_canvas_with_axis_labels_at_top_mid_bottom() {
+        let canvas = super::ChartCanvas::new(5, 2, 0.0, 100.0);
+        let lines = canvas.with_axis(|row_index, _height| format!("R{}", row_index));
+        let texts: Vec<String> = lines.iter().map(|l| visible_text(&l.text)).collect();
+        assert!(texts[0].contains("R0"));
+        assert!(texts[2].contains("R2"));
+        assert!(texts[4].contains("R4"));
+        assert!(!texts[1].contains("R1"));
+        assert!(!texts[3].contains("R3"));
+    }
+
+    #[test]
+    fn chart_canvas_with_axis_contains_separator() {
+        let canvas = super::ChartCanvas::new(3, 2, 0.0, 10.0);
+        let lines = canvas.with_axis(|_, _| "X".to_string());
+        for line in &lines {
+            let text = visible_text(&line.text);
+            assert!(text.contains('│'));
+        }
+    }
+
+    #[test]
+    fn chart_canvas_deterministic_output() {
+        let mut canvas = super::ChartCanvas::new(3, 5, 0.0, 100.0);
+        canvas.fill_pixel(0, 0, Some(Color::Red), 5);
+        canvas.fill_pixel(3, 2, Some(Color::Green), 3);
+        canvas.draw_glyph(1, 4, '.', Some(Color::Yellow), 2);
+        let lines_a = canvas.with_axis(|r, _| format!("{}", r));
+        let lines_b = canvas.with_axis(|r, _| format!("{}", r));
+        assert_eq!(lines_a, lines_b);
+    }
+
+    fn make_volume_candle(volume: u64) -> super::PriceCandle {
+        super::PriceCandle {
+            open_cents: 100,
+            high_cents: 100,
+            low_cents: 100,
+            close_cents: 100,
+            volume,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            point_count: 1,
+        }
+    }
+
+    #[test]
+    fn volume_chart_empty_candles_returns_empty() {
+        let lines = super::render_volume_chart_lines(&[], 5);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn volume_chart_zero_height_returns_empty() {
+        let candles = vec![make_volume_candle(1000)];
+        let lines = super::render_volume_chart_lines(&candles, 0);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn volume_chart_line_count_matches_height() {
+        let candles = vec![make_volume_candle(1000), make_volume_candle(500)];
+        let lines = super::render_volume_chart_lines(&candles, 4);
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn volume_chart_axis_label_present() {
+        let candles = vec![make_volume_candle(2_000_000)];
+        let lines = super::render_volume_chart_lines(&candles, 3);
+        let top_text = visible_text(&lines[0].text);
+        assert!(
+            top_text.contains("2.0M"),
+            "expected '2.0M' in top axis, got: {top_text}"
+        );
+    }
+
+    #[test]
+    fn volume_chart_contains_separator() {
+        let candles = vec![make_volume_candle(1000)];
+        let lines = super::render_volume_chart_lines(&candles, 3);
+        for line in &lines {
+            let text = visible_text(&line.text);
+            assert!(text.contains('│'), "expected separator in: {text}");
+        }
+    }
+
+    #[test]
+    fn volume_chart_skips_zero_volume() {
+        let candles = vec![make_volume_candle(0), make_volume_candle(1000)];
+        let lines = super::render_volume_chart_lines(&candles, 3);
+        assert_eq!(lines.len(), 3);
+    }
+
+    fn make_macd_candle(
+        macd: Option<f64>,
+        signal: Option<f64>,
+        histogram: Option<f64>,
+    ) -> super::PriceCandle {
+        super::PriceCandle {
+            open_cents: 100,
+            high_cents: 100,
+            low_cents: 100,
+            close_cents: 100,
+            volume: 0,
+            ema_20_cents: None,
+            ema_50_cents: None,
+            ema_200_cents: None,
+            macd_cents: macd,
+            signal_cents: signal,
+            histogram_cents: histogram,
+            point_count: 1,
+        }
+    }
+
+    #[test]
+    fn macd_chart_empty_candles_returns_empty() {
+        let lines = super::render_macd_chart_lines(&[], 5);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn macd_chart_zero_height_returns_empty() {
+        let candles = vec![make_macd_candle(Some(1.0), Some(0.5), Some(0.5))];
+        let lines = super::render_macd_chart_lines(&candles, 0);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn macd_chart_line_count_matches_height() {
+        let candles = vec![
+            make_macd_candle(Some(2.0), Some(1.0), Some(1.0)),
+            make_macd_candle(Some(-1.0), Some(-0.5), Some(-0.5)),
+        ];
+        let lines = super::render_macd_chart_lines(&candles, 4);
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn macd_chart_contains_separator() {
+        let candles = vec![make_macd_candle(Some(1.0), Some(0.5), Some(0.5))];
+        let lines = super::render_macd_chart_lines(&candles, 3);
+        for line in &lines {
+            let text = visible_text(&line.text);
+            assert!(text.contains('│'), "expected separator in: {text}");
+        }
+    }
+
+    #[test]
+    fn macd_chart_axis_labels_present() {
+        let candles = vec![
+            make_macd_candle(Some(200.0), Some(100.0), Some(100.0)),
+            make_macd_candle(Some(-50.0), Some(-25.0), Some(-25.0)),
+        ];
+        let lines = super::render_macd_chart_lines(&candles, 5);
+        let top_text = visible_text(&lines[0].text);
+        assert!(
+            top_text.contains('$'),
+            "expected dollar sign in top axis, got: {top_text}"
+        );
+    }
+
+    #[test]
+    fn macd_chart_handles_all_none_values() {
+        let candles = vec![make_macd_candle(None, None, None)];
+        let lines = super::render_macd_chart_lines(&candles, 3);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn volume_chart_fills_correct_columns() {
+        // Single candle: body at columns 0,1 (index=0 → body_column=1, body-1=0).
+        // With 1 candle, chart width=2. The bottom row should have non-space chart content.
+        let candles = vec![make_volume_candle(1000)];
+        let lines = super::render_volume_chart_lines(&candles, 2);
+        // The bottom row should contain block characters after the axis separator
+        let bottom_text = visible_text(&lines[1].text);
+        let after_sep: String = bottom_text
+            .chars()
+            .skip_while(|c| *c != '│')
+            .skip(1)
+            .collect();
+        assert!(
+            contains_braille(&after_sep),
+            "bottom row chart area should contain braille HD glyphs, got: {after_sep}"
+        );
+    }
+
+    #[test]
+    fn volume_chart_two_candles_render_two_hd_cells() {
+        let candles = vec![make_volume_candle(1000), make_volume_candle(1000)];
+        let lines = super::render_volume_chart_lines(&candles, 1);
+        let text = visible_text(&lines[0].text);
+        let after_sep: String = text.chars().skip_while(|c| *c != '│').skip(1).collect();
+        let braille_count = after_sep
+            .chars()
+            .filter(|ch| contains_braille(&ch.to_string()))
+            .count();
+        assert!(
+            braille_count >= 2,
+            "should have at least 2 braille cells for 2 candles, got {braille_count} in: {after_sep}"
+        );
+    }
+
+    #[test]
+    fn macd_chart_histogram_uses_correct_columns() {
+        // Positive histogram should fill chart area columns
+        let candles = vec![make_macd_candle(Some(100.0), Some(50.0), Some(50.0))];
+        let lines = super::render_macd_chart_lines(&candles, 3);
+        let has_braille = lines.iter().any(|line| {
+            let text = visible_text(&line.text);
+            let after_sep: String = text.chars().skip_while(|c| *c != '│').skip(1).collect();
+            contains_braille(&after_sep)
+        });
+        assert!(
+            has_braille,
+            "MACD histogram should produce braille HD glyphs"
         );
     }
 }

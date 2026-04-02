@@ -88,6 +88,11 @@ Smoke mode prints a short non-interactive summary and exits.
 
 - `j` or Down moves to the next visible row
 - `k` or Up moves to the previous visible row
+- `Home` jumps to the first row in the current list view
+- `End` jumps to the last row in the current list view
+- `PageDown` moves down by one visible page in the current list view
+- `PageUp` moves up by one visible page in the current list view
+- `o` toggles between the `Top Candidates` and `Top Opportunities` list views
 - `d` or `Enter` opens ticker detail for the selected row
 - `w` toggles watchlist membership for the selected symbol
 - `Space` pauses or resumes live application of feed updates
@@ -106,6 +111,7 @@ Smoke mode prints a short non-interactive summary and exits.
 - `j` and `k` move to the previous or next ticker inside the full filtered set
 - `1` through `6` jump chart range between `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`
 - `[` and `]` cycle chart range backward or forward
+- `←` and `→` step through chart bars one at a time (replay mode); indicators recalculate for the visible range
 - `w` toggles watchlist membership for the active ticker
 - `l` opens the issue log viewer from the detail screen
 - `Backspace`, `Esc`, `d`, or `Enter` closes the detail screen
@@ -114,16 +120,16 @@ The detail view is chart-first and currently shows:
 
 - current market price, mean target, median target, and weighted target when available
 - qualification state, confidence state, external support, threshold, and discount
-- Yahoo historical OHLC candles for the selected range
+- Yahoo historical OHLC candles for the selected range, rendered with a high-density Unicode braille grid
 - `EMA20`, `EMA50`, and `EMA200` overlays
-- a volume pane
-- a MACD pane with MACD line, signal line, and histogram
+- a volume pane rendered on the same braille grid
+- a MACD pane with MACD line, signal line, and histogram on the same braille grid
 - a valuation map showing price versus low, weighted, mean, median, and high target levels
 - analyst consensus breadth, recommendation mean, and rating breakdown
 - compact evidence text explaining the current state
 - recent symbol alerts or recent qualifying tape when room allows
 
-The detail layout adapts to terminal size. On short terminals it preserves the chart stack first and compresses or removes lower-priority text sections before heavily reducing the chart.
+The detail layout adapts to terminal size. On short terminals it preserves the chart stack first and compresses or removes lower-priority text sections before heavily reducing the chart. The chart stack uses braille cells so it can keep more visible bars and finer vertical steps within the same terminal width.
 
 ### Row Filter
 
@@ -137,7 +143,7 @@ Filter behavior:
 
 - matching is case-insensitive
 - filtering is applied to visible symbol text
-- ticker detail navigation follows the current filtered set, not just the rows shown in the capped main table
+- ticker detail navigation follows the current active ranked set, not just the rows shown in the capped main table
 
 ### Symbol Entry
 
@@ -171,6 +177,18 @@ Operational issue behavior:
 - `f` toggles watchlist-only mode for the ranked table
 
 When watchlist-only mode is on, only watched symbols remain in the main ranked table and the current filtered set.
+
+### Top Opportunities View
+
+- `Top Opportunities` is a separate main-view ranking focused on buy candidates rather than the baseline candidate sorter
+- it ranks only the current filtered qualified universe
+- it uses three evidence buckets when available: fundamentals, 1Y technical confirmation from cached chart summaries, and forecasts from analyst targets plus DCF when analysis is ready
+- missing buckets are treated as missing coverage, not automatic negative evidence
+- the visible table stays capped for readability, but `j` and `k` now scroll that window through the full active opportunities set
+- `Home`, `End`, `PageUp`, and `PageDown` operate on the full active opportunity order using the same ticker-based navigation model as the main candidate list
+- the `Idx` column shows the symbol's absolute rank in the full opportunity order
+- ticker detail and history navigation still use the full active opportunities set
+- the first time you switch into `Top Opportunities`, the selection starts at the first ranked ticker; after that, each list view restores its own last selected ticker when you toggle with `o`
 
 ### Pause And Resume
 

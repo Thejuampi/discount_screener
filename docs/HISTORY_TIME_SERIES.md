@@ -42,8 +42,8 @@ The history header shows:
 - `[` / `]`: move backward or forward through time windows
 - `j` / `Down`: scroll down
 - `k` / `Up`: scroll up
-- `n`: next symbol in the filtered set
-- `p`: previous symbol in the filtered set
+- `n`: next symbol in the active ranked set
+- `p`: previous symbol in the active ranked set
 - `e`: export the selected symbol's full history as Excel-friendly CSV files
 - `Esc`: close detail
 - `Backspace`: close detail
@@ -60,6 +60,8 @@ The history header shows:
 - `All`
 
 The default history window is `1M`.
+
+When history is opened from `Top Opportunities`, `n` and `p` continue through the opportunity-ranked symbol order rather than falling back to the baseline candidates list.
 
 ### Metric Groups
 

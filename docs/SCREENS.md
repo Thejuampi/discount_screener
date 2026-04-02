@@ -17,23 +17,30 @@ The layouts are viewport-aware. Exact spacing, pane height, and how much seconda
 5. Tracked symbols line: current live universe
 6. Filter line: current query, watchlist-only mode, input mode, and selected symbol
 7. Prompt line: current input hint or status message
-8. Top candidates table: ranked rows, capped in the main screen for readability
-9. Selected detail summary: compact explanation for the highlighted row
+8. Top candidates or top opportunities table: ranked rows, capped in the main screen for readability
+9. Selected detail summary or opportunity rationale: compact explanation for the highlighted row
 10. Alerts and recent tape: recent transitions and latest event-derived state changes
 
 ### Current Main-View Notes
 
 - `Unavailable` is the tracked symbol count that is not currently loaded.
+- `o` toggles between the baseline `Top Candidates` table and the composite `Top Opportunities` table.
 - The main table is intentionally capped. Open ticker detail to navigate the full filtered set.
+- In `Top Opportunities`, the rank uses available fundamentals, 1Y technical confirmation from cached chart summaries, and forecast support from analyst targets plus DCF when the analysis cache is ready.
+- In `Top Opportunities`, `j` and `k` move through the full ranked opportunity set while the visible table window follows the selected symbol.
+- `Home`, `End`, `PageUp`, and `PageDown` use the same ticker-based selection model across both main list views.
+- The `Idx` column in `Top Opportunities` reflects the symbol's absolute rank inside the full opportunity order, not just its position inside the visible window.
+- The first entry into `Top Opportunities` starts at the first ranked ticker, and later toggles between `Top Candidates` and `Top Opportunities` restore the last selected ticker for each view.
 - `Upside` is the table percentage column shown in the current UI.
 - `w` toggles watchlist membership and `f` toggles watchlist-only mode.
 - `Space` pauses live application of feed updates without leaving the main screen.
 - On narrower terminals, the header, status line, and prompt switch to compact variants before the right edge is clipped.
+- Symbols that were restored from the warm-start cache but not yet live-refreshed are shown in dark grey. Once a live feed update arrives for a symbol, it switches to its normal confidence-based color.
 
 Representative current header and status strings:
 
 ```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
+DISCOUNT TERMINAL  |  j/k move  |  o view  |  d detail  |  w watch  |  / filter  |  s symbol  |  l logs  |  f watch filter  |  space pause  |  q quit
 Mode: live  Source: yahoo  Feed: running  Tracked: 503  Loaded: 434  Unavailable: 69  Applied: 71426  Pending: 0  Rate: 4/s
 Health: degraded  Active issues: 1  Resolved: 0  Press l for issue log
 ```
@@ -47,7 +54,7 @@ Filter: query='NV' watchlist_only=off input_mode=filter selected=NVDA
 Filter rows: 'NV'  Enter apply  Backspace delete or go back  Esc cancel  Ctrl+C quit
 ```
 
-### Notes
+### Filter Notes
 
 - `input_mode=filter` means the row filter is active.
 - Matching is case-insensitive against visible symbol text.
@@ -62,7 +69,7 @@ Filter: query='AVGO' watchlist_only=off input_mode=symbol selected=AVGO
 Track symbol: 'AVGO'  Enter add  Backspace delete or go back  Esc cancel  Ctrl+C quit
 ```
 
-### Notes
+### Symbol Entry Notes
 
 - Symbol entry is available in live mode.
 - Enter one ticker or a comma-separated list.
@@ -72,14 +79,14 @@ Track symbol: 'AVGO'  Enter add  Backspace delete or go back  Esc cancel  Ctrl+C
 
 ![Ticker detail view](screenshots/ticker-details.png)
 
-### What You Are Seeing
+### Detail Layout
 
 1. Header: detail controls including chart-range switching
 2. Identity line: symbol, position inside the full filtered set, watchlist state, active chart range
 3. Summary lines: price, mean, median, weighted target, qualification, confidence, external support, threshold, and discount
-4. Price chart pane: Yahoo historical OHLC candles with `EMA20`, `EMA50`, and `EMA200`
-5. Volume pane: volume bars for the active visible range
-6. MACD pane: MACD line, signal line, and histogram
+4. Price chart pane: Yahoo historical OHLC candles with `EMA20`, `EMA50`, and `EMA200`, rendered with high-density Unicode braille cells so the chart can use the full plot width without the old two-columns-per-candle cap. On viewports wider than 100 columns, a volume profile histogram is drawn on the right side of the price chart showing total volume traded at each price level, split into up-volume (yellow) and down-volume (cyan)
+5. Volume pane: volume bars for the active visible range, rendered with the same high-density braille grid as the price pane
+6. MACD pane: MACD line, signal line, and histogram, also rendered on the high-density braille grid
 7. Valuation map: price position versus low, weighted, mean, median, and high target levels
 8. Consensus: analyst breadth, recommendation mean, and rating breakdown
 9. Evidence: compact explanation of why the ticker is qualified and how external support affects confidence
@@ -89,14 +96,17 @@ Track symbol: 'AVGO'  Enter add  Backspace delete or go back  Esc cancel  Ctrl+C
 
 - Use `1` through `6` to jump between `D`, `W`, `M`, `1Y`, `5Y`, and `10Y`.
 - Use `[` and `]` to cycle chart ranges.
+- Use `←` and `→` to step through chart bars one at a time (replay). Left removes the latest bar, Right restores one. All indicators (EMA, MACD) recalculate for the visible range. The offset resets when changing symbol, range, or when new data arrives.
 - The chart uses real Yahoo historical candles, not the earlier session-only synthetic price strip.
+- The detail chart stack uses Unicode braille cells for higher vertical precision and to fit more visible bars into the same terminal width.
 - The layout is price-first. On shorter terminals, recent context is dropped first, then secondary sections are compacted before the chart is heavily reduced.
-- Detail navigation uses the full filtered ticker set, not just the main table cap.
+- Detail navigation uses the full active ranked set for the current base view, not just the visible table window.
+- When a symbol is stale (warm-start cached, not yet live-refreshed), the detail identity line is shown in dark grey instead of cyan.
 
 Representative current detail header:
 
 ```text
-TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  w watch  |  l logs  |  Backspace or d or Enter close  |  Ctrl+C quit
+TICKER DETAIL  |  j/k next ticker  |  1-6 range  |  [/] cycle  |  ←/→ replay  |  w watch  |  l logs  |  Backspace or d or Enter close  |  q quit  |  Ctrl+C quit
 ```
 
 ## Screen 5: Issue Log Viewer
@@ -110,7 +120,7 @@ Idx  State     Sev      Source       Count  Title
 >  0  active    warn     feed             3  Live source partially degraded
 ```
 
-### Notes
+### Issue Log Notes
 
 - Active issues appear before resolved issues.
 - The detail panel below the table shows full current issue text and occurrence counts.
@@ -124,7 +134,7 @@ Representative current watchlist filter state:
 Filter: query='' watchlist_only=on input_mode=normal selected=AAPL
 ```
 
-### Notes
+### Watchlist Notes
 
 - The `W` column marks watched symbols with `*`.
 - `watchlist_only=on` means only watched symbols are shown in the main ranked table.
@@ -135,12 +145,12 @@ Filter: query='' watchlist_only=on input_mode=normal selected=AAPL
 Representative replay status:
 
 ```text
-DISCOUNT TERMINAL  |  j/k move  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit
+DISCOUNT TERMINAL  |  j/k move  |  o view  |  d detail  |  w watch  |  / filter  |  l logs  |  f watch filter  |  q quit
 Mode: replay  Source: journal  Feed: running  Symbols: 138  Applied: 23370  Pending: 0  Rate: 0/s
 Tracked symbols: replay session
 ```
 
-### Notes
+### Replay Notes
 
 - Replay mode does not start the live feed.
 - The main state is restored from journal history.
@@ -154,7 +164,7 @@ Representative paused status:
 Mode: live  Source: yahoo  Feed: paused  Tracked: 503  Loaded: 434  Unavailable: 69  Applied: 71426  Pending: 12  Rate: 0/s
 ```
 
-### Notes
+### Pause Notes
 
 - `Feed: paused` means incoming feed events are being buffered instead of applied.
 - `Pending` shows the backlog waiting to be applied once you resume.
