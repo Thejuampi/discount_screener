@@ -26,6 +26,8 @@ The layouts are viewport-aware. Exact spacing, pane height, and how much seconda
 - `Unavailable` is the tracked symbol count that is not currently loaded.
 - `o` toggles between the baseline `Top Candidates` table and the composite `Top Opportunities` table.
 - The main table is intentionally capped. Open ticker detail to navigate the full filtered set.
+- Sessions started with `--symbols` keep that explicit tracked set visible in `Top Candidates`, including low-confidence rows and provider failures.
+- Tracked symbols with live-provider failures stay visible as unavailable rows so you can open ticker detail and inspect the current diagnostics.
 - In `Top Opportunities`, the rank uses available fundamentals, 1Y technical confirmation from cached chart summaries, and forecast support from analyst targets plus DCF when the analysis cache is ready.
 - In `Top Opportunities`, `j` and `k` move through the full ranked opportunity set while the visible table window follows the selected symbol.
 - `Home`, `End`, `PageUp`, and `PageDown` use the same ticker-based selection model across both main list views.

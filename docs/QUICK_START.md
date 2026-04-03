@@ -51,6 +51,7 @@ cargo run -- --symbols AAPL,MSFT,NVDA
 ```
 
 The CLI list only seeds the initial live universe. During a live session you can add more symbols from inside the terminal with `s`.
+When you start with `--symbols`, those tracked symbols stay visible in `Top Candidates` even if they are currently low-confidence or temporarily unavailable from the live provider.
 
 ## 4. Learn The Minimum Controls
 

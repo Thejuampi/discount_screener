@@ -766,6 +766,24 @@ impl FeedErrorLogger {
         ))
     }
 
+    fn log_provider_result(
+        &self,
+        provider_result: &market_data::ProviderFetchResult,
+    ) -> io::Result<()> {
+        self.append_line(format!(
+            "ts={} kind=provider_result symbol={} snapshot={} external={} fundamentals={} core={} external_state={} fundamentals_state={} diagnostics={}",
+            unix_timestamp_seconds(),
+            provider_result.symbol,
+            if provider_result.snapshot.is_some() { "true" } else { "false" },
+            if provider_result.external_signal.is_some() { "true" } else { "false" },
+            if provider_result.fundamentals.is_some() { "true" } else { "false" },
+            provider_component_state_label(provider_result.coverage.core),
+            provider_component_state_label(provider_result.coverage.external),
+            provider_component_state_label(provider_result.coverage.fundamentals),
+            provider_result.diagnostics.len(),
+        ))
+    }
+
     fn log_refresh_summary(
         &self,
         tracked_symbols: usize,
@@ -838,6 +856,8 @@ struct AppState {
     selected_symbol: Option<String>,
     candidate_selected_symbol: Option<String>,
     opportunity_selected_symbol: Option<String>,
+    tracked_symbols: Vec<String>,
+    show_all_tracked_symbols_in_candidates: bool,
     view_filter: ViewFilter,
     input_mode: InputMode,
     pending_feed: VecDeque<FeedEvent>,
@@ -874,6 +894,8 @@ impl Default for AppState {
             selected_symbol: None,
             candidate_selected_symbol: None,
             opportunity_selected_symbol: None,
+            tracked_symbols: Vec::new(),
+            show_all_tracked_symbols_in_candidates: false,
             view_filter: ViewFilter::default(),
             input_mode: InputMode::Normal,
             pending_feed: VecDeque::new(),
@@ -905,6 +927,24 @@ impl Default for AppState {
 }
 
 impl AppState {
+    fn set_show_all_tracked_symbols_in_candidates(&mut self, enabled: bool) {
+        self.show_all_tracked_symbols_in_candidates = enabled;
+    }
+
+    fn set_tracked_symbols(&mut self, symbols: Vec<String>) {
+        let mut seen = HashSet::new();
+        self.tracked_symbols = symbols
+            .into_iter()
+            .filter(|symbol| seen.insert(symbol.clone()))
+            .collect();
+    }
+
+    fn add_tracked_symbols(&mut self, symbols: Vec<String>) {
+        let mut tracked_symbols = self.tracked_symbols.clone();
+        tracked_symbols.extend(symbols);
+        self.set_tracked_symbols(tracked_symbols);
+    }
+
     fn selection_for_view(&self, view: PrimaryViewMode) -> Option<&str> {
         let stored_selection = match view {
             PrimaryViewMode::Candidates => self.candidate_selected_symbol.as_deref(),
@@ -947,11 +987,62 @@ impl AppState {
         self.opportunity_selected_symbol = None;
     }
 
+    fn candidate_rows(&self, state: &TerminalState) -> Vec<CandidateRow> {
+        if self.show_all_tracked_symbols_in_candidates {
+            return self
+                .tracked_symbols
+                .iter()
+                .filter(|symbol| symbol_matches_view_filter(state, symbol, &self.view_filter))
+                .filter_map(|symbol| {
+                    state.candidate(symbol).or_else(|| {
+                        self.provider_coverage.get(symbol).and_then(|coverage| {
+                            symbol_coverage_has_error(coverage)
+                                .then(|| unavailable_candidate_row(symbol))
+                        })
+                    })
+                })
+                .collect();
+        }
+
+        let mut rows = filtered_symbol_rows(state, &self.view_filter);
+        let mut included_symbols = rows
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<HashSet<_>>();
+
+        for symbol in self
+            .tracked_symbols
+            .iter()
+            .filter(|symbol| symbol_matches_view_filter(state, symbol, &self.view_filter))
+        {
+            if included_symbols.contains(symbol) {
+                continue;
+            }
+
+            let Some(coverage) = self.symbol_coverage(symbol) else {
+                continue;
+            };
+            if !symbol_coverage_has_error(coverage) {
+                continue;
+            }
+
+            if let Some(candidate) = state.candidate(symbol) {
+                included_symbols.insert(symbol.clone());
+                rows.push(candidate);
+                continue;
+            }
+
+            included_symbols.insert(symbol.clone());
+            rows.push(unavailable_candidate_row(symbol));
+        }
+
+        rows
+    }
+
     fn visible_rows(&self, state: &TerminalState) -> Vec<CandidateRow> {
-        filtered_symbol_rows(state, &self.view_filter)
-            .into_iter()
-            .take(MAX_VISIBLE_ROWS)
-            .collect()
+        let mut rows = self.candidate_rows(state);
+        rows.truncate(MAX_VISIBLE_ROWS);
+        rows
     }
 
     fn visible_opportunity_rows(&self, state: &TerminalState) -> Vec<OpportunityRow> {
@@ -967,7 +1058,8 @@ impl AppState {
 
     fn active_detail_symbols(&self, state: &TerminalState) -> Vec<String> {
         match self.primary_view {
-            PrimaryViewMode::Candidates => filtered_symbol_rows(state, &self.view_filter)
+            PrimaryViewMode::Candidates => self
+                .candidate_rows(state)
                 .into_iter()
                 .map(|row| row.symbol)
                 .collect(),
@@ -1792,6 +1884,16 @@ impl AppState {
 
     fn symbol_coverage(&self, symbol: &str) -> Option<&SymbolCoverageEvent> {
         self.provider_coverage.get(symbol)
+    }
+
+    fn symbol_has_provider_error(&self, symbol: &str) -> bool {
+        self.symbol_coverage(symbol)
+            .map(symbol_coverage_has_error)
+            .unwrap_or(false)
+    }
+
+    fn symbol_is_unavailable(&self, state: &TerminalState, symbol: &str) -> bool {
+        state.detail(symbol).is_none() && self.symbol_coverage(symbol).is_some()
     }
 
     fn set_live_source_status(&mut self, status: LiveSourceStatus) {
@@ -4424,13 +4526,36 @@ fn build_screen_lines_for_viewport(
             } else {
                 ' '
             };
+            let is_unavailable = app.symbol_is_unavailable(state, &row.symbol);
+            let has_provider_error = app.symbol_has_provider_error(&row.symbol);
+            let price_label = if is_unavailable {
+                "n/a".to_string()
+            } else {
+                format_money(row.market_price_cents)
+            };
+            let fair_value_label = if is_unavailable {
+                "n/a".to_string()
+            } else {
+                format_money(row.intrinsic_value_cents)
+            };
+            let upside_label = if is_unavailable {
+                "n/a".to_string()
+            } else {
+                format_upside_percent(row.market_price_cents, row.intrinsic_value_cents)
+            };
+            let confidence_label = if is_unavailable {
+                "unavailable".to_string()
+            } else {
+                confidence_label(row.confidence).to_string()
+            };
             let symbol_label =
                 candidate_company_label(&row.symbol, state.company_name(&row.symbol));
             lines.push(RenderLine {
-                color: Some(candidate_row_color(
+                color: Some(candidate_display_color(
                     row,
                     index == selected_index,
                     app.is_symbol_stale(&row.symbol),
+                    has_provider_error,
                 )),
                 text: format!(
                     "{} {:>3}  {}  {:<width$} {:>10} {:>10} {:>8}  {}",
@@ -4438,10 +4563,10 @@ fn build_screen_lines_for_viewport(
                     index,
                     watched_marker,
                     symbol_label,
-                    format_money(row.market_price_cents),
-                    format_money(row.intrinsic_value_cents),
-                    format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
-                    confidence_label(row.confidence),
+                    price_label,
+                    fair_value_label,
+                    upside_label,
+                    confidence_label,
                     width = CANDIDATE_COMPANY_COLUMN_WIDTH,
                 ),
             });
@@ -4497,6 +4622,51 @@ fn build_screen_lines_for_viewport(
                     selected_detail.last_sequence, selected_detail.update_count,
                 ),
             });
+        } else if let Some(selected_symbol) = selected_symbol {
+            if let Some(coverage) = app.symbol_coverage(selected_symbol) {
+                lines.push(RenderLine {
+                    color: Some(if symbol_coverage_has_error(coverage) {
+                        Color::Red
+                    } else {
+                        Color::Yellow
+                    }),
+                    text: format!(
+                        "Symbol: {}  Watched: {}  Status: unavailable",
+                        format_symbol_with_company(
+                            selected_symbol,
+                            state.company_name(selected_symbol)
+                        ),
+                        if state.is_watched(selected_symbol) {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                    ),
+                });
+                lines.push(RenderLine {
+                    color: Some(Color::DarkGrey),
+                    text: format!(
+                        "Coverage: core={}  external={}  fundamentals={}",
+                        provider_component_state_label(coverage.coverage.core),
+                        provider_component_state_label(coverage.coverage.external),
+                        provider_component_state_label(coverage.coverage.fundamentals),
+                    ),
+                });
+                for detail_line in wrap_text(
+                    &format!("Source error: {}", format_symbol_coverage_summary(coverage)),
+                    108,
+                ) {
+                    lines.push(RenderLine {
+                        color: Some(Color::DarkYellow),
+                        text: detail_line,
+                    });
+                }
+            } else {
+                lines.push(RenderLine {
+                    color: None,
+                    text: "No active symbols yet.".to_string(),
+                });
+            }
         } else {
             lines.push(RenderLine {
                 color: None,
@@ -5317,6 +5487,59 @@ fn build_ticker_detail_lines_for_viewport(
     });
 
     let Some(detail) = state.detail(symbol) else {
+        if let Some(coverage) = app.symbol_coverage(symbol) {
+            lines.push(RenderLine {
+                color: Some(if symbol_coverage_has_error(coverage) {
+                    Color::Red
+                } else {
+                    Color::Yellow
+                }),
+                text: format!(
+                    "{}  Position: {}/{}  Watched: {}  Status unavailable",
+                    format_symbol_with_company(symbol, state.company_name(symbol)),
+                    symbol_index,
+                    symbol_count,
+                    if state.is_watched(symbol) {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                ),
+            });
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: format!(
+                    "Coverage: core={}  external={}  fundamentals={}",
+                    provider_component_state_label(coverage.coverage.core),
+                    provider_component_state_label(coverage.coverage.external),
+                    provider_component_state_label(coverage.coverage.fundamentals),
+                ),
+            });
+            for detail_line in wrap_text(
+                &format!(
+                    "Provider diagnostics: {}",
+                    format_symbol_coverage_summary(coverage)
+                ),
+                108,
+            ) {
+                lines.push(RenderLine {
+                    color: Some(Color::DarkYellow),
+                    text: detail_line,
+                });
+            }
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: "No price snapshot was published for this ticker, so valuation and chart sections are unavailable."
+                    .to_string(),
+            });
+            lines.push(RenderLine {
+                color: Some(Color::DarkGrey),
+                text: "Use j/k to inspect other tracked symbols or close the detail screen with Backspace."
+                    .to_string(),
+            });
+            return lines;
+        }
+
         lines.push(RenderLine {
             color: Some(Color::Red),
             text: format!("{symbol} is not active in the current session."),
@@ -7455,6 +7678,38 @@ fn summarize_recent_tape<'a>(tape: impl DoubleEndedIterator<Item = &'a TapeEvent
     format!("Tape: {}", recent.join("  |  "))
 }
 
+fn symbol_matches_view_filter(
+    state: &TerminalState,
+    symbol: &str,
+    view_filter: &ViewFilter,
+) -> bool {
+    let query = view_filter.query.trim();
+    let query_matches = query.is_empty()
+        || symbol
+            .to_ascii_uppercase()
+            .contains(&query.to_ascii_uppercase());
+    let watchlist_matches = !view_filter.watchlist_only || state.is_watched(symbol);
+    query_matches && watchlist_matches
+}
+
+fn symbol_coverage_has_error(coverage: &SymbolCoverageEvent) -> bool {
+    coverage
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.kind == market_data::ProviderDiagnosticKind::Error)
+}
+
+fn unavailable_candidate_row(symbol: &str) -> CandidateRow {
+    CandidateRow {
+        symbol: symbol.to_string(),
+        market_price_cents: 0,
+        intrinsic_value_cents: 0,
+        gap_bps: i32::MIN,
+        is_qualified: false,
+        confidence: ConfidenceBand::Low,
+    }
+}
+
 fn filtered_symbol_rows(state: &TerminalState, view_filter: &ViewFilter) -> Vec<CandidateRow> {
     state
         .filtered_rows(state.symbol_count().max(1), view_filter)
@@ -7787,14 +8042,19 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
             }
         }
 
+        let tracked_symbols = if options.symbols.is_empty() {
+            default_live_symbols()
+        } else {
+            options.symbols.clone()
+        };
+        let mut app = AppState::default();
+        app.set_show_all_tracked_symbols_in_candidates(options.symbols_explicit);
+        app.set_tracked_symbols(tracked_symbols.clone());
+
         return Ok(LoadedState {
             state,
-            app: AppState::default(),
-            tracked_symbols: if options.symbols.is_empty() {
-                default_live_symbols()
-            } else {
-                options.symbols.clone()
-            },
+            app,
+            tracked_symbols,
             persistence_db_path: None,
             startup_issues,
         });
@@ -7871,6 +8131,8 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
         .or_else(|| std::env::current_dir().ok().map(|dir| dir.join("exports")))
         .unwrap_or_else(|| PathBuf::from("exports"));
     app.set_history_export_root(history_export_root);
+    app.set_show_all_tracked_symbols_in_candidates(options.symbols_explicit);
+    app.set_tracked_symbols(tracked_symbols.clone());
 
     Ok(LoadedState {
         state,
@@ -8309,6 +8571,10 @@ where
             }
         };
 
+        if let Some(feed_error_logger) = feed_error_logger {
+            let _ = feed_error_logger.log_provider_result(&provider_result);
+        }
+
         if provider_result.coverage.core == market_data::ProviderComponentState::Fresh {
             fresh_symbols += 1;
         }
@@ -8462,6 +8728,19 @@ where
         });
     }
 
+    if let Some(feed_error_logger) = feed_error_logger {
+        let batch_symbols = refresh_plan
+            .symbols
+            .iter()
+            .map(|(_, symbol)| symbol.clone())
+            .collect::<Vec<_>>();
+        let _ = feed_error_logger.log_debug(&format!(
+            "refresh_batch phase={} symbols={}",
+            refresh_plan.phase_label,
+            format_symbol_list(&batch_symbols),
+        ));
+    }
+
     let worker_count = refresh_plan
         .concurrency
         .min(refresh_plan.symbols.len())
@@ -8505,6 +8784,9 @@ where
             completed_symbols += 1;
             match outcome {
                 FeedFetchOutcome::Provider(provider_result) => {
+                    if let Some(feed_error_logger) = feed_error_logger {
+                        let _ = feed_error_logger.log_provider_result(&provider_result);
+                    }
                     if provider_result.coverage.core == market_data::ProviderComponentState::Fresh {
                         fresh_symbols += 1;
                     }
@@ -11110,6 +11392,23 @@ fn candidate_row_color(row: &CandidateRow, is_selected: bool, is_stale: bool) ->
     confidence_color(row.confidence)
 }
 
+fn candidate_display_color(
+    row: &CandidateRow,
+    is_selected: bool,
+    is_stale: bool,
+    has_provider_error: bool,
+) -> Color {
+    if has_provider_error {
+        return if is_selected {
+            Color::DarkRed
+        } else {
+            Color::Red
+        };
+    }
+
+    candidate_row_color(row, is_selected, is_stale)
+}
+
 fn status_summary_color(qualification: QualificationStatus, confidence: ConfidenceBand) -> Color {
     match qualification {
         QualificationStatus::Qualified => confidence_color(confidence),
@@ -11132,6 +11431,14 @@ fn external_status_color(status: ExternalSignalStatus) -> Color {
         ExternalSignalStatus::Stale => Color::Yellow,
         ExternalSignalStatus::Supportive => Color::Green,
         ExternalSignalStatus::Divergent => Color::Red,
+    }
+}
+
+fn provider_component_state_label(state: market_data::ProviderComponentState) -> &'static str {
+    match state {
+        market_data::ProviderComponentState::Fresh => "fresh",
+        market_data::ProviderComponentState::Missing => "missing",
+        market_data::ProviderComponentState::Error => "error",
     }
 }
 
@@ -11276,6 +11583,7 @@ fn track_symbols_from_query(
     let added_symbols = live_symbols.add_symbols(symbols);
 
     if !added_symbols.is_empty() {
+        app.add_tracked_symbols(added_symbols.clone());
         if let Some(persistence_handle) = persistence_handle {
             persistence_handle.replace_tracked_symbols(live_symbols.snapshot());
         }
@@ -11500,6 +11808,7 @@ mod tests {
     use super::RelativeStrengthBand;
     use super::RenderLine;
     use super::RuntimeOptions;
+    use super::SymbolCoverageEvent;
     use super::VolumeProfileBin;
     use super::aggregate_historical_candles;
     use super::analysis_input_key;
@@ -12017,6 +12326,40 @@ mod tests {
                 fundamentals: super::market_data::ProviderComponentState::Fresh,
             },
             diagnostics: Vec::new(),
+        }
+    }
+
+    fn provider_error_coverage_event(symbol: &str, detail: &str) -> SymbolCoverageEvent {
+        SymbolCoverageEvent {
+            symbol: symbol.to_string(),
+            coverage: super::market_data::ProviderCoverage {
+                core: super::market_data::ProviderComponentState::Error,
+                external: super::market_data::ProviderComponentState::Missing,
+                fundamentals: super::market_data::ProviderComponentState::Missing,
+            },
+            diagnostics: vec![super::market_data::ProviderDiagnostic {
+                component: super::market_data::ProviderComponent::QuoteHtml,
+                kind: super::market_data::ProviderDiagnosticKind::Error,
+                detail: detail.to_string(),
+                retryable: false,
+            }],
+        }
+    }
+
+    fn provider_missing_coverage_event(symbol: &str, detail: &str) -> SymbolCoverageEvent {
+        SymbolCoverageEvent {
+            symbol: symbol.to_string(),
+            coverage: super::market_data::ProviderCoverage {
+                core: super::market_data::ProviderComponentState::Missing,
+                external: super::market_data::ProviderComponentState::Missing,
+                fundamentals: super::market_data::ProviderComponentState::Missing,
+            },
+            diagnostics: vec![super::market_data::ProviderDiagnostic {
+                component: super::market_data::ProviderComponent::Core,
+                kind: super::market_data::ProviderDiagnosticKind::Missing,
+                detail: detail.to_string(),
+                retryable: false,
+            }],
         }
     }
 
@@ -13310,6 +13653,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_runtime_options_marks_cli_symbols_as_explicit() {
+        let options =
+            parse_runtime_options_from(["--symbols", "IMAX,SPHR"]).expect("symbols should parse");
+
+        assert!(options.symbols_explicit);
+        assert_eq!(
+            options.symbols,
+            vec!["IMAX".to_string(), "SPHR".to_string()]
+        );
+    }
+
+    #[test]
     fn parse_runtime_options_rejects_unknown_profiles() {
         let error = parse_runtime_options_from(["--profile", "unknown-profile"])
             .expect_err("unknown profiles should be rejected");
@@ -14078,6 +14433,7 @@ mod tests {
 
         assert_eq!(loaded.tracked_symbols, vec!["JPM".to_string()]);
         assert!(loaded.state.detail("MSTR").is_none());
+        assert!(loaded.app.show_all_tracked_symbols_in_candidates);
     }
 
     #[test]
@@ -14626,6 +14982,8 @@ mod tests {
                 "kind=provider_coverage symbol=MSFT component=core classification=missing"
             )
         );
+        assert!(log_contents.contains("kind=provider_result symbol=AAPL"));
+        assert!(log_contents.contains("kind=provider_result symbol=MSFT"));
         assert!(log_contents.contains("kind=provider_error symbol=AMD"));
         assert!(
             log_contents.contains(
@@ -15759,6 +16117,154 @@ mod tests {
             !visible_lines
                 .iter()
                 .any(|line| line == "RECENT SYMBOL ALERTS")
+        );
+    }
+
+    #[test]
+    fn visible_rows_include_failed_tracked_symbols_without_snapshots() {
+        let state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.set_tracked_symbols(vec!["IMAX".to_string()]);
+        app.apply_symbol_coverage(
+            &state,
+            provider_error_coverage_event(
+                "IMAX",
+                "HTTP status client error (404 Not Found) for url (https://finance.yahoo.com/quote/IMAX/)",
+            ),
+        );
+
+        let rows = app.visible_rows(&state);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMAX"]
+        );
+    }
+
+    #[test]
+    fn explicit_symbol_sessions_show_loaded_tracked_symbols_even_when_confidence_is_low() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "IMAX".to_string(),
+            company_name: Some("IMAX Corporation".to_string()),
+            profitable: true,
+            market_price_cents: 10_000,
+            intrinsic_value_cents: 11_000,
+        });
+
+        let mut app = AppState::default();
+        app.set_show_all_tracked_symbols_in_candidates(true);
+        app.set_tracked_symbols(vec!["IMAX".to_string()]);
+
+        let rows = app.visible_rows(&state);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.symbol.as_str(), row.confidence, row.is_qualified))
+                .collect::<Vec<_>>(),
+            vec![("IMAX", ConfidenceBand::Low, false)]
+        );
+    }
+
+    #[test]
+    fn symbol_coverage_has_error_requires_an_error_diagnostic() {
+        assert!(super::symbol_coverage_has_error(
+            &provider_error_coverage_event("IMAX", "404 Not Found",)
+        ));
+        assert!(!super::symbol_coverage_has_error(
+            &provider_missing_coverage_event("IMAX", "core snapshot is missing market price"),
+        ));
+    }
+
+    #[test]
+    fn provider_component_state_labels_remain_stable() {
+        assert_eq!(
+            super::provider_component_state_label(
+                super::market_data::ProviderComponentState::Fresh
+            ),
+            "fresh"
+        );
+        assert_eq!(
+            super::provider_component_state_label(
+                super::market_data::ProviderComponentState::Missing,
+            ),
+            "missing"
+        );
+        assert_eq!(
+            super::provider_component_state_label(
+                super::market_data::ProviderComponentState::Error
+            ),
+            "error"
+        );
+    }
+
+    #[test]
+    fn main_screen_detail_summary_surfaces_unavailable_symbol_errors() {
+        let state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.set_tracked_symbols(vec!["IMAX".to_string()]);
+        app.apply_symbol_coverage(
+            &state,
+            provider_error_coverage_event(
+                "IMAX",
+                "HTTP status client error (404 Not Found) for url (https://finance.yahoo.com/quote/IMAX/)",
+            ),
+        );
+
+        let rows = app.visible_rows(&state);
+        let lines = build_screen_lines(&state, &rows, 0, 0, true, &app, None);
+        let visible_lines = lines
+            .iter()
+            .map(|line| visible_text(&line.text))
+            .collect::<Vec<_>>();
+
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("IMAX") && line.contains("unavailable"))
+        );
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("quote_html error") && line.contains("404 Not Found"))
+        );
+    }
+
+    #[test]
+    fn ticker_detail_renders_provider_errors_for_unavailable_symbols() {
+        let state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.set_tracked_symbols(vec!["IMAX".to_string()]);
+        app.apply_symbol_coverage(
+            &state,
+            provider_error_coverage_event(
+                "IMAX",
+                "HTTP status client error (404 Not Found) for url (https://finance.yahoo.com/quote/IMAX/)",
+            ),
+        );
+
+        let lines = build_ticker_detail_lines_for_viewport(&state, &app, "IMAX", 120, 28);
+        let visible_lines = lines
+            .iter()
+            .map(|line| visible_text(&line.text))
+            .collect::<Vec<_>>();
+
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("IMAX  Position: 1/1"))
+        );
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("Status unavailable"))
+        );
+        assert!(
+            visible_lines
+                .iter()
+                .any(|line| line.contains("quote_html error") && line.contains("404 Not Found"))
         );
     }
 

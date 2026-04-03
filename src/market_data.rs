@@ -13,6 +13,11 @@ use discount_screener::MarketSnapshot;
 use discount_screener::build_analyst_score;
 use reqwest::Url;
 use reqwest::blocking::Client;
+use reqwest::header::ACCEPT;
+use reqwest::header::ACCEPT_LANGUAGE;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
+use reqwest::header::UPGRADE_INSECURE_REQUESTS;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,6 +29,10 @@ const CHART_API_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/"
 const FUNDAMENTALS_TIMESERIES_URL: &str =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/";
 const QUOTE_PAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const QUOTE_PAGE_ACCEPT: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+const QUOTE_PAGE_ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
+const QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS: &str = "1";
 const PRICE_MARKER: &str = r#"\"price\":"#;
 const FINANCIAL_DATA_MARKER: &str = r#"\"financialData\":"#;
 const DEFAULT_KEY_STATISTICS_MARKER: &str = r#"\"defaultKeyStatistics\":"#;
@@ -215,6 +224,8 @@ impl MarketDataClient {
     pub fn new() -> io::Result<Self> {
         let client = Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .default_headers(quote_page_default_headers())
+            .cookie_store(true)
             .user_agent(QUOTE_PAGE_USER_AGENT)
             .build()
             .map_err(io::Error::other)?;
@@ -548,6 +559,20 @@ pub fn default_live_symbols() -> Vec<String> {
         .iter()
         .map(|symbol| symbol.to_string())
         .collect()
+}
+
+fn quote_page_default_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static(QUOTE_PAGE_ACCEPT));
+    headers.insert(
+        ACCEPT_LANGUAGE,
+        HeaderValue::from_static(QUOTE_PAGE_ACCEPT_LANGUAGE),
+    );
+    headers.insert(
+        UPGRADE_INSECURE_REQUESTS,
+        HeaderValue::from_static(QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS),
+    );
+    headers
 }
 
 fn quote_page_url(symbol: &str) -> io::Result<Url> {
@@ -1206,7 +1231,23 @@ fn is_retryable_provider_io_error(error: &io::Error) -> bool {
 
 fn extract_embedded_json_object<'a>(body: &'a str, marker: &str) -> Option<&'a str> {
     let marker_index = body.find(marker)?;
-    extract_embedded_json_object_at(body, marker_index, marker)
+    let object_start =
+        marker_index + marker.len() + body[marker_index + marker.len()..].find('{')?;
+    let bytes = body.as_bytes();
+
+    for index in object_start..bytes.len() {
+        if bytes[index] != b'}' {
+            continue;
+        }
+
+        let fragment = &body[object_start..=index];
+        let decoded = fragment.replace(r#"\""#, r#"""#);
+        if serde_json::from_str::<Value>(&decoded).is_ok() {
+            return Some(fragment);
+        }
+    }
+
+    None
 }
 
 fn extract_embedded_json_object_at<'a>(
@@ -1575,8 +1616,6 @@ fn compute_weighted_analyst_target(
     let mut weighted_target_sum = 0.0f32;
     let mut total_weight = 0.0f32;
     let mut scored_firm_count = 0u32;
-    let mut min_target_cents: Option<i64> = None;
-    let mut max_target_cents: Option<i64> = None;
 
     for entries in history_by_firm.values_mut() {
         entries.sort_by(|left, right| right.epoch_grade_date.cmp(&left.epoch_grade_date));
@@ -1586,17 +1625,6 @@ fn compute_weighted_analyst_target(
         else {
             continue;
         };
-
-        min_target_cents = Some(
-            min_target_cents
-                .map(|value| value.min(active_target_cents))
-                .unwrap_or(active_target_cents),
-        );
-        max_target_cents = Some(
-            max_target_cents
-                .map(|value| value.max(active_target_cents))
-                .unwrap_or(active_target_cents),
-        );
 
         let mut samples = Vec::new();
         for entry in entries.iter().copied() {
@@ -1650,18 +1678,8 @@ fn compute_weighted_analyst_target(
         return None;
     }
 
-    let Some(min_target_cents) = min_target_cents else {
-        return None;
-    };
-    let Some(max_target_cents) = max_target_cents else {
-        return None;
-    };
-
-    let weighted_fair_value_cents = (weighted_target_sum / total_weight).round() as i64;
-
     Some(WeightedAnalystTarget {
-        weighted_fair_value_cents: weighted_fair_value_cents
-            .clamp(min_target_cents, max_target_cents),
+        weighted_fair_value_cents: (weighted_target_sum / total_weight).round() as i64,
         scored_firm_count,
     })
 }
@@ -1707,9 +1725,13 @@ mod tests {
     use super::parse_quote_page;
     use super::parse_timeseries_metric;
     use super::populate_weighted_target;
+    use super::quote_page_default_headers;
     use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
+    use reqwest::header::ACCEPT;
+    use reqwest::header::ACCEPT_LANGUAGE;
+    use reqwest::header::UPGRADE_INSECURE_REQUESTS;
     use serde_json::json;
     use std::collections::HashSet;
     use std::io;
@@ -1735,6 +1757,28 @@ mod tests {
                 && has("UAL")
                 && has("LUV")
                 && !has("AAL")
+        );
+    }
+
+    #[test]
+    fn quote_requests_use_browser_like_default_headers() {
+        let headers = quote_page_default_headers();
+
+        assert_eq!(
+            headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
+            Some(super::QUOTE_PAGE_ACCEPT)
+        );
+        assert_eq!(
+            headers
+                .get(ACCEPT_LANGUAGE)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::QUOTE_PAGE_ACCEPT_LANGUAGE)
+        );
+        assert_eq!(
+            headers
+                .get(UPGRADE_INSECURE_REQUESTS)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS)
         );
     }
 
@@ -2229,11 +2273,22 @@ mod tests {
         );
 
         assert_eq!(
-            weighted_target.as_ref().map(|target| (
-                target.scored_firm_count,
-                (12_000..=18_000).contains(&target.weighted_fair_value_cents),
-            )),
-            Some((2, true))
+            weighted_target
+                .as_ref()
+                .map(|target| target.scored_firm_count),
+            Some(2)
+        );
+        assert!(
+            weighted_target
+                .as_ref()
+                .map(|target| target.weighted_fair_value_cents > 12_000)
+                .unwrap_or(false)
+        );
+        assert!(
+            weighted_target
+                .as_ref()
+                .map(|target| target.weighted_fair_value_cents < 15_000)
+                .unwrap_or(false)
         );
     }
 

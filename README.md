@@ -61,6 +61,7 @@ cargo run -- --symbols AAPL,MSFT,NVDA
 ```
 
 The CLI symbol list only seeds the initial live universe. When `--profile` and `--symbols` are used together, the custom symbols are appended to the selected profile. During a live session you can add more tracked symbols directly in the terminal with `s`.
+When you start with `--symbols`, those tracked symbols stay visible in `Top Candidates` even if they are currently low-confidence or temporarily unavailable from the live provider.
 
 Smoke mode:
 

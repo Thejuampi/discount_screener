@@ -41,6 +41,7 @@ cargo run -- --symbols AAPL,MSFT,NVDA
 ```
 
 That CLI list only seeds the initial live universe. During a live session you can add more symbols from inside the terminal with `s`.
+When you start with `--symbols`, those tracked symbols stay visible in `Top Candidates` even if they are currently low-confidence or temporarily unavailable from the live provider.
 
 ### Live Session With Persistence
 
@@ -385,6 +386,8 @@ NVDA
 ### The app starts but few or no symbols appear
 
 In live mode, verify outbound HTTPS access and use symbols with Yahoo Finance coverage for price, trailing EPS, and analyst-target data.
+
+If a tracked symbol fails Yahoo coverage checks, it now stays visible in the main table as an unavailable row and can be opened in ticker detail to inspect the current provider diagnostics.
 
 If the source is degraded, the health banner and issue rail should report the problem directly in the UI. The live status line also shows `Unavailable`. Press `l` for the full issue history.
 
