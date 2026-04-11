@@ -1,0 +1,114 @@
+{
+  "snapshots": [
+    {
+      "symbol": "STRONG",
+      "profitable": true,
+      "marketPriceCents": 1000,
+      "intrinsicValueCents": 2500
+    },
+    {
+      "symbol": "WEAK",
+      "profitable": true,
+      "marketPriceCents": 1000,
+      "intrinsicValueCents": 2700
+    }
+  ],
+  "externalSignals": [
+    {
+      "symbol": "STRONG",
+      "fairValueCents": 2300,
+      "ageSeconds": 0,
+      "lowFairValueCents": 1900,
+      "highFairValueCents": 2400,
+      "analystOpinionCount": 12,
+      "recommendationMeanHundredths": 140,
+      "weightedFairValueCents": 2400,
+      "weightedAnalystCount": 9
+    },
+    {
+      "symbol": "WEAK",
+      "fairValueCents": 1200,
+      "ageSeconds": 0,
+      "lowFairValueCents": 1000,
+      "highFairValueCents": 1300,
+      "analystOpinionCount": 3,
+      "recommendationMeanHundredths": 260
+    }
+  ],
+  "fundamentals": [
+    {
+      "symbol": "STRONG",
+      "freeCashFlowDollars": 200000000,
+      "operatingCashFlowDollars": 250000000,
+      "returnOnEquityBps": 2500,
+      "debtToEquityHundredths": 60,
+      "totalCashDollars": 800000000,
+      "totalDebtDollars": 100000000,
+      "earningsGrowthBps": 1500
+    },
+    {
+      "symbol": "WEAK",
+      "freeCashFlowDollars": -10000000,
+      "operatingCashFlowDollars": -5000000,
+      "returnOnEquityBps": 200,
+      "debtToEquityHundredths": 220,
+      "totalCashDollars": 20000000,
+      "totalDebtDollars": 200000000,
+      "earningsGrowthBps": -700
+    }
+  ],
+  "watchlist": ["STRONG"],
+  "query": "STR",
+  "chartSummaries": [
+    {
+      "symbol": "STRONG",
+      "range": "Year",
+      "latestCloseCents": 2450,
+      "ema20Cents": 2100,
+      "ema50Cents": 1900,
+      "ema200Cents": 1700,
+      "macdCents": 220,
+      "signalCents": 120,
+      "histogramCents": 100
+    },
+    {
+      "symbol": "WEAK",
+      "range": "Year",
+      "latestCloseCents": 1050,
+      "ema20Cents": 1200,
+      "ema50Cents": 1250,
+      "ema200Cents": 1350,
+      "macdCents": -50,
+      "signalCents": 20,
+      "histogramCents": -70
+    }
+  ],
+  "dcfAnalyses": [
+    {
+      "symbol": "STRONG",
+      "bearIntrinsicValueCents": 2000,
+      "baseIntrinsicValueCents": 3200,
+      "bullIntrinsicValueCents": 3800,
+      "waccBps": 900,
+      "baseGrowthBps": 1200,
+      "netDebtDollars": 0
+    }
+  ],
+  "expectedSelectedDetail": {
+    "symbol": "STRONG",
+    "qualification": "Qualified",
+    "externalStatus": "Supportive",
+    "confidence": "High",
+    "gapBps": 6000,
+    "externalSignalGapBps": 5652,
+    "weightedExternalSignalFairValueCents": 2400,
+    "weightedAnalystCount": 9,
+    "analystOpinionCount": 12,
+    "recommendationMeanHundredths": 140,
+    "isWatched": true
+  },
+  "expectedCandidateOrder": ["STRONG"],
+  "expectedOpportunityOrder": ["STRONG", "WEAK"],
+  "expectedWatchlistOnlyOrder": ["STRONG"],
+  "expectedQueryOrder": ["STRONG"]
+}

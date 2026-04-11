@@ -1,0 +1,45 @@
+name: monorepo-validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Desktop validation
+        working-directory: apps/desktop
+        run: |
+          cargo fmt --check
+          cargo test
+          cargo run -- --smoke
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Android validation
+        working-directory: apps/android
+        run: |
+          ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
+
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Shared contract validation
+        shell: pwsh
+        run: ./scripts/validate-contracts.ps1

@@ -1,0 +1,10 @@
+{
+  "ranges": [
+    { "id": "Day", "label": "D" },
+    { "id": "Week", "label": "W" },
+    { "id": "Month", "label": "M" },
+    { "id": "Year", "label": "1Y" },
+    { "id": "FiveYears", "label": "5Y" },
+    { "id": "TenYears", "label": "10Y" }
+  ]
+}
