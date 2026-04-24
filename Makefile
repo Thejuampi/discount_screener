@@ -2,14 +2,15 @@ REPO_ROOT := $(subst \,/,$(shell cd))
 DESKTOP_DIR := $(REPO_ROOT)/apps/desktop
 ANDROID_DIR := $(REPO_ROOT)/apps/android
 DIST_DIR := $(REPO_ROOT)/dist
-APK_EXPORT := $(DIST_DIR)/discount-screener-debug.apk
+APK_EXPORT_DEBUG := $(DIST_DIR)/discount-screener-debug.apk
+APK_EXPORT_RELEASE := $(DIST_DIR)/discount-screener-release.apk
 
 CARGO := cargo
 GRADLE := gradlew.bat
 
 .PHONY: all build test clean fmt check release run \
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
-        android-build android-test android-clean android-release android-run apk \
+        android-build android-test android-clean android-release android-run android-signing-bootstrap apk \
         contracts-test
 
 run: desktop-run
@@ -55,11 +56,15 @@ android-clean:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) clean && popd
 
 android-release:
-	pushd "$(ANDROID_DIR)" && $(GRADLE) assembleRelease && popd
+	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleRelease && popd
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk' '$(APK_EXPORT_RELEASE)'; Write-Host 'Installable release APK: $(APK_EXPORT_RELEASE)'"
+
+android-signing-bootstrap:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/create-android-release-keystore.ps1" -UpdateLocalProperties
 
 apk:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleDebug && popd
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk' '$(APK_EXPORT)'; Write-Host 'Installable APK: $(APK_EXPORT)'"
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk' '$(APK_EXPORT_DEBUG)'; Write-Host 'Installable APK: $(APK_EXPORT_DEBUG)'"
 
 # ── Contracts (cross-platform) ──
 

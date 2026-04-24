@@ -15,8 +15,12 @@ import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.RowExplanationKind
+import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.TrackedRowState
+import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
@@ -25,9 +29,11 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -38,6 +44,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -61,13 +68,15 @@ class DefaultDashboardRepositoryTest {
         context.deleteDatabase(DB_NAME)
     }
 
+    private val legacyModel = OpportunityScoringModel.Legacy
+
     @Test
     fun bootstrap_uses_sp500_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
             store.replaceTrackedSymbols(listOf("MSTR"))
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
-            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year)
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
 
             assertEquals("sp500", snapshot.currentProfile)
             assertTrue(snapshot.trackedSymbols.size > 400)
@@ -83,7 +92,7 @@ class DefaultDashboardRepositoryTest {
         try {
             seedWarmState(store)
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
-            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year)
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
 
             assertEquals(DashboardStartupPhase.ShowingCached, snapshot.startupPhase)
             assertEquals(listOf("NVDA", "AAPL", "MSFT"), snapshot.trackedRows.take(3).map { it.symbol })
@@ -100,17 +109,268 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun refresh_compares_live_rows_against_cached_rank_and_weighted_fair_value() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            val client = object : FakeYahooFinanceClient(delayMs = 5) {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    delay(5)
+                    return when (symbol) {
+                        "AAPL" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 25_000, weightedFairValueCents = 24_000)
+                        "NVDA" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 18_000, weightedFairValueCents = 18_000)
+                        "MSFT" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 11_500, weightedFairValueCents = 11_400)
+                        else -> super.fetchSymbol(symbol)
+                    }
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val snapshot = awaitSnapshot(repository) { current ->
+                current.trackedRows.count { it.state == TrackedRowState.Live } >= 3
+            }
+
+            val aapl = snapshot.trackedRows.first { it.symbol == "AAPL" }
+            assertEquals(ChangeDirection.Up, aapl.rankMovement?.direction)
+            assertEquals(1, aapl.rankMovement?.places)
+            assertEquals(ChangeDirection.Up, aapl.valuationChange?.direction)
+            assertEquals(15_000L, aapl.valuationChange?.previousFairValueCents)
+            assertEquals(24_000L, aapl.valuationChange?.currentFairValueCents)
+            assertEquals(ValuationChangeTier.Major, aapl.valuationChange?.tier)
+
+            val nvda = snapshot.trackedRows.first { it.symbol == "NVDA" }
+            assertEquals(ChangeDirection.Down, nvda.rankMovement?.direction)
+            assertEquals(1, nvda.rankMovement?.places)
+            assertEquals(ChangeDirection.Down, nvda.valuationChange?.direction)
+            assertEquals(20_000L, nvda.valuationChange?.previousFairValueCents)
+            assertEquals(18_000L, nvda.valuationChange?.currentFairValueCents)
+            assertEquals(ValuationChangeTier.Significant, nvda.valuationChange?.tier)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ensure_detail_loaded_replays_distinct_historical_weighted_fair_values() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = emptyList(),
+                revisions = listOf(
+                    revision(
+                        symbol = "NVDA",
+                        marketPriceCents = 10_000,
+                        intrinsicValueCents = 18_000,
+                        gapBps = 4_444,
+                        weightedFairValueCents = 19_500,
+                        evaluatedAt = 1_699_000_000L,
+                    ),
+                    revision(
+                        symbol = "NVDA",
+                        marketPriceCents = 11_000,
+                        intrinsicValueCents = 22_000,
+                        gapBps = 5_000,
+                        weightedFairValueCents = 24_000,
+                        evaluatedAt = 1_700_000_000L,
+                    ),
+                ),
+            )
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val snapshot = repository.ensureDetailLoaded("NVDA", ViewFilter(), ChartRange.Year, legacyModel)
+
+            val weightedHistory = snapshot.selectedHistory
+                .take(2)
+                .map { it.detail.weightedExternalSignalFairValueCents }
+            assertEquals(listOf(19_500L, 24_000L), weightedHistory)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun merge_revision_history_keeps_persisted_weighted_entries_when_runtime_history_is_already_present() {
+        val persistedHistory = listOf(
+            sampleRevision(weightedFairValueCents = 19_500L, evaluatedAtEpochSeconds = 1_699_000_000L),
+            sampleRevision(weightedFairValueCents = 24_000L, evaluatedAtEpochSeconds = 1_700_000_000L),
+        )
+        val runtimeHistory = listOf(
+            sampleRevision(weightedFairValueCents = null, evaluatedAtEpochSeconds = 1_700_000_500L),
+        )
+
+        val merged = mergeRevisionHistory(persistedHistory, runtimeHistory)
+
+        assertEquals(
+            listOf(19_500L, 24_000L, null),
+            merged.map { it.detail.weightedExternalSignalFairValueCents },
+        )
+    }
+
+    @Test
+    fun row_freshness_prioritizes_restored_updating_updated_and_stale_states() {
+        assertEquals(
+            RowFreshness.Restored,
+            rowFreshnessFor(
+                hasDetail = true,
+                issueMessage = null,
+                isRefreshed = false,
+                stale = true,
+                startupPhase = DashboardStartupPhase.ShowingCached,
+            ),
+        )
+        assertEquals(
+            RowFreshness.Updating,
+            rowFreshnessFor(
+                hasDetail = true,
+                issueMessage = null,
+                isRefreshed = false,
+                stale = true,
+                startupPhase = DashboardStartupPhase.Refreshing,
+            ),
+        )
+        assertEquals(
+            RowFreshness.Updated,
+            rowFreshnessFor(
+                hasDetail = true,
+                issueMessage = null,
+                isRefreshed = true,
+                stale = false,
+                startupPhase = DashboardStartupPhase.Ready,
+            ),
+        )
+        assertEquals(
+            RowFreshness.Stale,
+            rowFreshnessFor(
+                hasDetail = true,
+                issueMessage = null,
+                isRefreshed = false,
+                stale = true,
+                startupPhase = DashboardStartupPhase.Ready,
+            ),
+        )
+        assertEquals(
+            RowFreshness.Issue,
+            rowFreshnessFor(
+                hasDetail = false,
+                issueMessage = "Provider error",
+                isRefreshed = false,
+                stale = false,
+                startupPhase = DashboardStartupPhase.Ready,
+            ),
+        )
+    }
+
+    @Test
+    fun row_explanation_prioritizes_combined_target_price_rank_and_empty_states() {
+        assertEquals(
+            RowExplanationKind.CombinedMove,
+            rowExplanationFor(
+                hasComparableBaseline = true,
+                hasRankMovement = true,
+                hasPriceMovement = true,
+                hasTargetMovement = true,
+            ),
+        )
+        assertEquals(
+            RowExplanationKind.TargetChanged,
+            rowExplanationFor(
+                hasComparableBaseline = true,
+                hasRankMovement = false,
+                hasPriceMovement = false,
+                hasTargetMovement = true,
+            ),
+        )
+        assertEquals(
+            RowExplanationKind.RelativeReRank,
+            rowExplanationFor(
+                hasComparableBaseline = true,
+                hasRankMovement = true,
+                hasPriceMovement = false,
+                hasTargetMovement = false,
+            ),
+        )
+        assertEquals(
+            RowExplanationKind.NoBaseline,
+            rowExplanationFor(
+                hasComparableBaseline = false,
+                hasRankMovement = false,
+                hasPriceMovement = false,
+                hasTargetMovement = false,
+            ),
+        )
+        assertEquals(
+            RowExplanationKind.NoMeaningfulChange,
+            rowExplanationFor(
+                hasComparableBaseline = true,
+                hasRankMovement = false,
+                hasPriceMovement = false,
+                hasTargetMovement = false,
+            ),
+        )
+    }
+
+    @Test
+    fun row_trust_note_only_surfaces_missing_analyst_target() {
+        assertEquals(
+            "No analyst target",
+            rowTrustNote(
+                detail = sampleDetail(
+                    symbol = "NVDA",
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 18_000L,
+                ),
+                issueMessage = null,
+            ),
+        )
+        assertNull(
+            rowTrustNote(
+                detail = sampleDetail(
+                    symbol = "NVDA",
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 18_000L,
+                ).copy(
+                    weightedExternalSignalFairValueCents = 18_500L,
+                    weightedAnalystCount = 20,
+                ),
+                issueMessage = null,
+            ),
+        )
+        assertNull(
+            rowTrustNote(
+                detail = sampleDetail(
+                    symbol = "NVDA",
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 18_000L,
+                ).copy(
+                    externalSignalFairValueCents = 18_300L,
+                    analystOpinionCount = 16,
+                ),
+                issueMessage = null,
+            ),
+        )
+    }
+
+    @Test
+    fun significant_relative_move_uses_five_percent_threshold() {
+        assertFalse(hasSignificantRelativeMove(previousCents = 10_000L, currentCents = 10_499L))
+        assertTrue(hasSignificantRelativeMove(previousCents = 10_000L, currentCents = 10_500L))
+    }
+
+    @Test
     fun first_launch_shows_loading_rows_then_progressively_refreshes_live_data() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
             val client = FakeYahooFinanceClient(delayMs = 25)
             val repository = buildRepository(store = store, client = client)
 
-            val bootstrap = repository.bootstrap(ViewFilter(), null, ChartRange.Year)
+            val bootstrap = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             assertTrue(bootstrap.trackedRows.isNotEmpty())
             assertTrue(bootstrap.trackedRows.take(10).all { it.state == TrackedRowState.Loading })
 
-            val scheduled = repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            val scheduled = repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             assertEquals("dow", scheduled.currentProfile)
             assertEquals(DashboardStartupPhase.SwitchingProfile, scheduled.startupPhase)
             assertEquals("Switching to DOW…", scheduled.statusMessage)
@@ -178,14 +438,14 @@ class DefaultDashboardRepositoryTest {
             }
             val repository = buildRepository(store = store, client = client)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             awaitSnapshot(repository) { snapshot ->
                 snapshot.trackedRows.any { it.symbol == "AAPL" && it.state == TrackedRowState.Live }
             }
 
             quoteHtml404Mode = true
-            repository.refreshAll(ViewFilter(), null, ChartRange.Year)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
             val row = awaitSnapshot(repository) { snapshot ->
                 snapshot.trackedRows.any {
                     it.symbol == "AAPL" &&
@@ -260,8 +520,8 @@ class DefaultDashboardRepositoryTest {
             }
             val repository = buildRepository(store = store, client = client)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             val row = awaitSnapshot(repository) { snapshot ->
                 snapshot.trackedRows.any {
                     it.symbol == "AAPL" &&
@@ -333,8 +593,8 @@ class DefaultDashboardRepositoryTest {
             }
             val repository = buildRepository(store = store, client = client)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             val row = awaitSnapshot(repository) { snapshot ->
                 snapshot.trackedRows.any {
                     it.symbol == "AAPL" &&
@@ -375,14 +635,14 @@ class DefaultDashboardRepositoryTest {
         predicate: (com.discountscreener.android.domain.model.DashboardSnapshot) -> Boolean,
     ): com.discountscreener.android.domain.model.DashboardSnapshot {
         val deadline = System.currentTimeMillis() + timeoutMs
-        var snapshot = repository.currentSnapshot(ViewFilter(), selectedSymbol, selectedRange)
+        var snapshot = repository.currentSnapshot(ViewFilter(), selectedSymbol, selectedRange, legacyModel)
         while (!predicate(snapshot)) {
             if (System.currentTimeMillis() >= deadline) {
                 fail("Timed out waiting for repository snapshot to satisfy predicate; last snapshot=$snapshot")
             }
             Thread.sleep(10)
             dispatcher.scheduler.advanceUntilIdle()
-            snapshot = repository.currentSnapshot(ViewFilter(), selectedSymbol, selectedRange)
+            snapshot = repository.currentSnapshot(ViewFilter(), selectedSymbol, selectedRange, legacyModel)
         }
         return snapshot
     }
@@ -428,9 +688,11 @@ class DefaultDashboardRepositoryTest {
         marketPriceCents: Long,
         intrinsicValueCents: Long,
         gapBps: Int,
+        weightedFairValueCents: Long? = intrinsicValueCents,
+        evaluatedAt: Long = 1_700_000_000L,
     ) = SymbolRevisionInput(
         symbol = symbol,
-        evaluatedAt = 1_700_000_000L,
+        evaluatedAt = evaluatedAt,
         lastSequence = 1,
         updateCount = 1,
         priceHistory = listOf(PriceHistoryPoint(sequence = 1, marketPriceCents = marketPriceCents)),
@@ -446,6 +708,10 @@ class DefaultDashboardRepositoryTest {
                 symbol = symbol,
                 fairValueCents = intrinsicValueCents,
                 ageSeconds = 0,
+                weightedFairValueCents = weightedFairValueCents,
+                lowFairValueCents = weightedFairValueCents?.minus(1_500),
+                highFairValueCents = weightedFairValueCents?.plus(1_500),
+                weightedAnalystCount = weightedFairValueCents?.let { 18 },
             ),
             gapBps = gapBps,
             qualification = QualificationStatus.Qualified,
@@ -459,6 +725,38 @@ class DefaultDashboardRepositoryTest {
         ),
     )
 
+    private fun fetchResult(
+        symbol: String,
+        marketPriceCents: Long,
+        intrinsicValueCents: Long,
+        weightedFairValueCents: Long,
+    ) = ProviderFetchResult(
+        symbol = symbol,
+        snapshot = MarketSnapshot(
+            symbol = symbol,
+            companyName = companyNameFor(symbol),
+            profitable = true,
+            marketPriceCents = marketPriceCents,
+            intrinsicValueCents = intrinsicValueCents,
+        ),
+        externalSignal = ExternalValuationSignal(
+            symbol = symbol,
+            fairValueCents = intrinsicValueCents,
+            ageSeconds = 0,
+            lowFairValueCents = weightedFairValueCents - 1_500,
+            highFairValueCents = weightedFairValueCents + 1_500,
+            weightedFairValueCents = weightedFairValueCents,
+            weightedAnalystCount = 20,
+        ),
+        fundamentals = null,
+        coverage = ProviderCoverage(
+            core = ProviderComponentState.Fresh,
+            external = ProviderComponentState.Fresh,
+            fundamentals = ProviderComponentState.Missing,
+        ),
+        diagnostics = emptyList(),
+    )
+
     @Test
     fun enrichment_populates_all_chart_ranges_after_refresh() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
@@ -466,8 +764,8 @@ class DefaultDashboardRepositoryTest {
             val client = FakeYahooFinanceClient(delayMs = 5)
             val repository = buildRepository(store = store, client = client)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             val snapshot = awaitSnapshot(repository) { refreshed ->
                 refreshed.trackedRows.any { it.state == TrackedRowState.Live }
             }
@@ -478,7 +776,7 @@ class DefaultDashboardRepositoryTest {
                 }
             }
             val allCharts = ChartRange.entries.associateWith { range ->
-                repository.currentSnapshot(ViewFilter(), symbol, range).selectedCharts[range].orEmpty()
+                repository.currentSnapshot(ViewFilter(), symbol, range, legacyModel).selectedCharts[range].orEmpty()
             }
             assertTrue(
                 "Expected all chart ranges populated after enrichment, but got: ${allCharts.map { (k, v) -> "$k=${v.size}" }}",
@@ -505,8 +803,8 @@ class DefaultDashboardRepositoryTest {
             }
             val repository = buildRepository(store = store, client = failingClient)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             val snapshot = awaitSnapshot(repository) { current ->
                 current.issues.any { it.key.contains("enrichment") }
             }
@@ -530,8 +828,8 @@ class DefaultDashboardRepositoryTest {
             }
             val repository = buildRepository(store = store, client = countingClient)
 
-            repository.bootstrap(ViewFilter(), null, ChartRange.Year)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             val switched = awaitSnapshot(repository) { current ->
                 current.trackedRows.any { it.state == TrackedRowState.Live }
             }
@@ -544,7 +842,7 @@ class DefaultDashboardRepositoryTest {
 
             val afterEnrichment = enrichmentFetchRequestCount
 
-            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year)
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year, legacyModel)
             advanceUntilIdle()
 
             val afterDetail = enrichmentFetchRequestCount
@@ -707,6 +1005,26 @@ private fun sampleDetail(
     updateCount = 1,
     isWatched = false,
     companyName = "$symbol Inc.",
+)
+
+private fun sampleRevision(
+    weightedFairValueCents: Long?,
+    evaluatedAtEpochSeconds: Long,
+    symbol: String = "NVDA",
+) = SymbolRevision(
+    symbol = symbol,
+    evaluatedAtEpochSeconds = evaluatedAtEpochSeconds,
+    detail = sampleDetail(
+        symbol = symbol,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 18_000L,
+    ).copy(
+        externalSignalFairValueCents = weightedFairValueCents,
+        externalSignalLowFairValueCents = weightedFairValueCents?.minus(1_500L),
+        externalSignalHighFairValueCents = weightedFairValueCents?.plus(1_500L),
+        weightedExternalSignalFairValueCents = weightedFairValueCents,
+        weightedAnalystCount = weightedFairValueCents?.let { 18 },
+    ),
 )
 
 private fun companyNameFor(symbol: String): String = when (symbol) {

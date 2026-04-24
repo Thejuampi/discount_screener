@@ -2,6 +2,7 @@ package com.discountscreener.android.presentation.dashboard
 
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.repository.DashboardRepository
@@ -20,8 +21,11 @@ import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -106,11 +110,19 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun dashboard_tabs_match_simplified_order() {
+    fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Tracked", "Opportunities", "Watch", "System"),
+            listOf("Opportunities", "Tracked", "Watch", "System"),
             DashboardTab.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun dashboard_defaults_to_opportunities_with_aggressive_scoring() {
+        val state = DashboardUiState()
+
+        assertEquals(DashboardTab.Opportunities, state.currentTab)
+        assertEquals(OpportunityScoringModel.Aggressive, state.opportunityScoringModel)
     }
 
     @Test
@@ -153,6 +165,9 @@ class DashboardViewModelTest {
         val viewModel = testViewModel(repository)
 
         viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Tracked))
         advanceUntilIdle()
 
         viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
@@ -228,6 +243,51 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun replay_back_and_forward_clamp_to_loaded_chart_history() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("AAPL"),
+            detailCharts = mapOf(
+                ChartRange.Year to listOf(
+                    candle(1),
+                    candle(2),
+                    candle(3),
+                    candle(4),
+                ),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayBack) }
+        assertEquals(3, viewModel.state.value.detailRoute?.replayOffset)
+
+        viewModel.dispatch(DashboardAction.StepReplayForward)
+        assertEquals(2, viewModel.state.value.detailRoute?.replayOffset)
+
+        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayForward) }
+        assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
+    }
+
+    @Test
+    fun reset_replay_returns_detail_chart_to_live() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("AAPL"),
+            detailCharts = mapOf(ChartRange.Year to listOf(candle(1), candle(2))),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.StepReplayBack)
+        assertEquals(1, viewModel.state.value.detailRoute?.replayOffset)
+
+        viewModel.dispatch(DashboardAction.ResetReplay)
+        assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
+    }
+
+    @Test
     fun open_detail_from_watch_uses_tracked_source() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
         val viewModel = testViewModel(repository)
@@ -249,6 +309,65 @@ class DashboardViewModelTest {
         advanceUntilIdle()
 
         assertEquals(DetailSourceTab.Opportunities, viewModel.state.value.detailRoute?.sourceTab)
+    }
+
+    @Test
+    fun open_detail_keeps_loaded_history_available_when_switching_to_history_tab() = runTest(dispatcher) {
+        val history = listOf(
+            SymbolRevision(
+                symbol = "AAPL",
+                evaluatedAtEpochSeconds = 1_700_000_000L,
+                detail = SymbolDetail(
+                    symbol = "AAPL",
+                    profitable = true,
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 15_000L,
+                    gapBps = 5_000,
+                    minimumGapBps = 1_500,
+                    qualification = QualificationStatus.Qualified,
+                    externalStatus = com.discountscreener.core.model.ExternalSignalStatus.Supportive,
+                    externalSignalFairValueCents = 15_000L,
+                    weightedExternalSignalFairValueCents = 15_000L,
+                    weightedAnalystCount = 12,
+                    externalSignalGapBps = 5_000,
+                    externalSignalAgeSeconds = 0,
+                    externalSignalMaxAgeSeconds = 86_400L,
+                    confidence = ConfidenceBand.High,
+                    lastSequence = 1,
+                    updateCount = 1,
+                    isWatched = false,
+                ),
+            ),
+        )
+        val repository = RecordingDashboardRepository(
+            detailHistory = history,
+            detailData = history.single().detail,
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SetDetailSubtab(DetailSubtab.History))
+
+        assertEquals(DetailSubtab.History, viewModel.state.value.detailRoute?.subtab)
+        assertEquals(1, viewModel.state.value.detailHistory.size)
+        assertEquals(15_000L, viewModel.state.value.detailHistory.single().detail.weightedExternalSignalFairValueCents)
+    }
+
+    @Test
+    fun toggle_opportunity_model_switches_to_legacy_and_refreshes_rows() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
+            aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+
+        assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
+        assertEquals(listOf("LEGACY"), viewModel.state.value.opportunityRows.map { it.symbol })
+        assertEquals(OpportunityScoringModel.Legacy, repository.lastRequestedOpportunityModel)
     }
 
     @Test
@@ -296,42 +415,112 @@ class DashboardViewModelTest {
         isWatched = false,
     )
 
+    private fun candle(epochSeconds: Long) = HistoricalCandle(
+        epochSeconds = epochSeconds,
+        openCents = 10_000L,
+        highCents = 10_100L,
+        lowCents = 9_900L,
+        closeCents = 10_050L,
+        volume = 1_000L,
+    )
+
+    private fun detail(symbol: String) = SymbolDetail(
+        symbol = symbol,
+        profitable = true,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 15_000L,
+        gapBps = 3_333,
+        minimumGapBps = 1_500,
+        qualification = QualificationStatus.Qualified,
+        externalStatus = com.discountscreener.core.model.ExternalSignalStatus.Supportive,
+        externalSignalFairValueCents = 15_000L,
+        weightedExternalSignalFairValueCents = 15_000L,
+        weightedAnalystCount = 12,
+        externalSignalGapBps = 5_000,
+        externalSignalAgeSeconds = 0,
+        externalSignalMaxAgeSeconds = 86_400L,
+        confidence = ConfidenceBand.High,
+        lastSequence = 1,
+        updateCount = 1,
+        isWatched = false,
+    )
+
     private class RecordingDashboardRepository(
         private val trackedRows: List<TrackedSymbolRow> = emptyList(),
+        private val opportunityRows: List<OpportunityListRow> = emptyList(),
+        private val aggressiveRows: List<OpportunityListRow> = opportunityRows,
+        private val detailHistory: List<SymbolRevision> = emptyList(),
+        private val detailData: SymbolDetail? = null,
+        private val detailCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     ) : DashboardRepository {
         var lastCurrentFilter: ViewFilter? = null
+        var lastRequestedOpportunityModel: OpportunityScoringModel? = null
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
 
         override fun observeUpdates(): Flow<Long> = updates
 
-        override suspend fun bootstrap(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange): DashboardSnapshot =
-            emptySnapshot()
+        override suspend fun bootstrap(
+            filter: ViewFilter,
+            selectedSymbol: String?,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
-        override suspend fun currentSnapshot(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange): DashboardSnapshot {
+        override suspend fun currentSnapshot(
+            filter: ViewFilter,
+            selectedSymbol: String?,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot {
             lastCurrentFilter = filter
-            return emptySnapshot()
+            lastRequestedOpportunityModel = opportunityScoringModel
+            return emptySnapshot(opportunityScoringModel)
         }
 
-        override suspend fun refreshAll(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange): DashboardSnapshot =
-            emptySnapshot()
+        override suspend fun refreshAll(
+            filter: ViewFilter,
+            selectedSymbol: String?,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
-        override suspend fun ensureDetailLoaded(symbol: String, filter: ViewFilter, selectedRange: ChartRange): DashboardSnapshot =
-            emptySnapshot()
+        override suspend fun ensureDetailLoaded(
+            symbol: String,
+            filter: ViewFilter,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
-        override suspend fun addSymbols(rawInput: String, filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange): DashboardSnapshot =
-            emptySnapshot()
+        override suspend fun addSymbols(
+            rawInput: String,
+            filter: ViewFilter,
+            selectedSymbol: String?,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
-        override suspend fun selectProfile(profile: String, filter: ViewFilter, selectedRange: ChartRange): DashboardSnapshot {
+        override suspend fun selectProfile(
+            profile: String,
+            filter: ViewFilter,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot {
             currentProfile = profile
             return emptySnapshot(
+                opportunityScoringModel = opportunityScoringModel,
                 startupPhase = DashboardStartupPhase.SwitchingProfile,
                 statusMessage = "Switching to ${profile.uppercase()}…",
             )
         }
 
-        override suspend fun toggleWatchlist(symbol: String, filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange): DashboardSnapshot =
-            emptySnapshot()
+        override suspend fun toggleWatchlist(
+            symbol: String,
+            filter: ViewFilter,
+            selectedSymbol: String?,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
         override suspend fun loadSystemStats(): SystemStats = SystemStats(
             databaseFileSizeBytes = 0L,
@@ -344,6 +533,7 @@ class DashboardViewModelTest {
         override suspend fun clearAllData() = Unit
 
         private fun emptySnapshot(
+            opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.Aggressive,
             startupPhase: DashboardStartupPhase = DashboardStartupPhase.Ready,
             statusMessage: String? = null,
         ) = DashboardSnapshot(
@@ -353,11 +543,12 @@ class DashboardViewModelTest {
             trackedRows = trackedRows,
             watchlistSymbols = emptyList(),
             candidateRows = emptyList(),
-            opportunityRows = emptyList(),
+            opportunityRows = if (opportunityScoringModel == OpportunityScoringModel.Aggressive) aggressiveRows else opportunityRows,
+            opportunityScoringModel = opportunityScoringModel,
             issues = emptyList(),
-            selectedDetail = null,
-            selectedCharts = emptyMap(),
-            selectedHistory = emptyList(),
+            selectedDetail = detailData,
+            selectedCharts = detailCharts,
+            selectedHistory = detailHistory,
             selectedAlerts = emptyList(),
             lastUpdatedAtEpochSeconds = null,
             startupPhase = startupPhase,

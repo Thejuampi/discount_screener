@@ -17,6 +17,7 @@ From the repository root:
 - Desktop smoke check: `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke`
 - Android validation: `pwsh ./scripts/validate-android.ps1`
 - Android launch: `pwsh ./scripts/launch-android.ps1`
+- Android signing bootstrap: `make android-signing-bootstrap`
 - Shared contract checks: `pwsh ./scripts/validate-contracts.ps1`
 
 ## Requirements

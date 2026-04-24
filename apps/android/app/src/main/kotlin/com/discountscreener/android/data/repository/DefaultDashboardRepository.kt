@@ -15,12 +15,18 @@ import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
-import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
+import com.discountscreener.android.domain.model.RowExplanationKind
+import com.discountscreener.android.domain.model.RowFreshness
+import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
+import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
+import com.discountscreener.android.domain.model.rankMovement
+import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
@@ -28,6 +34,8 @@ import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.ReportingEngine
+import com.discountscreener.core.engine.buildSymbolDetail
+import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.DcfAnalysis
@@ -35,6 +43,7 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
 import com.discountscreener.core.model.SymbolDetail
@@ -122,6 +131,12 @@ class DefaultDashboardRepository(
     private val placeholderSymbols = linkedSetOf<String>()
     private val refreshedSymbols = linkedSetOf<String>()
     private val refreshAttemptedSymbols = linkedSetOf<String>()
+    private val comparisonBaselineRankBySymbol = linkedMapOf<String, Int>()
+    private val comparisonBaselineOpportunityRankByModel =
+        OpportunityScoringModel.entries.associateWith { linkedMapOf<String, Int>() }.toMutableMap()
+    private val comparisonBaselineWeightedFairValueBySymbol = linkedMapOf<String, Long>()
+    private val comparisonBaselineMarketPriceBySymbol = linkedMapOf<String, Long>()
+    private val freshnessTimestampBySymbol = linkedMapOf<String, Long>()
 
     private var currentProfile = DEFAULT_PROFILE
     private var lastUpdatedAtEpochSeconds: Long? = null
@@ -142,35 +157,39 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         if (!restored) {
             loadUniverse(DEFAULT_PROFILE)
             restored = true
         }
-        return currentSnapshot(filter, selectedSymbol, selectedRange)
+        return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
     override suspend fun currentSnapshot(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot = stateMutex.withLock {
-        snapshotLocked(filter, selectedSymbol, selectedRange)
+        snapshotLocked(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
     override suspend fun refreshAll(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         startRefreshForCurrentProfile(stateMutex.withLock { trackedSymbols.toList() })
-        return currentSnapshot(filter, selectedSymbol, selectedRange)
+        return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
     override suspend fun ensureDetailLoaded(
         symbol: String,
         filter: ViewFilter,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         ensureRevisionHistoryLoaded(symbol)
 
@@ -216,7 +235,7 @@ class DefaultDashboardRepository(
         }
         persistDelta(persistenceDelta)
         emitUpdate()
-        return currentSnapshot(filter, symbol, selectedRange)
+        return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
     }
 
     override suspend fun addSymbols(
@@ -224,6 +243,7 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         val symbols = rawInput
             .split(',')
@@ -232,7 +252,7 @@ class DefaultDashboardRepository(
             .map(String::uppercase)
             .distinct()
         if (symbols.isEmpty()) {
-            return currentSnapshot(filter, selectedSymbol, selectedRange)
+            return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
         }
 
         val newSymbols = stateMutex.withLock {
@@ -250,16 +270,22 @@ class DefaultDashboardRepository(
             startRefreshForCurrentProfile(newSymbols)
         }
 
-        return currentSnapshot(filter, selectedSymbol ?: newSymbols.firstOrNull(), selectedRange)
+        return currentSnapshot(
+            filter,
+            selectedSymbol ?: newSymbols.firstOrNull(),
+            selectedRange,
+            opportunityScoringModel,
+        )
     }
 
     override suspend fun selectProfile(
         profile: String,
         filter: ViewFilter,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         val request = beginProfileSwitch(profile)
-        return currentSnapshot(filter, request.symbols.firstOrNull(), selectedRange)
+        return currentSnapshot(filter, request.symbols.firstOrNull(), selectedRange, opportunityScoringModel)
     }
 
     private suspend fun beginProfileSwitch(profile: String): ProfileSwitchRequest {
@@ -315,6 +341,7 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         stateMutex.withLock {
             engine.toggleWatchlist(symbol)
@@ -323,7 +350,7 @@ class DefaultDashboardRepository(
         stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
         persistDelta(stateMutex.withLock { snapshotPersistenceDeltaLocked(emptyList(), symbol) })
         emitUpdate()
-        return currentSnapshot(filter, selectedSymbol, selectedRange)
+        return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
     private suspend fun loadUniverse(profile: String) {
@@ -439,6 +466,7 @@ class DefaultDashboardRepository(
         previousEnrichmentJob?.cancelAndJoin()
 
         stateMutex.withLock {
+            captureRefreshComparisonBaselineLocked()
             refreshedSymbols.clear()
             refreshAttemptedSymbols.clear()
             applyTransitionLocked(
@@ -649,6 +677,7 @@ class DefaultDashboardRepository(
         if (engine.detail(result.symbol) != null) {
             staleSymbols.remove(result.symbol)
             placeholderSymbols.remove(result.symbol)
+            freshnessTimestampBySymbol[result.symbol] = result.refreshedAtEpochSeconds
             appendRevisionLocked(result.symbol)
             lastUpdatedAtEpochSeconds = result.refreshedAtEpochSeconds
         }
@@ -660,6 +689,7 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         selectedSymbol: String?,
         selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         val normalizedFilter = filter.copy(query = filter.query.trim())
         val selectedDetail = selectedSymbol?.let(engine::detail)
@@ -681,14 +711,8 @@ class DefaultDashboardRepository(
             trackedRows = trackedRowsLocked(normalizedFilter, trackedIssueMessages),
             watchlistSymbols = engine.watchlistSymbols(),
             candidateRows = engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter),
-            opportunityRows = OpportunityEngine.buildRows(
-                engine,
-                OpportunityContext(
-                    filter = normalizedFilter,
-                    chartSummariesBySymbol = chartSummaries,
-                    analysesBySymbol = dcfCache,
-                ),
-            ),
+            opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel),
+            opportunityScoringModel = opportunityScoringModel,
             issues = issues.values
                 .sortedByDescending { it.lastSeenEvent }
                 .map(::toIssueRecord),
@@ -707,39 +731,28 @@ class DefaultDashboardRepository(
     private fun trackedRowsLocked(
         filter: ViewFilter,
         issueMessagesBySymbol: Map<String, String>,
-    ): List<TrackedSymbolRow> = trackedSymbols
-        .mapNotNull { symbol ->
-            val watched = engine.isWatched(symbol)
-            if (filter.query.isNotBlank() && !symbol.contains(filter.query, ignoreCase = true)) {
-                return@mapNotNull null
-            }
-            if (filter.watchlistOnly && !watched) {
-                return@mapNotNull null
-            }
-
-            val detail = engine.detail(symbol)
-            val issueMessage = issueMessagesBySymbol[symbol]
-            val state = when {
-                detail != null && symbol in refreshedSymbols -> TrackedRowState.Live
-                detail != null -> TrackedRowState.Cached
-                issueMessage != null -> TrackedRowState.Failed
-                else -> TrackedRowState.Loading
-            }
-
-            TrackedSymbolRow(
-                symbol = symbol,
-                marketPriceCents = detail?.marketPriceCents,
-                intrinsicValueCents = detail?.intrinsicValueCents,
-                gapBps = detail?.gapBps,
-                upsideBps = detail?.upsideBps,
-                confidence = detail?.confidence,
-                qualification = detail?.qualification,
-                isWatched = watched,
-                state = state,
-                stale = detail != null && symbol in staleSymbols,
-                providerIssue = issueMessage,
-                companyName = detail?.companyName,
+    ): List<TrackedSymbolRow> = rankedTrackedRowsLocked(issueMessagesBySymbol)
+        .mapIndexed { currentIndex, row ->
+            row.copy(
+                rankMovement = rankMovement(comparisonBaselineRankBySymbol[row.symbol], currentIndex),
+                explanation = rowExplanationFor(
+                    hasComparableBaseline = comparisonBaselineRankBySymbol[row.symbol] != null ||
+                        comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
+                        comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
+                    hasRankMovement = comparisonBaselineRankBySymbol[row.symbol] != null &&
+                        comparisonBaselineRankBySymbol[row.symbol] != currentIndex,
+                    hasPriceMovement = hasSignificantRelativeMove(
+                        previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
+                        currentCents = row.marketPriceCents,
+                    ),
+                    hasTargetMovement = row.valuationChange != null,
+                ),
             )
+        }
+        .filter { row ->
+            val queryMatches = filter.query.isBlank() || row.symbol.contains(filter.query, ignoreCase = true)
+            val watchlistMatches = !filter.watchlistOnly || row.isWatched
+            queryMatches && watchlistMatches
         }
         .sortedWith(
             compareByDescending<TrackedSymbolRow> { it.upsideBps ?: Int.MIN_VALUE }
@@ -747,12 +760,186 @@ class DefaultDashboardRepository(
                 .thenBy { it.symbol },
         )
 
+    private fun opportunityRowsLocked(
+        filter: ViewFilter,
+        scoringModel: OpportunityScoringModel,
+    ): List<OpportunityListRow> {
+        val issueMessagesBySymbol = activeIssueMessagesBySymbolLocked()
+        return rankedOpportunityRowsLocked(scoringModel)
+        .mapIndexed { currentIndex, row ->
+            buildOpportunityRowLocked(row, currentIndex, scoringModel, issueMessagesBySymbol[row.symbol])
+        }
+        .filter { row ->
+            filter.query.isBlank() ||
+                row.symbol.contains(filter.query, ignoreCase = true) ||
+                row.companyName?.contains(filter.query, ignoreCase = true) == true
+        }
+    }
+
     private fun trackedRowStateRank(state: TrackedRowState): Int = when (state) {
         TrackedRowState.Live -> 0
         TrackedRowState.Cached -> 1
         TrackedRowState.Loading -> 2
         TrackedRowState.Failed -> 3
     }
+
+    private fun rankedTrackedRowsLocked(
+        issueMessagesBySymbol: Map<String, String>,
+    ): List<TrackedSymbolRow> = trackedSymbols
+        .map { symbol -> buildTrackedRowLocked(symbol, issueMessagesBySymbol[symbol]) }
+        .sortedWith(
+            compareByDescending<TrackedSymbolRow> { it.upsideBps ?: Int.MIN_VALUE }
+                .thenBy { trackedRowStateRank(it.state) }
+                .thenBy { it.symbol },
+        )
+
+    private fun rankedOpportunityRowsLocked(
+        scoringModel: OpportunityScoringModel,
+    ) = OpportunityEngine.buildRows(
+        engine,
+        OpportunityContext(
+            filter = ViewFilter(),
+            chartSummariesBySymbol = chartSummaries,
+            analysesBySymbol = dcfCache,
+            scoringModel = scoringModel,
+        ),
+    )
+
+    private fun buildTrackedRowLocked(
+        symbol: String,
+        issueMessage: String?,
+    ): TrackedSymbolRow {
+        val watched = engine.isWatched(symbol)
+        val detail = engine.detail(symbol)
+        val state = when {
+            detail != null && symbol in refreshedSymbols -> TrackedRowState.Live
+            detail != null -> TrackedRowState.Cached
+            issueMessage != null -> TrackedRowState.Failed
+            else -> TrackedRowState.Loading
+        }
+        val freshness = rowFreshnessFor(
+            hasDetail = detail != null,
+            issueMessage = issueMessage,
+            isRefreshed = symbol in refreshedSymbols,
+            stale = detail != null && symbol in staleSymbols,
+            startupPhase = startupPhase,
+        )
+
+        return TrackedSymbolRow(
+            symbol = symbol,
+            marketPriceCents = detail?.marketPriceCents,
+            intrinsicValueCents = detail?.intrinsicValueCents,
+            gapBps = detail?.gapBps,
+            upsideBps = detail?.upsideBps,
+            confidence = detail?.confidence,
+            qualification = detail?.qualification,
+            isWatched = watched,
+            state = state,
+            freshness = freshness,
+            stale = detail != null && symbol in staleSymbols,
+            providerIssue = issueMessage,
+            trustNote = rowTrustNote(
+                detail = detail,
+                issueMessage = issueMessage,
+            ),
+            freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[symbol],
+            companyName = detail?.companyName,
+            valuationChange = significantValuationChange(
+                comparisonBaselineWeightedFairValueBySymbol[symbol],
+                preferredAnalystTargetFairValueCents(detail),
+            ),
+        )
+    }
+
+    private fun buildOpportunityRowLocked(
+        row: com.discountscreener.core.model.OpportunityRow,
+        currentIndex: Int,
+        scoringModel: OpportunityScoringModel,
+        issueMessage: String?,
+    ): OpportunityListRow {
+        val detail = engine.detail(row.symbol)
+        val baselineRank = comparisonBaselineOpportunityRankByModel
+            .getValue(scoringModel)[row.symbol]
+        val freshness = rowFreshnessFor(
+            hasDetail = detail != null,
+            issueMessage = issueMessage,
+            isRefreshed = row.symbol in refreshedSymbols,
+            stale = detail != null && row.symbol in staleSymbols,
+            startupPhase = startupPhase,
+        )
+        return OpportunityListRow(
+            symbol = row.symbol,
+            marketPriceCents = row.marketPriceCents,
+            intrinsicValueCents = row.intrinsicValueCents,
+            gapBps = row.gapBps,
+            upsideBps = row.upsideBps,
+            confidence = row.confidence,
+            isWatched = row.isWatched,
+            freshness = freshness,
+            providerIssue = issueMessage,
+            trustNote = rowTrustNote(
+                detail = detail,
+                issueMessage = issueMessage,
+            ),
+            freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[row.symbol],
+            fundamentalsScore = row.fundamentalsScore,
+            technicalScore = row.technicalScore,
+            forecastScore = row.forecastScore,
+            compositeScore = row.compositeScore,
+            coverageCount = row.coverageCount,
+            fundamentalsSignals = row.fundamentalsSignals,
+            technicalSignals = row.technicalSignals,
+            forecastSignals = row.forecastSignals,
+            companyName = row.companyName,
+            rankMovement = rankMovement(baselineRank, currentIndex),
+            valuationChange = significantValuationChange(
+                comparisonBaselineWeightedFairValueBySymbol[row.symbol],
+                preferredAnalystTargetFairValueCents(detail),
+            ),
+            explanation = rowExplanationFor(
+                hasComparableBaseline = baselineRank != null ||
+                    comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
+                    comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
+                hasRankMovement = baselineRank != null && baselineRank != currentIndex,
+                hasPriceMovement = hasSignificantRelativeMove(
+                    previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
+                    currentCents = detail?.marketPriceCents,
+                ),
+                hasTargetMovement = significantValuationChange(
+                    comparisonBaselineWeightedFairValueBySymbol[row.symbol],
+                    preferredAnalystTargetFairValueCents(detail),
+                ) != null,
+            ),
+        )
+    }
+
+    private fun captureRefreshComparisonBaselineLocked() {
+        comparisonBaselineRankBySymbol.clear()
+        comparisonBaselineWeightedFairValueBySymbol.clear()
+        comparisonBaselineMarketPriceBySymbol.clear()
+        comparisonBaselineOpportunityRankByModel.values.forEach { it.clear() }
+        val issueMessagesBySymbol = activeIssueMessagesBySymbolLocked()
+        rankedTrackedRowsLocked(issueMessagesBySymbol)
+            .forEachIndexed { index, row ->
+                comparisonBaselineRankBySymbol[row.symbol] = index
+            }
+        OpportunityScoringModel.entries.forEach { scoringModel ->
+            rankedOpportunityRowsLocked(scoringModel).forEachIndexed { index, row ->
+                comparisonBaselineOpportunityRankByModel.getValue(scoringModel)[row.symbol] = index
+            }
+        }
+        trackedSymbols.forEach { symbol ->
+            engine.detail(symbol)?.let { detail ->
+                preferredAnalystTargetFairValueCents(detail)
+                    ?.let { comparisonBaselineWeightedFairValueBySymbol[symbol] = it }
+                comparisonBaselineMarketPriceBySymbol[symbol] = detail.marketPriceCents
+            }
+        }
+    }
+
+    private fun activeIssueMessagesBySymbolLocked(): Map<String, String> = issues.values
+        .filter { it.active }
+        .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
 
     private fun hydrateWarmStartLocked(bootstrap: PersistenceBootstrap) {
         val trackedSymbolSet = trackedSymbols.toSet()
@@ -768,6 +955,11 @@ class DefaultDashboardRepository(
         )
 
         staleSymbols += hydratedStates.map { it.symbol }
+        bootstrap.lastPersistedAtEpochSeconds?.let { restoredAt ->
+            hydratedStates.forEach { state ->
+                freshnessTimestampBySymbol[state.symbol] = restoredAt
+            }
+        }
 
         chartCache.clear()
         chartSummaries.clear()
@@ -791,24 +983,29 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun ensureRevisionHistoryLoaded(symbol: String) {
-        if (stateMutex.withLock { revisions.containsKey(symbol) }) {
-            return
-        }
         val loaded = stateStore.loadRevisionHistory(symbol)
         stateMutex.withLock {
-            revisions.putIfAbsent(
-                symbol,
-                loaded.mapNotNull { persisted ->
-                    val detail = engine.detail(symbol) ?: return@mapNotNull null
-                    SymbolRevision(
-                        symbol = persisted.symbol,
-                        evaluatedAtEpochSeconds = persisted.evaluatedAt,
-                        detail = detail,
-                        chartSummaries = persisted.payload.chartSummaries.associateBy { it.range },
-                        dcfAnalysis = persisted.payload.dcfAnalysis,
-                    )
-                }.toMutableList(),
-            )
+            val persistedHistory = loaded.mapNotNull { persisted ->
+                val detail = buildSymbolDetail(
+                    snapshot = persisted.payload.snapshot,
+                    externalSignal = persisted.payload.externalSignal,
+                    fundamentals = persisted.payload.fundamentals,
+                    lastSequence = persisted.lastSequence,
+                    updateCount = persisted.updateCount,
+                    isWatched = persisted.payload.isWatched,
+                ) ?: return@mapNotNull null
+                SymbolRevision(
+                    symbol = persisted.symbol,
+                    evaluatedAtEpochSeconds = persisted.evaluatedAt,
+                    detail = detail,
+                    chartSummaries = persisted.payload.chartSummaries.associateBy { it.range },
+                    dcfAnalysis = persisted.payload.dcfAnalysis,
+                )
+            }
+            val mergedHistory = mergeRevisionHistory(persistedHistory, revisions[symbol].orEmpty())
+            if (mergedHistory.isNotEmpty()) {
+                revisions[symbol] = mergedHistory
+            }
         }
     }
 
@@ -1245,6 +1442,11 @@ class DefaultDashboardRepository(
         placeholderSymbols.clear()
         refreshedSymbols.clear()
         refreshAttemptedSymbols.clear()
+        comparisonBaselineRankBySymbol.clear()
+        comparisonBaselineOpportunityRankByModel.values.forEach { it.clear() }
+        comparisonBaselineWeightedFairValueBySymbol.clear()
+        comparisonBaselineMarketPriceBySymbol.clear()
+        freshnessTimestampBySymbol.clear()
         activeProfileSwitchJob = null
         activeRefreshJob = null
         activeEnrichmentJob = null
@@ -1282,6 +1484,75 @@ class DefaultDashboardRepository(
         private const val MAX_REVISION_HISTORY = 240
     }
 }
+
+internal fun mergeRevisionHistory(
+    persistedHistory: List<SymbolRevision>,
+    runtimeHistory: List<SymbolRevision>,
+): MutableList<SymbolRevision> = (persistedHistory + runtimeHistory)
+    .sortedWith(compareBy<SymbolRevision> { it.evaluatedAtEpochSeconds }.thenBy { revisionHistoryKey(it) })
+    .distinctBy(::revisionHistoryKey)
+    .toMutableList()
+
+internal fun rowFreshnessFor(
+    hasDetail: Boolean,
+    issueMessage: String?,
+    isRefreshed: Boolean,
+    stale: Boolean,
+    startupPhase: DashboardStartupPhase,
+): RowFreshness = when {
+    !hasDetail && issueMessage != null -> RowFreshness.Issue
+    !hasDetail -> RowFreshness.Loading
+    startupPhase in setOf(DashboardStartupPhase.SwitchingProfile, DashboardStartupPhase.Refreshing) && !isRefreshed ->
+        RowFreshness.Updating
+    stale && startupPhase == DashboardStartupPhase.ShowingCached -> RowFreshness.Restored
+    stale -> RowFreshness.Stale
+    issueMessage != null -> RowFreshness.Issue
+    isRefreshed -> RowFreshness.Updated
+    else -> RowFreshness.Updated
+}
+
+internal fun rowTrustNote(
+    detail: SymbolDetail?,
+    issueMessage: String?,
+): String? = when {
+    issueMessage != null -> null
+    preferredAnalystTargetFairValueCents(detail) == null -> "No analyst target"
+    else -> null
+}
+
+internal fun rowExplanationFor(
+    hasComparableBaseline: Boolean,
+    hasRankMovement: Boolean,
+    hasPriceMovement: Boolean,
+    hasTargetMovement: Boolean,
+): RowExplanationKind = when {
+    !hasComparableBaseline -> RowExplanationKind.NoBaseline
+    hasPriceMovement && hasTargetMovement -> RowExplanationKind.CombinedMove
+    hasTargetMovement -> RowExplanationKind.TargetChanged
+    hasPriceMovement -> RowExplanationKind.PriceMoved
+    hasRankMovement -> RowExplanationKind.RelativeReRank
+    else -> RowExplanationKind.NoMeaningfulChange
+}
+
+internal fun hasSignificantRelativeMove(
+    previousCents: Long?,
+    currentCents: Long?,
+): Boolean {
+    if (previousCents == null || currentCents == null || previousCents <= 0L || currentCents <= 0L) {
+        return false
+    }
+    return kotlin.math.abs(checkedUpsideBps(previousCents, currentCents) ?: return false) >= 500
+}
+
+private fun revisionHistoryKey(revision: SymbolRevision): String = listOf(
+    revision.symbol,
+    revision.evaluatedAtEpochSeconds.toString(),
+    revision.detail.lastSequence.toString(),
+    revision.detail.updateCount.toString(),
+    revision.detail.marketPriceCents.toString(),
+    revision.detail.intrinsicValueCents.toString(),
+    preferredAnalystTargetFairValueCents(revision.detail)?.toString() ?: "null",
+).joinToString("|")
 
 internal data class TimeseriesFallback(
     val snapshot: MarketSnapshot,

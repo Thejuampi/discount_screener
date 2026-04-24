@@ -1,5 +1,7 @@
 package com.discountscreener.android.ui.dashboard
 
+import com.discountscreener.core.engine.ChartAnalysis
+import com.discountscreener.core.engine.VolumeProfileBin
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
 import java.time.Instant
@@ -50,6 +52,11 @@ internal data class PriceChartModel(
 internal data class VolumeChartModel(
     val maxVolume: Long,
     val axisLabels: ChartAxisLabels,
+)
+
+internal data class VolumeProfileModel(
+    val bins: List<VolumeProfileBin>,
+    val maxBinVolume: Long,
 )
 
 internal data class MacdChartModel(
@@ -123,6 +130,36 @@ internal fun buildVolumeChartModel(candles: List<HistoricalCandle>): VolumeChart
             bottom = "0",
         ),
     )
+}
+
+internal fun buildVolumeProfileModel(
+    candles: List<HistoricalCandle>,
+    minPriceCents: Long,
+    maxPriceCents: Long,
+    binCount: Int,
+): VolumeProfileModel? {
+    if (candles.isEmpty() || binCount <= 0) return null
+    val bins = ChartAnalysis.computeVolumeProfile(
+        candles = candles,
+        minPriceCents = minPriceCents,
+        maxPriceCents = maxPriceCents,
+        binCount = binCount,
+    )
+    val maxBinVolume = bins.maxOfOrNull(VolumeProfileBin::totalVolume) ?: 0L
+    return VolumeProfileModel(
+        bins = bins,
+        maxBinVolume = maxBinVolume,
+    )
+}
+
+internal fun replayStatusText(
+    visibleCount: Int,
+    totalCount: Int,
+    replayOffset: Int,
+    maxVolume: Long,
+): String {
+    val replayLabel = if (replayOffset > 0) "Replay -$replayOffset from live" else "Live"
+    return "Showing $visibleCount / $totalCount candles  |  $replayLabel  |  Volume max ${compactFinancialNumber(maxVolume)}"
 }
 
 internal fun buildMacdChartModel(candles: List<HistoricalCandle>): MacdChartModel? {

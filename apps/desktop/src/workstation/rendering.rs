@@ -47,6 +47,18 @@ fn build_screen_lines(
     )
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpportunityScoreBreakdown {
+    fundamentals_score: Option<i32>,
+    technical_score: Option<i32>,
+    forecast_score: Option<i32>,
+    composite_score: i32,
+    coverage_count: usize,
+    fundamentals_signals: Vec<&'static str>,
+    technical_signals: Vec<&'static str>,
+    forecast_signals: Vec<&'static str>,
+}
+
 fn build_screen_lines_for_viewport(
     state: &TerminalState,
     rows: &[CandidateRow],
@@ -218,7 +230,10 @@ fn build_screen_lines_for_viewport(
         let visible_opportunity_rows = &opportunity_rows[opportunity_start..opportunity_end];
         lines.push(RenderLine {
             color: Some(Color::Cyan),
-            text: "TOP OPPORTUNITIES".to_string(),
+            text: format!(
+                "TOP OPPORTUNITIES  Model: {} [m]",
+                app.opportunity_scoring_model.label()
+            ),
         });
         lines.push(RenderLine {
             color: None,
@@ -260,9 +275,12 @@ fn build_screen_lines_for_viewport(
                     watched_marker,
                     symbol_label,
                     row.composite_score,
-                    format_opportunity_bucket(row.fundamentals_score),
-                    format_opportunity_bucket(row.technical_score),
-                    format_opportunity_bucket(row.forecast_score),
+                    format_opportunity_bucket(
+                        app.opportunity_scoring_model,
+                        row.fundamentals_score
+                    ),
+                    format_opportunity_bucket(app.opportunity_scoring_model, row.technical_score),
+                    format_opportunity_bucket(app.opportunity_scoring_model, row.forecast_score),
                     format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
                     confidence_label(row.confidence),
                     width = CANDIDATE_COMPANY_COLUMN_WIDTH,
@@ -280,7 +298,11 @@ fn build_screen_lines_for_viewport(
         });
 
         if let Some(selected_opportunity) = selected_opportunity {
-            lines.extend(build_opportunity_detail_lines(state, selected_opportunity));
+            lines.extend(build_opportunity_detail_lines(
+                state,
+                app,
+                selected_opportunity,
+            ));
         } else {
             lines.push(RenderLine {
                 color: Some(Color::DarkGrey),
@@ -556,17 +578,12 @@ fn build_opportunity_row(
     candidate: CandidateRow,
 ) -> Option<OpportunityRow> {
     let detail = state.detail(&candidate.symbol)?;
-    let (fundamentals_score, fundamentals_signals) = score_opportunity_fundamentals(&detail);
-    let (technical_score, technical_signals) =
-        score_opportunity_technicals(preferred_opportunity_chart_summary(app, &detail.symbol));
-    let (forecast_score, forecast_signals) = score_opportunity_forecasts(app, &detail);
-    let coverage_count = [fundamentals_score, technical_score, forecast_score]
-        .into_iter()
-        .filter(Option::is_some)
-        .count();
-    let composite_score = fundamentals_score.unwrap_or(0)
-        + technical_score.unwrap_or(0)
-        + forecast_score.unwrap_or(0);
+    let score = score_opportunity_with_model(
+        app,
+        &detail,
+        preferred_opportunity_chart_summary(app, &detail.symbol),
+        app.opportunity_scoring_model,
+    );
 
     Some(OpportunityRow {
         symbol: detail.symbol,
@@ -575,15 +592,52 @@ fn build_opportunity_row(
         gap_bps: detail.gap_bps,
         confidence: detail.confidence,
         is_watched: detail.is_watched,
+        fundamentals_score: score.fundamentals_score,
+        technical_score: score.technical_score,
+        forecast_score: score.forecast_score,
+        composite_score: score.composite_score,
+        coverage_count: score.coverage_count,
+        fundamentals_signals: score.fundamentals_signals,
+        technical_signals: score.technical_signals,
+        forecast_signals: score.forecast_signals,
+    })
+}
+
+fn score_opportunity_with_model(
+    app: &AppState,
+    detail: &SymbolDetail,
+    summary: Option<&ChartRangeSummary>,
+    model: OpportunityScoringModel,
+) -> OpportunityScoreBreakdown {
+    let (fundamentals_score, fundamentals_signals) = match model {
+        OpportunityScoringModel::Legacy => score_opportunity_fundamentals(detail),
+        OpportunityScoringModel::Aggressive => aggressive_fundamentals_score(detail),
+    };
+    let (technical_score, technical_signals) = match model {
+        OpportunityScoringModel::Legacy => score_opportunity_technicals(summary),
+        OpportunityScoringModel::Aggressive => aggressive_technical_score(summary),
+    };
+    let (forecast_score, forecast_signals) = match model {
+        OpportunityScoringModel::Legacy => score_opportunity_forecasts(app, detail),
+        OpportunityScoringModel::Aggressive => aggressive_forecast_score(app, detail),
+    };
+    let coverage_count = [fundamentals_score, technical_score, forecast_score]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+
+    OpportunityScoreBreakdown {
         fundamentals_score,
         technical_score,
         forecast_score,
-        composite_score,
+        composite_score: fundamentals_score.unwrap_or(0)
+            + technical_score.unwrap_or(0)
+            + forecast_score.unwrap_or(0),
         coverage_count,
         fundamentals_signals,
         technical_signals,
         forecast_signals,
-    })
+    }
 }
 
 fn score_opportunity_fundamentals(detail: &SymbolDetail) -> (Option<i32>, Vec<&'static str>) {
@@ -764,6 +818,227 @@ fn score_opportunity_forecasts(
     }
 }
 
+fn aggressive_fundamentals_score(detail: &SymbolDetail) -> (Option<i32>, Vec<&'static str>) {
+    let Some(fundamentals) = detail.fundamentals.as_ref() else {
+        return (None, Vec::new());
+    };
+
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    if fundamentals.free_cash_flow_dollars.unwrap_or(0) > 0 {
+        score += 2;
+        signals.push("FCF+2");
+    } else {
+        score -= 2;
+        signals.push("FCF-2");
+    }
+    if fundamentals.operating_cash_flow_dollars.unwrap_or(0) > 0 {
+        score += 1;
+        signals.push("OCF+1");
+    } else {
+        score -= 1;
+        signals.push("OCF-1");
+    }
+    let roe_bps = fundamentals.return_on_equity_bps.unwrap_or(0);
+    if roe_bps >= 2_000 {
+        score += 2;
+        signals.push("ROE20+");
+    } else if roe_bps >= 1_000 {
+        score += 1;
+        signals.push("ROE10+");
+    } else if roe_bps < 0 {
+        score -= 2;
+        signals.push("ROE-");
+    }
+
+    let balance_ok = fundamentals
+        .debt_to_equity_hundredths
+        .map(|value| value <= 100)
+        .unwrap_or(false)
+        || matches!(
+            (
+                fundamentals.total_cash_dollars,
+                fundamentals.total_debt_dollars,
+            ),
+            (Some(total_cash_dollars), Some(total_debt_dollars)) if total_cash_dollars >= total_debt_dollars
+        );
+    if balance_ok {
+        score += 2;
+        signals.push("Balance+2");
+    } else {
+        score -= 2;
+        signals.push("Balance-2");
+    }
+
+    let growth_bps = fundamentals.earnings_growth_bps.unwrap_or(0);
+    if growth_bps >= 1_000 {
+        score += 2;
+        signals.push("Growth10+");
+    } else if growth_bps > 0 {
+        score += 1;
+        signals.push("Growth+");
+    } else if growth_bps < 0 {
+        score -= 2;
+        signals.push("Growth-");
+    }
+
+    (Some(score), signals)
+}
+
+fn aggressive_technical_score(
+    summary: Option<&ChartRangeSummary>,
+) -> (Option<i32>, Vec<&'static str>) {
+    let Some(summary) = summary else {
+        return (None, Vec::new());
+    };
+    let Some(latest_close_cents) = summary.latest_close_cents else {
+        return (Some(0), Vec::new());
+    };
+
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    if summary
+        .ema20_cents
+        .is_some_and(|ema20_cents| latest_close_cents > ema20_cents)
+    {
+        score += 2;
+        signals.push(">EMA20+2");
+    } else if summary.ema20_cents.is_some() {
+        score -= 2;
+        signals.push("<EMA20-2");
+    }
+    if summary
+        .ema50_cents
+        .is_some_and(|ema50_cents| latest_close_cents > ema50_cents)
+    {
+        score += 1;
+        signals.push(">EMA50+1");
+    }
+    if summary
+        .ema200_cents
+        .is_some_and(|ema200_cents| latest_close_cents > ema200_cents)
+    {
+        score += 1;
+        signals.push(">EMA200+1");
+    }
+    if matches!(
+        (summary.ema20_cents, summary.ema50_cents),
+        (Some(ema20_cents), Some(ema50_cents)) if ema20_cents > ema50_cents
+    ) {
+        score += 1;
+        signals.push("EMA20>50");
+    }
+    if matches!(
+        (summary.macd_cents, summary.signal_cents),
+        (Some(macd_cents), Some(signal_cents)) if macd_cents > signal_cents
+    ) || summary
+        .histogram_cents
+        .is_some_and(|histogram_cents| histogram_cents > 0)
+    {
+        score += 1;
+        signals.push("MACD+");
+    } else if summary.histogram_cents.is_some() || summary.macd_cents.is_some() {
+        score -= 2;
+        signals.push("MACD-");
+    }
+
+    (Some(score), signals)
+}
+
+fn aggressive_forecast_score(
+    app: &AppState,
+    detail: &SymbolDetail,
+) -> (Option<i32>, Vec<&'static str>) {
+    let mut available = false;
+    let mut score = 0;
+    let mut signals = Vec::new();
+
+    match detail.external_status {
+        ExternalSignalStatus::Supportive => {
+            available = true;
+            score += 2;
+            signals.push("Support+2");
+        }
+        ExternalSignalStatus::Divergent => {
+            available = true;
+            score -= 2;
+            signals.push("Divergent-2");
+        }
+        ExternalSignalStatus::Stale | ExternalSignalStatus::Missing => {}
+    }
+
+    let analyst_count = detail.analyst_opinion_count.unwrap_or(0);
+    if analyst_count >= 10 {
+        available = true;
+        score += 2;
+        signals.push("Analysts10+");
+    } else if analyst_count >= 5 {
+        available = true;
+        score += 1;
+        signals.push("Analysts5+");
+    }
+
+    if let Some(recommendation_mean_hundredths) = detail.recommendation_mean_hundredths {
+        available = true;
+        if recommendation_mean_hundredths <= 170 {
+            score += 2;
+            signals.push("Rec1.7+");
+        } else if recommendation_mean_hundredths <= 220 {
+            score += 1;
+            signals.push("Rec2.2+");
+        } else if recommendation_mean_hundredths >= 300 {
+            score -= 2;
+            signals.push("Rec3.0-");
+        }
+    }
+
+    if let Some(weighted_external_signal_fair_value_cents) =
+        detail.weighted_external_signal_fair_value_cents
+    {
+        available = true;
+        let upside_bps = checked_upside_bps(
+            detail.market_price_cents,
+            weighted_external_signal_fair_value_cents,
+        )
+        .unwrap_or(0);
+        if upside_bps >= 5_000 {
+            score += 3;
+            signals.push("Weighted50+");
+        } else if upside_bps >= 3_000 {
+            score += 2;
+            signals.push("Weighted30+");
+        } else if upside_bps < 0 {
+            score -= 2;
+            signals.push("Weighted-");
+        }
+    }
+
+    if let Some(AnalysisCacheEntry::Ready { analysis, .. }) =
+        app.detail_analysis_entry(&detail.symbol)
+    {
+        available = true;
+        let margin_bps = dcf_margin_of_safety_bps(analysis, detail.market_price_cents).unwrap_or(0);
+        if margin_bps >= 4_000 {
+            score += 4;
+            signals.push("DCF40+");
+        } else if margin_bps >= 2_000 {
+            score += 2;
+            signals.push("DCF20+");
+        } else if margin_bps < -1_000 {
+            score -= 3;
+            signals.push("DCF-");
+        }
+    }
+
+    if available {
+        (Some(score), signals)
+    } else {
+        (None, Vec::new())
+    }
+}
+
 fn opportunity_row_color(row: &OpportunityRow, is_selected: bool, is_stale: bool) -> Color {
     if is_selected {
         return if row.confidence == ConfidenceBand::High {
@@ -779,13 +1054,20 @@ fn opportunity_row_color(row: &OpportunityRow, is_selected: bool, is_stale: bool
     confidence_color(row.confidence)
 }
 
-fn format_opportunity_bucket(score: Option<i32>) -> String {
+fn format_opportunity_bucket(model: OpportunityScoringModel, score: Option<i32>) -> String {
     score
-        .map(|value| format!("{value}/5"))
+        .map(|value| match model {
+            OpportunityScoringModel::Legacy => format!("{value}/5"),
+            OpportunityScoringModel::Aggressive => value.to_string(),
+        })
         .unwrap_or_else(|| "--".to_string())
 }
 
-fn build_opportunity_detail_lines(state: &TerminalState, row: &OpportunityRow) -> Vec<RenderLine> {
+fn build_opportunity_detail_lines(
+    state: &TerminalState,
+    app: &AppState,
+    row: &OpportunityRow,
+) -> Vec<RenderLine> {
     vec![
         RenderLine {
             color: Some(status_summary_color(
@@ -793,10 +1075,11 @@ fn build_opportunity_detail_lines(state: &TerminalState, row: &OpportunityRow) -
                 row.confidence,
             )),
             text: format!(
-                "Symbol: {}  Watched: {}  Opportunity score: {}  Coverage: {}/3  Confidence: {}",
+                "Symbol: {}  Watched: {}  Opportunity score: {}  Model: {}  Coverage: {}/3  Confidence: {}",
                 format_symbol_with_company(&row.symbol, state.company_name(&row.symbol)),
                 if row.is_watched { "yes" } else { "no" },
                 row.composite_score,
+                app.opportunity_scoring_model.label(),
                 row.coverage_count,
                 confidence_label(row.confidence),
             ),
@@ -808,9 +1091,9 @@ fn build_opportunity_detail_lines(state: &TerminalState, row: &OpportunityRow) -
                 format_money(row.market_price_cents),
                 format_money(row.intrinsic_value_cents),
                 format_upside_percent(row.market_price_cents, row.intrinsic_value_cents),
-                format_opportunity_bucket(row.fundamentals_score),
-                format_opportunity_bucket(row.technical_score),
-                format_opportunity_bucket(row.forecast_score),
+                format_opportunity_bucket(app.opportunity_scoring_model, row.fundamentals_score),
+                format_opportunity_bucket(app.opportunity_scoring_model, row.technical_score),
+                format_opportunity_bucket(app.opportunity_scoring_model, row.forecast_score),
             ),
         },
         RenderLine {
@@ -3780,4 +4063,3 @@ fn visible_text(text: &str) -> String {
 
     visible
 }
-

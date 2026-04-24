@@ -49,6 +49,12 @@ enum class DcfSignal {
 }
 
 @Serializable
+enum class OpportunityScoringModel {
+    Legacy,
+    Aggressive,
+}
+
+@Serializable
 data class ViewFilter(
     val query: String = "",
     val watchlistOnly: Boolean = false,

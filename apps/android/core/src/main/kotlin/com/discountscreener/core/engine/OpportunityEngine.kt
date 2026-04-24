@@ -6,6 +6,7 @@ import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSignal
 import com.discountscreener.core.model.ExternalSignalStatus
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
@@ -18,6 +19,18 @@ data class OpportunityContext(
     val filter: ViewFilter = ViewFilter(),
     val chartSummariesBySymbol: Map<String, Map<ChartRange, ChartRangeSummary>> = emptyMap(),
     val analysesBySymbol: Map<String, DcfAnalysis> = emptyMap(),
+    val scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
+)
+
+data class OpportunityScoreBreakdown(
+    val fundamentalsScore: Int?,
+    val technicalScore: Int?,
+    val forecastScore: Int?,
+    val compositeScore: Int,
+    val coverageCount: Int,
+    val fundamentalsSignals: List<String>,
+    val technicalSignals: List<String>,
+    val forecastSignals: List<String>,
 )
 
 object OpportunityEngine {
@@ -31,15 +44,12 @@ object OpportunityEngine {
             .filter { it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
-                val (fundamentalsScore, fundamentalsSignals) = scoreFundamentals(detail)
-                val (technicalScore, technicalSignals) = scoreTechnicals(
-                    preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
-                )
-                val (forecastScore, forecastSignals) = scoreForecasts(
+                val score = scoreWithModel(
                     detail = detail,
+                    summary = preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
                     analysis = context.analysesBySymbol[detail.symbol],
+                    model = context.scoringModel,
                 )
-                val coverageCount = listOf(fundamentalsScore, technicalScore, forecastScore).count { it != null }
                 OpportunityRow(
                     symbol = detail.symbol,
                     marketPriceCents = detail.marketPriceCents,
@@ -48,14 +58,14 @@ object OpportunityEngine {
                     upsideBps = detail.upsideBps,
                     confidence = detail.confidence,
                     isWatched = detail.isWatched,
-                    fundamentalsScore = fundamentalsScore,
-                    technicalScore = technicalScore,
-                    forecastScore = forecastScore,
-                    compositeScore = (fundamentalsScore ?: 0) + (technicalScore ?: 0) + (forecastScore ?: 0),
-                    coverageCount = coverageCount,
-                    fundamentalsSignals = fundamentalsSignals,
-                    technicalSignals = technicalSignals,
-                    forecastSignals = forecastSignals,
+                    fundamentalsScore = score.fundamentalsScore,
+                    technicalScore = score.technicalScore,
+                    forecastScore = score.forecastScore,
+                    compositeScore = score.compositeScore,
+                    coverageCount = score.coverageCount,
+                    fundamentalsSignals = score.fundamentalsSignals,
+                    technicalSignals = score.technicalSignals,
+                    forecastSignals = score.forecastSignals,
                     companyName = detail.companyName,
                 )
             }
@@ -69,6 +79,38 @@ object OpportunityEngine {
                 .thenBy { it.symbol },
         )
         return rows
+    }
+
+    fun scoreWithModel(
+        detail: SymbolDetail,
+        summary: ChartRangeSummary?,
+        analysis: DcfAnalysis?,
+        model: OpportunityScoringModel,
+    ): OpportunityScoreBreakdown {
+        val (fundamentalsScore, fundamentalsSignals) = when (model) {
+            OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
+            OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
+        }
+        val (technicalScore, technicalSignals) = when (model) {
+            OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
+            OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary)
+        }
+        val (forecastScore, forecastSignals) = when (model) {
+            OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis)
+            OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis)
+        }
+        val coverageCount = listOf(fundamentalsScore, technicalScore, forecastScore).count { it != null }
+
+        return OpportunityScoreBreakdown(
+            fundamentalsScore = fundamentalsScore,
+            technicalScore = technicalScore,
+            forecastScore = forecastScore,
+            compositeScore = (fundamentalsScore ?: 0) + (technicalScore ?: 0) + (forecastScore ?: 0),
+            coverageCount = coverageCount,
+            fundamentalsSignals = fundamentalsSignals,
+            technicalSignals = technicalSignals,
+            forecastSignals = forecastSignals,
+        )
     }
 
     fun scoreFundamentals(detail: SymbolDetail): Pair<Int?, List<String>> {
@@ -178,6 +220,204 @@ object OpportunityEngine {
                 DcfSignal.Fair -> Unit
             }
         }
+        return if (available) score to signals else null to emptyList()
+    }
+
+    private fun aggressiveFundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
+        val fundamentals = detail.fundamentals ?: return null to emptyList()
+        var score = 0
+        val signals = mutableListOf<String>()
+
+        if ((fundamentals.freeCashFlowDollars ?: 0) > 0) {
+            score += 2
+            signals += "FCF+2"
+        } else {
+            score -= 2
+            signals += "FCF-2"
+        }
+        if ((fundamentals.operatingCashFlowDollars ?: 0) > 0) {
+            score += 1
+            signals += "OCF+1"
+        } else {
+            score -= 1
+            signals += "OCF-1"
+        }
+
+        val roeBps = fundamentals.returnOnEquityBps ?: 0
+        when {
+            roeBps >= 2_000 -> {
+                score += 2
+                signals += "ROE20+"
+            }
+            roeBps >= 1_000 -> {
+                score += 1
+                signals += "ROE10+"
+            }
+            roeBps < 0 -> {
+                score -= 2
+                signals += "ROE-"
+            }
+        }
+
+        val balanceOk = (fundamentals.debtToEquityHundredths?.let { it <= 100 } ?: false) ||
+            (
+                fundamentals.totalCashDollars != null &&
+                    fundamentals.totalDebtDollars != null &&
+                    fundamentals.totalCashDollars >= fundamentals.totalDebtDollars
+                )
+        if (balanceOk) {
+            score += 2
+            signals += "Balance+2"
+        } else {
+            score -= 2
+            signals += "Balance-2"
+        }
+
+        val growthBps = fundamentals.earningsGrowthBps ?: 0
+        when {
+            growthBps >= 1_000 -> {
+                score += 2
+                signals += "Growth10+"
+            }
+            growthBps > 0 -> {
+                score += 1
+                signals += "Growth+"
+            }
+            growthBps < 0 -> {
+                score -= 2
+                signals += "Growth-"
+            }
+        }
+
+        return score to signals
+    }
+
+    private fun aggressiveTechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
+        summary ?: return null to emptyList()
+        val latestCloseCents = summary.latestCloseCents ?: return 0 to emptyList()
+        var score = 0
+        val signals = mutableListOf<String>()
+
+        if (summary.ema20Cents?.let { latestCloseCents > it } == true) {
+            score += 2
+            signals += ">EMA20+2"
+        } else if (summary.ema20Cents != null) {
+            score -= 2
+            signals += "<EMA20-2"
+        }
+        if (summary.ema50Cents?.let { latestCloseCents > it } == true) {
+            score += 1
+            signals += ">EMA50+1"
+        }
+        if (summary.ema200Cents?.let { latestCloseCents > it } == true) {
+            score += 1
+            signals += ">EMA200+1"
+        }
+        if (summary.ema20Cents != null && summary.ema50Cents != null && summary.ema20Cents > summary.ema50Cents) {
+            score += 1
+            signals += "EMA20>50"
+        }
+        if (
+            (summary.macdCents != null && summary.signalCents != null && summary.macdCents > summary.signalCents) ||
+            (summary.histogramCents?.let { it > 0 } == true)
+        ) {
+            score += 1
+            signals += "MACD+"
+        } else if (summary.histogramCents != null || summary.macdCents != null) {
+            score -= 2
+            signals += "MACD-"
+        }
+
+        return score to signals
+    }
+
+    private fun aggressiveForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+        var available = false
+        var score = 0
+        val signals = mutableListOf<String>()
+
+        when (detail.externalStatus) {
+            ExternalSignalStatus.Supportive -> {
+                available = true
+                score += 2
+                signals += "Support+2"
+            }
+            ExternalSignalStatus.Divergent -> {
+                available = true
+                score -= 2
+                signals += "Divergent-2"
+            }
+            ExternalSignalStatus.Stale, ExternalSignalStatus.Missing -> Unit
+        }
+
+        val analystCount = detail.analystOpinionCount ?: 0
+        when {
+            analystCount >= 10 -> {
+                available = true
+                score += 2
+                signals += "Analysts10+"
+            }
+            analystCount >= 5 -> {
+                available = true
+                score += 1
+                signals += "Analysts5+"
+            }
+        }
+
+        detail.recommendationMeanHundredths?.let { recommendation ->
+            available = true
+            when {
+                recommendation <= 170 -> {
+                    score += 2
+                    signals += "Rec1.7+"
+                }
+                recommendation <= 220 -> {
+                    score += 1
+                    signals += "Rec2.2+"
+                }
+                recommendation >= 300 -> {
+                    score -= 2
+                    signals += "Rec3.0-"
+                }
+            }
+        }
+
+        detail.weightedExternalSignalFairValueCents?.let { weightedFairValue ->
+            available = true
+            when (val upsideBps = checkedUpsideBps(detail.marketPriceCents, weightedFairValue) ?: 0) {
+                in 5_000..Int.MAX_VALUE -> {
+                    score += 3
+                    signals += "Weighted50+"
+                }
+                in 3_000..4_999 -> {
+                    score += 2
+                    signals += "Weighted30+"
+                }
+                in Int.MIN_VALUE..-1 -> {
+                    score -= 2
+                    signals += "Weighted-"
+                }
+            }
+        }
+
+        if (analysis != null) {
+            available = true
+            when (val marginBps = dcfMarginOfSafetyBps(analysis, detail.marketPriceCents) ?: 0) {
+                in 4_000..Int.MAX_VALUE -> {
+                    score += 4
+                    signals += "DCF40+"
+                }
+                in 2_000..3_999 -> {
+                    score += 2
+                    signals += "DCF20+"
+                }
+                in Int.MIN_VALUE..-1_001 -> {
+                    score -= 3
+                    signals += "DCF-"
+                }
+            }
+        }
+
         return if (available) score to signals else null to emptyList()
     }
 

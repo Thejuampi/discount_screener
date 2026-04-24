@@ -31,17 +31,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -50,11 +58,20 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.focusable
+import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
-import com.discountscreener.android.presentation.dashboard.HistoryMetricGroup
 import com.discountscreener.android.presentation.dashboard.HistorySubview
+import com.discountscreener.android.domain.model.ValuationChange
+import com.discountscreener.android.domain.model.ValuationChangeTier
+import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
+import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
+import com.discountscreener.android.domain.model.significantValuationChange
+import com.discountscreener.core.engine.ChartAnalysis
+import com.discountscreener.core.engine.ReplayWindow
+import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.SymbolDetail
@@ -74,7 +91,24 @@ fun DetailScreen(
     alerts: List<String>,
     onAction: (DashboardAction) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(route.symbol, route.subtab) {
+        focusRequester.requestFocus()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .focusRequester(focusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                val replayAction = replayActionForKey(event.key) ?: return@onPreviewKeyEvent false
+                if (route.subtab == DetailSubtab.Snapshot && event.type == KeyEventType.KeyDown) {
+                    onAction(replayAction)
+                }
+                route.subtab == DetailSubtab.Snapshot
+            },
+    ) {
         TopAppBar(
             title = {
                 Text(
@@ -127,11 +161,13 @@ fun DetailScreen(
                     detail = detail,
                     chartRange = route.chartRange,
                     candles = charts[route.chartRange].orEmpty(),
+                    replayOffset = route.replayOffset,
                     alerts = alerts,
                     onAction = onAction,
                 )
                 DetailSubtab.History -> HistoryContent(
                     route = route,
+                    detail = detail,
                     history = history,
                     onAction = onAction,
                 )
@@ -146,13 +182,28 @@ private fun SnapshotContent(
     detail: SymbolDetail?,
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
+    replayOffset: Int,
     alerts: List<String>,
     onAction: (DashboardAction) -> Unit,
 ) {
-    val priceChartModel = remember(candles) { buildPriceChartModel(candles) }
-    val volumeChartModel = remember(candles) { buildVolumeChartModel(candles) }
-    val macdChartModel = remember(candles) { buildMacdChartModel(candles) }
-    val dateTicks = remember(candles, chartRange) { buildDateAxisTicks(candles, chartRange) }
+    val replayWindow = remember(candles, replayOffset) {
+        ChartAnalysis.buildReplayWindow(candles, replayOffset)
+    }
+    val visibleCandles = replayWindow.visibleCandles
+    val priceChartModel = remember(visibleCandles) { buildPriceChartModel(visibleCandles) }
+    val volumeChartModel = remember(visibleCandles) { buildVolumeChartModel(visibleCandles) }
+    val macdChartModel = remember(visibleCandles) { buildMacdChartModel(visibleCandles) }
+    val volumeProfileModel = remember(visibleCandles, priceChartModel) {
+        priceChartModel?.let { model ->
+            buildVolumeProfileModel(
+                candles = visibleCandles,
+                minPriceCents = model.minValue.roundToLong(),
+                maxPriceCents = model.maxValue.roundToLong(),
+                binCount = VolumeProfileBinCount,
+            )
+        }
+    }
+    val dateTicks = remember(visibleCandles, chartRange) { buildDateAxisTicks(visibleCandles, chartRange) }
     val trendSignals = remember(priceChartModel, macdChartModel) {
         buildList {
             addAll(priceChartModel?.trendSignals.orEmpty())
@@ -197,13 +248,22 @@ private fun SnapshotContent(
         }
 
         item {
+            ChartReplayControls(
+                replayWindow = replayWindow,
+                maxVolume = volumeChartModel?.maxVolume ?: 0L,
+                onAction = onAction,
+            )
+        }
+
+        item {
             TrendSignalsSection(signals = trendSignals)
         }
 
         item {
             PriceChartSection(
-                candles = candles,
+                candles = visibleCandles,
                 model = priceChartModel,
+                volumeProfileModel = volumeProfileModel,
                 axisWidth = axisWidth,
                 dateTicks = if (macdChartModel == null && volumeChartModel == null) dateTicks else emptyList(),
             )
@@ -211,7 +271,7 @@ private fun SnapshotContent(
 
         item {
             VolumeChartSection(
-                candles = candles,
+                candles = visibleCandles,
                 model = volumeChartModel,
                 axisWidth = axisWidth,
                 dateTicks = if (macdChartModel == null) dateTicks else emptyList(),
@@ -220,7 +280,7 @@ private fun SnapshotContent(
 
         item {
             MacdChartSection(
-                candles = candles,
+                candles = visibleCandles,
                 model = macdChartModel,
                 axisWidth = axisWidth,
                 dateTicks = dateTicks,
@@ -556,33 +616,30 @@ private fun FundamentalInfoChip(
 @Composable
 private fun HistoryContent(
     route: DetailRoute,
+    detail: SymbolDetail?,
     history: List<SymbolRevision>,
     onAction: (DashboardAction) -> Unit,
 ) {
+    val filteredHistory = remember(history, route.historyTimeWindow) {
+        filterHistoryWindow(history, route.historyTimeWindow)
+    }
+    val valuationHistory = remember(filteredHistory) {
+        filteredHistory.filter { preferredAnalystTargetFairValueCents(it.detail) != null }
+    }
+    val targetEpisodes = remember(valuationHistory) { analystTargetEpisodes(valuationHistory) }
+    val changeEvents = remember(targetEpisodes) { analystTargetChangeEvents(targetEpisodes) }
+    val historyOverview = remember(valuationHistory, targetEpisodes) {
+        analystTargetHistoryOverview(valuationHistory, targetEpisodes)
+    }
+    val trendSummary = remember(valuationHistory) { valuationTrendSummary(valuationHistory) }
+    val historyStatus = remember(detail, history, valuationHistory) {
+        historyStatusMessage(detail, history, valuationHistory)
+    }
+    val showTrendSummary = changeEvents.size >= 2
+    val showChartToggle = changeEvents.size >= 2
+    val showChangeLog = changeEvents.isNotEmpty()
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FilterChip(
-                selected = route.historySubview == HistorySubview.Graphs,
-                onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Graphs)) },
-                label = { Text("Graphs") },
-            )
-            FilterChip(
-                selected = route.historySubview == HistorySubview.Table,
-                onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Table)) },
-                label = { Text("Table") },
-            )
-        }
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            HistoryMetricGroup.entries.forEach { group ->
-                FilterChip(
-                    selected = route.historyMetricGroup == group,
-                    onClick = { onAction(DashboardAction.SetHistoryMetricGroup(group)) },
-                    label = { Text(group.name, maxLines = 1) },
-                )
-            }
-        }
-
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ChartRange.entries.forEach { window ->
                 FilterChip(
@@ -593,51 +650,675 @@ private fun HistoryContent(
             }
         }
 
-        if (history.isEmpty()) {
-            Text("No revision history yet", style = MaterialTheme.typography.bodyMedium)
-        } else if (route.historySubview == HistorySubview.Graphs) {
-            HistoryGraph(history = history)
-        } else {
-            HistoryTable(history = history)
+        historyStatus?.let { HistoryStatusCard(it) }
+
+        historyOverview?.let { overview ->
+            HistoryOverviewCard(overview = overview)
+        }
+
+        if (showTrendSummary) {
+            TrendSummaryCard(summary = trendSummary)
+        }
+        if (showChartToggle) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = route.historySubview == HistorySubview.Graphs,
+                    onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Graphs)) },
+                    label = { Text("Chart") },
+                )
+                FilterChip(
+                    selected = route.historySubview == HistorySubview.Table,
+                    onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Table)) },
+                    label = { Text("Changes") },
+                )
+            }
+        }
+        if (showChangeLog) {
+            if (route.historySubview == HistorySubview.Graphs) {
+                if (showChartToggle) {
+                    HistoryGraph(episodes = targetEpisodes, summary = trendSummary)
+                } else {
+                    HistoryTable(changeEvents = changeEvents, summary = trendSummary)
+                }
+            } else {
+                HistoryTable(changeEvents = changeEvents, summary = trendSummary)
+            }
         }
     }
 }
 
 @Composable
-private fun HistoryGraph(history: List<SymbolRevision>) {
-    val gapValues = history.map { it.detail.gapBps.toFloat() }
+private fun HistoryGraph(
+    episodes: List<AnalystTargetEpisode>,
+    summary: ValuationTrendSummary,
+) {
+    val targetValues = episodes.map { it.targetFairValueCents.toFloat() }
     LineChart(
-        values = gapValues,
+        values = targetValues,
         modifier = Modifier
             .fillMaxWidth()
-            .height(180.dp)
+            .height(140.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant),
-        lineColor = MaterialTheme.colorScheme.tertiary,
+        lineColor = summary.color,
     )
 }
 
 @Composable
-private fun HistoryTable(history: List<SymbolRevision>) {
+private fun HistoryTable(
+    changeEvents: List<AnalystTargetChangeEvent>,
+    summary: ValuationTrendSummary,
+) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        items(history) { revision ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+        items(changeEvents.asReversed()) { event ->
+            val revision = event.current.endRevision
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        java.time.Instant.ofEpochSecond(revision.evaluatedAtEpochSeconds)
+                            .atZone(java.time.ZoneId.systemDefault())
+                            .toLocalDate()
+                            .toString(),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        money(event.current.targetFairValueCents),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = summary.color,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${money(event.previous.targetFairValueCents)} -> ${money(event.current.targetFairValueCents)}  ${signedPercentLabel(event.changeBps)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val color = valuationChangeColorForBps(event.changeBps, event.significantChange)
+                    Text(
+                        text = event.significantChange?.let { valuationChangeLabel(it) } ?: signedPercentLabel(event.changeBps),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = color,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrendSummaryCard(summary: ValuationTrendSummary) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(summary.color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = summary.title,
+            color = summary.color,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = summary.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun HistoryStatusCard(message: HistoryStatusMessage) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(message.color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = message.title,
+            color = message.color,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = message.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun HistoryOverviewCard(overview: AnalystTargetHistoryOverview) {
+    val accentColor = when (overview.state) {
+        AnalystTargetHistoryState.Changed ->
+            if ((overview.netChangeBps ?: 0) >= 0) BullishChartColor else BearishChartColor
+        AnalystTargetHistoryState.Flat,
+        AnalystTargetHistoryState.OneSnapshot -> MaterialTheme.colorScheme.primary
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(accentColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = overview.title,
+            color = accentColor,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = overview.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            HistoryMetaChip("Target ${money(overview.latestTargetCents)}")
+            overview.latestUpsideBps?.let { HistoryMetaChip("Upside ${signedPercentLabel(it)}") }
+            HistoryMetaChip("${overview.sourceLabel} source")
+            overview.coverageCount?.let { HistoryMetaChip("$it analysts") }
+            HistoryMetaChip(
+                when (overview.state) {
+                    AnalystTargetHistoryState.OneSnapshot -> "1 snapshot"
+                    AnalystTargetHistoryState.Flat -> "${overview.observationCount} observations"
+                    AnalystTargetHistoryState.Changed -> pluralizedLabel(overview.changeCount, "revision")
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryMetaChip(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(999.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun LatestMeaningfulChangeCard(
+    latestMeaningfulChange: LatestMeaningfulRevisionChange?,
+    latestRevision: SymbolRevision,
+) {
+    val weightedTarget = preferredAnalystTargetFairValueCents(latestRevision.detail) ?: return
+    val coverage = preferredAnalystCoverageCount(latestRevision.detail)
+    val title: String
+    val detail: String
+    val color: Color
+    if (latestMeaningfulChange != null) {
+        val change = latestMeaningfulChange.change
+        val directionText = when (change.direction) {
+            ChangeDirection.Up -> "raised"
+            ChangeDirection.Down -> "cut"
+        }
+        val tierText = if (change.tier == ValuationChangeTier.Major) "major" else "meaningful"
+        title = "Latest $tierText target change"
+        detail = buildString {
+            append("Analysts $directionText the analyst target ")
+            append(valuationChangeLabel(change))
+            append(" on ${revisionDateLabel(latestMeaningfulChange.current)}")
+            append(". ${money(preferredAnalystTargetFairValueCents(latestMeaningfulChange.previous.detail) ?: 0L)} -> ${money(weightedTarget)}")
+            coverage?.let { append(" from $it analysts") }
+            append(".")
+        }
+        color = valuationChangeColor(change)
+    } else {
+        title = "No meaningful target change in this window"
+        detail = buildString {
+            append("Latest analyst target is ${money(weightedTarget)}")
+            coverage?.let { append(" from $it analysts") }
+            append(". Changes stayed inside the 5% significance threshold.")
+        }
+        color = MaterialTheme.colorScheme.outline
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = title,
+            color = color,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SignificantRevisionSection(changes: List<RevisionValuationChange>) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Recent significant revisions",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            changes.takeLast(4).asReversed().forEach { change ->
+                val color = valuationChangeColor(change.change)
                 Text(
-                    java.time.Instant.ofEpochSecond(revision.evaluatedAtEpochSeconds)
-                        .atZone(java.time.ZoneId.systemDefault())
-                        .toLocalDate()
-                        .toString(),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "Disc ${formatPct(revision.detail.gapBps)}  Upside ${formatPct(revision.detail.upsideBps)}  Price ${money(revision.detail.marketPriceCents)}",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "${revisionDateLabel(change.revision)} ${valuationChangeLabel(change.change)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color,
+                    modifier = Modifier
+                        .background(color.copy(alpha = if (change.change.tier == ValuationChangeTier.Major) 0.22f else 0.12f), RoundedCornerShape(999.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
         }
     }
+}
+
+internal data class ValuationTrendSummary(
+    val title: String,
+    val detail: String,
+    val color: Color,
+)
+
+internal enum class AnalystTargetHistoryState {
+    OneSnapshot,
+    Flat,
+    Changed,
+}
+
+internal data class AnalystTargetEpisode(
+    val startRevision: SymbolRevision,
+    val endRevision: SymbolRevision,
+    val targetFairValueCents: Long,
+    val observationCount: Int,
+)
+
+internal data class AnalystTargetChangeEvent(
+    val previous: AnalystTargetEpisode,
+    val current: AnalystTargetEpisode,
+    val changeBps: Int,
+    val significantChange: ValuationChange?,
+)
+
+internal data class AnalystTargetHistoryOverview(
+    val state: AnalystTargetHistoryState,
+    val title: String,
+    val detail: String,
+    val latestTargetCents: Long,
+    val latestUpsideBps: Int?,
+    val sourceLabel: String,
+    val coverageCount: Int?,
+    val observationCount: Int,
+    val changeCount: Int,
+    val netChangeBps: Int?,
+)
+
+internal data class RevisionValuationChange(
+    val revision: SymbolRevision,
+    val change: ValuationChange,
+)
+
+internal data class LatestMeaningfulRevisionChange(
+    val previous: SymbolRevision,
+    val current: SymbolRevision,
+    val change: ValuationChange,
+)
+
+internal data class HistoryStatusMessage(
+    val title: String,
+    val detail: String,
+    val color: Color,
+)
+
+internal fun filterHistoryWindow(
+    history: List<SymbolRevision>,
+    window: ChartRange,
+): List<SymbolRevision> {
+    if (history.isEmpty()) return emptyList()
+    val latestEpoch = history.maxOf { it.evaluatedAtEpochSeconds }
+    val cutoff = latestEpoch - historyWindowSeconds(window)
+    return history.filter { it.evaluatedAtEpochSeconds >= cutoff }.ifEmpty { history }
+}
+
+internal fun historyWindowSeconds(window: ChartRange): Long = when (window) {
+    ChartRange.Day -> 86_400L
+    ChartRange.Week -> 7 * 86_400L
+    ChartRange.Month -> 30 * 86_400L
+    ChartRange.Year -> 365 * 86_400L
+    ChartRange.FiveYears -> 5 * 365 * 86_400L
+    ChartRange.TenYears -> 10 * 365 * 86_400L
+}
+
+internal fun valuationTrendSummary(history: List<SymbolRevision>): ValuationTrendSummary {
+    val fairValues = history.mapNotNull { preferredAnalystTargetFairValueCents(it.detail) }
+    if (fairValues.size < 2) {
+        return ValuationTrendSummary(
+            title = "Building analyst target history",
+            detail = "Need at least two target revisions to compare direction.",
+            color = Color(0xFF9E9E9E),
+        )
+    }
+    val stepChanges = fairValues.zipWithNext { previous, current ->
+        checkedUpsideBps(previous, current)?.takeIf { it != 0 }
+    }.filterNotNull()
+    if (stepChanges.isEmpty()) {
+        return ValuationTrendSummary(
+            title = "Analyst targets are flat",
+            detail = "Recent revisions are not materially changing the analyst target.",
+            color = Color(0xFF9E9E9E),
+        )
+    }
+
+    val positiveSteps = stepChanges.count { it > 0 }
+    val negativeSteps = stepChanges.count { it < 0 }
+    val averageStepBps = stepChanges.average().toInt()
+    val overallDirection = when {
+        positiveSteps > 0 && negativeSteps == 0 -> ChangeDirection.Up
+        negativeSteps > 0 && positiveSteps == 0 -> ChangeDirection.Down
+        positiveSteps > negativeSteps -> ChangeDirection.Up
+        negativeSteps > positiveSteps -> ChangeDirection.Down
+        else -> null
+    }
+    val title = when (overallDirection) {
+        ChangeDirection.Up ->
+            if (negativeSteps == 0) "Analysts steadily raising targets" else "Analyst targets drifting higher"
+        ChangeDirection.Down ->
+            if (positiveSteps == 0) "Analysts steadily cutting targets" else "Analyst targets drifting lower"
+        null -> "Analyst target revisions are mixed"
+    }
+    val detail = when (overallDirection) {
+        ChangeDirection.Up ->
+            "Average revision +${"%.1f".format(kotlin.math.abs(averageStepBps) / 100.0)}% per update. First ${money(fairValues.first())} -> latest ${money(fairValues.last())}."
+        ChangeDirection.Down ->
+            "Average revision -${"%.1f".format(kotlin.math.abs(averageStepBps) / 100.0)}% per update. First ${money(fairValues.first())} -> latest ${money(fairValues.last())}."
+        null ->
+            "Targets are whipsawing between upgrades and cuts. Latest analyst target is ${money(fairValues.last())}."
+    }
+    val color = when (overallDirection) {
+        ChangeDirection.Up -> BullishChartColor
+        ChangeDirection.Down -> BearishChartColor
+        null -> Color(0xFFFFB300)
+    }
+    return ValuationTrendSummary(title = title, detail = detail, color = color)
+}
+
+internal fun analystTargetEpisodes(history: List<SymbolRevision>): List<AnalystTargetEpisode> {
+    if (history.isEmpty()) return emptyList()
+    val episodes = mutableListOf<AnalystTargetEpisode>()
+    var startRevision = history.first()
+    var endRevision = history.first()
+    var target = preferredAnalystTargetFairValueCents(startRevision.detail) ?: return emptyList()
+    var observations = 1
+
+    history.drop(1).forEach { revision ->
+        val revisionTarget = preferredAnalystTargetFairValueCents(revision.detail) ?: return@forEach
+        if (revisionTarget == target) {
+            endRevision = revision
+            observations += 1
+        } else {
+            episodes += AnalystTargetEpisode(
+                startRevision = startRevision,
+                endRevision = endRevision,
+                targetFairValueCents = target,
+                observationCount = observations,
+            )
+            startRevision = revision
+            endRevision = revision
+            target = revisionTarget
+            observations = 1
+        }
+    }
+
+    episodes += AnalystTargetEpisode(
+        startRevision = startRevision,
+        endRevision = endRevision,
+        targetFairValueCents = target,
+        observationCount = observations,
+    )
+    return episodes
+}
+
+internal fun analystTargetChangeEvents(episodes: List<AnalystTargetEpisode>): List<AnalystTargetChangeEvent> = episodes
+    .zipWithNext { previous, current ->
+        val changeBps = checkedUpsideBps(previous.targetFairValueCents, current.targetFairValueCents) ?: 0
+        AnalystTargetChangeEvent(
+            previous = previous,
+            current = current,
+            changeBps = changeBps,
+            significantChange = significantValuationChange(
+                previousFairValueCents = previous.targetFairValueCents,
+                currentFairValueCents = current.targetFairValueCents,
+            ),
+        )
+    }
+
+internal fun analystTargetHistoryOverview(
+    valuationHistory: List<SymbolRevision>,
+    episodes: List<AnalystTargetEpisode>,
+): AnalystTargetHistoryOverview? {
+    if (valuationHistory.isEmpty() || episodes.isEmpty()) return null
+    val latestRevision = valuationHistory.last()
+    val latestTarget = preferredAnalystTargetFairValueCents(latestRevision.detail) ?: return null
+    val latestPrice = latestRevision.detail.marketPriceCents
+    val latestUpsideBps = checkedUpsideBps(latestPrice, latestTarget)
+    val firstRevision = valuationHistory.first()
+    val firstTarget = preferredAnalystTargetFairValueCents(firstRevision.detail) ?: latestTarget
+    val netChangeBps = checkedUpsideBps(firstTarget, latestTarget)
+    val sourceLabel = analystTargetSourceLabel(latestRevision.detail)
+    val coverage = preferredAnalystCoverageCount(latestRevision.detail)
+    val observationCount = valuationHistory.size
+    val changeCount = (episodes.size - 1).coerceAtLeast(0)
+    val windowDays = epochSpanDays(
+        firstRevision.evaluatedAtEpochSeconds,
+        latestRevision.evaluatedAtEpochSeconds,
+    )
+    val stableDays = epochSpanDays(
+        episodes.last().startRevision.evaluatedAtEpochSeconds,
+        latestRevision.evaluatedAtEpochSeconds,
+    )
+    val priceMoveBps = checkedUpsideBps(firstRevision.detail.marketPriceCents, latestPrice)
+    val state = when {
+        observationCount == 1 -> AnalystTargetHistoryState.OneSnapshot
+        episodes.size == 1 -> AnalystTargetHistoryState.Flat
+        else -> AnalystTargetHistoryState.Changed
+    }
+    val title = when (state) {
+        AnalystTargetHistoryState.OneSnapshot -> "First analyst-target snapshot"
+        AnalystTargetHistoryState.Flat -> "No analyst target changes in this range"
+        AnalystTargetHistoryState.Changed -> "Analyst target ${signedPercentLabel(netChangeBps ?: 0)} in this range"
+    }
+    val detail = when (state) {
+        AnalystTargetHistoryState.OneSnapshot -> buildString {
+            append("Latest analyst target is ${money(latestTarget)} vs price ${money(latestPrice)}")
+            latestUpsideBps?.let { append(" (${signedPercentLabel(it)} upside)") }
+            append(". Captured on ${revisionDateLabel(latestRevision)} from the $sourceLabel source.")
+        }
+        AnalystTargetHistoryState.Flat -> buildString {
+            append("Analysts held ${money(latestTarget)} across $observationCount observations")
+            if (windowDays > 0) {
+                append(" over $windowDays days")
+            }
+            append(".")
+            priceMoveBps?.takeIf { kotlin.math.abs(it) >= 100 }?.let {
+                append(" Price moved ${signedPercentLabel(it)} while targets stayed flat")
+                if (stableDays > 0) {
+                    append(" for $stableDays days")
+                }
+                append(".")
+            }
+        }
+        AnalystTargetHistoryState.Changed -> buildString {
+            append("Latest analyst target is ${money(latestTarget)} vs price ${money(latestPrice)}")
+            latestUpsideBps?.let { append(" (${signedPercentLabel(it)} upside)") }
+            append(". ${pluralizedLabel(changeCount, "revision")} across $observationCount observations")
+            if (windowDays > 0) {
+                append(" over $windowDays days")
+            }
+            append(". Last changed on ${revisionDateLabel(episodes.last().startRevision)}.")
+        }
+    }
+    return AnalystTargetHistoryOverview(
+        state = state,
+        title = title,
+        detail = detail,
+        latestTargetCents = latestTarget,
+        latestUpsideBps = latestUpsideBps,
+        sourceLabel = sourceLabel,
+        coverageCount = coverage,
+        observationCount = observationCount,
+        changeCount = changeCount,
+        netChangeBps = netChangeBps,
+    )
+}
+
+internal fun significantRevisionChanges(history: List<SymbolRevision>): List<RevisionValuationChange> = history
+    .zipWithNext { previous, current ->
+        significantValuationChange(
+            previousFairValueCents = preferredAnalystTargetFairValueCents(previous.detail),
+            currentFairValueCents = preferredAnalystTargetFairValueCents(current.detail),
+        )?.let { change -> RevisionValuationChange(revision = current, change = change) }
+    }
+    .mapNotNull { it }
+
+internal fun latestMeaningfulRevisionChange(
+    history: List<SymbolRevision>,
+): LatestMeaningfulRevisionChange? = history
+    .zipWithNext { previous, current ->
+        significantValuationChange(
+            previousFairValueCents = preferredAnalystTargetFairValueCents(previous.detail),
+            currentFairValueCents = preferredAnalystTargetFairValueCents(current.detail),
+        )?.let { change ->
+            LatestMeaningfulRevisionChange(previous = previous, current = current, change = change)
+        }
+    }
+    .lastOrNull()
+
+internal fun historyStatusMessage(
+    detail: SymbolDetail?,
+    history: List<SymbolRevision>,
+    valuationHistory: List<SymbolRevision>,
+): HistoryStatusMessage? {
+    val neutralColor = Color(0xFF9E9E9E)
+    if (history.isEmpty()) {
+        val currentWeightedTarget = preferredAnalystTargetFairValueCents(detail)
+        return if (currentWeightedTarget != null) {
+            HistoryStatusMessage(
+                title = "No saved analyst-target history yet",
+                detail = buildString {
+                    append("Current analyst target is ${money(currentWeightedTarget)}")
+                    preferredAnalystCoverageCount(detail)?.let { append(" from $it analysts") }
+                    append(", but there are no earlier saved revisions to compare yet.")
+                },
+                color = neutralColor,
+            )
+        } else {
+            HistoryStatusMessage(
+                title = "Waiting for analyst target history",
+                detail = "Yahoo has not produced an analyst target for this ticker yet.",
+                color = neutralColor,
+            )
+        }
+    }
+    if (valuationHistory.isEmpty()) {
+        return HistoryStatusMessage(
+            title = "No analyst-target history in this window",
+            detail = if (preferredAnalystTargetFairValueCents(detail) != null) {
+                "Saved revisions exist, but none of them include an analyst target in the selected time window yet."
+            } else {
+                "Saved revisions exist, but Yahoo did not supply an analyst target for them."
+            },
+            color = neutralColor,
+        )
+    }
+    if (valuationHistory.size == 1) {
+        val onlyRevision = valuationHistory.single()
+        return HistoryStatusMessage(
+            title = "Only one analyst-target snapshot",
+            detail = buildString {
+                append("Current analyst target is ${money(preferredAnalystTargetFairValueCents(onlyRevision.detail) ?: 0L)}")
+                preferredAnalystCoverageCount(onlyRevision.detail)?.let { append(" from $it analysts") }
+                append(". Need one more saved revision to show direction and trend.")
+            },
+            color = neutralColor,
+        )
+    }
+    return null
+}
+
+internal fun revisionChangeComparedToPrevious(
+    history: List<SymbolRevision>,
+    revision: SymbolRevision,
+): ValuationChange? {
+    val index = history.indexOfFirst { it.evaluatedAtEpochSeconds == revision.evaluatedAtEpochSeconds }
+    if (index <= 0) return null
+    return significantValuationChange(
+        previousFairValueCents = preferredAnalystTargetFairValueCents(history[index - 1].detail),
+        currentFairValueCents = preferredAnalystTargetFairValueCents(revision.detail),
+    )
+}
+
+internal fun revisionDateLabel(revision: SymbolRevision): String =
+    java.time.Instant.ofEpochSecond(revision.evaluatedAtEpochSeconds)
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDate()
+        .toString()
+
+internal fun signedPercentLabel(changeBps: Int): String {
+    val sign = if (changeBps > 0) "+" else ""
+    return "$sign${formatPct(changeBps)}"
+}
+
+internal fun analystTargetSourceLabel(detail: SymbolDetail): String = when {
+    detail.weightedExternalSignalFairValueCents != null -> "Weighted"
+    detail.externalSignalFairValueCents != null -> "Median"
+    else -> "Unknown"
+}
+
+internal fun epochSpanDays(startEpochSeconds: Long, endEpochSeconds: Long): Long =
+    ((endEpochSeconds - startEpochSeconds).coerceAtLeast(0L)) / 86_400L
+
+internal fun pluralizedLabel(count: Int, singular: String): String =
+    if (count == 1) "1 $singular" else "$count ${singular}s"
+
+private fun valuationChangeColor(change: ValuationChange): Color = when (change.direction) {
+    ChangeDirection.Up -> if (change.tier == ValuationChangeTier.Major) BullishChartColor else Color(0xFF2E7D32)
+    ChangeDirection.Down -> if (change.tier == ValuationChangeTier.Major) BearishChartColor else Color(0xFFC62828)
+}
+
+private fun valuationChangeColorForBps(changeBps: Int, change: ValuationChange?): Color {
+    change?.let { return valuationChangeColor(it) }
+    return if (changeBps >= 0) Color(0xFF2E7D32) else Color(0xFFC62828)
 }
 
 @Composable
@@ -684,6 +1365,7 @@ private fun TrendSignalsSection(signals: List<TrendSignal>) {
 private fun PriceChartSection(
     candles: List<HistoricalCandle>,
     model: PriceChartModel?,
+    volumeProfileModel: VolumeProfileModel?,
     axisWidth: Dp,
     dateTicks: List<ChartDateTick>,
 ) {
@@ -696,13 +1378,62 @@ private fun PriceChartSection(
             bottomTicks = dateTicks,
         ) { chartModifier ->
             if (model != null) {
-                OhlcChart(candles = candles, model = model, modifier = chartModifier)
+                Row(modifier = chartModifier) {
+                    OhlcChart(
+                        candles = candles,
+                        model = model,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                    )
+                    VolumeProfileChart(
+                        model = volumeProfileModel,
+                        modifier = Modifier
+                            .width(56.dp)
+                            .fillMaxHeight(),
+                    )
+                }
             } else {
                 Box(modifier = chartModifier, contentAlignment = Alignment.Center) {
                     Text("No chart data", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChartReplayControls(
+    replayWindow: ReplayWindow,
+    maxVolume: Long,
+    onAction: (DashboardAction) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TextButton(
+                onClick = { onAction(DashboardAction.StepReplayBack) },
+                enabled = replayWindow.totalCandles > 1 && replayWindow.replayOffset < replayWindow.totalCandles - 1,
+            ) { Text("Back") }
+            TextButton(
+                onClick = { onAction(DashboardAction.StepReplayForward) },
+                enabled = replayWindow.replayOffset > 0,
+            ) { Text("Forward") }
+            TextButton(
+                onClick = { onAction(DashboardAction.ResetReplay) },
+                enabled = replayWindow.replayOffset > 0,
+            ) { Text("Live") }
+        }
+        Text(
+            text = replayStatusText(
+                visibleCount = replayWindow.visibleCount,
+                totalCount = replayWindow.totalCandles,
+                replayOffset = replayWindow.replayOffset,
+                maxVolume = maxVolume,
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -1014,6 +1745,59 @@ internal fun VolumeChart(
 }
 
 @Composable
+internal fun VolumeProfileChart(
+    model: VolumeProfileModel?,
+    modifier: Modifier = Modifier,
+) {
+    val axisColor = MaterialTheme.colorScheme.outline
+    if (model == null || model.bins.isEmpty()) {
+        Box(modifier = modifier)
+        return
+    }
+
+    Canvas(modifier = modifier.padding(vertical = 4.dp, horizontal = 3.dp)) {
+        drawLine(
+            color = axisColor,
+            start = Offset(0f, 0f),
+            end = Offset(0f, size.height),
+            strokeWidth = 1f,
+        )
+        if (model.maxBinVolume <= 0L) return@Canvas
+
+        val availableWidth = (size.width - 2f).coerceAtLeast(1f)
+        val rowHeight = size.height / model.bins.size.toFloat()
+        model.bins.forEachIndexed { index, bin ->
+            val total = bin.totalVolume
+            if (total <= 0L) return@forEachIndexed
+
+            val filledWidth = ((total.toFloat() / model.maxBinVolume.toFloat()) * availableWidth)
+                .coerceIn(1f, availableWidth)
+            val upWidth = ((bin.upVolume.toFloat() / total.toFloat()) * filledWidth)
+                .coerceIn(0f, filledWidth)
+            val downWidth = filledWidth - upWidth
+            val top = index * rowHeight
+            val barTop = top + (rowHeight * 0.18f)
+            val barHeight = (rowHeight * 0.64f).coerceAtLeast(1f)
+
+            if (upWidth > 0f) {
+                drawRect(
+                    color = BullishChartColor,
+                    topLeft = Offset(2f, barTop),
+                    size = Size(upWidth, barHeight),
+                )
+            }
+            if (downWidth > 0f) {
+                drawRect(
+                    color = BearishChartColor,
+                    topLeft = Offset(2f + upWidth, barTop),
+                    size = Size(downWidth, barHeight),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 internal fun MacdChart(
     candles: List<HistoricalCandle>,
     model: MacdChartModel?,
@@ -1109,6 +1893,7 @@ internal data class MacdChartScale(
 
 private val MinChartAxisWidth = 36.dp
 private val ChartAxisPadding = 6.dp
+private const val VolumeProfileBinCount = 18
 internal val BullishChartColor = Color(0xFF00FF00)
 internal val BearishChartColor = Color(0xFFFF0000)
 internal val Ema20ChartColor = Color(0xFFFFFF00)
@@ -1165,6 +1950,18 @@ internal fun chartRangeLabel(range: ChartRange): String = when (range) {
     ChartRange.Year -> "1Y"
     ChartRange.FiveYears -> "5Y"
     ChartRange.TenYears -> "10Y"
+}
+
+internal fun replayActionForKey(key: Key): DashboardAction? = when (key) {
+    Key.DirectionLeft,
+    Key.VolumeDown,
+    -> DashboardAction.StepReplayBack
+
+    Key.DirectionRight,
+    Key.VolumeUp,
+    -> DashboardAction.StepReplayForward
+
+    else -> null
 }
 
 internal fun valuationAnchors(detail: SymbolDetail): List<ValuationAnchor> = buildList {

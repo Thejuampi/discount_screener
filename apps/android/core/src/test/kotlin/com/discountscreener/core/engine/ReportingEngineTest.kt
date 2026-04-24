@@ -7,6 +7,7 @@ import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.MarketSnapshot
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ViewFilter
 import kotlin.test.Test
@@ -154,6 +155,78 @@ class ReportingEngineTest {
                     netDebtDollars = 0,
                 ),
             ),
+        )
+    }
+
+    @Test
+    fun aggressive_model_rewards_high_upside_and_trend_more_than_legacy() {
+        val detail = engineDetail()
+        val summary = summary(2_450, 2_100, 1_900, 1_700, 220, 120, 100)
+        val analysis = com.discountscreener.core.model.DcfAnalysis(
+            bearIntrinsicValueCents = 25_000,
+            baseIntrinsicValueCents = 32_000,
+            bullIntrinsicValueCents = 38_000,
+            waccBps = 900,
+            baseGrowthBps = 1_200,
+            netDebtDollars = 0,
+        )
+
+        assertEquals(
+            15,
+            OpportunityEngine.scoreWithModel(
+                detail = detail,
+                summary = summary,
+                analysis = analysis,
+                model = OpportunityScoringModel.Legacy,
+            ).compositeScore,
+        )
+        assertEquals(
+            27,
+            OpportunityEngine.scoreWithModel(
+                detail = detail,
+                summary = summary,
+                analysis = analysis,
+                model = OpportunityScoringModel.Aggressive,
+            ).compositeScore,
+        )
+    }
+
+    @Test
+    fun aggressive_model_penalizes_broken_balance_sheet_and_bearish_setup() {
+        val detail = engineDetail().copy(
+            externalStatus = ExternalSignalStatus.Divergent,
+            weightedExternalSignalFairValueCents = 15_000,
+            analystOpinionCount = 2,
+            recommendationMeanHundredths = 340,
+            fundamentals = FundamentalSnapshot(
+                symbol = "NVDA",
+                freeCashFlowDollars = -10,
+                operatingCashFlowDollars = -10,
+                returnOnEquityBps = -500,
+                debtToEquityHundredths = 240,
+                totalCashDollars = 10_000_000,
+                totalDebtDollars = 500_000_000,
+                earningsGrowthBps = -900,
+            ),
+        )
+        val summary = summary(1_000, 1_100, 1_200, 1_300, -120, 10, -130)
+        val analysis = com.discountscreener.core.model.DcfAnalysis(
+            bearIntrinsicValueCents = 8_500,
+            baseIntrinsicValueCents = 9_000,
+            bullIntrinsicValueCents = 9_500,
+            waccBps = 900,
+            baseGrowthBps = 1_200,
+            netDebtDollars = 0,
+        )
+
+        assertEquals(
+            -22,
+            OpportunityEngine.scoreWithModel(
+                detail = detail,
+                summary = summary,
+                analysis = analysis,
+                model = OpportunityScoringModel.Aggressive,
+            ).compositeScore,
         )
     }
 

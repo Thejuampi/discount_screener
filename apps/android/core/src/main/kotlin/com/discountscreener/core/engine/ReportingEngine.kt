@@ -203,82 +203,17 @@ class ReportingEngine(
         )
     }
 
-    private fun buildDetail(state: SymbolState): SymbolDetail? {
-        val snapshot = state.snapshot ?: return null
-        val internalGapBps = checkedGapBps(snapshot.marketPriceCents, snapshot.intrinsicValueCents) ?: 0
-        val internalUpsideBps = checkedUpsideBps(snapshot.marketPriceCents, snapshot.intrinsicValueCents) ?: 0
-        val qualification = qualificationFor(snapshot, internalGapBps)
-        val externalStatus = externalStatusFor(snapshot, state.externalSignal)
-        val confidence = confidenceFor(qualification, externalStatus)
-        val external = state.externalSignal
-
-        return SymbolDetail(
-            symbol = snapshot.symbol,
-            profitable = snapshot.profitable,
-            marketPriceCents = snapshot.marketPriceCents,
-            intrinsicValueCents = snapshot.intrinsicValueCents,
-            gapBps = internalGapBps,
-            upsideBps = internalUpsideBps,
-            minimumGapBps = minGapBps,
-            qualification = qualification,
-            externalStatus = externalStatus,
-            externalSignalFairValueCents = external?.fairValueCents,
-            externalSignalLowFairValueCents = external?.lowFairValueCents,
-            externalSignalHighFairValueCents = external?.highFairValueCents,
-            weightedExternalSignalFairValueCents = clampedWeightedFairValue(external),
-            weightedAnalystCount = if (clampedWeightedFairValue(external) != null) external?.weightedAnalystCount else null,
-            externalSignalGapBps = external?.let { checkedGapBps(snapshot.marketPriceCents, it.fairValueCents) },
-            externalSignalAgeSeconds = external?.ageSeconds,
-            externalSignalMaxAgeSeconds = externalSignalMaxAgeSeconds,
-            analystOpinionCount = external?.analystOpinionCount,
-            recommendationMeanHundredths = external?.recommendationMeanHundredths,
-            strongBuyCount = external?.strongBuyCount,
-            buyCount = external?.buyCount,
-            holdCount = external?.holdCount,
-            sellCount = external?.sellCount,
-            strongSellCount = external?.strongSellCount,
+    private fun buildDetail(state: SymbolState): SymbolDetail? =
+        buildSymbolDetail(
+            snapshot = state.snapshot,
+            externalSignal = state.externalSignal,
             fundamentals = state.fundamentals,
-            confidence = confidence,
+            minGapBps = minGapBps,
+            externalSignalMaxAgeSeconds = externalSignalMaxAgeSeconds,
             lastSequence = state.lastSequence,
             updateCount = state.updateCount,
-            isWatched = watchlist.contains(snapshot.symbol),
-            companyName = snapshot.companyName,
+            isWatched = watchlist.contains(state.snapshot?.symbol),
         )
-    }
-
-    private fun qualificationFor(snapshot: MarketSnapshot, gapBps: Int): QualificationStatus = when {
-        !snapshot.profitable -> QualificationStatus.Unprofitable
-        gapBps >= minGapBps -> QualificationStatus.Qualified
-        else -> QualificationStatus.GapTooSmall
-    }
-
-    private fun externalStatusFor(
-        snapshot: MarketSnapshot,
-        externalSignal: ExternalValuationSignal?,
-    ): ExternalSignalStatus {
-        externalSignal ?: return ExternalSignalStatus.Missing
-        if (externalSignal.symbol != snapshot.symbol) return ExternalSignalStatus.Divergent
-        if (externalSignal.ageSeconds > externalSignalMaxAgeSeconds) return ExternalSignalStatus.Stale
-        return if ((checkedGapBps(snapshot.marketPriceCents, externalSignal.fairValueCents) ?: Int.MIN_VALUE) >= minGapBps) {
-            ExternalSignalStatus.Supportive
-        } else {
-            ExternalSignalStatus.Divergent
-        }
-    }
-
-    private fun confidenceFor(
-        qualification: QualificationStatus,
-        externalStatus: ExternalSignalStatus,
-    ): ConfidenceBand {
-        if (qualification != QualificationStatus.Qualified) {
-            return ConfidenceBand.Low
-        }
-        return when (externalStatus) {
-            ExternalSignalStatus.Missing -> ConfidenceBand.Provisional
-            ExternalSignalStatus.Supportive -> ConfidenceBand.High
-            ExternalSignalStatus.Stale, ExternalSignalStatus.Divergent -> ConfidenceBand.Low
-        }
-    }
 
     private fun sortedRows(): List<CandidateRow> = buildList {
         symbols.values.mapNotNullTo(this, ::buildCandidate)
@@ -352,6 +287,99 @@ fun checkedGapBps(marketPriceCents: Long, fairValueCents: Long): Int? {
     val market = BigInteger.valueOf(marketPriceCents)
     val scaledGapBps = ((fair - market) * BigInteger.valueOf(10_000L)) / fair
     return scaledGapBps.coerceIn(BigInteger.valueOf(Int.MIN_VALUE.toLong()), BigInteger.valueOf(Int.MAX_VALUE.toLong())).toInt()
+}
+
+fun buildSymbolDetail(
+    snapshot: MarketSnapshot?,
+    externalSignal: ExternalValuationSignal?,
+    fundamentals: FundamentalSnapshot?,
+    minGapBps: Int = 2_000,
+    externalSignalMaxAgeSeconds: Long = 30,
+    lastSequence: Int = 0,
+    updateCount: Int = 0,
+    isWatched: Boolean = false,
+): SymbolDetail? {
+    snapshot ?: return null
+    val sanitizedExternal = externalSignal?.let(::sanitizeExternalSignal)
+    val internalGapBps = checkedGapBps(snapshot.marketPriceCents, snapshot.intrinsicValueCents) ?: 0
+    val internalUpsideBps = checkedUpsideBps(snapshot.marketPriceCents, snapshot.intrinsicValueCents) ?: 0
+    val qualification = qualificationFor(snapshot, internalGapBps, minGapBps)
+    val externalStatus = externalStatusFor(snapshot, sanitizedExternal, minGapBps, externalSignalMaxAgeSeconds)
+    val confidence = confidenceFor(qualification, externalStatus)
+    val weightedFairValue = clampedWeightedFairValue(sanitizedExternal)
+
+    return SymbolDetail(
+        symbol = snapshot.symbol,
+        profitable = snapshot.profitable,
+        marketPriceCents = snapshot.marketPriceCents,
+        intrinsicValueCents = snapshot.intrinsicValueCents,
+        gapBps = internalGapBps,
+        upsideBps = internalUpsideBps,
+        minimumGapBps = minGapBps,
+        qualification = qualification,
+        externalStatus = externalStatus,
+        externalSignalFairValueCents = sanitizedExternal?.fairValueCents,
+        externalSignalLowFairValueCents = sanitizedExternal?.lowFairValueCents,
+        externalSignalHighFairValueCents = sanitizedExternal?.highFairValueCents,
+        weightedExternalSignalFairValueCents = weightedFairValue,
+        weightedAnalystCount = if (weightedFairValue != null) sanitizedExternal?.weightedAnalystCount else null,
+        externalSignalGapBps = sanitizedExternal?.let { checkedGapBps(snapshot.marketPriceCents, it.fairValueCents) },
+        externalSignalAgeSeconds = sanitizedExternal?.ageSeconds,
+        externalSignalMaxAgeSeconds = externalSignalMaxAgeSeconds,
+        analystOpinionCount = sanitizedExternal?.analystOpinionCount,
+        recommendationMeanHundredths = sanitizedExternal?.recommendationMeanHundredths,
+        strongBuyCount = sanitizedExternal?.strongBuyCount,
+        buyCount = sanitizedExternal?.buyCount,
+        holdCount = sanitizedExternal?.holdCount,
+        sellCount = sanitizedExternal?.sellCount,
+        strongSellCount = sanitizedExternal?.strongSellCount,
+        fundamentals = fundamentals,
+        confidence = confidence,
+        lastSequence = lastSequence,
+        updateCount = updateCount,
+        isWatched = isWatched,
+        companyName = snapshot.companyName,
+    )
+}
+
+private fun qualificationFor(
+    snapshot: MarketSnapshot,
+    gapBps: Int,
+    minGapBps: Int,
+): QualificationStatus = when {
+    !snapshot.profitable -> QualificationStatus.Unprofitable
+    gapBps >= minGapBps -> QualificationStatus.Qualified
+    else -> QualificationStatus.GapTooSmall
+}
+
+private fun externalStatusFor(
+    snapshot: MarketSnapshot,
+    externalSignal: ExternalValuationSignal?,
+    minGapBps: Int,
+    externalSignalMaxAgeSeconds: Long,
+): ExternalSignalStatus {
+    externalSignal ?: return ExternalSignalStatus.Missing
+    if (externalSignal.symbol != snapshot.symbol) return ExternalSignalStatus.Divergent
+    if (externalSignal.ageSeconds > externalSignalMaxAgeSeconds) return ExternalSignalStatus.Stale
+    return if ((checkedGapBps(snapshot.marketPriceCents, externalSignal.fairValueCents) ?: Int.MIN_VALUE) >= minGapBps) {
+        ExternalSignalStatus.Supportive
+    } else {
+        ExternalSignalStatus.Divergent
+    }
+}
+
+private fun confidenceFor(
+    qualification: QualificationStatus,
+    externalStatus: ExternalSignalStatus,
+): ConfidenceBand {
+    if (qualification != QualificationStatus.Qualified) {
+        return ConfidenceBand.Low
+    }
+    return when (externalStatus) {
+        ExternalSignalStatus.Missing -> ConfidenceBand.Provisional
+        ExternalSignalStatus.Supportive -> ConfidenceBand.High
+        ExternalSignalStatus.Stale, ExternalSignalStatus.Divergent -> ConfidenceBand.Low
+    }
 }
 
 fun checkedUpsideBps(marketPriceCents: Long, fairValueCents: Long): Int? {

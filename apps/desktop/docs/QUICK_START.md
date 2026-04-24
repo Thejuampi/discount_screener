@@ -138,6 +138,8 @@ The live status line includes tracked count, loaded count, unavailable count, ap
 
 The main table is capped for readability. In `Top Opportunities`, `j` and `k` now scroll that 20-row viewport through the full active opportunity ranking. The detail view still navigates the full active ranked set for the current list view.
 
+Inside `Top Opportunities`, press `m` to switch between the original legacy scorer and the newer aggressive scorer without leaving the screen.
+
 Selection is remembered per list view by ticker. The first time you enter `Top Opportunities`, the selection starts at the first ranked symbol; after that, toggling with `o` restores the last ticker you had selected in each list.
 
 If the live source or persistence path has problems, the main view shows them in the health banner and issue rail. Press `l` to open the full issue log viewer.

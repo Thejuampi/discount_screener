@@ -216,6 +216,8 @@ When watchlist-only mode is on, only watched symbols remain in the main ranked t
 - `Top Opportunities` is a separate main-view ranking focused on buy candidates rather than the baseline candidate sorter
 - it ranks only the current filtered qualified universe
 - it uses three evidence buckets when available: fundamentals, 1Y technical confirmation from cached chart summaries, and forecasts from analyst targets plus DCF when analysis is ready
+- press `m` in `Top Opportunities` to switch between the legacy balanced model and the new aggressive model
+- `Legacy` keeps the original even-weight bucket logic; `Aggressive` leans harder into upside, trend, and sharp penalties for weak balance-sheet or bearish setups
 - missing buckets are treated as missing coverage, not automatic negative evidence
 - the visible table stays capped for readability, but `j` and `k` now scroll that window through the full active opportunities set
 - `Home`, `End`, `PageUp`, and `PageDown` operate on the full active opportunity order using the same ticker-based navigation model as the main candidate list
