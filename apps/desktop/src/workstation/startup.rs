@@ -89,6 +89,9 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
                 issues,
                 last_persisted_at,
             }) => {
+                if !options.symbols_explicit && options.restore_state && !_persisted_tracked_symbols.is_empty() {
+                    tracked_symbols = _persisted_tracked_symbols.clone();
+                }
                 let tracked_symbol_set = tracked_symbols.iter().cloned().collect::<HashSet<_>>();
                 let hydrated_symbol_states = symbol_states
                     .into_iter()
@@ -193,6 +196,7 @@ where
                 options.state_db = Some(PathBuf::from(path));
             }
             "--no-persist" => options.persist_enabled = false,
+            "--restore-state" => options.restore_state = true,
             "--symbols" => {
                 let Some(symbols) = args.next() else {
                     return Err(io::Error::new(

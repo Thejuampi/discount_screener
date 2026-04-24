@@ -533,6 +533,7 @@ struct RuntimeOptions {
     smoke: bool,
     state_db: Option<PathBuf>,
     persist_enabled: bool,
+    restore_state: bool,
     symbols: Vec<String>,
     symbols_explicit: bool,
     #[cfg(test)]
@@ -549,6 +550,7 @@ impl Default for RuntimeOptions {
             smoke: false,
             state_db: None,
             persist_enabled: true,
+            restore_state: false,
             symbols: Vec::new(),
             symbols_explicit: false,
             #[cfg(test)]
