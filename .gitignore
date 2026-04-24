@@ -25,6 +25,7 @@
 mutants.out*/
 .claude/
 .opencode/
+.agents/workspace/
 feed-errors.log
 help-output.txt
 help-output-direct.txt
