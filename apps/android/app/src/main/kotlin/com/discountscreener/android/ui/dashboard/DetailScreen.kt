@@ -1624,7 +1624,7 @@ internal fun OhlcChart(
     model: PriceChartModel,
     modifier: Modifier = Modifier,
 ) {
-    if (candles.size < 2) return
+    if (candles.isEmpty()) return
     val closes = candles.map { it.closeCents.toFloat() }
     val opens = candles.map { it.openCents.toFloat() }
     val highs = candles.map { it.highCents.toFloat() }

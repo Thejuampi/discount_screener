@@ -69,7 +69,7 @@ internal data class MacdChartModel(
 )
 
 internal fun buildPriceChartModel(candles: List<HistoricalCandle>): PriceChartModel? {
-    if (candles.size < 2) return null
+    if (candles.isEmpty()) return null
     val closes = candles.map { it.closeCents.toDouble() }
     val ema20 = emaValues(closes, 20)
     val ema50 = emaValues(closes, 50)

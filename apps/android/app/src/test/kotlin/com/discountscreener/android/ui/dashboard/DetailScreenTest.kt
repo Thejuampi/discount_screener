@@ -74,6 +74,27 @@ class DetailScreenTest {
     }
 
     @Test
+    fun price_chart_model_supports_single_replay_candle() {
+        val model = buildPriceChartModel(
+            listOf(
+                sampleCandle(
+                    epochSeconds = dateEpoch(2024, 1, 1),
+                    openCents = 20_000L,
+                    lowCents = 19_500L,
+                    highCents = 20_500L,
+                    closeCents = 20_250L,
+                ),
+            ),
+        )!!
+
+        assertEquals(1, model.ema20.size)
+        assertEquals(1, model.ema50.size)
+        assertEquals(1, model.ema200.size)
+        assertTrue(model.axisLabels.top.startsWith("$"))
+        assertTrue(model.trendSignals.isEmpty())
+    }
+
+    @Test
     fun trend_signal_marks_fresh_bull_cross_with_explanation() {
         val signal = buildTrendSignal(
             fastSeries = listOf(10.0, 12.0),
