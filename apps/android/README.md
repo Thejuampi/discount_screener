@@ -18,7 +18,7 @@ This directory contains the native Android client for Discount Screener.
 ## Current implementation
 
 - live candidate and opportunity reporting
-- symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, and chart range selection
+- symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, chart range selection, and phone-native system back support to return to the dashboard
 - symbol detail chart replay with back/forward/live controls plus a right-side volume profile that bins visible replay-window volume by price and up/down candle direction
 - opportunities as the default landing surface with aggressive scoring selected by default and legacy scoring still available on demand
 - restore-to-live movement badges plus analyst target revision cues on both tracked and opportunity rows, with a state-driven history detail experience that collapses flat analyst-target spans, summarizes the latest net move, and shows change-only evidence when the range is sparse

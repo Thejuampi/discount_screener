@@ -1,5 +1,6 @@
 package com.discountscreener.android.ui.dashboard
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -91,6 +92,10 @@ fun DetailScreen(
     alerts: List<String>,
     onAction: (DashboardAction) -> Unit,
 ) {
+    BackHandler {
+        onAction(DashboardAction.BackFromDetail)
+    }
+
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(route.symbol, route.subtab) {
         focusRequester.requestFocus()
@@ -2108,3 +2113,5 @@ private fun percentile(sortedValues: List<Long>, fraction: Double): Long {
     val interpolated = lowerValue + ((upperValue - lowerValue) * (position - lowerIndex))
     return interpolated.roundToLong()
 }
+
+
