@@ -72,6 +72,7 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
     } else {
         default_live_symbols()
     };
+    let mut restored_tracked_symbols = false;
     let mut persistence_db_path = None;
 
     if options.persist_enabled {
@@ -82,15 +83,17 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
 
         match persistence::load_warm_start(&state_db) {
             Ok(PersistenceBootstrap {
-                tracked_symbols: _persisted_tracked_symbols,
+                had_previous_session,
+                tracked_symbols: persisted_tracked_symbols,
                 watchlist,
                 symbol_states,
                 chart_cache,
                 issues,
                 last_persisted_at,
             }) => {
-                if !options.symbols_explicit && options.restore_state && !_persisted_tracked_symbols.is_empty() {
-                    tracked_symbols = _persisted_tracked_symbols.clone();
+                if !options.symbols_explicit && had_previous_session {
+                    tracked_symbols = persisted_tracked_symbols.clone();
+                    restored_tracked_symbols = true;
                 }
                 let tracked_symbol_set = tracked_symbols.iter().cloned().collect::<HashSet<_>>();
                 let hydrated_symbol_states = symbol_states
@@ -129,7 +132,7 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
         }
     }
 
-    if tracked_symbols.is_empty() {
+    if tracked_symbols.is_empty() && !restored_tracked_symbols {
         tracked_symbols = default_live_symbols();
     }
 
@@ -139,7 +142,9 @@ fn load_initial_state(options: &RuntimeOptions) -> io::Result<LoadedState> {
         .or_else(|| std::env::current_dir().ok().map(|dir| dir.join("exports")))
         .unwrap_or_else(|| PathBuf::from("exports"));
     app.set_history_export_root(history_export_root);
-    app.set_show_all_tracked_symbols_in_candidates(options.symbols_explicit);
+    app.set_show_all_tracked_symbols_in_candidates(
+        options.symbols_explicit || restored_tracked_symbols,
+    );
     app.set_tracked_symbols(tracked_symbols.clone());
 
     Ok(LoadedState {
@@ -196,7 +201,6 @@ where
                 options.state_db = Some(PathBuf::from(path));
             }
             "--no-persist" => options.persist_enabled = false,
-            "--restore-state" => options.restore_state = true,
             "--symbols" => {
                 let Some(symbols) = args.next() else {
                     return Err(io::Error::new(
@@ -3773,4 +3777,3 @@ impl Drop for TerminalGuard {
         }
     }
 }
-

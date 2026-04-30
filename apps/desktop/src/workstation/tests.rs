@@ -2596,9 +2596,8 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert!(loaded.startup_issues.is_empty());
-        let default_symbols = super::default_live_symbols();
-        assert_eq!(loaded.tracked_symbols[0], "AAPL");
-        assert_eq!(loaded.tracked_symbols.len(), default_symbols.len());
+        assert_eq!(loaded.tracked_symbols, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        assert!(loaded.app.show_all_tracked_symbols_in_candidates);
         assert!(loaded.state.detail("AAPL").is_some());
         assert_eq!(
             loaded.state.price_history("AAPL", 10),
@@ -2658,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn no_arg_startup_uses_sp500_instead_of_a_single_remembered_symbol() {
+    fn no_arg_startup_restores_the_previous_tracked_symbol_set() {
         let state_db = unique_test_path("default-sp500.sqlite3");
         let _ = fs::remove_file(&state_db);
 
@@ -2680,12 +2679,35 @@ mod tests {
 
         let _ = fs::remove_file(&state_db);
 
-        assert_eq!(reloaded.tracked_symbols, super::default_live_symbols());
-        assert!(!reloaded
-            .tracked_symbols
-            .iter()
-            .any(|symbol| symbol == "MSTR"));
-        assert!(reloaded.state.detail("MSTR").is_none());
+        assert_eq!(reloaded.tracked_symbols, vec!["MSTR".to_string()]);
+        assert!(reloaded.app.show_all_tracked_symbols_in_candidates);
+        assert!(reloaded.state.detail("MSTR").is_some());
+    }
+
+    #[test]
+    fn no_arg_startup_can_restore_an_intentionally_empty_tracked_symbol_set() {
+        let state_db = unique_test_path("empty-session.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(Vec::new());
+        persistence_handle.shutdown(1_700_000_100);
+
+        let reloaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("no-arg startup should restore the saved tracked universe");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert!(reloaded.tracked_symbols.is_empty());
+        assert!(reloaded.app.show_all_tracked_symbols_in_candidates);
     }
 
     #[test]

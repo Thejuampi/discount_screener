@@ -215,10 +215,19 @@ private fun OpportunityScoringModelToggle(
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(
+            selected = selected == OpportunityScoringModel.AggressiveV2,
+            onClick = {
+                if (selected != OpportunityScoringModel.AggressiveV2) {
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.AggressiveV2))
+                }
+            },
+            label = { Text("Aggressive V2") },
+        )
+        FilterChip(
             selected = selected == OpportunityScoringModel.Aggressive,
             onClick = {
                 if (selected != OpportunityScoringModel.Aggressive) {
-                    onAction(DashboardAction.ToggleOpportunityScoringModel)
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Aggressive))
                 }
             },
             label = { Text("Aggressive") },
@@ -227,7 +236,7 @@ private fun OpportunityScoringModelToggle(
             selected = selected == OpportunityScoringModel.Legacy,
             onClick = {
                 if (selected != OpportunityScoringModel.Legacy) {
-                    onAction(DashboardAction.ToggleOpportunityScoringModel)
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
                 }
             },
             label = { Text("Legacy") },

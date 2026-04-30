@@ -33,6 +33,7 @@ import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
+import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
@@ -46,6 +47,7 @@ import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
+import com.discountscreener.core.model.PricingCandle
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -192,6 +194,7 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         ensureRevisionHistoryLoaded(symbol)
+        hydratePricingHistoryForDetail(symbol)
 
         val captures = mutableListOf<RawCapture>()
         ChartRange.entries.forEach { range ->
@@ -640,9 +643,16 @@ class DefaultDashboardRepository(
         }
 
         result.chartCandles?.takeIf(List<HistoricalCandle>::isNotEmpty)?.let { candles ->
-            chartCache[chartKey(result.symbol, ChartRange.Year)] = candles
+            val key = chartKey(result.symbol, ChartRange.Year)
+            val mergedCandles = mergeHistoricalCandles(
+                symbol = result.symbol,
+                range = ChartRange.Year,
+                persistedCandles = chartCache[key].orEmpty(),
+                incomingCandles = candles,
+            )
+            chartCache[key] = mergedCandles
             chartSummaries.getOrPut(result.symbol) { linkedMapOf() }[ChartRange.Year] =
-                ChartAnalysis.buildSummary(ChartRange.Year, candles, result.refreshedAtEpochSeconds)
+                ChartAnalysis.buildSummary(ChartRange.Year, mergedCandles, result.refreshedAtEpochSeconds)
             rawCaptures += RawCapture(
                 symbol = result.symbol,
                 captureKind = CaptureKind.ChartCandles,
@@ -1005,6 +1015,25 @@ class DefaultDashboardRepository(
             val mergedHistory = mergeRevisionHistory(persistedHistory, revisions[symbol].orEmpty())
             if (mergedHistory.isNotEmpty()) {
                 revisions[symbol] = mergedHistory
+            }
+        }
+    }
+
+    private suspend fun hydratePricingHistoryForDetail(symbol: String) {
+        val loaded = stateStore.loadPricingHistory(symbol)
+        if (loaded.isEmpty()) return
+        stateMutex.withLock {
+            loaded.forEach { chart ->
+                val key = chartKey(chart.symbol, chart.range)
+                val mergedCandles = mergeHistoricalCandles(
+                    symbol = chart.symbol,
+                    range = chart.range,
+                    persistedCandles = chartCache[key].orEmpty(),
+                    incomingCandles = chart.candles,
+                )
+                chartCache[key] = mergedCandles
+                chartSummaries.getOrPut(chart.symbol) { linkedMapOf() }[chart.range] =
+                    ChartAnalysis.buildSummary(chart.range, mergedCandles, chart.fetchedAt)
             }
         }
     }
@@ -1397,9 +1426,16 @@ class DefaultDashboardRepository(
         val capturedAt = now()
 
         for ((range, candles) in result.chartCaptures) {
-            chartCache[chartKey(result.symbol, range)] = candles
+            val key = chartKey(result.symbol, range)
+            val mergedCandles = mergeHistoricalCandles(
+                symbol = result.symbol,
+                range = range,
+                persistedCandles = chartCache[key].orEmpty(),
+                incomingCandles = candles,
+            )
+            chartCache[key] = mergedCandles
             chartSummaries.getOrPut(result.symbol) { linkedMapOf() }[range] =
-                ChartAnalysis.buildSummary(range, candles, capturedAt)
+                ChartAnalysis.buildSummary(range, mergedCandles, capturedAt)
             rawCaptures += RawCapture(
                 symbol = result.symbol,
                 captureKind = CaptureKind.ChartCandles,
@@ -1492,6 +1528,16 @@ internal fun mergeRevisionHistory(
     .sortedWith(compareBy<SymbolRevision> { it.evaluatedAtEpochSeconds }.thenBy { revisionHistoryKey(it) })
     .distinctBy(::revisionHistoryKey)
     .toMutableList()
+
+internal fun mergeHistoricalCandles(
+    symbol: String,
+    range: ChartRange,
+    persistedCandles: List<HistoricalCandle>,
+    incomingCandles: List<HistoricalCandle>,
+): List<HistoricalCandle> = PricingHistoryMerge.merge(
+    existing = persistedCandles.map { PricingCandle(symbol, range, it) },
+    incoming = incomingCandles.map { PricingCandle(symbol, range, it) },
+).map { it.candle }
 
 internal fun rowFreshnessFor(
     hasDetail: Boolean,

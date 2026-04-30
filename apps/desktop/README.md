@@ -72,7 +72,7 @@ cargo run -- --smoke
 
 Smoke mode is a static verification path and does not hit the network.
 
-Persistence is automatic via SQLite. Tracked symbols, watchlist, evaluated state, and issue history are restored on next launch.
+Persistence is automatic via SQLite. Tracked symbols, their ordering, watchlist, evaluated state, and issue history are restored on the next launch unless you start a one-off session with `--symbols` or `--profile`.
 
 Override the database path:
 

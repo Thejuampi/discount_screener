@@ -287,6 +287,113 @@ class DetailScreenTest {
     }
 
     @Test
+    fun primary_fair_value_prefers_weighted_target_over_median_and_mean() {
+        val fairValue = primaryFairValue(detailWithValuationAnchors())
+
+        assertEquals("Weighted", fairValue.sourceLabel)
+        assertEquals(27_200L, fairValue.valueCents)
+    }
+
+    @Test
+    fun primary_fair_value_falls_back_to_median_when_weighted_is_missing() {
+        val fairValue = primaryFairValue(
+            detailWithValuationAnchors().copy(
+                weightedExternalSignalFairValueCents = null,
+                weightedAnalystCount = null,
+            ),
+        )
+
+        assertEquals("Median", fairValue.sourceLabel)
+        assertEquals(26_500L, fairValue.valueCents)
+    }
+
+    @Test
+    fun primary_fair_value_falls_back_to_mean_when_analyst_targets_are_missing() {
+        val fairValue = primaryFairValue(
+            detailWithValuationAnchors().copy(
+                weightedExternalSignalFairValueCents = null,
+                externalSignalFairValueCents = null,
+            ),
+        )
+
+        assertEquals("Mean", fairValue.sourceLabel)
+        assertEquals(26_923L, fairValue.valueCents)
+    }
+
+    @Test
+    fun valuation_range_model_includes_price_and_primary_fair_value_markers() {
+        val model = valuationRangeModel(detailWithValuationAnchors())
+
+        assertEquals("Price", model.priceMarker.label)
+        assertEquals(17_270L, model.priceMarker.valueCents)
+        assertEquals("Fair value", model.fairValueMarker.label)
+        assertEquals(27_200L, model.fairValueMarker.valueCents)
+        assertEquals("Weighted", model.fairValueSourceLabel)
+        assertTrue((model.upsideBps ?: 0) > 0)
+    }
+
+    @Test
+    fun valuation_range_model_uses_analyst_low_and_high_for_x_axis_labels() {
+        val model = valuationRangeModel(detailWithValuationAnchors())
+
+        assertEquals(18_500L, model.axisLabels.minValueCents)
+        assertEquals(32_000L, model.axisLabels.maxValueCents)
+        assertEquals("Min $185", model.axisLabels.minLabel)
+        assertEquals("Range $185-$320", model.axisLabels.rangeLabel)
+        assertEquals("Max $320", model.axisLabels.maxLabel)
+    }
+
+    @Test
+    fun valuation_range_model_falls_back_to_visible_values_for_x_axis_labels_without_low_high() {
+        val model = valuationRangeModel(
+            detailWithValuationAnchors().copy(
+                externalSignalLowFairValueCents = null,
+                externalSignalHighFairValueCents = null,
+            ),
+        )
+
+        assertEquals(17_270L, model.axisLabels.minValueCents)
+        assertEquals(27_200L, model.axisLabels.maxValueCents)
+        assertEquals("Range $173-$272", model.axisLabels.rangeLabel)
+    }
+
+    @Test
+    fun consensus_segments_compute_counts_and_percentages() {
+        val segments = consensusSegments(detailWithValuationAnchors())
+
+        assertEquals(5, segments.size)
+        assertEquals(42, segments.sumOf(ConsensusSegment::count))
+        assertEquals(4_762, segments.first { it.label == "Strong Buy" }.shareBps)
+        assertEquals(2_381, segments.first { it.label == "Buy" }.shareBps)
+    }
+
+    @Test
+    fun consensus_segments_are_unavailable_when_all_counts_are_empty() {
+        val segments = consensusSegments(
+            detailWithValuationAnchors().copy(
+                strongBuyCount = null,
+                buyCount = null,
+                holdCount = null,
+                sellCount = null,
+                strongSellCount = null,
+            ),
+        )
+
+        assertTrue(segments.isEmpty())
+        assertTrue(
+            !hasConsensusConcentration(
+                detailWithValuationAnchors().copy(
+                    strongBuyCount = 0,
+                    buyCount = 0,
+                    holdCount = 0,
+                    sellCount = 0,
+                    strongSellCount = 0,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun valuation_trend_summary_detects_steady_upgrades() {
         val summary = valuationTrendSummary(
             listOf(
@@ -393,6 +500,19 @@ class DetailScreenTest {
                 valuationHistory = revisions,
             ),
         )
+    }
+
+    @Test
+    fun price_history_status_message_summarizes_saved_candle_span() {
+        val empty = priceHistoryStatusMessage(emptyList(), ChartRange.Year)
+        assertEquals("No saved price history yet", empty.title)
+        assertTrue(empty.detail.contains("1Y chart data"))
+
+        val ready = priceHistoryStatusMessage(sampleCandles(), ChartRange.Year)
+        assertEquals("Saved price history", ready.title)
+        assertTrue(ready.detail.contains("4 saved candles"))
+        assertTrue(ready.detail.contains("2024-01-01"))
+        assertTrue(ready.detail.contains("2024-01-22"))
     }
 
     @Test

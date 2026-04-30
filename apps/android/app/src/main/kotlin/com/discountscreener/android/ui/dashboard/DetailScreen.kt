@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -80,6 +82,7 @@ import com.discountscreener.core.model.SymbolRevision
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -174,6 +177,7 @@ fun DetailScreen(
                     route = route,
                     detail = detail,
                     history = history,
+                    charts = charts,
                     onAction = onAction,
                 )
             }
@@ -297,10 +301,6 @@ private fun SnapshotContent(
                 ValuationSection(detail = d)
             }
 
-            item {
-                ConsensusSection(detail = d)
-            }
-
             d.fundamentals?.let { fundamentals ->
                 item {
                     Text("Fundamentals", fontWeight = FontWeight.Bold)
@@ -358,180 +358,76 @@ private fun SnapshotContent(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ValuationSection(detail: SymbolDetail) {
-    val anchors = valuationAnchors(detail)
-    val stats = valuationAnchorStats(anchors.map(ValuationAnchor::valueCents))
-    if (anchors.isEmpty() || stats == null) return
-    val baseMarkers = valuationBaseMarkers(stats)
-    val detailMarkers = valuationDetailMarkers(detail, stats)
-    if (detailMarkers.isEmpty()) return
+    val model = valuationRangeModel(detail)
 
     Text("Valuation", fontWeight = FontWeight.Bold)
-    ValuationBoxPlotChart(
-        stats = stats,
-        baseMarkers = baseMarkers,
-        detailMarkers = detailMarkers,
+    ValuationHeadline(model = model)
+    ValuationRangeChart(
+        model = model,
         modifier = Modifier
             .fillMaxWidth()
-            .height(144.dp)
+            .height(132.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant),
     )
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        baseMarkers.forEach { point ->
-            ValuationLegendItem(point)
+    if (model.referenceValues.isNotEmpty()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            model.referenceValues.forEach { reference ->
+                Text(
+                    text = "${reference.label} ${compactMoney(reference.valueCents)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        detailMarkers.forEach { point ->
-            ValuationLegendItem(point)
-        }
-    }
-    Text(
-        "The full line is the total price axis for every value shown. The box still marks low, P25, median, P75, and max, while colored markers can sit inside or outside the forecast range when price, weighted value, or upper-percentile estimates move beyond it.",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    AnalystConcentrationSection(detail = detail)
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ConsensusSection(detail: SymbolDetail) {
-    val ratings = consensusBuckets(detail)
-    val totalRatings = ratings.sumOf(ConsensusBucket::count)
-    if (detail.analystOpinionCount == null && detail.recommendationMeanHundredths == null && totalRatings == 0) return
-
-    val holdColor = MaterialTheme.colorScheme.tertiary
-
-    Text("Consensus", fontWeight = FontWeight.Bold)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        detail.analystOpinionCount?.let {
-            AssistChip(onClick = {}, label = { Text("Analysts $it") })
+private fun ValuationHeadline(model: ValuationRangeModel) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        ValuationMetric(
+            label = "Price",
+            value = money(model.priceMarker.valueCents),
+            color = model.priceMarker.color,
+        )
+        ValuationMetric(
+            label = "Fair value",
+            value = money(model.fairValueMarker.valueCents),
+            color = model.fairValueMarker.color,
+        )
+        model.upsideBps?.let { upside ->
+            val color = if (upside >= 0) BullishChartColor else BearishChartColor
+            Text(
+                text = "${signedPercentLabel(upside)} vs price",
+                style = MaterialTheme.typography.labelMedium,
+                color = color,
+                modifier = Modifier
+                    .background(color.copy(alpha = 0.14f), RoundedCornerShape(999.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
         }
-        detail.weightedAnalystCount?.let {
-            AssistChip(onClick = {}, label = { Text("Weighted $it") })
-        }
-        detail.recommendationMeanHundredths?.let {
-            AssistChip(onClick = {}, label = { Text("Mean ${"%.2f".format(it / 100.0)}") })
-        }
-    }
-
-    if (totalRatings == 0) {
         Text(
-            "Rating distribution is not available from the current feed.",
-            style = MaterialTheme.typography.bodySmall,
+            text = model.fairValueSourceLabel,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(999.dp))
+                .padding(horizontal = 8.dp, vertical = 5.dp),
         )
-        return
-    }
-
-    val maxCount = ratings.maxOf(ConsensusBucket::count).coerceAtLeast(1)
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        ratings.forEach { bucket ->
-            val fillColor = when (bucket.label) {
-                "Strong Buy", "Buy" -> BullishChartColor
-                "Hold" -> holdColor
-                else -> BearishChartColor
-            }
-            ConsensusBarRow(bucket = bucket, maxCount = maxCount, fillColor = fillColor)
-        }
     }
 }
 
 @Composable
-private fun ValuationBoxPlotChart(
-    stats: ValuationStats,
-    baseMarkers: List<VisualAnchor>,
-    detailMarkers: List<VisualAnchor>,
-    modifier: Modifier = Modifier,
+private fun ValuationMetric(
+    label: String,
+    value: String,
+    color: Color,
 ) {
-    val axisColor = MaterialTheme.colorScheme.outline
-    val boxColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-    val forecastLineColor = axisColor.copy(alpha = 0.9f)
-    val fullAxisColor = axisColor.copy(alpha = 0.45f)
-    val domain = valuationDomain(stats, baseMarkers + detailMarkers)
-
-    Canvas(modifier = modifier.padding(horizontal = 14.dp, vertical = 18.dp)) {
-        fun priceX(value: Long): Float = domain.project(value, size.width)
-
-        val upperLayouts = layoutValuationMarkers(detailMarkers, domain, size.width, minSpacing = 18f)
-        val lowerLayouts = layoutValuationMarkers(baseMarkers, domain, size.width, minSpacing = 16f)
-        val centerY = size.height / 2f
-        val whiskerTop = centerY - 16f
-        val whiskerBottom = centerY + 16f
-        val boxTop = centerY - 12f
-        val boxBottom = centerY + 12f
-        val boxHeight = boxBottom - boxTop
-
-        val minX = priceX(stats.min)
-        val p25X = priceX(stats.p25)
-        val medianX = priceX(stats.median)
-        val p75X = priceX(stats.p75)
-        val maxX = priceX(stats.max)
-        val boxLeft = minOf(p25X, p75X)
-        val boxRight = maxOf(p25X, p75X)
-        val rawBoxWidth = boxRight - boxLeft
-        val boxWidth = rawBoxWidth.coerceAtLeast(6f)
-        val boxStartX = if (rawBoxWidth < 6f) {
-            (boxLeft - ((6f - rawBoxWidth) / 2f)).coerceIn(0f, (size.width - 6f).coerceAtLeast(0f))
-        } else {
-            boxLeft
-        }
-
-        drawLine(color = fullAxisColor, start = Offset(0f, centerY), end = Offset(size.width, centerY), strokeWidth = 2f)
-        drawLine(color = forecastLineColor, start = Offset(minX, centerY), end = Offset(maxX, centerY), strokeWidth = 3f)
-        drawLine(color = forecastLineColor, start = Offset(minX, whiskerTop), end = Offset(minX, whiskerBottom), strokeWidth = 3f)
-        drawLine(color = forecastLineColor, start = Offset(maxX, whiskerTop), end = Offset(maxX, whiskerBottom), strokeWidth = 3f)
-        drawRect(
-            color = boxColor,
-            topLeft = Offset(boxStartX, boxTop),
-            size = Size(boxWidth, boxHeight),
-        )
-        drawRect(
-            color = forecastLineColor,
-            topLeft = Offset(boxStartX, boxTop),
-            size = Size(boxWidth, boxHeight),
-            style = Stroke(width = 2f),
-        )
-        drawLine(
-            color = valuationReferenceColor("Median"),
-            start = Offset(medianX, boxTop),
-            end = Offset(medianX, boxBottom),
-            strokeWidth = 4f,
-        )
-
-        lowerLayouts.forEach { layout ->
-            val markerBottom = centerY + 22f + (layout.lane * 12f)
-            drawLine(
-                color = layout.anchor.color,
-                start = Offset(layout.x, centerY + 2f),
-                end = Offset(layout.x, markerBottom),
-                strokeWidth = if (layout.anchor.label == "Median") 3.5f else 3f,
-            )
-            drawCircle(
-                color = layout.anchor.color,
-                radius = 4.5f,
-                center = Offset(layout.x, markerBottom),
-            )
-        }
-
-        upperLayouts.forEach { layout ->
-            val markerTop = centerY - 22f - (layout.lane * 12f)
-            drawLine(
-                color = layout.anchor.color,
-                start = Offset(layout.x, centerY - 2f),
-                end = Offset(layout.x, markerTop),
-                strokeWidth = 3f,
-            )
-            drawCircle(
-                color = layout.anchor.color,
-                radius = 5f,
-                center = Offset(layout.x, markerTop),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ValuationLegendItem(point: VisualAnchor) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -539,55 +435,234 @@ private fun ValuationLegendItem(point: VisualAnchor) {
         Box(
             modifier = Modifier
                 .size(8.dp)
-                .background(point.color),
+                .background(color),
         )
         Text(
-            text = "${point.label} ${money(point.valueCents)}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = "$label $value",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ValuationRangeChart(
+    model: ValuationRangeModel,
+    modifier: Modifier = Modifier,
+) {
+    val axisColor = MaterialTheme.colorScheme.outline
+    val bandColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f)
+
+    BoxWithConstraints(modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        val markerWidth = 104.dp
+        fun markerOffset(value: Long): androidx.compose.ui.unit.Dp {
+            val raw = (maxWidth * model.domain.fraction(value)) - (markerWidth / 2f)
+            val maxOffset = (maxWidth - markerWidth).coerceAtLeast(0.dp)
+            return raw.coerceIn(0.dp, maxOffset)
+        }
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            fun priceX(value: Long): Float = model.domain.project(value, size.width)
+            val centerY = size.height * 0.55f
+            drawLine(
+                color = axisColor.copy(alpha = 0.62f),
+                start = Offset(0f, centerY),
+                end = Offset(size.width, centerY),
+                strokeWidth = 2f,
+            )
+            model.targetBandCents?.let { band ->
+                val left = priceX(band.first)
+                val right = priceX(band.second)
+                drawRect(
+                    color = bandColor,
+                    topLeft = Offset(minOf(left, right), centerY - 8f),
+                    size = Size(abs(right - left).coerceAtLeast(3f), 16f),
+                )
+            }
+            listOf(model.priceMarker, model.fairValueMarker).forEach { marker ->
+                val x = priceX(marker.valueCents)
+                drawLine(
+                    color = marker.color,
+                    start = Offset(x, centerY - 22f),
+                    end = Offset(x, centerY + 22f),
+                    strokeWidth = if (marker.label == "Fair value") 4f else 3f,
+                )
+                drawCircle(color = marker.color, radius = 6f, center = Offset(x, centerY))
+            }
+        }
+        ValuationMarkerLabel(
+            marker = model.priceMarker,
+            modifier = Modifier
+                .offset(x = markerOffset(model.priceMarker.valueCents), y = 4.dp)
+                .width(markerWidth)
+                .align(Alignment.TopStart),
+        )
+        ValuationMarkerLabel(
+            marker = model.fairValueMarker,
+            modifier = Modifier
+                .offset(x = markerOffset(model.fairValueMarker.valueCents), y = 86.dp)
+                .width(markerWidth)
+                .align(Alignment.TopStart),
+        )
+        ValuationAxisLabelRow(
+            labels = model.axisLabels,
+            modifier = Modifier.align(Alignment.BottomCenter),
         )
     }
 }
 
 @Composable
-private fun ConsensusBarRow(
-    bucket: ConsensusBucket,
-    maxCount: Int,
-    fillColor: Color,
+private fun ValuationAxisLabelRow(
+    labels: ValuationAxisLabels,
+    modifier: Modifier = Modifier,
 ) {
-    val progress = (bucket.count.toFloat() / maxCount.toFloat()).coerceIn(0f, 1f)
-    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = labels.minLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+        Text(
+            text = labels.rangeLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+        Text(
+            text = labels.maxLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+        )
+    }
+}
 
+@Composable
+private fun ValuationMarkerLabel(
+    marker: VisualAnchor,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier
+                .background(marker.color.copy(alpha = 0.18f), RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp, vertical = 3.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "${marker.label} ${compactMoney(marker.valueCents)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = marker.color,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AnalystConcentrationSection(detail: SymbolDetail) {
+    val segments = consensusSegments(detail)
+
+    Text("Analyst concentration", fontWeight = FontWeight.SemiBold)
+    if (segments.isEmpty()) {
+        Text(
+            text = "Rating distribution unavailable",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+
+    StackedConsensusBar(segments = segments)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        segments.forEach { segment ->
+            ConsensusSegmentRow(segment = segment)
+        }
+    }
+}
+
+@Composable
+private fun StackedConsensusBar(segments: List<ConsensusSegment>) {
+    val visibleSegments = segments.filter { it.count > 0 }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(16.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        visibleSegments.forEach { segment ->
+            Box(
+                modifier = Modifier
+                    .weight(segment.count.toFloat())
+                    .fillMaxHeight()
+                    .background(consensusSegmentColor(segment.label)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConsensusSegmentRow(segment: ConsensusSegment) {
+    val color = consensusSegmentColor(segment.label)
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color),
+        )
         Text(
-            text = bucket.label,
+            text = segment.label,
             style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.widthIn(min = 72.dp),
+            modifier = Modifier.width(88.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         Box(
             modifier = Modifier
                 .weight(1f)
-                .height(12.dp)
-                .background(trackColor),
+                .height(8.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(progress)
+                    .fillMaxWidth(segment.shareBps / 10_000f)
                     .fillMaxHeight()
-                    .background(fillColor),
+                    .background(color.copy(alpha = 0.72f)),
             )
         }
         Text(
-            text = bucket.count.toString(),
+            text = "${segment.count}  ${formatPct(segment.shareBps)}",
             style = MaterialTheme.typography.labelSmall,
             textAlign = TextAlign.End,
-            modifier = Modifier.width(28.dp),
+            modifier = Modifier.width(64.dp),
+            maxLines = 1,
         )
     }
+}
+
+@Composable
+private fun consensusSegmentColor(label: String): Color = when (label) {
+    "Strong Buy", "Buy" -> BullishChartColor
+    "Hold" -> MaterialTheme.colorScheme.tertiary
+    else -> BearishChartColor
 }
 
 @Composable
@@ -623,8 +698,12 @@ private fun HistoryContent(
     route: DetailRoute,
     detail: SymbolDetail?,
     history: List<SymbolRevision>,
+    charts: Map<ChartRange, List<HistoricalCandle>>,
     onAction: (DashboardAction) -> Unit,
 ) {
+    val historyCandles = remember(charts, route.historyTimeWindow) {
+        charts[route.historyTimeWindow].orEmpty()
+    }
     val filteredHistory = remember(history, route.historyTimeWindow) {
         filterHistoryWindow(history, route.historyTimeWindow)
     }
@@ -640,6 +719,9 @@ private fun HistoryContent(
     val historyStatus = remember(detail, history, valuationHistory) {
         historyStatusMessage(detail, history, valuationHistory)
     }
+    val priceHistoryStatus = remember(historyCandles, route.historyTimeWindow) {
+        priceHistoryStatusMessage(historyCandles, route.historyTimeWindow)
+    }
     val showTrendSummary = changeEvents.size >= 2
     val showChartToggle = changeEvents.size >= 2
     val showChangeLog = changeEvents.isNotEmpty()
@@ -654,6 +736,12 @@ private fun HistoryContent(
                 )
             }
         }
+
+        SavedPriceHistoryCard(
+            range = route.historyTimeWindow,
+            candles = historyCandles,
+            status = priceHistoryStatus,
+        )
 
         historyStatus?.let { HistoryStatusCard(it) }
 
@@ -688,6 +776,62 @@ private fun HistoryContent(
             } else {
                 HistoryTable(changeEvents = changeEvents, summary = trendSummary)
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SavedPriceHistoryCard(
+    range: ChartRange,
+    candles: List<HistoricalCandle>,
+    status: HistoryStatusMessage,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = status.title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = status.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = chartRangeLabel(range),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        if (candles.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                HistoryMetaChip("${candles.size} candles")
+                HistoryMetaChip("Latest ${money(candles.last().closeCents)}")
+                HistoryMetaChip("${candleDateLabel(candles.first())} -> ${candleDateLabel(candles.last())}")
+            }
+            LineChart(
+                values = candles.map { it.closeCents.toFloat() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp)
+                    .background(MaterialTheme.colorScheme.surface),
+                lineColor = status.color,
+            )
         }
     }
 }
@@ -1280,6 +1424,35 @@ internal fun historyStatusMessage(
     }
     return null
 }
+
+internal fun priceHistoryStatusMessage(
+    candles: List<HistoricalCandle>,
+    range: ChartRange,
+): HistoryStatusMessage {
+    val neutralColor = Color(0xFF9E9E9E)
+    if (candles.isEmpty()) {
+        return HistoryStatusMessage(
+            title = "No saved price history yet",
+            detail = "Saved candles will appear here after this ticker has refreshed ${chartRangeLabel(range)} chart data.",
+            color = neutralColor,
+        )
+    }
+    return HistoryStatusMessage(
+        title = "Saved price history",
+        detail = buildString {
+            append("${candles.size} saved candles")
+            append(" from ${candleDateLabel(candles.first())}")
+            append(" to ${candleDateLabel(candles.last())}.")
+        },
+        color = Color(0xFF2E7D32),
+    )
+}
+
+internal fun candleDateLabel(candle: HistoricalCandle): String =
+    java.time.Instant.ofEpochSecond(candle.epochSeconds)
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDate()
+        .toString()
 
 internal fun revisionChangeComparedToPrevious(
     history: List<SymbolRevision>,
@@ -1916,14 +2089,41 @@ internal data class VisualAnchor(
     val color: Color,
 )
 
+internal data class PrimaryFairValue(
+    val sourceLabel: String,
+    val valueCents: Long,
+)
+
+internal data class ValuationRangeModel(
+    val priceMarker: VisualAnchor,
+    val fairValueMarker: VisualAnchor,
+    val fairValueSourceLabel: String,
+    val upsideBps: Int?,
+    val targetBandCents: Pair<Long, Long>?,
+    val referenceValues: List<ValuationAnchor>,
+    val axisLabels: ValuationAxisLabels,
+    val domain: ValuationDomain,
+)
+
+internal data class ValuationAxisLabels(
+    val minValueCents: Long,
+    val maxValueCents: Long,
+    val minLabel: String,
+    val rangeLabel: String,
+    val maxLabel: String,
+)
+
 internal data class ValuationDomain(
     val minValue: Long,
     val maxValue: Long,
 ) {
     val span: Long = (maxValue - minValue).coerceAtLeast(1L)
 
+    fun fraction(value: Long): Float =
+        ((value - minValue).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+
     fun project(value: Long, width: Float): Float =
-        ((value - minValue).toFloat() / span.toFloat()) * width
+        fraction(value) * width
 }
 
 internal data class ValuationMarkerLayout(
@@ -1935,6 +2135,12 @@ internal data class ValuationMarkerLayout(
 internal data class ConsensusBucket(
     val label: String,
     val count: Int,
+)
+
+internal data class ConsensusSegment(
+    val label: String,
+    val count: Int,
+    val shareBps: Int,
 )
 
 internal data class ValuationStats(
@@ -1967,6 +2173,117 @@ internal fun replayActionForKey(key: Key): DashboardAction? = when (key) {
     -> DashboardAction.StepReplayForward
 
     else -> null
+}
+
+internal fun primaryFairValue(detail: SymbolDetail): PrimaryFairValue = detail.weightedExternalSignalFairValueCents?.let {
+    PrimaryFairValue(
+        sourceLabel = "Weighted",
+        valueCents = it,
+    )
+} ?: detail.externalSignalFairValueCents?.let {
+    PrimaryFairValue(
+        sourceLabel = "Median",
+        valueCents = it,
+    )
+} ?: PrimaryFairValue(
+    sourceLabel = "Mean",
+    valueCents = detail.intrinsicValueCents,
+)
+
+internal fun valuationRangeModel(detail: SymbolDetail): ValuationRangeModel {
+    val fairValue = primaryFairValue(detail)
+    val targetBand = analystTargetBand(detail)
+    val references = valuationReferenceValues(detail, fairValue)
+    val priceMarker = VisualAnchor("Price", detail.marketPriceCents, valuationReferenceColor("Price"))
+    val fairValueMarker = VisualAnchor(
+        label = "Fair value",
+        valueCents = fairValue.valueCents,
+        color = valuationReferenceColor(fairValue.sourceLabel),
+    )
+    return ValuationRangeModel(
+        priceMarker = priceMarker,
+        fairValueMarker = fairValueMarker,
+        fairValueSourceLabel = fairValue.sourceLabel,
+        upsideBps = checkedUpsideBps(detail.marketPriceCents, fairValue.valueCents),
+        targetBandCents = targetBand,
+        referenceValues = references,
+        axisLabels = valuationAxisLabels(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+        domain = valuationRangeDomain(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+    )
+}
+
+private fun analystTargetBand(detail: SymbolDetail): Pair<Long, Long>? {
+    val low = detail.externalSignalLowFairValueCents ?: return null
+    val high = detail.externalSignalHighFairValueCents ?: return null
+    if (low <= 0L || high <= 0L) return null
+    return minOf(low, high) to maxOf(low, high)
+}
+
+private fun valuationReferenceValues(
+    detail: SymbolDetail,
+    primary: PrimaryFairValue,
+): List<ValuationAnchor> = buildList {
+    detail.externalSignalLowFairValueCents?.takeIf { it > 0L }?.let { add(ValuationAnchor("Low", it)) }
+    detail.externalSignalFairValueCents?.takeIf { it > 0L && primary.sourceLabel != "Median" }?.let {
+        add(ValuationAnchor("Median", it))
+    }
+    detail.intrinsicValueCents.takeIf { it > 0L && primary.sourceLabel != "Mean" }?.let {
+        add(ValuationAnchor("Mean", it))
+    }
+    detail.externalSignalHighFairValueCents?.takeIf { it > 0L }?.let { add(ValuationAnchor("High", it)) }
+}.distinctBy { it.label }
+
+private fun valuationAxisLabels(
+    priceMarker: VisualAnchor,
+    fairValueMarker: VisualAnchor,
+    targetBand: Pair<Long, Long>?,
+    references: List<ValuationAnchor>,
+): ValuationAxisLabels {
+    val minValue = targetBand?.first ?: (listOf(priceMarker.valueCents, fairValueMarker.valueCents) + references.map(ValuationAnchor::valueCents)).min()
+    val maxValue = targetBand?.second ?: (listOf(priceMarker.valueCents, fairValueMarker.valueCents) + references.map(ValuationAnchor::valueCents)).max()
+    return ValuationAxisLabels(
+        minValueCents = minValue,
+        maxValueCents = maxValue,
+        minLabel = "Min ${compactMoney(minValue)}",
+        rangeLabel = "Range ${compactMoney(minValue)}-${compactMoney(maxValue)}",
+        maxLabel = "Max ${compactMoney(maxValue)}",
+    )
+}
+
+private fun valuationRangeDomain(
+    priceMarker: VisualAnchor,
+    fairValueMarker: VisualAnchor,
+    targetBand: Pair<Long, Long>?,
+    references: List<ValuationAnchor>,
+): ValuationDomain {
+    val values = buildList {
+        add(priceMarker.valueCents)
+        add(fairValueMarker.valueCents)
+        targetBand?.let {
+            add(it.first)
+            add(it.second)
+        }
+        addAll(references.map(ValuationAnchor::valueCents))
+    }
+    val rawMin = values.minOrNull() ?: 0L
+    val rawMax = values.maxOrNull() ?: rawMin
+    val rawSpan = rawMax - rawMin
+    val padding = if (rawSpan == 0L) {
+        (abs(rawMin) / 20L).coerceAtLeast(1L)
+    } else {
+        ((rawSpan * 10L) / 100L).coerceAtLeast(1L)
+    }
+    return ValuationDomain(minValue = rawMin - padding, maxValue = rawMax + padding)
 }
 
 internal fun valuationAnchors(detail: SymbolDetail): List<ValuationAnchor> = buildList {
@@ -2076,6 +2393,22 @@ internal fun consensusBuckets(detail: SymbolDetail): List<ConsensusBucket> = lis
     ConsensusBucket("Sell", detail.sellCount ?: 0),
     ConsensusBucket("Strong Sell", detail.strongSellCount ?: 0),
 )
+
+internal fun consensusSegments(detail: SymbolDetail): List<ConsensusSegment> {
+    val buckets = consensusBuckets(detail)
+    val total = buckets.sumOf(ConsensusBucket::count)
+    if (total <= 0) return emptyList()
+    return buckets.map { bucket ->
+        ConsensusSegment(
+            label = bucket.label,
+            count = bucket.count,
+            shareBps = ((bucket.count * 10_000.0) / total).roundToInt(),
+        )
+    }
+}
+
+internal fun hasConsensusConcentration(detail: SymbolDetail): Boolean =
+    consensusSegments(detail).isNotEmpty()
 
 internal fun chartSlotWidth(pointCount: Int, width: Float): Float = if (pointCount > 0) width / pointCount else width
 

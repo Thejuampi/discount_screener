@@ -70,6 +70,7 @@ pub(crate) struct PersistedIssueRecord {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PersistenceBootstrap {
+    pub had_previous_session: bool,
     pub tracked_symbols: Vec<String>,
     pub watchlist: Vec<String>,
     pub symbol_states: Vec<PersistedSymbolState>,
@@ -323,18 +324,33 @@ pub(crate) fn default_state_db_path() -> PathBuf {
 pub(crate) fn load_warm_start(path: &Path) -> io::Result<PersistenceBootstrap> {
     let connection = open_connection(path)?;
     run_migrations(&connection)?;
+    let had_previous_session = load_meta_value(&connection, META_KEY_LAST_STARTUP_AT)?.is_some()
+        || load_meta_value(&connection, META_KEY_LAST_CLEAN_SHUTDOWN_AT)?.is_some()
+        || load_meta_value(&connection, META_KEY_LAST_PERSISTED_AT)?.is_some();
     set_meta_value(
         &connection,
         META_KEY_LAST_STARTUP_AT,
         &crate::unix_timestamp_seconds().to_string(),
     )?;
 
+    let tracked_symbols = load_tracked_symbols(&connection)?;
+    let watchlist = load_watchlist(&connection)?;
+    let symbol_states = load_symbol_latest(&connection)?;
+    let chart_cache = load_chart_cache(&connection)?;
+    let issues = load_issues(&connection)?;
+
     Ok(PersistenceBootstrap {
-        tracked_symbols: load_tracked_symbols(&connection)?,
-        watchlist: load_watchlist(&connection)?,
-        symbol_states: load_symbol_latest(&connection)?,
-        chart_cache: load_chart_cache(&connection)?,
-        issues: load_issues(&connection)?,
+        had_previous_session: had_previous_session
+            || !tracked_symbols.is_empty()
+            || !watchlist.is_empty()
+            || !symbol_states.is_empty()
+            || !chart_cache.is_empty()
+            || !issues.is_empty(),
+        tracked_symbols,
+        watchlist,
+        symbol_states,
+        chart_cache,
+        issues,
         last_persisted_at: load_meta_value(&connection, META_KEY_LAST_PERSISTED_AT)?
             .and_then(|value| value.parse::<u64>().ok()),
     })

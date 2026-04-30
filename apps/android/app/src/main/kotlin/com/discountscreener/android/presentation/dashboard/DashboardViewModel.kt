@@ -102,6 +102,7 @@ sealed interface DashboardAction {
     data class AddSymbols(val rawInput: String) : DashboardAction
     data class SelectProfile(val profile: String) : DashboardAction
     data object ToggleOpportunityScoringModel : DashboardAction
+    data class SetOpportunityScoringModel(val model: OpportunityScoringModel) : DashboardAction
     data object RefreshSystemStats : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
@@ -119,7 +120,7 @@ data class DashboardUiState(
     val watchlistSymbols: List<String> = emptyList(),
     val candidateRows: List<CandidateRow> = emptyList(),
     val opportunityRows: List<OpportunityListRow> = emptyList(),
-    val opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.Aggressive,
+    val opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
     val issues: List<IssueRecord> = emptyList(),
     val detailRoute: DetailRoute? = null,
     val detailData: SymbolDetail? = null,
@@ -185,6 +186,7 @@ class DashboardViewModel(
             is DashboardAction.AddSymbols -> addSymbols(action.rawInput)
             is DashboardAction.SelectProfile -> selectProfile(action.profile)
             DashboardAction.ToggleOpportunityScoringModel -> toggleOpportunityScoringModel()
+            is DashboardAction.SetOpportunityScoringModel -> setOpportunityScoringModel(action.model)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
@@ -408,16 +410,24 @@ class DashboardViewModel(
     private fun toggleOpportunityScoringModel() {
         val nextModel = when (_state.value.opportunityScoringModel) {
             OpportunityScoringModel.Legacy -> OpportunityScoringModel.Aggressive
-            OpportunityScoringModel.Aggressive -> OpportunityScoringModel.Legacy
+            OpportunityScoringModel.Aggressive -> OpportunityScoringModel.AggressiveV2
+            OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.Legacy
         }
-        _state.value = _state.value.copy(opportunityScoringModel = nextModel)
+        setOpportunityScoringModel(nextModel)
+    }
+
+    private fun setOpportunityScoringModel(model: OpportunityScoringModel) {
+        if (_state.value.opportunityScoringModel == model) {
+            return
+        }
+        _state.value = _state.value.copy(opportunityScoringModel = model)
         viewModelScope.launch {
             render(
                 getDashboardSnapshot(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                    nextModel,
+                    model,
                 ),
             )
         }

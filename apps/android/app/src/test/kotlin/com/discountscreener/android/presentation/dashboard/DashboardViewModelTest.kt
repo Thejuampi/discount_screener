@@ -118,11 +118,11 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun dashboard_defaults_to_opportunities_with_aggressive_scoring() {
+    fun dashboard_defaults_to_opportunities_with_aggressive_v2_scoring() {
         val state = DashboardUiState()
 
         assertEquals(DashboardTab.Opportunities, state.currentTab)
-        assertEquals(OpportunityScoringModel.Aggressive, state.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, state.opportunityScoringModel)
     }
 
     @Test
@@ -355,19 +355,47 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun toggle_opportunity_model_switches_to_legacy_and_refreshes_rows() = runTest(dispatcher) {
+    fun toggle_opportunity_model_cycles_v2_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
+            aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
+        )
+        val viewModel = testViewModel(repository)
+        assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
+
+        // Cycle direction: Legacy -> Aggressive (V1) -> AggressiveV2 -> Legacy.
+        // Starting from the V2 default, the first toggle wraps to Legacy.
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.Legacy, repository.lastRequestedOpportunityModel)
+        assertEquals(listOf("LEGACY"), viewModel.state.value.opportunityRows.map { it.symbol })
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.Aggressive, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.Aggressive, repository.lastRequestedOpportunityModel)
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, repository.lastRequestedOpportunityModel)
+    }
+
+    @Test
+    fun set_opportunity_model_selects_the_requested_chip_model() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
             aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
         )
         val viewModel = testViewModel(repository)
 
-        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        viewModel.dispatch(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
         advanceUntilIdle()
 
         assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
-        assertEquals(listOf("LEGACY"), viewModel.state.value.opportunityRows.map { it.symbol })
         assertEquals(OpportunityScoringModel.Legacy, repository.lastRequestedOpportunityModel)
+        assertEquals(listOf("LEGACY"), viewModel.state.value.opportunityRows.map { it.symbol })
     }
 
     @Test
@@ -533,7 +561,7 @@ class DashboardViewModelTest {
         override suspend fun clearAllData() = Unit
 
         private fun emptySnapshot(
-            opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.Aggressive,
+            opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
             startupPhase: DashboardStartupPhase = DashboardStartupPhase.Ready,
             statusMessage: String? = null,
         ) = DashboardSnapshot(
@@ -543,7 +571,7 @@ class DashboardViewModelTest {
             trackedRows = trackedRows,
             watchlistSymbols = emptyList(),
             candidateRows = emptyList(),
-            opportunityRows = if (opportunityScoringModel == OpportunityScoringModel.Aggressive) aggressiveRows else opportunityRows,
+            opportunityRows = if (opportunityScoringModel == OpportunityScoringModel.Legacy) opportunityRows else aggressiveRows,
             opportunityScoringModel = opportunityScoringModel,
             issues = emptyList(),
             selectedDetail = detailData,

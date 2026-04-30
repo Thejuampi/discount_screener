@@ -210,6 +210,103 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun merge_historical_candles_replaces_existing_duplicate_and_sorts_new_candles() {
+        val existing = listOf(
+            candle(epochSeconds = 20, closeCents = 2_000),
+            candle(epochSeconds = 10, closeCents = 1_000),
+        )
+        val incoming = listOf(
+            candle(epochSeconds = 30, closeCents = 3_000),
+            candle(epochSeconds = 20, closeCents = 9_999),
+        )
+
+        val merged = mergeHistoricalCandles(
+            symbol = "NVDA",
+            range = ChartRange.Year,
+            persistedCandles = existing,
+            incomingCandles = incoming,
+        )
+
+        assertEquals(listOf(10L, 20L, 30L), merged.map { it.epochSeconds })
+        assertEquals(9_999L, merged.first { it.epochSeconds == 20L }.closeCents)
+    }
+
+    @Test
+    fun sqlite_persists_complete_deduped_pricing_candles_across_chart_captures() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = listOf(
+                    chartCapture(
+                        symbol = "NVDA",
+                        range = ChartRange.Year,
+                        capturedAt = 100,
+                        candles = listOf(
+                            candle(epochSeconds = 20, closeCents = 2_000),
+                            candle(epochSeconds = 10, closeCents = 1_000),
+                        ),
+                    ),
+                    chartCapture(
+                        symbol = "NVDA",
+                        range = ChartRange.Year,
+                        capturedAt = 200,
+                        candles = listOf(
+                            candle(epochSeconds = 20, closeCents = 9_999),
+                            candle(epochSeconds = 30, closeCents = 3_000),
+                        ),
+                    ),
+                ),
+                revisions = emptyList(),
+            )
+
+            val chart = store.loadPricingHistory("NVDA").single {
+                it.symbol == "NVDA" && it.range == ChartRange.Year
+            }
+
+            assertEquals(listOf(10L, 20L, 30L), chart.candles.map { it.epochSeconds })
+            assertEquals(9_999L, chart.candles.first { it.epochSeconds == 20L }.closeCents)
+            assertEquals(200L, chart.fetchedAt)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun sqlite_load_pricing_history_merges_pricing_table_and_legacy_raw_ranges() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = listOf(
+                    chartCapture(
+                        symbol = "NVDA",
+                        range = ChartRange.Year,
+                        capturedAt = 100,
+                        candles = listOf(candle(epochSeconds = 10, closeCents = 1_000)),
+                    ),
+                    chartCapture(
+                        symbol = "NVDA",
+                        range = ChartRange.Month,
+                        capturedAt = 200,
+                        candles = listOf(candle(epochSeconds = 20, closeCents = 2_000)),
+                    ),
+                ),
+                revisions = emptyList(),
+            )
+            store.writableDatabase.delete(
+                "pricing_candle",
+                "symbol = ? AND chart_range = ?",
+                arrayOf("NVDA", ChartRange.Month.name),
+            )
+
+            val history = store.loadPricingHistory("NVDA")
+
+            assertEquals(listOf(ChartRange.Month, ChartRange.Year), history.map { it.range }.sortedBy { it.name })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun row_freshness_prioritizes_restored_updating_updated_and_stale_states() {
         assertEquals(
             RowFreshness.Restored,
@@ -683,6 +780,19 @@ class DefaultDashboardRepositoryTest {
         ),
     )
 
+    private fun chartCapture(
+        symbol: String,
+        range: ChartRange,
+        capturedAt: Long,
+        candles: List<HistoricalCandle>,
+    ) = RawCapture(
+        symbol = symbol,
+        captureKind = CaptureKind.ChartCandles,
+        scopeKey = range.name,
+        capturedAt = capturedAt,
+        payload = RawCapturePayload.Chart(range = range, candles = candles),
+    )
+
     private fun revision(
         symbol: String,
         marketPriceCents: Long,
@@ -1025,6 +1135,18 @@ private fun sampleRevision(
         weightedExternalSignalFairValueCents = weightedFairValueCents,
         weightedAnalystCount = weightedFairValueCents?.let { 18 },
     ),
+)
+
+private fun candle(
+    epochSeconds: Long,
+    closeCents: Long,
+) = HistoricalCandle(
+    epochSeconds = epochSeconds,
+    openCents = closeCents - 100,
+    highCents = closeCents + 100,
+    lowCents = closeCents - 200,
+    closeCents = closeCents,
+    volume = 1_000L,
 )
 
 private fun companyNameFor(symbol: String): String = when (symbol) {
