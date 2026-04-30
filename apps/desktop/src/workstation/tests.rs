@@ -1,45 +1,4 @@
 mod tests {
-    use serde::Deserialize;
-    use super::AnalysisCacheEntry;
-    use super::AnalysisControl;
-    use super::AnalysisInputKey;
-    use super::AppEvent;
-    use super::AppEventPublisher;
-    use super::AppState;
-    use super::CANDIDATE_COMPANY_COLUMN_WIDTH;
-    use super::Color;
-    use super::DcfAnalysis;
-    use super::DcfSignal;
-    use super::Event;
-    use super::FeedErrorLogger;
-    use super::FeedEvent;
-    use super::FeedRefreshPlan;
-    use super::HistoryMetricGroup;
-    use super::HistorySubview;
-    use super::HistoryWindow;
-    use super::ISSUE_KEY_JOURNAL_RESTORE;
-    use super::ISSUE_KEY_WATCHLIST_RESTORE;
-    use super::InputMode;
-    use super::IssueCenter;
-    use super::IssueSeverity;
-    use super::IssueSource;
-    use super::KeyCode;
-    use super::KeyEvent;
-    use super::KeyEventKind;
-    use super::KeyModifiers;
-    use super::LiveSourceStatus;
-    use super::LiveSymbolState;
-    use super::LoopControl;
-    use super::MAX_VISIBLE_ROWS;
-    use super::OverlayMode;
-    use super::PersistenceStatusEvent;
-    use super::PrimaryViewMode;
-    use super::RelativeMetricScore;
-    use super::RelativeStrengthBand;
-    use super::RenderLine;
-    use super::RuntimeOptions;
-    use super::SymbolCoverageEvent;
-    use super::VolumeProfileBin;
     use super::aggregate_historical_candles;
     use super::analysis_input_key;
     use super::analyst_consensus_lines;
@@ -111,22 +70,65 @@ mod tests {
     use super::score_opportunity_forecasts;
     use super::score_opportunity_fundamentals;
     use super::score_opportunity_technicals;
+    use super::score_opportunity_with_model;
     use super::should_handle_key_event;
     use super::should_leave_input_mode_on_backspace;
     use super::should_refresh_weighted_target;
     use super::summarize_chart_range;
     use super::usage_text;
     use super::visible_text;
-    use crate::BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE;
+    use super::AnalysisCacheEntry;
+    use super::AnalysisControl;
+    use super::AnalysisInputKey;
+    use super::AppEvent;
+    use super::AppEventPublisher;
+    use super::AppState;
+    use super::Color;
+    use super::DcfAnalysis;
+    use super::DcfSignal;
+    use super::Event;
+    use super::FeedErrorLogger;
+    use super::FeedEvent;
+    use super::FeedRefreshPlan;
+    use super::HistoryMetricGroup;
+    use super::HistorySubview;
+    use super::HistoryWindow;
+    use super::InputMode;
+    use super::IssueCenter;
+    use super::IssueSeverity;
+    use super::IssueSource;
+    use super::KeyCode;
+    use super::KeyEvent;
+    use super::KeyEventKind;
+    use super::KeyModifiers;
+    use super::LiveSourceStatus;
+    use super::LiveSymbolState;
+    use super::LoopControl;
+    use super::OverlayMode;
+    use super::PersistenceStatusEvent;
+    use super::PrimaryViewMode;
+    use super::RelativeMetricScore;
+    use super::RelativeStrengthBand;
+    use super::RenderLine;
+    use super::RuntimeOptions;
+    use super::SymbolCoverageEvent;
+    use super::VolumeProfileBin;
+    use super::CANDIDATE_COMPANY_COLUMN_WIDTH;
+    use super::ISSUE_KEY_JOURNAL_RESTORE;
+    use super::ISSUE_KEY_WATCHLIST_RESTORE;
+    use super::MAX_VISIBLE_ROWS;
+    use crate::detail_layout;
+    use crate::unix_timestamp_seconds;
     use crate::ChartCacheKey;
     use crate::ChartRangeSummary;
+    use crate::OpportunityScoringModel;
+    use crate::PriceCandle;
+    use crate::SectorRelativeScore;
+    use crate::BACKGROUND_CHART_REQUEST_BUDGET_PER_CYCLE;
     use crate::DETAIL_CHART_AXIS_WIDTH;
     use crate::DETAIL_CHART_ROW_PADDING;
     use crate::DETAIL_VOLUME_PROFILE_WIDTH;
-    use crate::PriceCandle;
-    use crate::SectorRelativeScore;
-    use crate::detail_layout;
-    use crate::unix_timestamp_seconds;
+    use discount_screener::checked_gap_bps;
     use discount_screener::CandidateRow;
     use discount_screener::ConfidenceBand;
     use discount_screener::ExternalSignalStatus;
@@ -137,8 +139,8 @@ mod tests {
     use discount_screener::SymbolDetail;
     use discount_screener::TerminalState;
     use discount_screener::ViewFilter;
-    use discount_screener::checked_gap_bps;
     use rusqlite::Connection;
+    use serde::Deserialize;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::env::temp_dir;
@@ -146,9 +148,9 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::mpsc;
     use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
@@ -1077,18 +1079,14 @@ mod tests {
             ..FundamentalTimeseries::default()
         };
 
-        assert!(
-            compute_dcf_analysis(&fundamentals, &insufficient)
-                .expect_err("two points should fail")
-                .to_string()
-                .contains("at least 3 annual free cash flow points")
-        );
-        assert!(
-            compute_dcf_analysis(&fundamentals, &non_positive)
-                .expect_err("non-positive latest FCF should fail")
-                .to_string()
-                .contains("latest annual free cash flow is not positive")
-        );
+        assert!(compute_dcf_analysis(&fundamentals, &insufficient)
+            .expect_err("two points should fail")
+            .to_string()
+            .contains("at least 3 annual free cash flow points"));
+        assert!(compute_dcf_analysis(&fundamentals, &non_positive)
+            .expect_err("non-positive latest FCF should fail")
+            .to_string()
+            .contains("latest annual free cash flow is not positive"));
     }
 
     #[test]
@@ -1849,21 +1847,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible_lines.iter().any(|line| line == "FUNDAMENTALS"));
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("Proprietary DCF value"))
-        );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("DCF bear $14.50  base $18.00  bull $22.50"))
-        );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("Relative vs industry Software peers=5"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("Proprietary DCF value")));
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("DCF bear $14.50  base $18.00  bull $22.50")));
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("Relative vs industry Software peers=5")));
     }
 
     #[test]
@@ -1901,11 +1893,9 @@ mod tests {
             .expect_err("unknown profiles should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            error
-                .to_string()
-                .contains("Available profiles: sp500, dow, russell")
-        );
+        assert!(error
+            .to_string()
+            .contains("Available profiles: sp500, dow, russell"));
     }
 
     #[test]
@@ -2606,9 +2596,8 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert!(loaded.startup_issues.is_empty());
-        let default_symbols = super::default_live_symbols();
-        assert_eq!(loaded.tracked_symbols[0], "AAPL");
-        assert_eq!(loaded.tracked_symbols.len(), default_symbols.len());
+        assert_eq!(loaded.tracked_symbols, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        assert!(loaded.app.show_all_tracked_symbols_in_candidates);
         assert!(loaded.state.detail("AAPL").is_some());
         assert_eq!(
             loaded.state.price_history("AAPL", 10),
@@ -2668,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn no_arg_startup_uses_sp500_instead_of_a_single_remembered_symbol() {
+    fn no_arg_startup_restores_the_previous_tracked_symbol_set() {
         let state_db = unique_test_path("default-sp500.sqlite3");
         let _ = fs::remove_file(&state_db);
 
@@ -2690,14 +2679,35 @@ mod tests {
 
         let _ = fs::remove_file(&state_db);
 
-        assert_eq!(reloaded.tracked_symbols, super::default_live_symbols());
-        assert!(
-            !reloaded
-                .tracked_symbols
-                .iter()
-                .any(|symbol| symbol == "MSTR")
-        );
-        assert!(reloaded.state.detail("MSTR").is_none());
+        assert_eq!(reloaded.tracked_symbols, vec!["MSTR".to_string()]);
+        assert!(reloaded.app.show_all_tracked_symbols_in_candidates);
+        assert!(reloaded.state.detail("MSTR").is_some());
+    }
+
+    #[test]
+    fn no_arg_startup_can_restore_an_intentionally_empty_tracked_symbol_set() {
+        let state_db = unique_test_path("empty-session.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle.replace_tracked_symbols(Vec::new());
+        persistence_handle.shutdown(1_700_000_100);
+
+        let reloaded = load_initial_state(&RuntimeOptions {
+            state_db: Some(state_db.clone()),
+            persist_enabled: true,
+            ..RuntimeOptions::default()
+        })
+        .expect("no-arg startup should restore the saved tracked universe");
+
+        let _ = fs::remove_file(&state_db);
+
+        assert!(reloaded.tracked_symbols.is_empty());
+        assert!(reloaded.app.show_all_tracked_symbols_in_candidates);
     }
 
     #[test]
@@ -2954,12 +2964,10 @@ mod tests {
         let _ = fs::remove_file(&state_db);
 
         assert_eq!(last_persisted_sequence, state.latest_sequence());
-        assert!(
-            reloaded
-                .symbol_states
-                .iter()
-                .any(|record| record.symbol == "NVDA")
-        );
+        assert!(reloaded
+            .symbol_states
+            .iter()
+            .any(|record| record.symbol == "NVDA"));
     }
 
     #[test]
@@ -3208,19 +3216,13 @@ mod tests {
             fs::read_to_string(&log_path).expect("feed error log should be readable after refresh");
         let _ = fs::remove_file(&log_path);
 
-        assert!(
-            log_contents.contains(
-                "kind=provider_coverage symbol=MSFT component=core classification=missing"
-            )
-        );
+        assert!(log_contents
+            .contains("kind=provider_coverage symbol=MSFT component=core classification=missing"));
         assert!(log_contents.contains("kind=provider_result symbol=AAPL"));
         assert!(log_contents.contains("kind=provider_result symbol=MSFT"));
         assert!(log_contents.contains("kind=provider_error symbol=AMD"));
-        assert!(
-            log_contents.contains(
-                "kind=refresh_summary tracked=3 fresh=1 stale=0 degraded=1 unavailable=2"
-            )
-        );
+        assert!(log_contents
+            .contains("kind=refresh_summary tracked=3 fresh=1 stale=0 degraded=1 unavailable=2"));
     }
 
     #[test]
@@ -3899,11 +3901,9 @@ mod tests {
 
         assert!(lines.iter().any(|line| line.text.contains("view=Graphs")));
         assert!(lines.iter().any(|line| line.text.contains("Market price")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.text.contains("Intrinsic value"))
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("Intrinsic value")));
     }
 
     #[test]
@@ -3915,11 +3915,9 @@ mod tests {
 
         let lines = build_ticker_history_lines_for_viewport(&app, "AAPL", 140, 24);
 
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.text.contains("No graph tiles are available"))
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("No graph tiles are available")));
     }
 
     #[test]
@@ -4316,20 +4314,16 @@ mod tests {
             .map(|line| visible_text(&line.text))
             .collect::<Vec<_>>();
 
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.starts_with("PRICE CHART  |  1Y"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.starts_with("PRICE CHART  |  1Y")));
         assert!(visible_lines.iter().any(|line| line == "VALUATION MAP"));
         assert!(visible_lines.iter().any(|line| line == "CONSENSUS"));
         assert!(visible_lines.iter().any(|line| line == "EVIDENCE"));
         assert!(!visible_lines.iter().any(|line| line == "RECENT CONTEXT"));
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("candles + EMA"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("candles + EMA")));
         assert!(visible_lines.iter().any(|line| line.contains("-- VOLUME ")));
         assert!(visible_lines.iter().any(|line| line.contains("-- MACD ")));
         assert!(visible_lines.iter().any(|line| line.contains("EMA20")));
@@ -4337,18 +4331,14 @@ mod tests {
             visible_lines.iter().any(|line| contains_braille(line)),
             "detail chart should contain braille HD glyphs"
         );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("Ratings: SB"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("Ratings: SB")));
         assert!(!visible_lines.iter().any(|line| line == "QUALIFICATION"));
         assert!(!visible_lines.iter().any(|line| line == "CONFIDENCE"));
-        assert!(
-            !visible_lines
-                .iter()
-                .any(|line| line == "RECENT SYMBOL ALERTS")
-        );
+        assert!(!visible_lines
+            .iter()
+            .any(|line| line == "RECENT SYMBOL ALERTS"));
     }
 
     #[test]
@@ -4451,16 +4441,12 @@ mod tests {
             .map(|line| visible_text(&line.text))
             .collect::<Vec<_>>();
 
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("IMAX") && line.contains("unavailable"))
-        );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("quote_html error") && line.contains("404 Not Found"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("IMAX") && line.contains("unavailable")));
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("quote_html error") && line.contains("404 Not Found")));
     }
 
     #[test]
@@ -4482,21 +4468,15 @@ mod tests {
             .map(|line| visible_text(&line.text))
             .collect::<Vec<_>>();
 
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("IMAX  Position: 1/1"))
-        );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("Status unavailable"))
-        );
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("quote_html error") && line.contains("404 Not Found"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("IMAX  Position: 1/1")));
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("Status unavailable")));
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("quote_html error") && line.contains("404 Not Found")));
     }
 
     #[test]
@@ -4540,17 +4520,13 @@ mod tests {
             .map(|line| visible_text(&line.text))
             .collect::<Vec<_>>();
 
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("Volume compressed:"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("Volume compressed:")));
         assert!(visible_lines.iter().any(|line| line.contains("-- MACD ")));
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains("candles + EMA"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains("candles + EMA")));
     }
 
     #[test]
@@ -4595,11 +4571,9 @@ mod tests {
         assert!(lines[0].text.contains("1-6 range"));
         assert!(lines[0].text.contains("[/] cycle"));
         assert!(lines.iter().any(|line| line.text.contains("Chart 5Y")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.text.starts_with("PRICE CHART  |  5Y"))
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line.text.starts_with("PRICE CHART  |  5Y")));
     }
 
     #[test]
@@ -4764,6 +4738,34 @@ mod tests {
     }
 
     #[test]
+    fn m_toggles_opportunity_scoring_model_inside_opportunities_view() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.primary_view = PrimaryViewMode::Opportunities;
+
+        let result = handle_input_event(
+            KeyEvent::new_with_kind(KeyCode::Char('m'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut state,
+            &mut app,
+            &[],
+            0,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("m should be handled");
+
+        assert!(matches!(result, LoopControl::Continue));
+        assert_eq!(
+            app.opportunity_scoring_model,
+            OpportunityScoringModel::Aggressive
+        );
+    }
+
+    #[test]
     fn opportunities_view_renders_qualified_rows_outside_main_high_confidence_filter() {
         let mut state = TerminalState::new(2_000, 30, 8);
         let mut app = AppState::default();
@@ -4845,7 +4847,7 @@ mod tests {
         app.primary_view = PrimaryViewMode::Opportunities;
         let lines = opportunities_view_lines_for_viewport(&state, &mut app, 120, 22);
 
-        assert!(lines.iter().any(|line| line == "TOP OPPORTUNITIES"));
+        assert!(lines.iter().any(|line| line.contains("TOP OPPORTUNITIES")));
         assert!(lines.iter().any(|line| line.contains("TOP")));
         assert!(lines.iter().any(|line| line.contains("NEXT")));
     }
@@ -5122,6 +5124,148 @@ mod tests {
     }
 
     #[test]
+    fn aggressive_model_rewards_high_upside_and_trend_more_than_legacy() {
+        let mut app = AppState::default();
+        let mut selected_detail = detail();
+        selected_detail.fundamentals = Some(fundamentals_with(
+            "NVDA",
+            Some(200_000_000),
+            Some(250_000_000),
+            Some(2_500),
+            Some(40),
+            Some(500_000_000),
+            Some(100_000_000),
+            Some(1_400),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("NVDA", ChartRange::Year),
+            year_summary(
+                2_450,
+                Some(2_100),
+                Some(1_900),
+                Some(1_700),
+                Some(220),
+                Some(120),
+                Some(100),
+            ),
+        );
+        app.analysis_cache.insert(
+            selected_detail.symbol.clone(),
+            super::AnalysisCacheEntry::Ready {
+                input: AnalysisInputKey {
+                    symbol: selected_detail.symbol.clone(),
+                    shares_outstanding: None,
+                    total_debt_dollars: None,
+                    total_cash_dollars: None,
+                    beta_millis: None,
+                },
+                analysis: dcf_analysis_fixture(32_000),
+            },
+        );
+
+        let legacy = score_opportunity_with_model(
+            &app,
+            &selected_detail,
+            Some(
+                app.chart_summary("NVDA", ChartRange::Year)
+                    .expect("summary should exist"),
+            ),
+            OpportunityScoringModel::Legacy,
+        );
+        let aggressive = score_opportunity_with_model(
+            &app,
+            &selected_detail,
+            Some(
+                app.chart_summary("NVDA", ChartRange::Year)
+                    .expect("summary should exist"),
+            ),
+            OpportunityScoringModel::Aggressive,
+        );
+
+        assert_eq!(legacy.composite_score, 15);
+        assert_eq!(aggressive.composite_score, 27);
+    }
+
+    #[test]
+    fn aggressive_model_penalizes_broken_balance_sheet_and_bearish_setup() {
+        let mut app = AppState::default();
+        let mut selected_detail = detail();
+        selected_detail.external_status = ExternalSignalStatus::Divergent;
+        selected_detail.weighted_external_signal_fair_value_cents = Some(15_000);
+        selected_detail.analyst_opinion_count = Some(2);
+        selected_detail.recommendation_mean_hundredths = Some(340);
+        selected_detail.fundamentals = Some(fundamentals_with(
+            "NVDA",
+            Some(-10),
+            Some(-10),
+            Some(-500),
+            Some(240),
+            Some(10_000_000),
+            Some(500_000_000),
+            Some(-900),
+        ));
+        app.chart_summary_cache.insert(
+            super::ChartCacheKey::new("NVDA", ChartRange::Year),
+            year_summary(
+                1_000,
+                Some(1_100),
+                Some(1_200),
+                Some(1_300),
+                Some(-120),
+                Some(10),
+                Some(-130),
+            ),
+        );
+        app.analysis_cache.insert(
+            selected_detail.symbol.clone(),
+            super::AnalysisCacheEntry::Ready {
+                input: AnalysisInputKey {
+                    symbol: selected_detail.symbol.clone(),
+                    shares_outstanding: None,
+                    total_debt_dollars: None,
+                    total_cash_dollars: None,
+                    beta_millis: None,
+                },
+                analysis: dcf_analysis_fixture(9_000),
+            },
+        );
+
+        let aggressive = score_opportunity_with_model(
+            &app,
+            &selected_detail,
+            Some(
+                app.chart_summary("NVDA", ChartRange::Year)
+                    .expect("summary should exist"),
+            ),
+            OpportunityScoringModel::Aggressive,
+        );
+
+        assert_eq!(aggressive.composite_score, -22);
+    }
+
+    #[test]
+    fn opportunities_view_shows_active_scoring_model_in_header() {
+        let mut state = TerminalState::new(2_000, 30, 8);
+        let mut app = AppState::default();
+        app.primary_view = PrimaryViewMode::Opportunities;
+        app.opportunity_scoring_model = OpportunityScoringModel::Aggressive;
+
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "TOP".to_string(),
+            company_name: Some("Top Idea".to_string()),
+            profitable: true,
+            market_price_cents: 1_000,
+            intrinsic_value_cents: 4_000,
+        });
+
+        let lines = opportunities_view_lines_for_viewport(&state, &mut app, 120, 22);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Model: Aggressive [m]")));
+    }
+
+    #[test]
     fn ticker_detail_uses_opportunity_order_for_position_and_navigation() {
         let mut state = TerminalState::new(2_000, 30, 8);
         let mut app = AppState::default();
@@ -5200,11 +5344,9 @@ mod tests {
             .into_iter()
             .map(|line| visible_text(&line.text))
             .collect::<Vec<_>>();
-        assert!(
-            detail_lines
-                .iter()
-                .any(|line| line.contains("Position: 1/2"))
-        );
+        assert!(detail_lines
+            .iter()
+            .any(|line| line.contains("Position: 1/2")));
 
         let handled = handle_overlay_key(
             &mut app,
@@ -5432,11 +5574,9 @@ mod tests {
         let visible_lines = opportunities_view_lines_with_selected_index(&state, &app, 20, 120, 40);
 
         assert!(visible_lines.iter().any(|line| line.contains("OP20")));
-        assert!(
-            visible_lines
-                .iter()
-                .any(|line| line.contains(">  20") && line.contains("OP20"))
-        );
+        assert!(visible_lines
+            .iter()
+            .any(|line| line.contains(">  20") && line.contains("OP20")));
         assert!(!visible_lines.iter().any(|line| line.contains("OP00")));
     }
 
@@ -7342,8 +7482,7 @@ mod tests {
                 low_fair_value_cents: external_signal.low_fair_value_cents,
                 high_fair_value_cents: external_signal.high_fair_value_cents,
                 analyst_opinion_count: external_signal.analyst_opinion_count,
-                recommendation_mean_hundredths: external_signal
-                    .recommendation_mean_hundredths,
+                recommendation_mean_hundredths: external_signal.recommendation_mean_hundredths,
                 strong_buy_count: None,
                 buy_count: None,
                 hold_count: None,
@@ -7461,12 +7600,18 @@ mod tests {
         let selected_detail = state
             .detail(&expected_selected_detail.symbol)
             .expect("expected selected detail");
-        assert_eq!(selected_detail.qualification, expected_selected_detail.qualification);
+        assert_eq!(
+            selected_detail.qualification,
+            expected_selected_detail.qualification
+        );
         assert_eq!(
             selected_detail.external_status,
             expected_selected_detail.external_status
         );
-        assert_eq!(selected_detail.confidence, expected_selected_detail.confidence);
+        assert_eq!(
+            selected_detail.confidence,
+            expected_selected_detail.confidence
+        );
         assert_eq!(selected_detail.gap_bps, expected_selected_detail.gap_bps);
         assert_eq!(
             selected_detail.external_signal_gap_bps,
@@ -7488,6 +7633,9 @@ mod tests {
             selected_detail.recommendation_mean_hundredths,
             expected_selected_detail.recommendation_mean_hundredths
         );
-        assert_eq!(selected_detail.is_watched, expected_selected_detail.is_watched);
+        assert_eq!(
+            selected_detail.is_watched,
+            expected_selected_detail.is_watched
+        );
     }
 }

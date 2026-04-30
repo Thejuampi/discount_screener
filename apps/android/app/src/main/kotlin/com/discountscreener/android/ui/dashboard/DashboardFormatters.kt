@@ -1,5 +1,9 @@
 package com.discountscreener.android.ui.dashboard
 
+import com.discountscreener.android.domain.model.ChangeDirection
+import com.discountscreener.android.domain.model.RankMovement
+import com.discountscreener.android.domain.model.ValuationChange
+
 internal fun money(cents: Long): String = "$" + "%.2f".format(cents / 100.0)
 
 internal fun compactMoney(cents: Long): String {
@@ -43,6 +47,16 @@ internal fun symbolWithCompany(symbol: String, companyName: String?): String {
 }
 
 internal fun formatPct(bps: Int): String = "%.2f%%".format(bps / 100.0)
+
+internal fun rankMovementLabel(movement: RankMovement?): String? = movement?.let {
+    val arrow = if (it.direction == ChangeDirection.Up) "↑" else "↓"
+    "$arrow${it.places} rank"
+}
+
+internal fun valuationChangeLabel(change: ValuationChange?): String? = change?.let {
+    val arrow = if (it.direction == ChangeDirection.Up) "↑" else "↓"
+    "Target $arrow${"%.1f".format(kotlin.math.abs(it.changeBps) / 100.0)}%"
+}
 
 internal fun formatFileSize(bytes: Long): String = when {
     bytes >= 1_073_741_824L -> "%.1f GB".format(bytes / 1_073_741_824.0)

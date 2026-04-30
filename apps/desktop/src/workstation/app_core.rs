@@ -708,9 +708,32 @@ enum PrimaryViewMode {
     Opportunities,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpportunityScoringModel {
+    Legacy,
+    Aggressive,
+}
+
+impl OpportunityScoringModel {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Legacy => Self::Aggressive,
+            Self::Aggressive => Self::Legacy,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Legacy => "Legacy",
+            Self::Aggressive => "Aggressive",
+        }
+    }
+}
+
 struct AppState {
     paused: bool,
     primary_view: PrimaryViewMode,
+    opportunity_scoring_model: OpportunityScoringModel,
     selected_symbol: Option<String>,
     candidate_selected_symbol: Option<String>,
     opportunity_selected_symbol: Option<String>,
@@ -749,6 +772,7 @@ impl Default for AppState {
         Self {
             paused: false,
             primary_view: PrimaryViewMode::Candidates,
+            opportunity_scoring_model: OpportunityScoringModel::Legacy,
             selected_symbol: None,
             candidate_selected_symbol: None,
             opportunity_selected_symbol: None,
@@ -1040,6 +1064,16 @@ impl AppState {
         };
         self.selected_symbol = None;
         self.ensure_primary_view_selection(state);
+    }
+
+    fn toggle_opportunity_scoring_model(&mut self, state: &TerminalState) {
+        self.opportunity_scoring_model = self.opportunity_scoring_model.toggle();
+        self.selected_symbol = None;
+        self.ensure_primary_view_selection(state);
+        self.set_status_message(format!(
+            "Opportunity scoring model: {}.",
+            self.opportunity_scoring_model.label()
+        ));
     }
 
     fn ensure_primary_view_selection(&mut self, state: &TerminalState) {
@@ -2595,4 +2629,3 @@ struct OpportunityRow {
     technical_signals: Vec<&'static str>,
     forecast_signals: Vec<&'static str>,
 }
-

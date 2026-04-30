@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
+import com.discountscreener.core.model.OpportunityScoringModel
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -166,10 +167,16 @@ fun DashboardScreen(
                     if (state.opportunityRows.isEmpty()) {
                         EmptyState(
                             title = "No ranked opportunities",
-                            detail = "The upside view does not yet have enough live coverage to score opportunities. Check Upside for progress.",
+                            detail = "Opportunity ranks appear once restored data or live coverage is strong enough to score the current universe.",
                         )
                     } else {
-                        OpportunityList(state.opportunityRows, onAction)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OpportunityScoringModelToggle(
+                                selected = state.opportunityScoringModel,
+                                onAction = onAction,
+                            )
+                            OpportunityList(state.opportunityRows, state.opportunityScoringModel, onAction)
+                        }
                     }
                 }
 
@@ -197,6 +204,42 @@ fun DashboardScreen(
                 onAction(DashboardAction.SelectProfile(it))
                 showProfiles = false
             },
+        )
+    }
+}
+
+@Composable
+private fun OpportunityScoringModelToggle(
+    selected: OpportunityScoringModel,
+    onAction: (DashboardAction) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = selected == OpportunityScoringModel.AggressiveV2,
+            onClick = {
+                if (selected != OpportunityScoringModel.AggressiveV2) {
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.AggressiveV2))
+                }
+            },
+            label = { Text("Aggressive V2") },
+        )
+        FilterChip(
+            selected = selected == OpportunityScoringModel.Aggressive,
+            onClick = {
+                if (selected != OpportunityScoringModel.Aggressive) {
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Aggressive))
+                }
+            },
+            label = { Text("Aggressive") },
+        )
+        FilterChip(
+            selected = selected == OpportunityScoringModel.Legacy,
+            onClick = {
+                if (selected != OpportunityScoringModel.Legacy) {
+                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
+                }
+            },
+            label = { Text("Legacy") },
         )
     }
 }

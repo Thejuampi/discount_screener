@@ -49,6 +49,172 @@ enum class DcfSignal {
 }
 
 @Serializable
+enum class OpportunityScoringModel {
+    Legacy,
+    Aggressive,
+    AggressiveV2,
+}
+
+@Serializable
+enum class TrendSignal {
+    Improving,
+    Stable,
+    Deteriorating,
+    Mixed,
+    Volatile,
+    InsufficientData,
+}
+
+@Serializable
+enum class ConfidenceLevel {
+    Unavailable,
+    Low,
+    Medium,
+    High,
+}
+
+@Serializable
+enum class ProvenanceState {
+    Live,
+    Restored,
+    Stale,
+    Unavailable,
+    ParseUncertain,
+    ProviderUncertain,
+}
+
+@Serializable
+data class Provenance(
+    val source: String? = null,
+    val asOfEpochSeconds: Long? = null,
+    val state: ProvenanceState,
+) {
+    val isAvailable: Boolean
+        get() = state != ProvenanceState.Unavailable && !source.isNullOrBlank()
+}
+
+@Serializable
+enum class EvidenceStatus {
+    Available,
+    Unavailable,
+    Stale,
+    Sparse,
+    ParseUncertain,
+    ProviderUncertain,
+}
+
+@Serializable
+enum class EvidenceDirection {
+    Positive,
+    Neutral,
+    Negative,
+    Unavailable,
+}
+
+@Serializable
+data class PerformanceMetricEvidence(
+    val id: String,
+    val label: String,
+    val status: EvidenceStatus,
+    val direction: EvidenceDirection,
+    val valueCents: Long? = null,
+    val valueBps: Int? = null,
+    val valueHundredths: Int? = null,
+    val valueMillis: Int? = null,
+    val detail: String? = null,
+    val provenance: Provenance,
+) {
+    init {
+        require(id.isNotBlank()) { "Evidence id is required." }
+        require(label.isNotBlank()) { "Evidence label is required." }
+        if (status == EvidenceStatus.Available) {
+            require(provenance.isAvailable) { "Available evidence requires available provenance." }
+        }
+        if (status == EvidenceStatus.Unavailable) {
+            require(direction == EvidenceDirection.Unavailable) {
+                "Unavailable evidence must use the unavailable direction."
+            }
+        }
+    }
+}
+
+@Serializable
+enum class ScorecardSectionKind {
+    Growth,
+    Profitability,
+    CashConversion,
+    BalanceSheet,
+    Valuation,
+    Sentiment,
+    Confidence,
+}
+
+@Serializable
+data class PerformanceScorecardSection(
+    val kind: ScorecardSectionKind,
+    val evidence: List<PerformanceMetricEvidence>,
+) {
+    init {
+        require(evidence.isNotEmpty()) { "Scorecard section requires at least one evidence row." }
+    }
+}
+
+@Serializable
+enum class RiskSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+@Serializable
+data class RiskFlag(
+    val id: String,
+    val severity: RiskSeverity,
+    val title: String,
+    val evidenceIds: List<String>,
+    val detail: String? = null,
+) {
+    init {
+        require(id.isNotBlank()) { "Risk id is required." }
+        require(title.isNotBlank()) { "Risk title is required." }
+        if (severity != RiskSeverity.Info) {
+            require(evidenceIds.isNotEmpty()) { "Warning and critical risks require evidence references." }
+        }
+    }
+}
+
+@Serializable
+enum class DecisionReadiness {
+    ReadyForReview,
+    NeedsManualThesisCheck,
+    TooSparseToJudge,
+    BlockedByUnavailableData,
+}
+
+@Serializable
+data class PerformanceLens(
+    val trajectory: TrendSignal,
+    val confidence: ConfidenceLevel,
+    val provenance: Provenance,
+    val sections: List<PerformanceScorecardSection>,
+    val riskFlags: List<RiskFlag>,
+    val decisionReadiness: DecisionReadiness,
+) {
+    init {
+        require(sections.isNotEmpty()) { "Performance lens requires at least one scorecard section." }
+        if (confidence == ConfidenceLevel.High) {
+            require(hasAvailableEvidence()) { "High confidence requires at least one available evidence row." }
+        }
+        if (decisionReadiness != DecisionReadiness.TooSparseToJudge) {
+            require(provenance.isAvailable) { "Decision readiness requires available provenance." }
+        }
+    }
+
+    private fun hasAvailableEvidence(): Boolean =
+        sections.any { section -> section.evidence.any { it.status == EvidenceStatus.Available } }
+}
+
+@Serializable
 data class ViewFilter(
     val query: String = "",
     val watchlistOnly: Boolean = false,
@@ -206,6 +372,13 @@ data class HistoricalCandle(
     val lowCents: Long,
     val closeCents: Long,
     val volume: Long,
+)
+
+@Serializable
+data class PricingCandle(
+    val symbol: String,
+    val range: ChartRange,
+    val candle: HistoricalCandle,
 )
 
 @Serializable

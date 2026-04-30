@@ -62,18 +62,16 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                     },
                 )
                 StartupStage.Content -> {
-                    val route = state.detailRoute
-                    if (route != null) {
-                        DetailScreen(
-                            route = route,
+                    when (val detailRoute = state.detailRoute) {
+                        null -> DashboardScreen(state = state, onAction = viewModel::dispatch)
+                        else -> DetailScreen(
+                            route = detailRoute,
                             detail = state.detailData,
                             charts = state.detailCharts,
                             history = state.detailHistory,
                             alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
                             onAction = viewModel::dispatch,
                         )
-                    } else {
-                        DashboardScreen(state = state, onAction = viewModel::dispatch)
                     }
                 }
             }

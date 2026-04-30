@@ -1396,6 +1396,11 @@ fn handle_input_event(
                 KeyCode::Char('o') => {
                     app.toggle_primary_view(state);
                 }
+                KeyCode::Char('m')
+                    if matches!(app.primary_view, PrimaryViewMode::Opportunities) =>
+                {
+                    app.toggle_opportunity_scoring_model(state);
+                }
                 KeyCode::Char('l') => {
                     app.open_issue_log();
                 }
@@ -1469,4 +1474,3 @@ fn handle_input_event(
 
     Ok(LoopControl::Continue)
 }
-

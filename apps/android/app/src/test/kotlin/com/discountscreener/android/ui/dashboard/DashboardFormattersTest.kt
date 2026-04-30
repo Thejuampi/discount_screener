@@ -1,6 +1,11 @@
 package com.discountscreener.android.ui.dashboard
 
+import com.discountscreener.android.domain.model.ChangeDirection
+import com.discountscreener.android.domain.model.RankMovement
+import com.discountscreener.android.domain.model.ValuationChange
+import com.discountscreener.android.domain.model.ValuationChangeTier
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DashboardFormattersTest {
@@ -25,5 +30,34 @@ class DashboardFormattersTest {
         assertEquals("NVDA NVIDIA Corporation", symbolWithCompany("NVDA", "NVIDIA Corporation"))
         assertEquals("NVDA", symbolWithCompany("NVDA", null))
         assertEquals("NVDA", symbolWithCompany("NVDA", "NVDA"))
+    }
+
+    @Test
+    fun movement_labels_are_short_and_directional() {
+        assertEquals(
+            "↑3 rank",
+            rankMovementLabel(
+                RankMovement(
+                    direction = ChangeDirection.Up,
+                    places = 3,
+                    previousIndex = 4,
+                    currentIndex = 1,
+                ),
+            ),
+        )
+        assertEquals(
+            "Target ↓12.5%",
+            valuationChangeLabel(
+                ValuationChange(
+                    direction = ChangeDirection.Down,
+                    previousFairValueCents = 20_000L,
+                    currentFairValueCents = 17_500L,
+                    changeBps = -1_250,
+                    tier = ValuationChangeTier.Significant,
+                ),
+            ),
+        )
+        assertNull(rankMovementLabel(null))
+        assertNull(valuationChangeLabel(null))
     }
 }

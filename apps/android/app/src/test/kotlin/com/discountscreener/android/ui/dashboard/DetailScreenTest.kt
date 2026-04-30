@@ -1,15 +1,19 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.model.SymbolRevision
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -37,6 +41,15 @@ class DetailScreenTest {
     }
 
     @Test
+    fun replay_keyboard_controls_match_desktop_and_phone_volume_keys() {
+        assertEquals(DashboardAction.StepReplayBack, replayActionForKey(Key.DirectionLeft))
+        assertEquals(DashboardAction.StepReplayBack, replayActionForKey(Key.VolumeDown))
+        assertEquals(DashboardAction.StepReplayForward, replayActionForKey(Key.DirectionRight))
+        assertEquals(DashboardAction.StepReplayForward, replayActionForKey(Key.VolumeUp))
+        assertNull(replayActionForKey(Key.DirectionUp))
+    }
+
+    @Test
     fun ema_values_match_desktop_reference_series() {
         val emaSeries = emaValues(listOf(10_000.0, 20_000.0, 30_000.0), 2)
 
@@ -58,6 +71,27 @@ class DetailScreenTest {
         assertTrue((model.latestEma200Cents ?: 0L) > 0L)
         assertTrue(model.trendSignals.any { it.title == "Bull E20/E50" })
         assertTrue(model.trendSignals.any { it.title == "Bull E50/E200" })
+    }
+
+    @Test
+    fun price_chart_model_supports_single_replay_candle() {
+        val model = buildPriceChartModel(
+            listOf(
+                sampleCandle(
+                    epochSeconds = dateEpoch(2024, 1, 1),
+                    openCents = 20_000L,
+                    lowCents = 19_500L,
+                    highCents = 20_500L,
+                    closeCents = 20_250L,
+                ),
+            ),
+        )!!
+
+        assertEquals(1, model.ema20.size)
+        assertEquals(1, model.ema50.size)
+        assertEquals(1, model.ema200.size)
+        assertTrue(model.axisLabels.top.startsWith("$"))
+        assertTrue(model.trendSignals.isEmpty())
     }
 
     @Test
@@ -121,6 +155,50 @@ class DetailScreenTest {
         assertTrue(labels.contains("45.3M"))
         assertTrue(labels.contains("-$52.9"))
         assertEquals(6, labels.maxOf(String::length))
+    }
+
+    @Test
+    fun volume_profile_model_uses_visible_replay_candles() {
+        val model = buildVolumeProfileModel(
+            candles = listOf(
+                sampleCandle(
+                    epochSeconds = dateEpoch(2024, 1, 1),
+                    openCents = 2_000L,
+                    lowCents = 2_000L,
+                    highCents = 4_000L,
+                    closeCents = 4_000L,
+                    volume = 600L,
+                ),
+                sampleCandle(
+                    epochSeconds = dateEpoch(2024, 1, 2),
+                    openCents = 4_000L,
+                    lowCents = 2_000L,
+                    highCents = 4_000L,
+                    closeCents = 2_000L,
+                    volume = 400L,
+                ),
+            ),
+            minPriceCents = 2_000L,
+            maxPriceCents = 4_000L,
+            binCount = 2,
+        )!!
+
+        assertEquals(2, model.bins.size)
+        assertEquals(600L, model.bins.sumOf { it.upVolume })
+        assertEquals(400L, model.bins.sumOf { it.downVolume })
+        assertEquals(500L, model.maxBinVolume)
+    }
+
+    @Test
+    fun replay_summary_marks_historical_and_live_windows() {
+        assertEquals(
+            "Showing 7 / 10 candles  |  Replay -3 from live  |  Volume max 1.00K",
+            replayStatusText(visibleCount = 7, totalCount = 10, replayOffset = 3, maxVolume = 1_000L),
+        )
+        assertEquals(
+            "Showing 10 / 10 candles  |  Live  |  Volume max 1.00K",
+            replayStatusText(visibleCount = 10, totalCount = 10, replayOffset = 0, maxVolume = 1_000L),
+        )
     }
 
     @Test
@@ -209,6 +287,282 @@ class DetailScreenTest {
     }
 
     @Test
+    fun primary_fair_value_prefers_weighted_target_over_median_and_mean() {
+        val fairValue = primaryFairValue(detailWithValuationAnchors())
+
+        assertEquals("Weighted", fairValue.sourceLabel)
+        assertEquals(27_200L, fairValue.valueCents)
+    }
+
+    @Test
+    fun primary_fair_value_falls_back_to_median_when_weighted_is_missing() {
+        val fairValue = primaryFairValue(
+            detailWithValuationAnchors().copy(
+                weightedExternalSignalFairValueCents = null,
+                weightedAnalystCount = null,
+            ),
+        )
+
+        assertEquals("Median", fairValue.sourceLabel)
+        assertEquals(26_500L, fairValue.valueCents)
+    }
+
+    @Test
+    fun primary_fair_value_falls_back_to_mean_when_analyst_targets_are_missing() {
+        val fairValue = primaryFairValue(
+            detailWithValuationAnchors().copy(
+                weightedExternalSignalFairValueCents = null,
+                externalSignalFairValueCents = null,
+            ),
+        )
+
+        assertEquals("Mean", fairValue.sourceLabel)
+        assertEquals(26_923L, fairValue.valueCents)
+    }
+
+    @Test
+    fun valuation_range_model_includes_price_and_primary_fair_value_markers() {
+        val model = valuationRangeModel(detailWithValuationAnchors())
+
+        assertEquals("Price", model.priceMarker.label)
+        assertEquals(17_270L, model.priceMarker.valueCents)
+        assertEquals("Fair value", model.fairValueMarker.label)
+        assertEquals(27_200L, model.fairValueMarker.valueCents)
+        assertEquals("Weighted", model.fairValueSourceLabel)
+        assertTrue((model.upsideBps ?: 0) > 0)
+    }
+
+    @Test
+    fun valuation_range_model_uses_analyst_low_and_high_for_x_axis_labels() {
+        val model = valuationRangeModel(detailWithValuationAnchors())
+
+        assertEquals(18_500L, model.axisLabels.minValueCents)
+        assertEquals(32_000L, model.axisLabels.maxValueCents)
+        assertEquals("Min $185", model.axisLabels.minLabel)
+        assertEquals("Range $185-$320", model.axisLabels.rangeLabel)
+        assertEquals("Max $320", model.axisLabels.maxLabel)
+    }
+
+    @Test
+    fun valuation_range_model_falls_back_to_visible_values_for_x_axis_labels_without_low_high() {
+        val model = valuationRangeModel(
+            detailWithValuationAnchors().copy(
+                externalSignalLowFairValueCents = null,
+                externalSignalHighFairValueCents = null,
+            ),
+        )
+
+        assertEquals(17_270L, model.axisLabels.minValueCents)
+        assertEquals(27_200L, model.axisLabels.maxValueCents)
+        assertEquals("Range $173-$272", model.axisLabels.rangeLabel)
+    }
+
+    @Test
+    fun consensus_segments_compute_counts_and_percentages() {
+        val segments = consensusSegments(detailWithValuationAnchors())
+
+        assertEquals(5, segments.size)
+        assertEquals(42, segments.sumOf(ConsensusSegment::count))
+        assertEquals(4_762, segments.first { it.label == "Strong Buy" }.shareBps)
+        assertEquals(2_381, segments.first { it.label == "Buy" }.shareBps)
+    }
+
+    @Test
+    fun consensus_segments_are_unavailable_when_all_counts_are_empty() {
+        val segments = consensusSegments(
+            detailWithValuationAnchors().copy(
+                strongBuyCount = null,
+                buyCount = null,
+                holdCount = null,
+                sellCount = null,
+                strongSellCount = null,
+            ),
+        )
+
+        assertTrue(segments.isEmpty())
+        assertTrue(
+            !hasConsensusConcentration(
+                detailWithValuationAnchors().copy(
+                    strongBuyCount = 0,
+                    buyCount = 0,
+                    holdCount = 0,
+                    sellCount = 0,
+                    strongSellCount = 0,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun valuation_trend_summary_detects_steady_upgrades() {
+        val summary = valuationTrendSummary(
+            listOf(
+                revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 11_000L),
+                revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = 12_500L),
+            ),
+        )
+
+        assertEquals("Analysts steadily raising targets", summary.title)
+        assertTrue(summary.detail.contains("latest \$125.00"))
+    }
+
+    @Test
+    fun valuation_trend_summary_falls_back_to_median_target_when_weighted_is_missing() {
+        val summary = valuationTrendSummary(
+            listOf(
+                revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = null, externalFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = null, externalFairValueCents = 11_000L),
+                revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = null, externalFairValueCents = 12_500L),
+            ),
+        )
+
+        assertEquals("Analysts steadily raising targets", summary.title)
+        assertTrue(summary.detail.contains("latest \$125.00"))
+    }
+
+    @Test
+    fun significant_revision_changes_ignore_small_moves() {
+        val changes = significantRevisionChanges(
+            listOf(
+                revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 10_200L),
+                revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = 11_000L),
+            ),
+        )
+
+        assertEquals(1, changes.size)
+        assertEquals("2024-03-01", revisionDateLabel(changes.single().revision))
+    }
+
+    @Test
+    fun latest_meaningful_revision_change_returns_latest_significant_step() {
+        val latest = latestMeaningfulRevisionChange(
+            listOf(
+                revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 10_700L),
+                revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = 10_900L),
+                revisionAt(dateEpoch(2024, 4, 1), weightedFairValueCents = 12_500L),
+            ),
+        )
+
+        assertEquals("2024-04-01", revisionDateLabel(latest!!.current))
+        assertEquals("2024-03-01", revisionDateLabel(latest.previous))
+    }
+
+    @Test
+    fun history_status_message_explains_empty_and_single_snapshot_states() {
+        val emptyHistoryMessage = historyStatusMessage(
+            detail = detailWithValuationAnchors(),
+            history = emptyList(),
+            valuationHistory = emptyList(),
+        )
+        assertEquals("No saved analyst-target history yet", emptyHistoryMessage?.title)
+
+        val singleSnapshotMessage = historyStatusMessage(
+            detail = detailWithValuationAnchors(),
+            history = listOf(revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L)),
+            valuationHistory = listOf(revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L)),
+        )
+        assertEquals("Only one analyst-target snapshot", singleSnapshotMessage?.title)
+
+        assertNull(
+            historyStatusMessage(
+                detail = detailWithValuationAnchors(),
+                history = listOf(
+                    revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                    revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 11_000L),
+                ),
+                valuationHistory = listOf(
+                    revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                    revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 11_000L),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun history_status_message_does_not_report_missing_when_median_targets_exist() {
+        val revisions = listOf(
+            revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = null, externalFairValueCents = 10_000L),
+            revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = null, externalFairValueCents = 11_000L),
+        )
+
+        assertNull(
+            historyStatusMessage(
+                detail = detailWithValuationAnchors().copy(
+                    weightedExternalSignalFairValueCents = null,
+                    weightedAnalystCount = null,
+                    externalSignalFairValueCents = 11_000L,
+                    analystOpinionCount = 18,
+                ),
+                history = revisions,
+                valuationHistory = revisions,
+            ),
+        )
+    }
+
+    @Test
+    fun price_history_status_message_summarizes_saved_candle_span() {
+        val empty = priceHistoryStatusMessage(emptyList(), ChartRange.Year)
+        assertEquals("No saved price history yet", empty.title)
+        assertTrue(empty.detail.contains("1Y chart data"))
+
+        val ready = priceHistoryStatusMessage(sampleCandles(), ChartRange.Year)
+        assertEquals("Saved price history", ready.title)
+        assertTrue(ready.detail.contains("4 saved candles"))
+        assertTrue(ready.detail.contains("2024-01-01"))
+        assertTrue(ready.detail.contains("2024-01-22"))
+    }
+
+    @Test
+    fun analyst_target_episodes_collapse_repeated_targets_into_flat_spans() {
+        val episodes = analystTargetEpisodes(
+            listOf(
+                revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 1, 8), weightedFairValueCents = 10_000L),
+                revisionAt(dateEpoch(2024, 1, 15), weightedFairValueCents = 11_500L),
+                revisionAt(dateEpoch(2024, 1, 22), weightedFairValueCents = 11_500L),
+            ),
+        )
+
+        assertEquals(2, episodes.size)
+        assertEquals(2, episodes.first().observationCount)
+        assertEquals(2, episodes.last().observationCount)
+        assertEquals(11_500L, episodes.last().targetFairValueCents)
+    }
+
+    @Test
+    fun analyst_target_history_overview_reports_flat_state_with_price_context() {
+        val history = listOf(
+            revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = 10_000L, marketPriceCents = 8_500L),
+            revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = 10_000L, marketPriceCents = 9_500L),
+            revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = 10_000L, marketPriceCents = 11_000L),
+        )
+
+        val overview = analystTargetHistoryOverview(history, analystTargetEpisodes(history))
+
+        assertEquals(AnalystTargetHistoryState.Flat, overview?.state)
+        assertTrue(overview!!.detail.contains("Price moved"))
+        assertEquals(0, overview.changeCount)
+    }
+
+    @Test
+    fun analyst_target_history_overview_reports_change_count_and_source() {
+        val history = listOf(
+            revisionAt(dateEpoch(2024, 1, 1), weightedFairValueCents = null, externalFairValueCents = 10_000L),
+            revisionAt(dateEpoch(2024, 2, 1), weightedFairValueCents = null, externalFairValueCents = 11_000L),
+            revisionAt(dateEpoch(2024, 3, 1), weightedFairValueCents = null, externalFairValueCents = 12_000L),
+        )
+
+        val overview = analystTargetHistoryOverview(history, analystTargetEpisodes(history))
+
+        assertEquals(AnalystTargetHistoryState.Changed, overview?.state)
+        assertEquals("Median", overview?.sourceLabel)
+        assertEquals(2, overview?.changeCount)
+    }
+
+    @Test
     fun macd_chart_scale_keeps_zero_at_bottom_for_positive_only_series() {
         val scale = macdChartScale(
             macdLine = listOf(12.0, 10.0, 8.0),
@@ -265,6 +619,23 @@ class DetailScreenTest {
         isWatched = false,
     )
 
+    private fun revisionAt(
+        evaluatedAtEpochSeconds: Long,
+        weightedFairValueCents: Long?,
+        externalFairValueCents: Long = weightedFairValueCents ?: 0L,
+        marketPriceCents: Long = 17_270L,
+    ) = SymbolRevision(
+        symbol = "NVDA",
+        evaluatedAtEpochSeconds = evaluatedAtEpochSeconds,
+        detail = detailWithValuationAnchors().copy(
+            marketPriceCents = marketPriceCents,
+            weightedExternalSignalFairValueCents = weightedFairValueCents,
+            externalSignalFairValueCents = externalFairValueCents,
+            externalSignalLowFairValueCents = externalFairValueCents - 1_000L,
+            externalSignalHighFairValueCents = externalFairValueCents + 1_000L,
+        ),
+    )
+
     private fun sampleCandles() = listOf(
         sampleCandle(epochSeconds = dateEpoch(2024, 1, 1), closeCents = 10_000L),
         sampleCandle(epochSeconds = dateEpoch(2024, 1, 8), closeCents = 10_500L),
@@ -275,13 +646,17 @@ class DetailScreenTest {
     private fun sampleCandle(
         epochSeconds: Long,
         closeCents: Long = 10_000L,
+        openCents: Long = closeCents - 100L,
+        highCents: Long = closeCents + 100L,
+        lowCents: Long = closeCents - 200L,
+        volume: Long = 1_000L,
     ) = HistoricalCandle(
         epochSeconds = epochSeconds,
-        openCents = closeCents - 100L,
-        highCents = closeCents + 100L,
-        lowCents = closeCents - 200L,
+        openCents = openCents,
+        highCents = highCents,
+        lowCents = lowCents,
         closeCents = closeCents,
-        volume = 1_000L,
+        volume = volume,
     )
 
     private fun dateEpoch(year: Int, month: Int, day: Int): Long =

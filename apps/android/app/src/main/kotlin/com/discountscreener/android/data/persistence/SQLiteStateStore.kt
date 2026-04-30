@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.DcfAnalysis
@@ -14,6 +15,7 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedSymbolState
+import com.discountscreener.core.model.PricingCandle
 import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.android.domain.model.DatabaseTableInfo
@@ -160,11 +162,15 @@ class SQLiteStateStore(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion == 2 && newVersion >= SQLITE_SCHEMA_VERSION) {
-            db.execSQL("ALTER TABLE symbol_latest ADD COLUMN price_history_json TEXT")
-            return
+        if (oldVersion < 2) {
+            throw IllegalStateException("unsupported sqlite schema upgrade $oldVersion -> $newVersion")
         }
-        throw IllegalStateException("unsupported sqlite schema upgrade $oldVersion -> $newVersion")
+        if (oldVersion < 3 && newVersion >= 3) {
+            db.execSQL("ALTER TABLE symbol_latest ADD COLUMN price_history_json TEXT")
+        }
+        if (oldVersion < 4 && newVersion >= 4) {
+            createPricingCandleSchema(db)
+        }
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -192,6 +198,7 @@ class SQLiteStateStore(
             db.delete("watchlist", null, null)
             db.delete("raw_capture", null, null)
             db.delete("raw_latest", null, null)
+            db.delete("pricing_candle", null, null)
             db.delete("symbol_revision", null, null)
             db.delete("symbol_latest", null, null)
             db.delete("issue_state", null, null)
@@ -358,6 +365,7 @@ class SQLiteStateStore(
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
+                persistPricingCandles(db, capture)
                 latestTimestamp = maxOf(latestTimestamp ?: 0L, capture.capturedAt)
             }
 
@@ -479,6 +487,7 @@ class SQLiteStateStore(
                 )
             """.trimIndent(),
         )
+        createPricingCandleSchema(db)
         db.execSQL(
             """
                 CREATE TABLE symbol_revision (
@@ -584,6 +593,45 @@ class SQLiteStateStore(
         }
 
     private fun loadChartCache(db: SQLiteDatabase): List<PersistedChartRecord> =
+        loadLatestRawChartCache(db)
+
+    private fun loadPricingCandleCache(db: SQLiteDatabase, symbolFilter: String? = null): List<PersistedChartRecord> =
+        db.rawQuery(
+            """
+                SELECT symbol, chart_range, captured_at, epoch_seconds,
+                    open_cents, high_cents, low_cents, close_cents, volume
+                FROM pricing_candle
+                ${if (symbolFilter == null) "" else "WHERE symbol = ?"}
+                ORDER BY symbol ASC, chart_range ASC, epoch_seconds ASC
+            """.trimIndent(),
+            symbolFilter?.let { arrayOf(it) } ?: emptyArray(),
+        ).useRows { cursor ->
+            val grouped = linkedMapOf<Pair<String, ChartRange>, MutableList<Pair<Long, HistoricalCandle>>>()
+            while (cursor.moveToNext()) {
+                val symbol = cursor.getString(0)
+                val range = runCatching { ChartRange.valueOf(cursor.getString(1)) }.getOrNull() ?: continue
+                val capturedAt = cursor.getLong(2)
+                val candle = HistoricalCandle(
+                    epochSeconds = cursor.getLong(3),
+                    openCents = cursor.getLong(4),
+                    highCents = cursor.getLong(5),
+                    lowCents = cursor.getLong(6),
+                    closeCents = cursor.getLong(7),
+                    volume = cursor.getLong(8),
+                )
+                grouped.getOrPut(symbol to range) { mutableListOf() } += capturedAt to candle
+            }
+            grouped.map { (key, values) ->
+                PersistedChartRecord(
+                    symbol = key.first,
+                    range = key.second,
+                    candles = values.map { it.second },
+                    fetchedAt = values.maxOfOrNull { it.first } ?: 0L,
+                )
+            }
+        }
+
+    private fun loadLatestRawChartCache(db: SQLiteDatabase): List<PersistedChartRecord> =
         db.rawQuery(
             """
                 SELECT raw_capture.symbol, raw_capture.captured_at, raw_capture.payload_json
@@ -610,6 +658,122 @@ class SQLiteStateStore(
                 }
             }
         }
+
+    private fun loadRawChartHistory(db: SQLiteDatabase, symbol: String): List<PersistedChartRecord> =
+        db.rawQuery(
+            """
+                SELECT captured_at, payload_json
+                FROM raw_capture
+                WHERE symbol = ? AND capture_kind = ?
+                ORDER BY captured_at ASC, id ASC
+            """.trimIndent(),
+            arrayOf(symbol, encodeCaptureKind(CaptureKind.ChartCandles)),
+        ).useRows { cursor ->
+            val grouped = linkedMapOf<ChartRange, LinkedHashMap<Long, Pair<Long, HistoricalCandle>>>()
+            while (cursor.moveToNext()) {
+                val capturedAt = cursor.getLong(0)
+                val payload = json.decodeFromString<RawCapturePayload>(cursor.getString(1))
+                if (payload is RawCapturePayload.Chart) {
+                    val values = grouped.getOrPut(payload.range) { linkedMapOf() }
+                    payload.candles.forEach { candle ->
+                        values[candle.epochSeconds] = capturedAt to candle
+                    }
+                }
+            }
+            grouped.map { (range, values) ->
+                PersistedChartRecord(
+                    symbol = symbol,
+                    range = range,
+                    candles = values.values.map { it.second }.sortedBy { it.epochSeconds },
+                    fetchedAt = values.values.maxOfOrNull { it.first } ?: 0L,
+                )
+            }
+        }
+
+    private fun createPricingCandleSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+                CREATE TABLE IF NOT EXISTS pricing_candle (
+                    symbol TEXT NOT NULL,
+                    chart_range TEXT NOT NULL,
+                    captured_at INTEGER NOT NULL,
+                    epoch_seconds INTEGER NOT NULL,
+                    open_cents INTEGER NOT NULL,
+                    high_cents INTEGER NOT NULL,
+                    low_cents INTEGER NOT NULL,
+                    close_cents INTEGER NOT NULL,
+                    volume INTEGER NOT NULL,
+                    PRIMARY KEY(symbol, chart_range, epoch_seconds)
+                )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+                CREATE INDEX IF NOT EXISTS pricing_candle_symbol_range_idx
+                ON pricing_candle(symbol, chart_range, epoch_seconds)
+            """.trimIndent(),
+        )
+    }
+
+    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(Dispatchers.IO) {
+        val db = readableDatabase
+        mergePersistedChartHistory(
+            symbol = symbol,
+            existing = loadRawChartHistory(db, symbol),
+            incoming = loadPricingCandleCache(db, symbol),
+        )
+    }
+
+    private fun persistPricingCandles(db: SQLiteDatabase, capture: RawCapture) {
+        if (capture.captureKind != CaptureKind.ChartCandles) return
+        val payload = capture.payload as? RawCapturePayload.Chart ?: return
+        payload.candles.forEach { candle ->
+            db.insertWithOnConflict(
+                "pricing_candle",
+                null,
+                ContentValues().apply {
+                    put("symbol", capture.symbol)
+                    put("chart_range", payload.range.name)
+                    put("captured_at", capture.capturedAt)
+                    put("epoch_seconds", candle.epochSeconds)
+                    put("open_cents", candle.openCents)
+                    put("high_cents", candle.highCents)
+                    put("low_cents", candle.lowCents)
+                    put("close_cents", candle.closeCents)
+                    put("volume", candle.volume)
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        }
+    }
+
+    private fun mergePersistedChartHistory(
+        symbol: String,
+        existing: List<PersistedChartRecord>,
+        incoming: List<PersistedChartRecord>,
+    ): List<PersistedChartRecord> {
+        val mergedByRange = linkedMapOf<ChartRange, PersistedChartRecord>()
+        existing.forEach { chart ->
+            mergedByRange[chart.range] = chart
+        }
+        incoming.forEach { chart ->
+            val previous = mergedByRange[chart.range]
+            mergedByRange[chart.range] = if (previous == null) {
+                chart
+            } else {
+                PersistedChartRecord(
+                    symbol = symbol,
+                    range = chart.range,
+                    candles = PricingHistoryMerge.merge(
+                        existing = previous.candles.map { PricingCandle(symbol, chart.range, it) },
+                        incoming = chart.candles.map { PricingCandle(symbol, chart.range, it) },
+                    ).map { it.candle },
+                    fetchedAt = maxOf(previous.fetchedAt, chart.fetchedAt),
+                )
+            }
+        }
+        return mergedByRange.values.toList()
+    }
 
     private fun loadIssues(db: SQLiteDatabase): List<PersistedIssueRecord> =
         db.rawQuery(
@@ -699,16 +863,17 @@ class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 3
+        private const val SQLITE_SCHEMA_VERSION = 4
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
         private val TABLE_NAMES = listOf(
             "meta", "tracked_symbol", "watchlist", "raw_capture",
-            "raw_latest", "symbol_revision", "symbol_latest", "issue_state",
+            "raw_latest", "pricing_candle", "symbol_revision", "symbol_latest", "issue_state",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
+            LogTableQuery("pricing_candle", "captured_at"),
             LogTableQuery("symbol_revision", "evaluated_at"),
         )
     }

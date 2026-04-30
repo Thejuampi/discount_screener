@@ -18,9 +18,14 @@ This directory contains the native Android client for Discount Screener.
 ## Current implementation
 
 - live candidate and opportunity reporting
-- symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, and chart range selection
+- symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, chart range selection, and phone-native system back support to return to the dashboard
+- symbol detail chart replay with back/forward/live controls plus a right-side volume profile that bins visible replay-window volume by price and up/down candle direction
+- opportunities as the default landing surface with aggressive scoring selected by default and legacy scoring still available on demand
+- restore-to-live movement badges plus analyst target revision cues on both tracked and opportunity rows, with a state-driven history detail experience that collapses flat analyst-target spans, summarizes the latest net move, and shows change-only evidence when the range is sparse
+- tracked and opportunity rows now explain whether a meaningful move came from price, analyst target changes, relative re-ranking, or a combined move, and they surface quiet trust states such as No baseline, No meaningful change, freshness, saved/live timing, and No analyst target when Yahoo coverage is incomplete
 - local warm-start persistence for tracked symbols, watchlist, issues, chart cache, and revision history
 - operator surfaces for candidates, opportunities, watchlist, issues, and symbol detail
+- opportunities can switch in-place between the original legacy ranking model and a more aggressive high-risk/high-reward model from the opportunities tab
 - startup splash during warm restore plus a one-time disclaimer acceptance gate before entering the app
 
 ## Prerequisites
@@ -40,7 +45,11 @@ The repository no longer vendors an SDK under `apps/android`. Set `ANDROID_HOME`
 
 When the Android SDK is not available, `:core:test` remains the portable verification path for the reporting engine.
 
-Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug.apk`. The `make android-release` target still runs `assembleRelease`, which produces `app-release-unsigned.apk` unless you add your own release signing configuration.
+Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug.apk`.
+
+Use `make android-release` to export an **installable release APK** to `dist/discount-screener-release.apk`. If you provide `DISCOUNT_SCREENER_RELEASE_STORE_FILE`, `DISCOUNT_SCREENER_RELEASE_STORE_PASSWORD`, `DISCOUNT_SCREENER_RELEASE_KEY_ALIAS`, and `DISCOUNT_SCREENER_RELEASE_KEY_PASSWORD` as Gradle properties, environment variables, or `local.properties` entries, the release build uses that keystore. Otherwise it falls back to debug signing so the APK is still valid for local install and device testing.
+
+If you do not already have a release keystore, run `make android-signing-bootstrap`. That script creates one locally and writes the required `DISCOUNT_SCREENER_RELEASE_*` entries into `apps\android\local.properties` so later `make android-release` builds use your own signing identity.
 
 ## Run On Device
 

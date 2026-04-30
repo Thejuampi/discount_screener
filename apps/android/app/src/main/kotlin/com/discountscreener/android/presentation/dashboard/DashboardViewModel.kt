@@ -7,6 +7,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
@@ -21,12 +22,13 @@ import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
+import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.model.AlertEvent
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
-import com.discountscreener.core.model.OpportunityRow
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -37,8 +39,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 enum class DashboardTab {
-    Tracked,
     Opportunities,
+    Tracked,
     Watch,
     System,
 }
@@ -93,9 +95,14 @@ sealed interface DashboardAction {
     data class SetHistoryMetricGroup(val group: HistoryMetricGroup) : DashboardAction
     data class SetHistoryTimeWindow(val window: ChartRange) : DashboardAction
     data class SetReplayOffset(val offset: Int) : DashboardAction
+    data object StepReplayBack : DashboardAction
+    data object StepReplayForward : DashboardAction
+    data object ResetReplay : DashboardAction
     data class ToggleWatchlist(val symbol: String) : DashboardAction
     data class AddSymbols(val rawInput: String) : DashboardAction
     data class SelectProfile(val profile: String) : DashboardAction
+    data object ToggleOpportunityScoringModel : DashboardAction
+    data class SetOpportunityScoringModel(val model: OpportunityScoringModel) : DashboardAction
     data object RefreshSystemStats : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
@@ -104,7 +111,7 @@ sealed interface DashboardAction {
 data class DashboardUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
-    val currentTab: DashboardTab = DashboardTab.Tracked,
+    val currentTab: DashboardTab = DashboardTab.Opportunities,
     val availableProfiles: List<String> = emptyList(),
     val currentProfile: String = "sp500",
     val query: String = "",
@@ -112,7 +119,8 @@ data class DashboardUiState(
     val trackedRows: List<TrackedSymbolRow> = emptyList(),
     val watchlistSymbols: List<String> = emptyList(),
     val candidateRows: List<CandidateRow> = emptyList(),
-    val opportunityRows: List<OpportunityRow> = emptyList(),
+    val opportunityRows: List<OpportunityListRow> = emptyList(),
+    val opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
     val issues: List<IssueRecord> = emptyList(),
     val detailRoute: DetailRoute? = null,
     val detailData: SymbolDetail? = null,
@@ -171,9 +179,14 @@ class DashboardViewModel(
             is DashboardAction.SetReplayOffset -> _state.value = _state.value.copy(
                 detailRoute = _state.value.detailRoute?.copy(replayOffset = action.offset),
             )
+            DashboardAction.StepReplayBack -> stepReplayBack()
+            DashboardAction.StepReplayForward -> stepReplayForward()
+            DashboardAction.ResetReplay -> resetReplay()
             is DashboardAction.ToggleWatchlist -> toggleWatchlist(action.symbol)
             is DashboardAction.AddSymbols -> addSymbols(action.rawInput)
             is DashboardAction.SelectProfile -> selectProfile(action.profile)
+            DashboardAction.ToggleOpportunityScoringModel -> toggleOpportunityScoringModel()
+            is DashboardAction.SetOpportunityScoringModel -> setOpportunityScoringModel(action.model)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
@@ -190,6 +203,7 @@ class DashboardViewModel(
                         currentFilter(),
                         _state.value.detailRoute?.symbol,
                         _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                        _state.value.opportunityScoringModel,
                     ),
                 )
             }
@@ -199,6 +213,7 @@ class DashboardViewModel(
                 currentFilter(),
                 _state.value.detailRoute?.symbol,
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(initial)
             refresh()
@@ -211,6 +226,7 @@ class DashboardViewModel(
                 currentFilter(),
                 _state.value.detailRoute?.symbol,
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(snapshot)
             _state.value.detailRoute?.symbol?.let { loadDetailData(it) }
@@ -225,6 +241,7 @@ class DashboardViewModel(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
                 ),
             )
         }
@@ -241,6 +258,7 @@ class DashboardViewModel(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
                 ),
             )
         }
@@ -298,6 +316,33 @@ class DashboardViewModel(
         loadDetailData(route.symbol)
     }
 
+    private fun stepReplayBack() {
+        val state = _state.value
+        val route = state.detailRoute ?: return
+        val totalCandles = state.detailCharts[route.chartRange].orEmpty().size
+        _state.value = state.copy(
+            detailRoute = route.copy(
+                replayOffset = ChartAnalysis.stepReplayBack(route.replayOffset, totalCandles),
+            ),
+        )
+    }
+
+    private fun stepReplayForward() {
+        val state = _state.value
+        val route = state.detailRoute ?: return
+        _state.value = state.copy(
+            detailRoute = route.copy(
+                replayOffset = ChartAnalysis.stepReplayForward(route.replayOffset),
+            ),
+        )
+    }
+
+    private fun resetReplay() {
+        val state = _state.value
+        val route = state.detailRoute ?: return
+        _state.value = state.copy(detailRoute = route.copy(replayOffset = 0))
+    }
+
     private fun toggleWatchlist(symbol: String) {
         viewModelScope.launch {
             val snapshot = toggleDashboardWatchlist(
@@ -305,6 +350,7 @@ class DashboardViewModel(
                 currentFilter(),
                 _state.value.detailRoute?.symbol,
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(snapshot)
         }
@@ -318,6 +364,7 @@ class DashboardViewModel(
                 currentFilter(),
                 _state.value.detailRoute?.symbol,
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(snapshot)
         }
@@ -336,6 +383,7 @@ class DashboardViewModel(
                 profile,
                 currentFilter(),
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(snapshot)
         }
@@ -353,8 +401,35 @@ class DashboardViewModel(
                 symbol,
                 currentFilter(),
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                _state.value.opportunityScoringModel,
             )
             render(snapshot)
+        }
+    }
+
+    private fun toggleOpportunityScoringModel() {
+        val nextModel = when (_state.value.opportunityScoringModel) {
+            OpportunityScoringModel.Legacy -> OpportunityScoringModel.Aggressive
+            OpportunityScoringModel.Aggressive -> OpportunityScoringModel.AggressiveV2
+            OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.Legacy
+        }
+        setOpportunityScoringModel(nextModel)
+    }
+
+    private fun setOpportunityScoringModel(model: OpportunityScoringModel) {
+        if (_state.value.opportunityScoringModel == model) {
+            return
+        }
+        _state.value = _state.value.copy(opportunityScoringModel = model)
+        viewModelScope.launch {
+            render(
+                getDashboardSnapshot(
+                    currentFilter(),
+                    _state.value.detailRoute?.symbol,
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    model,
+                ),
+            )
         }
     }
 
@@ -407,6 +482,7 @@ class DashboardViewModel(
             watchlistSymbols = snapshot.watchlistSymbols,
             candidateRows = snapshot.candidateRows,
             opportunityRows = snapshot.opportunityRows,
+            opportunityScoringModel = snapshot.opportunityScoringModel,
             issues = snapshot.issues,
             detailData = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
                 snapshot.selectedDetail

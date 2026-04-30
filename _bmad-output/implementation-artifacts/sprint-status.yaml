@@ -1,0 +1,56 @@
+# generated: 2026-04-23 20:20
+# last_updated: 2026-04-24 10:35
+# project: Valuation Change Visibility
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+#
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in implementation artifacts
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Statuses below reflect the current reality after course correction:
+#   some list/history foundations are already shipped, but the explanation layer
+#   and degraded-state delivery remain incomplete.
+
+generated: 2026-04-23 20:20
+last_updated: 2026-04-24 10:35
+project: Valuation Change Visibility
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-establish-deterministic-comparison-baselines-for-tracked-and-opportunity-symbols: in-progress
+  1-2-show-material-rank-and-target-movement-in-list-rows: done
+  1-3-explain-cause-and-trust-state-directly-in-list-surfaces: done
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-generate-a-detail-summary-for-the-latest-meaningful-change: backlog
+  2-2-show-before-now-evidence-and-trust-state-in-detail: backlog
+  2-3-keep-list-and-detail-semantics-consistent-through-shared-read-models: backlog
+  epic-2-retrospective: optional
+
+  epic-3: in-progress
+  3-1-reconstruct-historical-valuation-truth-from-persisted-revisions: done
+  3-2-summarize-valuation-direction-and-recent-significant-revisions: in-progress
+  3-3-provide-history-evidence-views-and-degraded-state-messaging: in-progress
+  epic-3-retrospective: optional

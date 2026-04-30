@@ -1,0 +1,62 @@
+# generated: 2026-04-25T19:11:21-04:00
+# last_updated: 2026-04-26T00:00:00-04:00
+# project: Company Performance Lens
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+#
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in implementation artifacts
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Feature-specific sprint status is used to avoid overwriting the active Valuation Change Visibility sprint status.
+# - Start with Epic 1 so deterministic semantics and contract fixtures exist before UI stories.
+
+generated: 2026-04-25T19:11:21-04:00
+last_updated: 2026-04-26T00:00:00-04:00
+project: Company Performance Lens
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-define-performance-lens-domain-types: done
+  1-2-generate-scorecard-evidence-from-existing-symbol-data: backlog
+  1-3-derive-trajectory-confidence-risks-and-readiness: backlog
+  1-4-add-shared-contract-fixtures-for-lens-semantics: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-add-android-detail-performance-lens-section: backlog
+  2-2-add-terminal-detail-performance-lens-block: backlog
+  2-3-connect-detail-lens-to-existing-degraded-state-and-issue-language: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-project-compact-list-summaries-from-the-full-lens: backlog
+  3-2-render-android-row-summaries: backlog
+  3-3-render-terminal-row-summaries: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-add-threshold-and-override-regression-tests: backlog
+  4-2-document-operator-behavior: backlog
+  4-3-perform-live-and-smoke-verification: backlog
+  epic-4-retrospective: optional
