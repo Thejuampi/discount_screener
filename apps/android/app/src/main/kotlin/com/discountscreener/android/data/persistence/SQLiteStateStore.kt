@@ -18,6 +18,7 @@ import com.discountscreener.core.model.PersistedSymbolState
 import com.discountscreener.core.model.PricingCandle
 import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.android.domain.model.DatabaseTableInfo
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
@@ -170,6 +171,21 @@ class SQLiteStateStore(
         }
         if (oldVersion < 4 && newVersion >= 4) {
             createPricingCandleSchema(db)
+        }
+        if (oldVersion < 5 && newVersion >= 5) {
+            db.execSQL(
+                """
+                CREATE TABLE estimates_snapshot (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_name    TEXT    NOT NULL,
+                    computed_at_epoch INTEGER NOT NULL,
+                    payload_json    TEXT    NOT NULL
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                "CREATE INDEX estimates_snapshot_profile_idx ON estimates_snapshot(profile_name, computed_at_epoch, id)",
+            )
         }
     }
 
@@ -540,6 +556,19 @@ class SQLiteStateStore(
                 )
             """.trimIndent(),
         )
+        db.execSQL(
+            """
+                CREATE TABLE estimates_snapshot (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_name    TEXT    NOT NULL,
+                    computed_at_epoch INTEGER NOT NULL,
+                    payload_json    TEXT    NOT NULL
+                )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX estimates_snapshot_profile_idx ON estimates_snapshot(profile_name, computed_at_epoch, id)",
+        )
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -860,16 +889,50 @@ class SQLiteStateStore(
         else -> PersistenceIssueSeverity.Error
     }
 
+    suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.insertOrThrow(
+            "estimates_snapshot",
+            null,
+            ContentValues().apply {
+                put("profile_name", report.profileName)
+                put("computed_at_epoch", report.computedAtEpochSeconds)
+                put("payload_json", json.encodeToString(report))
+            },
+        )
+    }
+
+    suspend fun getEstimatesHistory(profileName: String): List<IndexEstimatesReport> =
+        withContext(Dispatchers.IO) {
+            readableDatabase.rawQuery(
+                """
+                SELECT payload_json FROM estimates_snapshot
+                WHERE profile_name = ?
+                ORDER BY computed_at_epoch ASC, id ASC
+                LIMIT $ESTIMATES_HISTORY_LIMIT
+                """.trimIndent(),
+                arrayOf(profileName),
+            ).useRows { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) {
+                        add(json.decodeFromString<IndexEstimatesReport>(cursor.getString(0)))
+                    }
+                }
+            }
+        }
+
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 4
+        private const val SQLITE_SCHEMA_VERSION = 5
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
+        private const val ESTIMATES_HISTORY_LIMIT = 365
         private val TABLE_NAMES = listOf(
             "meta", "tracked_symbol", "watchlist", "raw_capture",
             "raw_latest", "pricing_candle", "symbol_revision", "symbol_latest", "issue_state",
+            "estimates_snapshot",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),

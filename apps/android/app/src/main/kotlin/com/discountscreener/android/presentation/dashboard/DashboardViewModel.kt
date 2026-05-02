@@ -16,6 +16,8 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
+import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
+import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -140,6 +142,7 @@ data class DashboardUiState(
     val systemStatusMessage: String? = null,
     val indexEstimates: IndexEstimatesReport? = null,
     val indexEstimatesLoading: Boolean = false,
+    val estimatesHistory: List<IndexEstimatesReport> = emptyList(),
 )
 
 class DashboardViewModel(
@@ -155,11 +158,14 @@ class DashboardViewModel(
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
+    private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
+    private val getEstimatesHistory: GetEstimatesHistoryUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
 
     private var started = false
+    private var activeEstimatesJob: kotlinx.coroutines.Job? = null
 
     fun dispatch(action: DashboardAction) {
         when (action) {
@@ -455,10 +461,28 @@ class DashboardViewModel(
         }
 
     private fun loadEstimates() {
+        activeEstimatesJob?.cancel()
         _state.value = _state.value.copy(indexEstimatesLoading = true)
-        viewModelScope.launch {
-            val report = getIndexEstimates(_state.value.opportunityScoringModel)
-            _state.value = _state.value.copy(indexEstimates = report, indexEstimatesLoading = false)
+        activeEstimatesJob = viewModelScope.launch {
+            try {
+                val report = getIndexEstimates(_state.value.opportunityScoringModel)
+                val profileName = report.profileName
+                var history = getEstimatesHistory(profileName)
+                val last = history.lastOrNull()
+                val differs = last == null || report.scenarios.any { s ->
+                    last.scenarios.find { it.scenario == s.scenario }?.impliedUpsideBps != s.impliedUpsideBps
+                }
+                if (differs) {
+                    saveEstimatesSnapshot(report)
+                    history = getEstimatesHistory(profileName)
+                }
+                _state.value = _state.value.copy(
+                    indexEstimates = report,
+                    estimatesHistory = history,
+                )
+            } finally {
+                _state.value = _state.value.copy(indexEstimatesLoading = false)
+            }
         }
     }
 
@@ -548,6 +572,8 @@ class DashboardViewModel(
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,
                         getIndexEstimates = useCases.getIndexEstimates,
+                        saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
+                        getEstimatesHistory = useCases.getEstimatesHistory,
                     )
                 }
             }

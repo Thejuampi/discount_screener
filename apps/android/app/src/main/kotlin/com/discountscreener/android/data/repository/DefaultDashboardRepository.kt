@@ -43,6 +43,7 @@ import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
@@ -1539,6 +1540,13 @@ class DefaultDashboardRepository(
     override suspend fun trackedSymbolDetails(): List<SymbolDetail> = stateMutex.withLock {
         trackedSymbols.mapNotNull { engine.detail(it) }
     }
+
+    override suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) {
+        stateStore.saveEstimatesSnapshot(report)
+    }
+
+    override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> =
+        stateStore.getEstimatesHistory(profileName)
 
     companion object {
         private const val DEFAULT_PROFILE = "sp500"
