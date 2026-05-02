@@ -1534,6 +1534,12 @@ class DefaultDashboardRepository(
         emitUpdate()
     }
 
+    override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> = stateMutex.withLock { dcfCache.toMap() }
+
+    override suspend fun trackedSymbolDetails(): List<SymbolDetail> = stateMutex.withLock {
+        trackedSymbols.mapNotNull { engine.detail(it) }
+    }
+
     companion object {
         private const val DEFAULT_PROFILE = "sp500"
         private const val REFRESH_CONCURRENCY = 8

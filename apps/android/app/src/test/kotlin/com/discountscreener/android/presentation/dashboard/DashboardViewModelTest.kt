@@ -16,8 +16,10 @@ import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
+import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
 import com.discountscreener.core.model.CandidateRow
+import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
@@ -112,7 +114,7 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Tracked", "Watch", "System"),
+            listOf("Opportunities", "Tracked", "Watch", "System", "Estimates"),
             DashboardTab.entries.map { it.name },
         )
     }
@@ -430,6 +432,7 @@ class DashboardViewModelTest {
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
+            getIndexEstimates = GetIndexEstimatesUseCase(repository),
         )
     }
 
@@ -559,6 +562,26 @@ class DashboardViewModelTest {
         override suspend fun pruneOldRevisions(retentionDays: Int): Int = 0
 
         override suspend fun clearAllData() = Unit
+
+        override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> = emptyMap()
+
+        override suspend fun trackedSymbolDetails(): List<SymbolDetail> = trackedRows.map { row ->
+            SymbolDetail(
+                symbol = row.symbol,
+                profitable = true,
+                marketPriceCents = row.marketPriceCents ?: 0L,
+                intrinsicValueCents = row.intrinsicValueCents ?: 0L,
+                gapBps = row.gapBps ?: 0,
+                minimumGapBps = 1_500,
+                qualification = row.qualification ?: QualificationStatus.Qualified,
+                externalStatus = com.discountscreener.core.model.ExternalSignalStatus.Missing,
+                externalSignalMaxAgeSeconds = 86_400L,
+                confidence = row.confidence ?: ConfidenceBand.Low,
+                lastSequence = 1,
+                updateCount = 1,
+                isWatched = row.isWatched,
+            )
+        }
 
         private fun emptySnapshot(
             opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,

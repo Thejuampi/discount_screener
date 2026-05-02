@@ -484,3 +484,29 @@ data class PersistedReportState(
     val issues: List<IssueRecord> = emptyList(),
     val lastPersistedAtEpochSeconds: Long? = null,
 )
+
+@Serializable
+enum class EstimateScenario {
+    BearDcf,
+    BaseDcf,
+    BullDcf,
+    AnalystLow,
+    AnalystHigh,
+}
+
+@Serializable
+data class ScenarioEstimate(
+    val scenario: EstimateScenario,
+    val weightedPriceCents: Long,
+    val coverageCount: Int,
+    val impliedUpsideBps: Int,
+)
+
+@Serializable
+data class IndexEstimatesReport(
+    val profileName: String,
+    val currentWeightedPriceCents: Long,
+    val totalSymbols: Int,
+    val scenarios: List<ScenarioEstimate>,
+    val computedAtEpochSeconds: Long,
+)
