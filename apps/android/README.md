@@ -23,6 +23,7 @@ This directory contains the native Android client for Discount Screener.
 - opportunities as the default landing surface with aggressive scoring selected by default and legacy scoring still available on demand
 - restore-to-live movement badges plus analyst target revision cues on both tracked and opportunity rows, with a state-driven history detail experience that collapses flat analyst-target spans, summarizes the latest net move, and shows change-only evidence when the range is sparse
 - tracked and opportunity rows now explain whether a meaningful move came from price, analyst target changes, relative re-ranking, or a combined move, and they surface quiet trust states such as No baseline, No meaningful change, freshness, saved/live timing, and No analyst target when Yahoo coverage is incomplete
+- tracked and opportunity rows also surface a repository-computed `Act`, `Watch`, or `Avoid` triage chip when live data supports a direct decision, so the list can answer the first decision question before the user drills into detail
 - local warm-start persistence for tracked symbols, watchlist, issues, chart cache, and revision history
 - operator surfaces for candidates, opportunities, watchlist, issues, and symbol detail
 - opportunities can switch in-place between the original legacy ranking model and a more aggressive high-risk/high-reward model from the opportunities tab

@@ -19,6 +19,7 @@ import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
+import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.SystemStats
@@ -43,11 +44,13 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
 import com.discountscreener.core.model.PricingCandle
+import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -743,19 +746,29 @@ class DefaultDashboardRepository(
         issueMessagesBySymbol: Map<String, String>,
     ): List<TrackedSymbolRow> = rankedTrackedRowsLocked(issueMessagesBySymbol)
         .mapIndexed { currentIndex, row ->
+            var currentRankMovement = rankMovement(comparisonBaselineRankBySymbol[row.symbol], currentIndex)
+            var currentExplanation = rowExplanationFor(
+                hasComparableBaseline = comparisonBaselineRankBySymbol[row.symbol] != null ||
+                    comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
+                    comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
+                hasRankMovement = comparisonBaselineRankBySymbol[row.symbol] != null &&
+                    comparisonBaselineRankBySymbol[row.symbol] != currentIndex,
+                hasPriceMovement = hasSignificantRelativeMove(
+                    previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
+                    currentCents = row.marketPriceCents,
+                ),
+                hasTargetMovement = row.valuationChange != null,
+            )
             row.copy(
-                rankMovement = rankMovement(comparisonBaselineRankBySymbol[row.symbol], currentIndex),
-                explanation = rowExplanationFor(
-                    hasComparableBaseline = comparisonBaselineRankBySymbol[row.symbol] != null ||
-                        comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
-                        comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
-                    hasRankMovement = comparisonBaselineRankBySymbol[row.symbol] != null &&
-                        comparisonBaselineRankBySymbol[row.symbol] != currentIndex,
-                    hasPriceMovement = hasSignificantRelativeMove(
-                        previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
-                        currentCents = row.marketPriceCents,
-                    ),
-                    hasTargetMovement = row.valuationChange != null,
+                rankMovement = currentRankMovement,
+                explanation = currentExplanation,
+                decisionState = trackedDecisionStateFor(
+                    state = row.state,
+                    freshness = row.freshness,
+                    qualification = row.qualification,
+                    confidence = row.confidence,
+                    upsideBps = row.upsideBps,
+                    trustNote = row.trustNote,
                 ),
             )
         }
@@ -877,6 +890,26 @@ class DefaultDashboardRepository(
             stale = detail != null && row.symbol in staleSymbols,
             startupPhase = startupPhase,
         )
+        var currentRankMovement = rankMovement(baselineRank, currentIndex)
+        var currentValuationChange = significantValuationChange(
+            comparisonBaselineWeightedFairValueBySymbol[row.symbol],
+            preferredAnalystTargetFairValueCents(detail),
+        )
+        var currentExplanation = rowExplanationFor(
+            hasComparableBaseline = baselineRank != null ||
+                comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
+                comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
+            hasRankMovement = baselineRank != null && baselineRank != currentIndex,
+            hasPriceMovement = hasSignificantRelativeMove(
+                previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
+                currentCents = detail?.marketPriceCents,
+            ),
+            hasTargetMovement = currentValuationChange != null,
+        )
+        var currentTrustNote = rowTrustNote(
+            detail = detail,
+            issueMessage = issueMessage,
+        )
         return OpportunityListRow(
             symbol = row.symbol,
             marketPriceCents = row.marketPriceCents,
@@ -887,10 +920,7 @@ class DefaultDashboardRepository(
             isWatched = row.isWatched,
             freshness = freshness,
             providerIssue = issueMessage,
-            trustNote = rowTrustNote(
-                detail = detail,
-                issueMessage = issueMessage,
-            ),
+            trustNote = currentTrustNote,
             freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[row.symbol],
             fundamentalsScore = row.fundamentalsScore,
             technicalScore = row.technicalScore,
@@ -901,24 +931,15 @@ class DefaultDashboardRepository(
             technicalSignals = row.technicalSignals,
             forecastSignals = row.forecastSignals,
             companyName = row.companyName,
-            rankMovement = rankMovement(baselineRank, currentIndex),
-            valuationChange = significantValuationChange(
-                comparisonBaselineWeightedFairValueBySymbol[row.symbol],
-                preferredAnalystTargetFairValueCents(detail),
-            ),
-            explanation = rowExplanationFor(
-                hasComparableBaseline = baselineRank != null ||
-                    comparisonBaselineMarketPriceBySymbol[row.symbol] != null ||
-                    comparisonBaselineWeightedFairValueBySymbol[row.symbol] != null,
-                hasRankMovement = baselineRank != null && baselineRank != currentIndex,
-                hasPriceMovement = hasSignificantRelativeMove(
-                    previousCents = comparisonBaselineMarketPriceBySymbol[row.symbol],
-                    currentCents = detail?.marketPriceCents,
-                ),
-                hasTargetMovement = significantValuationChange(
-                    comparisonBaselineWeightedFairValueBySymbol[row.symbol],
-                    preferredAnalystTargetFairValueCents(detail),
-                ) != null,
+            rankMovement = currentRankMovement,
+            valuationChange = currentValuationChange,
+            explanation = currentExplanation,
+            decisionState = opportunityDecisionStateFor(
+                freshness = freshness,
+                confidence = row.confidence,
+                upsideBps = row.upsideBps,
+                compositeScore = row.compositeScore,
+                trustNote = currentTrustNote,
             ),
         )
     }
@@ -1557,12 +1578,60 @@ internal fun rowFreshnessFor(
     else -> RowFreshness.Updated
 }
 
+internal fun trackedDecisionStateFor(
+    state: TrackedRowState,
+    freshness: RowFreshness,
+    qualification: QualificationStatus?,
+    confidence: ConfidenceBand?,
+    upsideBps: Int?,
+    trustNote: String?,
+): RowDecisionState? = when {
+    state != TrackedRowState.Live -> null
+    freshness != RowFreshness.Updated -> null
+    qualification == QualificationStatus.Unprofitable -> RowDecisionState.Avoid
+    upsideBps != null && upsideBps <= 0 -> RowDecisionState.Avoid
+    trustNote != null -> RowDecisionState.Watch
+    qualification == QualificationStatus.Qualified &&
+        confidence == ConfidenceBand.High &&
+        upsideBps != null &&
+        upsideBps > 0 -> RowDecisionState.Act
+    else -> RowDecisionState.Watch
+}
+
+internal fun opportunityDecisionStateFor(
+    freshness: RowFreshness,
+    confidence: ConfidenceBand,
+    upsideBps: Int,
+    compositeScore: Int,
+    trustNote: String?,
+): RowDecisionState? = when {
+    freshness != RowFreshness.Updated -> null
+    confidence == ConfidenceBand.Low -> RowDecisionState.Avoid
+    upsideBps <= 0 -> RowDecisionState.Avoid
+    compositeScore < 8 -> RowDecisionState.Avoid
+    trustNote != null -> RowDecisionState.Watch
+    confidence == ConfidenceBand.High &&
+        compositeScore >= 10 -> RowDecisionState.Act
+    else -> RowDecisionState.Watch
+}
+
 internal fun rowTrustNote(
     detail: SymbolDetail?,
     issueMessage: String?,
-): String? = when {
-    issueMessage != null -> null
-    preferredAnalystTargetFairValueCents(detail) == null -> "No analyst target"
+): String? {
+    val analystCount = analystTargetOpinionCount(detail)
+    return when {
+        issueMessage != null -> null
+        preferredAnalystTargetFairValueCents(detail) == null -> "No analyst target"
+        analystCount == null -> "Unknown analyst coverage"
+        analystCount < 3 -> "Thin analyst coverage"
+        else -> null
+    }
+}
+
+private fun analystTargetOpinionCount(detail: SymbolDetail?): Int? = when {
+    detail?.weightedExternalSignalFairValueCents != null -> detail.weightedAnalystCount ?: detail.analystOpinionCount
+    detail?.externalSignalFairValueCents != null -> detail.analystOpinionCount
     else -> null
 }
 

@@ -45,6 +45,12 @@ enum class RowExplanationKind {
     NoMeaningfulChange,
 }
 
+enum class RowDecisionState {
+    Act,
+    Watch,
+    Avoid,
+}
+
 enum class ChangeDirection {
     Up,
     Down,
@@ -127,6 +133,7 @@ data class TrackedSymbolRow(
     val rankMovement: RankMovement? = null,
     val valuationChange: ValuationChange? = null,
     val explanation: RowExplanationKind? = null,
+    val decisionState: RowDecisionState? = null,
 )
 
 data class OpportunityListRow(
@@ -153,6 +160,7 @@ data class OpportunityListRow(
     val rankMovement: RankMovement? = null,
     val valuationChange: ValuationChange? = null,
     val explanation: RowExplanationKind? = null,
+    val decisionState: RowDecisionState? = null,
 )
 
 data class DashboardSnapshot(

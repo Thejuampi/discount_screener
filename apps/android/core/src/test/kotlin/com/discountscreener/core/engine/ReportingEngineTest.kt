@@ -29,9 +29,18 @@ class ReportingEngineTest {
     fun supportive_external_signal_upgrades_confidence() {
         val engine = ReportingEngine()
         engine.ingestSnapshot(snapshot("ACME", true, 8_000, 10_000))
-        engine.ingestExternal(external("ACME", 12_000, 5))
+        engine.ingestExternal(external("ACME", 12_000, 5, analystOpinionCount = 5))
 
         assertEquals(ConfidenceBand.High, engine.candidate("ACME")?.confidence)
+    }
+
+    @Test
+    fun supportive_external_signal_with_thin_analyst_coverage_stays_provisional() {
+        val engine = ReportingEngine()
+        engine.ingestSnapshot(snapshot("ACME", true, 8_000, 10_000))
+        engine.ingestExternal(external("ACME", 12_000, 5, analystOpinionCount = 1))
+
+        assertEquals(ConfidenceBand.Provisional, engine.candidate("ACME")?.confidence)
     }
 
     @Test
@@ -233,8 +242,17 @@ class ReportingEngineTest {
     private fun snapshot(symbol: String, profitable: Boolean, marketPriceCents: Long, intrinsicValueCents: Long) =
         MarketSnapshot(symbol = symbol, profitable = profitable, marketPriceCents = marketPriceCents, intrinsicValueCents = intrinsicValueCents)
 
-    private fun external(symbol: String, fairValueCents: Long, ageSeconds: Long) =
-        ExternalValuationSignal(symbol = symbol, fairValueCents = fairValueCents, ageSeconds = ageSeconds)
+    private fun external(
+        symbol: String,
+        fairValueCents: Long,
+        ageSeconds: Long,
+        analystOpinionCount: Int? = null,
+    ) = ExternalValuationSignal(
+        symbol = symbol,
+        fairValueCents = fairValueCents,
+        ageSeconds = ageSeconds,
+        analystOpinionCount = analystOpinionCount,
+    )
 
     private fun summary(
         latest: Long,
