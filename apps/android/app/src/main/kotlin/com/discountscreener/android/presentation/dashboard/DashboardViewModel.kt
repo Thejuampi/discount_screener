@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
 enum class DashboardTab {
@@ -219,6 +220,11 @@ class DashboardViewModel(
                     ),
                 )
             }
+        }
+        viewModelScope.launch {
+            observeDashboardUpdates()
+                .debounce(2_000L)
+                .collectLatest { loadEstimates() }
         }
         viewModelScope.launch {
             val initial = bootstrapDashboard(
@@ -470,7 +476,8 @@ class DashboardViewModel(
                 var history = getEstimatesHistory(profileName)
                 val last = history.lastOrNull()
                 val differs = last == null || report.scenarios.any { s ->
-                    last.scenarios.find { it.scenario == s.scenario }?.impliedUpsideBps != s.impliedUpsideBps
+                    val prev = last.scenarios.find { it.scenario == s.scenario }
+                    prev?.impliedUpsideBps != s.impliedUpsideBps || prev?.coverageCount != s.coverageCount
                 }
                 if (differs) {
                     saveEstimatesSnapshot(report)

@@ -16,11 +16,13 @@ object IndexEstimatesEngine {
     ): IndexEstimatesReport {
         var totalMarketCapDollars = 0L
         var weightedCurrentNumerator = 0.0
+        var eligibleSymbols = 0
         for (symbol in symbols) {
             val cap = symbol.fundamentals?.marketCapDollars ?: continue
             if (cap <= 0L) continue
             totalMarketCapDollars += cap
             weightedCurrentNumerator += symbol.marketPriceCents.toDouble() * cap.toDouble()
+            eligibleSymbols++
         }
         val currentWeightedPriceCents = if (totalMarketCapDollars > 0L) {
             (weightedCurrentNumerator / totalMarketCapDollars).toLong()
@@ -35,7 +37,7 @@ object IndexEstimatesEngine {
         return IndexEstimatesReport(
             profileName = profileName,
             currentWeightedPriceCents = currentWeightedPriceCents,
-            totalSymbols = symbols.size,
+            totalSymbols = eligibleSymbols,
             scenarios = scenarios,
             computedAtEpochSeconds = nowEpochSeconds,
         )

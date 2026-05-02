@@ -12,6 +12,7 @@ import com.discountscreener.android.data.persistence.RawCapturePayload
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
+import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
@@ -117,6 +118,7 @@ class DefaultDashboardRepository(
     private val stateStore: SQLiteStateStore,
     private val profileCatalog: ProfileCatalog,
     private val yahooClient: YahooFinanceClient,
+    private val secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
     private val nowProvider: () -> Long = { System.currentTimeMillis() / 1_000 },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : DashboardRepository {
@@ -1420,7 +1422,10 @@ class DefaultDashboardRepository(
         val needsTimeseries = stateMutex.withLock { timeseriesCache[symbol] == null }
         if (needsTimeseries) {
             try {
-                val ts = yahooClient.fetchFundamentalTimeseries(symbol)
+                var ts = yahooClient.fetchFundamentalTimeseries(symbol)
+                if (ts.freeCashFlow.isEmpty() && secondaryTimeseriesProvider != null) {
+                    ts = secondaryTimeseriesProvider.fetch(symbol) ?: ts
+                }
                 timeseries = ts
                 val fundamentals = stateMutex.withLock { engine.detail(symbol)?.fundamentals }
                 if (fundamentals != null) {

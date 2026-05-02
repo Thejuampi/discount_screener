@@ -246,4 +246,29 @@ class IndexEstimatesEngineTest {
 
         assertEquals(1_700_000_000L, result.computedAtEpochSeconds)
     }
+
+    @Test
+    fun total_symbols_counts_only_cap_eligible_symbols() {
+        var symbols = listOf(
+            symbol("A", marketPriceCents = 10_000L, marketCapDollars = 1_000_000L),
+            symbol("B", marketPriceCents = 5_000L, marketCapDollars = 500_000L),
+            symbol("C", marketPriceCents = 2_000L, marketCapDollars = null),
+        )
+
+        var result = IndexEstimatesEngine.compute(symbols, emptyMap(), "test", 0L)
+
+        assertEquals(2, result.totalSymbols)
+    }
+
+    @Test
+    fun total_symbols_is_zero_when_no_symbol_has_market_cap() {
+        var symbols = listOf(
+            symbol("A", marketPriceCents = 10_000L, marketCapDollars = null),
+            symbol("B", marketPriceCents = 5_000L, marketCapDollars = null),
+        )
+
+        var result = IndexEstimatesEngine.compute(symbols, emptyMap(), "test", 0L)
+
+        assertEquals(0, result.totalSymbols)
+    }
 }
