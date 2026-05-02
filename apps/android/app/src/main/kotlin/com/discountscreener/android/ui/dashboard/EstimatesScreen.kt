@@ -210,7 +210,7 @@ private fun HeaderCard(report: IndexEstimatesReport) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "Updated ${formatComputedTime(report.computedAtEpochSeconds)}",
+                text = "Updated ${formatRelativeTime(report.computedAtEpochSeconds)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -239,6 +239,11 @@ private fun ScenarioCard(estimate: ScenarioEstimate) {
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                Text(
+                    text = "${estimate.coverageCount} companies",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             Text(
                 text = formatUpside(estimate.impliedUpsideBps),
@@ -263,13 +268,18 @@ private fun formatUpside(bps: Int): String {
     return if (pct >= 0) "+%.1f%%".format(pct) else "%.1f%%".format(pct)
 }
 
-private fun formatComputedTime(epochSeconds: Long): String =
-    DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
-        .format(
-            Instant.ofEpochSecond(epochSeconds)
-                .atZone(ZoneId.systemDefault())
-                .toLocalTime(),
-        )
+private fun formatRelativeTime(epochSeconds: Long): String {
+    var nowSeconds = System.currentTimeMillis() / 1_000
+    var diffSeconds = nowSeconds - epochSeconds
+    return when {
+        diffSeconds < 10 -> "just now"
+        diffSeconds < 60 -> "${diffSeconds}s ago"
+        diffSeconds < 3600 -> "${diffSeconds / 60}m ago"
+        diffSeconds < 86400 -> "${diffSeconds / 3600}h ago"
+        else -> DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
+            .format(Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).toLocalTime())
+    }
+}
 
 @Composable
 private fun EstimatesTrendChart(history: List<IndexEstimatesReport>) {
