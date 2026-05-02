@@ -598,7 +598,7 @@ class SQLiteStateStore(
     private fun loadSymbolLatest(db: SQLiteDatabase): List<PersistedSymbolState> =
         db.rawQuery(
             """
-                SELECT symbol, snapshot_json, external_json, fundamentals_json, last_sequence, update_count, price_history_json
+                SELECT symbol, snapshot_json, external_json, fundamentals_json, last_sequence, update_count, price_history_json, payload_json
                 FROM symbol_latest
                 ORDER BY symbol ASC
             """.trimIndent(),
@@ -606,6 +606,8 @@ class SQLiteStateStore(
         ).useRows { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
+                    val payload = cursor.getNullableString(7)
+                        ?.let { runCatching { json.decodeFromString<EvaluatedSymbolState>(it) }.getOrNull() }
                     add(
                         PersistedSymbolState(
                             symbol = cursor.getString(0),
@@ -615,6 +617,7 @@ class SQLiteStateStore(
                             lastSequence = cursor.getInt(4),
                             updateCount = cursor.getInt(5),
                             priceHistory = cursor.getNullableString(6)?.let { json.decodeFromString(it) } ?: emptyList(),
+                            dcfAnalysis = payload?.dcfAnalysis,
                         ),
                     )
                 }
