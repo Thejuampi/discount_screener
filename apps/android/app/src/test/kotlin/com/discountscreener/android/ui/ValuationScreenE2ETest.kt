@@ -1,9 +1,11 @@
 package com.discountscreener.android.ui
 
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToNode
 import com.discountscreener.android.presentation.dashboard.DashboardAction
@@ -20,18 +22,20 @@ import com.discountscreener.core.model.SymbolDetail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class ValuationScreenE2ETest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createEmptyComposeRule()
 
     @Test
     fun snapshot_valuation_screen_prioritizes_price_fair_value_and_analyst_concentration() {
         val actions = mutableListOf<DashboardAction>()
+        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
 
-        composeRule.setContent {
+        activity.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = DetailRoute(
@@ -49,6 +53,7 @@ class ValuationScreenE2ETest {
                 )
             }
         }
+        composeRule.waitForIdle()
 
         assertVisibleAfterScroll("Valuation")
         assertVisibleAfterScroll("Price $172.70")

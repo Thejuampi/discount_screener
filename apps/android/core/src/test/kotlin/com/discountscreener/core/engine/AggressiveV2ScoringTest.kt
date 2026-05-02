@@ -31,7 +31,8 @@ class AggressiveV2ScoringTest {
 
     private fun baseDetail(
         marketPriceCents: Long = 10_000,
-        externalStatus: ExternalSignalStatus = ExternalSignalStatus.Missing,
+        externalStatus: ExternalSignalStatus = ExternalSignalStatus.Supportive,
+        externalSignalFairValueCents: Long? = null,
         weightedExternalSignalFairValueCents: Long? = null,
         externalSignalLowFairValueCents: Long? = null,
         externalSignalHighFairValueCents: Long? = null,
@@ -49,7 +50,7 @@ class AggressiveV2ScoringTest {
         minimumGapBps = 2_500,
         qualification = QualificationStatus.Qualified,
         externalStatus = externalStatus,
-        externalSignalFairValueCents = weightedExternalSignalFairValueCents,
+        externalSignalFairValueCents = externalSignalFairValueCents ?: weightedExternalSignalFairValueCents,
         externalSignalLowFairValueCents = externalSignalLowFairValueCents,
         externalSignalHighFairValueCents = externalSignalHighFairValueCents,
         weightedExternalSignalFairValueCents = weightedExternalSignalFairValueCents,
@@ -137,6 +138,39 @@ class AggressiveV2ScoringTest {
     fun forecasts_returns_null_when_no_forecast_signals_are_available() {
         val (score, _) = OpportunityEngine.aggressiveV2ForecastScore(baseDetail(), analysis = null)
         assertNull(score)
+    }
+
+    @Test
+    fun forecast_ignores_single_analyst_target_without_independent_dcf() {
+        val (score, signals) = OpportunityEngine.aggressiveV2ForecastScore(
+            baseDetail(
+                externalStatus = ExternalSignalStatus.Supportive,
+                weightedExternalSignalFairValueCents = 18_000,
+                analystOpinionCount = 1,
+                recommendationMeanHundredths = 150,
+            ),
+            analysis = null,
+        )
+
+        assertNull(score)
+        assertTrue("Cov<3" in signals, "thin coverage should be visible in forecast signals: $signals")
+    }
+
+    @Test
+    fun forecast_uses_median_target_when_weighted_target_is_missing_and_coverage_is_sufficient() {
+        val (score, signals) = OpportunityEngine.aggressiveV2ForecastScore(
+            baseDetail(
+                externalStatus = ExternalSignalStatus.Supportive,
+                externalSignalFairValueCents = 18_000,
+                weightedExternalSignalFairValueCents = null,
+                analystOpinionCount = 12,
+                recommendationMeanHundredths = 160,
+            ),
+            analysis = null,
+        )
+
+        assertNotNull(score)
+        assertTrue(score > 0, "sufficient median target coverage should score positively; score=$score signals=$signals")
     }
 
     @Test
@@ -291,14 +325,11 @@ class AggressiveV2ScoringTest {
     }
 
     // -----------------------------------------------------------------------------
-    // Contract: weighted upside and DCF margin are not double counted
+    // Contract: analyst targets and DCF are reliability-weighted instead of blindly summed
     // -----------------------------------------------------------------------------
 
     @Test
-    fun forecast_uses_max_of_weighted_and_dcf_upside_not_their_sum() {
-        // Both signals carry moderate (not saturated) upside. If the implementation summed
-        // them, the combined upside would saturate the ramp and the score would jump.
-        // Picking max(weighted, dcf) keeps the score equal to the weighted-only case.
+    fun forecast_blends_weighted_and_dcf_upside_instead_of_summing_them() {
         val analysisModerate = DcfAnalysis(
             bearIntrinsicValueCents = 12_500,
             baseIntrinsicValueCents = 13_000, // ~23% upside vs 10000 -> ramp ~+0.43
@@ -310,12 +341,27 @@ class AggressiveV2ScoringTest {
         val detail = baseDetail(
             marketPriceCents = 10_000,
             weightedExternalSignalFairValueCents = 13_000, // ~30% upside, also moderate
+            analystOpinionCount = 12,
         )
 
         val onlyWeighted = OpportunityEngine.aggressiveV2ForecastScore(detail, analysis = null).first!!
+        val onlyDcf = OpportunityEngine.aggressiveV2ForecastScore(
+            detail.copy(
+                externalSignalFairValueCents = null,
+                weightedExternalSignalFairValueCents = null,
+                weightedAnalystCount = null,
+                analystOpinionCount = null,
+            ),
+            analysisModerate,
+        ).first!!
         val both = OpportunityEngine.aggressiveV2ForecastScore(detail, analysisModerate).first!!
 
-        assertEquals(onlyWeighted, both, "weighted+DCF must not be additively combined; equal valuation gap should not be credited twice")
+        val lower = minOf(onlyWeighted, onlyDcf)
+        val upper = maxOf(onlyWeighted, onlyDcf)
+        assertTrue(
+            both in lower..upper,
+            "weighted+DCF should blend between the standalone signals; weighted=$onlyWeighted dcf=$onlyDcf both=$both",
+        )
     }
 
     // -----------------------------------------------------------------------------

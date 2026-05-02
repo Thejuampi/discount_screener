@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RankMovement
+import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.TrackedRowState
@@ -155,10 +156,19 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
     val freshness = freshnessColors(row.freshness)
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
+    val decisionLabel = decisionStateLabel(row.decisionState)
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        decisionLabel?.let {
+            val colors = decisionStateColors(row.decisionState)
+            ChangeBadge(
+                label = it,
+                contentColor = colors.first,
+                backgroundColor = colors.second,
+            )
+        }
         valuationLabel?.let {
             val colors = valuationChangeColors(row.valuationChange)
             ChangeBadge(
@@ -201,7 +211,7 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
         }
         if (row.isWatched) {
             ChangeBadge(
-                label = "Watch",
+                label = "Watchlist",
                 contentColor = MaterialTheme.colorScheme.primary,
                 backgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
             )
@@ -244,10 +254,19 @@ private fun TrackedRowSignals(row: TrackedSymbolRow) {
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
     val freshness = freshnessColors(row.freshness)
+    val decisionLabel = decisionStateLabel(row.decisionState)
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        decisionLabel?.let {
+            val colors = decisionStateColors(row.decisionState)
+            ChangeBadge(
+                label = it,
+                contentColor = colors.first,
+                backgroundColor = colors.second,
+            )
+        }
         valuationLabel?.let {
             val colors = valuationChangeColors(row.valuationChange)
             ChangeBadge(
@@ -310,6 +329,13 @@ private fun explanationLabel(explanation: RowExplanationKind?): String? = when (
     null -> null
 }
 
+internal fun decisionStateLabel(decisionState: RowDecisionState?): String? = when (decisionState) {
+    RowDecisionState.Act -> "Act"
+    RowDecisionState.Watch -> "Watch"
+    RowDecisionState.Avoid -> "Avoid"
+    null -> null
+}
+
 @Composable
 private fun ChangeBadge(
     label: String,
@@ -350,6 +376,14 @@ private fun explanationColors(explanation: RowExplanationKind?): Pair<Color, Col
         MaterialTheme.colorScheme.primary to MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
     RowExplanationKind.NoBaseline,
     RowExplanationKind.NoMeaningfulChange,
+    null -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
+}
+
+@Composable
+private fun decisionStateColors(decisionState: RowDecisionState?): Pair<Color, Color> = when (decisionState) {
+    RowDecisionState.Act -> BullishChartColor to BullishChartColor.copy(alpha = 0.16f)
+    RowDecisionState.Watch -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
+    RowDecisionState.Avoid -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
     null -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 

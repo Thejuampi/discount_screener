@@ -18,6 +18,7 @@ import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.RowExplanationKind
+import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.ValuationChangeTier
@@ -410,7 +411,7 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun row_trust_note_only_surfaces_missing_analyst_target() {
+    fun row_trust_note_surfaces_missing_or_thin_analyst_target_coverage() {
         assertEquals(
             "No analyst target",
             rowTrustNote(
@@ -418,6 +419,34 @@ class DefaultDashboardRepositoryTest {
                     symbol = "NVDA",
                     marketPriceCents = 10_000L,
                     intrinsicValueCents = 18_000L,
+                ),
+                issueMessage = null,
+            ),
+        )
+        assertEquals(
+            "Unknown analyst coverage",
+            rowTrustNote(
+                detail = sampleDetail(
+                    symbol = "NVDA",
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 18_000L,
+                ).copy(
+                    externalSignalFairValueCents = 18_300L,
+                    analystOpinionCount = null,
+                ),
+                issueMessage = null,
+            ),
+        )
+        assertEquals(
+            "Thin analyst coverage",
+            rowTrustNote(
+                detail = sampleDetail(
+                    symbol = "NVDA",
+                    marketPriceCents = 10_000L,
+                    intrinsicValueCents = 18_000L,
+                ).copy(
+                    externalSignalFairValueCents = 18_300L,
+                    analystOpinionCount = 1,
                 ),
                 issueMessage = null,
             ),
@@ -446,6 +475,154 @@ class DefaultDashboardRepositoryTest {
                     analystOpinionCount = 16,
                 ),
                 issueMessage = null,
+            ),
+        )
+    }
+
+    @Test
+    fun tracked_decision_state_marks_fresh_high_confidence_qualified_rows_as_act() {
+        assertEquals(
+            RowDecisionState.Act,
+            trackedDecisionStateFor(
+                state = TrackedRowState.Live,
+                freshness = RowFreshness.Updated,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun tracked_decision_state_marks_unprofitable_rows_as_avoid() {
+        assertEquals(
+            RowDecisionState.Avoid,
+            trackedDecisionStateFor(
+                state = TrackedRowState.Live,
+                freshness = RowFreshness.Updated,
+                qualification = QualificationStatus.Unprofitable,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun tracked_decision_state_allows_act_without_recent_change_explanation() {
+        assertEquals(
+            RowDecisionState.Act,
+            trackedDecisionStateFor(
+                state = TrackedRowState.Live,
+                freshness = RowFreshness.Updated,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun tracked_decision_state_keeps_trust_cautioned_rows_on_watch() {
+        assertEquals(
+            RowDecisionState.Watch,
+            trackedDecisionStateFor(
+                state = TrackedRowState.Live,
+                freshness = RowFreshness.Updated,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = "No analyst target",
+            ),
+        )
+    }
+
+    @Test
+    fun tracked_decision_state_hides_non_live_rows() {
+        assertNull(
+            trackedDecisionStateFor(
+                state = TrackedRowState.Cached,
+                freshness = RowFreshness.Restored,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+        assertNull(
+            trackedDecisionStateFor(
+                state = TrackedRowState.Live,
+                freshness = RowFreshness.Issue,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun opportunity_decision_state_marks_fresh_high_score_rows_as_act() {
+        assertEquals(
+            RowDecisionState.Act,
+            opportunityDecisionStateFor(
+                freshness = RowFreshness.Updated,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                compositeScore = 10,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun opportunity_decision_state_marks_low_score_rows_as_avoid() {
+        assertEquals(
+            RowDecisionState.Avoid,
+            opportunityDecisionStateFor(
+                freshness = RowFreshness.Updated,
+                confidence = ConfidenceBand.Provisional,
+                upsideBps = 400,
+                compositeScore = 7,
+                trustNote = null,
+            ),
+        )
+    }
+
+    @Test
+    fun opportunity_decision_state_keeps_missing_target_rows_on_watch() {
+        assertEquals(
+            RowDecisionState.Watch,
+            opportunityDecisionStateFor(
+                freshness = RowFreshness.Updated,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                compositeScore = 12,
+                trustNote = "No analyst target",
+            ),
+        )
+    }
+
+    @Test
+    fun opportunity_decision_state_hides_non_live_rows() {
+        assertNull(
+            opportunityDecisionStateFor(
+                freshness = RowFreshness.Restored,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                compositeScore = 12,
+                trustNote = null,
+            ),
+        )
+        assertNull(
+            opportunityDecisionStateFor(
+                freshness = RowFreshness.Issue,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                compositeScore = 12,
+                trustNote = null,
             ),
         )
     }

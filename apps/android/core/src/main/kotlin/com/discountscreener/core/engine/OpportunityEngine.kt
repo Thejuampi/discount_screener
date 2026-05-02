@@ -45,21 +45,28 @@ private const val V2_TECH_MACD_DIRECTION_WEIGHT = 15.0
 
 private const val V2_FORECAST_UPSIDE_LOWER_BPS = -2_000.0
 private const val V2_FORECAST_UPSIDE_UPPER_BPS = 5_000.0
-private const val V2_FORECAST_UPSIDE_WEIGHT = 35.0
+private const val V2_FORECAST_VALUATION_WEIGHT = 50.0
 private const val V2_FORECAST_REC_LOW_HUNDREDTHS = 150.0
 private const val V2_FORECAST_REC_HIGH_HUNDREDTHS = 300.0
-private const val V2_FORECAST_REC_WEIGHT = 25.0
-private const val V2_FORECAST_ANALYSTS_LOWER = 3.0
-private const val V2_FORECAST_ANALYSTS_UPPER = 15.0
-private const val V2_FORECAST_ANALYSTS_WEIGHT = 10.0
+private const val V2_FORECAST_REC_WEIGHT = 15.0
+private const val V2_FORECAST_MIN_ANALYST_OPINIONS = 3
+private const val V2_FORECAST_FULL_ANALYST_OPINIONS = 15.0
+private const val V2_FORECAST_BREADTH_WEIGHT = 20.0
 private const val V2_FORECAST_UNCERTAINTY_BOUND = 0.6
 private const val V2_FORECAST_UNCERTAINTY_WEIGHT = 10.0
+private const val V2_FORECAST_FRESHNESS_WEIGHT = 5.0
 private const val V2_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
+private const val V2_FORECAST_DCF_RELIABILITY = 0.75
+private const val V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
 
 private const val V2_FUNDAMENTALS_FULL_WEIGHT = 100.0
 private const val V2_TECHNICALS_FULL_WEIGHT = 100.0
 private const val V2_FORECAST_FULL_WEIGHT =
-    V2_FORECAST_UPSIDE_WEIGHT + V2_FORECAST_REC_WEIGHT + V2_FORECAST_ANALYSTS_WEIGHT + V2_FORECAST_UNCERTAINTY_WEIGHT
+    V2_FORECAST_VALUATION_WEIGHT +
+        V2_FORECAST_REC_WEIGHT +
+        V2_FORECAST_BREADTH_WEIGHT +
+        V2_FORECAST_UNCERTAINTY_WEIGHT +
+        V2_FORECAST_FRESHNESS_WEIGHT
 
 private const val V2_COMPOSITE_COVERAGE_BONUS = 5
 private const val V2_COMPOSITE_BOUND = 110
@@ -618,50 +625,150 @@ object OpportunityEngine {
 
     internal fun aggressiveV2ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
         val acc = EvidenceAccumulator(V2_FORECAST_FULL_WEIGHT)
+        val sufficiencySignals = mutableListOf<String>()
+        var reliableEvidenceWeight = 0.0
+        var hasValuationAnchor = false
 
-        // Combined valuation upside: take the more bullish of the weighted external upside
-        // and the DCF margin of safety. Same valuation gap is no longer credited twice.
-        val weightedUpsideBps = detail.weightedExternalSignalFairValueCents?.let {
-            checkedUpsideBps(detail.marketPriceCents, it)
-        }
-        val dcfMarginBps = analysis?.let { dcfMarginOfSafetyBps(it, detail.marketPriceCents) }
-        val combinedUpsideBps: Int? = when {
-            weightedUpsideBps != null && dcfMarginBps != null -> maxOf(weightedUpsideBps, dcfMarginBps)
-            weightedUpsideBps != null -> weightedUpsideBps
-            dcfMarginBps != null -> dcfMarginBps
-            else -> null
-        }
-        combinedUpsideBps?.let { upsideBps ->
-            acc.add(V2_FORECAST_UPSIDE_WEIGHT, smoothRamp(upsideBps.toDouble(), V2_FORECAST_UPSIDE_LOWER_BPS, V2_FORECAST_UPSIDE_UPPER_BPS), "Upside")
+        val targetFairValue = preferredForecastFairValueCents(detail)
+        val targetCount = targetAnalystCount(detail)
+        val recommendationCount = recommendationAnalystCount(detail)
+        val broadestAnalystCount = listOfNotNull(targetCount, recommendationCount).maxOrNull()
+        val externalFreshness = freshnessMultiplier(detail)
+        val externalStatusReliability = externalStatusReliability(detail.externalStatus)
+
+        val valuationInputs = mutableListOf<WeightedForecastRamp>()
+        targetFairValue?.let { fairValue ->
+            val targetUpsideBps = checkedUpsideBps(detail.marketPriceCents, fairValue)
+            val targetReliability = analystCoverageReliability(targetCount) * externalFreshness * externalStatusReliability
+            when {
+                targetUpsideBps == null -> Unit
+                !hasSufficientAnalystCoverage(targetCount) -> {
+                    sufficiencySignals += if (targetCount == null) "Cov?" else "Cov<${V2_FORECAST_MIN_ANALYST_OPINIONS}"
+                }
+                targetReliability > 0.0 -> {
+                    valuationInputs += WeightedForecastRamp(
+                        ramp = smoothRamp(targetUpsideBps.toDouble(), V2_FORECAST_UPSIDE_LOWER_BPS, V2_FORECAST_UPSIDE_UPPER_BPS),
+                        reliability = targetReliability,
+                    )
+                }
+            }
         }
 
-        // Recommendation strength (lower is better).
+        analysis?.let { dcf ->
+            dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
+                valuationInputs += WeightedForecastRamp(
+                    ramp = smoothRamp(marginBps.toDouble(), V2_FORECAST_UPSIDE_LOWER_BPS, V2_FORECAST_UPSIDE_UPPER_BPS),
+                    reliability = V2_FORECAST_DCF_RELIABILITY,
+                )
+            }
+        }
+
+        if (valuationInputs.isNotEmpty()) {
+            val reliabilitySum = valuationInputs.sumOf { it.reliability }
+            if (reliabilitySum > 0.0) {
+                val blendedRamp = valuationInputs.sumOf { it.ramp * it.reliability } / reliabilitySum
+                val weight = V2_FORECAST_VALUATION_WEIGHT * reliabilitySum.coerceAtMost(1.0)
+                acc.add(weight, blendedRamp, "Val")
+                reliableEvidenceWeight += weight
+                hasValuationAnchor = true
+            }
+        }
+
         detail.recommendationMeanHundredths?.let { rec ->
-            acc.add(V2_FORECAST_REC_WEIGHT, -smoothRamp(rec.toDouble(), V2_FORECAST_REC_LOW_HUNDREDTHS, V2_FORECAST_REC_HIGH_HUNDREDTHS), "Rec")
+            val recReliability = analystCoverageReliability(recommendationCount) * externalFreshness * externalStatusReliability
+            if (!hasSufficientAnalystCoverage(recommendationCount)) {
+                sufficiencySignals += if (recommendationCount == null) "RecCov?" else "RecCov<${V2_FORECAST_MIN_ANALYST_OPINIONS}"
+            } else if (recReliability > 0.0) {
+                val weight = V2_FORECAST_REC_WEIGHT * recReliability
+                acc.add(weight, -smoothRamp(rec.toDouble(), V2_FORECAST_REC_LOW_HUNDREDTHS, V2_FORECAST_REC_HIGH_HUNDREDTHS), "Rec")
+                reliableEvidenceWeight += weight
+            }
         }
 
-        // Analyst breadth (a small contribution; recommendation captures most of the value).
-        detail.analystOpinionCount?.let { count ->
-            acc.add(V2_FORECAST_ANALYSTS_WEIGHT, smoothRamp(count.toDouble(), V2_FORECAST_ANALYSTS_LOWER, V2_FORECAST_ANALYSTS_UPPER), "Cov")
+        broadestAnalystCount?.let { count ->
+            acc.add(V2_FORECAST_BREADTH_WEIGHT, analystBreadthRamp(count), "Cov")
+            reliableEvidenceWeight += V2_FORECAST_BREADTH_WEIGHT * analystCoverageReliability(count)
         }
 
-        // Uncertainty: wide low/high band relative to weighted point estimate is a penalty.
+        val targetReliabilityWithoutFreshness = analystCoverageReliability(targetCount) * externalStatusReliability
         val low = detail.externalSignalLowFairValueCents
         val high = detail.externalSignalHighFairValueCents
-        val centre = detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents
-        if (low != null && high != null && centre != null && centre > 0L && high > low) {
+        val centre = targetFairValue
+        if (low != null && high != null && centre != null && centre > 0L && high > low && targetReliabilityWithoutFreshness > 0.0) {
             val spreadFraction = (high - low).toDouble() / centre.toDouble()
-            acc.add(V2_FORECAST_UNCERTAINTY_WEIGHT, -smoothRamp(spreadFraction, 0.0, V2_FORECAST_UNCERTAINTY_BOUND), "Unc")
+            val weight = V2_FORECAST_UNCERTAINTY_WEIGHT * targetReliabilityWithoutFreshness
+            acc.add(weight, -smoothRamp(spreadFraction, 0.0, V2_FORECAST_UNCERTAINTY_BOUND), "Unc")
+            reliableEvidenceWeight += weight * externalFreshness
         }
 
-        val raw = acc.normalizedScore() ?: return null to emptyList()
+        if (targetFairValue != null && hasSufficientAnalystCoverage(targetCount)) {
+            val weight = V2_FORECAST_FRESHNESS_WEIGHT * analystCoverageReliability(targetCount)
+            acc.add(weight, freshnessRamp(externalFreshness), "Fresh")
+            reliableEvidenceWeight += weight * externalFreshness
+        }
 
-        // Freshness multiplier: stale forecasts decay toward zero (signal still positive but
-        // dampened). Missing age is treated as fresh.
-        val multiplier = freshnessMultiplier(detail)
-        val final = (raw.toDouble() * multiplier).roundToInt().coerceIn(-100, 100)
-        return final to acc.signals
+        val signals = (acc.signals + sufficiencySignals).distinct()
+        if (!hasValuationAnchor || reliableEvidenceWeight < V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
+            return null to signals
+        }
+
+        val raw = acc.normalizedScore() ?: return null to signals
+        return raw.coerceIn(-100, 100) to signals
     }
+
+    private data class WeightedForecastRamp(
+        val ramp: Double,
+        val reliability: Double,
+    )
+
+    private fun preferredForecastFairValueCents(detail: SymbolDetail): Long? =
+        detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents
+
+    private fun targetAnalystCount(detail: SymbolDetail): Int? = when {
+        detail.weightedExternalSignalFairValueCents != null -> detail.weightedAnalystCount ?: detail.analystOpinionCount
+        detail.externalSignalFairValueCents != null -> detail.analystOpinionCount
+        else -> null
+    }
+
+    private fun recommendationAnalystCount(detail: SymbolDetail): Int? {
+        val trendCount = listOfNotNull(
+            detail.strongBuyCount,
+            detail.buyCount,
+            detail.holdCount,
+            detail.sellCount,
+            detail.strongSellCount,
+        ).sum().takeIf { it > 0 }
+        return listOfNotNull(detail.analystOpinionCount, trendCount).maxOrNull()
+    }
+
+    private fun hasSufficientAnalystCoverage(count: Int?): Boolean =
+        count != null && count >= V2_FORECAST_MIN_ANALYST_OPINIONS
+
+    private fun analystCoverageReliability(count: Int?): Double {
+        if (!hasSufficientAnalystCoverage(count)) return 0.0
+        val progress = ((count!!.toDouble() - V2_FORECAST_MIN_ANALYST_OPINIONS.toDouble()) /
+            (V2_FORECAST_FULL_ANALYST_OPINIONS - V2_FORECAST_MIN_ANALYST_OPINIONS.toDouble()))
+            .coerceIn(0.0, 1.0)
+        return 0.35 + (0.65 * progress)
+    }
+
+    private fun analystBreadthRamp(count: Int): Double {
+        if (count < V2_FORECAST_MIN_ANALYST_OPINIONS) return -1.0
+        val progress = ((count.toDouble() - V2_FORECAST_MIN_ANALYST_OPINIONS.toDouble()) /
+            (V2_FORECAST_FULL_ANALYST_OPINIONS - V2_FORECAST_MIN_ANALYST_OPINIONS.toDouble()))
+            .coerceIn(0.0, 1.0)
+        return (-0.5 + (1.5 * progress)).coerceIn(-1.0, 1.0)
+    }
+
+    private fun externalStatusReliability(status: ExternalSignalStatus): Double = when (status) {
+        ExternalSignalStatus.Supportive,
+        ExternalSignalStatus.Divergent,
+        -> 1.0
+        ExternalSignalStatus.Stale -> 0.25
+        ExternalSignalStatus.Missing -> 0.0
+    }
+
+    private fun freshnessRamp(multiplier: Double): Double = (2.0 * multiplier - 1.0).coerceIn(-1.0, 1.0)
 
     private fun freshnessMultiplier(detail: SymbolDetail): Double {
         val age = detail.externalSignalAgeSeconds ?: return 1.0

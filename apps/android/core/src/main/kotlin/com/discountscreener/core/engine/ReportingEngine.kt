@@ -305,7 +305,7 @@ fun buildSymbolDetail(
     val internalUpsideBps = checkedUpsideBps(snapshot.marketPriceCents, snapshot.intrinsicValueCents) ?: 0
     val qualification = qualificationFor(snapshot, internalGapBps, minGapBps)
     val externalStatus = externalStatusFor(snapshot, sanitizedExternal, minGapBps, externalSignalMaxAgeSeconds)
-    val confidence = confidenceFor(qualification, externalStatus)
+    val confidence = confidenceFor(qualification, externalStatus, sanitizedExternal)
     val weightedFairValue = clampedWeightedFairValue(sanitizedExternal)
 
     return SymbolDetail(
@@ -371,15 +371,25 @@ private fun externalStatusFor(
 private fun confidenceFor(
     qualification: QualificationStatus,
     externalStatus: ExternalSignalStatus,
+    externalSignal: ExternalValuationSignal?,
 ): ConfidenceBand {
     if (qualification != QualificationStatus.Qualified) {
         return ConfidenceBand.Low
     }
     return when (externalStatus) {
         ExternalSignalStatus.Missing -> ConfidenceBand.Provisional
-        ExternalSignalStatus.Supportive -> ConfidenceBand.High
+        ExternalSignalStatus.Supportive -> if (hasHighConfidenceAnalystCoverage(externalSignal)) {
+            ConfidenceBand.High
+        } else {
+            ConfidenceBand.Provisional
+        }
         ExternalSignalStatus.Stale, ExternalSignalStatus.Divergent -> ConfidenceBand.Low
     }
+}
+
+private fun hasHighConfidenceAnalystCoverage(signal: ExternalValuationSignal?): Boolean {
+    val count = signal?.weightedAnalystCount ?: signal?.analystOpinionCount
+    return count != null && count >= 3
 }
 
 fun checkedUpsideBps(marketPriceCents: Long, fairValueCents: Long): Int? {
