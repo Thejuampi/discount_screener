@@ -60,9 +60,6 @@ private fun EstimatesContent(report: IndexEstimatesReport) {
         item {
             HeaderCard(report)
         }
-        item {
-            CurrentPriceRow(report.currentWeightedPriceCents)
-        }
         items(report.scenarios) { scenario ->
             ScenarioCard(scenario, report.totalSymbols)
         }
@@ -80,12 +77,17 @@ private fun HeaderCard(report: IndexEstimatesReport) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = "Active profile: ${report.profileName} · ${report.totalSymbols} symbols",
+                text = "${report.profileName.uppercase()} · ${report.totalSymbols} symbols",
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
-                text = "Computed at ${formatComputedTime(report.computedAtEpochSeconds)}",
+                text = "Cap-weighted implied upside vs current prices",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Updated ${formatComputedTime(report.computedAtEpochSeconds)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -94,70 +96,38 @@ private fun HeaderCard(report: IndexEstimatesReport) {
 }
 
 @Composable
-private fun CurrentPriceRow(currentWeightedPriceCents: Long) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+private fun ScenarioCard(estimate: ScenarioEstimate, totalSymbols: Int) {
+    var upsideColor = if (estimate.impliedUpsideBps >= 0) {
+        MaterialTheme.colorScheme.tertiary
+    } else {
+        MaterialTheme.colorScheme.error
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Current (baseline)", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                text = formatDollars(currentWeightedPriceCents),
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ScenarioCard(estimate: ScenarioEstimate, totalSymbols: Int) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = scenarioLabel(estimate.scenario),
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    text = formatDollars(estimate.weightedPriceCents),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
                     text = "${estimate.coverageCount} / $totalSymbols companies",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                val upsideColor = if (estimate.impliedUpsideBps >= 0) {
-                    MaterialTheme.colorScheme.tertiary
-                } else {
-                    MaterialTheme.colorScheme.error
-                }
-                Text(
-                    text = formatUpside(estimate.impliedUpsideBps),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = upsideColor,
-                )
             }
+            Text(
+                text = formatUpside(estimate.impliedUpsideBps),
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium,
+                color = upsideColor,
+            )
         }
     }
 }
@@ -168,12 +138,6 @@ private fun scenarioLabel(scenario: EstimateScenario): String = when (scenario) 
     EstimateScenario.BullDcf -> "Bull DCF"
     EstimateScenario.AnalystLow -> "Analyst Low"
     EstimateScenario.AnalystHigh -> "Analyst High"
-}
-
-private fun formatDollars(cents: Long): String {
-    var dollars = cents / 100
-    var centsRemainder = cents % 100
-    return "$${dollars}.%02d".format(centsRemainder)
 }
 
 private fun formatUpside(bps: Int): String {
