@@ -993,6 +993,10 @@ class DefaultDashboardRepository(
             }
         }
 
+        hydratedStates.forEach { state ->
+            state.dcfAnalysis?.let { dcfCache[state.symbol] = it }
+        }
+
         chartCache.clear()
         chartSummaries.clear()
         bootstrap.chartCache

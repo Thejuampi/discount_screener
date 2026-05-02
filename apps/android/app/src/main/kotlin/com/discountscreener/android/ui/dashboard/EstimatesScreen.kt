@@ -66,15 +66,59 @@ fun EstimatesScreen(
 
 @Composable
 private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: List<IndexEstimatesReport>) {
+    val dcfScenarios = report.scenarios.filter {
+        it.scenario in setOf(EstimateScenario.BearDcf, EstimateScenario.BaseDcf, EstimateScenario.BullDcf)
+    }
+    val dcfCoverageCount = dcfScenarios.maxOfOrNull { it.coverageCount } ?: 0
+    val showDcfWarning = report.totalSymbols > 0 && dcfCoverageCount * 2 < report.totalSymbols
+
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             HeaderCard(report)
         }
+        if (showDcfWarning) {
+            item {
+                DcfCoverageBanner(dcfCoverageCount, report.totalSymbols)
+            }
+        }
         items(report.scenarios) { scenario ->
-            ScenarioCard(scenario, report.totalSymbols)
+            ScenarioCard(scenario)
         }
         item {
             EstimatesTrendChart(estimatesHistory)
+        }
+    }
+}
+
+@Composable
+private fun DcfCoverageBanner(coverageCount: Int, totalSymbols: Int) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "\u26A0",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "DCF coverage is low ($coverageCount / $totalSymbols companies)",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Text(
+                    text = "DCF estimates may not be representative until more data is fetched",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
         }
     }
 }
@@ -109,7 +153,7 @@ private fun HeaderCard(report: IndexEstimatesReport) {
 }
 
 @Composable
-private fun ScenarioCard(estimate: ScenarioEstimate, totalSymbols: Int) {
+private fun ScenarioCard(estimate: ScenarioEstimate) {
     var upsideColor = if (estimate.impliedUpsideBps >= 0) {
         MaterialTheme.colorScheme.tertiary
     } else {
@@ -128,11 +172,6 @@ private fun ScenarioCard(estimate: ScenarioEstimate, totalSymbols: Int) {
                     text = scenarioLabel(estimate.scenario),
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    text = "${estimate.coverageCount} / $totalSymbols companies",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Text(

@@ -472,6 +472,7 @@ data class PersistedSymbolState(
     val lastSequence: Int = 0,
     val updateCount: Int = 0,
     val priceHistory: List<PriceHistoryPoint> = emptyList(),
+    val dcfAnalysis: DcfAnalysis? = null,
 )
 
 @Serializable
