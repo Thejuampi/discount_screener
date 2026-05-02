@@ -15,6 +15,7 @@ import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
+import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -22,6 +23,7 @@ import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
+import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.model.AlertEvent
 import com.discountscreener.core.model.CandidateRow
@@ -43,6 +45,7 @@ enum class DashboardTab {
     Tracked,
     Watch,
     System,
+    Estimates,
 }
 
 enum class DetailSubtab {
@@ -135,6 +138,8 @@ data class DashboardUiState(
     val systemStats: SystemStats? = null,
     val systemStatsLoading: Boolean = false,
     val systemStatusMessage: String? = null,
+    val indexEstimates: IndexEstimatesReport? = null,
+    val indexEstimatesLoading: Boolean = false,
 )
 
 class DashboardViewModel(
@@ -149,6 +154,7 @@ class DashboardViewModel(
     private val loadSystemStats: LoadSystemStatsUseCase,
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
+    private val getIndexEstimates: GetIndexEstimatesUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -217,6 +223,7 @@ class DashboardViewModel(
             )
             render(initial)
             refresh()
+            loadEstimates()
         }
     }
 
@@ -230,6 +237,7 @@ class DashboardViewModel(
             )
             render(snapshot)
             _state.value.detailRoute?.symbol?.let { loadDetailData(it) }
+            loadEstimates()
         }
     }
 
@@ -251,6 +259,9 @@ class DashboardViewModel(
         _state.value = _state.value.copy(currentTab = tab)
         if (tab == DashboardTab.System && _state.value.systemStats == null) {
             refreshSystemStats()
+        }
+        if (tab == DashboardTab.Estimates) {
+            loadEstimates()
         }
         viewModelScope.launch {
             render(
@@ -443,6 +454,14 @@ class DashboardViewModel(
             state.trackedRows
         }
 
+    private fun loadEstimates() {
+        _state.value = _state.value.copy(indexEstimatesLoading = true)
+        viewModelScope.launch {
+            val report = getIndexEstimates(_state.value.opportunityScoringModel)
+            _state.value = _state.value.copy(indexEstimates = report, indexEstimatesLoading = false)
+        }
+    }
+
     private fun refreshSystemStats() {
         _state.value = _state.value.copy(systemStatsLoading = true)
         viewModelScope.launch {
@@ -528,6 +547,7 @@ class DashboardViewModel(
                         loadSystemStats = useCases.loadSystemStats,
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,
+                        getIndexEstimates = useCases.getIndexEstimates,
                     )
                 }
             }

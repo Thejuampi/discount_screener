@@ -181,6 +181,10 @@ fun DashboardScreen(
                 }
 
                 DashboardTab.System -> SystemContent(state, onAction)
+                DashboardTab.Estimates -> EstimatesScreen(
+                    indexEstimates = state.indexEstimates,
+                    loading = state.indexEstimatesLoading,
+                )
             }
         }
     }
@@ -549,6 +553,7 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.Opportunities -> "Opps ${state.opportunityRows.size}"
     DashboardTab.Watch -> "Watch ${state.watchlistSymbols.size}"
     DashboardTab.System -> "System"
+    DashboardTab.Estimates -> "Estimates"
 }
 
 private fun formatUpdatedTime(epochSeconds: Long): String =
