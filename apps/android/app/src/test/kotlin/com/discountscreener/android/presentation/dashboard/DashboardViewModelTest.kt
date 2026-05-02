@@ -16,10 +16,15 @@ import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
+import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
+import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.EstimateScenario
+import com.discountscreener.core.model.IndexEstimatesReport
+import com.discountscreener.core.model.ScenarioEstimate
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
@@ -419,6 +424,40 @@ class DashboardViewModelTest {
         assertEquals("Switching to MERVAL…", viewModel.state.value.statusMessage)
     }
 
+    @Test
+    fun load_estimates_saves_snapshot_when_history_is_empty() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository()
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(1, repository.saveSnapshotCallCount)
+        assertFalse(viewModel.state.value.estimatesHistory.isEmpty())
+    }
+
+    @Test
+    fun load_estimates_skips_save_when_upside_unchanged() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository()
+        // Pre-seed with an identical zero-upside report to match what the engine returns with empty data
+        val zeroReport = IndexEstimatesReport(
+            profileName = "dow",
+            currentWeightedPriceCents = 0L,
+            totalSymbols = 0,
+            scenarios = EstimateScenario.entries.map { s ->
+                ScenarioEstimate(scenario = s, weightedPriceCents = 0L, coverageCount = 0, impliedUpsideBps = 0)
+            },
+            computedAtEpochSeconds = 1_000L,
+        )
+        repository.savedSnapshots.add(zeroReport)
+
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        // saveSnapshotCallCount must remain 0 because the upside values are identical
+        assertEquals(0, repository.saveSnapshotCallCount)
+    }
+
     private fun testViewModel(repository: DashboardRepository): DashboardViewModel {
         return DashboardViewModel(
             observeDashboardUpdates = ObserveDashboardUpdatesUseCase(repository),
@@ -433,6 +472,8 @@ class DashboardViewModelTest {
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
+            saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
+            getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
         )
     }
 
@@ -484,6 +525,8 @@ class DashboardViewModelTest {
         private val detailData: SymbolDetail? = null,
         private val detailCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     ) : DashboardRepository {
+        var saveSnapshotCallCount = 0
+        val savedSnapshots = mutableListOf<IndexEstimatesReport>()
         var lastCurrentFilter: ViewFilter? = null
         var lastRequestedOpportunityModel: OpportunityScoringModel? = null
         private val updates = MutableStateFlow(0L)
@@ -562,6 +605,14 @@ class DashboardViewModelTest {
         override suspend fun pruneOldRevisions(retentionDays: Int): Int = 0
 
         override suspend fun clearAllData() = Unit
+
+        override suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) {
+            saveSnapshotCallCount++
+            savedSnapshots.add(report)
+        }
+
+        override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> =
+            savedSnapshots.toList()
 
         override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> = emptyMap()
 

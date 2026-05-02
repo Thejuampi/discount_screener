@@ -11,11 +11,13 @@ import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
+import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
+import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
@@ -46,6 +48,8 @@ class DiscountScreenerAppContainer(context: Context) {
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllData = ClearAllDataUseCase(repository),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
+            saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
+            getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
         )
     }
 

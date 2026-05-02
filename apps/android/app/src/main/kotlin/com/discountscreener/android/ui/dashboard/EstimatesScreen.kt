@@ -1,12 +1,16 @@
 package com.discountscreener.android.ui.dashboard
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
@@ -15,8 +19,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.discountscreener.core.model.EstimateScenario
@@ -31,6 +40,7 @@ import java.time.format.FormatStyle
 fun EstimatesScreen(
     indexEstimates: IndexEstimatesReport?,
     loading: Boolean,
+    estimatesHistory: List<IndexEstimatesReport> = emptyList(),
 ) {
     when {
         loading && indexEstimates == null -> {
@@ -49,19 +59,22 @@ fun EstimatesScreen(
             }
         }
         else -> {
-            EstimatesContent(indexEstimates)
+            EstimatesContent(indexEstimates, estimatesHistory)
         }
     }
 }
 
 @Composable
-private fun EstimatesContent(report: IndexEstimatesReport) {
+private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: List<IndexEstimatesReport>) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             HeaderCard(report)
         }
         items(report.scenarios) { scenario ->
             ScenarioCard(scenario, report.totalSymbols)
+        }
+        item {
+            EstimatesTrendChart(estimatesHistory)
         }
     }
 }
@@ -152,3 +165,79 @@ private fun formatComputedTime(epochSeconds: Long): String =
                 .atZone(ZoneId.systemDefault())
                 .toLocalTime(),
         )
+
+@Composable
+private fun EstimatesTrendChart(history: List<IndexEstimatesReport>) {
+    val model = remember(history) { EstimatesTrendChartModel.from(history) }
+        ?: return
+
+    val scenarioColors = mapOf(
+        EstimateScenario.BearDcf to Color(0xFFEF5350),
+        EstimateScenario.BaseDcf to Color(0xFFFFCA28),
+        EstimateScenario.BullDcf to Color(0xFF66BB6A),
+        EstimateScenario.AnalystLow to Color(0xFF26C6DA),
+        EstimateScenario.AnalystHigh to Color(0xFF42A5F5),
+    )
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Forecast trend",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+        )
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .padding(bottom = 8.dp),
+        ) {
+            val w = size.width
+            val h = size.height
+
+            // Y=0 axis line — only when zero is within the visible range
+            val zeroFraction = (0f - model.minUpside) / model.upsideSpan
+            if (zeroFraction in 0f..1f) {
+                val zeroY = h - zeroFraction * h
+                drawLine(
+                    color = Color.Gray.copy(alpha = 0.4f),
+                    start = Offset(0f, zeroY),
+                    end = Offset(w, zeroY),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            }
+
+            model.series.forEach { series ->
+                val color = scenarioColors[series.scenario] ?: Color.White
+                val path = Path()
+                series.points.forEachIndexed { i, (epoch, upside) ->
+                    val x = ((epoch - model.minEpoch).toFloat() / model.epochSpan) * w
+                    val y = h - ((upside - model.minUpside) / model.upsideSpan) * h
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                drawPath(path, color = color, style = Stroke(width = 2.dp.toPx()))
+            }
+        }
+        // Legend
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            scenarioColors.forEach { (scenario, color) ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Box(modifier = Modifier.size(8.dp).background(color))
+                    Text(
+                        text = scenarioLabel(scenario),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}

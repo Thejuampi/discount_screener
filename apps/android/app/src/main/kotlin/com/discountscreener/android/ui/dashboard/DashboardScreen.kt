@@ -184,6 +184,7 @@ fun DashboardScreen(
                 DashboardTab.Estimates -> EstimatesScreen(
                     indexEstimates = state.indexEstimates,
                     loading = state.indexEstimatesLoading,
+                    estimatesHistory = state.estimatesHistory,
                 )
             }
         }
