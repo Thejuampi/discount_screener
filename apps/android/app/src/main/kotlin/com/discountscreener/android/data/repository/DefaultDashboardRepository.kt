@@ -36,6 +36,7 @@ import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.PricingHistoryMerge
+import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
@@ -52,6 +53,17 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
 import com.discountscreener.core.model.PricingCandle
+import com.discountscreener.core.model.QuantLensComparable
+import com.discountscreener.core.model.QuantLensCorrelationSeries
+import com.discountscreener.core.model.QuantLensInput
+import com.discountscreener.core.model.QuantLensLensId
+import com.discountscreener.core.model.QuantLensLensRowState
+import com.discountscreener.core.model.QuantLensModelVersion
+import com.discountscreener.core.model.QuantLensPrimaryStatus
+import com.discountscreener.core.model.QuantLensReasonCode
+import com.discountscreener.core.model.QuantLensReport
+import com.discountscreener.core.model.QuantLensRowLabel
+import com.discountscreener.core.model.QuantLensRowSummary
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
@@ -107,6 +119,11 @@ private data class PersistenceDelta(
     val issues: List<PersistedIssueRecord>,
 )
 
+private data class QuantLensCacheEntry(
+    val fingerprint: String,
+    val report: QuantLensReport,
+)
+
 private data class ProfileSwitchRequest(
     val generation: Long,
     val profile: String,
@@ -126,6 +143,7 @@ class DefaultDashboardRepository(
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
     private val updates = MutableStateFlow(0L)
+    private val dcfSourceCoordinator = DcfSourceCoordinator(yahooClient, secondaryTimeseriesProvider)
 
     private var engine = ReportingEngine()
     private var trackedSymbols = mutableListOf<String>()
@@ -134,6 +152,7 @@ class DefaultDashboardRepository(
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
+    private val quantLensCache = linkedMapOf<String, QuantLensCacheEntry>()
     private val issues = linkedMapOf<String, PersistedIssueRecord>()
     private val staleSymbols = linkedSetOf<String>()
     private val placeholderSymbols = linkedSetOf<String>()
@@ -225,17 +244,17 @@ class DefaultDashboardRepository(
         }
 
         val fundamentals = stateMutex.withLock { engine.detail(symbol)?.fundamentals }
-        if (fundamentals != null && timeseriesCache[symbol] == null) {
-            runCatching { yahooClient.fetchFundamentalTimeseries(symbol) }
-                .getOrNull()
-                ?.let { timeseries ->
+        val needsTimeseries = stateMutex.withLock { fundamentals != null && timeseriesCache[symbol] == null }
+        if (fundamentals != null && needsTimeseries) {
+            val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
+                DcfAnalysisEngine.compute(fundamentals, timeseries).getOrNull()
+            }
+            selection.timeseries?.let { timeseries ->
+                stateMutex.withLock {
                     timeseriesCache[symbol] = timeseries
-                    DcfAnalysisEngine.compute(fundamentals, timeseries).getOrNull()?.let { analysis ->
-                        stateMutex.withLock {
-                            dcfCache[symbol] = analysis
-                        }
-                    }
+                    selection.analysis?.let { analysis -> dcfCache[symbol] = analysis }
                 }
+            }
         }
 
         val persistenceDelta = stateMutex.withLock {
@@ -566,17 +585,12 @@ class DefaultDashboardRepository(
         val chartResult = runCatching { yahooClient.fetchHistoricalCandles(symbol, ChartRange.Year) }
         val chartCandles = chartResult.getOrNull()
         val dcfFallback = if (providerResult.snapshot == null) {
-            runCatching { yahooClient.fetchFundamentalTimeseries(symbol) }
-                .getOrNull()
-                ?.let { timeseries ->
-                    dcfFallbackFromTimeseries(
-                        symbol = symbol,
-                        companyName = providerResult.snapshot?.companyName,
-                        providerFundamentals = providerResult.fundamentals,
-                        chartCandles = chartCandles,
-                        timeseries = timeseries,
-                    )
-                }
+            resolveDcfFallback(
+                symbol = symbol,
+                companyName = providerResult.snapshot?.companyName,
+                providerFundamentals = providerResult.fundamentals,
+                chartCandles = chartCandles,
+            )
         } else {
             null
         }
@@ -720,14 +734,25 @@ class DefaultDashboardRepository(
             .filter { it.active }
             .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
 
+        val trackedRows = trackedRowsLocked(normalizedFilter, trackedIssueMessages)
+        val opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel)
+        val selectedQuantLens = selectedDetail?.let {
+            buildSelectedQuantLensLocked(
+                detail = it,
+                selectedRange = selectedRange,
+                opportunityRows = opportunityRows,
+                opportunityScoringModel = opportunityScoringModel,
+            )
+        }
+
         return DashboardSnapshot(
             availableProfiles = profileCatalog.availableProfiles(),
             currentProfile = currentProfile,
             trackedSymbols = trackedSymbols.toList(),
-            trackedRows = trackedRowsLocked(normalizedFilter, trackedIssueMessages),
+            trackedRows = trackedRows,
             watchlistSymbols = engine.watchlistSymbols(),
             candidateRows = engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter),
-            opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel),
+            opportunityRows = opportunityRows,
             opportunityScoringModel = opportunityScoringModel,
             issues = issues.values
                 .sortedByDescending { it.lastSeenEvent }
@@ -736,6 +761,7 @@ class DefaultDashboardRepository(
             selectedCharts = selectedCharts,
             selectedHistory = revisions[selectedSymbol].orEmpty(),
             selectedAlerts = engine.alerts().filter { it.symbol == selectedSymbol }.takeLast(6),
+            selectedQuantLens = selectedQuantLens,
             lastUpdatedAtEpochSeconds = lastUpdatedAtEpochSeconds,
             startupPhase = startupPhase,
             refreshCompletedSymbols = refreshCompletedSymbols,
@@ -874,6 +900,12 @@ class DefaultDashboardRepository(
                 comparisonBaselineWeightedFairValueBySymbol[symbol],
                 preferredAnalystTargetFairValueCents(detail),
             ),
+            quantLensSummary = detail?.let {
+                buildRowQuantLensSummaryLocked(
+                    detail = it,
+                    opportunityRow = null,
+                )
+            },
         )
     }
 
@@ -944,7 +976,283 @@ class DefaultDashboardRepository(
                 compositeScore = row.compositeScore,
                 trustNote = currentTrustNote,
             ),
+            quantLensSummary = detail?.let {
+                buildRowQuantLensSummaryLocked(
+                    detail = it,
+                    opportunityRow = row,
+                )
+            },
         )
+    }
+
+    private fun buildSelectedQuantLensLocked(
+        detail: SymbolDetail,
+        selectedRange: ChartRange,
+        opportunityRows: List<OpportunityListRow>,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): QuantLensReport {
+        val fingerprint = quantLensFingerprintLocked(detail, selectedRange, opportunityRows, opportunityScoringModel)
+        quantLensCache[detail.symbol]?.takeIf { it.fingerprint == fingerprint }?.let { return it.report }
+
+        val input = QuantLensInput(
+            detail = detail,
+            selectedRange = selectedRange,
+            inputFingerprint = fingerprint,
+            selectedCandlesByRange = ChartRange.entries.associateWith { range ->
+                chartCache[chartKey(detail.symbol, range)].orEmpty()
+            },
+            chartSummaries = chartSummaries[detail.symbol].orEmpty(),
+            dcfAnalysis = dcfCache[detail.symbol],
+            revisions = revisions[detail.symbol].orEmpty(),
+            opportunityRows = rankedOpportunityRowsLocked(opportunityScoringModel),
+            comparableUniverse = comparableUniverseLocked(detail.symbol, opportunityRows),
+            correlationSeries = correlationSeriesLocked(detail.symbol, selectedRange, opportunityRows),
+            scoringModel = opportunityScoringModel,
+            scoringVersion = opportunityScoringModel.ordinal,
+            nowEpochSeconds = now(),
+        )
+        val report = QuantLensEngine.analyze(input)
+        quantLensCache[detail.symbol] = QuantLensCacheEntry(fingerprint, report)
+        return report
+    }
+
+    private fun quantLensFingerprintLocked(
+        detail: SymbolDetail,
+        selectedRange: ChartRange,
+        opportunityRows: List<OpportunityListRow>,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): String {
+        val dcf = dcfCache[detail.symbol]
+        val selectedCandlesByRange = ChartRange.entries.associateWith { range ->
+            chartCache[chartKey(detail.symbol, range)].orEmpty()
+        }
+        val selectedChartHash = selectedCandlesByRange.entries
+            .sortedBy { it.key.name }
+            .joinToString(";") { (range, candles) -> "${range.name}:${quantLensCandleFingerprint(candles)}" }
+        val selectedSummaryHash = chartSummaries[detail.symbol].orEmpty().entries
+            .sortedBy { it.key.name }
+            .joinToString(";") { (range, summary) ->
+                listOf(
+                    range.name,
+                    summary.capturedAt,
+                    summary.candleCount,
+                    summary.latestCloseCents,
+                    summary.ema20Cents,
+                    summary.ema50Cents,
+                    summary.ema200Cents,
+                    summary.macdCents,
+                    summary.signalCents,
+                    summary.histogramCents,
+                ).joinToString(":")
+            }
+        val comparableHash = comparableUniverseLocked(detail.symbol, opportunityRows)
+            .joinToString(";") {
+                listOf(
+                    it.symbol,
+                    it.valuationUpsideBps,
+                    it.evidenceStrengthBps,
+                    it.opportunityScore,
+                    it.trendReliabilityBps,
+                    it.evSpreadBps,
+                ).joinToString(":")
+            }
+        val correlationHash = correlationSeriesLocked(detail.symbol, selectedRange, opportunityRows)
+            .joinToString(";") { "${it.symbol}:${it.range.name}:${quantLensCandleFingerprint(it.candles)}" }
+        return listOf(
+            currentProfile,
+            trackedSymbols.joinToString(","),
+            QuantLensModelVersion.CURRENT,
+            detail.symbol,
+            selectedRange.name,
+            detail.marketPriceCents,
+            detail.intrinsicValueCents,
+            detail.upsideBps,
+            detail.externalSignalLowFairValueCents,
+            detail.externalSignalFairValueCents,
+            detail.weightedExternalSignalFairValueCents,
+            detail.externalSignalHighFairValueCents,
+            dcf?.bearIntrinsicValueCents,
+            dcf?.baseIntrinsicValueCents,
+            dcf?.bullIntrinsicValueCents,
+            dcf?.source,
+            dcf?.sourceFingerprint,
+            selectedChartHash,
+            selectedSummaryHash,
+            quantLensRevisionFingerprint(revisions[detail.symbol].orEmpty()),
+            opportunityScoringModel.name,
+            comparableHash,
+            correlationHash,
+        ).joinToString("|")
+    }
+
+    private fun comparableUniverseLocked(
+        selectedSymbol: String,
+        opportunityRows: List<OpportunityListRow>,
+    ): List<QuantLensComparable> {
+        val opportunityBySymbol = opportunityRows.associateBy { it.symbol }
+        val symbols = (trackedSymbols + opportunityRows.map { it.symbol } + selectedSymbol)
+            .distinct()
+            .sorted()
+        return symbols.mapNotNull { symbol ->
+            val detail = engine.detail(symbol) ?: return@mapNotNull null
+            val opportunity = opportunityBySymbol[symbol]
+            QuantLensComparable(
+                symbol = symbol,
+                valuationUpsideBps = detail.upsideBps,
+                evidenceStrengthBps = evidenceOrdinalBps(detail.confidence),
+                opportunityScore = opportunity?.compositeScore,
+                trendReliabilityBps = chartSummaries[symbol]?.values?.maxOfOrNull { it.candleCount }?.coerceAtMost(100)
+                    ?.times(100),
+                evSpreadBps = quantLensEvSpreadBps(detail, dcfCache[symbol]),
+            )
+        }
+    }
+
+    private fun correlationSeriesLocked(
+        selectedSymbol: String,
+        selectedRange: ChartRange,
+        opportunityRows: List<OpportunityListRow>,
+    ): List<QuantLensCorrelationSeries> {
+        val symbols = (trackedSymbols + opportunityRows.map { it.symbol })
+            .distinct()
+            .filterNot { it == selectedSymbol }
+            .sorted()
+        return symbols.mapNotNull { symbol ->
+            val candles = chartCache[chartKey(symbol, selectedRange)].orEmpty()
+            if (candles.isEmpty()) {
+                null
+            } else {
+                QuantLensCorrelationSeries(symbol, selectedRange, candles)
+            }
+        }
+    }
+
+    private fun buildRowQuantLensSummaryLocked(
+        detail: SymbolDetail,
+        opportunityRow: com.discountscreener.core.model.OpportunityRow?,
+    ): QuantLensRowSummary {
+        val evidenceStatus = if (detail.marketPriceCents > 0L && detail.intrinsicValueCents > 0L) {
+            if ((opportunityRow?.coverageCount ?: 0) >= 3 || detail.confidence == ConfidenceBand.High) {
+                QuantLensPrimaryStatus.Available
+            } else {
+                QuantLensPrimaryStatus.Sparse
+            }
+        } else {
+            QuantLensPrimaryStatus.Unavailable
+        }
+        val evidenceLabel = when (evidenceStatus) {
+            QuantLensPrimaryStatus.Available -> QuantLensRowLabel.EvidenceStrong
+            QuantLensPrimaryStatus.Sparse -> QuantLensRowLabel.EvidenceSparse
+            else -> QuantLensRowLabel.EvidenceUnavailable
+        }
+        val states = mutableListOf(
+            QuantLensLensRowState(
+                lensId = QuantLensLensId.EvidenceStrength,
+                primaryStatus = evidenceStatus,
+                band = evidenceLabel.name,
+                label = evidenceLabel,
+                reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
+            ),
+        )
+
+        val analystAnchors = listOfNotNull(
+            detail.externalSignalLowFairValueCents,
+            detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents,
+            detail.externalSignalHighFairValueCents,
+        ).filter { it > 0L }
+        val dcf = dcfCache[detail.symbol]
+        val dcfAnchors = listOfNotNull(
+            dcf?.bearIntrinsicValueCents,
+            dcf?.baseIntrinsicValueCents,
+            dcf?.bullIntrinsicValueCents,
+        ).filter { it > 0L }
+        if (detail.marketPriceCents > 0L && (dcfAnchors.size == 3 || analystAnchors.size == 3)) {
+            val anchors = if (dcfAnchors.size == 3) dcfAnchors else analystAnchors
+            states += QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Available,
+                band = QuantLensRowLabel.EvRange.name,
+                label = QuantLensRowLabel.EvRange,
+                reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
+                evLowUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, anchors.first()),
+                evHighUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, anchors.last()),
+            )
+        } else {
+            val evLabel = if (detail.marketPriceCents > 0L) QuantLensRowLabel.EvSparse else QuantLensRowLabel.EvUnavailable
+            states += QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = if (detail.marketPriceCents > 0L) {
+                    QuantLensPrimaryStatus.Sparse
+                } else {
+                    QuantLensPrimaryStatus.Unavailable
+                },
+                band = evLabel.name,
+                label = evLabel,
+                reasonCodes = listOf(
+                    if (detail.marketPriceCents > 0L) {
+                        QuantLensReasonCode.MissingScenarioAnchors
+                    } else {
+                        QuantLensReasonCode.MissingMarketPrice
+                    },
+                ),
+            )
+        }
+
+        states += QuantLensLensRowState(
+            lensId = QuantLensLensId.CorrelationRisk,
+            primaryStatus = QuantLensPrimaryStatus.Unavailable,
+            band = QuantLensRowLabel.CorrUnavailable.name,
+            label = QuantLensRowLabel.CorrUnavailable,
+            reasonCodes = listOf(QuantLensReasonCode.InsufficientLocalHistory),
+        )
+
+        val trendSummary = chartSummaries[detail.symbol]?.values?.maxByOrNull { it.candleCount }
+        if (trendSummary != null && trendSummary.candleCount >= 20) {
+            states += QuantLensLensRowState(
+                lensId = QuantLensLensId.TrendReliability,
+                primaryStatus = QuantLensPrimaryStatus.Available,
+                band = QuantLensRowLabel.TrendModerate.name,
+                label = QuantLensRowLabel.TrendModerate,
+                reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
+            )
+        } else {
+            states += QuantLensLensRowState(
+                lensId = QuantLensLensId.TrendReliability,
+                primaryStatus = QuantLensPrimaryStatus.Sparse,
+                band = QuantLensRowLabel.TrendSparse.name,
+                label = QuantLensRowLabel.TrendSparse,
+                reasonCodes = listOf(QuantLensReasonCode.InsufficientTrendSamples),
+            )
+        }
+
+        states += QuantLensLensRowState(
+            lensId = QuantLensLensId.SimilarSetups,
+            primaryStatus = QuantLensPrimaryStatus.Sparse,
+            band = QuantLensRowLabel.SimilarSparse.name,
+            label = QuantLensRowLabel.SimilarSparse,
+            reasonCodes = listOf(QuantLensReasonCode.InsufficientComparables),
+        )
+
+        return QuantLensRowSummary(
+            symbol = detail.symbol,
+            fingerprint = listOf(
+                detail.symbol,
+                detail.marketPriceCents,
+                detail.intrinsicValueCents,
+                detail.upsideBps,
+                opportunityRow?.coverageCount,
+                opportunityRow?.compositeScore,
+                dcfCache[detail.symbol]?.sourceFingerprint,
+                trendSummary?.candleCount,
+            ).joinToString("|"),
+            lensStates = states,
+        )
+    }
+
+    private fun evidenceOrdinalBps(confidence: ConfidenceBand): Int = when (confidence) {
+        ConfidenceBand.High -> 8_000
+        ConfidenceBand.Provisional -> 5_500
+        ConfidenceBand.Low -> 3_000
     }
 
     private fun captureRefreshComparisonBaselineLocked() {
@@ -1290,6 +1598,32 @@ class DefaultDashboardRepository(
         )
     }
 
+    private suspend fun resolveDcfFallback(
+        symbol: String,
+        companyName: String?,
+        providerFundamentals: FundamentalSnapshot?,
+        chartCandles: List<HistoricalCandle>?,
+    ): TimeseriesFallback? {
+        val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
+            dcfFallbackFromTimeseries(
+                symbol = symbol,
+                companyName = companyName,
+                providerFundamentals = providerFundamentals,
+                chartCandles = chartCandles,
+                timeseries = timeseries,
+            )?.analysis
+        }
+        val selectedTimeseries = selection.timeseries ?: return null
+        val fallback = dcfFallbackFromTimeseries(
+            symbol = symbol,
+            companyName = companyName,
+            providerFundamentals = providerFundamentals,
+            chartCandles = chartCandles,
+            timeseries = selectedTimeseries,
+        ) ?: return null
+        return fallback.copy(analysis = selection.analysis ?: fallback.analysis)
+    }
+
     private fun mergeFundamentals(
         existing: FundamentalSnapshot?,
         derived: FundamentalSnapshot,
@@ -1422,14 +1756,13 @@ class DefaultDashboardRepository(
         val needsTimeseries = stateMutex.withLock { timeseriesCache[symbol] == null }
         if (needsTimeseries) {
             try {
-                var ts = yahooClient.fetchFundamentalTimeseries(symbol)
-                if (ts.freeCashFlow.isEmpty() && secondaryTimeseriesProvider != null) {
-                    ts = secondaryTimeseriesProvider.fetch(symbol) ?: ts
-                }
-                timeseries = ts
                 val fundamentals = stateMutex.withLock { engine.detail(symbol)?.fundamentals }
                 if (fundamentals != null) {
-                    dcfAnalysis = DcfAnalysisEngine.compute(fundamentals, ts).getOrNull()
+                    val selection = dcfSourceCoordinator.resolve(symbol) { selectedTimeseries ->
+                        DcfAnalysisEngine.compute(fundamentals, selectedTimeseries).getOrNull()
+                    }
+                    timeseries = selection.timeseries
+                    dcfAnalysis = selection.analysis
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -1504,6 +1837,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dcfCache.clear()
         timeseriesCache.clear()
+        quantLensCache.clear()
         issues.clear()
         staleSymbols.clear()
         placeholderSymbols.clear()
@@ -1565,6 +1899,9 @@ class DefaultDashboardRepository(
     }
 }
 
+private const val QUANT_LENS_ROW_MIN_UPSIDE_BPS = -100_000
+private const val QUANT_LENS_ROW_MAX_UPSIDE_BPS = 100_000
+
 internal fun mergeRevisionHistory(
     persistedHistory: List<SymbolRevision>,
     runtimeHistory: List<SymbolRevision>,
@@ -1599,6 +1936,61 @@ internal fun rowFreshnessFor(
     issueMessage != null -> RowFreshness.Issue
     isRefreshed -> RowFreshness.Updated
     else -> RowFreshness.Updated
+}
+
+internal fun boundedQuantLensRowUpsideBps(marketPriceCents: Long, fairValueCents: Long): Int? =
+    checkedUpsideBps(marketPriceCents, fairValueCents)?.coerceIn(QUANT_LENS_ROW_MIN_UPSIDE_BPS, QUANT_LENS_ROW_MAX_UPSIDE_BPS)
+
+internal fun quantLensRevisionFingerprint(history: List<SymbolRevision>): String = history
+    .sortedWith(compareBy<SymbolRevision> { it.evaluatedAtEpochSeconds }.thenBy { it.symbol })
+    .joinToString(";") { revision ->
+        val detail = revision.detail
+        listOf(
+            revision.symbol,
+            revision.evaluatedAtEpochSeconds,
+            detail.marketPriceCents,
+            detail.intrinsicValueCents,
+            detail.upsideBps,
+            detail.externalSignalLowFairValueCents,
+            detail.externalSignalFairValueCents,
+            detail.weightedExternalSignalFairValueCents,
+            detail.externalSignalHighFairValueCents,
+            detail.weightedAnalystCount,
+            revision.dcfAnalysis?.bearIntrinsicValueCents,
+            revision.dcfAnalysis?.baseIntrinsicValueCents,
+            revision.dcfAnalysis?.bullIntrinsicValueCents,
+            revision.dcfAnalysis?.source,
+            revision.dcfAnalysis?.sourceFingerprint,
+            revision.chartSummaries.entries.sortedBy { it.key.name }.joinToString(",") { (range, summary) ->
+                listOf(range.name, summary.candleCount, summary.latestCloseCents, summary.capturedAt).joinToString(":")
+            },
+        ).joinToString(":")
+    }
+
+internal fun quantLensCandleFingerprint(candles: List<HistoricalCandle>): String = candles
+    .sortedBy { it.epochSeconds }
+    .joinToString(",") { candle ->
+        listOf(candle.epochSeconds, candle.openCents, candle.highCents, candle.lowCents, candle.closeCents, candle.volume)
+            .joinToString(":")
+    }
+
+internal fun quantLensEvSpreadBps(detail: SymbolDetail, dcfAnalysis: DcfAnalysis?): Int? {
+    val dcfAnchors = dcfAnalysis?.let {
+        listOf(it.bearIntrinsicValueCents, it.baseIntrinsicValueCents, it.bullIntrinsicValueCents)
+    }.orEmpty().filter { it > 0L }
+    val analystAnchors = listOfNotNull(
+        detail.externalSignalLowFairValueCents,
+        detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents,
+        detail.externalSignalHighFairValueCents,
+    ).filter { it > 0L }
+    val anchors = when {
+        dcfAnchors.size == 3 -> dcfAnchors
+        analystAnchors.size == 3 -> analystAnchors
+        else -> return null
+    }
+    return checkedUpsideBps(anchors.first().coerceAtLeast(1L), anchors.last())
+        ?.coerceAtLeast(0)
+        ?.coerceAtMost(QUANT_LENS_ROW_MAX_UPSIDE_BPS)
 }
 
 internal fun trackedDecisionStateFor(

@@ -65,7 +65,7 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
 
     private fun fetchCompanyFacts(cikPadded: String): JsonObject? {
         return try {
-            val url = "$COMPANY_FACTS_URL/CIK$cikPadded.json"
+            val url = "${COMPANY_FACTS_URL}CIK$cikPadded.json"
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", SEC_USER_AGENT)
@@ -77,64 +77,58 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
         }
     }
 
-    private fun buildTimeseries(facts: JsonObject): FundamentalTimeseries? {
-        val usGaap = facts["facts"]?.jsonObject?.get("us-gaap")?.jsonObject ?: return null
+    private fun buildTimeseries(facts: JsonObject): FundamentalTimeseries? = buildSecEdgarTimeseries(facts)
+}
 
-        val opCfRecords = annualFyRecords(usGaap, "NetCashProvidedByUsedInOperatingActivities")
-        val capexRecords = annualFyRecords(usGaap, "PaymentsToAcquirePropertyPlantAndEquipment")
-        val sharesRecords = annualFyRecords(usGaap, "WeightedAverageNumberOfDilutedSharesOutstanding")
+internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? {
+    val usGaap = facts["facts"]?.jsonObject?.get("us-gaap")?.jsonObject ?: return null
 
-        if (opCfRecords.isEmpty()) return null
+    val opCfRecords = annualFyRecords(usGaap, "NetCashProvidedByUsedInOperatingActivities")
+    val capexRecords = annualFyRecords(usGaap, "PaymentsToAcquirePropertyPlantAndEquipment")
+    val sharesRecords = annualFyRecords(usGaap, "WeightedAverageNumberOfDilutedSharesOutstanding")
 
-        // Compute FCF = opCF - |capex| per fiscal year end date
-        val capexByDate = capexRecords.associate { it.asOfDate to it.value }
-        val freeCashFlow = opCfRecords.mapNotNull { opCf ->
-            val capex = capexByDate[opCf.asOfDate]
-                ?: capexRecords.minByOrNull { Math.abs(parseYear(it.asOfDate) - parseYear(opCf.asOfDate)) }
-                    ?.value
-                ?: 0.0
-            // SEC EDGAR capex is typically positive (payments) or negative; normalise to outflow
-            val capexOutflow = Math.abs(capex)
-            val fcf = opCf.value - capexOutflow
-            AnnualReportedValue(asOfDate = opCf.asOfDate, value = fcf)
-        }
+    if (opCfRecords.isEmpty() || capexRecords.isEmpty()) return null
 
-        val operatingCashFlow = opCfRecords.toList()
-        val capitalExpenditure = capexRecords.map { it.copy(value = -Math.abs(it.value)) }
-        val dilutedShares = sharesRecords.toList()
+    val capexByDate = capexRecords.associate { it.asOfDate to it.value }
+    val acceptedOperatingCashFlow = opCfRecords.filter { opCf -> capexByDate.containsKey(opCf.asOfDate) }
+    if (acceptedOperatingCashFlow.isEmpty()) return null
 
-        return FundamentalTimeseries(
-            freeCashFlow = freeCashFlow,
-            operatingCashFlow = operatingCashFlow,
-            capitalExpenditure = capitalExpenditure,
-            dilutedAverageShares = dilutedShares,
-        )
+    val acceptedDates = acceptedOperatingCashFlow.map { it.asOfDate }.toSet()
+    val freeCashFlow = acceptedOperatingCashFlow.map { opCf ->
+        val capexOutflow = Math.abs(requireNotNull(capexByDate[opCf.asOfDate]))
+        AnnualReportedValue(asOfDate = opCf.asOfDate, value = opCf.value - capexOutflow)
     }
+    val capitalExpenditure = capexRecords
+        .filter { capex -> capex.asOfDate in acceptedDates }
+        .map { capex -> capex.copy(value = -Math.abs(capex.value)) }
 
-    private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualReportedValue> {
-        val entries = usGaap[concept]
-            ?.jsonObject?.get("units")
-            ?.jsonObject?.entries
-            ?.firstOrNull()
-            ?.value?.jsonArray
-            ?: return emptyList()
+    return FundamentalTimeseries(
+        freeCashFlow = freeCashFlow,
+        operatingCashFlow = acceptedOperatingCashFlow,
+        capitalExpenditure = capitalExpenditure,
+        dilutedAverageShares = sharesRecords,
+    )
+}
 
-        // Keep only FY / 10-K annual records; deduplicate by fiscal-year end date keeping the
-        // earliest-filed value (most canonical).
-        val byDate = mutableMapOf<String, AnnualReportedValue>()
-        for (entry in entries) {
-            val obj = entry.jsonObject
-            val fp = obj["fp"]?.jsonPrimitive?.content ?: continue
-            val form = obj["form"]?.jsonPrimitive?.content ?: continue
-            if (fp != "FY" || !form.startsWith("10-K")) continue
-            val endDate = obj["end"]?.jsonPrimitive?.content ?: continue
-            val value = obj["val"]?.jsonPrimitive?.double ?: continue
-            if (!byDate.containsKey(endDate)) {
-                byDate[endDate] = AnnualReportedValue(asOfDate = endDate, value = value)
-            }
+private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualReportedValue> {
+    val entries = usGaap[concept]
+        ?.jsonObject?.get("units")
+        ?.jsonObject?.entries
+        ?.firstOrNull()
+        ?.value?.jsonArray
+        ?: return emptyList()
+
+    val byDate = mutableMapOf<String, AnnualReportedValue>()
+    for (entry in entries) {
+        val obj = entry.jsonObject
+        val fp = obj["fp"]?.jsonPrimitive?.content ?: continue
+        val form = obj["form"]?.jsonPrimitive?.content ?: continue
+        if (fp != "FY" || !form.startsWith("10-K")) continue
+        val endDate = obj["end"]?.jsonPrimitive?.content ?: continue
+        val value = obj["val"]?.jsonPrimitive?.double ?: continue
+        if (!byDate.containsKey(endDate)) {
+            byDate[endDate] = AnnualReportedValue(asOfDate = endDate, value = value)
         }
-        return byDate.values.sortedBy { it.asOfDate }
     }
-
-    private fun parseYear(date: String): Int = date.substringBefore("-").toIntOrNull() ?: 0
+    return byDate.values.sortedBy { it.asOfDate }
 }

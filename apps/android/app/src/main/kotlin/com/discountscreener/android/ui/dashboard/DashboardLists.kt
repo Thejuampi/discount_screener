@@ -35,6 +35,8 @@ import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
+import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -43,7 +45,11 @@ import kotlin.math.max
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun TrackedList(rows: List<TrackedSymbolRow>, onAction: (DashboardAction) -> Unit) {
+internal fun TrackedList(
+    rows: List<TrackedSymbolRow>,
+    quantLensChipsBySymbol: Map<String, List<QuantLensChipUi>> = emptyMap(),
+    onAction: (DashboardAction) -> Unit,
+) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         items(rows, key = { it.symbol }) { row ->
             Card(
@@ -65,6 +71,7 @@ internal fun TrackedList(rows: List<TrackedSymbolRow>, onAction: (DashboardActio
                             companyName = row.companyName,
                         )
                         TrackedRowSignals(row)
+                        QuantLensStrip(quantLensChipsBySymbol[row.symbol].orEmpty())
                         TrackedRowMetrics(row)
                     }
                 }
@@ -108,6 +115,7 @@ internal fun CandidateList(rows: List<CandidateRow>, onAction: (DashboardAction)
 internal fun OpportunityList(
     rows: List<OpportunityListRow>,
     scoringModel: OpportunityScoringModel,
+    quantLensChipsBySymbol: Map<String, List<QuantLensChipUi>> = emptyMap(),
     onAction: (DashboardAction) -> Unit,
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -127,6 +135,7 @@ internal fun OpportunityList(
                         ScoreBadge(row.compositeScore)
                     }
                     OpportunityRowSignals(row)
+                    QuantLensStrip(quantLensChipsBySymbol[row.symbol].orEmpty())
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
                         MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
@@ -146,6 +155,26 @@ internal fun OpportunityList(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuantLensStrip(chips: List<QuantLensChipUi>) {
+    val visibleChips = if (chips.isEmpty()) {
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensSeverity.Muted))
+    } else {
+        chips.take(3)
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        visibleChips.forEach { chip ->
+            val colors = quantLensColors(chip.severity)
+            ChangeBadge(
+                label = chip.label,
+                contentColor = colors.first,
+                backgroundColor = colors.second,
+            )
         }
     }
 }
@@ -385,6 +414,15 @@ private fun decisionStateColors(decisionState: RowDecisionState?): Pair<Color, C
     RowDecisionState.Watch -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
     RowDecisionState.Avoid -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
     null -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
+}
+
+@Composable
+private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = when (severity) {
+    QuantLensSeverity.Supportive -> BullishChartColor to BullishChartColor.copy(alpha = 0.14f)
+    QuantLensSeverity.Neutral -> MaterialTheme.colorScheme.tertiary to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+    QuantLensSeverity.Warning -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
+    QuantLensSeverity.Risk -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
+    QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
 @Composable

@@ -53,6 +53,7 @@ enum class DashboardTab {
 
 enum class DetailSubtab {
     Snapshot,
+    Lens,
     History,
 }
 
@@ -133,6 +134,8 @@ data class DashboardUiState(
     val detailCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     val detailHistory: List<SymbolRevision> = emptyList(),
     val detailAlerts: List<AlertEvent> = emptyList(),
+    val detailQuantLens: QuantLensUiState? = null,
+    val rowQuantLensChipsBySymbol: Map<String, List<QuantLensChipUi>> = emptyMap(),
     val lastUpdatedAtEpochSeconds: Long? = null,
     val startupPhase: DashboardStartupPhase = DashboardStartupPhase.Restoring,
     val refreshCompletedSymbols: Int = 0,
@@ -311,6 +314,7 @@ class DashboardViewModel(
             detailCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
+            detailQuantLens = null,
         )
     }
 
@@ -400,6 +404,7 @@ class DashboardViewModel(
             detailCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
+            detailQuantLens = null,
         )
         viewModelScope.launch {
             val snapshot = selectDashboardProfile(
@@ -553,6 +558,19 @@ class DashboardViewModel(
                 snapshot.selectedAlerts
             } else {
                 _state.value.detailAlerts
+            },
+            detailQuantLens = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
+                mapQuantLensReport(snapshot.selectedQuantLens)
+            } else {
+                _state.value.detailQuantLens
+            },
+            rowQuantLensChipsBySymbol = buildMap {
+                snapshot.trackedRows.forEach { row ->
+                    put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
+                }
+                snapshot.opportunityRows.forEach { row ->
+                    put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
+                }
             },
             lastUpdatedAtEpochSeconds = snapshot.lastUpdatedAtEpochSeconds,
             startupPhase = snapshot.startupPhase,

@@ -9,6 +9,8 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.QuantLensReport
+import com.discountscreener.core.model.QuantLensRowSummary
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 
@@ -134,6 +136,7 @@ data class TrackedSymbolRow(
     val valuationChange: ValuationChange? = null,
     val explanation: RowExplanationKind? = null,
     val decisionState: RowDecisionState? = null,
+    val quantLensSummary: QuantLensRowSummary? = null,
 )
 
 data class OpportunityListRow(
@@ -161,6 +164,7 @@ data class OpportunityListRow(
     val valuationChange: ValuationChange? = null,
     val explanation: RowExplanationKind? = null,
     val decisionState: RowDecisionState? = null,
+    val quantLensSummary: QuantLensRowSummary? = null,
 )
 
 data class DashboardSnapshot(
@@ -177,6 +181,7 @@ data class DashboardSnapshot(
     val selectedCharts: Map<ChartRange, List<HistoricalCandle>>,
     val selectedHistory: List<SymbolRevision>,
     val selectedAlerts: List<AlertEvent>,
+    val selectedQuantLens: QuantLensReport? = null,
     val lastUpdatedAtEpochSeconds: Long?,
     val startupPhase: DashboardStartupPhase,
     val refreshCompletedSymbols: Int,
