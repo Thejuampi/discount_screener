@@ -1,5 +1,8 @@
 {
   "editor.formatOnSave": true,
+  "markdown.styles": [
+    "docs/markdown-preview.css"
+  ],
   "rust-analyzer.cargo.allFeatures": true,
   "rust-analyzer.check.allTargets": true,
   "rust-analyzer.procMacro.enable": true,
