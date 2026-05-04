@@ -14,6 +14,7 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensComparable
 import com.discountscreener.core.model.QuantLensCorrelationSeries
+import com.discountscreener.core.model.QuantLensHorizon
 import com.discountscreener.core.model.QuantLensInput
 import com.discountscreener.core.model.QuantLensModelVersion
 import com.discountscreener.core.model.QuantLensPrimaryStatus
@@ -26,13 +27,14 @@ import kotlin.test.assertEquals
 
 class QuantLensEngineTest {
     @Test
-    fun scaffold_report_contains_all_five_explicit_sections() {
+    fun scaffold_report_contains_all_explicit_sections() {
         val report = QuantLensEngine.analyze(minimalInput())
 
         assertEquals(QuantLensPrimaryStatus.Sparse, report.evidenceStrength.primaryStatus)
         assertEquals(QuantLensPrimaryStatus.Sparse, report.expectedValueRange.primaryStatus)
         assertEquals(QuantLensPrimaryStatus.Unavailable, report.correlationRisk.primaryStatus)
         assertEquals(QuantLensPrimaryStatus.Insufficient, report.trendReliability.primaryStatus)
+        assertEquals(QuantLensPrimaryStatus.Unavailable, report.horizonContext.primaryStatus)
         assertEquals(QuantLensPrimaryStatus.Sparse, report.similarSetups.primaryStatus)
     }
 
@@ -146,6 +148,214 @@ class QuantLensEngineTest {
     }
 
     @Test
+    fun trend_reliability_is_stable_when_duplicate_epoch_order_changes() {
+        var baseCandles = (1..24).map { index -> candle(index, close = 10_000L + index * 75L) }
+            .filterNot { it.epochSeconds == 12L }
+        var lowDuplicate = candle(12, close = 5_000L)
+        var normalDuplicate = candle(12, close = 10_900L)
+        var highDuplicate = candle(12, close = 20_000L)
+
+        assertEquals(
+            QuantLensEngine.analyze(
+                minimalInput(
+                    selectedCandlesByRange = mapOf(
+                        ChartRange.Month to baseCandles + listOf(lowDuplicate, normalDuplicate, highDuplicate),
+                    ),
+                ),
+            ).trendReliability,
+            QuantLensEngine.analyze(
+                minimalInput(
+                    selectedCandlesByRange = mapOf(
+                        ChartRange.Month to baseCandles + listOf(highDuplicate, normalDuplicate, lowDuplicate),
+                    ),
+                ),
+            ).trendReliability,
+        )
+    }
+
+    @Test
+    fun correlation_risk_is_stable_when_duplicate_epoch_order_changes() {
+        var baseCandles = correlatedCandles(offset = 0).filterNot { it.epochSeconds == 12L }
+        var lowDuplicate = candle(12, close = 5_000L)
+        var normalDuplicate = candle(12, close = 10_900L)
+        var highDuplicate = candle(12, close = 20_000L)
+
+        assertEquals(
+            QuantLensEngine.analyze(
+                minimalInput(
+                    selectedCandlesByRange = mapOf(
+                        ChartRange.Month to baseCandles + listOf(lowDuplicate, normalDuplicate, highDuplicate),
+                    ),
+                    correlationSeries = listOf(
+                        QuantLensCorrelationSeries("BETA", ChartRange.Month, correlatedCandles(offset = 100)),
+                        QuantLensCorrelationSeries("GAMMA", ChartRange.Month, correlatedCandles(offset = 200)),
+                    ),
+                ),
+            ).correlationRisk,
+            QuantLensEngine.analyze(
+                minimalInput(
+                    selectedCandlesByRange = mapOf(
+                        ChartRange.Month to baseCandles + listOf(highDuplicate, normalDuplicate, lowDuplicate),
+                    ),
+                    correlationSeries = listOf(
+                        QuantLensCorrelationSeries("BETA", ChartRange.Month, correlatedCandles(offset = 100)),
+                        QuantLensCorrelationSeries("GAMMA", ChartRange.Month, correlatedCandles(offset = 200)),
+                    ),
+                ),
+            ).correlationRisk,
+        )
+    }
+
+    @Test
+    fun horizon_context_computes_three_baselines_from_loaded_chart_ranges() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Day to candleSeries(10_000, 10_100, 10_200, 10_404, 10_300, 10_609, 10_400, 10_816, 10_300, 11_021, 10_000),
+                    ChartRange.Month to candleSeries(20_000, 20_200, 20_400, 20_808, 20_600, 21_218, 20_800, 21_632, 20_600, 22_042, 20_000),
+                    ChartRange.FiveYears to (0..12).map { index -> candle(index + 1, close = 10_000L + index * 100L) },
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                HorizonSummary(QuantLensHorizon.FiveMinutes, ChartRange.Day, 1, 10, 200, 100, 477),
+                HorizonSummary(QuantLensHorizon.OneDay, ChartRange.Month, 1, 10, 200, 100, 477),
+                HorizonSummary(QuantLensHorizon.ThreeMonths, ChartRange.FiveYears, 3, 10, 286, 280, 294),
+            ),
+            report.horizonContext.horizons.map(::horizonSummary),
+        )
+    }
+
+    @Test
+    fun horizon_context_primary_status_is_available_when_all_horizons_are_available() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Day to flatCandles(count = 11),
+                    ChartRange.Month to flatCandles(count = 11),
+                    ChartRange.FiveYears to flatCandles(count = 13),
+                ),
+            ),
+        )
+
+        assertEquals(QuantLensPrimaryStatus.Available, report.horizonContext.primaryStatus)
+    }
+
+    @Test
+    fun horizon_context_primary_status_is_partial_when_some_horizons_are_available() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Day to flatCandles(count = 11),
+                    ChartRange.Month to flatCandles(count = 10),
+                ),
+            ),
+        )
+
+        assertEquals(QuantLensPrimaryStatus.Partial, report.horizonContext.primaryStatus)
+    }
+
+    @Test
+    fun horizon_context_marks_missing_short_and_invalid_sources_without_percentiles() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Month to flatCandles(count = 10),
+                    ChartRange.FiveYears to listOf(candle(1, close = 0), candle(2, close = -1)),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                HorizonDegradedSummary(QuantLensHorizon.FiveMinutes, QuantLensPrimaryStatus.Unavailable, 0, QuantLensReasonCode.MissingHorizonCandles, null),
+                HorizonDegradedSummary(QuantLensHorizon.OneDay, QuantLensPrimaryStatus.Insufficient, 9, QuantLensReasonCode.InsufficientHorizonSamples, null),
+                HorizonDegradedSummary(QuantLensHorizon.ThreeMonths, QuantLensPrimaryStatus.Unavailable, 0, QuantLensReasonCode.InvalidHorizonClose, null),
+            ),
+            report.horizonContext.horizons.map {
+                HorizonDegradedSummary(
+                    horizon = it.horizon,
+                    primaryStatus = it.primaryStatus,
+                    sampleCount = it.sampleCount,
+                    firstReason = it.reasonCodes.first(),
+                    medianAbsoluteMoveBps = it.medianAbsoluteMoveBps,
+                )
+            },
+        )
+    }
+
+    @Test
+    fun horizon_context_primary_status_is_unavailable_when_all_horizons_are_unavailable() {
+        val report = QuantLensEngine.analyze(minimalInput(selectedCandlesByRange = emptyMap()))
+
+        assertEquals(QuantLensPrimaryStatus.Unavailable, report.horizonContext.primaryStatus)
+    }
+
+    @Test
+    fun horizon_context_ignores_invalid_close_cents_before_windowing() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Day to listOf(candle(0, close = 0), candle(1, close = -1)) + flatCandles(count = 11),
+                ),
+            ),
+        )
+
+        assertEquals(10, report.horizonContext.horizons.first { it.horizon == QuantLensHorizon.FiveMinutes }.sampleCount)
+    }
+
+    @Test
+    fun horizon_context_canonicalizes_duplicate_epochs_before_sample_counting() {
+        var report = QuantLensEngine.analyze(
+            minimalInput(
+                selectedCandlesByRange = mapOf(
+                    ChartRange.Day to flatCandles(count = 10) + candle(5, close = 10_500),
+                ),
+            ),
+        )
+
+        assertEquals(
+            HorizonDegradedSummary(
+                horizon = QuantLensHorizon.FiveMinutes,
+                primaryStatus = QuantLensPrimaryStatus.Insufficient,
+                sampleCount = 9,
+                firstReason = QuantLensReasonCode.InsufficientHorizonSamples,
+                medianAbsoluteMoveBps = null,
+            ),
+            report.horizonContext.horizons.first { it.horizon == QuantLensHorizon.FiveMinutes }.let {
+                HorizonDegradedSummary(
+                    horizon = it.horizon,
+                    primaryStatus = it.primaryStatus,
+                    sampleCount = it.sampleCount,
+                    firstReason = it.reasonCodes.first(),
+                    medianAbsoluteMoveBps = it.medianAbsoluteMoveBps,
+                )
+            },
+        )
+    }
+
+    @Test
+    fun horizon_context_is_stable_when_duplicate_epoch_order_changes() {
+        var baseCandles = flatCandles(count = 11).filterNot { it.epochSeconds == 5L }
+        var lowDuplicate = candle(5, close = 5_000)
+        var normalDuplicate = candle(5, close = 10_000)
+        var highDuplicate = candle(5, close = 20_000)
+        var lowFirst = baseCandles + listOf(lowDuplicate, normalDuplicate, highDuplicate)
+        var highFirst = baseCandles + listOf(highDuplicate, normalDuplicate, lowDuplicate)
+
+        assertEquals(
+            QuantLensEngine.analyze(
+                minimalInput(selectedCandlesByRange = mapOf(ChartRange.Day to lowFirst)),
+            ).horizonContext,
+            QuantLensEngine.analyze(
+                minimalInput(selectedCandlesByRange = mapOf(ChartRange.Day to highFirst)),
+            ).horizonContext,
+        )
+    }
+
+    @Test
     fun similar_setups_returns_top_three_current_comparables() {
         val report = QuantLensEngine.analyze(
             minimalInput(
@@ -236,6 +446,44 @@ class QuantLensEngineTest {
         lowCents = close - 10,
         closeCents = close,
         volume = 1_000,
+    )
+
+    private fun candleSeries(vararg closes: Long): List<HistoricalCandle> = closes.mapIndexed { index, close ->
+        candle(index + 1, close)
+    }
+
+    private fun flatCandles(count: Int): List<HistoricalCandle> = (1..count).map { index ->
+        candle(index, close = 10_000)
+    }
+
+    private fun horizonSummary(
+        baseline: com.discountscreener.core.model.QuantLensHorizonBaseline,
+    ) = HorizonSummary(
+        horizon = baseline.horizon,
+        sourceRange = baseline.sourceRange,
+        lagCandles = baseline.lagCandles,
+        sampleCount = baseline.sampleCount,
+        medianAbsoluteMoveBps = baseline.medianAbsoluteMoveBps,
+        p25AbsoluteMoveBps = baseline.p25AbsoluteMoveBps,
+        p75AbsoluteMoveBps = baseline.p75AbsoluteMoveBps,
+    )
+
+    private data class HorizonSummary(
+        val horizon: QuantLensHorizon,
+        val sourceRange: ChartRange,
+        val lagCandles: Int,
+        val sampleCount: Int,
+        val medianAbsoluteMoveBps: Int?,
+        val p25AbsoluteMoveBps: Int?,
+        val p75AbsoluteMoveBps: Int?,
+    )
+
+    private data class HorizonDegradedSummary(
+        val horizon: QuantLensHorizon,
+        val primaryStatus: QuantLensPrimaryStatus,
+        val sampleCount: Int,
+        val firstReason: QuantLensReasonCode,
+        val medianAbsoluteMoveBps: Int?,
     )
 
     private fun comparable(

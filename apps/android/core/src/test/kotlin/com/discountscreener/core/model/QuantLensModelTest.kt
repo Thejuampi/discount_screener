@@ -21,6 +21,7 @@ class QuantLensModelTest {
         assertContains(encoded, """"expectedValueRange"""")
         assertContains(encoded, """"correlationRisk"""")
         assertContains(encoded, """"trendReliability"""")
+        assertContains(encoded, """"horizonContext"""")
         assertContains(encoded, """"similarSetups"""")
         assertContains(encoded, """"reasonCodes":["ScaffoldPending"]""")
     }
@@ -60,6 +61,39 @@ class QuantLensModelTest {
         }
 
         assertEquals("similarityBps must be between 0 and 10000.", failure.message)
+    }
+
+    @Test
+    fun rejects_negative_horizon_baseline_sample_count() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            QuantLensHorizonBaseline(
+                horizon = QuantLensHorizon.FiveMinutes,
+                primaryStatus = QuantLensPrimaryStatus.Insufficient,
+                sourceRange = ChartRange.Day,
+                lagCandles = 1,
+                sampleCount = -1,
+                reasonCodes = listOf(QuantLensReasonCode.InsufficientHorizonSamples),
+            )
+        }
+
+        assertEquals("sampleCount cannot be negative.", failure.message)
+    }
+
+    @Test
+    fun rejects_negative_absolute_horizon_move_bps() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            QuantLensHorizonBaseline(
+                horizon = QuantLensHorizon.FiveMinutes,
+                primaryStatus = QuantLensPrimaryStatus.Available,
+                sourceRange = ChartRange.Day,
+                lagCandles = 1,
+                sampleCount = 10,
+                medianAbsoluteMoveBps = -1,
+                reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+            )
+        }
+
+        assertEquals("medianAbsoluteMoveBps must be between 0 and 100000.", failure.message)
     }
 
     @Test
@@ -109,6 +143,20 @@ class QuantLensModelTest {
             primaryStatus = QuantLensPrimaryStatus.Insufficient,
             band = TrendReliabilityBand.Insufficient,
             reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
+        ),
+        horizonContext = QuantLensHorizonContext(
+            primaryStatus = QuantLensPrimaryStatus.Unavailable,
+            horizons = listOf(
+                QuantLensHorizonBaseline(
+                    horizon = QuantLensHorizon.FiveMinutes,
+                    primaryStatus = QuantLensPrimaryStatus.Unavailable,
+                    sourceRange = ChartRange.Day,
+                    lagCandles = 1,
+                    sampleCount = 0,
+                    reasonCodes = listOf(QuantLensReasonCode.MissingHorizonCandles),
+                ),
+            ),
+            reasonCodes = listOf(QuantLensReasonCode.MissingHorizonCandles),
         ),
         similarSetups = QuantLensSimilarSetups(
             primaryStatus = QuantLensPrimaryStatus.Sparse,

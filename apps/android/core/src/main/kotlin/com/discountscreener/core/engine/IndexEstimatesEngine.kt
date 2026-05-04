@@ -7,6 +7,7 @@ import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceDistribution
 import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.IndexEstimatesReport
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.ScenarioEstimate
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.math.roundToInt
@@ -55,8 +56,11 @@ object IndexEstimatesEngine {
         val eligibleSymbols = symbols.filter { symbol ->
             (symbol.fundamentals?.marketCapDollars ?: 0L) > 0L
         }
-        val coveredAnalyses = eligibleSymbols.mapNotNull { symbol -> dcfBySymbol[symbol.symbol] }
-        val denominator = eligibleSymbols.size
+        var analyses = eligibleSymbols.map { symbol -> symbol.symbol to dcfBySymbol[symbol.symbol] }
+        val notEligibleSymbols = analyses.count { (_, analysis) -> analysis?.resolverState == ResolverState.NotEligible }
+        val denominator = eligibleSymbols.size - notEligibleSymbols
+        val coveredAnalyses = analyses.mapNotNull { (_, analysis) -> analysis }
+            .filter(::isLiveCompleteDcf)
         val numerator = coveredAnalyses.size
         val coverageBps = if (denominator == 0 || numerator == 0) {
             0
@@ -71,11 +75,20 @@ object IndexEstimatesEngine {
             sourceDistribution = DcfSourceDistribution(
                 yahooCount = coveredAnalyses.count { it.source == DcfSource.YahooFinance },
                 secCount = coveredAnalyses.count { it.source == DcfSource.SecEdgar },
-                unknownCount = coveredAnalyses.count { it.source == null },
-                unavailableCount = denominator - numerator,
+                restoredCount = analyses.count { (_, analysis) -> analysis?.resolverState == ResolverState.RestoredOnly },
+                uncertainCount = analyses.count { (_, analysis) -> analysis?.resolverState == ResolverState.ProviderUncertain },
+                notEligibleCount = notEligibleSymbols,
+                unknownCount = coveredAnalyses.count { it.source == null || it.source == DcfSource.Unknown },
+                unavailableCount = analyses.count { (_, analysis) -> analysis == null || analysis.resolverState == ResolverState.Unavailable },
             ),
         )
     }
+
+    private fun isLiveCompleteDcf(analysis: DcfAnalysis): Boolean =
+        analysis.resolverState == ResolverState.Selected &&
+            analysis.bearIntrinsicValueCents > 0L &&
+            analysis.baseIntrinsicValueCents > 0L &&
+            analysis.bullIntrinsicValueCents > 0L
 
     private fun dcfCoverageStatus(
         denominator: Int,
@@ -129,9 +142,9 @@ object IndexEstimatesEngine {
         symbol: SymbolDetail,
         dcfBySymbol: Map<String, DcfAnalysis>,
     ): Long? = when (scenario) {
-        EstimateScenario.BearDcf -> dcfBySymbol[symbol.symbol]?.bearIntrinsicValueCents
-        EstimateScenario.BaseDcf -> dcfBySymbol[symbol.symbol]?.baseIntrinsicValueCents
-        EstimateScenario.BullDcf -> dcfBySymbol[symbol.symbol]?.bullIntrinsicValueCents
+        EstimateScenario.BearDcf -> dcfBySymbol[symbol.symbol]?.takeIf(::isLiveCompleteDcf)?.bearIntrinsicValueCents
+        EstimateScenario.BaseDcf -> dcfBySymbol[symbol.symbol]?.takeIf(::isLiveCompleteDcf)?.baseIntrinsicValueCents
+        EstimateScenario.BullDcf -> dcfBySymbol[symbol.symbol]?.takeIf(::isLiveCompleteDcf)?.bullIntrinsicValueCents
         EstimateScenario.AnalystLow -> symbol.externalSignalLowFairValueCents
         EstimateScenario.AnalystHigh -> symbol.externalSignalHighFairValueCents
     }

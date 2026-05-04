@@ -3,7 +3,7 @@ package com.discountscreener.core.model
 import kotlinx.serialization.Serializable
 
 object QuantLensModelVersion {
-    const val CURRENT: Int = 1
+    const val CURRENT: Int = 2
 }
 
 @Serializable
@@ -31,6 +31,14 @@ enum class QuantLensLensId {
     CorrelationRisk,
     TrendReliability,
     SimilarSetups,
+    HorizonContext,
+}
+
+@Serializable
+enum class QuantLensHorizon {
+    FiveMinutes,
+    OneDay,
+    ThreeMonths,
 }
 
 @Serializable
@@ -118,6 +126,10 @@ enum class QuantLensReasonCode {
     InsufficientTrendSamples,
     InsufficientComparables,
     CompleteScenarioAnchors,
+    HistoricalBaselineAvailable,
+    MissingHorizonCandles,
+    InsufficientHorizonSamples,
+    InvalidHorizonClose,
 }
 
 @Serializable
@@ -157,6 +169,7 @@ data class QuantLensReport(
     val expectedValueRange: QuantLensExpectedValueRange,
     val correlationRisk: QuantLensCorrelationRisk,
     val trendReliability: QuantLensTrendReliability,
+    val horizonContext: QuantLensHorizonContext,
     val similarSetups: QuantLensSimilarSetups,
     val notices: List<QuantLensReasonCode> = emptyList(),
 ) {
@@ -164,6 +177,39 @@ data class QuantLensReport(
         require(symbol.isNotBlank()) { "Quant Lens report symbol is required." }
         require(modelVersion > 0) { "Quant Lens model version must be positive." }
         require(inputFingerprint.isNotBlank()) { "Quant Lens report fingerprint is required." }
+    }
+}
+
+@Serializable
+data class QuantLensHorizonContext(
+    val primaryStatus: QuantLensPrimaryStatus,
+    val horizons: List<QuantLensHorizonBaseline>,
+    val reasonCodes: List<QuantLensReasonCode>,
+) {
+    init {
+        requireValidSection(primaryStatus, reasonCodes)
+    }
+}
+
+@Serializable
+data class QuantLensHorizonBaseline(
+    val horizon: QuantLensHorizon,
+    val primaryStatus: QuantLensPrimaryStatus,
+    val sourceRange: ChartRange,
+    val lagCandles: Int,
+    val sampleCount: Int,
+    val medianAbsoluteMoveBps: Int? = null,
+    val p25AbsoluteMoveBps: Int? = null,
+    val p75AbsoluteMoveBps: Int? = null,
+    val reasonCodes: List<QuantLensReasonCode>,
+) {
+    init {
+        requireValidSection(primaryStatus, reasonCodes)
+        require(lagCandles > 0) { "lagCandles must be positive." }
+        require(sampleCount >= 0) { "sampleCount cannot be negative." }
+        requireBps("medianAbsoluteMoveBps", medianAbsoluteMoveBps, max = 100_000)
+        requireBps("p25AbsoluteMoveBps", p25AbsoluteMoveBps, max = 100_000)
+        requireBps("p75AbsoluteMoveBps", p75AbsoluteMoveBps, max = 100_000)
     }
 }
 

@@ -5,6 +5,9 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceCandidate
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.ProviderDecisionReasonCode
+import com.discountscreener.core.model.RefreshDisposition
+import com.discountscreener.core.model.ResolverState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -42,6 +45,29 @@ class DcfSourceSelectionPolicyTest {
     }
 
     @Test
+    fun no_configured_providers_returns_blocked_unavailable_state() {
+        var selection = DcfSourceSelectionPolicy.select()
+
+        assertEquals(ResolverState.Unavailable, selection.resolverState)
+        assertEquals(RefreshDisposition.BlockedUntilProviderEnabled, selection.refreshDisposition)
+        assertEquals(
+            listOf(ProviderDecisionReasonCode.ProviderConfigurationAbsent, ProviderDecisionReasonCode.NoEnabledProviders),
+            selection.reasons.map { it.code },
+        )
+    }
+
+    @Test
+    fun materially_divergent_usable_sources_return_provider_uncertain() {
+        var selection = DcfSourceSelectionPolicy.select(
+            yahoo = candidate(DcfSource.YahooFinance, usableTimeseries()),
+            sec = candidate(DcfSource.SecEdgar, divergentTimeseries()),
+        )
+
+        assertEquals(ResolverState.ProviderUncertain, selection.resolverState)
+        assertEquals(listOf(ProviderDecisionReasonCode.ProviderDisagreement), selection.reasons.map { it.code })
+    }
+
+    @Test
     fun latest_non_positive_free_cash_flow_is_not_dcf_usable() {
         var candidate = candidate(DcfSource.YahooFinance, unusableTimeseries())
 
@@ -70,6 +96,14 @@ class DcfSourceSelectionPolicyTest {
             AnnualReportedValue("2021-12-31", 100.0),
             AnnualReportedValue("2022-12-31", 120.0),
             AnnualReportedValue("2023-12-31", -1.0),
+        ),
+    )
+
+    private fun divergentTimeseries() = FundamentalTimeseries(
+        freeCashFlow = listOf(
+            AnnualReportedValue("2021-12-31", 100.0),
+            AnnualReportedValue("2022-12-31", 120.0),
+            AnnualReportedValue("2023-12-31", 180.0),
         ),
     )
 

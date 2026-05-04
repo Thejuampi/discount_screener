@@ -6,21 +6,21 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use discount_screener::build_analyst_score;
 use discount_screener::AnalystOutcomeSample;
 use discount_screener::ExternalValuationSignal;
 use discount_screener::FundamentalSnapshot;
 use discount_screener::MarketSnapshot;
-use discount_screener::build_analyst_score;
-use reqwest::Url;
 use reqwest::blocking::Client;
-use reqwest::header::ACCEPT;
-use reqwest::header::ACCEPT_LANGUAGE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
+use reqwest::header::ACCEPT;
+use reqwest::header::ACCEPT_LANGUAGE;
 use reqwest::header::UPGRADE_INSECURE_REQUESTS;
+use reqwest::Url;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -186,6 +186,12 @@ pub struct AnnualReportedValue {
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct FundamentalTimeseries {
+    #[serde(default)]
+    pub source: FundamentalTimeseriesSource,
+    #[serde(default = "default_source_policy_stage")]
+    pub source_policy_stage: String,
+    #[serde(default)]
+    pub source_fingerprint: String,
     pub free_cash_flow: Vec<AnnualReportedValue>,
     pub operating_cash_flow: Vec<AnnualReportedValue>,
     pub capital_expenditure: Vec<AnnualReportedValue>,
@@ -194,6 +200,42 @@ pub struct FundamentalTimeseries {
     pub pretax_income: Vec<AnnualReportedValue>,
     pub tax_rate_for_calcs: Vec<AnnualReportedValue>,
     pub net_income: Vec<AnnualReportedValue>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FundamentalTimeseriesSource {
+    YahooFinance,
+    SecEdgar,
+    DesktopSecDeferred,
+    Restored,
+    #[default]
+    Unknown,
+}
+
+fn default_source_policy_stage() -> String {
+    "DesktopYahooOnly".to_string()
+}
+
+fn source_fingerprint(timeseries: &FundamentalTimeseries) -> String {
+    format!(
+        "{:?}|fcf={}|shares={}",
+        timeseries.source,
+        annual_series_fingerprint(&timeseries.free_cash_flow),
+        annual_series_fingerprint(&timeseries.diluted_average_shares)
+    )
+}
+
+fn annual_series_fingerprint(values: &[AnnualReportedValue]) -> String {
+    let mut points = values
+        .iter()
+        .filter(|point| !point.as_of_date.is_empty() && point.value.is_finite())
+        .collect::<Vec<_>>();
+    points.sort_by(|left, right| left.as_of_date.cmp(&right.as_of_date));
+    points
+        .into_iter()
+        .map(|point| format!("{}:{}", point.as_of_date, point.value))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,7 +479,10 @@ impl MarketDataClient {
         let body = response.text().map_err(io::Error::other)?;
         let root = serde_json::from_str::<Value>(&body).map_err(io::Error::other)?;
 
-        Ok(FundamentalTimeseries {
+        let mut timeseries = FundamentalTimeseries {
+            source: FundamentalTimeseriesSource::YahooFinance,
+            source_policy_stage: default_source_policy_stage(),
+            source_fingerprint: String::new(),
             free_cash_flow: parse_timeseries_metric(&root, "annualFreeCashFlow"),
             operating_cash_flow: parse_timeseries_metric(&root, "annualOperatingCashFlow"),
             capital_expenditure: parse_timeseries_metric(&root, "annualCapitalExpenditure"),
@@ -446,7 +491,9 @@ impl MarketDataClient {
             pretax_income: parse_timeseries_metric(&root, "annualPretaxIncome"),
             tax_rate_for_calcs: parse_timeseries_metric(&root, "annualTaxRateForCalcs"),
             net_income: parse_timeseries_metric(&root, "annualNetIncome"),
-        })
+        };
+        timeseries.source_fingerprint = source_fingerprint(&timeseries);
+        Ok(timeseries)
     }
 
     fn fetch_price_history(
@@ -1704,6 +1751,17 @@ fn closing_price_cents_on_or_after(
 
 #[cfg(test)]
 mod tests {
+    use super::chart_api_url;
+    use super::chart_range_api_url;
+    use super::chart_range_spec;
+    use super::compute_weighted_analyst_target;
+    use super::default_live_symbols;
+    use super::extract_embedded_json_object;
+    use super::parse_quote_page;
+    use super::parse_timeseries_metric;
+    use super::populate_weighted_target;
+    use super::quote_page_default_headers;
+    use super::quote_page_url;
     use super::AnnualReportedValue;
     use super::ChartRange;
     use super::HistoricalCandle;
@@ -1716,17 +1774,6 @@ mod tests {
     use super::YahooChartResponse;
     use super::YahooChartResult;
     use super::YahooUpgradeDowngradeEntry;
-    use super::chart_api_url;
-    use super::chart_range_api_url;
-    use super::chart_range_spec;
-    use super::compute_weighted_analyst_target;
-    use super::default_live_symbols;
-    use super::extract_embedded_json_object;
-    use super::parse_quote_page;
-    use super::parse_timeseries_metric;
-    use super::populate_weighted_target;
-    use super::quote_page_default_headers;
-    use super::quote_page_url;
     use discount_screener::ExternalValuationSignal;
     use discount_screener::MarketSnapshot;
     use reqwest::header::ACCEPT;
@@ -2278,18 +2325,14 @@ mod tests {
                 .map(|target| target.scored_firm_count),
             Some(2)
         );
-        assert!(
-            weighted_target
-                .as_ref()
-                .map(|target| target.weighted_fair_value_cents > 12_000)
-                .unwrap_or(false)
-        );
-        assert!(
-            weighted_target
-                .as_ref()
-                .map(|target| target.weighted_fair_value_cents < 15_000)
-                .unwrap_or(false)
-        );
+        assert!(weighted_target
+            .as_ref()
+            .map(|target| target.weighted_fair_value_cents > 12_000)
+            .unwrap_or(false));
+        assert!(weighted_target
+            .as_ref()
+            .map(|target| target.weighted_fair_value_cents < 15_000)
+            .unwrap_or(false));
     }
 
     #[test]

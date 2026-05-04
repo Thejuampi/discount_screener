@@ -3,10 +3,12 @@ package com.discountscreener.core.engine
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfCoverageStatus
+import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -52,6 +54,9 @@ class IndexEstimatesEngineTest {
         waccBps = 800,
         baseGrowthBps = 500,
         netDebtDollars = 0L,
+        source = DcfSource.YahooFinance,
+        sourceFingerprint = "YahooFinance:$ticker",
+        resolverState = ResolverState.Selected,
     )
 
     // ── tests ────────────────────────────────────────────────────────────────

@@ -403,13 +403,159 @@ data class FundamentalTimeseries(
 enum class DcfSource {
     YahooFinance,
     SecEdgar,
+    Derived,
+    Restored,
+    Unknown,
 }
+
+@Serializable
+enum class ProviderState {
+    Live,
+    RestoredOnly,
+    Stale,
+    Unavailable,
+    NotEligible,
+    UnsupportedSymbol,
+    ProviderDisabled,
+    ParseUncertain,
+    ProviderUncertain,
+    Rejected,
+    Cancelled,
+}
+
+@Serializable
+enum class ResolverState {
+    Selected,
+    Unavailable,
+    NotEligible,
+    RestoredOnly,
+    ProviderUncertain,
+    Cancelled,
+}
+
+@Serializable
+enum class RefreshDisposition {
+    RetryableRefresh,
+    TerminalUntilInputsChange,
+    BlockedUntilProviderEnabled,
+    NotApplicable,
+}
+
+@Serializable
+enum class ProviderDecisionReasonCode {
+    NetworkUnavailable,
+    HttpStatus,
+    RateLimited,
+    ProviderDisabled,
+    ProviderConfigurationAbsent,
+    NoEnabledProviders,
+    DesktopSecDeferred,
+    SymbolUnsupported,
+    NonUsIssuerUnsupported,
+    FundOrEtfUnsupported,
+    MissingCik,
+    MissingAnnualFcf,
+    LatestFcfNonPositive,
+    InsufficientAnnualPeriods,
+    MissingMarketCap,
+    MissingShares,
+    MissingDebtOrCash,
+    MissingBeta,
+    StaleFiscalPeriod,
+    FiscalPeriodMisaligned,
+    ProviderDisagreement,
+    RestoredWithoutLiveRefresh,
+    LegacySourceFreePayload,
+    GenerationSuperseded,
+    Cancelled,
+}
+
+@Serializable
+data class DataProvenance(
+    val source: DcfSource = DcfSource.Unknown,
+    val providerState: ProviderState = ProviderState.RestoredOnly,
+    val capturedAtEpochSeconds: Long? = null,
+    val asOfDate: String? = null,
+    val endpoint: String? = null,
+    val factFamily: String? = null,
+    val qualityFlags: List<ProviderDecisionReasonCode> = emptyList(),
+    val fallbackReason: ProviderDecisionReasonCode? = null,
+)
+
+@Serializable
+data class DerivedProvenance(
+    val source: DcfSource = DcfSource.Derived,
+    val inputs: List<DataProvenance> = emptyList(),
+    val reason: ProviderDecisionReasonCode? = null,
+)
+
+@Serializable
+data class ProviderDecisionReason(
+    val code: ProviderDecisionReasonCode,
+    val provider: DcfSource = DcfSource.Unknown,
+    val symbol: String? = null,
+    val affectedField: String? = null,
+    val fiscalPeriod: String? = null,
+    val upstreamStatus: String? = null,
+    val thresholdBps: Int? = null,
+    val comparisonBps: Int? = null,
+)
+
+@Serializable
+data class ProvenancedLong(
+    val value: Long? = null,
+    val provenance: DataProvenance = DataProvenance(),
+)
+
+@Serializable
+data class SourceResolvedFinancialSnapshot(
+    val marketCapDollars: ProvenancedLong = ProvenancedLong(),
+    val totalDebtDollars: ProvenancedLong = ProvenancedLong(),
+    val cashAndEquivalentsDollars: ProvenancedLong = ProvenancedLong(),
+    val dilutedShares: ProvenancedLong = ProvenancedLong(),
+    val currentPriceCents: ProvenancedLong = ProvenancedLong(),
+    val betaMillis: ProvenancedLong = ProvenancedLong(),
+    val currency: String? = null,
+    val fallbackChain: List<ProviderDecisionReasonCode> = emptyList(),
+)
+
+@Serializable
+data class SourceResolvedDcfInput(
+    val symbol: String,
+    val selectedSource: DcfSource,
+    val resolverState: ResolverState,
+    val timeseries: FundamentalTimeseries,
+    val financialSnapshot: SourceResolvedFinancialSnapshot = SourceResolvedFinancialSnapshot(),
+    val inputFingerprint: String,
+    val decisionFingerprint: String,
+    val selectedReasons: List<ProviderDecisionReason> = emptyList(),
+    val rejectedReasons: List<ProviderDecisionReason> = emptyList(),
+)
+
+@Serializable
+data class DcfProviderQuality(
+    val source: DcfSource,
+    val providerState: ProviderState,
+    val acceptedAnnualFcfPoints: Int = 0,
+    val latestFiscalPeriod: String? = null,
+    val reasons: List<ProviderDecisionReason> = emptyList(),
+)
+
+@Serializable
+data class DcfSourcePolicyConfig(
+    val providerPriority: List<DcfSource> = listOf(DcfSource.SecEdgar, DcfSource.YahooFinance),
+    val disagreementThresholdBps: Int = 1_000,
+    val nearZeroFcfFloor: Double = 1.0,
+)
 
 @Serializable
 data class DcfSourceCandidate(
     val source: DcfSource,
     val timeseries: FundamentalTimeseries? = null,
     val analysis: DcfAnalysis? = null,
+    val providerState: ProviderState = ProviderState.Live,
+    val reasons: List<ProviderDecisionReason> = emptyList(),
+    val quality: DcfProviderQuality? = null,
 )
 
 @Serializable
@@ -417,6 +563,13 @@ data class DcfSourceSelection(
     val selectedSource: DcfSource? = null,
     val timeseries: FundamentalTimeseries? = null,
     val analysis: DcfAnalysis? = null,
+    val resolverState: ResolverState = if (selectedSource == null) ResolverState.Unavailable else ResolverState.Selected,
+    val refreshDisposition: RefreshDisposition = RefreshDisposition.NotApplicable,
+    val providerQualities: List<DcfProviderQuality> = emptyList(),
+    val reasons: List<ProviderDecisionReason> = emptyList(),
+    val inputFingerprint: String? = null,
+    val decisionFingerprint: String? = null,
+    val financialSnapshot: SourceResolvedFinancialSnapshot = SourceResolvedFinancialSnapshot(),
 )
 
 @Serializable
@@ -429,6 +582,27 @@ data class DcfAnalysis(
     val netDebtDollars: Long,
     val source: DcfSource? = null,
     val sourceFingerprint: String? = null,
+    val resolverState: ResolverState = if (source == null) ResolverState.RestoredOnly else ResolverState.Selected,
+    val decisionFingerprint: String? = sourceFingerprint,
+    val provenance: DataProvenance = DataProvenance(
+        source = source ?: DcfSource.Unknown,
+        providerState = if (source == null) ProviderState.RestoredOnly else ProviderState.Live,
+        fallbackReason = if (source == null) ProviderDecisionReasonCode.LegacySourceFreePayload else null,
+    ),
+    val providerReasons: List<ProviderDecisionReason> = if (source == null) {
+        listOf(
+            ProviderDecisionReason(
+                code = ProviderDecisionReasonCode.LegacySourceFreePayload,
+                provider = DcfSource.Unknown,
+            ),
+            ProviderDecisionReason(
+                code = ProviderDecisionReasonCode.RestoredWithoutLiveRefresh,
+                provider = DcfSource.Restored,
+            ),
+        )
+    } else {
+        emptyList()
+    },
 )
 
 @Serializable
@@ -538,6 +712,9 @@ enum class DcfCoverageStatus {
 data class DcfSourceDistribution(
     val yahooCount: Int = 0,
     val secCount: Int = 0,
+    val restoredCount: Int = 0,
+    val uncertainCount: Int = 0,
+    val notEligibleCount: Int = 0,
     val unknownCount: Int = 0,
     val unavailableCount: Int = 0,
 )

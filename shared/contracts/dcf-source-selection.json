@@ -1,0 +1,56 @@
+{
+    "cases": [
+        {
+            "name": "sec_passes_yahoo_unavailable",
+            "yahoo": "unavailable",
+            "sec": "usable",
+            "expectedResolverState": "Selected",
+            "expectedSelectedSource": "SecEdgar",
+            "expectedReasonCodes": [
+                "NetworkUnavailable"
+            ]
+        },
+        {
+            "name": "yahoo_passes_sec_unsupported",
+            "yahoo": "usable",
+            "sec": "unsupported",
+            "expectedResolverState": "Selected",
+            "expectedSelectedSource": "YahooFinance",
+            "expectedReasonCodes": [
+                "InsufficientAnnualPeriods"
+            ]
+        },
+        {
+            "name": "both_unavailable_no_restore",
+            "yahoo": "unavailable",
+            "sec": "unavailable",
+            "expectedResolverState": "Unavailable",
+            "expectedSelectedSource": null,
+            "expectedReasonCodes": [
+                "NetworkUnavailable",
+                "NetworkUnavailable"
+            ]
+        },
+        {
+            "name": "no_enabled_providers",
+            "yahoo": "absent",
+            "sec": "absent",
+            "expectedResolverState": "Unavailable",
+            "expectedSelectedSource": null,
+            "expectedReasonCodes": [
+                "ProviderConfigurationAbsent",
+                "NoEnabledProviders"
+            ]
+        },
+        {
+            "name": "both_pass_materially_disagree",
+            "yahoo": "usable",
+            "sec": "divergent",
+            "expectedResolverState": "ProviderUncertain",
+            "expectedSelectedSource": null,
+            "expectedReasonCodes": [
+                "ProviderDisagreement"
+            ]
+        }
+    ]
+}

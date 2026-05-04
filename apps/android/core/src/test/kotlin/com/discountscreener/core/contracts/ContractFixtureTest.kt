@@ -3,13 +3,20 @@ package com.discountscreener.core.contracts
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.ReportingEngine
+import com.discountscreener.core.engine.DcfSourceSelectionPolicy
+import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.DcfSource
+import com.discountscreener.core.model.DcfSourceCandidate
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.MarketSnapshot
+import com.discountscreener.core.model.ProviderDecisionReasonCode
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.serialization.Serializable
@@ -31,6 +38,33 @@ class ContractFixtureTest {
         }
         val expected = fixture.ranges.map { range ->
             range.id.name to range.label
+        }
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun dcf_source_selection_fixture_matches_core_policy_contract() {
+        val fixture = loadDcfSourceSelectionFixture()
+
+        val actual = fixture.cases.map { case ->
+            var selection = DcfSourceSelectionPolicy.select(
+                yahoo = candidate(DcfSource.YahooFinance, case.yahoo),
+                sec = candidate(DcfSource.SecEdgar, case.sec),
+            )
+            DcfSelectionActual(
+                name = case.name,
+                resolverState = selection.resolverState,
+                selectedSource = selection.selectedSource,
+                reasonCodes = selection.reasons.map { it.code },
+            )
+        }
+        val expected = fixture.cases.map { case ->
+            DcfSelectionActual(
+                name = case.name,
+                resolverState = case.expectedResolverState,
+                selectedSource = case.expectedSelectedSource,
+                reasonCodes = case.expectedReasonCodes,
+            )
         }
         assertEquals(expected, actual)
     }
@@ -107,6 +141,52 @@ class ContractFixtureTest {
         return contractJson.decodeFromString(Files.readString(path))
     }
 
+    private fun loadDcfSourceSelectionFixture(): DcfSourceSelectionFixture {
+        val path = findFixturePath("dcf-source-selection.json")
+        return contractJson.decodeFromString(Files.readString(path))
+    }
+
+    private fun candidate(source: DcfSource, fixtureState: String): DcfSourceCandidate? = when (fixtureState) {
+        "absent" -> null
+        "unavailable" -> DcfSourceCandidate(source = source)
+        "unsupported" -> DcfSourceCandidate(source = source, timeseries = unsupportedTimeseries(), analysis = analysis())
+        "usable" -> DcfSourceCandidate(source = source, timeseries = usableTimeseries(), analysis = analysis())
+        "divergent" -> DcfSourceCandidate(source = source, timeseries = divergentTimeseries(), analysis = analysis())
+        else -> error("unknown DCF source fixture state $fixtureState")
+    }
+
+    private fun usableTimeseries() = FundamentalTimeseries(
+        freeCashFlow = listOf(
+            AnnualReportedValue("2021-12-31", 100.0),
+            AnnualReportedValue("2022-12-31", 120.0),
+            AnnualReportedValue("2023-12-31", 140.0),
+        ),
+    )
+
+    private fun divergentTimeseries() = FundamentalTimeseries(
+        freeCashFlow = listOf(
+            AnnualReportedValue("2021-12-31", 100.0),
+            AnnualReportedValue("2022-12-31", 120.0),
+            AnnualReportedValue("2023-12-31", 180.0),
+        ),
+    )
+
+    private fun unsupportedTimeseries() = FundamentalTimeseries(
+        freeCashFlow = listOf(AnnualReportedValue("2023-12-31", 140.0)),
+    )
+
+    private fun analysis() = DcfAnalysis(
+        bearIntrinsicValueCents = 8_000L,
+        baseIntrinsicValueCents = 10_000L,
+        bullIntrinsicValueCents = 12_000L,
+        waccBps = 800,
+        baseGrowthBps = 500,
+        netDebtDollars = 0L,
+        source = DcfSource.YahooFinance,
+        sourceFingerprint = "fixture",
+        resolverState = ResolverState.Selected,
+    )
+
     private fun findFixturePath(fileName: String): Path {
         var current = Paths.get("").toAbsolutePath()
         repeat(6) {
@@ -172,6 +252,28 @@ private data class ChartRangeContract(
 )
 
 @Serializable
+private data class DcfSourceSelectionFixture(
+    val cases: List<DcfSelectionCase>,
+)
+
+@Serializable
+private data class DcfSelectionCase(
+    val name: String,
+    val yahoo: String,
+    val sec: String,
+    val expectedResolverState: ResolverState,
+    val expectedSelectedSource: DcfSource? = null,
+    val expectedReasonCodes: List<ProviderDecisionReasonCode> = emptyList(),
+)
+
+private data class DcfSelectionActual(
+    val name: String,
+    val resolverState: ResolverState,
+    val selectedSource: DcfSource?,
+    val reasonCodes: List<ProviderDecisionReasonCode>,
+)
+
+@Serializable
 private data class NamedChartSummary(
     val symbol: String,
     val range: com.discountscreener.core.model.ChartRange,
@@ -216,5 +318,8 @@ private data class NamedDcfAnalysis(
             waccBps = waccBps,
             baseGrowthBps = baseGrowthBps,
             netDebtDollars = netDebtDollars,
+            source = DcfSource.YahooFinance,
+            sourceFingerprint = "contract:$symbol",
+            resolverState = ResolverState.Selected,
         )
 }
