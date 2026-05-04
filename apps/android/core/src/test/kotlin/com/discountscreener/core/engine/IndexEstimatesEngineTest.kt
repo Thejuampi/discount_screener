@@ -2,10 +2,13 @@ package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.DcfCoverageStatus
+import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -51,6 +54,9 @@ class IndexEstimatesEngineTest {
         waccBps = 800,
         baseGrowthBps = 500,
         netDebtDollars = 0L,
+        source = DcfSource.YahooFinance,
+        sourceFingerprint = "YahooFinance:$ticker",
+        resolverState = ResolverState.Selected,
     )
 
     // ── tests ────────────────────────────────────────────────────────────────
@@ -270,5 +276,54 @@ class IndexEstimatesEngineTest {
         var result = IndexEstimatesEngine.compute(symbols, emptyMap(), "test", 0L)
 
         assertEquals(0, result.totalSymbols)
+    }
+
+    @Test
+    fun dcf_coverage_status_is_unavailable_when_no_symbol_has_dcf() {
+        var symbols = listOf(symbol("A", marketPriceCents = 10_000L, marketCapDollars = 1L))
+
+        var result = IndexEstimatesEngine.compute(symbols, emptyMap(), "test", 0L)
+
+        assertEquals(DcfCoverageStatus.Unavailable, result.dcfCoverage.status)
+    }
+
+    @Test
+    fun dcf_coverage_status_is_low_confidence_below_twenty_five_percent() {
+        var symbols = (1..5).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        var dcfMap = mapOf(dcf("S1", bear = 8_000L, base = 10_000L, bull = 12_000L))
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(DcfCoverageStatus.LowConfidence, result.dcfCoverage.status)
+    }
+
+    @Test
+    fun dcf_coverage_status_is_partial_at_twenty_five_percent() {
+        var symbols = (1..4).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        var dcfMap = mapOf(dcf("S1", bear = 8_000L, base = 10_000L, bull = 12_000L))
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(DcfCoverageStatus.Partial, result.dcfCoverage.status)
+    }
+
+    @Test
+    fun dcf_coverage_status_is_ready_at_ninety_five_percent() {
+        var symbols = (1..20).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        var dcfMap = (1..19).associate { index -> dcf("S$index", bear = 8_000L, base = 10_000L, bull = 12_000L) }
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(DcfCoverageStatus.Ready, result.dcfCoverage.status)
+    }
+
+    @Test
+    fun dcf_coverage_summary_reports_basis_points() {
+        var symbols = (1..3).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        var dcfMap = mapOf(dcf("S1", bear = 8_000L, base = 10_000L, bull = 12_000L))
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(3_333, result.dcfCoverage.coverageBps)
     }
 }

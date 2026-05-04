@@ -979,6 +979,7 @@ fn analysis_input_key(fundamentals: &FundamentalSnapshot) -> AnalysisInputKey {
         total_debt_dollars: fundamentals.total_debt_dollars,
         total_cash_dollars: fundamentals.total_cash_dollars,
         beta_millis: fundamentals.beta_millis,
+        source_fingerprint: "DesktopYahooOnly".to_string(),
     }
 }
 

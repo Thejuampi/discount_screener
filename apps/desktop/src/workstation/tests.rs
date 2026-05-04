@@ -49,6 +49,7 @@ mod tests {
     use super::market_data::AnnualReportedValue;
     use super::market_data::ChartRange;
     use super::market_data::FundamentalTimeseries;
+    use super::market_data::FundamentalTimeseriesSource;
     use super::market_data::HistoricalCandle;
     use super::next_weighted_target_refresh_cursor;
     use super::normalize_frame;
@@ -258,6 +259,10 @@ mod tests {
             wacc_bps: 900,
             base_growth_bps: 300,
             net_debt_dollars: 0,
+            selected_source: FundamentalTimeseriesSource::YahooFinance,
+            source_policy_stage: "DesktopYahooOnly".to_string(),
+            source_fingerprint: "DesktopYahooOnly".to_string(),
+            decision_fingerprint: "DesktopYahooOnly|state=Selected|sec=DesktopSecDeferred".to_string(),
         }
     }
 
@@ -638,6 +643,9 @@ mod tests {
 
     fn sample_dcf_timeseries() -> FundamentalTimeseries {
         FundamentalTimeseries {
+            source: FundamentalTimeseriesSource::YahooFinance,
+            source_policy_stage: "DesktopYahooOnly".to_string(),
+            source_fingerprint: "YahooFinance|fixture".to_string(),
             free_cash_flow: vec![
                 annual_value("2021-12-31", 50_000_000.0),
                 annual_value("2022-12-31", 60_000_000.0),
@@ -677,6 +685,10 @@ mod tests {
             wacc_bps: 850,
             base_growth_bps: 1_350,
             net_debt_dollars: 100_000_000,
+            selected_source: FundamentalTimeseriesSource::YahooFinance,
+            source_policy_stage: "DesktopYahooOnly".to_string(),
+            source_fingerprint: "DesktopYahooOnly".to_string(),
+            decision_fingerprint: "DesktopYahooOnly|state=Selected|sec=DesktopSecDeferred".to_string(),
         }
     }
 
@@ -1051,6 +1063,37 @@ mod tests {
     }
 
     #[test]
+    fn compute_dcf_analysis_carries_desktop_yahoo_only_source_provenance() {
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+        let timeseries = sample_dcf_timeseries();
+        let analysis = compute_dcf_analysis(&fundamentals, &timeseries).expect("DCF should work");
+
+        assert_eq!(
+            (
+                FundamentalTimeseriesSource::YahooFinance,
+                "DesktopYahooOnly",
+                timeseries.source_fingerprint.as_str(),
+                true,
+            ),
+            (
+                analysis.selected_source,
+                analysis.source_policy_stage.as_str(),
+                analysis.source_fingerprint.as_str(),
+                analysis.decision_fingerprint.contains("DesktopSecDeferred"),
+            ),
+        );
+    }
+
+    #[test]
+    fn analysis_input_key_includes_desktop_source_policy_fingerprint() {
+        let fundamentals =
+            sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
+
+        assert_eq!("DesktopYahooOnly", analysis_input_key(&fundamentals).source_fingerprint);
+    }
+
+    #[test]
     fn compute_dcf_analysis_rejects_insufficient_and_non_positive_fcf_history() {
         let fundamentals =
             sample_fundamentals("NVDA", "technology", "Technology", "software", "Software");
@@ -1129,6 +1172,10 @@ mod tests {
             wacc_bps: 1_000,
             base_growth_bps: 500,
             net_debt_dollars: 0,
+            selected_source: FundamentalTimeseriesSource::YahooFinance,
+            source_policy_stage: "DesktopYahooOnly".to_string(),
+            source_fingerprint: "DesktopYahooOnly".to_string(),
+            decision_fingerprint: "DesktopYahooOnly|state=Selected|sec=DesktopSecDeferred".to_string(),
         };
 
         assert_eq!(dcf_margin_of_safety_bps(&analysis, i64::MAX), None);
@@ -5081,6 +5128,7 @@ mod tests {
                     total_debt_dollars: None,
                     total_cash_dollars: None,
                     beta_millis: None,
+                    source_fingerprint: "DesktopYahooOnly".to_string(),
                 },
                 analysis: dcf_analysis_fixture(32_000),
             },
@@ -5112,6 +5160,7 @@ mod tests {
                     total_debt_dollars: None,
                     total_cash_dollars: None,
                     beta_millis: None,
+                    source_fingerprint: "DesktopYahooOnly".to_string(),
                 },
                 analysis: dcf_analysis_fixture(10_000),
             },
@@ -5158,6 +5207,7 @@ mod tests {
                     total_debt_dollars: None,
                     total_cash_dollars: None,
                     beta_millis: None,
+                    source_fingerprint: "DesktopYahooOnly".to_string(),
                 },
                 analysis: dcf_analysis_fixture(32_000),
             },
@@ -5225,6 +5275,7 @@ mod tests {
                     total_debt_dollars: None,
                     total_cash_dollars: None,
                     beta_millis: None,
+                    source_fingerprint: "DesktopYahooOnly".to_string(),
                 },
                 analysis: dcf_analysis_fixture(9_000),
             },
@@ -7430,6 +7481,38 @@ mod tests {
             .expect("parse chart range fixture")
     }
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DcfSourceSelectionFixture {
+        cases: Vec<DcfSourceSelectionCase>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DcfSourceSelectionCase {
+        name: String,
+        expected_resolver_state: String,
+    }
+
+    fn load_dcf_source_selection_fixture() -> DcfSourceSelectionFixture {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shared/contracts/dcf-source-selection.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read DCF source fixture"))
+            .expect("parse DCF source fixture")
+    }
+
+    #[test]
+    fn contract_fixture_dcf_source_selection_is_available_to_desktop() {
+        let fixture = load_dcf_source_selection_fixture();
+
+        assert!(fixture.cases.iter().any(|case| {
+            case.name == "both_pass_materially_disagree"
+                && case.expected_resolver_state == "ProviderUncertain"
+        }));
+    }
+
     #[test]
     fn contract_fixture_chart_ranges_match_desktop_behavior() {
         let fixture = load_chart_ranges_fixture();
@@ -7535,6 +7618,10 @@ mod tests {
                             wacc_bps: analysis.wacc_bps,
                             base_growth_bps: analysis.base_growth_bps,
                             net_debt_dollars: analysis.net_debt_dollars,
+                            selected_source: FundamentalTimeseriesSource::YahooFinance,
+                            source_policy_stage: "DesktopYahooOnly".to_string(),
+                            source_fingerprint: "DesktopYahooOnly".to_string(),
+                            decision_fingerprint: "DesktopYahooOnly|state=Selected|sec=DesktopSecDeferred".to_string(),
                         },
                     },
                 );

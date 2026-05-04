@@ -8,10 +8,12 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
+import com.discountscreener.core.model.DataProvenance
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries as CoreFundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedSymbolState
@@ -90,6 +92,12 @@ sealed interface RawCapturePayload {
     data class Chart(
         val range: ChartRange,
         val candles: List<HistoricalCandle>,
+    ) : RawCapturePayload
+
+    @Serializable
+    data class FundamentalTimeseries(
+        val value: CoreFundamentalTimeseries,
+        val provenance: DataProvenance,
     ) : RawCapturePayload
 }
 

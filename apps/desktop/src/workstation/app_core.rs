@@ -1889,6 +1889,7 @@ struct AnalysisInputKey {
     total_debt_dollars: Option<i64>,
     total_cash_dollars: Option<i64>,
     beta_millis: Option<i32>,
+    source_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1906,6 +1907,10 @@ pub(crate) struct DcfAnalysis {
     wacc_bps: i32,
     base_growth_bps: i32,
     net_debt_dollars: i64,
+    selected_source: market_data::FundamentalTimeseriesSource,
+    source_policy_stage: String,
+    source_fingerprint: String,
+    decision_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2024,6 +2029,13 @@ fn compute_dcf_analysis(
         wacc_bps,
         base_growth_bps,
         net_debt_dollars,
+        selected_source: timeseries.source,
+        source_policy_stage: timeseries.source_policy_stage.clone(),
+        source_fingerprint: timeseries.source_fingerprint.clone(),
+        decision_fingerprint: format!(
+            "{}|state=Selected|sec=DesktopSecDeferred",
+            timeseries.source_fingerprint
+        ),
     })
 }
 

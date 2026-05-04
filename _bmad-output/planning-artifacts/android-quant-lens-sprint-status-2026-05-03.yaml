@@ -1,0 +1,304 @@
+# generated: 2026-05-03
+# last_updated: 2026-05-03
+# project: discount_screener
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+# epic_source: _bmad-output/planning-artifacts/android-quant-lens-epics-stories-2026-05-03.md
+#
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - planned: Epic is sequenced but not yet started
+#   - in-progress: Epic is actively being implemented
+#   - review: Epic implementation is ready for review
+#   - done: All epic stories are completed
+#
+# Story Status:
+#   - planned: Story is sequenced and waiting on predecessor stories
+#   - ready-for-dev: Story is implementation-ready and can be picked up next
+#   - in-progress: Developer is actively working
+#   - review: Story implementation is ready for code review
+#   - done: Story is completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but is not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Initial state is ready/planned only; nothing is completed.
+# - Keep stories sequential when they touch DefaultDashboardRepository.kt, DashboardViewModel.kt, or QuantLensEngine.kt.
+# - Full Quant Lens computation is selected-detail only; row chips must not trigger startup-wide analysis.
+# - Story 1.4 defines the bounded row-summary contract before row chips are implemented.
+# - Developers should move one story at a time from planned to ready-for-dev as dependencies pass.
+# - Round 2 planning repairs keep story statuses at ready-for-dev/planned only; no implementation status is advanced.
+# - Canonical degradation precedence is Unavailable > Sparse/Insufficient > Stale > Provisional/Partial > Available; Stale only wins after Unavailable and Sparse/Insufficient are ruled out.
+# - Similar Setups needs at least 3 qualifying comparables for top-3 output; exactly 2 remains sparse with count.
+
+generated: 2026-05-03
+last_updated: 2026-05-03
+project: discount_screener
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+epic_source: _bmad-output/planning-artifacts/android-quant-lens-epics-stories-2026-05-03.md
+selected_use_cases:
+  - Evidence Strength
+  - Expected Value Range
+  - Correlation Risk
+  - Trend Reliability
+  - Similar Setups
+repair_round_2_decisions:
+  degradation_precedence:
+    - Unavailable
+    - Sparse/Insufficient
+    - Stale
+    - Provisional/Partial
+    - Available
+  stale_when_sparse_wins: Sparse/Insufficient beats Stale; Stale is a primary status only after Unavailable and Sparse/Insufficient are ruled out, otherwise it is a secondary freshnessQualifier.
+  limited_input_label_term: sparse
+  similar_setups:
+    minimum_qualifying_comparables_for_top_3: 3
+    exactly_two_qualifying_comparables: sparse-with-count
+    feature_weights_by_slot:
+      valuationUpside: 3
+      evidenceOrdinal: 3
+      opportunityScore: 2
+      trendOrdinalOrSlope: 1
+      evSpread: 1
+    tie_break_order:
+      - ascending_distance
+      - descending_composite_score
+      - symbol
+    shared_feature_count_tie_break: removed
+  row_summary_top_level_fields:
+    - symbol
+    - fingerprint
+    - lensStates
+  lensStates_item_fields:
+    - lensId
+    - primaryStatus
+    - band
+    - label
+    - freshnessQualifier
+    - reasonCodes
+  presenter_rule: Row-chip presenters consume structured lens state fields and must not infer status, band, label, or freshness from freeform reason codes.
+  required_test_focus:
+    - Evidence stale precedence after unavailable and sparse/insufficient, with sparse-over-stale freshnessQualifier behavior.
+    - Similar Setups exact-two sparse case, clipping, ordinal mapping, weights 3/3/2/1/1, weighted Euclidean math, tie order by distance/descending composite score/symbol, and actual feature-value fingerprints.
+    - Trend materiality below 200 bps always mapping to Flat, at-or-above 200 bps direction, weak-fit Noisy only at/above 200 bps with no direction, and finite degenerate outputs.
+    - Correlation zero variance, constant returns, non-finite math, and extreme fixed-point finite sparse or insufficient outputs.
+status_values:
+  epic:
+    - planned
+    - in-progress
+    - review
+    - done
+  story:
+    - planned
+    - ready-for-dev
+    - in-progress
+    - review
+    - done
+  retrospective:
+    - optional
+    - done
+implementation_order:
+  - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+  - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+  - 1-4-bounded-row-summary-contract-and-label-precedence
+  - 2-1-evidence-strength-core-analyzer
+  - 2-2-evidence-strength-presenter-mapping-and-detail-section
+  - 2-3-expected-value-range-core-analyzer
+  - 2-4-expected-value-range-presenter-mapping-and-range-rail
+  - 3-1-correlation-risk-core-analyzer
+  - 3-2-local-history-correlation-integration-without-fan-out
+  - 3-3-trend-reliability-core-analyzer
+  - 3-4-trend-reliability-on-detail-history-and-estimates
+  - 4-1-similar-setups-core-analyzer
+  - 4-2-comparable-universe-assembly-without-fetching
+  - 4-3-similar-setups-detail-rows-and-symbol-navigation
+  - 5-1-dashboard-quant-lens-strip-across-opps-upside-and-watch
+  - 5-2-lens-tab-navigation-snapshot-mini-strip-and-section-focus
+  - 5-3-anti-overclaiming-copy-performance-and-regression-hardening
+dependencies:
+  1-1-quant-lens-core-contract-and-sparse-report-scaffold: []
+  1-2-selected-detail-input-boundary-and-in-memory-report-cache:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  1-3-presenter-display-contract-and-passive-ui-scaffolding:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+    - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+  1-4-bounded-row-summary-contract-and-label-precedence:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+    - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+  2-1-evidence-strength-core-analyzer:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  2-2-evidence-strength-presenter-mapping-and-detail-section:
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 2-1-evidence-strength-core-analyzer
+  2-3-expected-value-range-core-analyzer:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  2-4-expected-value-range-presenter-mapping-and-range-rail:
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 2-3-expected-value-range-core-analyzer
+  3-1-correlation-risk-core-analyzer:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  3-2-local-history-correlation-integration-without-fan-out:
+    - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+    - 3-1-correlation-risk-core-analyzer
+  3-3-trend-reliability-core-analyzer:
+    - 1-1-quant-lens-core-contract-and-sparse-report-scaffold
+  3-4-trend-reliability-on-detail-history-and-estimates:
+    - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 3-3-trend-reliability-core-analyzer
+  4-1-similar-setups-core-analyzer:
+    - 2-1-evidence-strength-core-analyzer
+    - 2-3-expected-value-range-core-analyzer
+    - 3-3-trend-reliability-core-analyzer
+  4-2-comparable-universe-assembly-without-fetching:
+    - 1-2-selected-detail-input-boundary-and-in-memory-report-cache
+    - 4-1-similar-setups-core-analyzer
+  4-3-similar-setups-detail-rows-and-symbol-navigation:
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 4-1-similar-setups-core-analyzer
+    - 4-2-comparable-universe-assembly-without-fetching
+  5-1-dashboard-quant-lens-strip-across-opps-upside-and-watch:
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 1-4-bounded-row-summary-contract-and-label-precedence
+    - 2-2-evidence-strength-presenter-mapping-and-detail-section
+    - 2-4-expected-value-range-presenter-mapping-and-range-rail
+    - 3-2-local-history-correlation-integration-without-fan-out
+    - 4-3-similar-setups-detail-rows-and-symbol-navigation
+  5-2-lens-tab-navigation-snapshot-mini-strip-and-section-focus:
+    - 1-3-presenter-display-contract-and-passive-ui-scaffolding
+    - 2-2-evidence-strength-presenter-mapping-and-detail-section
+    - 2-4-expected-value-range-presenter-mapping-and-range-rail
+    - 4-3-similar-setups-detail-rows-and-symbol-navigation
+  5-3-anti-overclaiming-copy-performance-and-regression-hardening:
+    - 5-1-dashboard-quant-lens-strip-across-opps-upside-and-watch
+    - 5-2-lens-tab-navigation-snapshot-mini-strip-and-section-focus
+development_status:
+  epic-1: done
+  1-1-quant-lens-core-contract-and-sparse-report-scaffold: done
+  1-2-selected-detail-input-boundary-and-in-memory-report-cache: done
+  1-3-presenter-display-contract-and-passive-ui-scaffolding: done
+  1-4-bounded-row-summary-contract-and-label-precedence: done
+  epic-1-retrospective: optional
+  epic-2: done
+  2-1-evidence-strength-core-analyzer: done
+  2-2-evidence-strength-presenter-mapping-and-detail-section: done
+  2-3-expected-value-range-core-analyzer: done
+  2-4-expected-value-range-presenter-mapping-and-range-rail: done
+  epic-2-retrospective: optional
+  epic-3: in-progress
+  3-1-correlation-risk-core-analyzer: done
+  3-2-local-history-correlation-integration-without-fan-out: done
+  3-3-trend-reliability-core-analyzer: done
+  3-4-trend-reliability-on-detail-history-and-estimates: planned
+  epic-3-retrospective: optional
+  epic-4: done
+  4-1-similar-setups-core-analyzer: done
+  4-2-comparable-universe-assembly-without-fetching: done
+  4-3-similar-setups-detail-rows-and-symbol-navigation: done
+  epic-4-retrospective: optional
+  epic-5: done
+  5-1-dashboard-quant-lens-strip-across-opps-upside-and-watch: done
+  5-2-lens-tab-navigation-snapshot-mini-strip-and-section-focus: done
+  5-3-anti-overclaiming-copy-performance-and-regression-hardening: done
+  epic-5-retrospective: optional
+rollup:
+  total_epics: 5
+  total_stories: 18
+  stories_ready_for_dev: 0
+  stories_planned: 1
+  stories_completed: 17
+  epics_completed: 4
+implementation_results:
+  review-fix-loop-2026-05-03:
+    completed_at: 2026-05-03
+    changed_files:
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/data/repository/DefaultDashboardRepository.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/presentation/dashboard/QuantLensUiModels.kt
+      - apps/android/app/src/test/kotlin/com/discountscreener/android/data/repository/DefaultDashboardRepositoryTest.kt
+      - apps/android/app/src/test/kotlin/com/discountscreener/android/presentation/dashboard/QuantLensUiModelsTest.kt
+    notes:
+      - Fixed the manual-QA startup crash by clamping row EV upside bounds to the row-summary model contract before constructing `QuantLensLensRowState`.
+      - Completed the row-summary contract so every populated row summary carries all five structured lens states, while presenter visibility still applies the Evidence, eligible EV, available elevated/high Corr, available Trend, available Similar priority and cap rules.
+      - Tightened row chip mapping so Correlation Risk chips require an `Available` structured status in addition to elevated/high labels.
+      - Strengthened selected-detail Quant Lens cache fingerprints with selected candles across ranges, chart summaries, revision content, comparable features, correlation-series candles, tracked symbols, and `QuantLensModelVersion.CURRENT`.
+      - Added comparable EV spread from already-loaded DCF or analyst three-anchor ranges without adding fetch or persistence fan-out.
+      - Story 3.4 remains planned as the separate History/Estimates-specific Trend Reliability extension.
+    validation:
+      android_validation: "scripts\\validate-android.ps1 passed after review fixes, including :core:test, :app:testDebugUnitTest, and :app:assembleDebug."
+      targeted_restore_test: ".\\gradlew.bat :app:testDebugUnitTest --tests \"com.discountscreener.android.data.repository.DefaultDashboardRepositoryTest.bootstrap_row_quant_lens_summary_exposes_all_lens_states\" passed after restoring the mutation."
+      diagnostics: "VS Code diagnostics reported no errors in changed repository, presenter, and test files."
+    manual_qa:
+      runtime: "Android emulator emulator-5554, installed via scripts\\android-run.ps1."
+      evidence_files:
+        - .agents/workspace/tmp/manual-qa/final-dashboard-2.png
+        - .agents/workspace/tmp/manual-qa/final-detail.png
+        - .agents/workspace/tmp/manual-qa/final-logcat-detail.txt
+      scenarios:
+        - Dashboard launched and stayed in MainActivity with row chips visible on Opps rows.
+        - Detail opened for NVDA and Lens displayed Evidence, EV, Correlation, Trend, and Similar header chips plus detail sections.
+        - Clean post-launch/detail log slices had no app FATAL EXCEPTION signature.
+    review:
+      result: "Focused final review found no high or medium release-blocking issues after fixes."
+    mutation_testing:
+      - Temporarily changed the Similar Setups row-summary lens id to Trend Reliability; `bootstrap_row_quant_lens_summary_exposes_all_lens_states` failed as expected, then passed after restoring the real code.
+  combined-android-quant-lens-vertical-slice:
+    completed_at: 2026-05-03
+    changed_files:
+      - apps/android/core/src/main/kotlin/com/discountscreener/core/model/QuantLensModels.kt
+      - apps/android/core/src/main/kotlin/com/discountscreener/core/engine/QuantLensEngine.kt
+      - apps/android/core/src/test/kotlin/com/discountscreener/core/engine/QuantLensEngineTest.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/domain/model/DashboardSnapshot.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/data/repository/DefaultDashboardRepository.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/presentation/dashboard/DashboardViewModel.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/presentation/dashboard/QuantLensUiModels.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/ui/DiscountScreenerApp.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/ui/dashboard/DashboardScreen.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/ui/dashboard/DashboardLists.kt
+      - apps/android/app/src/main/kotlin/com/discountscreener/android/ui/dashboard/DetailScreen.kt
+    notes:
+      - Implemented deterministic pure-core analyzers for Evidence Strength, Expected Value Range, Correlation Risk, Trend Reliability, and Similar Setups.
+      - EV uses DCF three-anchor scenarios first, analyst low/primary/high fallback, and keeps one/two-anchor cases sparse/reference-only.
+      - Correlation Risk uses selected-range local close-to-close return correlation only, from already-loaded local candle series.
+      - Trend Reliability uses least-squares fit over loaded selected candles with the 200 bps flat materiality rule.
+      - Similar Setups uses current-universe comparable feature vectors only, top-three gating, exact-two sparse behavior, and deterministic ordering.
+      - Repository builds selected-detail reports from existing local selected-detail state and in-memory caches; row summaries are bounded and do not fetch provider, SQLite history, DCF, chart, revision, or comparable data.
+      - Presenter maps core/domain outputs into UI labels and severity tokens; Compose renders passive row strips, Snapshot mini-strip, Lens tab, five detail sections, and similar-symbol navigation.
+      - Separate trend reliability on detail History and Estimates remains planned as Story 3.4; final hardening passed review, automated validation, manual QA, and a focused mutation check.
+    validation:
+      android_validation: ".\\scripts\\validate-android.ps1 passed after implementation, including :core:test, :app:testDebugUnitTest, and :app:assembleDebug"
+      copy_audit: "Focused Quant Lens source search found no prohibited visible-copy terms."
+    mutation_testing:
+      - Temporarily changed Similar Setups gate from fewer than 3 matches to fewer than 2; exact-two sparse focused test failed.
+  1-1-quant-lens-core-contract-and-sparse-report-scaffold:
+    completed_at: 2026-05-03
+    changed_files:
+      - apps/android/core/src/main/kotlin/com/discountscreener/core/model/QuantLensModels.kt
+      - apps/android/core/src/main/kotlin/com/discountscreener/core/engine/QuantLensEngine.kt
+      - apps/android/core/src/test/kotlin/com/discountscreener/core/model/QuantLensModelTest.kt
+      - apps/android/core/src/test/kotlin/com/discountscreener/core/engine/QuantLensEngineTest.kt
+    notes:
+      - Added serializable pure-core Quant Lens scaffold models, statuses, bands, reason codes, input/report contracts, comparable/correlation input contracts, and a deterministic sparse/unavailable report engine.
+      - No repository, presenter, Compose, persistence, provider, or startup-wide computation changes were made in this story.
+      - Strict TDD was followed: Story 1.1 tests were added first and failed on unresolved Quant Lens types before implementation.
+      - Manual live QA was not applicable for this core-only scaffold because there is no Android UI surface yet.
+    validation:
+      targeted_tests: ".\\gradlew :core:test --tests \"com.discountscreener.core.model.QuantLensModelTest\" --tests \"com.discountscreener.core.engine.QuantLensEngineTest\" passed"
+      core_tests: ".\\gradlew :core:test passed"
+      android_validation: ".\\scripts\\validate-android.ps1 passed, including :core:test, :app:testDebugUnitTest, and :app:assembleDebug"
+    mutation_testing:
+      - Temporarily changed scaffold Evidence primaryStatus from Sparse to Available; focused engine test failed.
+      - Temporarily loosened default bps max from 10000 to 10001; focused model invariant test failed.
+risks:
+  - Row chip UX and selected-detail-only architecture depend on Story 1.4's bounded row-summary discipline; no full list-wide Quant Lens computation at startup.
+  - Correlation and similar setups may remain sparse until local history/current-feature inputs exist; visible sparse states are required.
+  - Cache/fingerprint correctness is high risk because selected range, candles, revisions, estimates, DCF, comparables, correlation series, scoring version, model version, symbol, and profile all affect reuse.
+  - Shared implementation files should be changed sequentially to avoid overlapping worker conflicts.

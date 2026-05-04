@@ -28,6 +28,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.discountscreener.core.model.DcfCoverageStatus
+import com.discountscreener.core.model.DcfCoverageSummary
 import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.ScenarioEstimate
@@ -66,36 +68,48 @@ fun EstimatesScreen(
 
 @Composable
 private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: List<IndexEstimatesReport>) {
-    val dcfScenarios = report.scenarios.filter {
-        it.scenario in setOf(EstimateScenario.BearDcf, EstimateScenario.BaseDcf, EstimateScenario.BullDcf)
-    }
-    val dcfCoverageCount = dcfScenarios.maxOfOrNull { it.coverageCount } ?: 0
-    val dcfCoverage = if (report.totalSymbols > 0) dcfCoverageCount.toFloat() / report.totalSymbols else 0f
+    val coverage = report.dcfCoverage
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             HeaderCard(report)
         }
-        when {
-            report.totalSymbols > 0 && dcfCoverage < 0.25f -> {
-                item { DcfErrorBanner(dcfCoverageCount, report.totalSymbols) }
+        when (dcfCoverageBannerKind(coverage)) {
+            DcfCoverageBannerKind.Unavailable -> item {
+                DcfErrorBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
             }
-            report.totalSymbols > 0 && dcfCoverage < 0.50f -> {
-                item { DcfLowConfidenceBanner(dcfCoverageCount, report.totalSymbols) }
-                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            DcfCoverageBannerKind.LowConfidence -> item {
+                DcfLowConfidenceBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
             }
-            report.totalSymbols > 0 && dcfCoverage < 0.95f -> {
-                item { DcfProvisionalBanner(dcfCoverageCount, report.totalSymbols) }
-                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            DcfCoverageBannerKind.Partial -> item {
+                DcfLowConfidenceBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
             }
-            else -> {
-                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            DcfCoverageBannerKind.Provisional -> item {
+                DcfProvisionalBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
             }
+            DcfCoverageBannerKind.None -> Unit
         }
+        items(report.scenarios) { scenario -> ScenarioCard(scenario) }
         item {
             EstimatesTrendChart(estimatesHistory)
         }
     }
+}
+
+internal enum class DcfCoverageBannerKind {
+    None,
+    Unavailable,
+    LowConfidence,
+    Partial,
+    Provisional,
+}
+
+internal fun dcfCoverageBannerKind(summary: DcfCoverageSummary): DcfCoverageBannerKind = when (summary.status) {
+    DcfCoverageStatus.Unavailable -> DcfCoverageBannerKind.Unavailable
+    DcfCoverageStatus.LowConfidence -> DcfCoverageBannerKind.LowConfidence
+    DcfCoverageStatus.Partial -> DcfCoverageBannerKind.Partial
+    DcfCoverageStatus.Provisional -> DcfCoverageBannerKind.Provisional
+    DcfCoverageStatus.Ready -> DcfCoverageBannerKind.None
 }
 
 @Composable

@@ -3,6 +3,7 @@ package com.discountscreener.android.ui.dashboard
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -67,6 +69,10 @@ import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.presentation.dashboard.HistorySubview
+import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
+import com.discountscreener.android.presentation.dashboard.QuantLensSectionUi
+import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.android.presentation.dashboard.QuantLensUiState
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
@@ -77,6 +83,7 @@ import com.discountscreener.core.engine.ReplayWindow
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import kotlin.math.abs
@@ -93,6 +100,7 @@ fun DetailScreen(
     charts: Map<ChartRange, List<HistoricalCandle>>,
     history: List<SymbolRevision>,
     alerts: List<String>,
+    quantLens: QuantLensUiState? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
     BackHandler {
@@ -144,13 +152,22 @@ fun DetailScreen(
         )
 
         ScrollableTabRow(
-            selectedTabIndex = if (route.subtab == DetailSubtab.Snapshot) 0 else 1,
+            selectedTabIndex = when (route.subtab) {
+                DetailSubtab.Snapshot -> 0
+                DetailSubtab.Lens -> 1
+                DetailSubtab.History -> 2
+            },
             edgePadding = 0.dp,
         ) {
             Tab(
                 selected = route.subtab == DetailSubtab.Snapshot,
                 onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Snapshot)) },
                 text = { Text("Snapshot") },
+            )
+            Tab(
+                selected = route.subtab == DetailSubtab.Lens,
+                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) },
+                text = { Text("Lens") },
             )
             Tab(
                 selected = route.subtab == DetailSubtab.History,
@@ -171,8 +188,10 @@ fun DetailScreen(
                     candles = charts[route.chartRange].orEmpty(),
                     replayOffset = route.replayOffset,
                     alerts = alerts,
+                    quantLens = quantLens,
                     onAction = onAction,
                 )
+                DetailSubtab.Lens -> QuantLensContent(quantLens = quantLens, route = route, onAction = onAction)
                 DetailSubtab.History -> HistoryContent(
                     route = route,
                     detail = detail,
@@ -193,6 +212,7 @@ private fun SnapshotContent(
     candles: List<HistoricalCandle>,
     replayOffset: Int,
     alerts: List<String>,
+    quantLens: QuantLensUiState?,
     onAction: (DashboardAction) -> Unit,
 ) {
     val replayWindow = remember(candles, replayOffset) {
@@ -241,6 +261,7 @@ private fun SnapshotContent(
                     "Qual ${detail.qualification.name.lowercase()}  Conf ${detail.confidence.name.lowercase()}  External ${detail.externalStatus.name.lowercase()}",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
             }
         }
 
@@ -353,6 +374,138 @@ private fun SnapshotContent(
             }
         }
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuantLensMiniStrip(
+    chips: List<QuantLensChipUi>,
+    onAction: (DashboardAction) -> Unit,
+) {
+    val visibleChips = if (chips.isEmpty()) {
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensSeverity.Muted))
+    } else {
+        chips.take(5)
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        visibleChips.forEach { chip ->
+            AssistChip(
+                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) },
+                label = { Text(chip.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuantLensContent(
+    quantLens: QuantLensUiState?,
+    route: DetailRoute,
+    onAction: (DashboardAction) -> Unit,
+) {
+    if (quantLens == null) {
+        Text("Loading Quant Lens...", style = MaterialTheme.typography.bodyMedium)
+        return
+    }
+
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Quant Lens", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                QuantLensHeaderStrip(quantLens.headerChips)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ChartRange.entries.forEach { range ->
+                        FilterChip(
+                            selected = route.chartRange == range,
+                            onClick = { onAction(DashboardAction.SetChartRange(range)) },
+                            label = { Text(chartRangeLabel(range), maxLines = 1) },
+                        )
+                    }
+                }
+            }
+        }
+        items(quantLens.sections, key = { it.lensId.name }) { section ->
+            QuantLensSection(section, onAction)
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuantLensHeaderStrip(chips: List<QuantLensChipUi>) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        chips.forEach { chip ->
+            QuantLensChipText(chip)
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAction) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                section.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            QuantLensChipText(section.chip)
+        }
+        Text(section.primaryLine, style = MaterialTheme.typography.bodyMedium)
+        section.rows.forEach { (label, value) ->
+            val rowModifier = if (section.lensId == QuantLensLensId.SimilarSetups) {
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onAction(DashboardAction.OpenDetail(label)) }
+            } else {
+                Modifier.fillMaxWidth()
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = rowModifier) {
+                Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                Text(value, fontWeight = FontWeight.Medium)
+            }
+        }
+        if (section.footerChips.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                section.footerChips.forEach { chip ->
+                    HistoryMetaChip(chip)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuantLensChipText(chip: QuantLensChipUi) {
+    val colors = quantLensColors(chip.severity)
+    Text(
+        text = chip.label,
+        style = MaterialTheme.typography.labelMedium,
+        color = colors.first,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(colors.second)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    )
+}
+
+@Composable
+private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = when (severity) {
+    QuantLensSeverity.Supportive -> BullishChartColor to BullishChartColor.copy(alpha = 0.14f)
+    QuantLensSeverity.Neutral -> MaterialTheme.colorScheme.tertiary to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+    QuantLensSeverity.Warning -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
+    QuantLensSeverity.Risk -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
+    QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -2446,5 +2599,3 @@ private fun percentile(sortedValues: List<Long>, fraction: Double): Long {
     val interpolated = lowerValue + ((upperValue - lowerValue) * (position - lowerIndex))
     return interpolated.roundToLong()
 }
-
-

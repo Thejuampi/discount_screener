@@ -70,6 +70,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             charts = state.detailCharts,
                             history = state.detailHistory,
                             alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
+                            quantLens = state.detailQuantLens,
                             onAction = viewModel::dispatch,
                         )
                     }
