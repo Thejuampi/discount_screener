@@ -43,6 +43,7 @@ import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.DataProvenance
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.IndexEstimatesReport
@@ -254,6 +255,12 @@ class DefaultDashboardRepository(
                     timeseriesCache[symbol] = timeseries
                     selection.analysis?.let { analysis -> dcfCache[symbol] = analysis }
                 }
+                captures += fundamentalTimeseriesCapture(
+                    symbol = symbol,
+                    timeseries = timeseries,
+                    analysis = selection.analysis,
+                    capturedAt = now(),
+                )
             }
         }
 
@@ -1811,6 +1818,12 @@ class DefaultDashboardRepository(
 
         result.timeseries?.let { ts ->
             timeseriesCache[result.symbol] = ts
+            rawCaptures += fundamentalTimeseriesCapture(
+                symbol = result.symbol,
+                timeseries = ts,
+                analysis = result.dcfAnalysis,
+                capturedAt = capturedAt,
+            )
         }
         result.dcfAnalysis?.let { analysis ->
             dcfCache[result.symbol] = analysis
@@ -1899,6 +1912,22 @@ class DefaultDashboardRepository(
     }
 }
 
+private fun fundamentalTimeseriesCapture(
+    symbol: String,
+    timeseries: FundamentalTimeseries,
+    analysis: DcfAnalysis?,
+    capturedAt: Long,
+) = RawCapture(
+    symbol = symbol,
+    captureKind = CaptureKind.FundamentalTimeseries,
+    scopeKey = analysis?.source?.name ?: "unknown",
+    capturedAt = capturedAt,
+    payload = RawCapturePayload.FundamentalTimeseries(
+        value = timeseries,
+        provenance = analysis?.provenance ?: DataProvenance(),
+    ),
+)
+
 private const val QUANT_LENS_ROW_MIN_UPSIDE_BPS = -100_000
 private const val QUANT_LENS_ROW_MAX_UPSIDE_BPS = 100_000
 
@@ -1967,12 +1996,44 @@ internal fun quantLensRevisionFingerprint(history: List<SymbolRevision>): String
         ).joinToString(":")
     }
 
-internal fun quantLensCandleFingerprint(candles: List<HistoricalCandle>): String = candles
-    .sortedBy { it.epochSeconds }
-    .joinToString(",") { candle ->
-        listOf(candle.epochSeconds, candle.openCents, candle.highCents, candle.lowCents, candle.closeCents, candle.volume)
-            .joinToString(":")
+private const val FNV_64_OFFSET_BASIS = -3_750_763_034_362_895_579L
+private const val FNV_64_PRIME = 1_099_511_628_211L
+
+internal fun quantLensCandleFingerprint(candles: List<HistoricalCandle>): String {
+    val canonicalCandles = canonicalizeQuantLensCandlesByEpoch(candles)
+    var hash = FNV_64_OFFSET_BASIS
+    hash = quantLensFingerprintHashLong(hash, canonicalCandles.size.toLong())
+    for (candle in canonicalCandles) {
+        hash = quantLensFingerprintHashLong(hash, candle.epochSeconds)
+        hash = quantLensFingerprintHashLong(hash, candle.openCents)
+        hash = quantLensFingerprintHashLong(hash, candle.highCents)
+        hash = quantLensFingerprintHashLong(hash, candle.lowCents)
+        hash = quantLensFingerprintHashLong(hash, candle.closeCents)
+        hash = quantLensFingerprintHashLong(hash, candle.volume)
     }
+    return "${canonicalCandles.size}:$hash"
+}
+
+private fun canonicalizeQuantLensCandlesByEpoch(candles: List<HistoricalCandle>): List<HistoricalCandle> = candles
+    .sortedWith(
+        compareBy<HistoricalCandle> { it.epochSeconds }
+            .thenBy { it.openCents }
+            .thenBy { it.highCents }
+            .thenBy { it.lowCents }
+            .thenBy { it.closeCents }
+            .thenBy { it.volume },
+    )
+    .distinctBy { it.epochSeconds }
+
+private fun quantLensFingerprintHashLong(seed: Long, value: Long): Long {
+    var hash = seed
+    var shift = 0
+    while (shift < 64) {
+        hash = (hash xor ((value ushr shift) and 0xffL)) * FNV_64_PRIME
+        shift += 8
+    }
+    return hash
+}
 
 internal fun quantLensEvSpreadBps(detail: SymbolDetail, dcfAnalysis: DcfAnalysis?): Int? {
     val dcfAnchors = dcfAnalysis?.let {

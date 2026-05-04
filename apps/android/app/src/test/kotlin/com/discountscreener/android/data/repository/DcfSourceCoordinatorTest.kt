@@ -24,6 +24,33 @@ class DcfSourceCoordinatorTest {
         assertEquals(DcfSource.SecEdgar to 0, selection.selectedSource to yahoo.timeseriesFetchCount)
     }
 
+    @Test
+    fun resolve_selects_usable_yahoo_when_secondary_provider_is_not_configured() = runTest {
+        var yahoo = CountingYahooFinanceClient()
+        var coordinator = DcfSourceCoordinator(yahooClient = yahoo)
+
+        var selection = coordinator.resolve("AAPL") { analysis() }
+
+        assertEquals(DcfSource.YahooFinance to 1, selection.selectedSource to yahoo.timeseriesFetchCount)
+    }
+
+    @Test
+    fun resolve_selects_usable_yahoo_when_secondary_provider_is_unavailable() = runTest {
+        var yahoo = CountingYahooFinanceClient()
+        var secondary = UnavailableTimeseriesProvider()
+        var coordinator = DcfSourceCoordinator(
+            yahooClient = yahoo,
+            secondaryTimeseriesProvider = secondary,
+        )
+
+        var selection = coordinator.resolve("AAPL") { analysis() }
+
+        assertEquals(
+            Triple(DcfSource.YahooFinance, 1, 1),
+            Triple(selection.selectedSource, yahoo.timeseriesFetchCount, secondary.fetchCount),
+        )
+    }
+
     private class CountingYahooFinanceClient : YahooFinanceClient() {
         var timeseriesFetchCount = 0
 
@@ -37,6 +64,15 @@ class DcfSourceCoordinatorTest {
         private val timeseries: FundamentalTimeseries?,
     ) : FundamentalTimeseriesProvider {
         override suspend fun fetch(symbol: String): FundamentalTimeseries? = timeseries
+    }
+
+    private class UnavailableTimeseriesProvider : FundamentalTimeseriesProvider {
+        var fetchCount = 0
+
+        override suspend fun fetch(symbol: String): FundamentalTimeseries? {
+            fetchCount++
+            throw IllegalStateException("unavailable")
+        }
     }
 }
 

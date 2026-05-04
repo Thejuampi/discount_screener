@@ -8,6 +8,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   candidate ranking, watchlist filtering, query filtering, opportunity ranking, and symbol-detail projection
 - `chart-ranges.json`:
   canonical chart-range order and display labels used in the product surface
+- `dcf-source-selection.json`:
+  golden resolver-state cases for selected, unavailable, disabled/absent, and uncertain DCF source decisions
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

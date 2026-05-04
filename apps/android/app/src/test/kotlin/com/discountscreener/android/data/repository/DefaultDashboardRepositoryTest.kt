@@ -114,7 +114,7 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun bootstrap_row_quant_lens_summary_exposes_all_lens_states() = runTest(dispatcher) {
+    fun bootstrap_row_quant_lens_summary_exposes_visible_lens_states() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
             seedWarmState(store)
@@ -122,12 +122,85 @@ class DefaultDashboardRepositoryTest {
             val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
 
             assertEquals(
-                QuantLensLensId.entries.toList(),
+                listOf(
+                    QuantLensLensId.EvidenceStrength,
+                    QuantLensLensId.ExpectedValueRange,
+                    QuantLensLensId.CorrelationRisk,
+                    QuantLensLensId.TrendReliability,
+                    QuantLensLensId.SimilarSetups,
+                ),
                 snapshot.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary?.lensStates?.map { it.lensId },
             )
         } finally {
             store.close()
         }
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_is_deterministic_for_identical_large_series() {
+        var candles = largeQuantLensCandleSeries()
+
+        assertEquals(
+            quantLensCandleFingerprint(candles),
+            quantLensCandleFingerprint(candles.asReversed()),
+        )
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_is_stable_when_duplicate_entries_are_reordered() {
+        var original = baseQuantLensFingerprintCandle()
+        var duplicate = original.copy(
+            openCents = 9_000L,
+            highCents = 9_500L,
+            lowCents = 8_800L,
+            closeCents = 9_250L,
+            volume = 100_000L,
+        )
+        var next = original.copy(epochSeconds = original.epochSeconds + 86_400L)
+        var canonicalFingerprint = quantLensCandleFingerprint(listOf(duplicate, next))
+
+        assertEquals(
+            listOf(canonicalFingerprint, canonicalFingerprint),
+            listOf(
+                quantLensCandleFingerprint(listOf(original, duplicate, next)),
+                quantLensCandleFingerprint(listOf(duplicate, original, next)),
+            ),
+        )
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_epoch_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(epochSeconds = 1_700_086_400L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_open_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(openCents = 10_001L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_high_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(highCents = 10_501L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_low_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(lowCents = 9_801L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_close_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(closeCents = 10_251L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_changes_when_volume_changes() {
+        assertCandleFingerprintChanges(baseQuantLensFingerprintCandle().copy(volume = 123_457L))
+    }
+
+    @Test
+    fun quant_lens_candle_fingerprint_handles_large_series_with_bounded_output() {
+        assertTrue(quantLensCandleFingerprint(largeQuantLensCandleSeries()).length <= 32)
     }
 
     @Test
@@ -945,6 +1018,37 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun enrichment_uses_yahoo_when_secondary_provider_is_not_configured() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context)
+        try {
+            var client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = dcfFundamentals(symbol),
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return if (symbol == "AAPL") richTimeseries() else super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            var repository = buildRepository(store = store, client = client)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(DcfSource.YahooFinance, awaitDcfSource(repository, "AAPL"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun refresh_fallback_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
@@ -1069,6 +1173,35 @@ class DefaultDashboardRepositoryTest {
         nowProvider = { 1_700_000_000L },
         ioDispatcher = dispatcher,
     )
+
+    private fun assertCandleFingerprintChanges(mutated: HistoricalCandle) {
+        var original = baseQuantLensFingerprintCandle()
+
+        assertNotEquals(
+            quantLensCandleFingerprint(listOf(original)),
+            quantLensCandleFingerprint(listOf(mutated)),
+        )
+    }
+
+    private fun baseQuantLensFingerprintCandle() = HistoricalCandle(
+        epochSeconds = 1_700_000_000L,
+        openCents = 10_000L,
+        highCents = 10_500L,
+        lowCents = 9_800L,
+        closeCents = 10_250L,
+        volume = 123_456L,
+    )
+
+    private fun largeQuantLensCandleSeries(count: Int = 100_000): List<HistoricalCandle> = List(count) { index ->
+        HistoricalCandle(
+            epochSeconds = 1_600_000_000L + index.toLong() * 86_400L,
+            openCents = 10_000L + (index % 500),
+            highCents = 10_050L + (index % 500),
+            lowCents = 9_950L + (index % 500),
+            closeCents = 10_025L + (index % 500),
+            volume = 1_000_000L + index.toLong(),
+        )
+    }
 
     private suspend fun awaitSnapshot(
         repository: DefaultDashboardRepository,

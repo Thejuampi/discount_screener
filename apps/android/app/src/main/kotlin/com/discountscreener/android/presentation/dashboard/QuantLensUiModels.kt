@@ -3,6 +3,8 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.core.model.CorrelationRiskBand
 import com.discountscreener.core.model.EvidenceStrengthBand
 import com.discountscreener.core.model.ExpectedValueRangeBand
+import com.discountscreener.core.model.QuantLensHorizon
+import com.discountscreener.core.model.QuantLensHorizonBaseline
 import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.model.QuantLensLensRowState
 import com.discountscreener.core.model.QuantLensPrimaryStatus
@@ -48,6 +50,7 @@ internal fun mapQuantLensReport(report: QuantLensReport?): QuantLensUiState? {
         evSection(report),
         correlationSection(report),
         trendSection(report),
+        horizonContextSection(report),
         similarSection(report),
     )
     return QuantLensUiState(
@@ -190,6 +193,33 @@ private fun similarSection(report: QuantLensReport): QuantLensSectionUi {
     )
 }
 
+private fun horizonContextSection(report: QuantLensReport): QuantLensSectionUi {
+    val section = report.horizonContext
+    val label = when (section.primaryStatus) {
+        QuantLensPrimaryStatus.Available -> "Baseline ready"
+        QuantLensPrimaryStatus.Partial -> "Baseline partial"
+        QuantLensPrimaryStatus.Insufficient -> "Baseline sparse"
+        else -> "Baseline unavailable"
+    }
+    val severity = when (section.primaryStatus) {
+        QuantLensPrimaryStatus.Available,
+        QuantLensPrimaryStatus.Partial,
+        -> QuantLensSeverity.Neutral
+        else -> QuantLensSeverity.Muted
+    }
+    return QuantLensSectionUi(
+        lensId = QuantLensLensId.HorizonContext,
+        title = "Horizon context",
+        chip = QuantLensChipUi(QuantLensLensId.HorizonContext, label, severity),
+        primaryLine = "Historical baseline from loaded candles",
+        rows = section.horizons.map { baseline -> horizonRowWithLabel(baseline) },
+        footerChips = listOf("Historical context", "No forecast"),
+    )
+}
+
+private fun horizonRowWithLabel(baseline: QuantLensHorizonBaseline): Pair<String, String> =
+    horizonLabel(baseline.horizon).let { it to "$it · ${horizonRow(baseline)}" }
+
 private fun rowChip(state: QuantLensLensRowState): QuantLensChipUi =
     QuantLensChipUi(
         lensId = state.lensId,
@@ -227,6 +257,28 @@ private fun evRowRange(state: QuantLensLensRowState): String {
     return if (low != null && high != null) "EV ${signedPercent(low)}..${signedPercent(high)}" else "EV range"
 }
 
+private fun horizonLabel(horizon: QuantLensHorizon): String = when (horizon) {
+    QuantLensHorizon.FiveMinutes -> "5m"
+    QuantLensHorizon.OneDay -> "1D"
+    QuantLensHorizon.ThreeMonths -> "3M"
+}
+
+private fun horizonRow(baseline: QuantLensHorizonBaseline): String = when (baseline.primaryStatus) {
+    QuantLensPrimaryStatus.Available -> {
+        val median = baseline.medianAbsoluteMoveBps
+        val p25 = baseline.p25AbsoluteMoveBps
+        val p75 = baseline.p75AbsoluteMoveBps
+        if (median != null && p25 != null && p75 != null) {
+            "Median ${absolutePercent(median)} · P25-P75 ${absolutePercent(p25)}-${absolutePercent(p75)} · ${baseline.sampleCount} windows"
+        } else {
+            "${baseline.sampleCount} windows"
+        }
+    }
+    QuantLensPrimaryStatus.Insufficient -> "Need 10 windows · ${baseline.sourceRange.name} candles"
+    QuantLensPrimaryStatus.Unavailable -> "Unavailable · ${baseline.sourceRange.name} candles"
+    else -> "${baseline.primaryStatus.name} · ${baseline.sourceRange.name} candles"
+}
+
 private fun evRangeLabel(lowCents: Long?, highCents: Long?, report: QuantLensReport): String {
     val price = report.expectedValueRange.weightedFairValueCents ?: return "EV range"
     val low = lowCents?.let { checkedPercent(report = report, value = it) }
@@ -259,6 +311,8 @@ private fun signedPercent(bps: Int): String {
     val sign = if (bps >= 0) "+" else "-"
     return "$sign${abs(bps) / 100}%"
 }
+
+private fun absolutePercent(bps: Int): String = "%.2f%%".format(bps / 100.0)
 
 private fun decimalBps(bps: Int): String = "%.2f".format(bps / 10_000.0)
 

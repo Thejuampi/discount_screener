@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.CorrelationRiskBand
 import com.discountscreener.core.model.EvidenceStrengthBand
 import com.discountscreener.core.model.ExpectedValueRangeSource
@@ -9,6 +10,9 @@ import com.discountscreener.core.model.QuantLensCorrelationRisk
 import com.discountscreener.core.model.QuantLensCorrelationPair
 import com.discountscreener.core.model.QuantLensEvidenceStrength
 import com.discountscreener.core.model.QuantLensExpectedValueRange
+import com.discountscreener.core.model.QuantLensHorizon
+import com.discountscreener.core.model.QuantLensHorizonBaseline
+import com.discountscreener.core.model.QuantLensHorizonContext
 import com.discountscreener.core.model.QuantLensInput
 import com.discountscreener.core.model.QuantLensModelVersion
 import com.discountscreener.core.model.QuantLensPrimaryStatus
@@ -20,15 +24,19 @@ import com.discountscreener.core.model.SimilarSetupMatch
 import com.discountscreener.core.model.SimilarSetupsBand
 import com.discountscreener.core.model.TrendReliabilityBand
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 object QuantLensEngine {
+    private const val MIN_HORIZON_WINDOWS = 10
+
     fun analyze(input: QuantLensInput): QuantLensReport {
         val evidenceStrength = analyzeEvidenceStrength(input)
         val expectedValueRange = analyzeExpectedValueRange(input)
         val correlationRisk = analyzeCorrelationRisk(input)
         val trendReliability = analyzeTrendReliability(input)
+        val horizonContext = analyzeHorizonContext(input)
         val similarSetups = analyzeSimilarSetups(input, evidenceStrength, expectedValueRange, trendReliability)
 
         return QuantLensReport(
@@ -42,12 +50,14 @@ object QuantLensEngine {
                 expectedValueRange.primaryStatus,
                 correlationRisk.primaryStatus,
                 trendReliability.primaryStatus,
+                horizonContext.primaryStatus,
                 similarSetups.primaryStatus,
             ),
             evidenceStrength = evidenceStrength,
             expectedValueRange = expectedValueRange,
             correlationRisk = correlationRisk,
             trendReliability = trendReliability,
+            horizonContext = horizonContext,
             similarSetups = similarSetups,
             notices = listOf(QuantLensReasonCode.ScaffoldPending),
         )
@@ -106,6 +116,121 @@ object QuantLensEngine {
             reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
         )
     }
+
+    private fun analyzeHorizonContext(input: QuantLensInput): QuantLensHorizonContext {
+        val horizons = listOf(
+            HorizonSpec(QuantLensHorizon.FiveMinutes, ChartRange.Day, lagCandles = 1),
+            HorizonSpec(QuantLensHorizon.OneDay, ChartRange.Month, lagCandles = 1),
+            HorizonSpec(QuantLensHorizon.ThreeMonths, ChartRange.FiveYears, lagCandles = 3),
+        ).map { spec -> analyzeHorizonBaseline(input, spec) }
+        val primaryStatus = when {
+            horizons.all { it.primaryStatus == QuantLensPrimaryStatus.Available } -> QuantLensPrimaryStatus.Available
+            horizons.any { it.primaryStatus == QuantLensPrimaryStatus.Available } -> QuantLensPrimaryStatus.Partial
+            horizons.any { it.primaryStatus == QuantLensPrimaryStatus.Insufficient } -> QuantLensPrimaryStatus.Insufficient
+            else -> QuantLensPrimaryStatus.Unavailable
+        }
+        return QuantLensHorizonContext(
+            primaryStatus = primaryStatus,
+            horizons = horizons,
+            reasonCodes = horizons.flatMap { it.reasonCodes }.distinct(),
+        )
+    }
+
+    private fun analyzeHorizonBaseline(
+        input: QuantLensInput,
+        spec: HorizonSpec,
+    ): QuantLensHorizonBaseline {
+        val sourceCandles = input.selectedCandlesByRange[spec.sourceRange]
+        if (sourceCandles.isNullOrEmpty()) {
+            return horizonBaseline(
+                spec = spec,
+                primaryStatus = QuantLensPrimaryStatus.Unavailable,
+                sampleCount = 0,
+                reasonCodes = listOf(QuantLensReasonCode.MissingHorizonCandles),
+            )
+        }
+
+        val validCandles = sourceCandles
+            .filter { it.closeCents > 0L }
+            .let(::canonicalizeCandlesByEpoch)
+        if (validCandles.isEmpty()) {
+            return horizonBaseline(
+                spec = spec,
+                primaryStatus = QuantLensPrimaryStatus.Unavailable,
+                sampleCount = 0,
+                reasonCodes = listOf(QuantLensReasonCode.InvalidHorizonClose),
+            )
+        }
+
+        val absoluteMovesBps = (spec.lagCandles until validCandles.size).map { index ->
+            absoluteMoveBps(
+                baseCloseCents = validCandles[index - spec.lagCandles].closeCents,
+                currentCloseCents = validCandles[index].closeCents,
+            )
+        }
+        if (absoluteMovesBps.size < MIN_HORIZON_WINDOWS) {
+            return horizonBaseline(
+                spec = spec,
+                primaryStatus = QuantLensPrimaryStatus.Insufficient,
+                sampleCount = absoluteMovesBps.size,
+                reasonCodes = listOf(QuantLensReasonCode.InsufficientHorizonSamples),
+            )
+        }
+
+        val sortedMoves = absoluteMovesBps.sorted()
+        return horizonBaseline(
+            spec = spec,
+            primaryStatus = QuantLensPrimaryStatus.Available,
+            sampleCount = sortedMoves.size,
+            medianAbsoluteMoveBps = nearestRank(sortedMoves, percentile = 0.50),
+            p25AbsoluteMoveBps = nearestRank(sortedMoves, percentile = 0.25),
+            p75AbsoluteMoveBps = nearestRank(sortedMoves, percentile = 0.75),
+            reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+        )
+    }
+
+    private fun horizonBaseline(
+        spec: HorizonSpec,
+        primaryStatus: QuantLensPrimaryStatus,
+        sampleCount: Int,
+        medianAbsoluteMoveBps: Int? = null,
+        p25AbsoluteMoveBps: Int? = null,
+        p75AbsoluteMoveBps: Int? = null,
+        reasonCodes: List<QuantLensReasonCode>,
+    ) = QuantLensHorizonBaseline(
+        horizon = spec.horizon,
+        primaryStatus = primaryStatus,
+        sourceRange = spec.sourceRange,
+        lagCandles = spec.lagCandles,
+        sampleCount = sampleCount,
+        medianAbsoluteMoveBps = medianAbsoluteMoveBps,
+        p25AbsoluteMoveBps = p25AbsoluteMoveBps,
+        p75AbsoluteMoveBps = p75AbsoluteMoveBps,
+        reasonCodes = reasonCodes,
+    )
+
+    private fun absoluteMoveBps(baseCloseCents: Long, currentCloseCents: Long): Int {
+        val returnBps = (((currentCloseCents - baseCloseCents).toDouble() / baseCloseCents.toDouble()) * 10_000.0)
+            .roundToInt()
+            .coerceIn(-100_000, 100_000)
+        return abs(returnBps)
+    }
+
+    private fun nearestRank(sortedValues: List<Int>, percentile: Double): Int {
+        val rank = ceil(percentile * sortedValues.size).toInt().coerceIn(1, sortedValues.size)
+        return sortedValues[rank - 1]
+    }
+
+    private fun canonicalizeCandlesByEpoch(candles: List<HistoricalCandle>): List<HistoricalCandle> = candles
+        .sortedWith(
+            compareBy<HistoricalCandle> { it.epochSeconds }
+                .thenBy { it.openCents }
+                .thenBy { it.highCents }
+                .thenBy { it.lowCents }
+                .thenBy { it.closeCents }
+                .thenBy { it.volume },
+        )
+        .distinctBy { it.epochSeconds }
 
     private fun analyzeExpectedValueRange(input: QuantLensInput): QuantLensExpectedValueRange {
         val detail = input.detail
@@ -225,7 +350,7 @@ object QuantLensEngine {
     private fun analyzeTrendReliability(input: QuantLensInput): QuantLensTrendReliability {
         val candles = input.selectedCandlesByRange[input.selectedRange].orEmpty()
             .filter { it.closeCents > 0L }
-            .sortedBy { it.epochSeconds }
+            .let(::canonicalizeCandlesByEpoch)
         if (candles.size < 20) {
             return QuantLensTrendReliability(
                 primaryStatus = QuantLensPrimaryStatus.Insufficient,
@@ -316,7 +441,7 @@ object QuantLensEngine {
     private fun returnsByEpoch(candles: List<HistoricalCandle>): Map<Long, Double> =
         candles
             .filter { it.closeCents > 0L }
-            .sortedBy { it.epochSeconds }
+            .let(::canonicalizeCandlesByEpoch)
             .zipWithNext()
             .associate { (previous, current) ->
                 current.epochSeconds to ((current.closeCents - previous.closeCents).toDouble() / previous.closeCents.toDouble())
@@ -353,6 +478,12 @@ object QuantLensEngine {
     }
 
     private data class Fit(val slope: Double, val intercept: Double, val rSquared: Double)
+
+    private data class HorizonSpec(
+        val horizon: QuantLensHorizon,
+        val sourceRange: ChartRange,
+        val lagCandles: Int,
+    )
 
     private fun leastSquares(values: List<Double>): Fit {
         val xMean = values.indices.average()
