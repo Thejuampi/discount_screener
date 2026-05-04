@@ -14,6 +14,7 @@ import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.ProviderComponentState
+import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
@@ -24,6 +25,7 @@ import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
@@ -33,6 +35,7 @@ import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -45,6 +48,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -104,6 +108,23 @@ class DefaultDashboardRepositoryTest {
                 snapshot.candidateRows.first { it.symbol == "NVDA" }.companyName,
             )
             assertTrue(snapshot.candidateRows.isNotEmpty())
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_row_quant_lens_summary_exposes_all_lens_states() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertEquals(
+                QuantLensLensId.entries.toList(),
+                snapshot.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary?.lensStates?.map { it.lensId },
+            )
         } finally {
             store.close()
         }
@@ -634,6 +655,39 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun bounded_quant_lens_row_upside_clamps_extreme_positive_ev_anchor() {
+        assertEquals(100_000, boundedQuantLensRowUpsideBps(marketPriceCents = 1L, fairValueCents = 10_001L))
+    }
+
+    @Test
+    fun bounded_quant_lens_row_upside_preserves_normal_ev_anchor() {
+        assertEquals(2_500, boundedQuantLensRowUpsideBps(marketPriceCents = 10_000L, fairValueCents = 12_500L))
+    }
+
+    @Test
+    fun quant_lens_revision_fingerprint_changes_when_target_content_changes() {
+        assertNotEquals(
+            quantLensRevisionFingerprint(listOf(sampleRevision(weightedFairValueCents = 19_500L, evaluatedAtEpochSeconds = 1L))),
+            quantLensRevisionFingerprint(listOf(sampleRevision(weightedFairValueCents = 24_000L, evaluatedAtEpochSeconds = 1L))),
+        )
+    }
+
+    @Test
+    fun quant_lens_ev_spread_uses_loaded_analyst_anchors() {
+        assertEquals(
+            2_500,
+            quantLensEvSpreadBps(
+                sampleDetail("NVDA", marketPriceCents = 10_000L, intrinsicValueCents = 12_000L).copy(
+                    externalSignalLowFairValueCents = 10_000L,
+                    weightedExternalSignalFairValueCents = 11_000L,
+                    externalSignalHighFairValueCents = 12_500L,
+                ),
+                dcfAnalysis = null,
+            ),
+        )
+    }
+
+    @Test
     fun first_launch_shows_loading_rows_then_progressively_refreshes_live_data() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
@@ -890,13 +944,128 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    @Test
+    fun refresh_fallback_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    if (symbol == "AAPL") {
+                        return ProviderFetchResult(
+                            symbol = symbol,
+                            snapshot = null,
+                            externalSignal = null,
+                            fundamentals = dcfFundamentals(symbol),
+                            coverage = ProviderCoverage(
+                                core = ProviderComponentState.Missing,
+                                external = ProviderComponentState.Missing,
+                                fundamentals = ProviderComponentState.Fresh,
+                            ),
+                            diagnostics = emptyList(),
+                        )
+                    }
+                    return super.fetchSymbol(symbol)
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return if (symbol == "AAPL") unusableTimeseries() else super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                secondaryTimeseriesProvider = FakeTimeseriesProvider(richTimeseries()),
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(DcfSource.SecEdgar, awaitDcfSource(repository, "AAPL"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun detail_load_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = emptyList(),
+                revisions = listOf(
+                    revision(
+                        symbol = "AAPL",
+                        marketPriceCents = 10_000,
+                        intrinsicValueCents = 15_000,
+                        gapBps = 3_333,
+                        fundamentals = dcfFundamentals("AAPL"),
+                    ),
+                ),
+            )
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return if (symbol == "AAPL") unusableTimeseries() else super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                secondaryTimeseriesProvider = FakeTimeseriesProvider(richTimeseries()),
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.ensureDetailLoaded("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(DcfSource.SecEdgar, repository.dcfSnapshot()["AAPL"]?.source)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun enrichment_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = dcfFundamentals(symbol),
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return if (symbol == "AAPL") unusableTimeseries() else super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                secondaryTimeseriesProvider = FakeTimeseriesProvider(richTimeseries()),
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(DcfSource.SecEdgar, awaitDcfSource(repository, "AAPL"))
+        } finally {
+            store.close()
+        }
+    }
+
     private fun buildRepository(
         store: SQLiteStateStore,
         client: FakeYahooFinanceClient,
+        secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
     ) = DefaultDashboardRepository(
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
         yahooClient = client,
+        secondaryTimeseriesProvider = secondaryTimeseriesProvider,
         nowProvider = { 1_700_000_000L },
         ioDispatcher = dispatcher,
     )
@@ -919,6 +1088,24 @@ class DefaultDashboardRepositoryTest {
             snapshot = repository.currentSnapshot(ViewFilter(), selectedSymbol, selectedRange, legacyModel)
         }
         return snapshot
+    }
+
+    private suspend fun awaitDcfSource(
+        repository: DefaultDashboardRepository,
+        symbol: String,
+        timeoutMs: Long = 5_000,
+    ): DcfSource? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var source = repository.dcfSnapshot()[symbol]?.source
+        while (source == null) {
+            if (System.currentTimeMillis() >= deadline) {
+                fail("Timed out waiting for $symbol DCF source; last snapshot=${repository.dcfSnapshot()}")
+            }
+            Thread.sleep(10)
+            dispatcher.scheduler.advanceUntilIdle()
+            source = repository.dcfSnapshot()[symbol]?.source
+        }
+        return source
     }
 
     private suspend fun seedWarmState(store: SQLiteStateStore) {
@@ -977,6 +1164,7 @@ class DefaultDashboardRepositoryTest {
         gapBps: Int,
         weightedFairValueCents: Long? = intrinsicValueCents,
         evaluatedAt: Long = 1_700_000_000L,
+        fundamentals: FundamentalSnapshot? = null,
     ) = SymbolRevisionInput(
         symbol = symbol,
         evaluatedAt = evaluatedAt,
@@ -1000,6 +1188,7 @@ class DefaultDashboardRepositoryTest {
                 highFairValueCents = weightedFairValueCents?.plus(1_500),
                 weightedAnalystCount = weightedFairValueCents?.let { 18 },
             ),
+            fundamentals = fundamentals,
             gapBps = gapBps,
             qualification = QualificationStatus.Qualified,
             externalStatus = ExternalSignalStatus.Supportive,
@@ -1268,6 +1457,12 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    private class FakeTimeseriesProvider(
+        private val timeseries: FundamentalTimeseries?,
+    ) : FundamentalTimeseriesProvider {
+        override suspend fun fetch(symbol: String): FundamentalTimeseries? = timeseries
+    }
+
     companion object {
         private const val DB_NAME = "discount_screener_state.sqlite3"
     }
@@ -1332,6 +1527,26 @@ private fun companyNameFor(symbol: String): String = when (symbol) {
     "MSFT" -> "Microsoft Corporation"
     else -> "$symbol Holdings"
 }
+
+private fun dcfFundamentals(symbol: String) = FundamentalSnapshot(
+    symbol = symbol,
+    marketCapDollars = 600_000_000_000L,
+    sharesOutstanding = 4_800_000_000L,
+    betaMillis = 1_000,
+)
+
+private fun unusableTimeseries() = FundamentalTimeseries(
+    freeCashFlow = listOf(
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 30_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 34_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", -1.0),
+    ),
+    dilutedAverageShares = listOf(
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 5_100_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 5_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 4_900_000_000.0),
+    ),
+)
 
 private fun richTimeseries() = FundamentalTimeseries(
     freeCashFlow = listOf(

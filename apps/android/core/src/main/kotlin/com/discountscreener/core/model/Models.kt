@@ -400,6 +400,26 @@ data class FundamentalTimeseries(
 )
 
 @Serializable
+enum class DcfSource {
+    YahooFinance,
+    SecEdgar,
+}
+
+@Serializable
+data class DcfSourceCandidate(
+    val source: DcfSource,
+    val timeseries: FundamentalTimeseries? = null,
+    val analysis: DcfAnalysis? = null,
+)
+
+@Serializable
+data class DcfSourceSelection(
+    val selectedSource: DcfSource? = null,
+    val timeseries: FundamentalTimeseries? = null,
+    val analysis: DcfAnalysis? = null,
+)
+
+@Serializable
 data class DcfAnalysis(
     val bearIntrinsicValueCents: Long,
     val baseIntrinsicValueCents: Long,
@@ -407,6 +427,8 @@ data class DcfAnalysis(
     val waccBps: Int,
     val baseGrowthBps: Int,
     val netDebtDollars: Long,
+    val source: DcfSource? = null,
+    val sourceFingerprint: String? = null,
 )
 
 @Serializable
@@ -504,10 +526,37 @@ data class ScenarioEstimate(
 )
 
 @Serializable
+enum class DcfCoverageStatus {
+    Unavailable,
+    LowConfidence,
+    Partial,
+    Provisional,
+    Ready,
+}
+
+@Serializable
+data class DcfSourceDistribution(
+    val yahooCount: Int = 0,
+    val secCount: Int = 0,
+    val unknownCount: Int = 0,
+    val unavailableCount: Int = 0,
+)
+
+@Serializable
+data class DcfCoverageSummary(
+    val totalEligibleSymbols: Int = 0,
+    val coveredSymbols: Int = 0,
+    val coverageBps: Int = 0,
+    val status: DcfCoverageStatus = DcfCoverageStatus.Unavailable,
+    val sourceDistribution: DcfSourceDistribution = DcfSourceDistribution(),
+)
+
+@Serializable
 data class IndexEstimatesReport(
     val profileName: String,
     val currentWeightedPriceCents: Long,
     val totalSymbols: Int,
     val scenarios: List<ScenarioEstimate>,
     val computedAtEpochSeconds: Long,
+    val dcfCoverage: DcfCoverageSummary = DcfCoverageSummary(),
 )

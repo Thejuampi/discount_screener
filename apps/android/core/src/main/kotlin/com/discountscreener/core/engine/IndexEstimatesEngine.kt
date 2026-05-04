@@ -1,6 +1,10 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.DcfCoverageStatus
+import com.discountscreener.core.model.DcfCoverageSummary
+import com.discountscreener.core.model.DcfSource
+import com.discountscreener.core.model.DcfSourceDistribution
 import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.ScenarioEstimate
@@ -40,7 +44,49 @@ object IndexEstimatesEngine {
             totalSymbols = eligibleSymbols,
             scenarios = scenarios,
             computedAtEpochSeconds = nowEpochSeconds,
+            dcfCoverage = computeDcfCoverage(symbols, dcfBySymbol),
         )
+    }
+
+    private fun computeDcfCoverage(
+        symbols: List<SymbolDetail>,
+        dcfBySymbol: Map<String, DcfAnalysis>,
+    ): DcfCoverageSummary {
+        val eligibleSymbols = symbols.filter { symbol ->
+            (symbol.fundamentals?.marketCapDollars ?: 0L) > 0L
+        }
+        val coveredAnalyses = eligibleSymbols.mapNotNull { symbol -> dcfBySymbol[symbol.symbol] }
+        val denominator = eligibleSymbols.size
+        val numerator = coveredAnalyses.size
+        val coverageBps = if (denominator == 0 || numerator == 0) {
+            0
+        } else {
+            numerator * 10_000 / denominator
+        }
+        return DcfCoverageSummary(
+            totalEligibleSymbols = denominator,
+            coveredSymbols = numerator,
+            coverageBps = coverageBps,
+            status = dcfCoverageStatus(denominator, numerator, coverageBps),
+            sourceDistribution = DcfSourceDistribution(
+                yahooCount = coveredAnalyses.count { it.source == DcfSource.YahooFinance },
+                secCount = coveredAnalyses.count { it.source == DcfSource.SecEdgar },
+                unknownCount = coveredAnalyses.count { it.source == null },
+                unavailableCount = denominator - numerator,
+            ),
+        )
+    }
+
+    private fun dcfCoverageStatus(
+        denominator: Int,
+        numerator: Int,
+        coverageBps: Int,
+    ): DcfCoverageStatus = when {
+        denominator == 0 || numerator == 0 -> DcfCoverageStatus.Unavailable
+        coverageBps < 2_500 -> DcfCoverageStatus.LowConfidence
+        coverageBps < 5_000 -> DcfCoverageStatus.Partial
+        coverageBps < 9_500 -> DcfCoverageStatus.Provisional
+        else -> DcfCoverageStatus.Ready
     }
 
     private fun computeScenario(

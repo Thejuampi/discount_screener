@@ -159,7 +159,7 @@ fun DashboardScreen(
                             },
                         )
                     } else {
-                        TrackedList(visibleTrackedRows, onAction)
+                        TrackedList(visibleTrackedRows, state.rowQuantLensChipsBySymbol, onAction)
                     }
                 }
 
@@ -175,7 +175,12 @@ fun DashboardScreen(
                                 selected = state.opportunityScoringModel,
                                 onAction = onAction,
                             )
-                            OpportunityList(state.opportunityRows, state.opportunityScoringModel, onAction)
+                            OpportunityList(
+                                state.opportunityRows,
+                                state.opportunityScoringModel,
+                                state.rowQuantLensChipsBySymbol,
+                                onAction,
+                            )
                         }
                     }
                 }
