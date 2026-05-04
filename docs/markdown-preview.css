@@ -1,0 +1,10 @@
+body p,
+body li,
+body blockquote {
+    text-align: justify;
+}
+
+body div[align="center"],
+body div[align="center"] p {
+    text-align: center;
+}

@@ -70,19 +70,27 @@ private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: Lis
         it.scenario in setOf(EstimateScenario.BearDcf, EstimateScenario.BaseDcf, EstimateScenario.BullDcf)
     }
     val dcfCoverageCount = dcfScenarios.maxOfOrNull { it.coverageCount } ?: 0
-    val showDcfWarning = report.totalSymbols > 0 && dcfCoverageCount * 2 < report.totalSymbols
+    val dcfCoverage = if (report.totalSymbols > 0) dcfCoverageCount.toFloat() / report.totalSymbols else 0f
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             HeaderCard(report)
         }
-        if (showDcfWarning) {
-            item {
-                DcfCoverageBanner(dcfCoverageCount, report.totalSymbols)
+        when {
+            report.totalSymbols > 0 && dcfCoverage < 0.25f -> {
+                item { DcfErrorBanner(dcfCoverageCount, report.totalSymbols) }
             }
-        }
-        items(report.scenarios) { scenario ->
-            ScenarioCard(scenario)
+            report.totalSymbols > 0 && dcfCoverage < 0.50f -> {
+                item { DcfLowConfidenceBanner(dcfCoverageCount, report.totalSymbols) }
+                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            }
+            report.totalSymbols > 0 && dcfCoverage < 0.95f -> {
+                item { DcfProvisionalBanner(dcfCoverageCount, report.totalSymbols) }
+                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            }
+            else -> {
+                items(report.scenarios) { scenario -> ScenarioCard(scenario) }
+            }
         }
         item {
             EstimatesTrendChart(estimatesHistory)
@@ -91,7 +99,65 @@ private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: Lis
 }
 
 @Composable
-private fun DcfCoverageBanner(coverageCount: Int, totalSymbols: Int) {
+private fun DcfProvisionalBanner(coverageCount: Int, totalSymbols: Int) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "\u26A0",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Provisional — DCF based on $coverageCount / $totalSymbols companies",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DcfLowConfidenceBanner(coverageCount: Int, totalSymbols: Int) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "\u26A0",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "Low confidence — only $coverageCount / $totalSymbols companies have DCF data",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                Text(
+                    text = "Results may be skewed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DcfErrorBanner(coverageCount: Int, totalSymbols: Int) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
         modifier = Modifier.fillMaxWidth(),
@@ -108,13 +174,13 @@ private fun DcfCoverageBanner(coverageCount: Int, totalSymbols: Int) {
             )
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    text = "DCF coverage is low ($coverageCount / $totalSymbols companies)",
+                    text = "Not enough DCF data ($coverageCount / $totalSymbols companies)",
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
                 Text(
-                    text = "DCF estimates may not be representative until more data is fetched",
+                    text = "Estimates require at least 25% coverage",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -144,7 +210,7 @@ private fun HeaderCard(report: IndexEstimatesReport) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "Updated ${formatComputedTime(report.computedAtEpochSeconds)}",
+                text = "Updated ${formatRelativeTime(report.computedAtEpochSeconds)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -173,6 +239,11 @@ private fun ScenarioCard(estimate: ScenarioEstimate) {
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                Text(
+                    text = "${estimate.coverageCount} companies",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             Text(
                 text = formatUpside(estimate.impliedUpsideBps),
@@ -197,13 +268,18 @@ private fun formatUpside(bps: Int): String {
     return if (pct >= 0) "+%.1f%%".format(pct) else "%.1f%%".format(pct)
 }
 
-private fun formatComputedTime(epochSeconds: Long): String =
-    DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
-        .format(
-            Instant.ofEpochSecond(epochSeconds)
-                .atZone(ZoneId.systemDefault())
-                .toLocalTime(),
-        )
+private fun formatRelativeTime(epochSeconds: Long): String {
+    var nowSeconds = System.currentTimeMillis() / 1_000
+    var diffSeconds = nowSeconds - epochSeconds
+    return when {
+        diffSeconds < 10 -> "just now"
+        diffSeconds < 60 -> "${diffSeconds}s ago"
+        diffSeconds < 3600 -> "${diffSeconds / 60}m ago"
+        diffSeconds < 86400 -> "${diffSeconds / 3600}h ago"
+        else -> DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
+            .format(Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).toLocalTime())
+    }
+}
 
 @Composable
 private fun EstimatesTrendChart(history: List<IndexEstimatesReport>) {
@@ -235,7 +311,7 @@ private fun EstimatesTrendChart(history: List<IndexEstimatesReport>) {
             val h = size.height
 
             // Y=0 axis line — only when zero is within the visible range
-            val zeroFraction = (0f - model.minUpside) / model.upsideSpan
+            val zeroFraction = (0f - model.drawMinUpside) / (model.drawMaxUpside - model.drawMinUpside).coerceAtLeast(1f)
             if (zeroFraction in 0f..1f) {
                 val zeroY = h - zeroFraction * h
                 drawLine(
@@ -251,7 +327,7 @@ private fun EstimatesTrendChart(history: List<IndexEstimatesReport>) {
                 val path = Path()
                 series.points.forEachIndexed { i, (epoch, upside) ->
                     val x = ((epoch - model.minEpoch).toFloat() / model.epochSpan) * w
-                    val y = h - ((upside - model.minUpside) / model.upsideSpan) * h
+                    val y = h - ((upside - model.drawMinUpside) / (model.drawMaxUpside - model.drawMinUpside).coerceAtLeast(1f)) * h
                     if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
                 drawPath(path, color = color, style = Stroke(width = 2.dp.toPx()))

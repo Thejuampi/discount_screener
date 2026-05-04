@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.profile.ProfileCatalog
+import com.discountscreener.android.data.remote.SecEdgarTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
@@ -31,6 +32,7 @@ class DiscountScreenerAppContainer(context: Context) {
             stateStore = SQLiteStateStore(appContext),
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = YahooFinanceClient(),
+            secondaryTimeseriesProvider = SecEdgarTimeseriesProvider(),
         )
     }
 

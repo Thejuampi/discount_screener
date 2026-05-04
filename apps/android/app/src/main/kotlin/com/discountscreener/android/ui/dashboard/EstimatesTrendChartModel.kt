@@ -15,7 +15,16 @@ internal data class EstimatesTrendChartModel(
     val minEpoch: Long,
     val maxEpoch: Long,
 ) {
-    val upsideSpan: Float = (maxUpside - minUpside).coerceAtLeast(1f)
+    val drawMinUpside: Float
+        get() {
+            val raw = maxUpside - minUpside
+            return if (raw < 10f) (maxUpside + minUpside) / 2f - 5f else minUpside
+        }
+    val drawMaxUpside: Float
+        get() {
+            val raw = maxUpside - minUpside
+            return if (raw < 10f) (maxUpside + minUpside) / 2f + 5f else maxUpside
+        }
     val epochSpan: Long = (maxEpoch - minEpoch).coerceAtLeast(1L)
 
     companion object {
