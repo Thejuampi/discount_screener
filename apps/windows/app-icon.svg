@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded background -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- Subtle inner highlight -->
+  <rect x="6" y="6" width="500" height="500" rx="108" fill="none"
+        stroke="rgba(255,255,255,0.18)" stroke-width="2"/>
+
+  <!-- 3 ascending bars (semi-transparent) -->
+  <rect x="98"  y="320" width="76" height="108" rx="14" fill="rgba(255,255,255,0.55)"/>
+  <rect x="218" y="248" width="76" height="180" rx="14" fill="rgba(255,255,255,0.78)"/>
+  <rect x="338" y="170" width="76" height="258" rx="14" fill="rgba(255,255,255,0.96)"/>
+
+  <!-- Upward trending line -->
+  <polyline points="80,210 200,140 312,170 432,82"
+            stroke="white" stroke-width="22" fill="none"
+            stroke-linecap="round" stroke-linejoin="round"
+            filter="url(#glow)"/>
+
+  <!-- Arrow head at top right -->
+  <polyline points="372,82 432,82 432,142"
+            stroke="white" stroke-width="22" fill="none"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

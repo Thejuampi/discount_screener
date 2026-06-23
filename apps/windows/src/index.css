@@ -1,0 +1,6 @@
+/* Minimal reset — all UI styles live in App.css */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
