@@ -44,3 +44,17 @@ Thumbs.db
 *.pyc
 *.pyo
 *.pyd
+
+# ── Windows (Tauri) app: build artifacts & deps ──
+/apps/windows/node_modules/
+/apps/windows/src-tauri/target/
+/apps/windows/dist/
+
+# ── Personal / sensitive data — NEVER commit ──
+schwab reports/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+history.sqlite
