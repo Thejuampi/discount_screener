@@ -41,6 +41,7 @@ import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ProjectedProviderState
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -190,6 +191,7 @@ fun DashboardScreen(
                     indexEstimates = state.indexEstimates,
                     loading = state.indexEstimatesLoading,
                     estimatesHistory = state.estimatesHistory,
+                    notice = state.estimatesNotice,
                 )
             }
         }
@@ -298,6 +300,8 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
 
         item { DatabaseStatsCard(state) }
 
+        item { ProviderStateCard(state.providerState) }
+
         item { LogStatsCard(state) }
 
         item {
@@ -369,6 +373,46 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
                 showClearDialog = false
             },
         )
+    }
+}
+
+internal data class ProviderStatusSummary(
+    val title: String,
+    val status: String,
+    val affectedSymbols: String?,
+    val retryState: String,
+)
+
+internal fun providerStatusSummary(providerState: ProjectedProviderState): ProviderStatusSummary = ProviderStatusSummary(
+    title = "Provider State: ${providerState.category.name}",
+    status = providerState.statusCopy,
+    affectedSymbols = providerState.affectedSymbols.takeIf(List<String>::isNotEmpty)?.joinToString(", "),
+    retryState = if (providerState.retryable) "Retryable" else "No retry needed",
+)
+
+@Composable
+private fun ProviderStateCard(providerState: ProjectedProviderState) {
+    val summary = providerStatusSummary(providerState)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(summary.title, fontWeight = FontWeight.Bold)
+            Text(summary.status, style = MaterialTheme.typography.bodySmall)
+            summary.affectedSymbols?.let {
+                Text("Affected: $it", style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                summary.retryState,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

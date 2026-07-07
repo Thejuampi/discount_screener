@@ -28,6 +28,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.discountscreener.android.domain.model.DashboardNotice
+import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.core.model.DcfCoverageStatus
 import com.discountscreener.core.model.DcfCoverageSummary
 import com.discountscreener.core.model.EstimateScenario
@@ -43,6 +45,7 @@ fun EstimatesScreen(
     indexEstimates: IndexEstimatesReport?,
     loading: Boolean,
     estimatesHistory: List<IndexEstimatesReport> = emptyList(),
+    notice: DashboardNotice? = null,
 ) {
     when {
         loading && indexEstimates == null -> {
@@ -50,27 +53,35 @@ fun EstimatesScreen(
                 CircularProgressIndicator()
             }
         }
+        notice != null && indexEstimates == null -> {
+            EstimatesNoticeState(notice)
+        }
         indexEstimates == null -> {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("No estimates available")
             }
         }
         indexEstimates.currentWeightedPriceCents == 0L -> {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No price data available yet")
-            }
+            EstimatesNoticeState(notice ?: DashboardNotice("Estimates unavailable", "No price data available yet", DashboardNoticeSeverity.Info))
         }
         else -> {
-            EstimatesContent(indexEstimates, estimatesHistory)
+            EstimatesContent(indexEstimates, estimatesHistory, notice)
         }
     }
 }
 
 @Composable
-private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: List<IndexEstimatesReport>) {
+private fun EstimatesContent(
+    report: IndexEstimatesReport,
+    estimatesHistory: List<IndexEstimatesReport>,
+    notice: DashboardNotice?,
+) {
     val coverage = report.dcfCoverage
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        notice?.let { activeNotice ->
+            item { NoticeBanner(activeNotice) }
+        }
         item {
             HeaderCard(report)
         }
@@ -92,6 +103,48 @@ private fun EstimatesContent(report: IndexEstimatesReport, estimatesHistory: Lis
         items(report.scenarios) { scenario -> ScenarioCard(scenario) }
         item {
             EstimatesTrendChart(estimatesHistory)
+        }
+    }
+}
+
+@Composable
+private fun EstimatesNoticeState(notice: DashboardNotice) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        NoticeBanner(notice)
+    }
+}
+
+@Composable
+private fun NoticeBanner(notice: DashboardNotice) {
+    val containerColor = when (notice.severity) {
+        DashboardNoticeSeverity.Info -> MaterialTheme.colorScheme.surfaceVariant
+        DashboardNoticeSeverity.Warning -> MaterialTheme.colorScheme.tertiaryContainer
+        DashboardNoticeSeverity.Error -> MaterialTheme.colorScheme.errorContainer
+    }
+    val contentColor = when (notice.severity) {
+        DashboardNoticeSeverity.Info -> MaterialTheme.colorScheme.onSurfaceVariant
+        DashboardNoticeSeverity.Warning -> MaterialTheme.colorScheme.onTertiaryContainer
+        DashboardNoticeSeverity.Error -> MaterialTheme.colorScheme.onErrorContainer
+    }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = notice.title,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor,
+            )
+            Text(
+                text = notice.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor,
+            )
         }
     }
 }

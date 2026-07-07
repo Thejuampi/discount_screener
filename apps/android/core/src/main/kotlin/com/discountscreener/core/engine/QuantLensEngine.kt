@@ -1,6 +1,9 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ComputationArea
+import com.discountscreener.core.model.ComputationFailure
+import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.CorrelationRiskBand
 import com.discountscreener.core.model.EvidenceStrengthBand
 import com.discountscreener.core.model.ExpectedValueRangeSource
@@ -23,6 +26,7 @@ import com.discountscreener.core.model.QuantLensTrendReliability
 import com.discountscreener.core.model.SimilarSetupMatch
 import com.discountscreener.core.model.SimilarSetupsBand
 import com.discountscreener.core.model.TrendReliabilityBand
+import com.discountscreener.core.model.captureComputationResult
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -31,7 +35,12 @@ import kotlin.math.sqrt
 object QuantLensEngine {
     private const val MIN_HORIZON_WINDOWS = 10
 
-    fun analyze(input: QuantLensInput): QuantLensReport {
+    fun analyze(input: QuantLensInput): ComputationResult<QuantLensReport> = captureComputationResult(
+        area = ComputationArea.QuantLens,
+        code = "quant_lens_analysis_failed",
+        symbol = input.detail.symbol,
+        message = { error -> error.message ?: "Quant Lens analysis failed." },
+    ) {
         val evidenceStrength = analyzeEvidenceStrength(input)
         val expectedValueRange = analyzeExpectedValueRange(input)
         val correlationRisk = analyzeCorrelationRisk(input)
@@ -39,7 +48,7 @@ object QuantLensEngine {
         val horizonContext = analyzeHorizonContext(input)
         val similarSetups = analyzeSimilarSetups(input, evidenceStrength, expectedValueRange, trendReliability)
 
-        return QuantLensReport(
+        QuantLensReport(
             symbol = input.detail.symbol,
             selectedRange = input.selectedRange,
             computedAtEpochSeconds = input.nowEpochSeconds,
@@ -243,10 +252,18 @@ object QuantLensEngine {
             )
         }
 
-        val dcfAnchors = input.dcfAnalysis?.let {
-            listOf(it.bearIntrinsicValueCents, it.baseIntrinsicValueCents, it.bullIntrinsicValueCents)
-        }.orEmpty().filter { it > 0L }
-        val analystAnchors = analystAnchors(detail)
+        val dcfAnchors = normalizedScenarioAnchors(
+            anchors = input.dcfAnalysis?.let {
+                listOf(it.bearIntrinsicValueCents, it.baseIntrinsicValueCents, it.bullIntrinsicValueCents)
+            }.orEmpty(),
+            source = "DCF",
+            symbol = detail.symbol,
+        )
+        val analystAnchors = normalizedScenarioAnchors(
+            anchors = analystAnchors(detail),
+            source = "analyst",
+            symbol = detail.symbol,
+        )
 
         val sourceAndAnchors = when {
             dcfAnchors.size == 3 -> ExpectedValueRangeSource.Dcf to dcfAnchors
@@ -437,6 +454,35 @@ object QuantLensEngine {
             detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents,
             detail.externalSignalHighFairValueCents,
         ).filter { it > 0L }
+
+    private fun normalizedScenarioAnchors(
+        anchors: List<Long>,
+        source: String,
+        symbol: String,
+    ): List<Long> {
+        if (anchors.isEmpty()) {
+            return emptyList()
+        }
+        val positiveAnchors = anchors.filter { it > 0L }
+        if (positiveAnchors.size < anchors.size) {
+            return positiveAnchors
+        }
+        if (positiveAnchors.size < 3) {
+            return positiveAnchors
+        }
+        if (positiveAnchors.size != 3) {
+            throw invalidScenarioAnchors(source, symbol, positiveAnchors)
+        }
+        return positiveAnchors.sorted()
+    }
+
+    private fun invalidScenarioAnchors(
+        source: String,
+        symbol: String,
+        anchors: List<Long>,
+    ): IllegalStateException = IllegalStateException(
+        "$source scenario anchors could not be normalized for $symbol: ${anchors.joinToString()}",
+    )
 
     private fun returnsByEpoch(candles: List<HistoricalCandle>): Map<Long, Double> =
         candles

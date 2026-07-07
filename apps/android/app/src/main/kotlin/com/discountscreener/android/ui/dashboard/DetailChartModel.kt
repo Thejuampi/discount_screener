@@ -1,14 +1,23 @@
 package com.discountscreener.android.ui.dashboard
 
 import com.discountscreener.core.engine.ChartAnalysis
-import com.discountscreener.core.engine.VolumeProfileBin
+import com.discountscreener.core.engine.ReplayWindow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ProjectedChartData
+import com.discountscreener.core.model.ProjectedChartStatus
+import com.discountscreener.core.model.ProjectedTechnicalSignal
+import com.discountscreener.core.model.ProjectedTechnicalSignalBias
+import com.discountscreener.core.model.ProjectedTechnicalSignalKind
+import com.discountscreener.core.model.ProjectedVolumeProfileAnalysis
+import com.discountscreener.core.model.ProjectedVolumeProfileBin
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+
+private const val SnapshotVolumeProfileBinCount = 18
 
 internal data class ChartAxisLabels(
     val top: String,
@@ -42,11 +51,11 @@ internal data class PriceChartModel(
     val ema200: List<Double>,
     val axisLabels: ChartAxisLabels,
     val trendSignals: List<TrendSignal>,
+    val latestEma20Cents: Long?,
+    val latestEma50Cents: Long?,
+    val latestEma200Cents: Long?,
 ) {
     val span: Float = (maxValue - minValue).coerceAtLeast(1f)
-    val latestEma20Cents: Long? = ema20.lastOrNull()?.roundToLong()
-    val latestEma50Cents: Long? = ema50.lastOrNull()?.roundToLong()
-    val latestEma200Cents: Long? = ema200.lastOrNull()?.roundToLong()
 }
 
 internal data class VolumeChartModel(
@@ -55,7 +64,7 @@ internal data class VolumeChartModel(
 )
 
 internal data class VolumeProfileModel(
-    val bins: List<VolumeProfileBin>,
+    val bins: List<ProjectedVolumeProfileBin>,
     val maxBinVolume: Long,
 )
 
@@ -68,65 +77,148 @@ internal data class MacdChartModel(
     val trendSignal: TrendSignal?,
 )
 
+internal data class SnapshotChartModels(
+    val replayWindow: ReplayWindow,
+    val visibleCandles: List<HistoricalCandle>,
+    val priceChartModel: PriceChartModel?,
+    val volumeChartModel: VolumeChartModel?,
+    val macdChartModel: MacdChartModel?,
+    val volumeProfileModel: VolumeProfileModel?,
+    val trendSignals: List<TrendSignal>,
+    val dateTicks: List<ChartDateTick>,
+)
+
+internal fun buildSnapshotChartModels(
+    chartRange: ChartRange,
+    candles: List<HistoricalCandle>,
+    replayOffset: Int,
+    projectedChart: ProjectedChartData? = null,
+): SnapshotChartModels {
+    var projectedCandidate = projectedChart?.takeIf { chart ->
+        chart.analysis.status != ProjectedChartStatus.Unavailable ||
+            chart.analysis.replayWindow.totalCandles > 0 ||
+            chart.candles.isNotEmpty()
+    }
+    if (projectedCandidate != null) {
+        return buildProjectedSnapshotChartModels(projectedCandidate, replayOffset)
+    }
+    var replayWindow = ChartAnalysis.buildReplayWindow(candles, replayOffset)
+    var visibleCandles = replayWindow.visibleCandles
+    var priceChartModel = buildPriceChartModel(visibleCandles)
+    var volumeChartModel = buildVolumeChartModel(visibleCandles)
+    var macdChartModel = buildMacdChartModel(visibleCandles)
+    var volumeProfileModel = priceChartModel?.let { priceModel ->
+        buildVolumeProfileModel(
+            candles = visibleCandles,
+            minPriceCents = priceModel.minValue.roundToLong(),
+            maxPriceCents = priceModel.maxValue.roundToLong(),
+            binCount = SnapshotVolumeProfileBinCount,
+        )
+    }
+    var trendSignals = trendSignals(priceChartModel, macdChartModel)
+    return SnapshotChartModels(
+        replayWindow = replayWindow,
+        visibleCandles = visibleCandles,
+        priceChartModel = priceChartModel,
+        volumeChartModel = volumeChartModel,
+        macdChartModel = macdChartModel,
+        volumeProfileModel = volumeProfileModel,
+        trendSignals = trendSignals,
+        dateTicks = buildDateAxisTicks(visibleCandles, chartRange),
+    )
+}
+
+private fun buildProjectedSnapshotChartModels(
+    chart: ProjectedChartData,
+    replayOffset: Int,
+): SnapshotChartModels {
+    var replayAdjustedChart = projectedChartForReplayOffset(chart, replayOffset)
+    var projectedReplayWindow = replayAdjustedChart.analysis.replayWindow
+    var replayWindow = ReplayWindow(
+        visibleCandles = projectedReplayWindow.visibleCandles,
+        totalCandles = projectedReplayWindow.totalCandles,
+        replayOffset = projectedReplayWindow.replayOffset,
+    )
+    var priceChartModel = buildPriceChartModel(replayAdjustedChart)
+    var volumeChartModel = buildVolumeChartModel(replayAdjustedChart)
+    var macdChartModel = buildMacdChartModel(replayAdjustedChart)
+    var volumeProfileModel = buildVolumeProfileModel(replayAdjustedChart.analysis.volumeProfile)
+    var trendSignals = trendSignals(priceChartModel, macdChartModel)
+    return SnapshotChartModels(
+        replayWindow = replayWindow,
+        visibleCandles = replayWindow.visibleCandles,
+        priceChartModel = priceChartModel,
+        volumeChartModel = volumeChartModel,
+        macdChartModel = macdChartModel,
+        volumeProfileModel = volumeProfileModel,
+        trendSignals = trendSignals,
+        dateTicks = buildDateAxisTicks(replayWindow.visibleCandles, replayAdjustedChart.range),
+    )
+}
+
+private fun projectedChartForReplayOffset(
+    chart: ProjectedChartData,
+    replayOffset: Int,
+): ProjectedChartData {
+    if (chart.analysis.replayWindow.replayOffset == replayOffset || chart.candles.isEmpty()) {
+        return chart
+    }
+    return ChartAnalysis.buildProjectedChartData(
+        range = chart.range,
+        candles = chart.candles,
+        capturedAtEpochSeconds = chart.summary?.capturedAt ?: chart.candles.last().epochSeconds,
+        replayOffset = replayOffset,
+        volumeProfileBinCount = chart.analysis.volumeProfile?.bins?.size?.takeIf { binCount -> binCount > 0 }
+            ?: SnapshotVolumeProfileBinCount,
+        summary = chart.summary,
+    )
+}
+
+private fun trendSignals(
+    priceChartModel: PriceChartModel?,
+    macdChartModel: MacdChartModel?,
+): List<TrendSignal> = buildList {
+    addAll(priceChartModel?.trendSignals.orEmpty())
+    macdChartModel?.trendSignal?.let(::add)
+}
+
 internal fun buildPriceChartModel(candles: List<HistoricalCandle>): PriceChartModel? {
     if (candles.isEmpty()) return null
-    val closes = candles.map { it.closeCents.toDouble() }
-    val ema20 = emaValues(closes, 20)
-    val ema50 = emaValues(closes, 50)
-    val ema200 = emaValues(closes, 200)
-    val allValues = buildList {
-        candles.forEach { candle ->
-            add(candle.lowCents.toFloat())
-            add(candle.highCents.toFloat())
-            add(candle.openCents.toFloat())
-            add(candle.closeCents.toFloat())
-        }
-        addAll(ema20.map(Double::toFloat))
-        addAll(ema50.map(Double::toFloat))
-        addAll(ema200.map(Double::toFloat))
-    }
-    val (minValue, maxValue) = paddedValueRange(
-        min = allValues.minOrNull() ?: 0f,
-        max = allValues.maxOrNull() ?: 0f,
-    )
+    var chart = projectedChartDataForVisibleCandles(candles)
+    return buildPriceChartModel(chart)
+}
+
+internal fun buildPriceChartModel(chart: ProjectedChartData): PriceChartModel? {
+    var price = chart.analysis.price ?: return null
     return PriceChartModel(
-        minValue = minValue,
-        maxValue = maxValue,
-        ema20 = ema20,
-        ema50 = ema50,
-        ema200 = ema200,
-        axisLabels = axisLabelsForCents(minValue, maxValue),
-        trendSignals = listOfNotNull(
-            buildTrendSignal(
-                fastSeries = ema20,
-                slowSeries = ema50,
-                label = "E20/E50",
-                bullishMeaning = "Short trend is above medium trend",
-                bearishMeaning = "Short trend is below medium trend",
-                bullishCrossMeaning = "Short trend just crossed above medium trend",
-                bearishCrossMeaning = "Short trend just crossed below medium trend",
-            ),
-            buildTrendSignal(
-                fastSeries = ema50,
-                slowSeries = ema200,
-                label = "E50/E200",
-                bullishMeaning = "Medium trend is above long trend",
-                bearishMeaning = "Medium trend is below long trend",
-                bullishCrossMeaning = "Medium trend just crossed above long trend",
-                bearishCrossMeaning = "Medium trend just crossed below long trend",
-            ),
-        ),
+        minValue = price.domain.minValue,
+        maxValue = price.domain.maxValue,
+        ema20 = price.ema20,
+        ema50 = price.ema50,
+        ema200 = price.ema200,
+        axisLabels = axisLabelsForCents(price.domain.minValue, price.domain.maxValue),
+        trendSignals = chart.analysis.technicalSignals.filter { signal ->
+            signal.kind == ProjectedTechnicalSignalKind.Ema20Ema50 || signal.kind == ProjectedTechnicalSignalKind.Ema50Ema200
+        }.map(::adaptTrendSignal),
+        latestEma20Cents = price.latestEma20Cents,
+        latestEma50Cents = price.latestEma50Cents,
+        latestEma200Cents = price.latestEma200Cents,
     )
 }
 
 internal fun buildVolumeChartModel(candles: List<HistoricalCandle>): VolumeChartModel? {
     if (candles.isEmpty()) return null
-    val maxVolume = candles.maxOfOrNull(HistoricalCandle::volume)?.coerceAtLeast(1L) ?: 1L
+    var chart = projectedChartDataForVisibleCandles(candles)
+    return buildVolumeChartModel(chart)
+}
+
+internal fun buildVolumeChartModel(chart: ProjectedChartData): VolumeChartModel? {
+    var volume = chart.analysis.volume ?: return null
     return VolumeChartModel(
-        maxVolume = maxVolume,
+        maxVolume = volume.maxVolume,
         axisLabels = ChartAxisLabels(
-            top = compactFinancialNumber(maxVolume),
-            middle = compactFinancialNumber(maxVolume / 2),
+            top = compactFinancialNumber(volume.maxVolume),
+            middle = compactFinancialNumber(volume.maxVolume / 2),
             bottom = "0",
         ),
     )
@@ -139,16 +231,24 @@ internal fun buildVolumeProfileModel(
     binCount: Int,
 ): VolumeProfileModel? {
     if (candles.isEmpty() || binCount <= 0) return null
-    val bins = ChartAnalysis.computeVolumeProfile(
+    var profile = ChartAnalysis.buildVolumeProfileAnalysis(
         candles = candles,
         minPriceCents = minPriceCents,
         maxPriceCents = maxPriceCents,
         binCount = binCount,
     )
-    val maxBinVolume = bins.maxOfOrNull(VolumeProfileBin::totalVolume) ?: 0L
     return VolumeProfileModel(
-        bins = bins,
-        maxBinVolume = maxBinVolume,
+        bins = profile.bins,
+        maxBinVolume = profile.maxBinVolume,
+    )
+}
+
+internal fun buildVolumeProfileModel(profile: ProjectedVolumeProfileAnalysis?): VolumeProfileModel? {
+    profile ?: return null
+    if (profile.bins.isEmpty()) return null
+    return VolumeProfileModel(
+        bins = profile.bins,
+        maxBinVolume = profile.maxBinVolume,
     )
 }
 
@@ -158,34 +258,28 @@ internal fun replayStatusText(
     replayOffset: Int,
     maxVolume: Long,
 ): String {
-    val replayLabel = if (replayOffset > 0) "Replay -$replayOffset from live" else "Live"
+    var replayLabel = if (replayOffset > 0) "Replay -$replayOffset from live" else "Live"
     return "Showing $visibleCount / $totalCount candles  |  $replayLabel  |  Volume max ${compactFinancialNumber(maxVolume)}"
 }
 
 internal fun buildMacdChartModel(candles: List<HistoricalCandle>): MacdChartModel? {
-    if (candles.size < 26) return null
-    val closes = candles.map { it.closeCents.toDouble() }
-    val ema12 = emaValues(closes, 12)
-    val ema26 = emaValues(closes, 26)
-    val macdLine = ema12.zip(ema26).map { (fast, slow) -> fast - slow }
-    val signalLine = emaValues(macdLine, 9)
-    val histogram = macdLine.zip(signalLine).map { (macd, signal) -> macd - signal }
-    val scale = macdChartScale(macdLine, signalLine, histogram)
+    if (candles.isEmpty()) return null
+    var chart = projectedChartDataForVisibleCandles(candles)
+    return buildMacdChartModel(chart)
+}
+
+internal fun buildMacdChartModel(chart: ProjectedChartData): MacdChartModel? {
+    var macd = chart.analysis.macd ?: return null
+    var scale = macdChartScale(macd.macdLine, macd.signalLine, macd.histogram)
     return MacdChartModel(
-        macdLine = macdLine,
-        signalLine = signalLine,
-        histogram = histogram,
+        macdLine = macd.macdLine,
+        signalLine = macd.signalLine,
+        histogram = macd.histogram,
         scale = scale,
         axisLabels = axisLabelsForCents(scale.minValue, scale.maxValue),
-        trendSignal = buildTrendSignal(
-            fastSeries = macdLine,
-            slowSeries = signalLine,
-            label = "MACD",
-            bullishMeaning = "Momentum is above the signal line",
-            bearishMeaning = "Momentum is below the signal line",
-            bullishCrossMeaning = "Momentum just crossed above the signal line",
-            bearishCrossMeaning = "Momentum just crossed below the signal line",
-        ),
+        trendSignal = chart.analysis.technicalSignals
+            .firstOrNull { signal -> signal.kind == ProjectedTechnicalSignalKind.MacdSignal }
+            ?.let(::adaptTrendSignal),
     )
 }
 
@@ -204,8 +298,8 @@ internal fun buildDateAxisTicks(
             ),
         )
     }
-    val labelCount = maxLabels.coerceIn(2, candles.size)
-    val lastIndex = candles.lastIndex
+    var labelCount = maxLabels.coerceIn(2, candles.size)
+    var lastIndex = candles.lastIndex
     return (0 until labelCount)
         .map { tick ->
             (lastIndex.toFloat() * tick.toFloat() / (labelCount - 1).toFloat()).roundToInt()
@@ -220,56 +314,18 @@ internal fun buildDateAxisTicks(
         }
 }
 
-internal fun emaValues(values: List<Double>, period: Int): List<Double> {
-    if (values.isEmpty() || period <= 0) return emptyList()
-    val multiplier = 2.0 / (period + 1)
-    val output = ArrayList<Double>(values.size)
-    var previous = values.first()
-    values.forEachIndexed { index, value ->
-        previous = if (index == 0) value else ((value - previous) * multiplier) + previous
-        output += previous
-    }
-    return output
-}
-
-internal fun buildTrendSignal(
-    fastSeries: List<Double>,
-    slowSeries: List<Double>,
-    label: String,
-    bullishMeaning: String,
-    bearishMeaning: String,
-    bullishCrossMeaning: String,
-    bearishCrossMeaning: String,
-): TrendSignal? {
-    if (fastSeries.size < 2 || slowSeries.size < 2) return null
-    val latestDiff = fastSeries.last() - slowSeries.last()
-    if (latestDiff == 0.0) return null
-    val previousDiff = fastSeries[fastSeries.lastIndex - 1] - slowSeries[slowSeries.lastIndex - 1]
-    val bullish = latestDiff > 0.0
-    val freshCross = (bullish && previousDiff <= 0.0) || (!bullish && previousDiff >= 0.0)
-    val bias = if (bullish) TrendSignalBias.Bull else TrendSignalBias.Bear
-    val title = when {
-        freshCross && bullish -> "Bull cross $label"
-        freshCross -> "Bear cross $label"
-        bullish -> "Bull $label"
-        else -> "Bear $label"
-    }
-    val meaning = when {
-        freshCross && bullish -> bullishCrossMeaning
-        freshCross -> bearishCrossMeaning
-        bullish -> bullishMeaning
-        else -> bearishMeaning
-    }
-    return TrendSignal(
-        title = title,
-        meaning = meaning,
-        bias = bias,
-        freshCross = freshCross,
-    )
-}
+internal fun adaptTrendSignal(signal: ProjectedTechnicalSignal): TrendSignal = TrendSignal(
+    title = signal.title,
+    meaning = signal.meaning,
+    bias = when (signal.bias) {
+        ProjectedTechnicalSignalBias.Bull -> TrendSignalBias.Bull
+        ProjectedTechnicalSignalBias.Bear -> TrendSignalBias.Bear
+    },
+    freshCross = signal.freshCross,
+)
 
 private fun axisLabelsForCents(minValue: Float, maxValue: Float): ChartAxisLabels {
-    val midValue = minValue + ((maxValue - minValue) / 2f)
+    var midValue = minValue + ((maxValue - minValue) / 2f)
     return ChartAxisLabels(
         top = compactMoney(maxValue.roundToLong()),
         middle = compactMoney(midValue.roundToLong()),
@@ -277,17 +333,17 @@ private fun axisLabelsForCents(minValue: Float, maxValue: Float): ChartAxisLabel
     )
 }
 
-private fun paddedValueRange(min: Float, max: Float): Pair<Float, Float> {
-    if (min == max) {
-        val padding = maxOf(1f, kotlin.math.abs(min) * 0.05f)
-        return (min - padding) to (max + padding)
-    }
-    val padding = ((max - min) * 0.05f).coerceAtLeast(1f)
-    return (min - padding) to (max + padding)
-}
+private fun projectedChartDataForVisibleCandles(candles: List<HistoricalCandle>): ProjectedChartData =
+    ChartAnalysis.buildProjectedChartData(
+        range = ChartRange.Month,
+        candles = candles,
+        capturedAtEpochSeconds = candles.lastOrNull()?.epochSeconds ?: 0L,
+        replayOffset = 0,
+        volumeProfileBinCount = 0,
+    )
 
 private fun formatDateTick(epochSeconds: Long, range: ChartRange): String {
-    val zonedDateTime = Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault())
+    var zonedDateTime = Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault())
     return when (range) {
         ChartRange.Day -> zonedDateTime.format(DateTimeFormatter.ofPattern("HH:mm"))
         ChartRange.Week,

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -30,9 +31,12 @@ import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.model.AlertEvent
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ProjectedDetailData
+import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -131,10 +135,12 @@ data class DashboardUiState(
     val issues: List<IssueRecord> = emptyList(),
     val detailRoute: DetailRoute? = null,
     val detailData: SymbolDetail? = null,
+    val projectedDetailData: ProjectedDetailData? = null,
     val detailCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     val detailHistory: List<SymbolRevision> = emptyList(),
     val detailAlerts: List<AlertEvent> = emptyList(),
     val detailQuantLens: QuantLensUiState? = null,
+    val detailNotice: DashboardNotice? = null,
     val rowQuantLensChipsBySymbol: Map<String, List<QuantLensChipUi>> = emptyMap(),
     val lastUpdatedAtEpochSeconds: Long? = null,
     val startupPhase: DashboardStartupPhase = DashboardStartupPhase.Restoring,
@@ -144,9 +150,11 @@ data class DashboardUiState(
     val systemStats: SystemStats? = null,
     val systemStatsLoading: Boolean = false,
     val systemStatusMessage: String? = null,
+    val providerState: ProjectedProviderState = ProjectedProviderState(),
     val indexEstimates: IndexEstimatesReport? = null,
     val indexEstimatesLoading: Boolean = false,
     val estimatesHistory: List<IndexEstimatesReport> = emptyList(),
+    val estimatesNotice: DashboardNotice? = null,
 )
 
 class DashboardViewModel(
@@ -278,16 +286,6 @@ class DashboardViewModel(
         if (tab == DashboardTab.Estimates) {
             loadEstimates()
         }
-        viewModelScope.launch {
-            render(
-                getDashboardSnapshot(
-                    currentFilter(),
-                    _state.value.detailRoute?.symbol,
-                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                    _state.value.opportunityScoringModel,
-                ),
-            )
-        }
     }
 
     private fun openDetail(symbol: String) {
@@ -303,6 +301,7 @@ class DashboardViewModel(
                 sourceTab = sourceTab,
                 sourceSymbols = sourceSymbols,
             ),
+            detailNotice = null,
         )
         loadDetailData(symbol)
     }
@@ -311,10 +310,12 @@ class DashboardViewModel(
         _state.value = _state.value.copy(
             detailRoute = null,
             detailData = null,
+            projectedDetailData = null,
             detailCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
+            detailNotice = null,
         )
     }
 
@@ -327,6 +328,7 @@ class DashboardViewModel(
         val newSymbol = symbols[newIndex]
         _state.value = _state.value.copy(
             detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
+            detailNotice = null,
         )
         loadDetailData(newSymbol)
     }
@@ -339,14 +341,14 @@ class DashboardViewModel(
 
     private fun setChartRange(range: ChartRange) {
         val route = _state.value.detailRoute?.copy(chartRange = range, replayOffset = 0) ?: return
-        _state.value = _state.value.copy(detailRoute = route)
+        _state.value = _state.value.copy(detailRoute = route, detailNotice = null)
         loadDetailData(route.symbol)
     }
 
     private fun stepReplayBack() {
         val state = _state.value
         val route = state.detailRoute ?: return
-        val totalCandles = state.detailCharts[route.chartRange].orEmpty().size
+        var totalCandles = projectedChartTotalCandles(state, route) ?: state.detailCharts[route.chartRange].orEmpty().size
         _state.value = state.copy(
             detailRoute = route.copy(
                 replayOffset = ChartAnalysis.stepReplayBack(route.replayOffset, totalCandles),
@@ -401,10 +403,13 @@ class DashboardViewModel(
         _state.value = _state.value.copy(
             detailRoute = null,
             detailData = null,
+            projectedDetailData = null,
             detailCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
+            detailNotice = null,
+            estimatesNotice = null,
         )
         viewModelScope.launch {
             val snapshot = selectDashboardProfile(
@@ -471,26 +476,57 @@ class DashboardViewModel(
             state.trackedRows
         }
 
+    private fun projectedChartTotalCandles(state: DashboardUiState, route: DetailRoute): Int? {
+        var projectedDetail = state.projectedDetailData ?: return null
+        if (projectedDetail.symbol != route.symbol || projectedDetail.chart.range != route.chartRange) return null
+        var replayTotal = projectedDetail.chart.analysis.replayWindow.totalCandles
+        if (replayTotal > 0) return replayTotal
+        var candleTotal = projectedDetail.chart.candles.size
+        return candleTotal.takeIf { total -> total > 0 }
+    }
+
     private fun loadEstimates() {
         activeEstimatesJob?.cancel()
         _state.value = _state.value.copy(indexEstimatesLoading = true)
         activeEstimatesJob = viewModelScope.launch {
             try {
-                val report = getIndexEstimates(_state.value.opportunityScoringModel)
-                val profileName = report.profileName
-                var history = getEstimatesHistory(profileName)
-                val last = history.lastOrNull()
-                val differs = last == null || report.scenarios.any { s ->
-                    val prev = last.scenarios.find { it.scenario == s.scenario }
-                    prev?.impliedUpsideBps != s.impliedUpsideBps || prev?.coverageCount != s.coverageCount
+                when (val result = getIndexEstimates(_state.value.opportunityScoringModel)) {
+                    is ComputationResult.Error -> {
+                        _state.value = _state.value.copy(
+                            estimatesNotice = DashboardNotice(
+                                title = "Estimates unavailable",
+                                message = result.failure.message,
+                            ),
+                        )
+                        return@launch
+                    }
+                    is ComputationResult.Success -> {
+                        val report = result.value
+                        val profileName = report.profileName
+                        var history = getEstimatesHistory(profileName)
+                        val last = history.lastOrNull()
+                        val differs = last == null || report.scenarios.any { scenario ->
+                            val previous = last.scenarios.find { it.scenario == scenario.scenario }
+                            previous?.impliedUpsideBps != scenario.impliedUpsideBps ||
+                                previous?.coverageCount != scenario.coverageCount
+                        }
+                        if (differs) {
+                            saveEstimatesSnapshot(report)
+                            history = getEstimatesHistory(profileName)
+                        }
+                        _state.value = _state.value.copy(
+                            indexEstimates = report,
+                            estimatesHistory = history,
+                            estimatesNotice = null,
+                        )
+                    }
                 }
-                if (differs) {
-                    saveEstimatesSnapshot(report)
-                    history = getEstimatesHistory(profileName)
-                }
+            } catch (error: Throwable) {
                 _state.value = _state.value.copy(
-                    indexEstimates = report,
-                    estimatesHistory = history,
+                    estimatesNotice = DashboardNotice(
+                        title = "Estimates unavailable",
+                        message = error.message ?: "Estimates could not be refreshed.",
+                    ),
                 )
             } finally {
                 _state.value = _state.value.copy(indexEstimatesLoading = false)
@@ -525,8 +561,12 @@ class DashboardViewModel(
     }
 
     private fun render(snapshot: DashboardSnapshot) {
-        val currentRoute = _state.value.detailRoute
-        _state.value = _state.value.copy(
+        var currentState = _state.value
+        var currentRoute = currentState.detailRoute
+        var projectedDetail = snapshot.screenData.selectedDetail
+        var selectedDetailMatchesRoute = currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol
+        var projectedDetailMatchesRoute = currentRoute != null && projectedDetail?.symbol == currentRoute.symbol
+        _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
                 snapshot.startupPhase == DashboardStartupPhase.Refreshing,
@@ -539,31 +579,37 @@ class DashboardViewModel(
             opportunityRows = snapshot.opportunityRows,
             opportunityScoringModel = snapshot.opportunityScoringModel,
             issues = snapshot.issues,
-            detailData = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
+            detailData = if (selectedDetailMatchesRoute) {
                 snapshot.selectedDetail
             } else {
-                _state.value.detailData
+                currentState.detailData
             },
-            detailCharts = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
+            projectedDetailData = if (projectedDetailMatchesRoute) {
+                projectedDetail
+            } else {
+                currentState.projectedDetailData
+            },
+            detailCharts = if (selectedDetailMatchesRoute) {
                 snapshot.selectedCharts
             } else {
-                _state.value.detailCharts
+                currentState.detailCharts
             },
-            detailHistory = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
+            detailHistory = if (selectedDetailMatchesRoute) {
                 snapshot.selectedHistory
             } else {
-                _state.value.detailHistory
+                currentState.detailHistory
             },
-            detailAlerts = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
+            detailAlerts = if (selectedDetailMatchesRoute) {
                 snapshot.selectedAlerts
             } else {
-                _state.value.detailAlerts
+                currentState.detailAlerts
             },
-            detailQuantLens = if (currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol) {
-                mapQuantLensReport(snapshot.selectedQuantLens)
+            detailQuantLens = if (selectedDetailMatchesRoute) {
+                mapQuantLensReport(snapshot.selectedQuantLens, snapshot.selectedDetail?.marketPriceCents)
             } else {
-                _state.value.detailQuantLens
+                currentState.detailQuantLens
             },
+            detailNotice = if (selectedDetailMatchesRoute) snapshot.detailNotice else currentState.detailNotice,
             rowQuantLensChipsBySymbol = buildMap {
                 snapshot.trackedRows.forEach { row ->
                     put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
@@ -577,6 +623,9 @@ class DashboardViewModel(
             refreshCompletedSymbols = snapshot.refreshCompletedSymbols,
             refreshTargetSymbols = snapshot.refreshTargetSymbols,
             statusMessage = snapshot.statusMessage,
+            providerState = snapshot.screenData.providerState,
+            indexEstimates = snapshot.screenData.estimates.report,
+            estimatesNotice = snapshot.estimatesNotice ?: currentState.estimatesNotice,
         )
     }
 

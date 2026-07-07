@@ -18,13 +18,16 @@ import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowFreshness
+import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
@@ -34,8 +37,14 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.PriceHistoryPoint
+import com.discountscreener.core.model.ProjectedConfidence
+import com.discountscreener.core.model.ProjectedOpportunityRow
+import com.discountscreener.core.model.ProjectedProviderCategory
+import com.discountscreener.core.model.ProjectedTrackedRow
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensLensId
+import com.discountscreener.core.model.QuantLensRowSummary
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
@@ -48,6 +57,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -114,7 +124,21 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun bootstrap_row_quant_lens_summary_exposes_visible_lens_states() = runTest(dispatcher) {
+    fun bootstrap_filters_projected_tracked_rows_by_query() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            val snapshot = repository.bootstrap(ViewFilter(query = "MSFT"), null, ChartRange.Year, legacyModel)
+
+            assertEquals(listOf("MSFT"), snapshot.trackedRows.map { it.symbol })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_row_quant_lens_summary_uses_projected_row_summary() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
             seedWarmState(store)
@@ -122,15 +146,136 @@ class DefaultDashboardRepositoryTest {
             val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
 
             assertEquals(
-                listOf(
-                    QuantLensLensId.EvidenceStrength,
-                    QuantLensLensId.ExpectedValueRange,
-                    QuantLensLensId.CorrelationRisk,
-                    QuantLensLensId.TrendReliability,
-                    QuantLensLensId.SimilarSetups,
+                QuantLensProjectionParityExpectation(
+                    tracked = snapshot.screenData.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary,
+                    opportunity = snapshot.screenData.opportunityRows.first { it.symbol == "NVDA" }.quantLensSummary,
                 ),
-                snapshot.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary?.lensStates?.map { it.lensId },
+                QuantLensProjectionParityExpectation(
+                    tracked = snapshot.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary,
+                    opportunity = snapshot.opportunityRows.first { it.symbol == "NVDA" }.quantLensSummary,
+                ),
             )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_provider_uncertain_quant_lens_summary_uses_projected_row_summary() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(
+                store,
+                nvdaDcfAnalysis = providerUncertainDcfAnalysis(),
+                nvdaHasExternalSignal = false,
+            )
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertEquals(
+                snapshot.screenData.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary,
+                snapshot.trackedRows.first { it.symbol == "NVDA" }.quantLensSummary,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_populates_projected_screen_data_for_warm_rows() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertEquals(listOf("NVDA", "AAPL", "MSFT"), snapshot.screenData.trackedRows.take(3).map { it.symbol })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_legacy_tracked_row_semantics_mirror_projected_screen_data() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var legacyRow = snapshot.trackedRows.first { it.symbol == "NVDA" }
+            var projectedRow = snapshot.screenData.trackedRows.first { it.symbol == "NVDA" }
+
+            assertEquals(projectedTrackedSemantics(projectedRow), legacyTrackedSemantics(legacyRow))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_legacy_opportunity_row_semantics_mirror_projected_screen_data() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var projectedRow = snapshot.screenData.opportunityRows.first { it.symbol == "NVDA" }
+            var legacyRow = snapshot.opportunityRows.first { it.symbol == "NVDA" }
+
+            assertEquals(projectedOpportunitySemantics(projectedRow), legacyOpportunitySemantics(legacyRow))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_source_free_dcf_projection_is_visible_in_legacy_row() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store, nvdaDcfAnalysis = sourceFreeDcfAnalysis(), nvdaHasExternalSignal = false)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var row = snapshot.trackedRows.first { it.symbol == "NVDA" }
+
+            assertEquals(
+                SourceFreeProjectionExpectation(
+                    providerCategory = ProjectedProviderCategory.SourceUnknown,
+                    trustNote = "Source unknown",
+                    confidence = ConfidenceBand.Low,
+                    freshness = RowFreshness.Restored,
+                ),
+                SourceFreeProjectionExpectation(
+                    providerCategory = snapshot.screenData.providerState.category,
+                    trustNote = row.trustNote,
+                    confidence = row.confidence,
+                    freshness = row.freshness,
+                ),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ticker_switching_with_reversed_analyst_range_keeps_detail_snapshots_alive() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(
+                store = store,
+                nvdaWeightedFairValueCents = 20_000L,
+                nvdaAnalystLowFairValueCents = 23_000L,
+                nvdaAnalystHighFairValueCents = 17_000L,
+            )
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+
+            val initial = repository.bootstrap(ViewFilter(), "AAPL", ChartRange.Year, legacyModel)
+            val malformed = repository.ensureDetailLoaded("NVDA", ViewFilter(), ChartRange.Year, legacyModel)
+            val recovered = repository.ensureDetailLoaded("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(listOf("AAPL", "NVDA", "AAPL"), listOf(initial.selectedDetail?.symbol, malformed.selectedDetail?.symbol, recovered.selectedDetail?.symbol))
+            assertNull(malformed.detailNotice)
+            assertNotNull(malformed.selectedQuantLens)
+            assertEquals(20_000L, malformed.selectedQuantLens?.expectedValueRange?.weightedFairValueCents)
+            assertNull(recovered.detailNotice)
         } finally {
             store.close()
         }
@@ -242,6 +387,38 @@ class DefaultDashboardRepositoryTest {
             assertEquals(20_000L, nvda.valuationChange?.previousFairValueCents)
             assertEquals(18_000L, nvda.valuationChange?.currentFairValueCents)
             assertEquals(ValuationChangeTier.Significant, nvda.valuationChange?.tier)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun refresh_stable_sorted_rank_does_not_report_relative_rerank() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            seedWarmState(store)
+            val client = object : FakeYahooFinanceClient(delayMs = 5) {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    delay(5)
+                    return when (symbol) {
+                        "NVDA" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 20_000, weightedFairValueCents = 20_000)
+                        "AAPL" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 15_000, weightedFairValueCents = 15_000)
+                        "MSFT" -> fetchResult(symbol, marketPriceCents = 10_000, intrinsicValueCents = 12_000, weightedFairValueCents = 12_000)
+                        else -> super.fetchSymbol(symbol)
+                    }
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val snapshot = awaitSnapshot(repository) { current ->
+                listOf("NVDA", "AAPL", "MSFT").all { symbol ->
+                    current.trackedRows.any { it.symbol == symbol && it.state == TrackedRowState.Live }
+                }
+            }
+
+            assertEquals(RowExplanationKind.NoMeaningfulChange, snapshot.trackedRows.first { it.symbol == "NVDA" }.explanation)
         } finally {
             store.close()
         }
@@ -1183,6 +1360,84 @@ class DefaultDashboardRepositoryTest {
         )
     }
 
+    private fun projectedTrackedSemantics(row: ProjectedTrackedRow) = RowProjectionExpectation(
+        fairValueCents = row.fairValueAnchor.valueCents,
+        upsideBps = row.upsideBps,
+        confidence = row.confidence.toLegacyConfidenceName(),
+        trustNote = row.trustSignal?.label,
+        decision = row.decision?.name,
+    )
+
+    private fun legacyTrackedSemantics(row: TrackedSymbolRow) = RowProjectionExpectation(
+        fairValueCents = row.intrinsicValueCents,
+        upsideBps = row.upsideBps,
+        confidence = row.confidence?.name,
+        trustNote = row.trustNote,
+        decision = row.decisionState?.name,
+    )
+
+    private fun projectedOpportunitySemantics(row: ProjectedOpportunityRow) = RowProjectionExpectation(
+        fairValueCents = row.fairValueAnchor.valueCents,
+        upsideBps = row.upsideBps,
+        confidence = row.confidence.toLegacyConfidenceName(),
+        trustNote = row.trustSignal?.label,
+        decision = row.decision?.name,
+    )
+
+    private fun legacyOpportunitySemantics(row: OpportunityListRow) = RowProjectionExpectation(
+        fairValueCents = row.intrinsicValueCents,
+        upsideBps = row.upsideBps,
+        confidence = row.confidence.name,
+        trustNote = row.trustNote,
+        decision = row.decisionState?.name,
+    )
+
+    private fun ProjectedConfidence.toLegacyConfidenceName(): String? = when (this) {
+        ProjectedConfidence.Unavailable -> null
+        ProjectedConfidence.Low,
+        ProjectedConfidence.Provisional,
+        ProjectedConfidence.High -> name
+    }
+
+    private fun sourceFreeDcfAnalysis() = DcfAnalysis(
+        bearIntrinsicValueCents = 10_000L,
+        baseIntrinsicValueCents = 20_000L,
+        bullIntrinsicValueCents = 24_000L,
+        waccBps = 900,
+        baseGrowthBps = 300,
+        netDebtDollars = 0L,
+    )
+
+    private fun providerUncertainDcfAnalysis() = DcfAnalysis(
+        bearIntrinsicValueCents = 0L,
+        baseIntrinsicValueCents = 20_000L,
+        bullIntrinsicValueCents = 0L,
+        waccBps = 900,
+        baseGrowthBps = 300,
+        netDebtDollars = 0L,
+        resolverState = ResolverState.ProviderUncertain,
+    )
+
+    private data class QuantLensProjectionParityExpectation(
+        val tracked: QuantLensRowSummary?,
+        val opportunity: QuantLensRowSummary?,
+    )
+
+    private data class RowProjectionExpectation(
+        val fairValueCents: Long?,
+        val upsideBps: Int?,
+        val confidence: String?,
+        val trustNote: String?,
+        val decision: String?,
+    )
+
+    private data class SourceFreeProjectionExpectation(
+        val providerCategory: ProjectedProviderCategory,
+        val trustNote: String?,
+        val confidence: ConfidenceBand?,
+        val freshness: RowFreshness,
+    )
+
     private fun baseQuantLensFingerprintCandle() = HistoricalCandle(
         epochSeconds = 1_700_000_000L,
         openCents = 10_000L,
@@ -1241,7 +1496,14 @@ class DefaultDashboardRepositoryTest {
         return source
     }
 
-    private suspend fun seedWarmState(store: SQLiteStateStore) {
+    private suspend fun seedWarmState(
+        store: SQLiteStateStore,
+        nvdaDcfAnalysis: DcfAnalysis? = null,
+        nvdaHasExternalSignal: Boolean = true,
+        nvdaWeightedFairValueCents: Long? = 20_000L,
+        nvdaAnalystLowFairValueCents: Long? = nvdaWeightedFairValueCents?.minus(1_500L),
+        nvdaAnalystHighFairValueCents: Long? = nvdaWeightedFairValueCents?.plus(1_500L),
+    ) {
         store.persistBatch(
             rawCaptures = listOf(
                 chartCapture("NVDA", 12_000),
@@ -1249,7 +1511,17 @@ class DefaultDashboardRepositoryTest {
                 chartCapture("MSFT", 10_000),
             ),
             revisions = listOf(
-                revision("NVDA", marketPriceCents = 10_000, intrinsicValueCents = 20_000, gapBps = 5_000),
+                revision(
+                    "NVDA",
+                    marketPriceCents = 10_000,
+                    intrinsicValueCents = 20_000,
+                    gapBps = 5_000,
+                    weightedFairValueCents = nvdaWeightedFairValueCents,
+                    analystLowFairValueCents = nvdaAnalystLowFairValueCents,
+                    analystHighFairValueCents = nvdaAnalystHighFairValueCents,
+                    dcfAnalysis = nvdaDcfAnalysis,
+                    hasExternalSignal = nvdaHasExternalSignal,
+                ),
                 revision("AAPL", marketPriceCents = 10_000, intrinsicValueCents = 15_000, gapBps = 3_333),
                 revision("MSFT", marketPriceCents = 10_000, intrinsicValueCents = 12_000, gapBps = 1_666),
             ),
@@ -1296,8 +1568,12 @@ class DefaultDashboardRepositoryTest {
         intrinsicValueCents: Long,
         gapBps: Int,
         weightedFairValueCents: Long? = intrinsicValueCents,
+        analystLowFairValueCents: Long? = weightedFairValueCents?.minus(1_500L),
+        analystHighFairValueCents: Long? = weightedFairValueCents?.plus(1_500L),
         evaluatedAt: Long = 1_700_000_000L,
         fundamentals: FundamentalSnapshot? = null,
+        dcfAnalysis: DcfAnalysis? = null,
+        hasExternalSignal: Boolean = true,
     ) = SymbolRevisionInput(
         symbol = symbol,
         evaluatedAt = evaluatedAt,
@@ -1312,23 +1588,28 @@ class DefaultDashboardRepositoryTest {
                 marketPriceCents = marketPriceCents,
                 intrinsicValueCents = intrinsicValueCents,
             ),
-            externalSignal = ExternalValuationSignal(
-                symbol = symbol,
-                fairValueCents = intrinsicValueCents,
-                ageSeconds = 0,
-                weightedFairValueCents = weightedFairValueCents,
-                lowFairValueCents = weightedFairValueCents?.minus(1_500),
-                highFairValueCents = weightedFairValueCents?.plus(1_500),
-                weightedAnalystCount = weightedFairValueCents?.let { 18 },
-            ),
+            externalSignal = if (hasExternalSignal) {
+                ExternalValuationSignal(
+                    symbol = symbol,
+                    fairValueCents = intrinsicValueCents,
+                    ageSeconds = 0,
+                    weightedFairValueCents = weightedFairValueCents,
+                    lowFairValueCents = analystLowFairValueCents,
+                    highFairValueCents = analystHighFairValueCents,
+                    weightedAnalystCount = weightedFairValueCents?.let { 18 },
+                )
+            } else {
+                null
+            },
             fundamentals = fundamentals,
+            dcfAnalysis = dcfAnalysis,
             gapBps = gapBps,
             qualification = QualificationStatus.Qualified,
-            externalStatus = ExternalSignalStatus.Supportive,
+            externalStatus = if (hasExternalSignal) ExternalSignalStatus.Supportive else ExternalSignalStatus.Missing,
             coreStatus = MetricGroupStatus(available = true, stale = false),
             fundamentalsStatus = MetricGroupStatus(available = false, stale = false),
             relativeStatus = MetricGroupStatus(available = false, stale = false),
-            dcfStatus = MetricGroupStatus(available = false, stale = false),
+            dcfStatus = MetricGroupStatus(available = dcfAnalysis != null, stale = false),
             chartStatus = MetricGroupStatus(available = true, stale = false),
             isWatched = symbol == "AAPL",
         ),

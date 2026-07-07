@@ -7,11 +7,31 @@ import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ProjectedChartAnalysis
+import com.discountscreener.core.model.ProjectedChartData
+import com.discountscreener.core.model.ProjectedChartStatus
+import com.discountscreener.core.model.ProjectedDetailData
+import com.discountscreener.core.model.ProjectedFairValueAnchor
+import com.discountscreener.core.model.ProjectedFairValueRole
+import com.discountscreener.core.model.ProjectedMacdChartAnalysis
+import com.discountscreener.core.model.ProjectedPriceChartAnalysis
+import com.discountscreener.core.model.ProjectedPriceDomain
+import com.discountscreener.core.model.ProjectedProvenanceState
+import com.discountscreener.core.model.ProjectedReplayWindow
+import com.discountscreener.core.model.ProjectedTechnicalSignal
+import com.discountscreener.core.model.ProjectedTechnicalSignalBias
+import com.discountscreener.core.model.ProjectedTechnicalSignalKind
+import com.discountscreener.core.model.ProjectedValuationAnchor
+import com.discountscreener.core.model.ProjectedValuationAnchorKind
+import com.discountscreener.core.model.ProjectedVolumeChartAnalysis
+import com.discountscreener.core.model.ProjectedVolumeProfileAnalysis
+import com.discountscreener.core.model.ProjectedVolumeProfileBin
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlin.math.roundToLong
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -50,13 +70,16 @@ class DetailScreenTest {
     }
 
     @Test
-    fun ema_values_match_desktop_reference_series() {
-        val emaSeries = emaValues(listOf(10_000.0, 20_000.0, 30_000.0), 2)
+    fun price_chart_model_uses_core_ema_reference_series() {
+        var model = buildPriceChartModel(
+            listOf(
+                sampleCandle(epochSeconds = dateEpoch(2024, 1, 1), closeCents = 10_000L),
+                sampleCandle(epochSeconds = dateEpoch(2024, 1, 2), closeCents = 20_000L),
+                sampleCandle(epochSeconds = dateEpoch(2024, 1, 3), closeCents = 30_000L),
+            ),
+        )!!
 
-        assertEquals(3, emaSeries.size)
-        assertEquals(10_000.0, emaSeries[0], 0.001)
-        assertEquals(16_666.6667, emaSeries[1], 0.01)
-        assertEquals(25_555.5556, emaSeries[2], 0.01)
+        assertEquals(listOf(1_000_000L, 1_095_238L, 1_276_644L), model.ema20.map { value -> (value * 100.0).roundToLong() })
     }
 
     @Test
@@ -95,21 +118,149 @@ class DetailScreenTest {
     }
 
     @Test
-    fun trend_signal_marks_fresh_bull_cross_with_explanation() {
-        val signal = buildTrendSignal(
-            fastSeries = listOf(10.0, 12.0),
-            slowSeries = listOf(11.0, 11.0),
-            label = "E20/E50",
-            bullishMeaning = "bull",
-            bearishMeaning = "bear",
-            bullishCrossMeaning = "bull cross",
-            bearishCrossMeaning = "bear cross",
-        )!!
+    fun chart_models_adapt_projected_technical_series_without_recomputing_them() {
+        var chart = ProjectedChartData(
+            range = ChartRange.Month,
+            candles = listOf(
+                sampleCandle(epochSeconds = dateEpoch(2024, 1, 1), closeCents = 10_000L),
+                sampleCandle(epochSeconds = dateEpoch(2024, 1, 2), closeCents = 20_000L),
+            ),
+            analysis = ProjectedChartAnalysis(
+                status = ProjectedChartStatus.Available,
+                price = ProjectedPriceChartAnalysis(
+                    domain = ProjectedPriceDomain(minValue = 1f, maxValue = 999f),
+                    latestCloseCents = 20_000L,
+                    ema20 = listOf(111.0, 222.0),
+                    ema50 = listOf(333.0, 444.0),
+                    ema200 = listOf(555.0, 666.0),
+                    latestEma20Cents = 222L,
+                    latestEma50Cents = 444L,
+                    latestEma200Cents = 666L,
+                ),
+                macd = ProjectedMacdChartAnalysis(
+                    macdLine = listOf(7.0, 8.0),
+                    signalLine = listOf(5.0, 6.0),
+                    histogram = listOf(2.0, 2.0),
+                    latestMacdCents = 8L,
+                    latestSignalCents = 6L,
+                    latestHistogramCents = 2L,
+                ),
+                technicalSignals = listOf(
+                    ProjectedTechnicalSignal(
+                        kind = ProjectedTechnicalSignalKind.Ema20Ema50,
+                        title = "Sentinel EMA",
+                        meaning = "Projected price signal",
+                        bias = ProjectedTechnicalSignalBias.Bull,
+                        freshCross = true,
+                    ),
+                    ProjectedTechnicalSignal(
+                        kind = ProjectedTechnicalSignalKind.MacdSignal,
+                        title = "Sentinel MACD",
+                        meaning = "Projected momentum signal",
+                        bias = ProjectedTechnicalSignalBias.Bear,
+                        freshCross = false,
+                    ),
+                ),
+            ),
+        )
 
-        assertEquals("Bull cross E20/E50", signal.title)
-        assertEquals("bull cross", signal.meaning)
-        assertEquals(TrendSignalBias.Bull, signal.bias)
-        assertTrue(signal.freshCross)
+        var priceModel = buildPriceChartModel(chart)!!
+        var macdModel = buildMacdChartModel(chart)!!
+
+        assertEquals(
+            ProjectedChartAdapterExpectation(
+                priceMinValue = 1f,
+                priceMaxValue = 999f,
+                ema20 = listOf(111.0, 222.0),
+                latestEma200Cents = 666L,
+                macdLine = listOf(7.0, 8.0),
+                signalTitles = listOf("Sentinel EMA", "Sentinel MACD"),
+            ),
+            ProjectedChartAdapterExpectation(
+                priceMinValue = priceModel.minValue,
+                priceMaxValue = priceModel.maxValue,
+                ema20 = priceModel.ema20,
+                latestEma200Cents = priceModel.latestEma200Cents,
+                macdLine = macdModel.macdLine,
+                signalTitles = priceModel.trendSignals.map(TrendSignal::title) + listOfNotNull(macdModel.trendSignal?.title),
+            ),
+        )
+    }
+
+    @Test
+    fun snapshot_chart_models_prefer_projected_chart_semantics() {
+        var chart = projectedChartWithSentinels()
+        var models = buildSnapshotChartModels(
+            chartRange = ChartRange.Year,
+            candles = sampleCandles(),
+            replayOffset = 2,
+            projectedChart = chart,
+        )
+
+        assertEquals(
+            ProjectedSnapshotChartExpectation(
+                visibleCount = 1,
+                totalCandles = 3,
+                replayOffset = 2,
+                priceMaxValue = 999f,
+                ema20 = listOf(111.0, 222.0),
+                maxVolume = 42_424L,
+                volumeProfileMax = 18L,
+                macdLine = listOf(7.0, 8.0),
+                signalTitles = listOf("Sentinel EMA", "Sentinel MACD"),
+            ),
+            ProjectedSnapshotChartExpectation(
+                visibleCount = models.replayWindow.visibleCount,
+                totalCandles = models.replayWindow.totalCandles,
+                replayOffset = models.replayWindow.replayOffset,
+                priceMaxValue = models.priceChartModel?.maxValue,
+                ema20 = models.priceChartModel?.ema20.orEmpty(),
+                maxVolume = models.volumeChartModel?.maxVolume,
+                volumeProfileMax = models.volumeProfileModel?.maxBinVolume,
+                macdLine = models.macdChartModel?.macdLine.orEmpty(),
+                signalTitles = models.trendSignals.map(TrendSignal::title),
+            ),
+        )
+    }
+
+    @Test
+    fun snapshot_chart_models_apply_route_replay_offset_to_projected_full_candles() {
+        var models = buildSnapshotChartModels(
+            chartRange = ChartRange.Year,
+            candles = sampleCandles(),
+            replayOffset = 1,
+            projectedChart = projectedChartWithSentinels(),
+        )
+
+        assertEquals(
+            ProjectedRouteReplayExpectation(
+                visibleCloseCents = listOf(10_000L, 11_000L),
+                replayOffset = 1,
+                latestEma20Cents = 10_095L,
+                maxVolume = 1_000L,
+            ),
+            ProjectedRouteReplayExpectation(
+                visibleCloseCents = models.replayWindow.visibleCandles.map(HistoricalCandle::closeCents),
+                replayOffset = models.replayWindow.replayOffset,
+                latestEma20Cents = models.priceChartModel?.latestEma20Cents,
+                maxVolume = models.volumeChartModel?.maxVolume,
+            ),
+        )
+    }
+
+    @Test
+    fun trend_signal_marks_fresh_bull_cross_with_explanation() {
+        var signal = adaptTrendSignal(
+            ProjectedTechnicalSignal(
+                kind = ProjectedTechnicalSignalKind.Ema20Ema50,
+                title = "Bull cross E20/E50",
+                meaning = "bull cross",
+                bias = ProjectedTechnicalSignalBias.Bull,
+                freshCross = true,
+            ),
+        )
+
+        assertEquals(TrendSignal("Bull cross E20/E50", "bull cross", TrendSignalBias.Bull, true), signal)
     }
 
     @Test
@@ -355,6 +506,30 @@ class DetailScreenTest {
         assertEquals(17_270L, model.axisLabels.minValueCents)
         assertEquals(27_200L, model.axisLabels.maxValueCents)
         assertEquals("Range $173-$272", model.axisLabels.rangeLabel)
+    }
+
+    @Test
+    fun valuation_range_model_prefers_projected_fair_value_and_anchor_labels() {
+        var detail = detailWithValuationAnchors()
+        var projectedDetail = projectedDetailWithModelValuation(detail)
+        var model = valuationRangeModel(detail, projectedDetail)
+
+        assertEquals(
+            ProjectedValuationExpectation(
+                fairValueMarkerLabel = "Model fair value",
+                fairValueSourceLabel = "Source unknown - saved model",
+                fairValueCents = 12_000L,
+                axisRangeLabel = "Range $90.0-$160",
+                referenceLabels = listOf("Low target", "DCF bear", "DCF bull", "Intrinsic model", "High target"),
+            ),
+            ProjectedValuationExpectation(
+                fairValueMarkerLabel = model.fairValueMarker.label,
+                fairValueSourceLabel = model.fairValueSourceLabel,
+                fairValueCents = model.fairValueMarker.valueCents,
+                axisRangeLabel = model.axisLabels.rangeLabel,
+                referenceLabels = model.referenceValues.map(ValuationAnchor::label),
+            ),
+        )
     }
 
     @Test
@@ -659,8 +834,156 @@ class DetailScreenTest {
         volume = volume,
     )
 
+    private fun projectedChartWithSentinels() = ProjectedChartData(
+        range = ChartRange.Year,
+        candles = listOf(
+            sampleCandle(epochSeconds = dateEpoch(2024, 1, 1), closeCents = 10_000L),
+            sampleCandle(epochSeconds = dateEpoch(2024, 1, 8), closeCents = 11_000L),
+            sampleCandle(epochSeconds = dateEpoch(2024, 1, 15), closeCents = 12_000L),
+        ),
+        analysis = ProjectedChartAnalysis(
+            status = ProjectedChartStatus.Available,
+            replayWindow = ProjectedReplayWindow(
+                visibleCandles = listOf(sampleCandle(epochSeconds = dateEpoch(2024, 1, 1), closeCents = 88_000L)),
+                totalCandles = 3,
+                replayOffset = 2,
+            ),
+            price = ProjectedPriceChartAnalysis(
+                domain = ProjectedPriceDomain(minValue = 1f, maxValue = 999f),
+                latestCloseCents = 88_000L,
+                ema20 = listOf(111.0, 222.0),
+                ema50 = listOf(333.0, 444.0),
+                ema200 = listOf(555.0, 666.0),
+                latestEma20Cents = 222L,
+                latestEma50Cents = 444L,
+                latestEma200Cents = 666L,
+            ),
+            volume = ProjectedVolumeChartAnalysis(maxVolume = 42_424L),
+            volumeProfile = ProjectedVolumeProfileAnalysis(
+                bins = listOf(ProjectedVolumeProfileBin(upVolume = 7L, downVolume = 11L)),
+                maxBinVolume = 18L,
+            ),
+            macd = ProjectedMacdChartAnalysis(
+                macdLine = listOf(7.0, 8.0),
+                signalLine = listOf(5.0, 6.0),
+                histogram = listOf(2.0, 2.0),
+                latestMacdCents = 8L,
+                latestSignalCents = 6L,
+                latestHistogramCents = 2L,
+            ),
+            technicalSignals = listOf(
+                ProjectedTechnicalSignal(
+                    kind = ProjectedTechnicalSignalKind.Ema20Ema50,
+                    title = "Sentinel EMA",
+                    meaning = "Projected price signal",
+                    bias = ProjectedTechnicalSignalBias.Bull,
+                    freshCross = true,
+                ),
+                ProjectedTechnicalSignal(
+                    kind = ProjectedTechnicalSignalKind.MacdSignal,
+                    title = "Sentinel MACD",
+                    meaning = "Projected momentum signal",
+                    bias = ProjectedTechnicalSignalBias.Bear,
+                    freshCross = false,
+                ),
+            ),
+        ),
+    )
+
+    private fun projectedDetailWithModelValuation(detail: SymbolDetail) = ProjectedDetailData(
+        symbol = detail.symbol,
+        detail = detail,
+        fairValueAnchor = ProjectedFairValueAnchor.model(
+            valueCents = 12_000L,
+            sourceLabel = "Source unknown - saved model",
+            role = ProjectedFairValueRole.SourceFreeModel,
+            compactLabel = "Saved model",
+            provenanceState = ProjectedProvenanceState.SourceUnknown,
+        ),
+        valuationAnchors = listOf(
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.PrimaryFairValue,
+                valueCents = 12_000L,
+                label = "Model fair value",
+                sourceLabel = "Source unknown - saved model",
+                provenanceState = ProjectedProvenanceState.SourceUnknown,
+            ),
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.AnalystLowTarget,
+                valueCents = 9_000L,
+                label = "Low target",
+                sourceLabel = "Low target",
+                provenanceState = ProjectedProvenanceState.Live,
+            ),
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.DcfBearModel,
+                valueCents = 10_000L,
+                label = "DCF bear",
+                sourceLabel = "Source unknown - saved model",
+                provenanceState = ProjectedProvenanceState.SourceUnknown,
+            ),
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.DcfBullModel,
+                valueCents = 14_000L,
+                label = "DCF bull",
+                sourceLabel = "Source unknown - saved model",
+                provenanceState = ProjectedProvenanceState.SourceUnknown,
+            ),
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.IntrinsicModel,
+                valueCents = 15_000L,
+                label = "Intrinsic model",
+                sourceLabel = "Intrinsic model",
+                provenanceState = ProjectedProvenanceState.Live,
+            ),
+            ProjectedValuationAnchor(
+                kind = ProjectedValuationAnchorKind.AnalystHighTarget,
+                valueCents = 16_000L,
+                label = "High target",
+                sourceLabel = "High target",
+                provenanceState = ProjectedProvenanceState.Live,
+            ),
+        ),
+    )
+
     private fun dateEpoch(year: Int, month: Int, day: Int): Long =
         LocalDate.of(year, month, day)
             .atStartOfDay(ZoneId.systemDefault())
             .toEpochSecond()
+
+    private data class ProjectedChartAdapterExpectation(
+        val priceMinValue: Float,
+        val priceMaxValue: Float,
+        val ema20: List<Double>,
+        val latestEma200Cents: Long?,
+        val macdLine: List<Double>,
+        val signalTitles: List<String>,
+    )
+
+    private data class ProjectedSnapshotChartExpectation(
+        val visibleCount: Int,
+        val totalCandles: Int,
+        val replayOffset: Int,
+        val priceMaxValue: Float?,
+        val ema20: List<Double>,
+        val maxVolume: Long?,
+        val volumeProfileMax: Long?,
+        val macdLine: List<Double>,
+        val signalTitles: List<String>,
+    )
+
+    private data class ProjectedRouteReplayExpectation(
+        val visibleCloseCents: List<Long>,
+        val replayOffset: Int,
+        val latestEma20Cents: Long?,
+        val maxVolume: Long?,
+    )
+
+    private data class ProjectedValuationExpectation(
+        val fairValueMarkerLabel: String,
+        val fairValueSourceLabel: String,
+        val fairValueCents: Long,
+        val axisRangeLabel: String,
+        val referenceLabels: List<String>,
+    )
 }
