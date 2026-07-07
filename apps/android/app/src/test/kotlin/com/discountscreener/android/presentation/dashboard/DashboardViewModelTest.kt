@@ -1,5 +1,6 @@
 package com.discountscreener.android.presentation.dashboard
 
+import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -26,10 +27,19 @@ import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.ScenarioEstimate
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ComputationArea
+import com.discountscreener.core.model.ComputationFailure
+import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ProjectedDashboardData
+import com.discountscreener.core.model.ProjectedDetailData
+import com.discountscreener.core.model.ProjectedEstimatesData
+import com.discountscreener.core.model.ProjectedFairValueAnchor
+import com.discountscreener.core.model.ProjectedFairValueRole
+import com.discountscreener.core.model.ProjectedProvenanceState
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
@@ -86,6 +96,17 @@ class DashboardViewModelTest {
         viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Watch))
         advanceUntilIdle()
         assertEquals(DashboardTab.Watch, viewModel.state.value.currentTab)
+    }
+
+    @Test
+    fun select_tab_does_not_rebuild_dashboard_snapshot() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Watch))
+        advanceUntilIdle()
+
+        assertEquals(0, repository.currentSnapshotCallCount)
     }
 
     @Test
@@ -362,6 +383,92 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun render_stores_projected_selected_detail_for_matching_route_symbol() = runTest(dispatcher) {
+        var projectedDetail = projectedDetail("AAPL")
+        var repository = RecordingDashboardRepository(
+            detailData = projectedDetail.detail,
+            projectedDetailData = projectedDetail,
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals(projectedDetail, viewModel.state.value.projectedDetailData)
+    }
+
+    @Test
+    fun render_retains_projected_detail_when_next_projection_is_for_different_symbol() = runTest(dispatcher) {
+        var aaplProjection = projectedDetail("AAPL")
+        var msftProjection = projectedDetail("MSFT")
+        var repository = RecordingDashboardRepository(
+            detailData = aaplProjection.detail,
+            projectedDetailData = aaplProjection,
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        repository.setDetailProjection(msftProjection.detail, msftProjection)
+        viewModel.dispatch(DashboardAction.UpdateQuery("route still AAPL"))
+        advanceUntilIdle()
+
+        assertEquals(aaplProjection, viewModel.state.value.projectedDetailData)
+    }
+
+    @Test
+    fun render_does_not_apply_detail_notice_when_next_snapshot_is_for_different_symbol() = runTest(dispatcher) {
+        var aaplProjection = projectedDetail("AAPL")
+        var msftProjection = projectedDetail("MSFT")
+        var repository = RecordingDashboardRepository(
+            detailData = aaplProjection.detail,
+            projectedDetailData = aaplProjection,
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        repository.setDetailProjection(
+            detail = msftProjection.detail,
+            projectedDetail = msftProjection,
+            notice = DashboardNotice(
+                title = "Quant Lens unavailable",
+                message = "MSFT returned a malformed estimate range.",
+            ),
+        )
+        viewModel.dispatch(DashboardAction.UpdateQuery("route still AAPL"))
+        advanceUntilIdle()
+
+        assertEquals(aaplProjection, viewModel.state.value.projectedDetailData)
+        assertNull(viewModel.state.value.detailNotice)
+    }
+
+    @Test
+    fun back_and_profile_switch_clear_projected_detail() = runTest(dispatcher) {
+        var projectedDetail = projectedDetail("AAPL")
+        var repository = RecordingDashboardRepository(
+            detailData = projectedDetail.detail,
+            projectedDetailData = projectedDetail,
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.BackFromDetail)
+        var afterBack = viewModel.state.value.projectedDetailData
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SelectProfile("merval"))
+        advanceUntilIdle()
+        var afterProfileSwitch = viewModel.state.value.projectedDetailData
+
+        assertEquals(
+            ProjectedDetailLifecycleExpectation(afterBack = null, afterProfileSwitch = null),
+            ProjectedDetailLifecycleExpectation(afterBack = afterBack, afterProfileSwitch = afterProfileSwitch),
+        )
+    }
+
+    @Test
     fun toggle_opportunity_model_cycles_v2_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
@@ -458,6 +565,58 @@ class DashboardViewModelTest {
         assertEquals(0, repository.saveSnapshotCallCount)
     }
 
+    @Test
+    fun load_estimates_uses_projected_screen_data_report_without_separate_reads() = runTest(dispatcher) {
+        var report = estimatesReport(profileName = "projected", currentWeightedPriceCents = 123_456L)
+        var repository = RecordingDashboardRepository(projectedEstimatesReport = report)
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Estimates))
+        advanceUntilIdle()
+
+        assertEquals(
+            EstimatesProjectionUseCaseExpectation(
+                report = report,
+                currentSnapshotCalls = 0,
+                currentIndexEstimatesCalls = 1,
+                trackedDetailsCalls = 0,
+                dcfSnapshotCalls = 0,
+            ),
+            EstimatesProjectionUseCaseExpectation(
+                report = viewModel.state.value.indexEstimates,
+                currentSnapshotCalls = repository.currentSnapshotCallCount,
+                currentIndexEstimatesCalls = repository.currentIndexEstimatesCallCount,
+                trackedDetailsCalls = repository.trackedSymbolDetailsCallCount,
+                dcfSnapshotCalls = repository.dcfSnapshotCallCount,
+            ),
+        )
+    }
+
+    @Test
+    fun load_estimates_surfaces_non_fatal_notice_when_result_is_error() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            currentIndexEstimatesResult = ComputationResult.Error(
+                ComputationFailure(
+                    code = "index_estimates_failed",
+                    area = ComputationArea.Estimates,
+                    message = "Estimate model fell outside the supported range.",
+                    recoverable = true,
+                ),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Estimates))
+        advanceUntilIdle()
+
+        assertEquals("Estimates unavailable", viewModel.state.value.estimatesNotice?.title)
+        assertEquals(
+            "Estimate model fell outside the supported range.",
+            viewModel.state.value.estimatesNotice?.message,
+        )
+        assertFalse(viewModel.state.value.indexEstimatesLoading)
+    }
+
     private fun testViewModel(repository: DashboardRepository): DashboardViewModel {
         return DashboardViewModel(
             observeDashboardUpdates = ObserveDashboardUpdatesUseCase(repository),
@@ -517,20 +676,51 @@ class DashboardViewModelTest {
         isWatched = false,
     )
 
+    private fun projectedDetail(symbol: String) = ProjectedDetailData(
+        symbol = symbol,
+        detail = detail(symbol).copy(intrinsicValueCents = 18_000L),
+        fairValueAnchor = ProjectedFairValueAnchor.model(
+            valueCents = 18_000L,
+            sourceLabel = "Source unknown - saved model",
+            role = ProjectedFairValueRole.SourceFreeModel,
+            compactLabel = "Saved model",
+            provenanceState = ProjectedProvenanceState.SourceUnknown,
+        ),
+    )
+
     private class RecordingDashboardRepository(
         private val trackedRows: List<TrackedSymbolRow> = emptyList(),
         private val opportunityRows: List<OpportunityListRow> = emptyList(),
         private val aggressiveRows: List<OpportunityListRow> = opportunityRows,
         private val detailHistory: List<SymbolRevision> = emptyList(),
-        private val detailData: SymbolDetail? = null,
+        private var detailData: SymbolDetail? = null,
         private val detailCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
+        private val projectedEstimatesReport: IndexEstimatesReport = estimatesReport(),
+        private val currentIndexEstimatesResult: ComputationResult<IndexEstimatesReport> =
+            ComputationResult.Success(projectedEstimatesReport),
+        private var projectedDetailData: ProjectedDetailData? = null,
+        private var detailNotice: DashboardNotice? = null,
     ) : DashboardRepository {
         var saveSnapshotCallCount = 0
+        var currentSnapshotCallCount = 0
+        var currentIndexEstimatesCallCount = 0
+        var dcfSnapshotCallCount = 0
+        var trackedSymbolDetailsCallCount = 0
         val savedSnapshots = mutableListOf<IndexEstimatesReport>()
         var lastCurrentFilter: ViewFilter? = null
         var lastRequestedOpportunityModel: OpportunityScoringModel? = null
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
+
+        fun setDetailProjection(
+            detail: SymbolDetail?,
+            projectedDetail: ProjectedDetailData?,
+            notice: DashboardNotice? = null,
+        ) {
+            detailData = detail
+            projectedDetailData = projectedDetail
+            detailNotice = notice
+        }
 
         override fun observeUpdates(): Flow<Long> = updates
 
@@ -547,9 +737,15 @@ class DashboardViewModelTest {
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
+            currentSnapshotCallCount++
             lastCurrentFilter = filter
             lastRequestedOpportunityModel = opportunityScoringModel
             return emptySnapshot(opportunityScoringModel)
+        }
+
+        override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> {
+            currentIndexEstimatesCallCount++
+            return currentIndexEstimatesResult
         }
 
         override suspend fun refreshAll(
@@ -614,10 +810,15 @@ class DashboardViewModelTest {
         override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> =
             savedSnapshots.toList()
 
-        override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> = emptyMap()
+        override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> {
+            dcfSnapshotCallCount++
+            return emptyMap()
+        }
 
-        override suspend fun trackedSymbolDetails(): List<SymbolDetail> = trackedRows.map { row ->
-            SymbolDetail(
+        override suspend fun trackedSymbolDetails(): List<SymbolDetail> {
+            trackedSymbolDetailsCallCount++
+            return trackedRows.map { row ->
+                SymbolDetail(
                 symbol = row.symbol,
                 profitable = true,
                 marketPriceCents = row.marketPriceCents ?: 0L,
@@ -631,7 +832,8 @@ class DashboardViewModelTest {
                 lastSequence = 1,
                 updateCount = 1,
                 isWatched = row.isWatched,
-            )
+                )
+            }
         }
 
         private fun emptySnapshot(
@@ -652,11 +854,49 @@ class DashboardViewModelTest {
             selectedCharts = detailCharts,
             selectedHistory = detailHistory,
             selectedAlerts = emptyList(),
+            detailNotice = detailNotice,
             lastUpdatedAtEpochSeconds = null,
             startupPhase = startupPhase,
             refreshCompletedSymbols = 0,
             refreshTargetSymbols = 0,
             statusMessage = statusMessage,
+            screenData = ProjectedDashboardData(
+                selectedDetail = projectedDetailData,
+                estimates = ProjectedEstimatesData(report = projectedEstimatesReport),
+            ),
+        )
+    }
+
+    private data class ProjectedDetailLifecycleExpectation(
+        val afterBack: ProjectedDetailData?,
+        val afterProfileSwitch: ProjectedDetailData?,
+    )
+
+    private data class EstimatesProjectionUseCaseExpectation(
+        val report: IndexEstimatesReport?,
+        val currentSnapshotCalls: Int,
+        val currentIndexEstimatesCalls: Int,
+        val trackedDetailsCalls: Int,
+        val dcfSnapshotCalls: Int,
+    )
+
+    companion object {
+        private fun estimatesReport(
+            profileName: String = "dow",
+            currentWeightedPriceCents: Long = 0L,
+        ) = IndexEstimatesReport(
+            profileName = profileName,
+            currentWeightedPriceCents = currentWeightedPriceCents,
+            totalSymbols = 0,
+            scenarios = EstimateScenario.entries.map { scenario ->
+                ScenarioEstimate(
+                    scenario = scenario,
+                    weightedPriceCents = currentWeightedPriceCents,
+                    coverageCount = 0,
+                    impliedUpsideBps = 0,
+                )
+            },
+            computedAtEpochSeconds = 1_000L,
         )
     }
 }

@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -64,10 +66,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
+import com.discountscreener.android.domain.model.DashboardNotice
+import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
+import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
 import com.discountscreener.android.presentation.dashboard.HistorySubview
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSectionUi
@@ -78,11 +83,13 @@ import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.significantValuationChange
-import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.ReplayWindow
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ProjectedDetailData
+import com.discountscreener.core.model.ProjectedValuationAnchor
+import com.discountscreener.core.model.ProjectedValuationAnchorKind
 import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
@@ -101,6 +108,8 @@ fun DetailScreen(
     history: List<SymbolRevision>,
     alerts: List<String>,
     quantLens: QuantLensUiState? = null,
+    detailNotice: DashboardNotice? = null,
+    projectedDetail: ProjectedDetailData? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
     BackHandler {
@@ -111,6 +120,7 @@ fun DetailScreen(
     LaunchedEffect(route.symbol, route.subtab) {
         focusRequester.requestFocus()
     }
+    var routeProjectedDetail = projectedDetail?.takeIf { projection -> projection.symbol == route.symbol }
 
     Column(
         modifier = Modifier
@@ -189,9 +199,15 @@ fun DetailScreen(
                     replayOffset = route.replayOffset,
                     alerts = alerts,
                     quantLens = quantLens,
+                    projectedDetail = routeProjectedDetail,
                     onAction = onAction,
                 )
-                DetailSubtab.Lens -> QuantLensContent(quantLens = quantLens, route = route, onAction = onAction)
+                DetailSubtab.Lens -> QuantLensContent(
+                    quantLens = quantLens,
+                    notice = detailNotice,
+                    route = route,
+                    onAction = onAction,
+                )
                 DetailSubtab.History -> HistoryContent(
                     route = route,
                     detail = detail,
@@ -213,33 +229,32 @@ private fun SnapshotContent(
     replayOffset: Int,
     alerts: List<String>,
     quantLens: QuantLensUiState?,
+    projectedDetail: ProjectedDetailData?,
     onAction: (DashboardAction) -> Unit,
 ) {
-    val replayWindow = remember(candles, replayOffset) {
-        ChartAnalysis.buildReplayWindow(candles, replayOffset)
+    var chartModelCache = remember(candles, chartRange, projectedDetail?.chart) {
+        mutableMapOf<Int, SnapshotChartModels>()
     }
-    val visibleCandles = replayWindow.visibleCandles
-    val priceChartModel = remember(visibleCandles) { buildPriceChartModel(visibleCandles) }
-    val volumeChartModel = remember(visibleCandles) { buildVolumeChartModel(visibleCandles) }
-    val macdChartModel = remember(visibleCandles) { buildMacdChartModel(visibleCandles) }
-    val volumeProfileModel = remember(visibleCandles, priceChartModel) {
-        priceChartModel?.let { model ->
-            buildVolumeProfileModel(
-                candles = visibleCandles,
-                minPriceCents = model.minValue.roundToLong(),
-                maxPriceCents = model.maxValue.roundToLong(),
-                binCount = VolumeProfileBinCount,
+    var chartModels = remember(candles, chartRange, replayOffset, projectedDetail?.chart) {
+        chartModelCache.getOrPut(replayOffset) {
+            buildSnapshotChartModels(
+                chartRange = chartRange,
+                candles = candles,
+                replayOffset = replayOffset,
+                projectedChart = projectedDetail?.chart,
             )
         }
     }
-    val dateTicks = remember(visibleCandles, chartRange) { buildDateAxisTicks(visibleCandles, chartRange) }
-    val trendSignals = remember(priceChartModel, macdChartModel) {
-        buildList {
-            addAll(priceChartModel?.trendSignals.orEmpty())
-            macdChartModel?.trendSignal?.let(::add)
-        }
-    }
-    val axisWidth = rememberChartAxisWidth(
+    var replayWindow = chartModels.replayWindow
+    var visibleCandles = chartModels.visibleCandles
+    var priceChartModel = chartModels.priceChartModel
+    var volumeChartModel = chartModels.volumeChartModel
+    var macdChartModel = chartModels.macdChartModel
+    var volumeProfileModel = chartModels.volumeProfileModel
+    var dateTicks = chartModels.dateTicks
+    var trendSignals = chartModels.trendSignals
+    var displayedDetail = detail ?: projectedDetail?.detail
+    var axisWidth = rememberChartAxisWidth(
         priceChartModel?.axisLabels,
         volumeChartModel?.axisLabels,
         macdChartModel?.axisLabels,
@@ -247,18 +262,19 @@ private fun SnapshotContent(
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
-            if (detail == null) {
+            var currentDetail = displayedDetail
+            if (currentDetail == null) {
                 Text("Loading detail...", style = MaterialTheme.typography.bodyMedium)
                 return@item
             }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}  Disc ${formatPct(detail.gapBps)}  Upside ${formatPct(detail.upsideBps)}",
+                    "Price ${money(currentDetail.marketPriceCents)}  Fair ${money(currentDetail.intrinsicValueCents)}  Disc ${formatPct(currentDetail.gapBps)}  Upside ${formatPct(currentDetail.upsideBps)}",
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "Qual ${detail.qualification.name.lowercase()}  Conf ${detail.confidence.name.lowercase()}  External ${detail.externalStatus.name.lowercase()}",
+                    "Qual ${currentDetail.qualification.name.lowercase()}  Conf ${currentDetail.confidence.name.lowercase()}  External ${currentDetail.externalStatus.name.lowercase()}",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
@@ -317,9 +333,9 @@ private fun SnapshotContent(
             )
         }
 
-        detail?.let { d ->
+        displayedDetail?.let { d ->
             item {
-                ValuationSection(detail = d)
+                ValuationSection(detail = d, projectedDetail = projectedDetail)
             }
 
             d.fundamentals?.let { fundamentals ->
@@ -401,10 +417,11 @@ private fun QuantLensMiniStrip(
 @Composable
 private fun QuantLensContent(
     quantLens: QuantLensUiState?,
+    notice: DashboardNotice?,
     route: DetailRoute,
     onAction: (DashboardAction) -> Unit,
 ) {
-    if (quantLens == null) {
+    if (quantLens == null && notice == null) {
         Text("Loading Quant Lens...", style = MaterialTheme.typography.bodyMedium)
         return
     }
@@ -413,7 +430,7 @@ private fun QuantLensContent(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Quant Lens", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                QuantLensHeaderStrip(quantLens.headerChips)
+                QuantLensHeaderStrip(quantLens?.headerChips.orEmpty())
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     ChartRange.entries.forEach { range ->
                         FilterChip(
@@ -425,8 +442,46 @@ private fun QuantLensContent(
                 }
             }
         }
-        items(quantLens.sections, key = { it.lensId.name }) { section ->
+        notice?.let { activeNotice ->
+            item { InlineNoticeCard(activeNotice) }
+        }
+        items(quantLens?.sections.orEmpty(), key = { it.lensId.name }) { section ->
             QuantLensSection(section, onAction)
+        }
+    }
+}
+
+@Composable
+private fun InlineNoticeCard(notice: DashboardNotice) {
+    val containerColor = when (notice.severity) {
+        DashboardNoticeSeverity.Info -> MaterialTheme.colorScheme.surfaceVariant
+        DashboardNoticeSeverity.Warning -> MaterialTheme.colorScheme.tertiaryContainer
+        DashboardNoticeSeverity.Error -> MaterialTheme.colorScheme.errorContainer
+    }
+    val contentColor = when (notice.severity) {
+        DashboardNoticeSeverity.Info -> MaterialTheme.colorScheme.onSurfaceVariant
+        DashboardNoticeSeverity.Warning -> MaterialTheme.colorScheme.onTertiaryContainer
+        DashboardNoticeSeverity.Error -> MaterialTheme.colorScheme.onErrorContainer
+    }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = notice.title,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+            )
+            Text(
+                text = notice.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor,
+            )
         }
     }
 }
@@ -460,6 +515,9 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
             QuantLensChipText(section.chip)
         }
         Text(section.primaryLine, style = MaterialTheme.typography.bodyMedium)
+        section.evRailModel?.let { rail ->
+            EvRangeRail(model = rail, modifier = Modifier.fillMaxWidth().height(56.dp))
+        }
         section.rows.forEach { (label, value) ->
             val rowModifier = if (section.lensId == QuantLensLensId.SimilarSetups) {
                 Modifier
@@ -508,10 +566,86 @@ private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = w
     QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
+@Composable
+private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) {
+    val trackColor = MaterialTheme.colorScheme.outlineVariant
+    val bearColor = BearishChartColor
+    val bullColor = BullishChartColor
+    val baseColor = MaterialTheme.colorScheme.primary
+    val muteAlpha = 0.4f
+
+    Canvas(modifier = modifier) {
+        val padding = 24.dp.toPx()
+        val availableWidth = size.width - 2 * padding
+        val midY = size.height / 2f
+        val markerRadius = 6.dp.toPx()
+        val clampedMin = minOf(model.lowUpsideBps, -200).toFloat()
+        val clampedMax = maxOf(model.highUpsideBps, 200).toFloat()
+        val span = clampedMax - clampedMin
+        fun xFor(bps: Int) = padding + ((bps - clampedMin) / span) * availableWidth
+
+        val xLow = xFor(model.lowUpsideBps)
+        val xWeighted = xFor(model.weightedUpsideBps)
+        val xHigh = xFor(model.highUpsideBps)
+        val trackAlpha = if (model.isStale) muteAlpha else 1f
+
+        // track
+        drawLine(
+            color = trackColor.copy(alpha = trackAlpha),
+            start = androidx.compose.ui.geometry.Offset(xLow, midY),
+            end = androidx.compose.ui.geometry.Offset(xHigh, midY),
+            strokeWidth = 1.5.dp.toPx(),
+        )
+
+        // zero line when crosses zero
+        if (model.crossesZero) {
+            val xZero = xFor(0)
+            drawLine(
+                color = trackColor.copy(alpha = trackAlpha),
+                start = androidx.compose.ui.geometry.Offset(xZero, midY - 10.dp.toPx()),
+                end = androidx.compose.ui.geometry.Offset(xZero, midY + 10.dp.toPx()),
+                strokeWidth = 1.dp.toPx(),
+            )
+        }
+
+        val markerAlpha = if (model.isStale) muteAlpha else 1f
+
+        // bear hollow circle
+        drawCircle(
+            color = bearColor.copy(alpha = markerAlpha),
+            radius = markerRadius,
+            center = androidx.compose.ui.geometry.Offset(xLow, midY),
+            style = Stroke(width = 1.5.dp.toPx()),
+        )
+
+        // bull hollow circle
+        drawCircle(
+            color = bullColor.copy(alpha = markerAlpha),
+            radius = markerRadius,
+            center = androidx.compose.ui.geometry.Offset(xHigh, midY),
+            style = Stroke(width = 1.5.dp.toPx()),
+        )
+
+        // weighted filled diamond
+        val d = markerRadius * 0.85f
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(xWeighted, midY - d)
+            lineTo(xWeighted + d, midY)
+            lineTo(xWeighted, midY + d)
+            lineTo(xWeighted - d, midY)
+            close()
+        }
+        drawPath(path = path, color = baseColor.copy(alpha = markerAlpha))
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ValuationSection(detail: SymbolDetail) {
-    val model = valuationRangeModel(detail)
+private fun ValuationSection(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData? = null,
+) {
+    var model = valuationRangeModel(detail, projectedDetail)
 
     Text("Valuation", fontWeight = FontWeight.Bold)
     ValuationHeadline(model = model)
@@ -549,7 +683,7 @@ private fun ValuationHeadline(model: ValuationRangeModel) {
             color = model.priceMarker.color,
         )
         ValuationMetric(
-            label = "Fair value",
+            label = model.fairValueMarker.label,
             value = money(model.fairValueMarker.valueCents),
             color = model.fairValueMarker.color,
         )
@@ -635,12 +769,13 @@ private fun ValuationRangeChart(
                 )
             }
             listOf(model.priceMarker, model.fairValueMarker).forEach { marker ->
-                val x = priceX(marker.valueCents)
+                var x = priceX(marker.valueCents)
+                var isFairValue = marker == model.fairValueMarker
                 drawLine(
                     color = marker.color,
                     start = Offset(x, centerY - 22f),
                     end = Offset(x, centerY + 22f),
-                    strokeWidth = if (marker.label == "Fair value") 4f else 3f,
+                    strokeWidth = if (isFairValue) 4f else 3f,
                 )
                 drawCircle(color = marker.color, radius = 6f, center = Offset(x, centerY))
             }
@@ -2224,7 +2359,6 @@ internal data class MacdChartScale(
 
 private val MinChartAxisWidth = 36.dp
 private val ChartAxisPadding = 6.dp
-private const val VolumeProfileBinCount = 18
 internal val BullishChartColor = Color(0xFF00FF00)
 internal val BearishChartColor = Color(0xFFFF0000)
 internal val Ema20ChartColor = Color(0xFFFFFF00)
@@ -2343,12 +2477,17 @@ internal fun primaryFairValue(detail: SymbolDetail): PrimaryFairValue = detail.w
     valueCents = detail.intrinsicValueCents,
 )
 
-internal fun valuationRangeModel(detail: SymbolDetail): ValuationRangeModel {
-    val fairValue = primaryFairValue(detail)
-    val targetBand = analystTargetBand(detail)
-    val references = valuationReferenceValues(detail, fairValue)
-    val priceMarker = VisualAnchor("Price", detail.marketPriceCents, valuationReferenceColor("Price"))
-    val fairValueMarker = VisualAnchor(
+internal fun valuationRangeModel(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData? = null,
+): ValuationRangeModel {
+    var projectedModel = projectedValuationRangeModel(detail, projectedDetail)
+    if (projectedModel != null) return projectedModel
+    var fairValue = primaryFairValue(detail)
+    var targetBand = analystTargetBand(detail)
+    var references = valuationReferenceValues(detail, fairValue)
+    var priceMarker = VisualAnchor("Price", detail.marketPriceCents, valuationReferenceColor("Price"))
+    var fairValueMarker = VisualAnchor(
         label = "Fair value",
         valueCents = fairValue.valueCents,
         color = valuationReferenceColor(fairValue.sourceLabel),
@@ -2373,6 +2512,57 @@ internal fun valuationRangeModel(detail: SymbolDetail): ValuationRangeModel {
             references = references,
         ),
     )
+}
+
+private fun projectedValuationRangeModel(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData?,
+): ValuationRangeModel? {
+    projectedDetail ?: return null
+    if (projectedDetail.symbol != detail.symbol) return null
+    var fairValueAnchor = projectedDetail.fairValueAnchor
+    var fairValueCents = fairValueAnchor.valueCents ?: return null
+    if (fairValueCents <= 0L) return null
+    var references = projectedValuationReferenceValues(projectedDetail.valuationAnchors)
+    var targetBand = projectedAnalystTargetBand(projectedDetail.valuationAnchors)
+    var priceMarker = VisualAnchor("Price", detail.marketPriceCents, valuationReferenceColor("Price"))
+    var fairValueMarker = VisualAnchor(
+        label = fairValueAnchor.displayLabel,
+        valueCents = fairValueCents,
+        color = valuationReferenceColor(fairValueAnchor.sourceLabel),
+    )
+    return ValuationRangeModel(
+        priceMarker = priceMarker,
+        fairValueMarker = fairValueMarker,
+        fairValueSourceLabel = fairValueAnchor.sourceLabel,
+        upsideBps = checkedUpsideBps(detail.marketPriceCents, fairValueCents),
+        targetBandCents = targetBand,
+        referenceValues = references,
+        axisLabels = valuationAxisLabels(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+        domain = valuationRangeDomain(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+    )
+}
+
+private fun projectedValuationReferenceValues(anchors: List<ProjectedValuationAnchor>): List<ValuationAnchor> = anchors
+    .filter { anchor -> anchor.kind != ProjectedValuationAnchorKind.PrimaryFairValue }
+    .map { anchor -> ValuationAnchor(anchor.label, anchor.valueCents) }
+    .distinctBy(ValuationAnchor::label)
+
+private fun projectedAnalystTargetBand(anchors: List<ProjectedValuationAnchor>): Pair<Long, Long>? {
+    var low = anchors.firstOrNull { anchor -> anchor.kind == ProjectedValuationAnchorKind.AnalystLowTarget }?.valueCents
+    var high = anchors.firstOrNull { anchor -> anchor.kind == ProjectedValuationAnchorKind.AnalystHighTarget }?.valueCents
+    if (low == null || high == null || low <= 0L || high <= 0L) return null
+    return minOf(low, high) to maxOf(low, high)
 }
 
 private fun analystTargetBand(detail: SymbolDetail): Pair<Long, Long>? {
@@ -2468,13 +2658,22 @@ internal fun valuationDetailMarkers(detail: SymbolDetail, stats: ValuationStats)
 internal fun valuationReferenceColor(label: String): Color = when (label) {
     "Price" -> Color(0xFFFFB300)
     "Low" -> Color(0xFF29B6F6)
+    "Low target" -> Color(0xFF29B6F6)
     "P25" -> Color(0xFF26C6DA)
     "Median" -> Color(0xFFFFD54F)
     "Mean" -> Color(0xFFAB47BC)
     "P75" -> Color(0xFF66BB6A)
     "Weighted" -> Color(0xFF7E57C2)
+    "Weighted target" -> Color(0xFF7E57C2)
+    "Analyst fair value" -> Color(0xFF7E57C2)
+    "Model fair value" -> Color(0xFFAB47BC)
+    "DCF bear" -> Color(0xFF29B6F6)
+    "DCF base" -> Color(0xFFAB47BC)
+    "DCF bull" -> Color(0xFF66BB6A)
+    "Intrinsic model" -> Color(0xFFAB47BC)
     "P95" -> Color(0xFFEC407A)
     "P99" -> Color(0xFFFF7043)
+    "High target" -> Color(0xFFEF5350)
     "Max" -> Color(0xFFEF5350)
     else -> Color(0xFFD1C4E9)
 }

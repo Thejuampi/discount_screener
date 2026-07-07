@@ -3,6 +3,21 @@ package com.discountscreener.core.engine
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ProjectedChartAnalysis
+import com.discountscreener.core.model.ProjectedChartData
+import com.discountscreener.core.model.ProjectedChartStatus
+import com.discountscreener.core.model.ProjectedMacdChartAnalysis
+import com.discountscreener.core.model.ProjectedPriceChartAnalysis
+import com.discountscreener.core.model.ProjectedPriceDomain
+import com.discountscreener.core.model.ProjectedReplayWindow
+import com.discountscreener.core.model.ProjectedTechnicalSignal
+import com.discountscreener.core.model.ProjectedTechnicalSignalBias
+import com.discountscreener.core.model.ProjectedTechnicalSignalKind
+import com.discountscreener.core.model.ProjectedVolumeChartAnalysis
+import com.discountscreener.core.model.ProjectedVolumeProfileAnalysis
+import com.discountscreener.core.model.ProjectedVolumeProfileBin
+import kotlin.math.abs
+import kotlin.math.round
 
 data class ReplayWindow(
     val visibleCandles: List<HistoricalCandle>,
@@ -21,6 +36,34 @@ data class VolumeProfileBin(
 }
 
 object ChartAnalysis {
+    fun buildProjectedChartData(
+        range: ChartRange,
+        candles: List<HistoricalCandle>,
+        capturedAtEpochSeconds: Long,
+        replayOffset: Int,
+        volumeProfileBinCount: Int,
+        summary: ChartRangeSummary? = null,
+    ): ProjectedChartData {
+        var chartSummary = summary ?: candles.takeIf { candidateCandles -> candidateCandles.isNotEmpty() }?.let { visibleCandles ->
+            buildSummary(
+                range = range,
+                candles = visibleCandles,
+                capturedAtEpochSeconds = capturedAtEpochSeconds,
+            )
+        }
+        var replayWindow = buildReplayWindow(candles, replayOffset)
+        return ProjectedChartData(
+            range = range,
+            candles = candles,
+            summary = chartSummary,
+            analysis = buildProjectedAnalysis(
+                replayWindow = replayWindow,
+                summary = chartSummary,
+                volumeProfileBinCount = volumeProfileBinCount,
+            ),
+        )
+    }
+
     fun buildSummary(
         range: ChartRange,
         candles: List<HistoricalCandle>,
@@ -43,6 +86,29 @@ object ChartAnalysis {
             macdCents = macd.macd.lastOrNull()?.roundToLong(),
             signalCents = macd.signal.lastOrNull()?.roundToLong(),
             histogramCents = macd.histogram.lastOrNull()?.roundToLong(),
+        )
+    }
+
+    fun buildVolumeProfileAnalysis(
+        candles: List<HistoricalCandle>,
+        minPriceCents: Long,
+        maxPriceCents: Long,
+        binCount: Int,
+    ): ProjectedVolumeProfileAnalysis {
+        var bins = computeVolumeProfile(
+            candles = candles,
+            minPriceCents = minPriceCents,
+            maxPriceCents = maxPriceCents,
+            binCount = binCount,
+        ).map { bin ->
+            ProjectedVolumeProfileBin(
+                upVolume = bin.upVolume,
+                downVolume = bin.downVolume,
+            )
+        }
+        return ProjectedVolumeProfileAnalysis(
+            bins = bins,
+            maxBinVolume = bins.maxOfOrNull(ProjectedVolumeProfileBin::totalVolume) ?: 0L,
         )
     }
 
@@ -119,6 +185,204 @@ object ChartAnalysis {
         return bins.map { it.toBin() }
     }
 
+    private fun buildProjectedAnalysis(
+        replayWindow: ReplayWindow,
+        summary: ChartRangeSummary?,
+        volumeProfileBinCount: Int,
+    ): ProjectedChartAnalysis {
+        var visibleCandles = replayWindow.visibleCandles
+        var projectedReplayWindow = replayWindow.toProjectedReplayWindow()
+        if (visibleCandles.isEmpty()) {
+            return ProjectedChartAnalysis(
+                status = if (summary == null) ProjectedChartStatus.Unavailable else ProjectedChartStatus.SummaryOnly,
+                replayWindow = projectedReplayWindow,
+            )
+        }
+
+        var closes = visibleCandles.map { candle -> candle.closeCents.toDouble() }
+        var ema20 = ema(closes, 20)
+        var ema50 = ema(closes, 50)
+        var ema200 = ema(closes, 200)
+        var price = priceAnalysis(
+            candles = visibleCandles,
+            ema20 = ema20,
+            ema50 = ema50,
+            ema200 = ema200,
+        )
+        var macd = macdAnalysis(visibleCandles, closes)
+        var volume = ProjectedVolumeChartAnalysis(
+            maxVolume = visibleCandles.maxOfOrNull(HistoricalCandle::volume)?.coerceAtLeast(1L) ?: 1L,
+        )
+        var volumeProfile = buildVolumeProfileAnalysis(
+            candles = visibleCandles,
+            minPriceCents = price.domain.minValue.roundToLong(),
+            maxPriceCents = price.domain.maxValue.roundToLong(),
+            binCount = volumeProfileBinCount,
+        )
+        return ProjectedChartAnalysis(
+            status = ProjectedChartStatus.Available,
+            replayWindow = projectedReplayWindow,
+            price = price,
+            volume = volume,
+            volumeProfile = volumeProfile,
+            macd = macd,
+            technicalSignals = technicalSignals(
+                ema20 = ema20,
+                ema50 = ema50,
+                ema200 = ema200,
+                macd = macd,
+            ),
+        )
+    }
+
+    private fun priceAnalysis(
+        candles: List<HistoricalCandle>,
+        ema20: List<Double>,
+        ema50: List<Double>,
+        ema200: List<Double>,
+    ): ProjectedPriceChartAnalysis {
+        var allValues = buildList {
+            candles.forEach { candle ->
+                add(candle.lowCents.toFloat())
+                add(candle.highCents.toFloat())
+                add(candle.openCents.toFloat())
+                add(candle.closeCents.toFloat())
+            }
+            addAll(ema20.map(Double::toFloat))
+            addAll(ema50.map(Double::toFloat))
+            addAll(ema200.map(Double::toFloat))
+        }
+        var domain = paddedPriceDomain(
+            min = allValues.minOrNull() ?: 0f,
+            max = allValues.maxOrNull() ?: 0f,
+        )
+        return ProjectedPriceChartAnalysis(
+            domain = domain,
+            latestCloseCents = candles.lastOrNull()?.closeCents,
+            ema20 = ema20,
+            ema50 = ema50,
+            ema200 = ema200,
+            latestEma20Cents = ema20.lastOrNull()?.roundToLong(),
+            latestEma50Cents = ema50.lastOrNull()?.roundToLong(),
+            latestEma200Cents = ema200.lastOrNull()?.roundToLong(),
+        )
+    }
+
+    private fun macdAnalysis(
+        candles: List<HistoricalCandle>,
+        closes: List<Double>,
+    ): ProjectedMacdChartAnalysis? {
+        if (candles.size < 26) return null
+        var macd = macd(closes)
+        return ProjectedMacdChartAnalysis(
+            macdLine = macd.macd,
+            signalLine = macd.signal,
+            histogram = macd.histogram,
+            latestMacdCents = macd.macd.lastOrNull()?.roundToLong(),
+            latestSignalCents = macd.signal.lastOrNull()?.roundToLong(),
+            latestHistogramCents = macd.histogram.lastOrNull()?.roundToLong(),
+        )
+    }
+
+    private fun technicalSignals(
+        ema20: List<Double>,
+        ema50: List<Double>,
+        ema200: List<Double>,
+        macd: ProjectedMacdChartAnalysis?,
+    ): List<ProjectedTechnicalSignal> = buildList {
+        buildTechnicalSignal(ema20, ema50, ProjectedTechnicalSignalKind.Ema20Ema50)?.let(::add)
+        buildTechnicalSignal(ema50, ema200, ProjectedTechnicalSignalKind.Ema50Ema200)?.let(::add)
+        macd?.let { macdAnalysis ->
+            buildTechnicalSignal(
+                macdAnalysis.macdLine,
+                macdAnalysis.signalLine,
+                ProjectedTechnicalSignalKind.MacdSignal,
+            )?.let(::add)
+        }
+    }
+
+    private fun buildTechnicalSignal(
+        fastSeries: List<Double>,
+        slowSeries: List<Double>,
+        kind: ProjectedTechnicalSignalKind,
+    ): ProjectedTechnicalSignal? {
+        var latestIndex = minOf(fastSeries.lastIndex, slowSeries.lastIndex)
+        if (latestIndex < 1) return null
+        var latestDiff = fastSeries[latestIndex] - slowSeries[latestIndex]
+        if (latestDiff == 0.0) return null
+        var previousDiff = fastSeries[latestIndex - 1] - slowSeries[latestIndex - 1]
+        var bullish = latestDiff > 0.0
+        var freshCross = (bullish && previousDiff <= 0.0) || (!bullish && previousDiff >= 0.0)
+        var bias = if (bullish) ProjectedTechnicalSignalBias.Bull else ProjectedTechnicalSignalBias.Bear
+        return ProjectedTechnicalSignal(
+            kind = kind,
+            title = technicalSignalTitle(kind, bias, freshCross),
+            meaning = technicalSignalMeaning(kind, bias, freshCross),
+            bias = bias,
+            freshCross = freshCross,
+        )
+    }
+
+    private fun technicalSignalTitle(
+        kind: ProjectedTechnicalSignalKind,
+        bias: ProjectedTechnicalSignalBias,
+        freshCross: Boolean,
+    ): String {
+        var label = technicalSignalLabel(kind)
+        return when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "Bull cross $label"
+            freshCross -> "Bear cross $label"
+            bias == ProjectedTechnicalSignalBias.Bull -> "Bull $label"
+            else -> "Bear $label"
+        }
+    }
+
+    private fun technicalSignalMeaning(
+        kind: ProjectedTechnicalSignalKind,
+        bias: ProjectedTechnicalSignalBias,
+        freshCross: Boolean,
+    ): String = when (kind) {
+        ProjectedTechnicalSignalKind.Ema20Ema50 -> when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "Short trend just crossed above medium trend"
+            freshCross -> "Short trend just crossed below medium trend"
+            bias == ProjectedTechnicalSignalBias.Bull -> "Short trend is above medium trend"
+            else -> "Short trend is below medium trend"
+        }
+        ProjectedTechnicalSignalKind.Ema50Ema200 -> when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "Medium trend just crossed above long trend"
+            freshCross -> "Medium trend just crossed below long trend"
+            bias == ProjectedTechnicalSignalBias.Bull -> "Medium trend is above long trend"
+            else -> "Medium trend is below long trend"
+        }
+        ProjectedTechnicalSignalKind.MacdSignal -> when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "Momentum just crossed above the signal line"
+            freshCross -> "Momentum just crossed below the signal line"
+            bias == ProjectedTechnicalSignalBias.Bull -> "Momentum is above the signal line"
+            else -> "Momentum is below the signal line"
+        }
+    }
+
+    private fun technicalSignalLabel(kind: ProjectedTechnicalSignalKind): String = when (kind) {
+        ProjectedTechnicalSignalKind.Ema20Ema50 -> "E20/E50"
+        ProjectedTechnicalSignalKind.Ema50Ema200 -> "E50/E200"
+        ProjectedTechnicalSignalKind.MacdSignal -> "MACD"
+    }
+
+    private fun paddedPriceDomain(min: Float, max: Float): ProjectedPriceDomain {
+        if (min == max) {
+            var padding = maxOf(1f, abs(min) * 0.05f)
+            return ProjectedPriceDomain(minValue = min - padding, maxValue = max + padding)
+        }
+        var padding = ((max - min) * 0.05f).coerceAtLeast(1f)
+        return ProjectedPriceDomain(minValue = min - padding, maxValue = max + padding)
+    }
+
+    private fun ReplayWindow.toProjectedReplayWindow(): ProjectedReplayWindow = ProjectedReplayWindow(
+        visibleCandles = visibleCandles,
+        totalCandles = totalCandles,
+        replayOffset = replayOffset,
+    )
+
     private fun ema(values: List<Double>, period: Int): List<Double> {
         if (values.isEmpty()) return emptyList()
         val multiplier = 2.0 / (period + 1)
@@ -147,8 +411,9 @@ object ChartAnalysis {
         return MacdValues(macdLine, signalLine, histogram)
     }
 
-    private fun Double.roundToLong(): Long = kotlin.math.round(this).toLong()
-    private fun Double.roundToInt(): Int = kotlin.math.round(this).toInt()
+    private fun Double.roundToLong(): Long = round(this).toLong()
+    private fun Float.roundToLong(): Long = round(this).toLong()
+    private fun Double.roundToInt(): Int = round(this).toInt()
     private fun Int.saturatingLastIndex(): Int = (this - 1).coerceAtLeast(0)
 
     private data class MutableVolumeProfileBin(

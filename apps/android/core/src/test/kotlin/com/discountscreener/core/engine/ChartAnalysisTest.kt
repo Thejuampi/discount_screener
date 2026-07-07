@@ -1,11 +1,108 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.ProjectedChartStatus
+import com.discountscreener.core.model.ProjectedTechnicalSignalBias
+import com.discountscreener.core.model.ProjectedTechnicalSignalKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class ChartAnalysisTest {
+    @Test
+    fun projected_chart_analysis_exposes_series_latest_values_and_price_domain() {
+        var candles = (1..30).map { index ->
+            candle(index, open = 10_000, low = 10_000, high = 10_000, close = 10_000, volume = 1_000)
+        }
+
+        var chart = ChartAnalysis.buildProjectedChartData(
+            range = ChartRange.Month,
+            candles = candles,
+            capturedAtEpochSeconds = 123L,
+            replayOffset = 0,
+            volumeProfileBinCount = 4,
+        )
+
+        assertEquals(
+            ChartAnalysisSeriesExpectation(
+                status = ProjectedChartStatus.Available,
+                visibleCount = 30,
+                latestCloseCents = 10_000L,
+                ema20Count = 30,
+                ema50Count = 30,
+                ema200Count = 30,
+                latestEma20Cents = 10_000L,
+                latestEma50Cents = 10_000L,
+                latestEma200Cents = 10_000L,
+                macdCount = 30,
+                signalCount = 30,
+                histogramCount = 30,
+                latestMacdCents = 0L,
+                latestSignalCents = 0L,
+                latestHistogramCents = 0L,
+                priceMinValue = 9_500f,
+                priceMaxValue = 10_500f,
+                volumeMax = 1_000L,
+                volumeProfileBinCount = 4,
+            ),
+            ChartAnalysisSeriesExpectation(
+                status = chart.analysis.status,
+                visibleCount = chart.analysis.replayWindow.visibleCount,
+                latestCloseCents = chart.analysis.price?.latestCloseCents,
+                ema20Count = chart.analysis.price?.ema20.orEmpty().size,
+                ema50Count = chart.analysis.price?.ema50.orEmpty().size,
+                ema200Count = chart.analysis.price?.ema200.orEmpty().size,
+                latestEma20Cents = chart.analysis.price?.latestEma20Cents,
+                latestEma50Cents = chart.analysis.price?.latestEma50Cents,
+                latestEma200Cents = chart.analysis.price?.latestEma200Cents,
+                macdCount = chart.analysis.macd?.macdLine.orEmpty().size,
+                signalCount = chart.analysis.macd?.signalLine.orEmpty().size,
+                histogramCount = chart.analysis.macd?.histogram.orEmpty().size,
+                latestMacdCents = chart.analysis.macd?.latestMacdCents,
+                latestSignalCents = chart.analysis.macd?.latestSignalCents,
+                latestHistogramCents = chart.analysis.macd?.latestHistogramCents,
+                priceMinValue = chart.analysis.price?.domain?.minValue,
+                priceMaxValue = chart.analysis.price?.domain?.maxValue,
+                volumeMax = chart.analysis.volume?.maxVolume,
+                volumeProfileBinCount = chart.analysis.volumeProfile?.bins.orEmpty().size,
+            ),
+        )
+    }
+
+    @Test
+    fun projected_chart_analysis_exposes_technical_signal_kind_and_bias() {
+        var candles = (1..30).map { index ->
+            candle(
+                epoch = index,
+                open = 10_000L + (index * 100L),
+                low = 9_900L + (index * 100L),
+                high = 10_200L + (index * 100L),
+                close = 10_100L + (index * 100L),
+                volume = 1_000L,
+            )
+        }
+
+        var chart = ChartAnalysis.buildProjectedChartData(
+            range = ChartRange.Month,
+            candles = candles,
+            capturedAtEpochSeconds = 123L,
+            replayOffset = 0,
+            volumeProfileBinCount = 4,
+        )
+
+        assertEquals(
+            listOf(
+                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema20Ema50, ProjectedTechnicalSignalBias.Bull),
+                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema50Ema200, ProjectedTechnicalSignalBias.Bull),
+                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.MacdSignal, ProjectedTechnicalSignalBias.Bull),
+            ),
+            chart.analysis.technicalSignals.map { signal ->
+                ProjectedTechnicalSignalExpectation(signal.kind, signal.bias)
+            },
+        )
+    }
+
     @Test
     fun replay_window_uses_prefix_before_replay_offset() {
         val candles = (1..10).map { index -> candle(index, volume = index.toLong()) }
@@ -97,5 +194,32 @@ class ChartAnalysisTest {
         lowCents = low,
         closeCents = close,
         volume = volume,
+    )
+
+    private data class ChartAnalysisSeriesExpectation(
+        val status: ProjectedChartStatus,
+        val visibleCount: Int,
+        val latestCloseCents: Long?,
+        val ema20Count: Int,
+        val ema50Count: Int,
+        val ema200Count: Int,
+        val latestEma20Cents: Long?,
+        val latestEma50Cents: Long?,
+        val latestEma200Cents: Long?,
+        val macdCount: Int,
+        val signalCount: Int,
+        val histogramCount: Int,
+        val latestMacdCents: Long?,
+        val latestSignalCents: Long?,
+        val latestHistogramCents: Long?,
+        val priceMinValue: Float?,
+        val priceMaxValue: Float?,
+        val volumeMax: Long?,
+        val volumeProfileBinCount: Int,
+    )
+
+    private data class ProjectedTechnicalSignalExpectation(
+        val kind: ProjectedTechnicalSignalKind,
+        val bias: ProjectedTechnicalSignalBias,
     )
 }

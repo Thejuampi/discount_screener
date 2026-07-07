@@ -22,6 +22,11 @@ import com.discountscreener.core.model.QuantLensSimilarSetups
 import com.discountscreener.core.model.QuantLensTrendReliability
 import com.discountscreener.core.model.SimilarSetupsBand
 import com.discountscreener.core.model.TrendReliabilityBand
+import com.discountscreener.core.model.ExpectedValueRangeSource
+import com.discountscreener.core.model.QuantLensFreshnessQualifier
+import junit.framework.TestCase.assertNotNull
+import junit.framework.TestCase.assertNull
+import junit.framework.TestCase.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -41,7 +46,7 @@ class QuantLensUiModelsTest {
             state(QuantLensLensId.EvidenceStrength, QuantLensRowLabel.EvidenceStrong),
         )
 
-        assertEquals(listOf("Evidence strong", "EV +10%..+20%", "Corr high"), mapRowQuantLensSummary(summary).map { it.label })
+        assertEquals(listOf("Strong signals", "+10%..+20% upside", "Moves together"), mapRowQuantLensSummary(summary).map { it.label })
     }
 
     @Test
@@ -51,7 +56,7 @@ class QuantLensUiModelsTest {
             state(QuantLensLensId.CorrelationRisk, QuantLensRowLabel.CorrHigh, status = QuantLensPrimaryStatus.Sparse),
         )
 
-        assertEquals(listOf("Evidence strong"), mapRowQuantLensSummary(summary).map { it.label })
+        assertEquals(listOf("Strong signals"), mapRowQuantLensSummary(summary).map { it.label })
     }
 
     @Test
@@ -65,7 +70,7 @@ class QuantLensUiModelsTest {
             ),
         )
 
-        assertEquals("Evidence unavailable", mapRowQuantLensSummary(summary).single().label)
+        assertEquals("No signals", mapRowQuantLensSummary(summary).single().label)
     }
 
     @Test
@@ -73,7 +78,7 @@ class QuantLensUiModelsTest {
         val state = mapQuantLensReport(report())
 
         assertEquals(
-            listOf("Evidence strength", "Expected value range", "Correlation risk", "Trend reliability", "Horizon context", "Similar setups"),
+            listOf("Signal quality", "Price estimate", "Market overlap", "Price trend", "Typical moves", "Similar patterns"),
             state?.sections?.map { it.title },
         )
     }
@@ -84,13 +89,13 @@ class QuantLensUiModelsTest {
 
         assertEquals(
             HorizonSectionSnapshot(
-                primaryLine = "Historical baseline from loaded candles",
+                primaryLine = "How much this stock usually moves",
                 rows = listOf(
-                    "5m" to "5m · Median 0.42% · P25-P75 0.18%-0.91% · 72 windows",
-                    "1D" to "1D · Median 1.50% · P25-P75 0.80%-2.20% · 21 windows",
-                    "3M" to "3M · Median 8.40% · P25-P75 4.20%-12.30% · 58 windows",
+                    "5m" to "±0.42% typical · 0.18%–0.91% usual range",
+                    "1D" to "±1.50% typical · 0.80%–2.20% usual range",
+                    "3M" to "±8.40% typical · 4.20%–12.30% usual range",
                 ),
-                footerChips = listOf("Historical context", "No forecast"),
+                footerChips = listOf("Based on price history", "Not a forecast"),
             ),
             section?.let { HorizonSectionSnapshot(it.primaryLine, it.rows, it.footerChips) },
         )
@@ -125,7 +130,7 @@ class QuantLensUiModelsTest {
             state(QuantLensLensId.ExpectedValueRange, QuantLensRowLabel.EvRange, low = 1_000, high = 2_000),
         )
 
-        assertEquals(listOf("Evidence strong", "EV +10%..+20%"), mapRowQuantLensSummary(summary).map { it.label })
+        assertEquals(listOf("Strong signals", "+10%..+20% upside"), mapRowQuantLensSummary(summary).map { it.label })
     }
 
     private fun summary(vararg states: QuantLensLensRowState) = QuantLensRowSummary(
@@ -169,6 +174,11 @@ class QuantLensUiModelsTest {
             ),
             reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
         ),
+        expectedValueRange: QuantLensExpectedValueRange = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Sparse,
+            band = ExpectedValueRangeBand.Sparse,
+            reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
+        ),
     ) = QuantLensReport(
         symbol = "ACME",
         selectedRange = ChartRange.Month,
@@ -181,11 +191,7 @@ class QuantLensUiModelsTest {
             band = EvidenceStrengthBand.Sparse,
             reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
         ),
-        expectedValueRange = QuantLensExpectedValueRange(
-            primaryStatus = QuantLensPrimaryStatus.Sparse,
-            band = ExpectedValueRangeBand.Sparse,
-            reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
-        ),
+        expectedValueRange = expectedValueRange,
         correlationRisk = QuantLensCorrelationRisk(
             primaryStatus = QuantLensPrimaryStatus.Unavailable,
             band = CorrelationRiskBand.Unavailable,
@@ -236,4 +242,108 @@ class QuantLensUiModelsTest {
         val rows: List<Pair<String, String>>,
         val footerChips: List<String>,
     )
+
+    @Test
+    fun ev_section_scenario_weighted_positive_primary_line_and_rail() {
+        val price = 10_000L // $100.00
+        val low = 10_800L   // $108 -> +800 bps
+        val weighted = 11_500L // $115 -> +1500 bps
+        val high = 12_400L  // $124 -> +2400 bps
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Available,
+            band = ExpectedValueRangeBand.ScenarioWeighted,
+            source = ExpectedValueRangeSource.Dcf,
+            weightedFairValueCents = weighted,
+            weightedUpsideBps = 1500,
+            lowFairValueCents = low,
+            highFairValueCents = high,
+            spreadBps = 1600,
+            freshnessQualifier = QuantLensFreshnessQualifier.Fresh,
+            reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+        )
+        var r = report(expectedValueRange = ev)
+        val section = mapQuantLensReport(r, price)!!.sections.first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertNotNull(section.evRailModel)
+        assertEquals(false, section.evRailModel!!.crossesZero)
+        assertEquals(800, section.evRailModel!!.lowUpsideBps)
+        assertEquals(2400, section.evRailModel!!.highUpsideBps)
+    }
+
+    @Test
+    fun ev_section_scenario_weighted_crosses_zero_chip_and_flag() {
+        val price = 10_000L
+        val low = 9_600L  // -400 bps
+        val weighted = 11_200L // +1200 bps
+        val high = 12_400L // +2400 bps
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Available,
+            band = ExpectedValueRangeBand.ScenarioWeighted,
+            weightedFairValueCents = weighted,
+            weightedUpsideBps = 1200,
+            lowFairValueCents = low,
+            highFairValueCents = high,
+            freshnessQualifier = QuantLensFreshnessQualifier.Fresh,
+            reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+        )
+        var r = report(expectedValueRange = ev)
+        val section = mapQuantLensReport(r, price)!!.sections.first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertEquals("Mixed up/down", section.chip.label)
+        assertNotNull(section.evRailModel)
+        assertTrue(section.evRailModel!!.crossesZero)
+    }
+
+    @Test
+    fun ev_section_reference_only_no_rail_dollar_rows() {
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Sparse,
+            band = ExpectedValueRangeBand.ReferenceOnly,
+            lowFairValueCents = 9_500L,
+            highFairValueCents = 11_000L,
+            reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
+        )
+        var r = report(expectedValueRange = ev)
+        val section = mapQuantLensReport(r, 10_000L)!!.sections.first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertNull(section.evRailModel)
+        assertTrue(section.rows.isNotEmpty())
+        assertTrue(section.rows.all { (_, v) -> v.contains("$") })
+    }
+
+    @Test
+    fun ev_section_unavailable_empty_rows_no_rail() {
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Unavailable,
+            band = ExpectedValueRangeBand.Unavailable,
+            reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
+        )
+        var r = report(expectedValueRange = ev)
+        val section = mapQuantLensReport(r, 10_000L)!!.sections.first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertEquals("No price estimate available", section.primaryLine)
+        assertTrue(section.rows.isEmpty())
+        assertNull(section.evRailModel)
+    }
+
+    @Test
+    fun ev_section_stale_footer_chip_and_rail_stale_flag() {
+        val price = 10_000L
+        val low = 10_800L
+        val weighted = 11_500L
+        val high = 12_400L
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Available,
+            band = ExpectedValueRangeBand.ScenarioWeighted,
+            source = ExpectedValueRangeSource.Dcf,
+            weightedFairValueCents = weighted,
+            weightedUpsideBps = 1500,
+            lowFairValueCents = low,
+            highFairValueCents = high,
+            spreadBps = 1600,
+            freshnessQualifier = QuantLensFreshnessQualifier.Stale,
+            reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+        )
+        var r = report(expectedValueRange = ev)
+        val section = mapQuantLensReport(r, price)!!.sections.first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertTrue(section.footerChips.any { it.contains("saved") })
+        assertNotNull(section.evRailModel)
+        assertTrue(section.evRailModel!!.isStale)
+    }
 }

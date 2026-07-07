@@ -18,14 +18,19 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.DashboardNotice
+import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
+import com.discountscreener.android.domain.model.ProfileTransitionFeedback
 import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
+import com.discountscreener.android.domain.logging.AppLogger
+import com.discountscreener.android.domain.logging.NoOpAppLogger
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.rankMovement
 import com.discountscreener.android.domain.model.significantValuationChange
@@ -33,27 +38,47 @@ import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.IndexEstimatesEngine
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.ReportingEngine
+import com.discountscreener.core.engine.ScreenDataProjectionEngine
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
+import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
+import com.discountscreener.core.model.ComputationArea
+import com.discountscreener.core.model.ComputationFailure
+import com.discountscreener.core.model.ComputationResult
+import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DataProvenance
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
-import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
 import com.discountscreener.core.model.PricingCandle
+import com.discountscreener.core.model.ProjectedConfidence
+import com.discountscreener.core.model.ProjectedOpportunityDecisionFacts
+import com.discountscreener.core.model.ProjectedOpportunityRow
+import com.discountscreener.core.model.ProjectedProviderCategory
+import com.discountscreener.core.model.ProjectedProvenanceState
+import com.discountscreener.core.model.ProjectedRowDecision
+import com.discountscreener.core.model.ProjectedRowFreshness
+import com.discountscreener.core.model.ProjectedTrackedRow
+import com.discountscreener.core.model.ProjectionComparisonBaselines
+import com.discountscreener.core.model.ProjectionProfileFacts
+import com.discountscreener.core.model.ProjectionRoute
+import com.discountscreener.core.model.ProjectionSymbolState
+import com.discountscreener.core.model.getOrNull
 import com.discountscreener.core.model.QuantLensComparable
 import com.discountscreener.core.model.QuantLensCorrelationSeries
 import com.discountscreener.core.model.QuantLensInput
@@ -66,8 +91,10 @@ import com.discountscreener.core.model.QuantLensReport
 import com.discountscreener.core.model.QuantLensRowLabel
 import com.discountscreener.core.model.QuantLensRowSummary
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
+import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -88,6 +115,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import kotlin.math.roundToLong
 
@@ -122,7 +150,7 @@ private data class PersistenceDelta(
 
 private data class QuantLensCacheEntry(
     val fingerprint: String,
-    val report: QuantLensReport,
+    val result: ComputationResult<QuantLensReport>,
 )
 
 private data class ProfileSwitchRequest(
@@ -139,12 +167,15 @@ class DefaultDashboardRepository(
     private val secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
     private val nowProvider: () -> Long = { System.currentTimeMillis() / 1_000 },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val computeDispatcher: CoroutineDispatcher = ioDispatcher,
+    private val logger: AppLogger = NoOpAppLogger,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
     private val updates = MutableStateFlow(0L)
     private val dcfSourceCoordinator = DcfSourceCoordinator(yahooClient, secondaryTimeseriesProvider)
+    private val screenDataProjectionEngine = ScreenDataProjectionEngine()
 
     private var engine = ReportingEngine()
     private var trackedSymbols = mutableListOf<String>()
@@ -199,8 +230,20 @@ class DefaultDashboardRepository(
         selectedSymbol: String?,
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
-    ): DashboardSnapshot = stateMutex.withLock {
-        snapshotLocked(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+    ): DashboardSnapshot = withContext(computeDispatcher) {
+        stateMutex.withLock {
+            snapshotLocked(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+        }
+    }
+
+    override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> = withContext(computeDispatcher) {
+        stateMutex.withLock {
+            safeEstimatesReportLocked().also { result ->
+                if (result is ComputationResult.Error) {
+                    logComputationFailure("current index estimates", result.failure)
+                }
+            }
+        }
     }
 
     override suspend fun refreshAll(
@@ -728,29 +771,106 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        val normalizedFilter = filter.copy(query = filter.query.trim())
-        val selectedDetail = selectedSymbol?.let(engine::detail)
-        val selectedCharts = if (selectedSymbol == null) {
+        var normalizedFilter = filter.copy(query = filter.query.trim())
+        var normalizedSelectedSymbol = selectedSymbol?.trim()?.takeIf { it.isNotBlank() }
+        var selectedDetail = normalizedSelectedSymbol?.let(engine::detail)
+        var selectedCharts = if (normalizedSelectedSymbol == null) {
             emptyMap()
         } else {
             ChartRange.entries.associateWith { range ->
-                chartCache[chartKey(selectedSymbol, range)].orEmpty()
+                chartCache[chartKey(normalizedSelectedSymbol, range)].orEmpty()
             }
         }
-        val trackedIssueMessages = issues.values
+        var issueRecords = issues.values
+            .sortedByDescending { it.lastSeenEvent }
+            .map(::toIssueRecord)
+            .toMutableList()
+        var trackedIssueMessages = issues.values
             .filter { it.active }
             .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
-
-        val trackedRows = trackedRowsLocked(normalizedFilter, trackedIssueMessages)
-        val opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel)
-        val selectedQuantLens = selectedDetail?.let {
-            buildSelectedQuantLensLocked(
+        var dashboardCandidateRows = engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter)
+        var scoredOpportunityRows = filteredScoredOpportunityRowsLocked(normalizedFilter, opportunityScoringModel)
+        var projectionCandidateRows = scoredOpportunityRows.map(::candidateRowFromOpportunityRow)
+        var projectionRequest = screenDataProjectionRequestLocked(
+            filter = normalizedFilter,
+            selectedSymbol = normalizedSelectedSymbol,
+            selectedRange = selectedRange,
+            opportunityScoringModel = opportunityScoringModel,
+            candidateRows = projectionCandidateRows,
+            opportunityDecisionFactsBySymbol = projectedOpportunityDecisionFactsBySymbol(scoredOpportunityRows),
+            issues = issueRecords,
+            issueMessagesBySymbol = trackedIssueMessages,
+        )
+        var detailNotice: DashboardNotice? = null
+        var estimatesNotice: DashboardNotice? = null
+        var screenDataResult = screenDataProjectionEngine.project(
+            projectionRequest,
+        )
+        var screenData: com.discountscreener.core.model.ProjectedDashboardData
+        var trackedRows: List<TrackedSymbolRow>
+        var opportunityRows: List<OpportunityListRow>
+        when (screenDataResult) {
+            is ComputationResult.Success -> {
+                screenData = screenDataResult.value
+                trackedRows = trackedRowsFromProjectionLocked(screenData.trackedRows, trackedIssueMessages)
+                opportunityRows = opportunityRowsFromProjectionLocked(
+                    projectedRows = screenData.opportunityRows,
+                    scoredRows = scoredOpportunityRows,
+                    issueMessagesBySymbol = trackedIssueMessages,
+                    scoringModel = opportunityScoringModel,
+                )
+            }
+            is ComputationResult.Error -> {
+                var failure = screenDataResult.failure
+                logComputationFailure("snapshot projection", failure)
+                detailNotice = dashboardNoticeForFailure(failure)
+                if (shouldSurfaceTransientIssue(failure)) {
+                    issueRecords.add(transientIssueForFailure(failure))
+                }
+                var estimatesResult = safeEstimatesReportLocked()
+                screenData = projectionFallbackScreenData(
+                    estimatesReport = estimatesResult.getOrNull() ?: emptyEstimatesReport(),
+                    issues = issueRecords,
+                    symbol = failure.symbol,
+                )
+                if (estimatesResult is ComputationResult.Error) {
+                    logComputationFailure("projection fallback estimates", estimatesResult.failure)
+                    estimatesNotice = dashboardNoticeForFailure(estimatesResult.failure)
+                }
+                trackedRows = trackedRowsLocked(normalizedFilter, trackedIssueMessages)
+                opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel)
+            }
+        }
+        var projectedSelectedDetail = screenData.selectedDetail
+        selectedDetail = projectedSelectedDetail?.detail ?: selectedDetail
+        if (projectedSelectedDetail != null && normalizedSelectedSymbol != null) {
+            selectedCharts = selectedCharts + (selectedRange to projectedSelectedDetail.chart.candles)
+        }
+        var selectedQuantLens: QuantLensReport? = null
+        selectedDetail?.let {
+            when (
+                val quantLensResult = buildSelectedQuantLensLocked(
                 detail = it,
                 selectedRange = selectedRange,
                 opportunityRows = opportunityRows,
                 opportunityScoringModel = opportunityScoringModel,
-            )
+                )
+            ) {
+                is ComputationResult.Success -> {
+                    selectedQuantLens = quantLensResult.value
+                }
+                is ComputationResult.Error -> {
+                    var failure = quantLensResult.failure
+                    detailNotice = detailNotice ?: dashboardNoticeForFailure(failure)
+                    if (shouldSurfaceTransientIssue(failure)) {
+                        issueRecords.add(transientIssueForFailure(failure))
+                    }
+                }
+            }
         }
+        screenData = screenData.copy(
+            providerState = screenData.providerState.copy(issues = issueRecords),
+        )
 
         return DashboardSnapshot(
             availableProfiles = profileCatalog.availableProfiles(),
@@ -758,23 +878,423 @@ class DefaultDashboardRepository(
             trackedSymbols = trackedSymbols.toList(),
             trackedRows = trackedRows,
             watchlistSymbols = engine.watchlistSymbols(),
-            candidateRows = engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter),
+            candidateRows = dashboardCandidateRows,
             opportunityRows = opportunityRows,
             opportunityScoringModel = opportunityScoringModel,
-            issues = issues.values
-                .sortedByDescending { it.lastSeenEvent }
-                .map(::toIssueRecord),
+            issues = issueRecords,
             selectedDetail = selectedDetail,
             selectedCharts = selectedCharts,
-            selectedHistory = revisions[selectedSymbol].orEmpty(),
-            selectedAlerts = engine.alerts().filter { it.symbol == selectedSymbol }.takeLast(6),
+            selectedHistory = screenData.selectedDetail?.revisions ?: revisions[normalizedSelectedSymbol].orEmpty(),
+            selectedAlerts = screenData.selectedDetail?.alerts ?: engine.alerts().filter { it.symbol == normalizedSelectedSymbol }.takeLast(6),
             selectedQuantLens = selectedQuantLens,
+            detailNotice = detailNotice,
             lastUpdatedAtEpochSeconds = lastUpdatedAtEpochSeconds,
             startupPhase = startupPhase,
             refreshCompletedSymbols = refreshCompletedSymbols,
             refreshTargetSymbols = refreshTargetSymbols,
             statusMessage = statusMessage,
+            estimatesNotice = estimatesNotice,
+            screenData = screenData,
         )
+    }
+
+    private fun estimatesReportLocked(): IndexEstimatesReport {
+        var details = trackedSymbols.mapNotNull { symbol -> engine.detail(symbol) }
+        return IndexEstimatesEngine.compute(
+            symbols = details,
+            dcfBySymbol = dcfCache,
+            profileName = currentProfile,
+            nowEpochSeconds = now(),
+        )
+    }
+
+    private fun safeEstimatesReportLocked(): ComputationResult<IndexEstimatesReport> = try {
+        ComputationResult.Success(estimatesReportLocked())
+    } catch (error: Throwable) {
+        ComputationResult.Error(
+            ComputationFailure(
+                code = "index_estimates_failed",
+                area = ComputationArea.Estimates,
+                message = error.message ?: "Index estimates computation failed.",
+                recoverable = true,
+                cause = error,
+            ),
+        )
+    }
+
+    private fun projectionFallbackScreenData(
+        estimatesReport: IndexEstimatesReport,
+        issues: List<IssueRecord>,
+        symbol: String?,
+    ) = com.discountscreener.core.model.ProjectedDashboardData(
+        candidateRows = emptyList(),
+        estimates = com.discountscreener.core.model.ProjectedEstimatesData(report = estimatesReport),
+        providerState = com.discountscreener.core.model.ProjectedProviderState(
+            category = ProjectedProviderCategory.ProviderUncertain,
+            statusCopy = "Local projections degraded; showing raw rows",
+            retryable = false,
+            computedAtEpochSeconds = now(),
+            issues = issues,
+            affectedSymbols = listOfNotNull(symbol),
+        ),
+    )
+
+    private fun emptyEstimatesReport(): IndexEstimatesReport =
+        com.discountscreener.core.model.ProjectedEstimatesData().report
+
+    private fun dashboardNoticeForFailure(failure: ComputationFailure): DashboardNotice {
+        val title = when (failure.area) {
+            ComputationArea.QuantLens -> "Quant Lens unavailable"
+            ComputationArea.Projection -> "Projection degraded"
+            ComputationArea.Estimates -> "Estimates unavailable"
+        }
+        return DashboardNotice(
+            title = title,
+            message = failure.message,
+            severity = if (failure.recoverable) DashboardNoticeSeverity.Warning else DashboardNoticeSeverity.Error,
+        )
+    }
+
+    private fun shouldSurfaceTransientIssue(failure: ComputationFailure): Boolean =
+        failure.symbol != null
+
+    private fun transientIssueForFailure(failure: ComputationFailure): IssueRecord =
+        IssueRecord(
+            key = "transient:${failure.area.name.lowercase()}:${failure.symbol ?: failure.code}",
+            title = dashboardNoticeForFailure(failure).title,
+            detail = failure.message,
+            severity = if (failure.recoverable) "warning" else "error",
+            active = true,
+            count = 1,
+            lastSeenEpochSeconds = now(),
+        )
+
+    private fun logComputationFailure(context: String, failure: ComputationFailure) {
+        var symbolSuffix = failure.symbol?.let { " for $it" }.orEmpty()
+        logger.error(
+            TAG,
+            "$context failed area=${failure.area.name} code=${failure.code}$symbolSuffix recoverable=${failure.recoverable}: ${failure.message}",
+            failure.cause,
+        )
+    }
+
+    private fun screenDataProjectionRequestLocked(
+        filter: ViewFilter,
+        selectedSymbol: String?,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+        candidateRows: List<CandidateRow>,
+        opportunityDecisionFactsBySymbol: Map<String, ProjectedOpportunityDecisionFacts>,
+        issues: List<IssueRecord>,
+        issueMessagesBySymbol: Map<String, String>,
+    ): ScreenDataProjectionRequest {
+        var tracked = trackedSymbols.toList()
+        var watchlist = engine.watchlistSymbols().toSet()
+        var detailSymbols = (tracked + watchlist + candidateRows.map { it.symbol } + listOfNotNull(selectedSymbol) + dcfCache.keys)
+            .distinct()
+        var detailsBySymbol = detailSymbols.mapNotNull { symbol ->
+            engine.detail(symbol)?.let { detail -> symbol to detail }
+        }.toMap()
+        return ScreenDataProjectionRequest(
+            profile = ProjectionProfileFacts(
+                currentProfile = currentProfile,
+                availableProfiles = profileCatalog.availableProfiles(),
+            ),
+            route = ProjectionRoute(
+                filter = filter,
+                selectedSymbol = selectedSymbol,
+                selectedRange = selectedRange,
+                replayOffset = 0,
+                opportunityScoringModel = opportunityScoringModel,
+            ),
+            nowEpochSeconds = now(),
+            trackedSymbols = tracked,
+            watchlistSymbols = watchlist,
+            detailsBySymbol = detailsBySymbol,
+            candidateRows = candidateRows,
+            opportunityDecisionFactsBySymbol = opportunityDecisionFactsBySymbol,
+            chartCandles = projectionChartCandlesLocked(detailSymbols),
+            chartSummariesBySymbol = chartSummaries.mapValues { entry -> entry.value.toMap() },
+            dcfBySymbol = dcfCache.toMap(),
+            revisionsBySymbol = revisions.mapValues { entry -> entry.value.toList() },
+            alertsBySymbol = engine.alerts().groupBy { alert -> alert.symbol },
+            issues = issues,
+            symbolStateBySymbol = projectionSymbolStatesLocked(detailSymbols, issueMessagesBySymbol),
+            baselines = ProjectionComparisonBaselines(
+                previousRankBySymbol = comparisonBaselineRankBySymbol.toMap(),
+                previousFairValueCentsBySymbol = comparisonBaselineWeightedFairValueBySymbol.toMap(),
+            ),
+        )
+    }
+
+    private fun projectionChartCandlesLocked(symbols: List<String>): Map<SymbolRangeKey, List<HistoricalCandle>> = buildMap {
+        symbols.forEach { symbol ->
+            ChartRange.entries.forEach { range ->
+                var candles = chartCache[chartKey(symbol, range)].orEmpty()
+                if (candles.isNotEmpty()) {
+                    put(SymbolRangeKey(symbol = symbol, range = range), candles)
+                }
+            }
+        }
+    }
+
+    private fun projectionSymbolStatesLocked(
+        symbols: List<String>,
+        issueMessagesBySymbol: Map<String, String>,
+    ): Map<String, ProjectionSymbolState> = buildMap {
+        symbols.forEach { symbol ->
+            projectionSymbolStateLocked(symbol, issueMessagesBySymbol[symbol])?.let { state ->
+                put(symbol, state)
+            }
+        }
+    }
+
+    private fun projectionSymbolStateLocked(
+        symbol: String,
+        issueMessage: String?,
+    ): ProjectionSymbolState? {
+        var detail = engine.detail(symbol)
+        if (detail == null && issueMessage == null) {
+            return null
+        }
+        var category = when {
+            detail == null && issueMessage != null -> ProjectedProviderCategory.Unavailable
+            symbol in refreshedSymbols -> ProjectedProviderCategory.Live
+            detail != null && symbol in staleSymbols && startupPhase == DashboardStartupPhase.ShowingCached -> ProjectedProviderCategory.Restored
+            detail != null && symbol in staleSymbols -> ProjectedProviderCategory.Stale
+            detail != null -> ProjectedProviderCategory.Live
+            else -> ProjectedProviderCategory.Unavailable
+        }
+        var provenanceState = when (category) {
+            ProjectedProviderCategory.Live -> ProjectedProvenanceState.Live
+            ProjectedProviderCategory.Restored -> ProjectedProvenanceState.Restored
+            ProjectedProviderCategory.Stale -> ProjectedProvenanceState.Stale
+            ProjectedProviderCategory.Unavailable -> ProjectedProvenanceState.Unavailable
+            ProjectedProviderCategory.ProviderUncertain -> ProjectedProvenanceState.ProviderUncertain
+            ProjectedProviderCategory.ParseUncertain -> ProjectedProvenanceState.ParseUncertain
+            ProjectedProviderCategory.NotEligible -> ProjectedProvenanceState.NotEligible
+            ProjectedProviderCategory.Disabled -> ProjectedProvenanceState.Disabled
+            ProjectedProviderCategory.Superseded -> ProjectedProvenanceState.Superseded
+            ProjectedProviderCategory.SourceUnknown -> ProjectedProvenanceState.SourceUnknown
+        }
+        return ProjectionSymbolState(
+            symbol = symbol,
+            providerCategory = category,
+            provenanceState = provenanceState,
+            capturedAtEpochSeconds = freshnessTimestampBySymbol[symbol],
+            stale = detail != null && symbol in staleSymbols,
+        )
+    }
+
+    private fun filteredScoredOpportunityRowsLocked(
+        filter: ViewFilter,
+        scoringModel: OpportunityScoringModel,
+    ): List<OpportunityRow> = rankedOpportunityRowsLocked(scoringModel)
+        .filter { row ->
+            filter.query.isBlank() ||
+                row.symbol.contains(filter.query, ignoreCase = true) ||
+                row.companyName?.contains(filter.query, ignoreCase = true) == true
+        }
+
+    private fun candidateRowFromOpportunityRow(row: OpportunityRow) = CandidateRow(
+        symbol = row.symbol,
+        marketPriceCents = row.marketPriceCents,
+        intrinsicValueCents = row.intrinsicValueCents,
+        gapBps = row.gapBps,
+        upsideBps = row.upsideBps,
+        isQualified = true,
+        confidence = row.confidence,
+        companyName = row.companyName,
+    )
+
+    private fun projectedOpportunityDecisionFactsBySymbol(rows: List<OpportunityRow>): Map<String, ProjectedOpportunityDecisionFacts> =
+        rows.associate { row -> row.symbol to ProjectedOpportunityDecisionFacts(compositeScore = row.compositeScore) }
+
+    private fun trackedRowsFromProjectionLocked(
+        projectedRows: List<ProjectedTrackedRow>,
+        issueMessagesBySymbol: Map<String, String>,
+    ): List<TrackedSymbolRow> {
+        var sortedRows = projectedRows.sortedWith(
+            compareByDescending<ProjectedTrackedRow> { it.upsideBps ?: Int.MIN_VALUE }
+                .thenBy { projectedRow ->
+                    trackedRowStateRank(
+                        trackedRowStateFromProjection(
+                            projectedRow.symbol,
+                            projectedRow.detail ?: engine.detail(projectedRow.symbol),
+                            issueMessagesBySymbol[projectedRow.symbol],
+                        ),
+                    )
+                }
+                .thenBy { it.symbol },
+        )
+        return sortedRows.mapIndexed { currentIndex, projectedRow ->
+            var detail = projectedRow.detail ?: engine.detail(projectedRow.symbol)
+            var state = trackedRowStateFromProjection(projectedRow.symbol, detail, issueMessagesBySymbol[projectedRow.symbol])
+            var fairValueCents = projectedRow.fairValueAnchor.valueCents
+            TrackedSymbolRow(
+                symbol = projectedRow.symbol,
+                marketPriceCents = projectedRow.marketPriceCents ?: detail?.marketPriceCents,
+                intrinsicValueCents = fairValueCents,
+                gapBps = projectedRow.upsideBps,
+                upsideBps = projectedRow.upsideBps,
+                confidence = projectedRow.confidence.toConfidenceBandOrNull(),
+                qualification = detail?.qualification,
+                isWatched = engine.isWatched(projectedRow.symbol),
+                state = state,
+                freshness = projectedRow.freshness.toRowFreshness(),
+                stale = detail != null && projectedRow.symbol in staleSymbols,
+                providerIssue = issueMessagesBySymbol[projectedRow.symbol],
+                trustNote = projectedRow.trustSignal?.label,
+                freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[projectedRow.symbol],
+                companyName = detail?.companyName,
+                rankMovement = rankMovement(comparisonBaselineRankBySymbol[projectedRow.symbol], currentIndex),
+                valuationChange = significantValuationChange(
+                    comparisonBaselineWeightedFairValueBySymbol[projectedRow.symbol],
+                    fairValueCents,
+                ),
+                explanation = trackedExplanationFromProjection(
+                    symbol = projectedRow.symbol,
+                    currentIndex = currentIndex,
+                    marketPriceCents = projectedRow.marketPriceCents ?: detail?.marketPriceCents,
+                    fairValueCents = fairValueCents,
+                ),
+                decisionState = projectedRow.decision.toRowDecisionState(),
+                quantLensSummary = projectedRow.quantLensSummary ?: detail?.let {
+                    buildRowQuantLensSummaryLocked(
+                        detail = it,
+                        opportunityRow = null,
+                    )
+                },
+            )
+        }
+    }
+
+    private fun trackedRowStateFromProjection(
+        symbol: String,
+        detail: SymbolDetail?,
+        issueMessage: String?,
+    ): TrackedRowState = when {
+        detail != null && symbol in refreshedSymbols -> TrackedRowState.Live
+        detail != null -> TrackedRowState.Cached
+        issueMessage != null -> TrackedRowState.Failed
+        else -> TrackedRowState.Loading
+    }
+
+    private fun opportunityRowsFromProjectionLocked(
+        projectedRows: List<ProjectedOpportunityRow>,
+        scoredRows: List<OpportunityRow>,
+        issueMessagesBySymbol: Map<String, String>,
+        scoringModel: OpportunityScoringModel,
+    ): List<OpportunityListRow> {
+        var scoredBySymbol = scoredRows.associateBy { row -> row.symbol }
+        return projectedRows.mapIndexed { currentIndex, projectedRow ->
+            var scoredRow = scoredBySymbol[projectedRow.symbol]
+            var detail = engine.detail(projectedRow.symbol)
+            var fairValueCents = projectedRow.fairValueAnchor.valueCents ?: projectedRow.candidateRow.intrinsicValueCents
+            var upsideBps = projectedRow.upsideBps ?: projectedRow.candidateRow.upsideBps
+            var freshness = projectedRow.freshness.toRowFreshness()
+            var confidence = projectedRow.confidence.toConfidenceBandOrNull() ?: scoredRow?.confidence ?: projectedRow.candidateRow.confidence
+            var baselineRank = comparisonBaselineOpportunityRankByModel.getValue(scoringModel)[projectedRow.symbol]
+            OpportunityListRow(
+                symbol = projectedRow.symbol,
+                marketPriceCents = projectedRow.candidateRow.marketPriceCents,
+                intrinsicValueCents = fairValueCents,
+                gapBps = upsideBps,
+                upsideBps = upsideBps,
+                confidence = confidence,
+                isWatched = detail?.isWatched ?: scoredRow?.isWatched ?: false,
+                freshness = freshness,
+                providerIssue = issueMessagesBySymbol[projectedRow.symbol],
+                trustNote = projectedRow.trustSignal?.label,
+                freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[projectedRow.symbol],
+                fundamentalsScore = scoredRow?.fundamentalsScore,
+                technicalScore = scoredRow?.technicalScore,
+                forecastScore = scoredRow?.forecastScore,
+                compositeScore = scoredRow?.compositeScore ?: 0,
+                coverageCount = scoredRow?.coverageCount ?: 0,
+                fundamentalsSignals = scoredRow?.fundamentalsSignals.orEmpty(),
+                technicalSignals = scoredRow?.technicalSignals.orEmpty(),
+                forecastSignals = scoredRow?.forecastSignals.orEmpty(),
+                companyName = detail?.companyName ?: projectedRow.candidateRow.companyName,
+                rankMovement = rankMovement(baselineRank, currentIndex),
+                valuationChange = significantValuationChange(
+                    comparisonBaselineWeightedFairValueBySymbol[projectedRow.symbol],
+                    fairValueCents,
+                ),
+                explanation = opportunityExplanationFromProjection(projectedRow.symbol, currentIndex, fairValueCents, baselineRank),
+                decisionState = projectedRow.decision.toRowDecisionState(),
+                quantLensSummary = projectedRow.quantLensSummary ?: detail?.let {
+                    buildRowQuantLensSummaryLocked(
+                        detail = it,
+                        opportunityRow = scoredRow,
+                    )
+                },
+            )
+        }
+    }
+
+    private fun opportunityExplanationFromProjection(
+        symbol: String,
+        currentIndex: Int,
+        fairValueCents: Long?,
+        baselineRank: Int?,
+    ): RowExplanationKind {
+        var previousFairValueCents = comparisonBaselineWeightedFairValueBySymbol[symbol]
+        return rowExplanationFor(
+            hasComparableBaseline = baselineRank != null ||
+                comparisonBaselineMarketPriceBySymbol[symbol] != null ||
+                previousFairValueCents != null,
+            hasRankMovement = baselineRank != null && baselineRank != currentIndex,
+            hasPriceMovement = hasSignificantRelativeMove(
+                previousCents = comparisonBaselineMarketPriceBySymbol[symbol],
+                currentCents = engine.detail(symbol)?.marketPriceCents,
+            ),
+            hasTargetMovement = significantValuationChange(previousFairValueCents, fairValueCents) != null,
+        )
+    }
+
+    private fun trackedExplanationFromProjection(
+        symbol: String,
+        currentIndex: Int,
+        marketPriceCents: Long?,
+        fairValueCents: Long?,
+    ): RowExplanationKind {
+        var previousFairValueCents = comparisonBaselineWeightedFairValueBySymbol[symbol]
+        return rowExplanationFor(
+            hasComparableBaseline = comparisonBaselineRankBySymbol[symbol] != null ||
+                comparisonBaselineMarketPriceBySymbol[symbol] != null ||
+                previousFairValueCents != null,
+            hasRankMovement = comparisonBaselineRankBySymbol[symbol] != null &&
+                comparisonBaselineRankBySymbol[symbol] != currentIndex,
+            hasPriceMovement = hasSignificantRelativeMove(
+                previousCents = comparisonBaselineMarketPriceBySymbol[symbol],
+                currentCents = marketPriceCents,
+            ),
+            hasTargetMovement = significantValuationChange(previousFairValueCents, fairValueCents) != null,
+        )
+    }
+
+    private fun ProjectedConfidence.toConfidenceBandOrNull(): ConfidenceBand? = when (this) {
+        ProjectedConfidence.High -> ConfidenceBand.High
+        ProjectedConfidence.Provisional -> ConfidenceBand.Provisional
+        ProjectedConfidence.Low -> ConfidenceBand.Low
+        ProjectedConfidence.Unavailable -> null
+    }
+
+    private fun ProjectedRowFreshness.toRowFreshness(): RowFreshness = when (this) {
+        ProjectedRowFreshness.Loading -> RowFreshness.Loading
+        ProjectedRowFreshness.Updating -> RowFreshness.Updating
+        ProjectedRowFreshness.Updated -> RowFreshness.Updated
+        ProjectedRowFreshness.Restored -> RowFreshness.Restored
+        ProjectedRowFreshness.Stale -> RowFreshness.Stale
+        ProjectedRowFreshness.Issue -> RowFreshness.Issue
+    }
+
+    private fun ProjectedRowDecision?.toRowDecisionState(): RowDecisionState? = when (this) {
+        ProjectedRowDecision.Act -> RowDecisionState.Act
+        ProjectedRowDecision.Watch -> RowDecisionState.Watch
+        ProjectedRowDecision.Avoid -> RowDecisionState.Avoid
+        null -> null
     }
 
     private fun trackedRowsLocked(
@@ -917,7 +1437,7 @@ class DefaultDashboardRepository(
     }
 
     private fun buildOpportunityRowLocked(
-        row: com.discountscreener.core.model.OpportunityRow,
+        row: OpportunityRow,
         currentIndex: Int,
         scoringModel: OpportunityScoringModel,
         issueMessage: String?,
@@ -997,9 +1517,9 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityRows: List<OpportunityListRow>,
         opportunityScoringModel: OpportunityScoringModel,
-    ): QuantLensReport {
+    ): ComputationResult<QuantLensReport> {
         val fingerprint = quantLensFingerprintLocked(detail, selectedRange, opportunityRows, opportunityScoringModel)
-        quantLensCache[detail.symbol]?.takeIf { it.fingerprint == fingerprint }?.let { return it.report }
+        quantLensCache[detail.symbol]?.takeIf { it.fingerprint == fingerprint }?.let { return it.result }
 
         val input = QuantLensInput(
             detail = detail,
@@ -1018,9 +1538,12 @@ class DefaultDashboardRepository(
             scoringVersion = opportunityScoringModel.ordinal,
             nowEpochSeconds = now(),
         )
-        val report = QuantLensEngine.analyze(input)
-        quantLensCache[detail.symbol] = QuantLensCacheEntry(fingerprint, report)
-        return report
+        val result = QuantLensEngine.analyze(input)
+        if (result is ComputationResult.Error) {
+            logComputationFailure("selected quant lens", result.failure)
+        }
+        quantLensCache[detail.symbol] = QuantLensCacheEntry(fingerprint, result)
+        return result
     }
 
     private fun quantLensFingerprintLocked(
@@ -1136,7 +1659,7 @@ class DefaultDashboardRepository(
 
     private fun buildRowQuantLensSummaryLocked(
         detail: SymbolDetail,
-        opportunityRow: com.discountscreener.core.model.OpportunityRow?,
+        opportunityRow: OpportunityRow?,
     ): QuantLensRowSummary {
         val evidenceStatus = if (detail.marketPriceCents > 0L && detail.intrinsicValueCents > 0L) {
             if ((opportunityRow?.coverageCount ?: 0) >= 3 || detail.confidence == ConfidenceBand.High) {
@@ -1464,7 +1987,7 @@ class DefaultDashboardRepository(
         previousEnrichmentJob?.cancelAndJoin()
     }
 
-    private fun applyTransitionLocked(feedback: com.discountscreener.android.domain.model.ProfileTransitionFeedback) {
+    private fun applyTransitionLocked(feedback: ProfileTransitionFeedback) {
         startupPhase = feedback.startupPhase
         refreshCompletedSymbols = feedback.refreshCompletedSymbols
         refreshTargetSymbols = feedback.refreshTargetSymbols
@@ -1898,17 +2421,27 @@ class DefaultDashboardRepository(
     }
 
     override suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) {
-        stateStore.saveEstimatesSnapshot(report)
+        try {
+            stateStore.saveEstimatesSnapshot(report)
+        } catch (error: Throwable) {
+            logger.error(TAG, "Failed to save estimates snapshot for ${report.profileName}", error)
+            throw error
+        }
     }
 
-    override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> =
+    override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> = try {
         stateStore.getEstimatesHistory(profileName)
+    } catch (error: Throwable) {
+        logger.error(TAG, "Failed to load estimates history for $profileName", error)
+        throw error
+    }
 
     companion object {
         private const val DEFAULT_PROFILE = "sp500"
         private const val REFRESH_CONCURRENCY = 8
         private const val MAX_RETRY_ROUNDS = 2
         private const val MAX_REVISION_HISTORY = 240
+        private const val TAG = "DiscountScreener"
     }
 }
 

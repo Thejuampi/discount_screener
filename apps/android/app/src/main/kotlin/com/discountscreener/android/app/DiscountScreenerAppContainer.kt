@@ -7,6 +7,7 @@ import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
+import com.discountscreener.android.domain.logging.AndroidAppLogger
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
@@ -33,6 +34,7 @@ class DiscountScreenerAppContainer(context: Context) {
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = YahooFinanceClient(),
             secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
+            logger = AndroidAppLogger(),
         )
     }
 

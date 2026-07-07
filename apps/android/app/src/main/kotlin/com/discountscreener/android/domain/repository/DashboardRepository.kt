@@ -3,6 +3,7 @@ package com.discountscreener.android.domain.repository
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -24,6 +25,7 @@ interface DashboardRepository {
     suspend fun clearAllData()
     suspend fun dcfSnapshot(): Map<String, DcfAnalysis>
     suspend fun trackedSymbolDetails(): List<SymbolDetail>
+    suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport)
     suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport>
 }

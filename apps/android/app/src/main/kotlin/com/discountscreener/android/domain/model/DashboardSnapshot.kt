@@ -8,6 +8,7 @@ import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ProjectedDashboardData
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensReport
 import com.discountscreener.core.model.QuantLensRowSummary
@@ -182,11 +183,14 @@ data class DashboardSnapshot(
     val selectedHistory: List<SymbolRevision>,
     val selectedAlerts: List<AlertEvent>,
     val selectedQuantLens: QuantLensReport? = null,
+    val detailNotice: DashboardNotice? = null,
     val lastUpdatedAtEpochSeconds: Long?,
     val startupPhase: DashboardStartupPhase,
     val refreshCompletedSymbols: Int,
     val refreshTargetSymbols: Int,
     val statusMessage: String?,
+    val estimatesNotice: DashboardNotice? = null,
+    val screenData: ProjectedDashboardData = ProjectedDashboardData.empty(),
 )
 
 private const val SIGNIFICANT_VALUATION_MOVE_BPS = 500

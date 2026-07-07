@@ -1,6 +1,7 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.CorrelationRiskBand
 import com.discountscreener.core.model.DcfAnalysis
@@ -19,6 +20,7 @@ import com.discountscreener.core.model.QuantLensInput
 import com.discountscreener.core.model.QuantLensModelVersion
 import com.discountscreener.core.model.QuantLensPrimaryStatus
 import com.discountscreener.core.model.QuantLensReasonCode
+import com.discountscreener.core.model.QuantLensReport
 import com.discountscreener.core.model.SimilarSetupsBand
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.TrendReliabilityBand
@@ -28,7 +30,7 @@ import kotlin.test.assertEquals
 class QuantLensEngineTest {
     @Test
     fun scaffold_report_contains_all_explicit_sections() {
-        val report = QuantLensEngine.analyze(minimalInput())
+        val report = QuantLensEngine.analyze(minimalInput()).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Sparse, report.evidenceStrength.primaryStatus)
         assertEquals(QuantLensPrimaryStatus.Sparse, report.expectedValueRange.primaryStatus)
@@ -40,7 +42,7 @@ class QuantLensEngineTest {
 
     @Test
     fun scaffold_report_keeps_domain_bands_for_every_section() {
-        val report = QuantLensEngine.analyze(minimalInput())
+        val report = QuantLensEngine.analyze(minimalInput()).requireSuccess()
 
         assertEquals(EvidenceStrengthBand.Sparse, report.evidenceStrength.band)
         assertEquals(ExpectedValueRangeBand.Sparse, report.expectedValueRange.band)
@@ -61,7 +63,7 @@ class QuantLensEngineTest {
 
     @Test
     fun scaffold_report_carries_supplied_metadata() {
-        val report = QuantLensEngine.analyze(minimalInput())
+        val report = QuantLensEngine.analyze(minimalInput()).requireSuccess()
 
         assertEquals("ACME", report.symbol)
         assertEquals(ChartRange.Month, report.selectedRange)
@@ -86,7 +88,7 @@ class QuantLensEngineTest {
                     sourceFingerprint = "dcf",
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Available, report.expectedValueRange.primaryStatus)
         assertEquals(ExpectedValueRangeBand.ScenarioWeighted, report.expectedValueRange.band)
@@ -106,7 +108,7 @@ class QuantLensEngineTest {
                     externalSignalFairValueCents = 12_000,
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Sparse, report.expectedValueRange.primaryStatus)
         assertEquals(ExpectedValueRangeBand.ReferenceOnly, report.expectedValueRange.band)
@@ -124,7 +126,7 @@ class QuantLensEngineTest {
                     QuantLensCorrelationSeries("GAMMA", ChartRange.Month, correlatedCandles(offset = 200)),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Available, report.correlationRisk.primaryStatus)
         assertEquals(CorrelationRiskBand.High, report.correlationRisk.band)
@@ -141,7 +143,7 @@ class QuantLensEngineTest {
                     },
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Available, report.trendReliability.primaryStatus)
         assertEquals(TrendReliabilityBand.Flat, report.trendReliability.band)
@@ -162,14 +164,14 @@ class QuantLensEngineTest {
                         ChartRange.Month to baseCandles + listOf(lowDuplicate, normalDuplicate, highDuplicate),
                     ),
                 ),
-            ).trendReliability,
+            ).requireSuccess().trendReliability,
             QuantLensEngine.analyze(
                 minimalInput(
                     selectedCandlesByRange = mapOf(
                         ChartRange.Month to baseCandles + listOf(highDuplicate, normalDuplicate, lowDuplicate),
                     ),
                 ),
-            ).trendReliability,
+            ).requireSuccess().trendReliability,
         )
     }
 
@@ -191,7 +193,7 @@ class QuantLensEngineTest {
                         QuantLensCorrelationSeries("GAMMA", ChartRange.Month, correlatedCandles(offset = 200)),
                     ),
                 ),
-            ).correlationRisk,
+            ).requireSuccess().correlationRisk,
             QuantLensEngine.analyze(
                 minimalInput(
                     selectedCandlesByRange = mapOf(
@@ -202,7 +204,7 @@ class QuantLensEngineTest {
                         QuantLensCorrelationSeries("GAMMA", ChartRange.Month, correlatedCandles(offset = 200)),
                     ),
                 ),
-            ).correlationRisk,
+            ).requireSuccess().correlationRisk,
         )
     }
 
@@ -216,7 +218,7 @@ class QuantLensEngineTest {
                     ChartRange.FiveYears to (0..12).map { index -> candle(index + 1, close = 10_000L + index * 100L) },
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(
             listOf(
@@ -238,7 +240,7 @@ class QuantLensEngineTest {
                     ChartRange.FiveYears to flatCandles(count = 13),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Available, report.horizonContext.primaryStatus)
     }
@@ -252,7 +254,7 @@ class QuantLensEngineTest {
                     ChartRange.Month to flatCandles(count = 10),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Partial, report.horizonContext.primaryStatus)
     }
@@ -266,7 +268,7 @@ class QuantLensEngineTest {
                     ChartRange.FiveYears to listOf(candle(1, close = 0), candle(2, close = -1)),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(
             listOf(
@@ -288,7 +290,7 @@ class QuantLensEngineTest {
 
     @Test
     fun horizon_context_primary_status_is_unavailable_when_all_horizons_are_unavailable() {
-        val report = QuantLensEngine.analyze(minimalInput(selectedCandlesByRange = emptyMap()))
+        val report = QuantLensEngine.analyze(minimalInput(selectedCandlesByRange = emptyMap())).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Unavailable, report.horizonContext.primaryStatus)
     }
@@ -301,7 +303,7 @@ class QuantLensEngineTest {
                     ChartRange.Day to listOf(candle(0, close = 0), candle(1, close = -1)) + flatCandles(count = 11),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(10, report.horizonContext.horizons.first { it.horizon == QuantLensHorizon.FiveMinutes }.sampleCount)
     }
@@ -314,7 +316,7 @@ class QuantLensEngineTest {
                     ChartRange.Day to flatCandles(count = 10) + candle(5, close = 10_500),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(
             HorizonDegradedSummary(
@@ -348,10 +350,10 @@ class QuantLensEngineTest {
         assertEquals(
             QuantLensEngine.analyze(
                 minimalInput(selectedCandlesByRange = mapOf(ChartRange.Day to lowFirst)),
-            ).horizonContext,
+            ).requireSuccess().horizonContext,
             QuantLensEngine.analyze(
                 minimalInput(selectedCandlesByRange = mapOf(ChartRange.Day to highFirst)),
-            ).horizonContext,
+            ).requireSuccess().horizonContext,
         )
     }
 
@@ -367,7 +369,7 @@ class QuantLensEngineTest {
                     comparable("EPSI", upside = -1_000, evidence = 3_000, score = 10, trend = 2_000, spread = 8_000),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Available, report.similarSetups.primaryStatus)
         assertEquals(SimilarSetupsBand.Available, report.similarSetups.band)
@@ -384,11 +386,51 @@ class QuantLensEngineTest {
                     comparable("GAMMA", upside = 2_200, evidence = 7_200, score = 68),
                 ),
             ),
-        )
+        ).requireSuccess()
 
         assertEquals(QuantLensPrimaryStatus.Sparse, report.similarSetups.primaryStatus)
         assertEquals(2, report.similarSetups.qualifyingComparableCount)
         assertEquals(emptyList(), report.similarSetups.matches)
+    }
+
+    @Test
+    fun expected_value_normalizes_reversed_analyst_range_without_throwing() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                detail = detail(
+                    externalSignalLowFairValueCents = 16_000,
+                    externalSignalFairValueCents = 14_000,
+                    externalSignalHighFairValueCents = 9_000,
+                    weightedExternalSignalFairValueCents = 8_000,
+                ),
+            ),
+        ).requireSuccess()
+
+        assertEquals(ExpectedValueRangeBand.ScenarioWeighted, report.expectedValueRange.band)
+        assertEquals(8_000, report.expectedValueRange.lowFairValueCents)
+        assertEquals(10_500, report.expectedValueRange.weightedFairValueCents)
+        assertEquals(16_000, report.expectedValueRange.highFairValueCents)
+    }
+
+    @Test
+    fun expected_value_normalizes_out_of_order_dcf_anchors_without_throwing() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                dcfAnalysis = DcfAnalysis(
+                    bearIntrinsicValueCents = 17_000,
+                    baseIntrinsicValueCents = 9_000,
+                    bullIntrinsicValueCents = 13_000,
+                    waccBps = 900,
+                    baseGrowthBps = 300,
+                    netDebtDollars = 0,
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        ).requireSuccess()
+
+        assertEquals(9_000, report.expectedValueRange.lowFairValueCents)
+        assertEquals(13_000, report.expectedValueRange.weightedFairValueCents)
+        assertEquals(17_000, report.expectedValueRange.highFairValueCents)
     }
 
     private fun minimalInput(
@@ -414,6 +456,7 @@ class QuantLensEngineTest {
         externalSignalLowFairValueCents: Long? = null,
         externalSignalFairValueCents: Long? = null,
         externalSignalHighFairValueCents: Long? = null,
+        weightedExternalSignalFairValueCents: Long? = null,
     ) = SymbolDetail(
         symbol = "ACME",
         profitable = true,
@@ -426,6 +469,7 @@ class QuantLensEngineTest {
         externalSignalFairValueCents = externalSignalFairValueCents,
         externalSignalLowFairValueCents = externalSignalLowFairValueCents,
         externalSignalHighFairValueCents = externalSignalHighFairValueCents,
+        weightedExternalSignalFairValueCents = weightedExternalSignalFairValueCents,
         externalSignalMaxAgeSeconds = 86_400,
         confidence = ConfidenceBand.Provisional,
         lastSequence = 1,
@@ -501,4 +545,9 @@ class QuantLensEngineTest {
         trendReliabilityBps = trend,
         evSpreadBps = spread,
     )
+
+    private fun ComputationResult<QuantLensReport>.requireSuccess(): QuantLensReport = when (this) {
+        is ComputationResult.Success -> value
+        is ComputationResult.Error -> throw AssertionError("Expected Quant Lens success, got $failure")
+    }
 }
