@@ -433,6 +433,26 @@ class QuantLensEngineTest {
         assertEquals(17_000, report.expectedValueRange.highFairValueCents)
     }
 
+    @Test
+    fun expected_value_clamps_extreme_weighted_upside_without_throwing() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                detail = detail(
+                    marketPriceCents = 10_000,
+                    intrinsicValueCents = 250_000,
+                    gapBps = 240_000,
+                    externalSignalLowFairValueCents = 248_500,
+                    externalSignalFairValueCents = 250_000,
+                    externalSignalHighFairValueCents = 251_500,
+                    weightedExternalSignalFairValueCents = 250_000,
+                ),
+            ),
+        ).requireSuccess()
+
+        assertEquals(ExpectedValueRangeBand.ScenarioWeighted, report.expectedValueRange.band)
+        assertEquals(100_000, report.expectedValueRange.weightedUpsideBps)
+    }
+
     private fun minimalInput(
         detail: SymbolDetail = detail(),
         dcfAnalysis: DcfAnalysis? = null,
@@ -453,6 +473,9 @@ class QuantLensEngineTest {
     )
 
     private fun detail(
+        marketPriceCents: Long = 10_000,
+        intrinsicValueCents: Long = 12_000,
+        gapBps: Int = 1_667,
         externalSignalLowFairValueCents: Long? = null,
         externalSignalFairValueCents: Long? = null,
         externalSignalHighFairValueCents: Long? = null,
@@ -460,9 +483,9 @@ class QuantLensEngineTest {
     ) = SymbolDetail(
         symbol = "ACME",
         profitable = true,
-        marketPriceCents = 10_000,
-        intrinsicValueCents = 12_000,
-        gapBps = 1_667,
+        marketPriceCents = marketPriceCents,
+        intrinsicValueCents = intrinsicValueCents,
+        gapBps = gapBps,
         minimumGapBps = 1_500,
         qualification = QualificationStatus.Qualified,
         externalStatus = ExternalSignalStatus.Missing,

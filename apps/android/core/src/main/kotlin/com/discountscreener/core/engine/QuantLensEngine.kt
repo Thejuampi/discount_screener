@@ -34,6 +34,8 @@ import kotlin.math.sqrt
 
 object QuantLensEngine {
     private const val MIN_HORIZON_WINDOWS = 10
+    private const val MIN_QUANT_LENS_BPS = -100_000
+    private const val MAX_QUANT_LENS_BPS = 100_000
 
     fun analyze(input: QuantLensInput): ComputationResult<QuantLensReport> = captureComputationResult(
         area = ComputationArea.QuantLens,
@@ -288,8 +290,8 @@ object QuantLensEngine {
         val base = anchors[1]
         val high = anchors[2]
         val weighted = ((low + (base * 2) + high) / 4L).coerceAtLeast(0L)
-        val weightedUpsideBps = checkedUpsideBps(marketPriceCents, weighted) ?: 0
-        val spreadBps = checkedUpsideBps(low.coerceAtLeast(1L), high) ?: 0
+        val weightedUpsideBps = boundedQuantLensBps(checkedUpsideBps(marketPriceCents, weighted)) ?: 0
+        val spreadBps = boundedQuantLensBps(checkedUpsideBps(low.coerceAtLeast(1L), high), min = 0) ?: 0
 
         return QuantLensExpectedValueRange(
             primaryStatus = QuantLensPrimaryStatus.Available,
@@ -299,7 +301,7 @@ object QuantLensEngine {
             weightedUpsideBps = weightedUpsideBps,
             lowFairValueCents = low,
             highFairValueCents = high,
-            spreadBps = spreadBps.coerceAtLeast(0),
+            spreadBps = spreadBps,
             reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
         )
     }
@@ -483,6 +485,9 @@ object QuantLensEngine {
     ): IllegalStateException = IllegalStateException(
         "$source scenario anchors could not be normalized for $symbol: ${anchors.joinToString()}",
     )
+
+    private fun boundedQuantLensBps(value: Int?, min: Int = MIN_QUANT_LENS_BPS, max: Int = MAX_QUANT_LENS_BPS): Int? =
+        value?.coerceIn(min, max)
 
     private fun returnsByEpoch(candles: List<HistoricalCandle>): Map<Long, Double> =
         candles
