@@ -10,6 +10,7 @@ import com.discountscreener.core.model.ProjectedMacdChartAnalysis
 import com.discountscreener.core.model.ProjectedPriceChartAnalysis
 import com.discountscreener.core.model.ProjectedPriceDomain
 import com.discountscreener.core.model.ProjectedReplayWindow
+import com.discountscreener.core.model.ProjectedRsiChartAnalysis
 import com.discountscreener.core.model.ProjectedTechnicalSignal
 import com.discountscreener.core.model.ProjectedTechnicalSignalBias
 import com.discountscreener.core.model.ProjectedTechnicalSignalKind
@@ -17,6 +18,8 @@ import com.discountscreener.core.model.ProjectedVolumeChartAnalysis
 import com.discountscreener.core.model.ProjectedVolumeProfileAnalysis
 import com.discountscreener.core.model.ProjectedVolumeProfileBin
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.round
 
 data class ReplayWindow(
@@ -210,6 +213,7 @@ object ChartAnalysis {
             ema200 = ema200,
         )
         var macd = macdAnalysis(visibleCandles, closes)
+        var rsi = rsiAnalysis(visibleCandles)
         var volume = ProjectedVolumeChartAnalysis(
             maxVolume = visibleCandles.maxOfOrNull(HistoricalCandle::volume)?.coerceAtLeast(1L) ?: 1L,
         )
@@ -226,11 +230,13 @@ object ChartAnalysis {
             volume = volume,
             volumeProfile = volumeProfile,
             macd = macd,
+            rsi = rsi,
             technicalSignals = technicalSignals(
                 ema20 = ema20,
                 ema50 = ema50,
                 ema200 = ema200,
                 macd = macd,
+                rsi = rsi,
             ),
         )
     }
@@ -289,6 +295,7 @@ object ChartAnalysis {
         ema50: List<Double>,
         ema200: List<Double>,
         macd: ProjectedMacdChartAnalysis?,
+        rsi: ProjectedRsiChartAnalysis?,
     ): List<ProjectedTechnicalSignal> = buildList {
         buildTechnicalSignal(ema20, ema50, ProjectedTechnicalSignalKind.Ema20Ema50)?.let(::add)
         buildTechnicalSignal(ema50, ema200, ProjectedTechnicalSignalKind.Ema50Ema200)?.let(::add)
@@ -298,6 +305,10 @@ object ChartAnalysis {
                 macdAnalysis.signalLine,
                 ProjectedTechnicalSignalKind.MacdSignal,
             )?.let(::add)
+        }
+        rsi?.let { rsiAnalysis ->
+            buildRsiMomentumSignal(rsiAnalysis)?.let(::add)
+            buildRsiInflectionSignal(rsiAnalysis)?.let(::add)
         }
     }
 
@@ -360,12 +371,152 @@ object ChartAnalysis {
             bias == ProjectedTechnicalSignalBias.Bull -> "Momentum is above the signal line"
             else -> "Momentum is below the signal line"
         }
+        ProjectedTechnicalSignalKind.RsiMomentum -> when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "RSI momentum just turned bullish"
+            freshCross -> "RSI momentum just turned bearish"
+            bias == ProjectedTechnicalSignalBias.Bull -> "RSI momentum remains bullish"
+            else -> "RSI momentum remains bearish"
+        }
+        ProjectedTechnicalSignalKind.RsiInflection -> when {
+            freshCross && bias == ProjectedTechnicalSignalBias.Bull -> "RSI acceleration just turned upward"
+            freshCross -> "RSI acceleration just turned downward"
+            bias == ProjectedTechnicalSignalBias.Bull -> "RSI acceleration is improving"
+            else -> "RSI acceleration is deteriorating"
+        }
     }
 
     private fun technicalSignalLabel(kind: ProjectedTechnicalSignalKind): String = when (kind) {
         ProjectedTechnicalSignalKind.Ema20Ema50 -> "E20/E50"
         ProjectedTechnicalSignalKind.Ema50Ema200 -> "E50/E200"
         ProjectedTechnicalSignalKind.MacdSignal -> "MACD"
+        ProjectedTechnicalSignalKind.RsiMomentum -> "RSI"
+        ProjectedTechnicalSignalKind.RsiInflection -> "RSI inflect"
+    }
+
+    private fun rsiAnalysis(candles: List<HistoricalCandle>): ProjectedRsiChartAnalysis? {
+        if (candles.size < 2) return null
+        val closes = candles.map { it.closeCents.toDouble() }
+        val volumes = candles.map { it.volume.toDouble().coerceAtLeast(0.0) }
+        val wilder = rsiWilder(closes, period = 14)
+        val volumeWeighted = rsiWeightedByRelativeVolume(closes, volumes, period = 14)
+        val signal = volumeWeighted.zip(wilder) { weighted, classic ->
+            ((weighted * 0.65) + (classic * 0.35)).coerceIn(0.0, 100.0)
+        }
+        val smoothedSignal = ema(signal, 5).map { it.coerceIn(0.0, 100.0) }
+        val slope = derivative(smoothedSignal)
+        val acceleration = derivative(slope)
+        return ProjectedRsiChartAnalysis(
+            wilderRsi = wilder,
+            signalRsi = smoothedSignal,
+            slope = slope,
+            acceleration = acceleration,
+            latestWilderRsi = wilder.lastOrNull(),
+            latestSignalRsi = smoothedSignal.lastOrNull(),
+            latestSlope = slope.lastOrNull(),
+            latestAcceleration = acceleration.lastOrNull(),
+        )
+    }
+
+    private fun rsiWilder(values: List<Double>, period: Int): List<Double> {
+        if (values.isEmpty()) return emptyList()
+        if (values.size == 1) return listOf(50.0)
+        val deltas = listOf(0.0) + values.zipWithNext { previous, current -> current - previous }
+        val gains = deltas.map { delta -> max(delta, 0.0) }
+        val losses = deltas.map { delta -> max(-delta, 0.0) }
+        val avgGains = wilderAverage(gains, period)
+        val avgLosses = wilderAverage(losses, period)
+        return avgGains.zip(avgLosses) { avgGain, avgLoss ->
+            when {
+                avgGain == 0.0 && avgLoss == 0.0 -> 50.0
+                avgLoss == 0.0 -> 100.0
+                else -> {
+                    val rs = avgGain / avgLoss
+                    100.0 - (100.0 / (1.0 + rs))
+                }
+            }
+        }
+    }
+
+    private fun rsiWeightedByRelativeVolume(values: List<Double>, volumes: List<Double>, period: Int): List<Double> {
+        if (values.isEmpty()) return emptyList()
+        val relativeVolume = volumes.mapIndexed { index, volume ->
+            val from = max(0, index - period + 1)
+            val window = volumes.subList(from, index + 1)
+            val baseline = window.average().takeIf { it > 0.0 } ?: 1.0
+            (volume / baseline).coerceIn(0.5, 2.0)
+        }
+        val deltas = listOf(0.0) + values.zipWithNext { previous, current -> current - previous }
+        val weightedGains = deltas.mapIndexed { index, delta -> max(delta, 0.0) * relativeVolume[index] }
+        val weightedLosses = deltas.mapIndexed { index, delta -> max(-delta, 0.0) * relativeVolume[index] }
+        val avgGains = wilderAverage(weightedGains, period)
+        val avgLosses = wilderAverage(weightedLosses, period)
+        return avgGains.zip(avgLosses) { avgGain, avgLoss ->
+            when {
+                avgGain == 0.0 && avgLoss == 0.0 -> 50.0
+                avgLoss == 0.0 -> 100.0
+                else -> {
+                    val rs = avgGain / avgLoss
+                    100.0 - (100.0 / (1.0 + rs))
+                }
+            }
+        }
+    }
+
+    private fun derivative(values: List<Double>): List<Double> {
+        if (values.isEmpty()) return emptyList()
+        val output = MutableList(values.size) { 0.0 }
+        for (index in 1 until values.size) {
+            output[index] = values[index] - values[index - 1]
+        }
+        return ema(output, 3)
+    }
+
+    private fun wilderAverage(values: List<Double>, period: Int): List<Double> {
+        if (values.isEmpty()) return emptyList()
+        val output = ArrayList<Double>(values.size)
+        var previous = values.first()
+        values.forEachIndexed { index, value ->
+            previous = if (index == 0) {
+                value
+            } else if (index < period) {
+                ((previous * index) + value) / (index + 1)
+            } else {
+                ((previous * (period - 1)) + value) / period
+            }
+            output += previous
+        }
+        return output
+    }
+
+    private fun buildRsiMomentumSignal(rsi: ProjectedRsiChartAnalysis): ProjectedTechnicalSignal? {
+        val latest = rsi.latestSignalRsi ?: return null
+        val slope = rsi.latestSlope ?: return null
+        if (latest == 50.0 && slope == 0.0) return null
+        val bias = if (latest >= 50.0 && slope >= 0.0) ProjectedTechnicalSignalBias.Bull else ProjectedTechnicalSignalBias.Bear
+        val priorSlope = rsi.slope.dropLast(1).lastOrNull() ?: 0.0
+        val freshCross = (slope >= 0.0 && priorSlope < 0.0) || (slope <= 0.0 && priorSlope > 0.0)
+        return ProjectedTechnicalSignal(
+            kind = ProjectedTechnicalSignalKind.RsiMomentum,
+            title = technicalSignalTitle(ProjectedTechnicalSignalKind.RsiMomentum, bias, freshCross),
+            meaning = technicalSignalMeaning(ProjectedTechnicalSignalKind.RsiMomentum, bias, freshCross),
+            bias = bias,
+            freshCross = freshCross,
+        )
+    }
+
+    private fun buildRsiInflectionSignal(rsi: ProjectedRsiChartAnalysis): ProjectedTechnicalSignal? {
+        val latest = rsi.latestAcceleration ?: return null
+        if (latest == 0.0) return null
+        val prior = rsi.acceleration.dropLast(1).lastOrNull() ?: 0.0
+        val bias = if (latest > 0.0) ProjectedTechnicalSignalBias.Bull else ProjectedTechnicalSignalBias.Bear
+        val freshCross = (latest > 0.0 && prior <= 0.0) || (latest < 0.0 && prior >= 0.0)
+        return ProjectedTechnicalSignal(
+            kind = ProjectedTechnicalSignalKind.RsiInflection,
+            title = technicalSignalTitle(ProjectedTechnicalSignalKind.RsiInflection, bias, freshCross),
+            meaning = technicalSignalMeaning(ProjectedTechnicalSignalKind.RsiInflection, bias, freshCross),
+            bias = bias,
+            freshCross = freshCross,
+        )
     }
 
     private fun paddedPriceDomain(min: Float, max: Float): ProjectedPriceDomain {

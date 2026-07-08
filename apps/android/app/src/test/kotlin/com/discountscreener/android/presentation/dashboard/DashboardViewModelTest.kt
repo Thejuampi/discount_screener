@@ -5,6 +5,7 @@ import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
+import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
@@ -20,6 +21,7 @@ import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.DcfAnalysis
@@ -340,6 +342,39 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun update_ticker_search_query_loads_ranked_suggestions() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            tickerSuggestions = listOf(
+                tickerSuggestion("MSFT", listOf("dow", "sp500"), inCurrentProfile = true),
+                tickerSuggestion("MSTR", listOf("sp500"), inCurrentProfile = false),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("MS"))
+        advanceUntilIdle()
+
+        assertEquals("MS", repository.lastTickerSuggestionQuery)
+        assertEquals(listOf("MSFT", "MSTR"), viewModel.state.value.tickerSearchSuggestions.map { it.symbol })
+    }
+
+    @Test
+    fun select_ticker_suggestion_opens_ad_hoc_detail_with_single_symbol_route() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("SHOP"),
+            tickerSuggestions = listOf(tickerSuggestion("SHOP", listOf("europe"), inCurrentProfile = false)),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTickerSuggestion("SHOP"))
+        advanceUntilIdle()
+
+        assertEquals("SHOP", repository.lastOpenedSymbol)
+        assertEquals("SHOP", viewModel.state.value.detailRoute?.symbol)
+        assertEquals(listOf("SHOP"), viewModel.state.value.detailRoute?.sourceSymbols)
+    }
+
+    @Test
     fun open_detail_keeps_loaded_history_available_when_switching_to_history_tab() = runTest(dispatcher) {
         val history = listOf(
             SymbolRevision(
@@ -633,6 +668,7 @@ class DashboardViewModelTest {
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
+            searchTickers = SearchTickersUseCase(repository),
         )
     }
 
@@ -700,6 +736,7 @@ class DashboardViewModelTest {
             ComputationResult.Success(projectedEstimatesReport),
         private var projectedDetailData: ProjectedDetailData? = null,
         private var detailNotice: DashboardNotice? = null,
+        private val tickerSuggestions: List<TickerSearchSuggestion> = emptyList(),
     ) : DashboardRepository {
         var saveSnapshotCallCount = 0
         var currentSnapshotCallCount = 0
@@ -709,6 +746,8 @@ class DashboardViewModelTest {
         val savedSnapshots = mutableListOf<IndexEstimatesReport>()
         var lastCurrentFilter: ViewFilter? = null
         var lastRequestedOpportunityModel: OpportunityScoringModel? = null
+        var lastTickerSuggestionQuery: String? = null
+        var lastOpenedSymbol: String? = null
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
 
@@ -760,7 +799,19 @@ class DashboardViewModelTest {
             filter: ViewFilter,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
-        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
+        ): DashboardSnapshot {
+            lastOpenedSymbol = symbol
+            return emptySnapshot(opportunityScoringModel)
+        }
+
+        override suspend fun searchTickers(
+            query: String,
+            currentProfile: String,
+            limit: Int,
+        ): List<TickerSearchSuggestion> {
+            lastTickerSuggestionQuery = query
+            return tickerSuggestions.take(limit)
+        }
 
         override suspend fun addSymbols(
             rawInput: String,
@@ -897,6 +948,17 @@ class DashboardViewModelTest {
                 )
             },
             computedAtEpochSeconds = 1_000L,
+        )
+
+        private fun tickerSuggestion(
+            symbol: String,
+            profiles: List<String>,
+            inCurrentProfile: Boolean,
+        ) = TickerSearchSuggestion(
+            symbol = symbol,
+            companyName = "$symbol Holdings",
+            profiles = profiles,
+            inCurrentProfile = inCurrentProfile,
         )
     }
 }

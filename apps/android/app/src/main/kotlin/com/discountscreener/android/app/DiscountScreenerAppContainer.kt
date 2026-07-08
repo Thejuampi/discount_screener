@@ -20,6 +20,7 @@ import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCas
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
@@ -54,6 +55,7 @@ class DiscountScreenerAppContainer(context: Context) {
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
+            searchTickers = SearchTickersUseCase(repository),
         )
     }
 

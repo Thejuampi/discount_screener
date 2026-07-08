@@ -1786,6 +1786,23 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun ensure_detail_loaded_fetches_ad_hoc_symbol_without_tracking_it() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val snapshot = repository.ensureDetailLoaded("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals("SHOP", snapshot.selectedDetail?.symbol)
+            assertTrue(snapshot.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty())
+            assertFalse(snapshot.trackedSymbols.contains("SHOP"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun fallback_snapshot_uses_latest_chart_close_when_quote_html_is_missing() {
         val store = SQLiteStateStore(context)
         try {

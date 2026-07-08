@@ -27,6 +27,7 @@ import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.SystemStats
+import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.logging.AppLogger
@@ -196,6 +197,7 @@ class DefaultDashboardRepository(
     private val comparisonBaselineWeightedFairValueBySymbol = linkedMapOf<String, Long>()
     private val comparisonBaselineMarketPriceBySymbol = linkedMapOf<String, Long>()
     private val freshnessTimestampBySymbol = linkedMapOf<String, Long>()
+    private val companyNameBySymbol = linkedMapOf<String, String>()
 
     private var currentProfile = DEFAULT_PROFILE
     private var lastUpdatedAtEpochSeconds: Long? = null
@@ -262,6 +264,7 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
+        ensureAdHocSymbolLoaded(symbol)
         ensureRevisionHistoryLoaded(symbol)
         hydratePricingHistoryForDetail(symbol)
 
@@ -314,6 +317,36 @@ class DefaultDashboardRepository(
         persistDelta(persistenceDelta)
         emitUpdate()
         return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+    }
+
+    override suspend fun searchTickers(
+        query: String,
+        currentProfile: String,
+        limit: Int,
+    ): List<TickerSearchSuggestion> {
+        val localSuggestions = profileCatalog.searchTickers(query, currentProfile, limit)
+        if (query.trim().length >= 2) {
+            localSuggestions
+                .take(4)
+                .filter { suggestion -> localCompanyNameFor(suggestion.symbol).isNullOrBlank() }
+                .forEach { suggestion ->
+                    runCatching {
+                        yahooClient.fetchSymbol(suggestion.symbol).snapshot?.companyName
+                    }.getOrNull()?.takeIf(String::isNotBlank)?.let { companyName ->
+                        stateMutex.withLock {
+                            companyNameBySymbol[suggestion.symbol] = companyName
+                        }
+                    }
+                }
+        }
+        return localSuggestions.map { suggestion ->
+            TickerSearchSuggestion(
+                symbol = suggestion.symbol,
+                companyName = localCompanyNameFor(suggestion.symbol),
+                profiles = suggestion.profiles,
+                inCurrentProfile = suggestion.inCurrentProfile,
+            )
+        }
     }
 
     override suspend fun addSymbols(
@@ -468,6 +501,46 @@ class DefaultDashboardRepository(
         stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
         stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
         emitUpdate()
+    }
+
+    private suspend fun ensureAdHocSymbolLoaded(symbol: String) {
+        val normalizedSymbol = symbol.trim().uppercase()
+        val alreadyLoaded = stateMutex.withLock { engine.detail(normalizedSymbol) != null }
+        if (alreadyLoaded) {
+            return
+        }
+
+        val fetchedAt = now()
+        val providerResult = yahooClient.fetchSymbol(normalizedSymbol)
+        val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
+        ChartRange.entries.forEach { range ->
+            val candles = runCatching { yahooClient.fetchHistoricalCandles(normalizedSymbol, range) }.getOrDefault(emptyList())
+            if (candles.isNotEmpty()) {
+                chartCaptures += range to candles
+            }
+        }
+
+        stateMutex.withLock {
+            providerResult.snapshot?.let(engine::ingestSnapshot)
+            providerResult.snapshot?.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+                companyNameBySymbol[normalizedSymbol] = companyName
+            }
+            providerResult.externalSignal?.let(engine::ingestExternal)
+            providerResult.fundamentals?.let(engine::ingestFundamentals)
+            providerResult.snapshot?.let {
+                refreshedSymbols += normalizedSymbol
+                freshnessTimestampBySymbol[normalizedSymbol] = fetchedAt
+                lastUpdatedAtEpochSeconds = fetchedAt
+            }
+            chartCaptures.forEach { (range, candles) ->
+                chartCache[chartKey(normalizedSymbol, range)] = candles
+                chartSummaries.getOrPut(normalizedSymbol) { linkedMapOf() }[range] =
+                    ChartAnalysis.buildSummary(range, candles, fetchedAt)
+            }
+            if (engine.detail(normalizedSymbol) != null) {
+                appendRevisionLocked(normalizedSymbol)
+            }
+        }
     }
 
     private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
@@ -677,6 +750,9 @@ class DefaultDashboardRepository(
 
         effectiveSnapshot?.let {
             engine.ingestSnapshot(it)
+            it.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+                companyNameBySymbol[result.symbol] = companyName
+            }
             rawCaptures += RawCapture(
                 symbol = result.symbol,
                 captureKind = CaptureKind.Snapshot,
@@ -2071,6 +2147,12 @@ class DefaultDashboardRepository(
             marketPriceCents = latestCloseCents,
             intrinsicValueCents = cachedDetail.intrinsicValueCents,
         )
+    }
+
+    private suspend fun localCompanyNameFor(symbol: String): String? = stateMutex.withLock {
+        companyNameBySymbol[symbol]
+            ?: engine.detail(symbol)?.companyName
+            ?: revisions[symbol]?.lastOrNull()?.detail?.companyName
     }
 
     internal fun isSuppressibleQuoteHtml404(diagnostic: ProviderDiagnostic): Boolean =

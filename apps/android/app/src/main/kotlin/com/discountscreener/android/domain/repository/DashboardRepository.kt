@@ -2,6 +2,7 @@ package com.discountscreener.android.domain.repository
 
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.SystemStats
+import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.DcfAnalysis
@@ -28,4 +29,5 @@ interface DashboardRepository {
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport)
     suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport>
+    suspend fun searchTickers(query: String, currentProfile: String, limit: Int = 8): List<TickerSearchSuggestion>
 }

@@ -23,6 +23,51 @@ class ProfileCatalog(private val assets: AssetManager) {
         return FALLBACK_PROFILES[normalized].orEmpty()
     }
 
+    fun searchTickers(query: String, currentProfile: String, limit: Int = 8): List<ProfileTickerSuggestion> {
+        val trimmedQuery = query.trim().uppercase(Locale.US)
+        if (trimmedQuery.isBlank()) return emptyList()
+        val normalizedCurrentProfile = normalize(currentProfile)
+        return tickerUniverse()
+            .asSequence()
+            .map { (symbol, profiles) ->
+                val inCurrentProfile = normalizedCurrentProfile in profiles
+                val matchRank = matchRank(symbol, trimmedQuery, inCurrentProfile) ?: return@map null
+                ProfileTickerSuggestion(
+                    symbol = symbol,
+                    profiles = profiles.sorted(),
+                    inCurrentProfile = inCurrentProfile,
+                    matchRank = matchRank,
+                )
+            }
+            .filterNotNull()
+            .sortedWith(
+                compareBy<ProfileTickerSuggestion> { it.matchRank }
+                    .thenByDescending { it.inCurrentProfile }
+                    .thenBy { it.symbol.length }
+                    .thenBy { it.symbol },
+            )
+            .take(limit)
+            .toList()
+    }
+
+    fun profileMembership(symbol: String): List<String> =
+        tickerUniverse()[symbol.uppercase(Locale.US)].orEmpty().sorted()
+
+    private fun tickerUniverse(): Map<String, Set<String>> = buildMap {
+        availableProfiles().forEach { profile ->
+            loadProfile(profile).forEach { symbol ->
+                put(symbol.uppercase(Locale.US), get(symbol.uppercase(Locale.US)).orEmpty() + normalize(profile))
+            }
+        }
+    }
+
+    private fun matchRank(symbol: String, query: String, inCurrentProfile: Boolean): Int? = when {
+        symbol == query -> if (inCurrentProfile) 0 else 3
+        symbol.startsWith(query) -> if (inCurrentProfile) 1 else 4
+        query in symbol -> if (inCurrentProfile) 2 else 5
+        else -> null
+    }
+
     private fun normalize(value: String): String =
         value.lowercase(Locale.US).filter(Char::isLetterOrDigit)
 
@@ -32,3 +77,10 @@ class ProfileCatalog(private val assets: AssetManager) {
         )
     }
 }
+
+data class ProfileTickerSuggestion(
+    val symbol: String,
+    val profiles: List<String>,
+    val inCurrentProfile: Boolean,
+    val matchRank: Int,
+)

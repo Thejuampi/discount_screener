@@ -193,5 +193,16 @@ data class DashboardSnapshot(
     val screenData: ProjectedDashboardData = ProjectedDashboardData.empty(),
 )
 
+data class TickerSearchSuggestion(
+    val symbol: String,
+    val companyName: String? = null,
+    val profiles: List<String> = emptyList(),
+    val inCurrentProfile: Boolean = false,
+) {
+    init {
+        require(symbol.isNotBlank()) { "Ticker search suggestion symbol is required." }
+    }
+}
+
 private const val SIGNIFICANT_VALUATION_MOVE_BPS = 500
 private const val MAJOR_VALUATION_MOVE_BPS = 2_000
