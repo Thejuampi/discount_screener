@@ -282,6 +282,45 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun ticker_switching_with_extreme_valuation_upside_keeps_quant_lens_non_fatal() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = listOf(
+                    chartCapture("NVDA", 12_000),
+                    chartCapture("AAPL", 11_000),
+                    chartCapture("MSFT", 10_000),
+                ),
+                revisions = listOf(
+                    revision(
+                        "NVDA",
+                        marketPriceCents = 10_000,
+                        intrinsicValueCents = 250_000,
+                        gapBps = 240_000,
+                        weightedFairValueCents = 250_000,
+                    ),
+                    revision("AAPL", marketPriceCents = 10_000, intrinsicValueCents = 15_000, gapBps = 3_333),
+                    revision("MSFT", marketPriceCents = 10_000, intrinsicValueCents = 12_000, gapBps = 1_666),
+                ),
+            )
+            store.replaceWatchlist(listOf("AAPL"))
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+
+            val initial = repository.bootstrap(ViewFilter(), "AAPL", ChartRange.Year, legacyModel)
+            val extreme = repository.ensureDetailLoaded("NVDA", ViewFilter(), ChartRange.Year, legacyModel)
+            val recovered = repository.ensureDetailLoaded("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(listOf("AAPL", "NVDA", "AAPL"), listOf(initial.selectedDetail?.symbol, extreme.selectedDetail?.symbol, recovered.selectedDetail?.symbol))
+            assertNull(extreme.detailNotice)
+            assertNotNull(extreme.selectedQuantLens)
+            assertEquals(250_000L, extreme.selectedQuantLens?.expectedValueRange?.weightedFairValueCents)
+            assertNull(recovered.detailNotice)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun quant_lens_candle_fingerprint_is_deterministic_for_identical_large_series() {
         var candles = largeQuantLensCandleSeries()
 

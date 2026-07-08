@@ -1628,7 +1628,8 @@ class DefaultDashboardRepository(
             val opportunity = opportunityBySymbol[symbol]
             QuantLensComparable(
                 symbol = symbol,
-                valuationUpsideBps = detail.upsideBps,
+                valuationUpsideBps = detail.upsideBps
+                    ?.coerceIn(QUANT_LENS_ROW_MIN_UPSIDE_BPS, QUANT_LENS_ROW_MAX_UPSIDE_BPS),
                 evidenceStrengthBps = evidenceOrdinalBps(detail.confidence),
                 opportunityScore = opportunity?.compositeScore,
                 trendReliabilityBps = chartSummaries[symbol]?.values?.maxOfOrNull { it.candleCount }?.coerceAtMost(100)
