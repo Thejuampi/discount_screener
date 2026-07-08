@@ -182,6 +182,7 @@ data class ProjectedChartAnalysis(
     val volume: ProjectedVolumeChartAnalysis? = null,
     val volumeProfile: ProjectedVolumeProfileAnalysis? = null,
     val macd: ProjectedMacdChartAnalysis? = null,
+    val rsi: ProjectedRsiChartAnalysis? = null,
     val technicalSignals: List<ProjectedTechnicalSignal> = emptyList(),
 )
 
@@ -252,6 +253,18 @@ data class ProjectedMacdChartAnalysis(
 )
 
 @Serializable
+data class ProjectedRsiChartAnalysis(
+    val wilderRsi: List<Double> = emptyList(),
+    val signalRsi: List<Double> = emptyList(),
+    val slope: List<Double> = emptyList(),
+    val acceleration: List<Double> = emptyList(),
+    val latestWilderRsi: Double? = null,
+    val latestSignalRsi: Double? = null,
+    val latestSlope: Double? = null,
+    val latestAcceleration: Double? = null,
+)
+
+@Serializable
 data class ProjectedTechnicalSignal(
     val kind: ProjectedTechnicalSignalKind,
     val title: String,
@@ -265,6 +278,8 @@ enum class ProjectedTechnicalSignalKind {
     Ema20Ema50,
     Ema50Ema200,
     MacdSignal,
+    RsiMomentum,
+    RsiInflection,
 }
 
 @Serializable

@@ -77,12 +77,25 @@ internal data class MacdChartModel(
     val trendSignal: TrendSignal?,
 )
 
+internal data class RsiChartModel(
+    val wilderRsi: List<Double>,
+    val signalRsi: List<Double>,
+    val slope: List<Double>,
+    val acceleration: List<Double>,
+    val latestWilderRsi: Double?,
+    val latestSignalRsi: Double?,
+    val latestSlope: Double?,
+    val latestAcceleration: Double?,
+    val trendSignals: List<TrendSignal>,
+)
+
 internal data class SnapshotChartModels(
     val replayWindow: ReplayWindow,
     val visibleCandles: List<HistoricalCandle>,
     val priceChartModel: PriceChartModel?,
     val volumeChartModel: VolumeChartModel?,
     val macdChartModel: MacdChartModel?,
+    val rsiChartModel: RsiChartModel?,
     val volumeProfileModel: VolumeProfileModel?,
     val trendSignals: List<TrendSignal>,
     val dateTicks: List<ChartDateTick>,
@@ -107,6 +120,7 @@ internal fun buildSnapshotChartModels(
     var priceChartModel = buildPriceChartModel(visibleCandles)
     var volumeChartModel = buildVolumeChartModel(visibleCandles)
     var macdChartModel = buildMacdChartModel(visibleCandles)
+    var rsiChartModel = buildRsiChartModel(visibleCandles)
     var volumeProfileModel = priceChartModel?.let { priceModel ->
         buildVolumeProfileModel(
             candles = visibleCandles,
@@ -122,6 +136,7 @@ internal fun buildSnapshotChartModels(
         priceChartModel = priceChartModel,
         volumeChartModel = volumeChartModel,
         macdChartModel = macdChartModel,
+        rsiChartModel = rsiChartModel,
         volumeProfileModel = volumeProfileModel,
         trendSignals = trendSignals,
         dateTicks = buildDateAxisTicks(visibleCandles, chartRange),
@@ -142,6 +157,7 @@ private fun buildProjectedSnapshotChartModels(
     var priceChartModel = buildPriceChartModel(replayAdjustedChart)
     var volumeChartModel = buildVolumeChartModel(replayAdjustedChart)
     var macdChartModel = buildMacdChartModel(replayAdjustedChart)
+    var rsiChartModel = buildRsiChartModel(replayAdjustedChart)
     var volumeProfileModel = buildVolumeProfileModel(replayAdjustedChart.analysis.volumeProfile)
     var trendSignals = trendSignals(priceChartModel, macdChartModel)
     return SnapshotChartModels(
@@ -150,6 +166,7 @@ private fun buildProjectedSnapshotChartModels(
         priceChartModel = priceChartModel,
         volumeChartModel = volumeChartModel,
         macdChartModel = macdChartModel,
+        rsiChartModel = rsiChartModel,
         volumeProfileModel = volumeProfileModel,
         trendSignals = trendSignals,
         dateTicks = buildDateAxisTicks(replayWindow.visibleCandles, replayAdjustedChart.range),
@@ -280,6 +297,31 @@ internal fun buildMacdChartModel(chart: ProjectedChartData): MacdChartModel? {
         trendSignal = chart.analysis.technicalSignals
             .firstOrNull { signal -> signal.kind == ProjectedTechnicalSignalKind.MacdSignal }
             ?.let(::adaptTrendSignal),
+    )
+}
+
+internal fun buildRsiChartModel(candles: List<HistoricalCandle>): RsiChartModel? {
+    if (candles.isEmpty()) return null
+    return buildRsiChartModel(projectedChartDataForVisibleCandles(candles))
+}
+
+internal fun buildRsiChartModel(chart: ProjectedChartData): RsiChartModel? {
+    val rsi = chart.analysis.rsi ?: return null
+    return RsiChartModel(
+        wilderRsi = rsi.wilderRsi,
+        signalRsi = rsi.signalRsi,
+        slope = rsi.slope,
+        acceleration = rsi.acceleration,
+        latestWilderRsi = rsi.latestWilderRsi,
+        latestSignalRsi = rsi.latestSignalRsi,
+        latestSlope = rsi.latestSlope,
+        latestAcceleration = rsi.latestAcceleration,
+        trendSignals = chart.analysis.technicalSignals
+            .filter { signal ->
+                signal.kind == ProjectedTechnicalSignalKind.RsiMomentum ||
+                    signal.kind == ProjectedTechnicalSignalKind.RsiInflection
+            }
+            .map(::adaptTrendSignal),
     )
 }
 

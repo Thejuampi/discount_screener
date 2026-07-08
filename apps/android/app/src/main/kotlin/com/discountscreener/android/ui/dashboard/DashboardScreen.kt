@@ -1,5 +1,6 @@
 package com.discountscreener.android.ui.dashboard
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -55,6 +56,14 @@ fun DashboardScreen(
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var showProfiles by remember { mutableStateOf(false) }
+    val tickerSearchActive = state.tickerSearchExpanded ||
+        state.tickerSearchQuery.isNotBlank() ||
+        state.tickerSearchSuggestions.isNotEmpty() ||
+        state.tickerSearchNotice != null
+
+    BackHandler(enabled = tickerSearchActive) {
+        onAction(DashboardAction.ClearTickerSearch)
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -108,6 +117,19 @@ fun DashboardScreen(
                 )
             }
         }
+
+        TickerSearchBar(
+            query = state.tickerSearchQuery,
+            suggestions = state.tickerSearchSuggestions,
+            expanded = state.tickerSearchExpanded,
+            notice = state.tickerSearchNotice,
+            label = "Ticker",
+            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it.uppercase())) },
+            onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
+            onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
+            onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        )
 
         ScrollableTabRow(
             selectedTabIndex = state.currentTab.ordinal,

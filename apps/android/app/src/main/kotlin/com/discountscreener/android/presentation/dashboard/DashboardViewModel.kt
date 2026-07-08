@@ -6,10 +6,12 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.discountscreener.android.domain.model.DashboardNotice
+import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
+import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
@@ -19,6 +21,7 @@ import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -96,6 +99,11 @@ sealed interface DashboardAction {
     data object Refresh : DashboardAction
     data class SelectTab(val tab: DashboardTab) : DashboardAction
     data class UpdateQuery(val query: String) : DashboardAction
+    data class UpdateTickerSearchQuery(val query: String) : DashboardAction
+    data class SelectTickerSuggestion(val symbol: String) : DashboardAction
+    data object SubmitTickerSearch : DashboardAction
+    data class SetTickerSearchExpanded(val expanded: Boolean) : DashboardAction
+    data object ClearTickerSearch : DashboardAction
     data class OpenDetail(val symbol: String) : DashboardAction
     data object BackFromDetail : DashboardAction
     data object PrevTicker : DashboardAction
@@ -126,6 +134,10 @@ data class DashboardUiState(
     val availableProfiles: List<String> = emptyList(),
     val currentProfile: String = "sp500",
     val query: String = "",
+    val tickerSearchQuery: String = "",
+    val tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),
+    val tickerSearchExpanded: Boolean = false,
+    val tickerSearchNotice: DashboardNotice? = null,
     val trackedSymbols: List<String> = emptyList(),
     val trackedRows: List<TrackedSymbolRow> = emptyList(),
     val watchlistSymbols: List<String> = emptyList(),
@@ -157,6 +169,7 @@ data class DashboardUiState(
     val estimatesNotice: DashboardNotice? = null,
 )
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 class DashboardViewModel(
     private val observeDashboardUpdates: ObserveDashboardUpdatesUseCase,
     private val bootstrapDashboard: BootstrapDashboardUseCase,
@@ -172,6 +185,7 @@ class DashboardViewModel(
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
+    private val searchTickers: SearchTickersUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -185,6 +199,11 @@ class DashboardViewModel(
             DashboardAction.Refresh -> refresh()
             is DashboardAction.SelectTab -> selectTab(action.tab)
             is DashboardAction.UpdateQuery -> updateQuery(action.query)
+            is DashboardAction.UpdateTickerSearchQuery -> updateTickerSearchQuery(action.query)
+            is DashboardAction.SelectTickerSuggestion -> selectTickerSuggestion(action.symbol)
+            DashboardAction.SubmitTickerSearch -> submitTickerSearch()
+            is DashboardAction.SetTickerSearchExpanded -> setTickerSearchExpanded(action.expanded)
+            DashboardAction.ClearTickerSearch -> clearTickerSearch()
             is DashboardAction.OpenDetail -> openDetail(action.symbol)
             DashboardAction.BackFromDetail -> backFromDetail()
             DashboardAction.PrevTicker -> navigateTicker(-1)
@@ -288,22 +307,96 @@ class DashboardViewModel(
         }
     }
 
+    private fun updateTickerSearchQuery(query: String) {
+        _state.value = _state.value.copy(
+            tickerSearchQuery = query,
+            tickerSearchExpanded = query.isNotBlank(),
+            tickerSearchNotice = null,
+        )
+        viewModelScope.launch {
+            val suggestions = if (query.isBlank()) {
+                emptyList()
+            } else {
+                searchTickers(query, _state.value.currentProfile)
+            }
+            _state.value = _state.value.copy(
+                tickerSearchSuggestions = suggestions,
+                tickerSearchExpanded = query.isNotBlank() && suggestions.isNotEmpty(),
+            )
+        }
+    }
+
+    private fun selectTickerSuggestion(symbol: String) {
+        _state.value = _state.value.copy(
+            tickerSearchQuery = symbol,
+            tickerSearchExpanded = false,
+            tickerSearchSuggestions = emptyList(),
+            tickerSearchNotice = null,
+        )
+        openDetail(symbol)
+    }
+
+    private fun submitTickerSearch() {
+        val symbol = _state.value.tickerSearchQuery.trim().uppercase()
+        if (symbol.isBlank()) return
+        selectTickerSuggestion(symbol)
+    }
+
+    private fun setTickerSearchExpanded(expanded: Boolean) {
+        _state.value = _state.value.copy(tickerSearchExpanded = expanded)
+    }
+
+    private fun clearTickerSearch() {
+        _state.value = _state.value.copy(
+            tickerSearchQuery = "",
+            tickerSearchExpanded = false,
+            tickerSearchSuggestions = emptyList(),
+            tickerSearchNotice = null,
+        )
+    }
+
     private fun openDetail(symbol: String) {
         val state = _state.value
         val sourceTab = when (state.currentTab) {
             DashboardTab.Opportunities -> DetailSourceTab.Opportunities
             else -> DetailSourceTab.Tracked
         }
-        val sourceSymbols = sourceSymbolsForTab(state, sourceTab)
-        _state.value = state.copy(
-            detailRoute = DetailRoute(
-                symbol = symbol,
-                sourceTab = sourceTab,
-                sourceSymbols = sourceSymbols,
-            ),
-            detailNotice = null,
+        val sourceSymbols = sourceSymbolsForTab(state, sourceTab).takeIf { symbol in it } ?: listOf(symbol)
+        val detailRoute = DetailRoute(
+            symbol = symbol,
+            sourceTab = sourceTab,
+            sourceSymbols = sourceSymbols,
         )
-        loadDetailData(symbol)
+        _state.value = state.copy(
+            detailRoute = detailRoute,
+            detailNotice = null,
+            tickerSearchQuery = "",
+            tickerSearchExpanded = false,
+            tickerSearchSuggestions = emptyList(),
+            tickerSearchNotice = null,
+        )
+        viewModelScope.launch {
+            try {
+                val snapshot = selectDashboardSymbol(
+                    symbol,
+                    currentFilter(),
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                )
+                render(snapshot)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    detailRoute = null,
+                    tickerSearchExpanded = false,
+                    tickerSearchSuggestions = emptyList(),
+                    tickerSearchNotice = DashboardNotice(
+                        title = "Ticker unavailable",
+                        message = error.message ?: "The ticker could not be opened.",
+                        severity = DashboardNoticeSeverity.Warning,
+                    ),
+                )
+            }
+        }
     }
 
     private fun backFromDetail() {
@@ -316,6 +409,8 @@ class DashboardViewModel(
             detailAlerts = emptyList(),
             detailQuantLens = null,
             detailNotice = null,
+            tickerSearchExpanded = false,
+            tickerSearchSuggestions = emptyList(),
         )
     }
 
@@ -329,6 +424,7 @@ class DashboardViewModel(
         _state.value = _state.value.copy(
             detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
             detailNotice = null,
+            tickerSearchQuery = newSymbol,
         )
         loadDetailData(newSymbol)
     }
@@ -430,13 +526,23 @@ class DashboardViewModel(
 
     private fun loadDetailData(symbol: String) {
         viewModelScope.launch {
-            val snapshot = selectDashboardSymbol(
-                symbol,
-                currentFilter(),
-                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                _state.value.opportunityScoringModel,
-            )
-            render(snapshot)
+            try {
+                val snapshot = selectDashboardSymbol(
+                    symbol,
+                    currentFilter(),
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                )
+                render(snapshot)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    detailNotice = DashboardNotice(
+                        title = "Ticker unavailable",
+                        message = error.message ?: "The ticker could not be opened.",
+                        severity = DashboardNoticeSeverity.Warning,
+                    ),
+                )
+            }
         }
     }
 
@@ -648,6 +754,7 @@ class DashboardViewModel(
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,
+                        searchTickers = useCases.searchTickers,
                     )
                 }
             }

@@ -15,4 +15,5 @@ data class DashboardUseCases(
     val getIndexEstimates: GetIndexEstimatesUseCase,
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     val getEstimatesHistory: GetEstimatesHistoryUseCase,
+    val searchTickers: SearchTickersUseCase,
 )

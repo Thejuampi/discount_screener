@@ -91,16 +91,63 @@ class ChartAnalysisTest {
             volumeProfileBinCount = 4,
         )
 
-        assertEquals(
-            listOf(
-                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema20Ema50, ProjectedTechnicalSignalBias.Bull),
-                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema50Ema200, ProjectedTechnicalSignalBias.Bull),
-                ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.MacdSignal, ProjectedTechnicalSignalBias.Bull),
-            ),
-            chart.analysis.technicalSignals.map { signal ->
-                ProjectedTechnicalSignalExpectation(signal.kind, signal.bias)
-            },
+        val signals = chart.analysis.technicalSignals.map { signal ->
+            ProjectedTechnicalSignalExpectation(signal.kind, signal.bias)
+        }
+        assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema20Ema50, ProjectedTechnicalSignalBias.Bull)))
+        assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema50Ema200, ProjectedTechnicalSignalBias.Bull)))
+        assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.MacdSignal, ProjectedTechnicalSignalBias.Bull)))
+        assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.RsiMomentum, ProjectedTechnicalSignalBias.Bull)))
+    }
+
+    @Test
+    fun projected_chart_analysis_exposes_dual_rsi_series_and_derivatives() {
+        val candles = (1..40).map { index ->
+            candle(
+                epoch = index,
+                open = 10_000L + (index * 120L),
+                low = 9_900L + (index * 120L),
+                high = 10_300L + (index * 120L),
+                close = 10_200L + (index * 120L),
+                volume = 1_000L + (index * 50L),
+            )
+        }
+
+        val chart = ChartAnalysis.buildProjectedChartData(
+            range = ChartRange.Month,
+            candles = candles,
+            capturedAtEpochSeconds = 123L,
+            replayOffset = 0,
+            volumeProfileBinCount = 4,
         )
+
+        val rsi = chart.analysis.rsi
+        assertEquals(candles.size, rsi?.wilderRsi.orEmpty().size)
+        assertEquals(candles.size, rsi?.signalRsi.orEmpty().size)
+        assertEquals(candles.size, rsi?.slope.orEmpty().size)
+        assertEquals(candles.size, rsi?.acceleration.orEmpty().size)
+        assertTrue((rsi?.latestWilderRsi ?: 0.0) > 50.0)
+        assertTrue((rsi?.latestSignalRsi ?: 0.0) > 50.0)
+    }
+
+    @Test
+    fun projected_chart_analysis_keeps_flat_rsi_neutral() {
+        val candles = (1..40).map { index ->
+            candle(index, open = 10_000L, low = 10_000L, high = 10_000L, close = 10_000L, volume = 1_000L)
+        }
+
+        val chart = ChartAnalysis.buildProjectedChartData(
+            range = ChartRange.Month,
+            candles = candles,
+            capturedAtEpochSeconds = 123L,
+            replayOffset = 0,
+            volumeProfileBinCount = 4,
+        )
+
+        val rsi = chart.analysis.rsi
+        assertEquals(50.0, rsi?.latestWilderRsi ?: 0.0, 0.01)
+        assertEquals(50.0, rsi?.latestSignalRsi ?: 0.0, 0.01)
+        assertEquals(0.0, rsi?.latestSlope ?: 0.0, 0.01)
     }
 
     @Test

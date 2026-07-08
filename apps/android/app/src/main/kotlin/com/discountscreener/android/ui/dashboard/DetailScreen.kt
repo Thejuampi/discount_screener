@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
@@ -109,10 +110,23 @@ fun DetailScreen(
     alerts: List<String>,
     quantLens: QuantLensUiState? = null,
     detailNotice: DashboardNotice? = null,
+    tickerSearchQuery: String = "",
+    tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),
+    tickerSearchExpanded: Boolean = false,
+    tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
-    BackHandler {
+    val tickerSearchActive = tickerSearchExpanded ||
+        tickerSearchQuery.isNotBlank() ||
+        tickerSearchSuggestions.isNotEmpty() ||
+        tickerSearchNotice != null
+
+    BackHandler(enabled = tickerSearchActive) {
+        onAction(DashboardAction.ClearTickerSearch)
+    }
+
+    BackHandler(enabled = !tickerSearchActive) {
         onAction(DashboardAction.BackFromDetail)
     }
 
@@ -121,6 +135,7 @@ fun DetailScreen(
         focusRequester.requestFocus()
     }
     var routeProjectedDetail = projectedDetail?.takeIf { projection -> projection.symbol == route.symbol }
+    var titleDetail = detail ?: routeProjectedDetail?.detail
 
     Column(
         modifier = Modifier
@@ -137,11 +152,22 @@ fun DetailScreen(
     ) {
         TopAppBar(
             title = {
-                Text(
-                    text = route.symbol,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        text = titleDetail?.companyName ?: route.symbol,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!titleDetail?.companyName.isNullOrBlank()) {
+                        Text(
+                            text = route.symbol,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             },
             navigationIcon = {
                 TextButton(onClick = { onAction(DashboardAction.BackFromDetail) }) { Text("Back") }
@@ -159,6 +185,20 @@ fun DetailScreen(
                     Text(if (detail?.isWatched == true) "Unwatch" else "Watch")
                 }
             },
+        )
+
+        TickerSearchBar(
+            query = tickerSearchQuery,
+            suggestions = tickerSearchSuggestions,
+            expanded = tickerSearchExpanded,
+            notice = tickerSearchNotice,
+            label = "Search ticker",
+            placeholder = "Ticker or company",
+            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it.uppercase())) },
+            onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
+            onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
+            onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
         )
 
         ScrollableTabRow(
@@ -250,6 +290,7 @@ private fun SnapshotContent(
     var priceChartModel = chartModels.priceChartModel
     var volumeChartModel = chartModels.volumeChartModel
     var macdChartModel = chartModels.macdChartModel
+    var rsiChartModel = chartModels.rsiChartModel
     var volumeProfileModel = chartModels.volumeProfileModel
     var dateTicks = chartModels.dateTicks
     var trendSignals = chartModels.trendSignals
@@ -329,6 +370,13 @@ private fun SnapshotContent(
                 candles = visibleCandles,
                 model = macdChartModel,
                 axisWidth = axisWidth,
+                dateTicks = dateTicks,
+            )
+        }
+
+        item {
+            RsiChartSection(
+                model = rsiChartModel,
                 dateTicks = dateTicks,
             )
         }
@@ -1938,6 +1986,37 @@ private fun MacdChartSection(
 }
 
 @Composable
+private fun RsiChartSection(
+    model: RsiChartModel?,
+    dateTicks: List<ChartDateTick>,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("RSI", fontWeight = FontWeight.Bold)
+        Text(
+            text = rsiSummaryText(model),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "RSI compares recent gains versus losses. The slope shows whether momentum is strengthening or fading. The acceleration shows whether that change is speeding up or rolling over.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        model?.trendSignals?.takeIf(List<TrendSignal>::isNotEmpty)?.let { signals ->
+            TrendSignalsSection(signals = signals)
+        }
+        ChartPane(
+            axisLabels = ChartAxisLabels(top = "100", middle = "50", bottom = "0"),
+            axisWidth = 36.dp,
+            chartHeight = 100.dp,
+            bottomTicks = dateTicks,
+        ) { chartModifier ->
+            RsiChart(model = model, modifier = chartModifier)
+        }
+    }
+}
+
+@Composable
 private fun ChartPane(
     axisLabels: ChartAxisLabels?,
     axisWidth: Dp,
@@ -1996,6 +2075,15 @@ private fun rememberChartAxisWidth(vararg axisLabels: ChartAxisLabels?): Dp {
             maxOf(MinChartAxisWidth, widestLabelWidth.toDp() + ChartAxisPadding)
         }
     }
+}
+
+private fun rsiSummaryText(model: RsiChartModel?): String {
+    model ?: return "RSI needs at least 2 candles."
+    val classic = model.latestWilderRsi?.let { String.format("%.1f", it) } ?: "n/a"
+    val signal = model.latestSignalRsi?.let { String.format("%.1f", it) } ?: "n/a"
+    val slope = model.latestSlope?.let { String.format("%.2f", it) } ?: "n/a"
+    val acceleration = model.latestAcceleration?.let { String.format("%.2f", it) } ?: "n/a"
+    return "Wilder $classic  Signal $signal  Slope $slope  Accel $acceleration"
 }
 
 internal fun chartAxisLabelTexts(vararg axisLabels: ChartAxisLabels?): List<String> = axisLabels
@@ -2316,6 +2404,54 @@ internal fun MacdChart(
             end = Offset(size.width, zeroY),
             strokeWidth = 0.5f,
         )
+    }
+}
+
+@Composable
+internal fun RsiChart(
+    model: RsiChartModel?,
+    modifier: Modifier = Modifier,
+) {
+    if (model == null || model.signalRsi.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text("RSI unavailable", style = MaterialTheme.typography.labelSmall)
+        }
+        return
+    }
+
+    val classicColor = MaterialTheme.colorScheme.primary
+    val signalColor = MaterialTheme.colorScheme.tertiary
+    val axisColor = MaterialTheme.colorScheme.outline
+    Canvas(modifier = modifier.padding(4.dp)) {
+        val projectY: (Double) -> Float = { value ->
+            size.height - (((value.toFloat().coerceIn(0f, 100f)) / 100f) * size.height)
+        }
+
+        listOf(30.0, 50.0, 70.0).forEach { level ->
+            val y = projectY(level)
+            drawLine(
+                color = axisColor,
+                start = Offset(0f, y),
+                end = Offset(size.width, y),
+                strokeWidth = if (level == 50.0) 1f else 0.5f,
+            )
+        }
+
+        val classicPath = Path()
+        model.wilderRsi.forEachIndexed { index, value ->
+            val x = chartCenterX(index, model.wilderRsi.size, size.width)
+            val y = projectY(value)
+            if (index == 0) classicPath.moveTo(x, y) else classicPath.lineTo(x, y)
+        }
+        drawPath(path = classicPath, color = classicColor, style = Stroke(width = 2f))
+
+        val signalPath = Path()
+        model.signalRsi.forEachIndexed { index, value ->
+            val x = chartCenterX(index, model.signalRsi.size, size.width)
+            val y = projectY(value)
+            if (index == 0) signalPath.moveTo(x, y) else signalPath.lineTo(x, y)
+        }
+        drawPath(path = signalPath, color = signalColor, style = Stroke(width = 3f))
     }
 }
 
