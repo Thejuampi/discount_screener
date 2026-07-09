@@ -331,7 +331,7 @@ class DefaultDashboardRepository(
                 .filter { suggestion -> localCompanyNameFor(suggestion.symbol).isNullOrBlank() }
                 .forEach { suggestion ->
                     runCatching {
-                        yahooClient.fetchSymbol(suggestion.symbol).snapshot?.companyName
+                        yahooClient.fetchSymbol(suggestion.symbol).companyName
                     }.getOrNull()?.takeIf(String::isNotBlank)?.let { companyName ->
                         stateMutex.withLock {
                             companyNameBySymbol[suggestion.symbol] = companyName
@@ -521,9 +521,21 @@ class DefaultDashboardRepository(
         }
 
         stateMutex.withLock {
-            providerResult.snapshot?.let(engine::ingestSnapshot)
-            providerResult.snapshot?.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+            providerResult.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
                 companyNameBySymbol[normalizedSymbol] = companyName
+            }
+            providerResult.snapshot?.let { snapshot ->
+                val snapshotToIngest = if (snapshot.companyName.isNullOrBlank()) {
+                    companyNameBySymbol[normalizedSymbol]?.let { companyName ->
+                        snapshot.copy(companyName = companyName)
+                    } ?: snapshot
+                } else {
+                    snapshot
+                }
+                engine.ingestSnapshot(snapshotToIngest)
+                snapshotToIngest.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+                    companyNameBySymbol[normalizedSymbol] = companyName
+                }
             }
             providerResult.externalSignal?.let(engine::ingestExternal)
             providerResult.fundamentals?.let(engine::ingestFundamentals)
@@ -710,7 +722,7 @@ class DefaultDashboardRepository(
         val dcfFallback = if (providerResult.snapshot == null) {
             resolveDcfFallback(
                 symbol = symbol,
-                companyName = providerResult.snapshot?.companyName,
+                companyName = providerResult.companyName,
                 providerFundamentals = providerResult.fundamentals,
                 chartCandles = chartCandles,
             )
@@ -748,9 +760,17 @@ class DefaultDashboardRepository(
         val effectiveSnapshot = providerResult?.snapshot ?: fallbackSnapshot ?: result.fallbackSnapshot
         val effectiveFundamentals = providerResult?.fundamentals ?: result.fallbackFundamentals
 
+        providerResult?.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+            companyNameBySymbol[result.symbol] = companyName
+        }
         effectiveSnapshot?.let {
-            engine.ingestSnapshot(it)
-            it.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+            val snapshotToIngest = if (it.companyName.isNullOrBlank()) {
+                companyNameBySymbol[result.symbol]?.let { companyName -> it.copy(companyName = companyName) } ?: it
+            } else {
+                it
+            }
+            engine.ingestSnapshot(snapshotToIngest)
+            snapshotToIngest.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
                 companyNameBySymbol[result.symbol] = companyName
             }
             rawCaptures += RawCapture(
@@ -758,7 +778,7 @@ class DefaultDashboardRepository(
                 captureKind = CaptureKind.Snapshot,
                 scopeKey = null,
                 capturedAt = result.refreshedAtEpochSeconds,
-                payload = RawCapturePayload.Snapshot(it),
+                payload = RawCapturePayload.Snapshot(snapshotToIngest),
             )
         }
         providerResult?.externalSignal?.let {
@@ -1222,7 +1242,7 @@ class DefaultDashboardRepository(
                 providerIssue = issueMessagesBySymbol[projectedRow.symbol],
                 trustNote = projectedRow.trustSignal?.label,
                 freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[projectedRow.symbol],
-                companyName = detail?.companyName,
+                companyName = resolvedCompanyNameLocked(projectedRow.symbol, detail),
                 rankMovement = rankMovement(comparisonBaselineRankBySymbol[projectedRow.symbol], currentIndex),
                 valuationChange = significantValuationChange(
                     comparisonBaselineWeightedFairValueBySymbol[projectedRow.symbol],
@@ -1291,7 +1311,8 @@ class DefaultDashboardRepository(
                 fundamentalsSignals = scoredRow?.fundamentalsSignals.orEmpty(),
                 technicalSignals = scoredRow?.technicalSignals.orEmpty(),
                 forecastSignals = scoredRow?.forecastSignals.orEmpty(),
-                companyName = detail?.companyName ?: projectedRow.candidateRow.companyName,
+                companyName = resolvedCompanyNameLocked(projectedRow.symbol, detail)
+                    ?: projectedRow.candidateRow.companyName,
                 rankMovement = rankMovement(baselineRank, currentIndex),
                 valuationChange = significantValuationChange(
                     comparisonBaselineWeightedFairValueBySymbol[projectedRow.symbol],
@@ -1498,7 +1519,7 @@ class DefaultDashboardRepository(
                 issueMessage = issueMessage,
             ),
             freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[symbol],
-            companyName = detail?.companyName,
+            companyName = resolvedCompanyNameLocked(symbol, detail),
             valuationChange = significantValuationChange(
                 comparisonBaselineWeightedFairValueBySymbol[symbol],
                 preferredAnalystTargetFairValueCents(detail),
@@ -1578,6 +1599,7 @@ class DefaultDashboardRepository(
                 upsideBps = row.upsideBps,
                 compositeScore = row.compositeScore,
                 trustNote = currentTrustNote,
+                scoringModel = scoringModel,
             ),
             quantLensSummary = detail?.let {
                 buildRowQuantLensSummaryLocked(
@@ -2149,10 +2171,13 @@ class DefaultDashboardRepository(
         )
     }
 
-    private suspend fun localCompanyNameFor(symbol: String): String? = stateMutex.withLock {
-        companyNameBySymbol[symbol]
-            ?: engine.detail(symbol)?.companyName
+    private fun resolvedCompanyNameLocked(symbol: String, detail: SymbolDetail?): String? =
+        detail?.companyName?.takeIf(String::isNotBlank)
+            ?: companyNameBySymbol[symbol]
             ?: revisions[symbol]?.lastOrNull()?.detail?.companyName
+
+    private suspend fun localCompanyNameFor(symbol: String): String? = stateMutex.withLock {
+        resolvedCompanyNameLocked(symbol, engine.detail(symbol))
     }
 
     internal fun isSuppressibleQuoteHtml404(diagnostic: ProviderDiagnostic): Boolean =
@@ -2696,14 +2721,15 @@ internal fun opportunityDecisionStateFor(
     upsideBps: Int,
     compositeScore: Int,
     trustNote: String?,
+    scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
 ): RowDecisionState? = when {
     freshness != RowFreshness.Updated -> null
     confidence == ConfidenceBand.Low -> RowDecisionState.Avoid
     upsideBps <= 0 -> RowDecisionState.Avoid
-    compositeScore < 8 -> RowDecisionState.Avoid
+    compositeScore < OpportunityEngine.avoidBelowScore(scoringModel) -> RowDecisionState.Avoid
     trustNote != null -> RowDecisionState.Watch
     confidence == ConfidenceBand.High &&
-        compositeScore >= 10 -> RowDecisionState.Act
+        compositeScore >= OpportunityEngine.actAtOrAboveScore(scoringModel) -> RowDecisionState.Act
     else -> RowDecisionState.Watch
 }
 

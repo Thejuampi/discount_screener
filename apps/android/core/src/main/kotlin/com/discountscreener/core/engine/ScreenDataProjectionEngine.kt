@@ -8,6 +8,7 @@ import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.IndexEstimatesReport
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProviderDecisionReasonCode
 import com.discountscreener.core.model.ProviderState
 import com.discountscreener.core.model.ProjectedAnalystTargetStatistic
@@ -192,6 +193,7 @@ class ScreenDataProjectionEngine {
                 freshness = freshness,
                 trustSignal = currentTrustSignal,
                 opportunityDecisionFacts = decisionFacts,
+                scoringModel = request.route.opportunityScoringModel,
             ),
             quantLensSummary = quantLensRowSummary(row.symbol, detail, dcfAnalysis),
         )
@@ -567,11 +569,18 @@ class ScreenDataProjectionEngine {
         qualification: QualificationStatus? = null,
         trustSignal: ProjectedTrustSignal? = null,
         opportunityDecisionFacts: ProjectedOpportunityDecisionFacts? = null,
+        scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
     ): ProjectedRowDecision? {
         if (freshness != ProjectedRowFreshness.Updated) return null
         var upsideBps = projectedUpsideBps(marketPriceCents, anchor.valueCents) ?: return null
         if (opportunityDecisionFacts != null) {
-            return opportunityDecision(upsideBps, confidence, trustSignal, opportunityDecisionFacts)
+            return opportunityDecision(
+                upsideBps = upsideBps,
+                confidence = confidence,
+                trustSignal = trustSignal,
+                facts = opportunityDecisionFacts,
+                scoringModel = scoringModel,
+            )
         }
         return trackedDecision(upsideBps, qualification, confidence, trustSignal)
     }
@@ -594,15 +603,18 @@ class ScreenDataProjectionEngine {
         confidence: ProjectedConfidence,
         trustSignal: ProjectedTrustSignal?,
         facts: ProjectedOpportunityDecisionFacts,
+        scoringModel: OpportunityScoringModel,
     ): ProjectedRowDecision? {
         var compositeScore = facts.compositeScore
+        val avoidBelow = OpportunityEngine.avoidBelowScore(scoringModel)
+        val actAtOrAbove = OpportunityEngine.actAtOrAboveScore(scoringModel)
         return when {
             confidence == ProjectedConfidence.Unavailable -> null
             confidence == ProjectedConfidence.Low -> ProjectedRowDecision.Avoid
             upsideBps <= 0 -> ProjectedRowDecision.Avoid
-            compositeScore != null && compositeScore < 8 -> ProjectedRowDecision.Avoid
+            compositeScore != null && compositeScore < avoidBelow -> ProjectedRowDecision.Avoid
             trustSignal != null -> ProjectedRowDecision.Watch
-            confidence == ProjectedConfidence.High && (compositeScore ?: 10) >= 10 -> ProjectedRowDecision.Act
+            confidence == ProjectedConfidence.High && (compositeScore ?: actAtOrAbove) >= actAtOrAbove -> ProjectedRowDecision.Act
             else -> ProjectedRowDecision.Watch
         }
     }

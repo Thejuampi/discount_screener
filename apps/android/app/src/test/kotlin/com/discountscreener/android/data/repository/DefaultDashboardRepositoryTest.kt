@@ -1873,15 +1873,17 @@ class DefaultDashboardRepositoryTest {
             delay(delayMs)
             val price = 10_000L + symbol.sumOf { it.code }.toLong()
             val fair = price + 2_500L
+            val companyName = companyNameFor(symbol)
             return ProviderFetchResult(
                 symbol = symbol,
                 snapshot = MarketSnapshot(
                     symbol = symbol,
-                    companyName = companyNameFor(symbol),
+                    companyName = companyName,
                     profitable = true,
                     marketPriceCents = price,
                     intrinsicValueCents = fair,
                 ),
+                companyName = companyName,
                 externalSignal = ExternalValuationSignal(
                     symbol = symbol,
                     fairValueCents = fair,

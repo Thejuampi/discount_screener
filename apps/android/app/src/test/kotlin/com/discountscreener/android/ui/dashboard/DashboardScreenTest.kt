@@ -1,6 +1,7 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.compose.ui.unit.dp
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedProviderCategory
 import com.discountscreener.core.model.ProjectedProviderState
 import org.junit.Assert.assertEquals
@@ -36,6 +37,19 @@ class DashboardScreenTest {
                 retryState = "Retryable",
             ),
             summary,
+        )
+    }
+
+    @Test
+    fun opportunity_scoring_chip_order_includes_legacy_and_v3() {
+        assertEquals(
+            listOf(
+                OpportunityScoringModel.AggressiveV3,
+                OpportunityScoringModel.AggressiveV2,
+                OpportunityScoringModel.Aggressive,
+                OpportunityScoringModel.Legacy,
+            ),
+            opportunityScoringModelChipOrder,
         )
     }
 }

@@ -71,6 +71,86 @@ private const val V2_FORECAST_FULL_WEIGHT =
 private const val V2_COMPOSITE_COVERAGE_BONUS = 5
 private const val V2_COMPOSITE_BOUND = 110
 
+// AggressiveV3 tuning constants. Extends V2 evidence math with multi-multiple valuation,
+// RSI/volume technicals, recommendation skew, DCF scenario width, and a beta risk haircut.
+private const val V3_FUND_FCF_YIELD_LOWER = -0.02
+private const val V3_FUND_FCF_YIELD_UPPER = 0.08
+private const val V3_FUND_FCF_WEIGHT = 22.0
+private const val V3_FUND_OCF_FALLBACK_WEIGHT = 10.0
+private const val V3_FUND_ROE_LOWER_BPS = 0.0
+private const val V3_FUND_ROE_UPPER_BPS = 2_000.0
+private const val V3_FUND_ROE_WEIGHT = 16.0
+private const val V3_FUND_GROWTH_LOWER_BPS = -500.0
+private const val V3_FUND_GROWTH_UPPER_BPS = 1_500.0
+private const val V3_FUND_GROWTH_WEIGHT = 12.0
+private const val V3_FUND_BALANCE_DE_LOW = 30.0
+private const val V3_FUND_BALANCE_DE_HIGH = 200.0
+private const val V3_FUND_BALANCE_WEIGHT = 16.0
+private const val V3_FUND_VALUATION_WEIGHT = 24.0
+private const val V3_FUND_PE_LOW = 800.0
+private const val V3_FUND_PE_HIGH = 3_500.0
+private const val V3_FUND_EV_EBITDA_LOW = 600.0
+private const val V3_FUND_EV_EBITDA_HIGH = 2_000.0
+private const val V3_FUND_PB_LOW = 100.0
+private const val V3_FUND_PB_HIGH = 500.0
+private const val V3_FUND_CASH_QUALITY_WEIGHT = 10.0
+
+private const val V3_TECH_TREND_DELTA_BOUND = 0.10
+private const val V3_TECH_TREND_PRICE_20_WEIGHT = 12.0
+private const val V3_TECH_TREND_20_50_WEIGHT = 18.0
+private const val V3_TECH_TREND_50_200_WEIGHT = 15.0
+private const val V3_TECH_HISTOGRAM_BOUND = 0.005
+private const val V3_TECH_HISTOGRAM_WEIGHT = 12.0
+private const val V3_TECH_MACD_DIRECTION_WEIGHT = 8.0
+private const val V3_TECH_RSI_WEIGHT = 25.0
+private const val V3_TECH_VOLUME_WEIGHT = 10.0
+private const val V3_TECH_RSI_SLOPE_BOUND = 2.0
+private const val V3_TECH_VOLUME_RATIO_LOW = 70.0
+private const val V3_TECH_VOLUME_RATIO_HIGH = 150.0
+
+private const val V3_FORECAST_UPSIDE_LOWER_BPS = -2_000.0
+private const val V3_FORECAST_UPSIDE_UPPER_BPS = 5_000.0
+private const val V3_FORECAST_VALUATION_WEIGHT = 42.0
+private const val V3_FORECAST_REC_LOW_HUNDREDTHS = 150.0
+private const val V3_FORECAST_REC_HIGH_HUNDREDTHS = 300.0
+private const val V3_FORECAST_REC_WEIGHT = 12.0
+private const val V3_FORECAST_SKEW_WEIGHT = 12.0
+private const val V3_FORECAST_MIN_ANALYST_OPINIONS = 3
+private const val V3_FORECAST_FULL_ANALYST_OPINIONS = 15.0
+private const val V3_FORECAST_BREADTH_WEIGHT = 14.0
+private const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
+private const val V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT = 8.0
+private const val V3_FORECAST_DCF_UNCERTAINTY_WEIGHT = 8.0
+private const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
+private const val V3_FORECAST_DCF_WIDTH_UPPER = 1.0
+private const val V3_FORECAST_FRESHNESS_WEIGHT = 4.0
+private const val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
+private const val V3_FORECAST_DCF_RELIABILITY = 0.75
+private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
+
+private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
+private const val V3_TECHNICALS_FULL_WEIGHT = 100.0
+private const val V3_FORECAST_FULL_WEIGHT =
+    V3_FORECAST_VALUATION_WEIGHT +
+        V3_FORECAST_REC_WEIGHT +
+        V3_FORECAST_SKEW_WEIGHT +
+        V3_FORECAST_BREADTH_WEIGHT +
+        V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT +
+        V3_FORECAST_DCF_UNCERTAINTY_WEIGHT +
+        V3_FORECAST_FRESHNESS_WEIGHT
+
+private const val V3_COMPOSITE_COVERAGE_BONUS = 5
+private const val V3_COMPOSITE_BOUND = 110
+private const val V3_BETA_HAIRCUT_MAX = 10.0
+private const val V3_BETA_LOW_MILLIS = 800.0
+private const val V3_BETA_HIGH_MILLIS = 1_600.0
+
+// Act/Avoid cutoffs. Legacy/Aggressive use the original 0–15-ish point scale; V2/V3 use ±100 means.
+private const val LEGACY_AVOID_BELOW_SCORE = 8
+private const val LEGACY_ACT_AT_OR_ABOVE_SCORE = 10
+private const val CONTINUOUS_AVOID_BELOW_SCORE = 0
+private const val CONTINUOUS_ACT_AT_OR_ABOVE_SCORE = 30
+
 data class OpportunityContext(
     val filter: ViewFilter = ViewFilter(),
     val chartSummariesBySymbol: Map<String, Map<ChartRange, ChartRangeSummary>> = emptyMap(),
@@ -90,6 +170,26 @@ data class OpportunityScoreBreakdown(
 )
 
 object OpportunityEngine {
+    /** Composite scores strictly below this mark opportunities as Avoid (when other gates pass). */
+    fun avoidBelowScore(model: OpportunityScoringModel): Int = when (model) {
+        OpportunityScoringModel.Legacy,
+        OpportunityScoringModel.Aggressive,
+        -> LEGACY_AVOID_BELOW_SCORE
+        OpportunityScoringModel.AggressiveV2,
+        OpportunityScoringModel.AggressiveV3,
+        -> CONTINUOUS_AVOID_BELOW_SCORE
+    }
+
+    /** High-confidence Act requires composite at or above this mark (when other gates pass). */
+    fun actAtOrAboveScore(model: OpportunityScoringModel): Int = when (model) {
+        OpportunityScoringModel.Legacy,
+        OpportunityScoringModel.Aggressive,
+        -> LEGACY_ACT_AT_OR_ABOVE_SCORE
+        OpportunityScoringModel.AggressiveV2,
+        OpportunityScoringModel.AggressiveV3,
+        -> CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
+    }
+
     fun buildRows(
         reportingEngine: ReportingEngine,
         context: OpportunityContext = OpportunityContext(),
@@ -147,19 +247,29 @@ object OpportunityEngine {
             OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
             OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
+            OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
         }
         val (technicalScore, technicalSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
             OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
+            OpportunityScoringModel.AggressiveV3 -> aggressiveV3TechnicalScore(summary)
         }
         val (forecastScore, forecastSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis)
             OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
+            OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
         }
         val coverageCount = listOf(fundamentalsScore, technicalScore, forecastScore).count { it != null }
-        val composite = compositeScoreFor(model, fundamentalsScore, technicalScore, forecastScore, coverageCount)
+        val composite = compositeScoreFor(
+            model = model,
+            fundamentals = fundamentalsScore,
+            technical = technicalScore,
+            forecast = forecastScore,
+            coverageCount = coverageCount,
+            detail = detail,
+        )
 
         return OpportunityScoreBreakdown(
             fundamentalsScore = fundamentalsScore,
@@ -179,6 +289,7 @@ object OpportunityEngine {
         technical: Int?,
         forecast: Int?,
         coverageCount: Int,
+        detail: SymbolDetail,
     ): Int = when (model) {
         OpportunityScoringModel.Legacy,
         OpportunityScoringModel.Aggressive,
@@ -194,6 +305,26 @@ object OpportunityEngine {
                 (mean + bonus).roundToInt().coerceIn(-V2_COMPOSITE_BOUND, V2_COMPOSITE_BOUND)
             }
         }
+
+        OpportunityScoringModel.AggressiveV3 -> {
+            if (coverageCount == 0) {
+                0
+            } else {
+                val sum = (fundamentals ?: 0) + (technical ?: 0) + (forecast ?: 0)
+                val mean = sum.toDouble() / coverageCount.toDouble()
+                val bonus = V3_COMPOSITE_COVERAGE_BONUS * (coverageCount - 1)
+                val base = (mean + bonus).coerceIn(-V3_COMPOSITE_BOUND.toDouble(), V3_COMPOSITE_BOUND.toDouble())
+                val haircut = v3BetaRiskHaircut(detail)
+                (base - haircut).roundToInt().coerceIn(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
+            }
+        }
+    }
+
+    private fun v3BetaRiskHaircut(detail: SymbolDetail): Double {
+        val betaMillis = detail.fundamentals?.betaMillis ?: return 0.0
+        // Missing beta is not a penalty. High beta (→1.6+) haircuts up to V3_BETA_HAIRCUT_MAX.
+        val ramp = smoothRamp(betaMillis.toDouble(), V3_BETA_LOW_MILLIS, V3_BETA_HIGH_MILLIS)
+        return ((ramp + 1.0) / 2.0) * V3_BETA_HAIRCUT_MAX
     }
 
     fun scoreFundamentals(detail: SymbolDetail): Pair<Int?, List<String>> {
@@ -714,6 +845,313 @@ object OpportunityEngine {
 
         val raw = acc.normalizedScore() ?: return null to signals
         return raw.coerceIn(-100, 100) to signals
+    }
+
+    // ----------------------------------------------------------------------------------
+    // AggressiveV3 scoring model.
+    //
+    // Design contract (extends V2):
+    //  * Same EvidenceAccumulator + smoothRamp math and [-100, +100] bucket normalization.
+    //  * Fundamentals: multi-multiple valuation blend (FwdPE / EV/EBITDA / P/B) + optional
+    //    FCF/OCF cash quality; still one cash-flow vote (FCF yield or OCF fallback).
+    //  * Technicals: V2-style trend/MACD budget plus RSI regime (mid-bullish preferred,
+    //    overbought chase discouraged) and optional volume confirmation.
+    //  * Forecast: V2 reliability/freshness gates plus recommendation distribution skew
+    //    and DCF bear–bull scenario width as uncertainty.
+    //  * Composite: coverage-weighted mean + bonus, then beta risk haircut (missing beta = 0).
+    // ----------------------------------------------------------------------------------
+
+    internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
+        val fundamentals = detail.fundamentals ?: return null to emptyList()
+        val acc = EvidenceAccumulator(V3_FUNDAMENTALS_FULL_WEIGHT)
+
+        val fcfDollars = fundamentals.freeCashFlowDollars
+        val marketCapDollars = fundamentals.marketCapDollars
+        when {
+            fcfDollars != null && marketCapDollars != null && marketCapDollars > 0L -> {
+                val yieldFraction = fcfDollars.toDouble() / marketCapDollars.toDouble()
+                acc.add(V3_FUND_FCF_WEIGHT, smoothRamp(yieldFraction, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER), "FCFy")
+            }
+            fcfDollars != null -> {
+                acc.add(V3_FUND_FCF_WEIGHT, if (fcfDollars > 0L) 1.0 else -1.0, "FCF")
+            }
+            else -> {
+                val ocfDollars = fundamentals.operatingCashFlowDollars
+                if (ocfDollars != null) {
+                    acc.add(V3_FUND_OCF_FALLBACK_WEIGHT, if (ocfDollars > 0L) 1.0 else -1.0, "OCF")
+                }
+            }
+        }
+
+        fundamentals.returnOnEquityBps?.let { roeBps ->
+            acc.add(V3_FUND_ROE_WEIGHT, smoothRamp(roeBps.toDouble(), V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS), "ROE")
+        }
+
+        fundamentals.earningsGrowthBps?.let { growthBps ->
+            acc.add(V3_FUND_GROWTH_WEIGHT, smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS), "Growth")
+        }
+
+        val deHundredths = fundamentals.debtToEquityHundredths
+        if (deHundredths != null) {
+            acc.add(V3_FUND_BALANCE_WEIGHT, -smoothRamp(deHundredths.toDouble(), V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH), "D/E")
+        } else {
+            val cash = fundamentals.totalCashDollars
+            val debt = fundamentals.totalDebtDollars
+            if (cash != null && debt != null) {
+                acc.add(V3_FUND_BALANCE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+            }
+        }
+
+        // Multi-multiple valuation panel: blend available positive multiples so cheaper → +1.
+        // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
+        // saturate the full valuation budget.
+        val valuationRamps = mutableListOf<Double>()
+        fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
+            valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
+        }
+        fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
+            valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
+        }
+        fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
+            valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
+        }
+        if (valuationRamps.isNotEmpty()) {
+            val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
+            val coverageFraction = valuationRamps.size.toDouble() / 3.0
+            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
+        }
+
+        // Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign).
+        val ocfForQuality = fundamentals.operatingCashFlowDollars
+        if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
+            val conversion = fcfDollars.toDouble() / ocfForQuality.toDouble()
+            acc.add(V3_FUND_CASH_QUALITY_WEIGHT, smoothRamp(conversion, 0.0, 1.0), "Conv")
+        }
+
+        return acc.normalizedScore() to acc.signals
+    }
+
+    internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
+        summary ?: return null to emptyList()
+        val latestCloseCents = summary.latestCloseCents ?: return null to emptyList()
+        val acc = EvidenceAccumulator(V3_TECHNICALS_FULL_WEIGHT)
+
+        summary.ema20Cents?.takeIf { it > 0 }?.let { ema20 ->
+            val delta = (latestCloseCents - ema20).toDouble() / ema20.toDouble()
+            acc.add(V3_TECH_TREND_PRICE_20_WEIGHT, smoothRamp(delta, -V3_TECH_TREND_DELTA_BOUND, V3_TECH_TREND_DELTA_BOUND), "Px/20")
+        }
+        if (summary.ema20Cents != null && summary.ema50Cents != null && summary.ema50Cents > 0) {
+            val delta = (summary.ema20Cents - summary.ema50Cents).toDouble() / summary.ema50Cents.toDouble()
+            acc.add(V3_TECH_TREND_20_50_WEIGHT, smoothRamp(delta, -V3_TECH_TREND_DELTA_BOUND, V3_TECH_TREND_DELTA_BOUND), "20/50")
+        }
+        if (summary.ema50Cents != null && summary.ema200Cents != null && summary.ema200Cents > 0) {
+            val delta = (summary.ema50Cents - summary.ema200Cents).toDouble() / summary.ema200Cents.toDouble()
+            acc.add(V3_TECH_TREND_50_200_WEIGHT, smoothRamp(delta, -V3_TECH_TREND_DELTA_BOUND, V3_TECH_TREND_DELTA_BOUND), "50/200")
+        }
+
+        if (summary.histogramCents != null && latestCloseCents > 0) {
+            val ratio = summary.histogramCents.toDouble() / latestCloseCents.toDouble()
+            acc.add(V3_TECH_HISTOGRAM_WEIGHT, smoothRamp(ratio, -V3_TECH_HISTOGRAM_BOUND, V3_TECH_HISTOGRAM_BOUND), "Hist")
+        }
+
+        if (summary.macdCents != null && summary.signalCents != null) {
+            val direction = when {
+                summary.macdCents > summary.signalCents -> 1.0
+                summary.macdCents < summary.signalCents -> -1.0
+                else -> 0.0
+            }
+            acc.add(V3_TECH_MACD_DIRECTION_WEIGHT, direction, "MACD")
+        }
+
+        summary.latestWilderRsi?.let { rsi ->
+            val levelRamp = v3RsiLevelRamp(rsi)
+            val slopeRamp = summary.latestRsiSlope?.let { slope ->
+                smoothRamp(slope, -V3_TECH_RSI_SLOPE_BOUND, V3_TECH_RSI_SLOPE_BOUND)
+            } ?: 0.0
+            val combined = (0.65 * levelRamp) + (0.35 * slopeRamp)
+            acc.add(V3_TECH_RSI_WEIGHT, combined.coerceIn(-1.0, 1.0), "RSI")
+        }
+
+        summary.volumeRatioHundredths?.let { volumeHundredths ->
+            acc.add(
+                V3_TECH_VOLUME_WEIGHT,
+                smoothRamp(volumeHundredths.toDouble(), V3_TECH_VOLUME_RATIO_LOW, V3_TECH_VOLUME_RATIO_HIGH),
+                "Vol",
+            )
+        }
+
+        return acc.normalizedScore() to acc.signals
+    }
+
+    /**
+     * RSI level preference: reward mid-bullish zone (~45–65), discourage overbought chase.
+     * 30 → −1, 55 → +1, 80 → −0.5, above 80 stays −0.5.
+     */
+    internal fun v3RsiLevelRamp(rsi: Double): Double = when {
+        rsi <= 30.0 -> -1.0
+        rsi <= 55.0 -> smoothRamp(rsi, 30.0, 55.0)
+        rsi <= 80.0 -> {
+            val t = (rsi - 55.0) / (80.0 - 55.0)
+            (1.0 - (t * 1.5)).coerceIn(-1.0, 1.0)
+        }
+        else -> -0.5
+    }
+
+    internal fun aggressiveV3ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+        val acc = EvidenceAccumulator(V3_FORECAST_FULL_WEIGHT)
+        val sufficiencySignals = mutableListOf<String>()
+        var reliableEvidenceWeight = 0.0
+        var hasValuationAnchor = false
+
+        val targetFairValue = preferredForecastFairValueCents(detail)
+        val targetCount = targetAnalystCount(detail)
+        val recommendationCount = recommendationAnalystCount(detail)
+        val broadestAnalystCount = listOfNotNull(targetCount, recommendationCount).maxOrNull()
+        val externalFreshness = v3FreshnessMultiplier(detail)
+        val externalStatusReliability = externalStatusReliability(detail.externalStatus)
+
+        val valuationInputs = mutableListOf<WeightedForecastRamp>()
+        targetFairValue?.let { fairValue ->
+            val targetUpsideBps = checkedUpsideBps(detail.marketPriceCents, fairValue)
+            val targetReliability = v3AnalystCoverageReliability(targetCount) * externalFreshness * externalStatusReliability
+            when {
+                targetUpsideBps == null -> Unit
+                !v3HasSufficientAnalystCoverage(targetCount) -> {
+                    sufficiencySignals += if (targetCount == null) "Cov?" else "Cov<${V3_FORECAST_MIN_ANALYST_OPINIONS}"
+                }
+                targetReliability > 0.0 -> {
+                    valuationInputs += WeightedForecastRamp(
+                        ramp = smoothRamp(targetUpsideBps.toDouble(), V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
+                        reliability = targetReliability,
+                    )
+                }
+            }
+        }
+
+        analysis?.let { dcf ->
+            dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
+                valuationInputs += WeightedForecastRamp(
+                    ramp = smoothRamp(marginBps.toDouble(), V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
+                    reliability = V3_FORECAST_DCF_RELIABILITY,
+                )
+            }
+        }
+
+        if (valuationInputs.isNotEmpty()) {
+            val reliabilitySum = valuationInputs.sumOf { it.reliability }
+            if (reliabilitySum > 0.0) {
+                val blendedRamp = valuationInputs.sumOf { it.ramp * it.reliability } / reliabilitySum
+                val weight = V3_FORECAST_VALUATION_WEIGHT * reliabilitySum.coerceAtMost(1.0)
+                acc.add(weight, blendedRamp, "Val")
+                reliableEvidenceWeight += weight
+                hasValuationAnchor = true
+            }
+        }
+
+        detail.recommendationMeanHundredths?.let { rec ->
+            val recReliability = v3AnalystCoverageReliability(recommendationCount) * externalFreshness * externalStatusReliability
+            if (!v3HasSufficientAnalystCoverage(recommendationCount)) {
+                sufficiencySignals += if (recommendationCount == null) "RecCov?" else "RecCov<${V3_FORECAST_MIN_ANALYST_OPINIONS}"
+            } else if (recReliability > 0.0) {
+                val weight = V3_FORECAST_REC_WEIGHT * recReliability
+                acc.add(weight, -smoothRamp(rec.toDouble(), V3_FORECAST_REC_LOW_HUNDREDTHS, V3_FORECAST_REC_HIGH_HUNDREDTHS), "Rec")
+                reliableEvidenceWeight += weight
+            }
+        }
+
+        // Recommendation distribution skew: distinct from mean rating.
+        val skew = v3RecommendationSkew(detail)
+        if (skew != null) {
+            val skewReliability = v3AnalystCoverageReliability(recommendationCount) * externalFreshness * externalStatusReliability
+            if (v3HasSufficientAnalystCoverage(recommendationCount) && skewReliability > 0.0) {
+                val weight = V3_FORECAST_SKEW_WEIGHT * skewReliability
+                acc.add(weight, skew, "Skew")
+                reliableEvidenceWeight += weight
+            }
+        }
+
+        broadestAnalystCount?.let { count ->
+            acc.add(V3_FORECAST_BREADTH_WEIGHT, v3AnalystBreadthRamp(count), "Cov")
+            reliableEvidenceWeight += V3_FORECAST_BREADTH_WEIGHT * v3AnalystCoverageReliability(count)
+        }
+
+        val targetReliabilityWithoutFreshness = v3AnalystCoverageReliability(targetCount) * externalStatusReliability
+        val low = detail.externalSignalLowFairValueCents
+        val high = detail.externalSignalHighFairValueCents
+        val centre = targetFairValue
+        if (low != null && high != null && centre != null && centre > 0L && high > low && targetReliabilityWithoutFreshness > 0.0) {
+            val spreadFraction = (high - low).toDouble() / centre.toDouble()
+            val weight = V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT * targetReliabilityWithoutFreshness
+            acc.add(weight, -smoothRamp(spreadFraction, 0.0, V3_FORECAST_UNCERTAINTY_BOUND), "Unc")
+            reliableEvidenceWeight += weight * externalFreshness
+        }
+
+        analysis?.let { dcf ->
+            val base = dcf.baseIntrinsicValueCents
+            val bear = dcf.bearIntrinsicValueCents
+            val bull = dcf.bullIntrinsicValueCents
+            if (base > 0L && bull >= base && base >= bear && bull > bear) {
+                val widthFraction = (bull - bear).toDouble() / base.toDouble()
+                acc.add(
+                    V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
+                    -smoothRamp(widthFraction, V3_FORECAST_DCF_WIDTH_LOWER, V3_FORECAST_DCF_WIDTH_UPPER),
+                    "DcfUnc",
+                )
+                reliableEvidenceWeight += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT
+            }
+        }
+
+        if (targetFairValue != null && v3HasSufficientAnalystCoverage(targetCount)) {
+            val weight = V3_FORECAST_FRESHNESS_WEIGHT * v3AnalystCoverageReliability(targetCount)
+            acc.add(weight, freshnessRamp(externalFreshness), "Fresh")
+            reliableEvidenceWeight += weight * externalFreshness
+        }
+
+        val signals = (acc.signals + sufficiencySignals).distinct()
+        if (!hasValuationAnchor || reliableEvidenceWeight < V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
+            return null to signals
+        }
+
+        val raw = acc.normalizedScore() ?: return null to signals
+        return raw.coerceIn(-100, 100) to signals
+    }
+
+    private fun v3RecommendationSkew(detail: SymbolDetail): Double? {
+        val strongBuy = detail.strongBuyCount ?: 0
+        val buy = detail.buyCount ?: 0
+        val hold = detail.holdCount ?: 0
+        val sell = detail.sellCount ?: 0
+        val strongSell = detail.strongSellCount ?: 0
+        val total = strongBuy + buy + hold + sell + strongSell
+        if (total <= 0) return null
+        val bullish = (strongBuy + buy).toDouble()
+        val bearish = (sell + strongSell).toDouble()
+        return ((bullish - bearish) / total.toDouble()).coerceIn(-1.0, 1.0)
+    }
+
+    private fun v3HasSufficientAnalystCoverage(count: Int?): Boolean =
+        count != null && count >= V3_FORECAST_MIN_ANALYST_OPINIONS
+
+    private fun v3AnalystCoverageReliability(count: Int?): Double {
+        if (!v3HasSufficientAnalystCoverage(count)) return 0.0
+        val progress = ((count!!.toDouble() - V3_FORECAST_MIN_ANALYST_OPINIONS.toDouble()) /
+            (V3_FORECAST_FULL_ANALYST_OPINIONS - V3_FORECAST_MIN_ANALYST_OPINIONS.toDouble()))
+            .coerceIn(0.0, 1.0)
+        return 0.35 + (0.65 * progress)
+    }
+
+    private fun v3AnalystBreadthRamp(count: Int): Double {
+        if (count < V3_FORECAST_MIN_ANALYST_OPINIONS) return -1.0
+        val progress = ((count.toDouble() - V3_FORECAST_MIN_ANALYST_OPINIONS.toDouble()) /
+            (V3_FORECAST_FULL_ANALYST_OPINIONS - V3_FORECAST_MIN_ANALYST_OPINIONS.toDouble()))
+            .coerceIn(0.0, 1.0)
+        return (-0.5 + (1.5 * progress)).coerceIn(-1.0, 1.0)
+    }
+
+    private fun v3FreshnessMultiplier(detail: SymbolDetail): Double {
+        val age = detail.externalSignalAgeSeconds ?: return 1.0
+        if (age <= 0L) return 1.0
+        return exp(-age.toDouble() / V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS)
     }
 
     private data class WeightedForecastRamp(

@@ -78,6 +78,7 @@ object ChartAnalysis {
         val ema50 = ema(closes, 50).lastOrNull()?.roundToLong()
         val ema200 = ema(closes, 200).lastOrNull()?.roundToLong()
         val macd = macd(closes)
+        val rsi = rsiAnalysis(candles)
         return ChartRangeSummary(
             range = range,
             capturedAt = capturedAtEpochSeconds,
@@ -89,7 +90,25 @@ object ChartAnalysis {
             macdCents = macd.macd.lastOrNull()?.roundToLong(),
             signalCents = macd.signal.lastOrNull()?.roundToLong(),
             histogramCents = macd.histogram.lastOrNull()?.roundToLong(),
+            latestWilderRsi = rsi?.latestWilderRsi,
+            latestRsiSlope = rsi?.latestSlope,
+            volumeRatioHundredths = volumeRatioHundredths(candles),
         )
+    }
+
+    private fun volumeRatioHundredths(candles: List<HistoricalCandle>): Int? {
+        if (candles.isEmpty()) return null
+        val volumes = candles.map { it.volume.coerceAtLeast(0L) }
+        val latest = volumes.last()
+        if (volumes.all { it == 0L }) return null
+        val sorted = volumes.sorted()
+        val median = if (sorted.size % 2 == 0) {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
+        } else {
+            sorted[sorted.size / 2].toDouble()
+        }
+        if (median <= 0.0) return null
+        return ((latest.toDouble() / median) * 100.0).roundToInt().coerceIn(0, 10_000)
     }
 
     fun buildVolumeProfileAnalysis(

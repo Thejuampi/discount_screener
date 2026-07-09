@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -27,12 +30,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -242,39 +248,55 @@ fun DashboardScreen(
     }
 }
 
+internal val opportunityScoringModelChipOrder = listOf(
+    OpportunityScoringModel.AggressiveV3,
+    OpportunityScoringModel.AggressiveV2,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.Legacy,
+)
+
+internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
+    OpportunityScoringModel.AggressiveV3 -> "Aggressive V3"
+    OpportunityScoringModel.AggressiveV2 -> "Aggressive V2"
+    OpportunityScoringModel.Aggressive -> "Aggressive"
+    OpportunityScoringModel.Legacy -> "Legacy"
+}
+
 @Composable
 private fun OpportunityScoringModelToggle(
     selected: OpportunityScoringModel,
     onAction: (DashboardAction) -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = selected == OpportunityScoringModel.AggressiveV2,
-            onClick = {
-                if (selected != OpportunityScoringModel.AggressiveV2) {
-                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.AggressiveV2))
-                }
-            },
-            label = { Text("Aggressive V2") },
-        )
-        FilterChip(
-            selected = selected == OpportunityScoringModel.Aggressive,
-            onClick = {
-                if (selected != OpportunityScoringModel.Aggressive) {
-                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Aggressive))
-                }
-            },
-            label = { Text("Aggressive") },
-        )
-        FilterChip(
-            selected = selected == OpportunityScoringModel.Legacy,
-            onClick = {
-                if (selected != OpportunityScoringModel.Legacy) {
-                    onAction(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
-                }
-            },
-            label = { Text("Legacy") },
-        )
+    // Four chips overflow a typical phone width; LazyRow keeps every model reachable and
+    // scrolls the selected chip into view so selection never looks like "no chip filled".
+    val listState = rememberLazyListState()
+    val selectedIndex = opportunityScoringModelChipOrder.indexOf(selected).coerceAtLeast(0)
+
+    LaunchedEffect(selected) {
+        listState.animateScrollToItem(selectedIndex)
+    }
+
+    LazyRow(
+        state = listState,
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(
+            items = opportunityScoringModelChipOrder,
+            key = { _, model -> model.name },
+        ) { _, model ->
+            val isSelected = selected == model
+            FilterChip(
+                selected = isSelected,
+                onClick = {
+                    if (!isSelected) {
+                        onAction(DashboardAction.SetOpportunityScoringModel(model))
+                    }
+                },
+                label = { Text(model.chipLabel()) },
+                modifier = Modifier.semantics { this.selected = isSelected },
+            )
+        }
     }
 }
 

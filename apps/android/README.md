@@ -20,13 +20,14 @@ This directory contains the native Android client for Discount Screener.
 - live candidate and opportunity reporting
 - symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, chart range selection, and phone-native system back support to return to the dashboard
 - symbol detail chart replay with back/forward/live controls plus a right-side volume profile that bins visible replay-window volume by price and up/down candle direction
-- opportunities as the default landing surface with aggressive scoring selected by default and legacy scoring still available on demand
+- opportunities as the default landing surface with **Aggressive V2** scoring selected by default; Aggressive V3 (multi-multiple + RSI + conviction + beta haircut), Aggressive V1, and Legacy remain available on demand
 - restore-to-live movement badges plus analyst target revision cues on both tracked and opportunity rows, with a state-driven history detail experience that collapses flat analyst-target spans, summarizes the latest net move, and shows change-only evidence when the range is sparse
 - tracked and opportunity rows now explain whether a meaningful move came from price, analyst target changes, relative re-ranking, or a combined move, and they surface quiet trust states such as No baseline, No meaningful change, freshness, saved/live timing, and No analyst target when Yahoo coverage is incomplete
 - tracked and opportunity rows also surface a repository-computed `Act`, `Watch`, or `Avoid` triage chip when live data supports a direct decision, so the list can answer the first decision question before the user drills into detail
 - local warm-start persistence for tracked symbols, watchlist, issues, chart cache, and revision history
 - operator surfaces for candidates, opportunities, watchlist, issues, and symbol detail
-- opportunities can switch in-place between the original legacy ranking model and a more aggressive high-risk/high-reward model from the opportunities tab
+- opportunities can switch in-place among Legacy, Aggressive, Aggressive V2, and Aggressive V3 ranking models from the opportunities tab
+- Aggressive V3 keeps V2's continuous evidence math and adds blended valuation multiples (forward PE / EV/EBITDA / P/B), RSI regime + volume confirmation on chart summaries, analyst recommendation skew, DCF scenario-width uncertainty, and a beta risk haircut on the composite; Act/Avoid cutoffs are model-aware (±100 scale for V2/V3)
 - startup splash during warm restore plus a one-time disclaimer acceptance gate before entering the app
 
 ## Prerequisites
