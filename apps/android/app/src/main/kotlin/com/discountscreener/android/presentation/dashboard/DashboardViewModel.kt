@@ -610,17 +610,10 @@ class DashboardViewModel(
                     is ComputationResult.Success -> {
                         val report = result.value
                         val profileName = report.profileName
-                        var history = getEstimatesHistory(profileName)
-                        val last = history.lastOrNull()
-                        val differs = last == null || report.scenarios.any { scenario ->
-                            val previous = last.scenarios.find { it.scenario == scenario.scenario }
-                            previous?.impliedUpsideBps != scenario.impliedUpsideBps ||
-                                previous?.coverageCount != scenario.coverageCount
-                        }
-                        if (differs) {
-                            saveEstimatesSnapshot(report)
-                            history = getEstimatesHistory(profileName)
-                        }
+                        // Policy lives in repository: one durable point per UTC day,
+                        // skips enrichment micro-noise, coalesces legacy multi-row days on read.
+                        saveEstimatesSnapshot(report)
+                        val history = getEstimatesHistory(profileName)
                         _state.value = _state.value.copy(
                             indexEstimates = report,
                             estimatesHistory = history,

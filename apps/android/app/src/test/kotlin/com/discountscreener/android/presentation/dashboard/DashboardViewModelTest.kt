@@ -857,13 +857,36 @@ class DashboardViewModelTest {
 
         override suspend fun clearAllData() = Unit
 
-        override suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) {
-            saveSnapshotCallCount++
-            savedSnapshots.add(report)
+        override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {
+            val history = com.discountscreener.core.engine.EstimatesHistoryPolicy.coalesceDaily(savedSnapshots)
+            val previous = history.lastOrNull()
+            return when (
+                com.discountscreener.core.engine.EstimatesHistoryPolicy.decide(previous, report)
+            ) {
+                com.discountscreener.core.engine.EstimatesHistoryPolicy.PersistAction.Skip -> false
+                com.discountscreener.core.engine.EstimatesHistoryPolicy.PersistAction.ReplaceDay -> {
+                    val day = com.discountscreener.core.engine.EstimatesHistoryPolicy.dayKey(
+                        report.computedAtEpochSeconds,
+                    )
+                    savedSnapshots.removeAll {
+                        com.discountscreener.core.engine.EstimatesHistoryPolicy.dayKey(
+                            it.computedAtEpochSeconds,
+                        ) == day
+                    }
+                    savedSnapshots.add(report)
+                    saveSnapshotCallCount++
+                    true
+                }
+                com.discountscreener.core.engine.EstimatesHistoryPolicy.PersistAction.AppendDay -> {
+                    savedSnapshots.add(report)
+                    saveSnapshotCallCount++
+                    true
+                }
+            }
         }
 
         override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> =
-            savedSnapshots.toList()
+            com.discountscreener.core.engine.EstimatesHistoryPolicy.coalesceDaily(savedSnapshots)
 
         override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> {
             dcfSnapshotCallCount++
