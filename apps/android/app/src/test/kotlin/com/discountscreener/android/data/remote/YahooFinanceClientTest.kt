@@ -87,6 +87,68 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun parses_loews_corporation_name_for_single_letter_symbol_l() {
+        val body = """
+            <!doctype html><html><head><meta property="og:title" content="Loews Corporation (L) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":115.20},\"targetMeanPrice\":{\"raw\":125.00},\"targetMedianPrice\":{\"raw\":124.00}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":8.12}}}";
+            </script></body></html>
+        """.trimIndent()
+
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuotePage("L", body, null, diagnostics)
+
+        assertEquals("Loews Corporation", parsed.companyName)
+        assertEquals("Loews Corporation", parsed.snapshot?.companyName)
+        assertEquals(emptyList<ProviderDiagnostic>(), diagnostics)
+    }
+
+    @Test
+    fun parses_company_name_from_title_tag_when_og_title_is_missing() {
+        val body = """
+            <!doctype html><html><head><title>Loews Corporation (L) Stock Price, News, Quote &amp; History - Yahoo Finance</title></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":115.20},\"targetMeanPrice\":{\"raw\":125.00},\"targetMedianPrice\":{\"raw\":124.00}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":8.12}}}";
+            </script></body></html>
+        """.trimIndent()
+
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuotePage("L", body, null, diagnostics)
+
+        assertEquals("Loews Corporation", parsed.companyName)
+        assertEquals(emptyList<ProviderDiagnostic>(), diagnostics)
+    }
+
+    @Test
+    fun unescapes_html_entities_in_company_name_for_single_letter_symbol_t() {
+        val body = """
+            <!doctype html><html><head><meta property="og:title" content="AT&amp;T Inc. (T) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":28.15},\"targetMeanPrice\":{\"raw\":30.00},\"targetMedianPrice\":{\"raw\":29.50}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":2.12}}}";
+            </script></body></html>
+        """.trimIndent()
+
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuotePage("T", body, null, diagnostics)
+
+        assertEquals("AT&T Inc.", parsed.companyName)
+        assertEquals(emptyList<ProviderDiagnostic>(), diagnostics)
+    }
+
+    @Test
+    fun keeps_company_name_when_core_snapshot_is_missing() {
+        val body = """
+            <!doctype html><html><head><title>Loews Corporation (L) Stock Price, News, Quote &amp; History - Yahoo Finance</title></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":115.20}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":8.12}}}";
+            </script></body></html>
+        """.trimIndent()
+
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuotePage("L", body, null, diagnostics)
+
+        assertEquals("Loews Corporation", parsed.companyName)
+        assertNull(parsed.snapshot)
+        assertEquals("core", diagnostics.firstOrNull()?.component)
+    }
+
+    @Test
     fun returns_missing_snapshot_when_quote_page_is_incomplete() {
         val body = """
             <!doctype html><html><head></head><body><script>

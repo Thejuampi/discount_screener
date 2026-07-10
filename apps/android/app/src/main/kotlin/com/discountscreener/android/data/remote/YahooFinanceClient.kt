@@ -54,6 +54,7 @@ data class ProviderFetchResult(
     val snapshot: MarketSnapshot?,
     val externalSignal: ExternalValuationSignal?,
     val fundamentals: FundamentalSnapshot?,
+    val companyName: String? = null,
     val coverage: ProviderCoverage,
     val diagnostics: List<ProviderDiagnostic>,
 )
@@ -62,6 +63,7 @@ internal data class QuoteContext(
     val snapshot: MarketSnapshot? = null,
     val externalSignal: ExternalValuationSignal? = null,
     val fundamentals: FundamentalSnapshot? = null,
+    val companyName: String? = null,
 )
 
 private data class RecommendationPeriod(
@@ -100,6 +102,8 @@ internal const val PRICE_MARKER = "\\\"price\\\":"
 internal const val ASSET_PROFILE_MARKER = "\\\"assetProfile\\\":"
 internal const val RECOMMENDATION_TREND_MARKER = "\\\"recommendationTrend\\\":"
 private const val META_TITLE_MARKER = "<meta property=\"og:title\" content=\""
+private const val TITLE_MARKER = "<title>"
+private const val LONG_NAME_MARKER = "\\\"longName\\\":"
 
 internal val BROWSER_DEFAULT_HEADERS_INTERCEPTOR = Interceptor { chain ->
     var request = chain.request()
@@ -184,6 +188,7 @@ open class YahooFinanceClient(
             snapshot = quoteContext.snapshot,
             externalSignal = quoteContext.externalSignal,
             fundamentals = quoteContext.fundamentals,
+            companyName = quoteContext.companyName,
             coverage = ProviderCoverage(
                 core = componentState(quoteContext.snapshot != null, diagnostics, CORE_COMPONENT),
                 external = componentState(quoteContext.externalSignal != null, diagnostics, EXTERNAL_COMPONENT),
@@ -364,7 +369,11 @@ internal fun parseQuotePage(
     val lowFairValueCents = financialData.rawMoney("targetLowPrice")
     val highFairValueCents = financialData.rawMoney("targetHighPrice")
     val profitable = statistics.rawDouble("trailingEps")?.let { it > 0.0 }
-    val companyName = parseCompanyName(body, symbol)
+    val companyName = resolveCompanyName(
+        body = body,
+        symbol = symbol,
+        assetProfile = assetProfile,
+    )
     val analystOpinionCount = financialData.rawInt("numberOfAnalystOpinions")
         ?: currentRecommendation?.totalCount()
     val recommendationMeanHundredths = financialData.rawDouble("recommendationMean")
@@ -461,6 +470,7 @@ internal fun parseQuotePage(
         snapshot = snapshot,
         externalSignal = externalSignal,
         fundamentals = fundamentals,
+        companyName = companyName,
     )
 }
 
@@ -538,25 +548,68 @@ internal fun extractEmbeddedJsonObjectAt(body: String, markerIndex: Int, marker:
     return null
 }
 
-private fun parseCompanyName(body: String, symbol: String): String? {
+internal fun resolveCompanyName(
+    body: String,
+    symbol: String,
+    assetProfile: JsonObject? = null,
+): String? {
+    val candidates = listOfNotNull(
+        parseMetaTitle(body)?.let { parseCompanyNameFromTitle(it, symbol) },
+        parseHtmlTitle(body)?.let { parseCompanyNameFromTitle(it, symbol) },
+        assetProfile?.string("longName")?.let(::normalizeCompanyName),
+        assetProfile?.string("shortName")?.let(::normalizeCompanyName),
+        parseEmbeddedStringField(body, LONG_NAME_MARKER)?.let(::normalizeCompanyName),
+    )
+    return candidates.firstOrNull { candidate ->
+        candidate.isNotBlank() && !candidate.equals(symbol, ignoreCase = true)
+    }
+}
+
+private fun parseMetaTitle(body: String): String? {
     val start = body.indexOf(META_TITLE_MARKER)
     if (start < 0) return null
     val contentStart = start + META_TITLE_MARKER.length
     val contentEnd = body.indexOf('"', contentStart)
     if (contentEnd < 0) return null
-    val metaTitle = body.substring(contentStart, contentEnd)
-    val pattern = " ($symbol) "
-    val companyName = metaTitle.substringBefore(pattern, "").trim()
-    if (companyName.isBlank()) return null
-    return companyName
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .takeIf(String::isNotBlank)
+    return body.substring(contentStart, contentEnd)
 }
+
+private fun parseHtmlTitle(body: String): String? {
+    val start = body.indexOf(TITLE_MARKER, ignoreCase = true)
+    if (start < 0) return null
+    val contentStart = start + TITLE_MARKER.length
+    val contentEnd = body.indexOf("</title>", contentStart, ignoreCase = true)
+    if (contentEnd < 0) return null
+    return body.substring(contentStart, contentEnd).trim().takeIf(String::isNotBlank)
+}
+
+internal fun parseCompanyNameFromTitle(title: String, symbol: String): String? {
+    val normalizedTitle = normalizeCompanyName(title) ?: return null
+    val pattern = Regex("(?i)\\s+\\(${Regex.escape(symbol)}\\)\\s+")
+    val match = pattern.find(normalizedTitle) ?: return null
+    return normalizedTitle.substring(0, match.range.first).trim().takeIf(String::isNotBlank)
+}
+
+private fun parseEmbeddedStringField(body: String, marker: String): String? {
+    val markerIndex = body.indexOf(marker)
+    if (markerIndex < 0) return null
+    val valueStart = markerIndex + marker.length
+    if (body.getOrNull(valueStart) != '"') return null
+    val contentStart = valueStart + 1
+    val contentEnd = body.indexOf('"', contentStart)
+    if (contentEnd < 0) return null
+    return body.substring(contentStart, contentEnd)
+}
+
+private fun normalizeCompanyName(raw: String): String? = raw
+    .trim()
+    .replace("&amp;", "&")
+    .replace("&quot;", "\"")
+    .replace("&#39;", "'")
+    .replace("&#x27;", "'")
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .takeIf(String::isNotBlank)
 
 private fun toRecommendationPeriod(element: JsonElement): RecommendationPeriod? {
     val obj = element.jsonObject

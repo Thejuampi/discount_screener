@@ -7,6 +7,7 @@ import com.discountscreener.core.model.ProjectedTechnicalSignalBias
 import com.discountscreener.core.model.ProjectedTechnicalSignalKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ChartAnalysisTest {
@@ -98,6 +99,34 @@ class ChartAnalysisTest {
         assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.Ema50Ema200, ProjectedTechnicalSignalBias.Bull)))
         assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.MacdSignal, ProjectedTechnicalSignalBias.Bull)))
         assertTrue(signals.contains(ProjectedTechnicalSignalExpectation(ProjectedTechnicalSignalKind.RsiMomentum, ProjectedTechnicalSignalBias.Bull)))
+    }
+
+    @Test
+    fun build_summary_populates_rsi_and_volume_ratio() {
+        var candles = (1..40).map { index ->
+            candle(
+                epoch = index,
+                open = 10_000L + (index * 50L),
+                low = 9_900L + (index * 50L),
+                high = 10_200L + (index * 50L),
+                close = 10_100L + (index * 50L),
+                volume = if (index == 40) 4_000L else 1_000L,
+            )
+        }
+
+        var summary = ChartAnalysis.buildSummary(
+            range = ChartRange.Month,
+            candles = candles,
+            capturedAtEpochSeconds = 123L,
+        )
+
+        assertTrue((summary.latestWilderRsi ?: 0.0) > 50.0)
+        assertNotNull(summary.latestRsiSlope)
+        assertNotNull(summary.volumeRatioHundredths)
+        assertTrue(
+            (summary.volumeRatioHundredths ?: 0) > 100,
+            "latest elevated volume should report ratio above median; got ${summary.volumeRatioHundredths}",
+        )
     }
 
     @Test

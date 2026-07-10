@@ -37,6 +37,7 @@ import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -132,7 +133,7 @@ internal fun OpportunityList(
                             companyName = row.companyName,
                             modifier = Modifier.weight(1f),
                         )
-                        ScoreBadge(row.compositeScore)
+                        ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
                     }
                     OpportunityRowSignals(row)
                     QuantLensStrip(quantLensChipsBySymbol[row.symbol].orEmpty())
@@ -483,8 +484,8 @@ private fun TrackedRowMetrics(row: TrackedSymbolRow) {
 }
 
 @Composable
-private fun ScoreBadge(score: Int) {
-    val (textColor, backgroundColor) = scoreBadgeColors(score)
+private fun ScoreBadge(score: Int, scoringModel: OpportunityScoringModel) {
+    val (textColor, backgroundColor) = scoreBadgeColors(score, scoringModel)
     Text(
         text = "Score $score",
         color = textColor,
@@ -563,11 +564,23 @@ private fun qualificationColor(qualification: QualificationStatus?): Color = whe
     null -> MaterialTheme.colorScheme.outline
 }
 
-private fun scoreBadgeColors(score: Int): Pair<Color, Color> = when {
-    score >= 12 -> Color(0xFF66BB6A) to Color(0x1F66BB6A)
-    score >= 10 -> Color(0xFF29B6F6) to Color(0x1F29B6F6)
-    score >= 8 -> Color(0xFFFFCA28) to Color(0x1FFFCA28)
-    else -> Color(0xFFB0BEC5) to Color(0x1FB0BEC5)
+private fun scoreBadgeColors(score: Int, scoringModel: OpportunityScoringModel): Pair<Color, Color> {
+    val strong = OpportunityEngine.actAtOrAboveScore(scoringModel)
+    val mid = when (scoringModel) {
+        OpportunityScoringModel.Legacy,
+        OpportunityScoringModel.Aggressive,
+        -> 10
+        OpportunityScoringModel.AggressiveV2,
+        OpportunityScoringModel.AggressiveV3,
+        -> 15
+    }
+    val weak = OpportunityEngine.avoidBelowScore(scoringModel)
+    return when {
+        score >= strong -> Color(0xFF66BB6A) to Color(0x1F66BB6A)
+        score >= mid -> Color(0xFF29B6F6) to Color(0x1F29B6F6)
+        score >= weak -> Color(0xFFFFCA28) to Color(0x1FFFCA28)
+        else -> Color(0xFFB0BEC5) to Color(0x1FB0BEC5)
+    }
 }
 
 private fun formatOpportunityBucket(score: Int?, scoringModel: OpportunityScoringModel): String = when {

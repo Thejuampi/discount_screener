@@ -550,7 +550,8 @@ class DashboardViewModel(
         val nextModel = when (_state.value.opportunityScoringModel) {
             OpportunityScoringModel.Legacy -> OpportunityScoringModel.Aggressive
             OpportunityScoringModel.Aggressive -> OpportunityScoringModel.AggressiveV2
-            OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.Legacy
+            OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.AggressiveV3
+            OpportunityScoringModel.AggressiveV3 -> OpportunityScoringModel.Legacy
         }
         setOpportunityScoringModel(nextModel)
     }

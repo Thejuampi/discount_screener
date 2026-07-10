@@ -53,6 +53,7 @@ enum class OpportunityScoringModel {
     Legacy,
     Aggressive,
     AggressiveV2,
+    AggressiveV3,
 }
 
 @Serializable
@@ -617,6 +618,15 @@ data class ChartRangeSummary(
     val macdCents: Long? = null,
     val signalCents: Long? = null,
     val histogramCents: Long? = null,
+    /** Latest Wilder RSI (0–100). Populated by [com.discountscreener.core.engine.ChartAnalysis.buildSummary]. */
+    val latestWilderRsi: Double? = null,
+    /** Latest smoothed RSI slope (points per bar). */
+    val latestRsiSlope: Double? = null,
+    /**
+     * Recent volume vs series median as hundredths of ratio
+     * (100 = median, 200 = 2× median). Null when volume is unavailable.
+     */
+    val volumeRatioHundredths: Int? = null,
 )
 
 @Serializable

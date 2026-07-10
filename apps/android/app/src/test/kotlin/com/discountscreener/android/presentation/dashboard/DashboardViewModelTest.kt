@@ -504,7 +504,7 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun toggle_opportunity_model_cycles_v2_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
+    fun toggle_opportunity_model_cycles_v2_to_v3_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
             aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
@@ -512,8 +512,12 @@ class DashboardViewModelTest {
         val viewModel = testViewModel(repository)
         assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
 
-        // Cycle direction: Legacy -> Aggressive (V1) -> AggressiveV2 -> Legacy.
-        // Starting from the V2 default, the first toggle wraps to Legacy.
+        // Cycle: AggressiveV2 -> AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2.
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
+
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
