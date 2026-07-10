@@ -100,6 +100,9 @@ data class ProjectedTrackedRow(
     val detail: SymbolDetail? = null,
     val marketPriceCents: Long? = null,
     val fairValueAnchor: ProjectedFairValueAnchor = ProjectedFairValueAnchor.unavailable(),
+    /** Discount of market vs fair: (fair - market) / fair, in bps. */
+    val gapBps: Int? = null,
+    /** Upside of fair vs market: (fair - market) / market, in bps. */
     val upsideBps: Int? = null,
     val confidence: ProjectedConfidence = ProjectedConfidence.Unavailable,
     val freshness: ProjectedRowFreshness = ProjectedRowFreshness.Loading,
@@ -118,6 +121,9 @@ data class ProjectedOpportunityRow(
     val symbol: String,
     val candidateRow: CandidateRow,
     val fairValueAnchor: ProjectedFairValueAnchor = ProjectedFairValueAnchor.unavailable(),
+    /** Discount of market vs fair: (fair - market) / fair, in bps. */
+    val gapBps: Int? = null,
+    /** Upside of fair vs market: (fair - market) / market, in bps. */
     val upsideBps: Int? = null,
     val confidence: ProjectedConfidence = ProjectedConfidence.Unavailable,
     val freshness: ProjectedRowFreshness = ProjectedRowFreshness.Loading,
@@ -139,6 +145,9 @@ data class ProjectedDetailData(
     val chart: ProjectedChartData = ProjectedChartData(),
     val revisions: List<SymbolRevision> = emptyList(),
     val alerts: List<AlertEvent> = emptyList(),
+    val waccBps: Int? = null,
+    val waccProvisional: Boolean = false,
+    val waccAssumptionLabels: List<String> = emptyList(),
 ) {
     init {
         require(symbol.isNotBlank()) { "Projected detail symbol is required." }

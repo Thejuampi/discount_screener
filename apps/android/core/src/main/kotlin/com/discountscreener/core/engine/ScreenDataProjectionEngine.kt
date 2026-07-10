@@ -48,7 +48,7 @@ import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.captureComputationResult
 import com.discountscreener.core.model.lowerForProviderUncertainty
 import com.discountscreener.core.model.toProjectedConfidence
-import kotlin.math.roundToInt
+
 
 private const val QUANT_LENS_ROW_UPSIDE_MIN_BPS = -100_000
 private const val QUANT_LENS_ROW_UPSIDE_MAX_BPS = 100_000
@@ -138,6 +138,7 @@ class ScreenDataProjectionEngine {
         var anchor = fairValueAnchor(detail, dcfAnalysis, statistic)
         var freshness = rowFreshness(symbol, detail != null, dcfAnalysis, request)
         var confidence = projectedConfidence(detail?.confidence, dcfAnalysis, symbolState)
+        var gapBps = projectedDiscountBps(detail?.marketPriceCents, anchor.valueCents)
         var upsideBps = projectedUpsideBps(detail?.marketPriceCents, anchor.valueCents)
         var blockingIssue = hasBlockingProviderIssue(symbol, detail != null, request)
         var currentTrustSignal = trustSignal(detail, anchor, dcfAnalysis, blockingIssue)
@@ -146,6 +147,7 @@ class ScreenDataProjectionEngine {
             detail = detail,
             marketPriceCents = detail?.marketPriceCents,
             fairValueAnchor = anchor,
+            gapBps = gapBps,
             upsideBps = upsideBps,
             confidence = confidence,
             freshness = freshness,
@@ -174,6 +176,7 @@ class ScreenDataProjectionEngine {
         var anchor = fairValueAnchor(detail, dcfAnalysis, statistic, row.intrinsicValueCents)
         var freshness = rowFreshness(row.symbol, true, dcfAnalysis, request)
         var confidence = projectedConfidence(detail?.confidence ?: row.confidence, dcfAnalysis, symbolState)
+        var gapBps = projectedDiscountBps(row.marketPriceCents, anchor.valueCents)
         var upsideBps = projectedUpsideBps(row.marketPriceCents, anchor.valueCents)
         var blockingIssue = hasBlockingProviderIssue(row.symbol, true, request)
         var currentTrustSignal = trustSignal(detail, anchor, dcfAnalysis, blockingIssue)
@@ -182,6 +185,7 @@ class ScreenDataProjectionEngine {
             symbol = row.symbol,
             candidateRow = row,
             fairValueAnchor = anchor,
+            gapBps = gapBps,
             upsideBps = upsideBps,
             confidence = confidence,
             freshness = freshness,
@@ -222,6 +226,9 @@ class ScreenDataProjectionEngine {
             ),
             revisions = request.revisionsBySymbol[symbol].orEmpty(),
             alerts = request.alertsBySymbol[symbol].orEmpty(),
+            waccBps = dcfAnalysis?.waccBps,
+            waccProvisional = dcfAnalysis?.waccInputs?.isProvisional() == true,
+            waccAssumptionLabels = dcfAnalysis?.waccInputs?.summaryLabels().orEmpty(),
         )
     }
 
@@ -702,15 +709,30 @@ class ScreenDataProjectionEngine {
         dcfAnalysis?.decisionFingerprint.orEmpty(),
     ).joinToString(separator = ":")
 
+    /**
+     * Upside: percent the market price must move to reach fair value.
+     * (fair - market) / market
+     */
     private fun projectedUpsideBps(
         marketPriceCents: Long?,
         fairValueCents: Long?,
     ): Int? {
         if (marketPriceCents == null || fairValueCents == null) return null
-        if (marketPriceCents <= 0L || fairValueCents <= 0L) return null
-        return ((fairValueCents.toDouble() / marketPriceCents.toDouble() - 1.0) * 10_000.0)
-            .roundToInt()
-            .coerceIn(QUANT_LENS_ROW_UPSIDE_MIN_BPS, QUANT_LENS_ROW_UPSIDE_MAX_BPS)
+        return checkedUpsideBps(marketPriceCents, fairValueCents)
+            ?.coerceIn(QUANT_LENS_ROW_UPSIDE_MIN_BPS, QUANT_LENS_ROW_UPSIDE_MAX_BPS)
+    }
+
+    /**
+     * Discount: percent off fair value represented by the current price.
+     * 1 - market/fair = (fair - market) / fair
+     */
+    private fun projectedDiscountBps(
+        marketPriceCents: Long?,
+        fairValueCents: Long?,
+    ): Int? {
+        if (marketPriceCents == null || fairValueCents == null) return null
+        return checkedGapBps(marketPriceCents, fairValueCents)
+            ?.coerceIn(QUANT_LENS_ROW_UPSIDE_MIN_BPS, QUANT_LENS_ROW_UPSIDE_MAX_BPS)
     }
 
     private fun providerCategory(request: ScreenDataProjectionRequest): ProjectedProviderCategory {

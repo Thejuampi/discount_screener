@@ -1,9 +1,10 @@
 package com.discountscreener.core.engine
 
-import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.WaccFieldSource
+import com.discountscreener.core.model.WaccInputProvenance
 import kotlin.math.absoluteValue
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -29,10 +30,16 @@ private const val BEAR_TERMINAL_GROWTH_BPS = 200
 private const val BASE_TERMINAL_GROWTH_BPS = 250
 private const val BULL_TERMINAL_GROWTH_BPS = 300
 
+private data class ResolvedWacc(
+    val waccBps: Int,
+    val inputs: WaccInputProvenance,
+)
+
 object DcfAnalysisEngine {
     fun compute(
         fundamentals: FundamentalSnapshot,
         timeseries: FundamentalTimeseries,
+        marketPriceCents: Long? = null,
     ): Result<DcfAnalysis> = runCatching {
         require(timeseries.freeCashFlow.size >= 3) {
             "DCF unavailable: need at least 3 annual free cash flow points."
@@ -45,7 +52,7 @@ object DcfAnalysisEngine {
         val fcfPerShare = freeCashFlowPerShareSeries(fundamentals, timeseries, currentShares)
         val rawBaseGrowthBps = deriveBaseGrowthBps(fcfPerShare)
             ?: error("DCF unavailable: insufficient positive free cash flow per share history.")
-        val waccBps = deriveWaccBps(fundamentals, timeseries)
+        val resolvedWacc = deriveWacc(fundamentals, timeseries, marketPriceCents)
         val netDebtDollars = (fundamentals.totalDebtDollars ?: 0L) - (fundamentals.totalCashDollars ?: 0L)
 
         val bearGrowthBps = (rawBaseGrowthBps - SCENARIO_GROWTH_SPREAD_BPS).coerceIn(BEAR_GROWTH_MIN_BPS, BEAR_GROWTH_MAX_BPS)
@@ -57,33 +64,34 @@ object DcfAnalysisEngine {
             currentShares,
             netDebtDollars,
             bearGrowthBps,
-            clampTerminalGrowthBps(BEAR_TERMINAL_GROWTH_BPS, waccBps),
-            waccBps,
+            clampTerminalGrowthBps(BEAR_TERMINAL_GROWTH_BPS, resolvedWacc.waccBps),
+            resolvedWacc.waccBps,
         ) ?: error("DCF unavailable: bear scenario produced an invalid value.")
         val baseIntrinsic = discountedIntrinsicValuePerShareCents(
             latestFcf,
             currentShares,
             netDebtDollars,
             baseGrowthBps,
-            clampTerminalGrowthBps(BASE_TERMINAL_GROWTH_BPS, waccBps),
-            waccBps,
+            clampTerminalGrowthBps(BASE_TERMINAL_GROWTH_BPS, resolvedWacc.waccBps),
+            resolvedWacc.waccBps,
         ) ?: error("DCF unavailable: base scenario produced an invalid value.")
         val bullIntrinsic = discountedIntrinsicValuePerShareCents(
             latestFcf,
             currentShares,
             netDebtDollars,
             bullGrowthBps,
-            clampTerminalGrowthBps(BULL_TERMINAL_GROWTH_BPS, waccBps),
-            waccBps,
+            clampTerminalGrowthBps(BULL_TERMINAL_GROWTH_BPS, resolvedWacc.waccBps),
+            resolvedWacc.waccBps,
         ) ?: error("DCF unavailable: bull scenario produced an invalid value.")
 
         DcfAnalysis(
             bearIntrinsicValueCents = bearIntrinsic,
             baseIntrinsicValueCents = baseIntrinsic,
             bullIntrinsicValueCents = bullIntrinsic,
-            waccBps = waccBps,
+            waccBps = resolvedWacc.waccBps,
             baseGrowthBps = baseGrowthBps,
             netDebtDollars = netDebtDollars,
+            waccInputs = resolvedWacc.inputs,
         )
     }
 
@@ -134,32 +142,82 @@ object DcfAnalysisEngine {
     private fun parseYmd(value: String): java.time.LocalDate? =
         runCatching { java.time.LocalDate.parse(value) }.getOrNull()
 
-    private fun deriveWaccBps(
+    private fun resolveMarketCapDollars(
         fundamentals: FundamentalSnapshot,
         timeseries: FundamentalTimeseries,
-    ): Int {
-        val marketCap = fundamentals.marketCapDollars?.takeIf { it > 0 }?.toDouble()
+        marketPriceCents: Long?,
+    ): Pair<Double, WaccFieldSource>? {
+        fundamentals.marketCapDollars?.takeIf { it > 0L }?.let { reported ->
+            return reported.toDouble() to WaccFieldSource.Reported
+        }
+        val shares = latestShareCount(fundamentals, timeseries) ?: return null
+        val priceCents = marketPriceCents?.takeIf { it > 0L } ?: return null
+        val derived = (priceCents / 100.0) * shares
+        if (!derived.isFinite() || derived <= 0.0) return null
+        return derived to WaccFieldSource.DerivedPriceTimesShares
+    }
+
+    private fun deriveWacc(
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries,
+        marketPriceCents: Long?,
+    ): ResolvedWacc {
+        val (marketCap, marketCapSource) = resolveMarketCapDollars(fundamentals, timeseries, marketPriceCents)
             ?: error("DCF unavailable: market cap is missing.")
+        val betaSource = if (fundamentals.betaMillis != null) WaccFieldSource.Reported else WaccFieldSource.Default
         val beta = (fundamentals.betaMillis ?: 1_000) / 1_000.0
         val costOfEquityBps = RISK_FREE_RATE_BPS + (beta * EQUITY_RISK_PREMIUM_BPS).roundToInt()
+
+        val totalDebtSource =
+            if (fundamentals.totalDebtDollars != null) WaccFieldSource.Reported else WaccFieldSource.AssumedZero
+        val totalCashSource =
+            if (fundamentals.totalCashDollars != null) WaccFieldSource.Reported else WaccFieldSource.AssumedZero
         val totalDebt = (fundamentals.totalDebtDollars ?: 0L).coerceAtLeast(0).toDouble()
         val totalCash = (fundamentals.totalCashDollars ?: 0L).coerceAtLeast(0).toDouble()
         val netDebt = (totalDebt - totalCash).coerceAtLeast(0.0)
         val debtWeightBase = marketCap + netDebt
         val equityWeight = if (debtWeightBase > 0.0) marketCap / debtWeightBase else 1.0
         val debtWeight = if (debtWeightBase > 0.0) netDebt / debtWeightBase else 0.0
+
         val latestInterestExpense = timeseries.interestExpense.lastOrNull()?.value?.absoluteValue
+        val costOfDebtSource: WaccFieldSource
         val costOfDebtBps = if (totalDebt > 0.0) {
-            (latestInterestExpense?.let { ((it / totalDebt) * 10_000.0).roundToInt() } ?: DEFAULT_COST_OF_DEBT_BPS)
-                .coerceIn(MIN_COST_OF_DEBT_BPS, MAX_COST_OF_DEBT_BPS)
+            if (latestInterestExpense != null) {
+                costOfDebtSource = WaccFieldSource.InterestOverDebt
+                ((latestInterestExpense / totalDebt) * 10_000.0).roundToInt()
+                    .coerceIn(MIN_COST_OF_DEBT_BPS, MAX_COST_OF_DEBT_BPS)
+            } else {
+                costOfDebtSource = WaccFieldSource.Default
+                DEFAULT_COST_OF_DEBT_BPS
+            }
         } else {
+            // Debt weight is zero, so default cost does not affect WACC; keep UI quiet.
+            costOfDebtSource = WaccFieldSource.Reported
             DEFAULT_COST_OF_DEBT_BPS
         }
-        val taxRateBps = (timeseries.taxRateForCalcs.lastOrNull()?.value?.times(10_000.0)?.roundToInt() ?: DEFAULT_TAX_RATE_BPS)
+
+        val taxRateSource =
+            if (timeseries.taxRateForCalcs.isNotEmpty()) WaccFieldSource.Reported else WaccFieldSource.Default
+        val taxRateBps = (timeseries.taxRateForCalcs.lastOrNull()?.value?.times(10_000.0)?.roundToInt()
+            ?: DEFAULT_TAX_RATE_BPS)
             .coerceIn(0, 3_500)
         val afterTaxCostOfDebtBps = (costOfDebtBps * (1.0 - taxRateBps / 10_000.0)).roundToInt()
         val weighted = (equityWeight * costOfEquityBps) + (debtWeight * afterTaxCostOfDebtBps)
-        return weighted.roundToInt().coerceIn(MIN_WACC_BPS, MAX_WACC_BPS)
+        val unclamped = weighted.roundToInt()
+        val waccBps = unclamped.coerceIn(MIN_WACC_BPS, MAX_WACC_BPS)
+
+        return ResolvedWacc(
+            waccBps = waccBps,
+            inputs = WaccInputProvenance(
+                marketCap = marketCapSource,
+                beta = betaSource,
+                totalDebt = totalDebtSource,
+                totalCash = totalCashSource,
+                costOfDebt = costOfDebtSource,
+                taxRate = taxRateSource,
+                waccClamped = unclamped != waccBps,
+            ),
+        )
     }
 
     private fun clampTerminalGrowthBps(terminalGrowthBps: Int, waccBps: Int): Int =

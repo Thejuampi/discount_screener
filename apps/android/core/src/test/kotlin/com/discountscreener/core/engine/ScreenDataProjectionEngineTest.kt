@@ -35,11 +35,26 @@ import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.model.WaccFieldSource
+import com.discountscreener.core.model.WaccInputProvenance
 import com.discountscreener.core.model.lowerForProviderUncertainty
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class ScreenDataProjectionEngineTest {
+    @Test
+    fun tracked_row_keeps_discount_and_upside_distinct_for_price_10_fair_12() {
+        // $10 → $12: upside 20%, discount ≈ 16.67%
+        val result = projectSingleSymbol(
+            symbol = "ACME",
+            detail = detail("ACME", marketPriceCents = 1_000L, intrinsicValueCents = 1_200L, confidence = ConfidenceBand.High),
+        )
+        val row = result.trackedRows.single()
+        assertEquals(1_666, row.gapBps)
+        assertEquals(2_000, row.upsideBps)
+    }
+
     @Test
     fun empty_projection_is_deterministic_for_identical_requests() {
         var request = emptyRequest(nowEpochSeconds = 1_777_000_123L)
@@ -458,7 +473,8 @@ class ScreenDataProjectionEngineTest {
         symbol = "ACME",
         marketPriceCents = 10_000L,
         intrinsicValueCents = 12_000L,
-        gapBps = 2_000,
+        gapBps = 1_666,
+        upsideBps = 2_000,
         isQualified = true,
         confidence = ConfidenceBand.High,
     )
@@ -481,6 +497,39 @@ class ScreenDataProjectionEngineTest {
             analystTargetStatisticBySymbol = analystTargetStatistic?.let { mapOf(symbol to it) }.orEmpty(),
         ),
     ).requireSuccess()
+
+    @Test
+    fun selected_detail_projects_wacc_assumption_labels() {
+        val result = projectSingleSymbol(
+            symbol = "WACC1",
+            detail = detail(
+                symbol = "WACC1",
+                marketPriceCents = 10_000L,
+                intrinsicValueCents = 12_000L,
+                confidence = ConfidenceBand.High,
+            ),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 9_000L,
+                baseIntrinsicValueCents = 12_000L,
+                bullIntrinsicValueCents = 15_000L,
+            ).copy(
+                waccBps = 850,
+                waccInputs = WaccInputProvenance(
+                    marketCap = WaccFieldSource.DerivedPriceTimesShares,
+                    beta = WaccFieldSource.Default,
+                    taxRate = WaccFieldSource.Default,
+                ),
+            ),
+        )
+
+        val selected = result.selectedDetail
+        assertEquals(850, selected?.waccBps)
+        assertEquals(true, selected?.waccProvisional)
+        assertTrue(selected?.waccAssumptionLabels?.contains("beta=default") == true)
+        assertTrue(selected?.waccAssumptionLabels?.contains("market cap=price×shares") == true)
+    }
 
     @Test
     fun projection_returns_typed_error_for_invalid_request_symbols() {
@@ -675,7 +724,8 @@ class ScreenDataProjectionEngineTest {
         profitable = true,
         marketPriceCents = marketPriceCents,
         intrinsicValueCents = intrinsicValueCents,
-        gapBps = upsideBps(marketPriceCents, intrinsicValueCents),
+        gapBps = discountBps(marketPriceCents, intrinsicValueCents),
+        upsideBps = upsideBps(marketPriceCents, intrinsicValueCents),
         minimumGapBps = 2_000,
         qualification = QualificationStatus.Qualified,
         externalStatus = ExternalSignalStatus.Supportive,
@@ -684,7 +734,7 @@ class ScreenDataProjectionEngineTest {
         externalSignalHighFairValueCents = externalSignalHighFairValueCents,
         weightedExternalSignalFairValueCents = weightedExternalSignalFairValueCents,
         weightedAnalystCount = weightedAnalystCount,
-        externalSignalGapBps = externalSignalFairValueCents?.let { upsideBps(marketPriceCents, it) },
+        externalSignalGapBps = externalSignalFairValueCents?.let { discountBps(marketPriceCents, it) },
         externalSignalAgeSeconds = 0L,
         externalSignalMaxAgeSeconds = 86_400L,
         analystOpinionCount = analystOpinionCount,
@@ -714,6 +764,9 @@ class ScreenDataProjectionEngineTest {
 
     private fun upsideBps(marketPriceCents: Long, fairValueCents: Long): Int =
         (((fairValueCents.toDouble() / marketPriceCents.toDouble()) - 1.0) * 10_000.0).toInt()
+
+    private fun discountBps(marketPriceCents: Long, fairValueCents: Long): Int =
+        (((fairValueCents.toDouble() - marketPriceCents.toDouble()) / fairValueCents.toDouble()) * 10_000.0).toInt()
 
     private fun candle(
         epoch: Int,

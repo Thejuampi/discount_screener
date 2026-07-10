@@ -574,6 +574,38 @@ data class DcfSourceSelection(
 )
 
 @Serializable
+enum class WaccFieldSource {
+    Reported,
+    Default,
+    DerivedPriceTimesShares,
+    AssumedZero,
+    InterestOverDebt,
+}
+
+@Serializable
+data class WaccInputProvenance(
+    val marketCap: WaccFieldSource = WaccFieldSource.Reported,
+    val beta: WaccFieldSource = WaccFieldSource.Reported,
+    val totalDebt: WaccFieldSource = WaccFieldSource.Reported,
+    val totalCash: WaccFieldSource = WaccFieldSource.Reported,
+    val costOfDebt: WaccFieldSource = WaccFieldSource.Reported,
+    val taxRate: WaccFieldSource = WaccFieldSource.Reported,
+    val waccClamped: Boolean = false,
+) {
+    fun summaryLabels(): List<String> = buildList {
+        if (marketCap == WaccFieldSource.DerivedPriceTimesShares) add("market cap=price×shares")
+        if (beta == WaccFieldSource.Default) add("beta=default")
+        if (totalDebt == WaccFieldSource.AssumedZero) add("debt=assumed 0")
+        if (totalCash == WaccFieldSource.AssumedZero) add("cash=assumed 0")
+        if (costOfDebt == WaccFieldSource.Default) add("cost of debt=default")
+        if (taxRate == WaccFieldSource.Default) add("tax=default")
+        if (waccClamped) add("wacc=clamped")
+    }
+
+    fun isProvisional(): Boolean = summaryLabels().isNotEmpty()
+}
+
+@Serializable
 data class DcfAnalysis(
     val bearIntrinsicValueCents: Long,
     val baseIntrinsicValueCents: Long,
@@ -604,6 +636,7 @@ data class DcfAnalysis(
     } else {
         emptyList()
     },
+    val waccInputs: WaccInputProvenance = WaccInputProvenance(),
 )
 
 @Serializable

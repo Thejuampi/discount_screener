@@ -523,12 +523,12 @@ class DefaultDashboardRepositoryTest {
     @Test
     fun merge_historical_candles_replaces_existing_duplicate_and_sorts_new_candles() {
         val existing = listOf(
-            candle(epochSeconds = 20, closeCents = 2_000),
-            candle(epochSeconds = 10, closeCents = 1_000),
+            candle(epochSeconds = 1_704_672_000, closeCents = 2_000),
+            candle(epochSeconds = 1_704_067_200, closeCents = 1_000),
         )
         val incoming = listOf(
-            candle(epochSeconds = 30, closeCents = 3_000),
-            candle(epochSeconds = 20, closeCents = 9_999),
+            candle(epochSeconds = 1_705_276_800, closeCents = 3_000),
+            candle(epochSeconds = 1_704_715_200, closeCents = 9_999),
         )
 
         val merged = mergeHistoricalCandles(
@@ -538,8 +538,8 @@ class DefaultDashboardRepositoryTest {
             incomingCandles = incoming,
         )
 
-        assertEquals(listOf(10L, 20L, 30L), merged.map { it.epochSeconds })
-        assertEquals(9_999L, merged.first { it.epochSeconds == 20L }.closeCents)
+        assertEquals(listOf(1_704_067_200L, 1_704_715_200L, 1_705_276_800L), merged.map { it.epochSeconds })
+        assertEquals(9_999L, merged.first { it.epochSeconds == 1_704_715_200L }.closeCents)
     }
 
     @Test
@@ -553,8 +553,8 @@ class DefaultDashboardRepositoryTest {
                         range = ChartRange.Year,
                         capturedAt = 100,
                         candles = listOf(
-                            candle(epochSeconds = 20, closeCents = 2_000),
-                            candle(epochSeconds = 10, closeCents = 1_000),
+                            candle(epochSeconds = 1_704_110_400, closeCents = 2_000),
+                            candle(epochSeconds = 1_704_672_000, closeCents = 1_000),
                         ),
                     ),
                     chartCapture(
@@ -562,8 +562,8 @@ class DefaultDashboardRepositoryTest {
                         range = ChartRange.Year,
                         capturedAt = 200,
                         candles = listOf(
-                            candle(epochSeconds = 20, closeCents = 9_999),
-                            candle(epochSeconds = 30, closeCents = 3_000),
+                            candle(epochSeconds = 1_704_067_200, closeCents = 9_999),
+                            candle(epochSeconds = 1_705_276_800, closeCents = 3_000),
                         ),
                     ),
                 ),
@@ -574,8 +574,8 @@ class DefaultDashboardRepositoryTest {
                 it.symbol == "NVDA" && it.range == ChartRange.Year
             }
 
-            assertEquals(listOf(10L, 20L, 30L), chart.candles.map { it.epochSeconds })
-            assertEquals(9_999L, chart.candles.first { it.epochSeconds == 20L }.closeCents)
+            assertEquals(listOf(1_704_067_200L, 1_704_672_000L, 1_705_276_800L), chart.candles.map { it.epochSeconds })
+            assertEquals(9_999L, chart.candles.first { it.epochSeconds == 1_704_067_200L }.closeCents)
             assertEquals(200L, chart.fetchedAt)
         } finally {
             store.close()
@@ -1265,6 +1265,66 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun refresh_recomputes_cached_dcf() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            var refreshedFundamentals = dcfFundamentals("AAPL")
+            var aaplTimeseriesFetches = 0
+            var omitAaplSnapshot = false
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    val response = super.fetchSymbol(symbol)
+                    return response.copy(
+                        snapshot = if (symbol == "AAPL" && omitAaplSnapshot) null else response.snapshot,
+                        fundamentals = if (symbol == "AAPL") refreshedFundamentals else null,
+                        coverage = ProviderCoverage(
+                            core = if (symbol == "AAPL" && omitAaplSnapshot) ProviderComponentState.Missing else ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = if (symbol == "AAPL") ProviderComponentState.Fresh else ProviderComponentState.Missing,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    if (symbol == "AAPL") {
+                        aaplTimeseriesFetches += 1
+                        return richTimeseries()
+                    }
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            awaitDcfSource(repository, "AAPL")
+            val before = repository.dcfSnapshot().getValue("AAPL")
+            val fetchesBeforeRefresh = aaplTimeseriesFetches
+
+            refreshedFundamentals = dcfFundamentals("AAPL").copy(
+                betaMillis = 2_000,
+                totalDebtDollars = 300_000_000_000L,
+                totalCashDollars = 0L,
+                sharesOutstanding = 4_000_000_000L,
+            )
+            omitAaplSnapshot = true
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val after = awaitDcfAnalysis(repository, "AAPL") { analysis ->
+                analysis.waccBps != before.waccBps && analysis.baseIntrinsicValueCents != before.baseIntrinsicValueCents
+            }
+
+            assertEquals(before.source, after.source)
+            assertEquals(before.sourceFingerprint, after.sourceFingerprint)
+            assertEquals(before.decisionFingerprint, after.decisionFingerprint)
+            assertEquals(before.provenance, after.provenance)
+            assertEquals(before.providerReasons, after.providerReasons)
+            assertEquals(fetchesBeforeRefresh, aaplTimeseriesFetches)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun refresh_fallback_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
@@ -1533,6 +1593,25 @@ class DefaultDashboardRepositoryTest {
             source = repository.dcfSnapshot()[symbol]?.source
         }
         return source
+    }
+
+    private suspend fun awaitDcfAnalysis(
+        repository: DefaultDashboardRepository,
+        symbol: String,
+        timeoutMs: Long = 5_000,
+        predicate: (DcfAnalysis) -> Boolean,
+    ): DcfAnalysis {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var analysis = repository.dcfSnapshot()[symbol]
+        while (analysis == null || !predicate(analysis)) {
+            if (System.currentTimeMillis() >= deadline) {
+                fail("Timed out waiting for $symbol DCF analysis; last snapshot=${repository.dcfSnapshot()}")
+            }
+            Thread.sleep(10)
+            dispatcher.scheduler.advanceUntilIdle()
+            analysis = repository.dcfSnapshot()[symbol]
+        }
+        return analysis
     }
 
     private suspend fun seedWarmState(

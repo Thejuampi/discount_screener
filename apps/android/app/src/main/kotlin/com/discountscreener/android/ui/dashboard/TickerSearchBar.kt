@@ -76,8 +76,11 @@ internal fun TickerSearchBar(
                                     onSelect(suggestion.symbol)
                                 },
                             headlineContent = {
+                                val name = suggestion.companyName
+                                    ?.trim()
+                                    ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
                                 Text(
-                                    text = suggestion.companyName?.let { "${suggestion.symbol} - $it" } ?: suggestion.symbol,
+                                    text = name?.let { "${suggestion.symbol} - $it" } ?: suggestion.symbol,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,

@@ -2,6 +2,7 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.MarketSnapshot
+import kotlinx.serialization.json.jsonObject
 import okhttp3.Request
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -164,6 +165,170 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun resolve_market_cap_prefers_reported_value() {
+        assertEquals(
+            5_000_000_000L,
+            resolveMarketCapDollars(
+                reportedMarketCap = 5_000_000_000.0,
+                sharesOutstanding = 100_000_000.0,
+                marketPriceDollars = 10.0,
+            ),
+        )
+    }
+
+    @Test
+    fun resolve_market_cap_falls_back_to_price_times_shares() {
+        assertEquals(
+            1_200_000_000L,
+            resolveMarketCapDollars(
+                reportedMarketCap = null,
+                sharesOutstanding = 100_000_000.0,
+                marketPriceDollars = 12.0,
+            ),
+        )
+    }
+
+    @Test
+    fun resolve_market_cap_returns_null_when_fallback_inputs_missing() {
+        assertNull(
+            resolveMarketCapDollars(
+                reportedMarketCap = null,
+                sharesOutstanding = 100_000_000.0,
+                marketPriceDollars = null,
+            ),
+        )
+    }
+
+    @Test
+    fun yahoo_request_symbol_maps_share_class_dot_to_hyphen() {
+        assertEquals("BF-B", yahooRequestSymbol("BF.B"))
+    }
+
+    @Test
+    fun yahoo_request_symbol_keeps_exchange_suffix() {
+        assertEquals("YPFD.BA", yahooRequestSymbol("YPFD.BA"))
+    }
+
+    @Test
+    fun usable_company_name_rejects_null_string() {
+        assertEquals(false, isUsableCompanyName("null"))
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_aapl_has_core_snapshot_and_company_name() {
+        val root = loadQuoteSummaryFixture("AAPL")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "AAPL", null, diagnostics)
+        assertEquals("Apple Inc.", parsed.companyName)
+        assertEquals("Apple Inc.", parsed.snapshot?.companyName)
+        assertEquals(31_339L, parsed.snapshot?.marketPriceCents)
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_l_resolves_loews_name() {
+        val root = loadQuoteSummaryFixture("L")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "L", null, diagnostics)
+        assertEquals("Loews Corporation", parsed.companyName)
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_aapl_has_external_targets() {
+        val root = loadQuoteSummaryFixture("AAPL")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "AAPL", null, diagnostics)
+        assertEquals(31_500L, parsed.externalSignal?.fairValueCents)
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_aapl_has_fundamentals_sector() {
+        val root = loadQuoteSummaryFixture("AAPL")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "AAPL", null, diagnostics)
+        assertEquals("Technology", parsed.fundamentals?.sectorName)
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_t_unescapes_company_name() {
+        val root = loadQuoteSummaryFixture("T")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "T", null, diagnostics)
+        assertEquals("AT&T Inc.", parsed.companyName)
+    }
+
+    @Test
+    fun parse_quote_summary_fixture_brk_b_hyphenated_symbol() {
+        val root = loadQuoteSummaryFixture("BRK-B")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "BRK-B", null, diagnostics)
+        assertEquals("Berkshire Hathaway Inc.", parsed.companyName)
+    }
+
+    @Test
+    fun parses_loews_long_name_from_chart_meta_when_quote_html_is_unavailable() {
+        // Live sample shape from query1 chart/L (HTML quote/L returns HTTP 404).
+        val root = chartMetaJson(
+            symbol = "L",
+            longName = "Loews Corporation",
+            shortName = "Loews Corporation",
+            price = 115.2,
+        )
+        assertEquals("Loews Corporation", parseChartCompanyName(root, "L"))
+    }
+
+    @Test
+    fun prefers_chart_long_name_over_short_name() {
+        val root = chartMetaJson(
+            symbol = "C",
+            longName = "Citigroup Inc.",
+            shortName = "Citigroup, Inc.",
+            price = 80.1,
+        )
+        assertEquals("Citigroup Inc.", parseChartCompanyName(root, "C"))
+    }
+
+    @Test
+    fun uses_chart_short_name_when_long_name_is_blank() {
+        val root = chartMetaJson(
+            symbol = "F",
+            longName = "",
+            shortName = "Ford Motor Company",
+            price = 12.5,
+        )
+        assertEquals("Ford Motor Company", parseChartCompanyName(root, "F"))
+    }
+
+    @Test
+    fun rejects_chart_company_name_equal_to_symbol() {
+        val root = chartMetaJson(symbol = "V", longName = "V", shortName = "V", price = 300.0)
+        assertNull(parseChartCompanyName(root, "V"))
+    }
+
+    @Test
+    fun rejects_numeric_junk_chart_short_name() {
+        val root = chartMetaJson(symbol = "N", longName = "", shortName = "2075626", price = 1.0)
+        assertNull(parseChartCompanyName(root, "N"))
+    }
+
+    @Test
+    fun merges_chart_company_name_when_quote_context_lacks_name() {
+        val merged = mergeCompanyName(
+            quoteCompanyName = null,
+            chartCompanyName = "Apple Inc.",
+        )
+        assertEquals("Apple Inc.", merged)
+    }
+
+    @Test
+    fun keeps_quote_company_name_over_chart_fallback() {
+        val merged = mergeCompanyName(
+            quoteCompanyName = "AT&T Inc.",
+            chartCompanyName = "AT&T Inc",
+        )
+        assertEquals("AT&T Inc.", merged)
+    }
+
+    @Test
     fun interceptor_adds_accept_language_when_absent() {
         val request = Request.Builder()
             .url("https://query1.finance.yahoo.com/v8/finance/chart/AAPL")
@@ -193,6 +358,26 @@ class YahooFinanceClientTest {
             BROWSER_DEFAULT_HEADERS_INTERCEPTOR.intercept(chain)
         } catch (_: ExpectedStopException) {}
         assertEquals("fr-FR", captured!!.header("Accept-Language"))
+    }
+
+    private fun chartMetaJson(
+        symbol: String,
+        longName: String,
+        shortName: String,
+        price: Double,
+    ): kotlinx.serialization.json.JsonObject {
+        val body = """
+            {"chart":{"result":[{"meta":{"currency":"USD","symbol":"$symbol","longName":"$longName","shortName":"$shortName","regularMarketPrice":$price},"timestamp":[1],"indicators":{"quote":[{"close":[$price],"open":[$price],"high":[$price],"low":[$price],"volume":[1]}]}}],"error":null}}
+        """.trimIndent()
+        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+    }
+
+    private fun loadQuoteSummaryFixture(symbol: String): kotlinx.serialization.json.JsonObject {
+        val stream = requireNotNull(
+            javaClass.classLoader?.getResourceAsStream("yahoo/quoteSummary/$symbol.json"),
+        ) { "missing fixture yahoo/quoteSummary/$symbol.json" }
+        val body = stream.bufferedReader().use { it.readText() }
+        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
     }
 
     private class ExpectedStopException : RuntimeException()

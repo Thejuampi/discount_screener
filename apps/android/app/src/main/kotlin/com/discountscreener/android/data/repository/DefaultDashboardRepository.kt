@@ -16,6 +16,8 @@ import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.isRateLimitDetail
+import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DashboardNotice
@@ -113,6 +115,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -290,11 +293,13 @@ class DefaultDashboardRepository(
             }
         }
 
-        val fundamentals = stateMutex.withLock { engine.detail(symbol)?.fundamentals }
+        val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
+        val fundamentals = detailForDcf?.fundamentals
+        val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
         val needsTimeseries = stateMutex.withLock { fundamentals != null && timeseriesCache[symbol] == null }
         if (fundamentals != null && needsTimeseries) {
             val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
-                DcfAnalysisEngine.compute(fundamentals, timeseries).getOrNull()
+                DcfAnalysisEngine.compute(fundamentals, timeseries, marketPriceCents).getOrNull()
             }
             selection.timeseries?.let { timeseries ->
                 stateMutex.withLock {
@@ -325,7 +330,9 @@ class DefaultDashboardRepository(
         limit: Int,
     ): List<TickerSearchSuggestion> {
         val localSuggestions = profileCatalog.searchTickers(query, currentProfile, limit)
-        if (query.trim().length >= 2) {
+        // Include single-letter queries (e.g. L / Loews) so names can be filled from Yahoo chart meta
+        // when quote HTML 404s.
+        if (query.trim().isNotEmpty()) {
             localSuggestions
                 .take(4)
                 .filter { suggestion -> localCompanyNameFor(suggestion.symbol).isNullOrBlank() }
@@ -668,15 +675,36 @@ class DefaultDashboardRepository(
 
     private suspend fun runRefresh(symbols: List<String>, generation: Long) {
         val retryQueue = ArrayDeque<String>()
-        processRefreshRound(symbols, retryQueue, generation)
-        repeat(MAX_RETRY_ROUNDS) {
+        processRefreshRound(
+            symbols = symbols,
+            retryQueue = retryQueue,
+            generation = generation,
+            recordTerminalIssues = false,
+        )
+        repeat(MAX_RETRY_ROUNDS) { round ->
             if (retryQueue.isEmpty()) return
+            delay(retryBackoffMillis(round))
             val batch = buildList {
                 while (retryQueue.isNotEmpty()) {
                     add(retryQueue.removeFirst())
                 }
             }
-            processRefreshRound(batch, retryQueue, generation)
+            val isFinalRound = round == MAX_RETRY_ROUNDS - 1
+            processRefreshRound(
+                symbols = batch,
+                retryQueue = retryQueue,
+                generation = generation,
+                recordTerminalIssues = isFinalRound,
+            )
+        }
+        // Any symbols still only retryable and never recorded need a terminal settle.
+        if (retryQueue.isNotEmpty()) {
+            processRefreshRound(
+                symbols = retryQueue.toList(),
+                retryQueue = ArrayDeque(),
+                generation = generation,
+                recordTerminalIssues = true,
+            )
         }
     }
 
@@ -684,6 +712,7 @@ class DefaultDashboardRepository(
         symbols: List<String>,
         retryQueue: ArrayDeque<String>,
         generation: Long,
+        recordTerminalIssues: Boolean,
     ) = coroutineScope {
         symbols
             .asFlow()
@@ -695,13 +724,29 @@ class DefaultDashboardRepository(
                 if (!isActiveGeneration) {
                     return@collect
                 }
-                if (result.retryable && result.symbol !in retryQueue) {
+                val needsRecovery = result.retryable && isRefreshResultIncomplete(result)
+                if (needsRecovery && !recordTerminalIssues && result.symbol !in retryQueue) {
                     retryQueue.add(result.symbol)
                 }
-                val persistenceDelta = stateMutex.withLock { applyRefreshResultLocked(result) }
+                val persistenceDelta = stateMutex.withLock {
+                    applyRefreshResultLocked(
+                        result = result,
+                        suppressTransientRateLimits = !recordTerminalIssues,
+                        recordTerminalFailure = recordTerminalIssues || !needsRecovery,
+                    )
+                }
                 queuePersist(persistenceDelta)
                 emitUpdate()
             }
+    }
+
+    private fun isRefreshResultIncomplete(result: SymbolRefreshResult): Boolean {
+        val hasSnapshot = result.providerResult?.snapshot != null ||
+            result.fallbackSnapshot != null
+        val hasName = !result.providerResult?.companyName.isNullOrBlank()
+        val hasChart = !result.chartCandles.isNullOrEmpty()
+        // Incomplete when we have neither a live snapshot nor even a chart-backed recovery signal.
+        return !hasSnapshot && !hasName && !hasChart
     }
 
     private suspend fun fetchRefreshResult(symbol: String, generation: Long): SymbolRefreshResult {
@@ -719,7 +764,10 @@ class DefaultDashboardRepository(
 
         val chartResult = runCatching { yahooClient.fetchHistoricalCandles(symbol, ChartRange.Year) }
         val chartCandles = chartResult.getOrNull()
-        val dcfFallback = if (providerResult.snapshot == null) {
+        val hasCachedDcfInputs = stateMutex.withLock {
+            dcfCache[symbol] != null && timeseriesCache[symbol] != null
+        }
+        val dcfFallback = if (providerResult.snapshot == null && !hasCachedDcfInputs) {
             resolveDcfFallback(
                 symbol = symbol,
                 companyName = providerResult.companyName,
@@ -745,7 +793,11 @@ class DefaultDashboardRepository(
         )
     }
 
-    private fun applyRefreshResultLocked(result: SymbolRefreshResult): PersistenceDelta {
+    private fun applyRefreshResultLocked(
+        result: SymbolRefreshResult,
+        suppressTransientRateLimits: Boolean = false,
+        recordTerminalFailure: Boolean = true,
+    ): PersistenceDelta {
         val rawCaptures = mutableListOf<RawCapture>()
         val providerResult = result.providerResult
         val fallbackSnapshot = if (providerResult?.snapshot == null) {
@@ -760,7 +812,7 @@ class DefaultDashboardRepository(
         val effectiveSnapshot = providerResult?.snapshot ?: fallbackSnapshot ?: result.fallbackSnapshot
         val effectiveFundamentals = providerResult?.fundamentals ?: result.fallbackFundamentals
 
-        providerResult?.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+        providerResult?.companyName?.takeIf { name -> isUsableCompanyName(name) }?.let { companyName ->
             companyNameBySymbol[result.symbol] = companyName
         }
         effectiveSnapshot?.let {
@@ -770,7 +822,7 @@ class DefaultDashboardRepository(
                 it
             }
             engine.ingestSnapshot(snapshotToIngest)
-            snapshotToIngest.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+            snapshotToIngest.companyName?.takeIf { name -> isUsableCompanyName(name) }?.let { companyName ->
                 companyNameBySymbol[result.symbol] = companyName
             }
             rawCaptures += RawCapture(
@@ -800,6 +852,7 @@ class DefaultDashboardRepository(
                 capturedAt = result.refreshedAtEpochSeconds,
                 payload = RawCapturePayload.Fundamentals(it),
             )
+            recomputeCachedDcfLocked(result.symbol, it)
         }
         result.fallbackTimeseries?.let { timeseries ->
             timeseriesCache[result.symbol] = timeseries
@@ -828,18 +881,55 @@ class DefaultDashboardRepository(
             )
         }
 
+        val recovered =
+            effectiveSnapshot != null ||
+                isUsableCompanyName(providerResult?.companyName) ||
+                !result.chartCandles.isNullOrEmpty()
+        val diagnostics = providerResult?.diagnostics.orEmpty().let { list ->
+            if (suppressTransientRateLimits) {
+                list.filterNot { diagnostic ->
+                    diagnostic.retryable && isRateLimitDetail(diagnostic.detail)
+                }
+            } else {
+                list
+            }
+        }
         applyDiagnosticsLocked(
             symbol = result.symbol,
-            diagnostics = providerResult?.diagnostics.orEmpty(),
-            chartError = result.chartError,
+            diagnostics = diagnostics,
+            chartError = if (suppressTransientRateLimits && result.chartError != null && isRetryable(result.chartError)) {
+                null
+            } else {
+                result.chartError
+            },
             suppressQuoteHtml404 = fallbackSnapshot != null || result.fallbackSnapshot != null,
-            suppressCoreMissing = result.fallbackSnapshot != null,
+            suppressCoreMissing = result.fallbackSnapshot != null || recovered,
         )
+        if (recordTerminalFailure && !recovered && engine.detail(result.symbol) == null) {
+            recordIssueLocked(
+                key = "${result.symbol}:provider:terminal",
+                severity = PersistenceIssueSeverity.Warning,
+                title = "Provider unavailable",
+                detail = "No market data after retries for ${result.symbol}. Will use cache when available.",
+            )
+        }
+        if (recovered) {
+            // Success clears prior terminal noise for this symbol.
+            issues.keys.filter { key ->
+                key.startsWith("${result.symbol}:provider:") ||
+                    key.startsWith("${result.symbol}:chart:") ||
+                    key.startsWith("${result.symbol}:enrichment:")
+            }.forEach { key ->
+                issues[key]?.let { issue -> issues[key] = issue.copy(active = false) }
+            }
+        }
 
         if (refreshAttemptedSymbols.add(result.symbol)) {
             refreshCompletedSymbols += 1
         }
-        refreshedSymbols += result.symbol
+        if (recovered) {
+            refreshedSymbols += result.symbol
+        }
         applyTransitionLocked(
             reduceProfileTransition(
                 ProfileTransitionEvent.RefreshProgress(
@@ -941,6 +1031,36 @@ class DefaultDashboardRepository(
         selectedDetail = projectedSelectedDetail?.detail ?: selectedDetail
         if (projectedSelectedDetail != null && normalizedSelectedSymbol != null) {
             selectedCharts = selectedCharts + (selectedRange to projectedSelectedDetail.chart.candles)
+        }
+        // Eventual good state: never leave detail on eternal "Loading" after refresh has tried.
+        if (
+            selectedDetail == null &&
+            normalizedSelectedSymbol != null &&
+            (
+                normalizedSelectedSymbol in refreshAttemptedSymbols ||
+                    startupPhase == DashboardStartupPhase.Ready
+                )
+        ) {
+            val issueDetail = trackedIssueMessages[normalizedSelectedSymbol]
+            val companyName = companyNameBySymbol[normalizedSelectedSymbol]
+            detailNotice = detailNotice ?: DashboardNotice(
+                title = "Market data unavailable",
+                message = buildString {
+                    append(normalizedSelectedSymbol)
+                    if (!companyName.isNullOrBlank()) {
+                        append(" (")
+                        append(companyName)
+                        append(')')
+                    }
+                    append(" has no usable quote after refresh.")
+                    if (!issueDetail.isNullOrBlank()) {
+                        append(' ')
+                        append(issueDetail)
+                    }
+                    append(" Open another symbol or retry Refresh later.")
+                },
+                severity = DashboardNoticeSeverity.Warning,
+            )
         }
         var selectedQuantLens: QuantLensReport? = null
         selectedDetail?.let {
@@ -1231,8 +1351,8 @@ class DefaultDashboardRepository(
                 symbol = projectedRow.symbol,
                 marketPriceCents = projectedRow.marketPriceCents ?: detail?.marketPriceCents,
                 intrinsicValueCents = fairValueCents,
-                gapBps = projectedRow.upsideBps,
-                upsideBps = projectedRow.upsideBps,
+                gapBps = projectedRow.gapBps ?: detail?.gapBps,
+                upsideBps = projectedRow.upsideBps ?: detail?.upsideBps,
                 confidence = projectedRow.confidence.toConfidenceBandOrNull(),
                 qualification = detail?.qualification,
                 isWatched = engine.isWatched(projectedRow.symbol),
@@ -1273,6 +1393,8 @@ class DefaultDashboardRepository(
         detail != null && symbol in refreshedSymbols -> TrackedRowState.Live
         detail != null -> TrackedRowState.Cached
         issueMessage != null -> TrackedRowState.Failed
+        // After refresh has attempted this symbol, never leave the UI stuck on Loading.
+        symbol in refreshAttemptedSymbols -> TrackedRowState.Failed
         else -> TrackedRowState.Loading
     }
 
@@ -1287,6 +1409,7 @@ class DefaultDashboardRepository(
             var scoredRow = scoredBySymbol[projectedRow.symbol]
             var detail = engine.detail(projectedRow.symbol)
             var fairValueCents = projectedRow.fairValueAnchor.valueCents ?: projectedRow.candidateRow.intrinsicValueCents
+            var gapBps = projectedRow.gapBps ?: projectedRow.candidateRow.gapBps
             var upsideBps = projectedRow.upsideBps ?: projectedRow.candidateRow.upsideBps
             var freshness = projectedRow.freshness.toRowFreshness()
             var confidence = projectedRow.confidence.toConfidenceBandOrNull() ?: scoredRow?.confidence ?: projectedRow.candidateRow.confidence
@@ -1295,7 +1418,7 @@ class DefaultDashboardRepository(
                 symbol = projectedRow.symbol,
                 marketPriceCents = projectedRow.candidateRow.marketPriceCents,
                 intrinsicValueCents = fairValueCents,
-                gapBps = upsideBps,
+                gapBps = gapBps,
                 upsideBps = upsideBps,
                 confidence = confidence,
                 isWatched = detail?.isWatched ?: scoredRow?.isWatched ?: false,
@@ -1491,6 +1614,7 @@ class DefaultDashboardRepository(
             detail != null && symbol in refreshedSymbols -> TrackedRowState.Live
             detail != null -> TrackedRowState.Cached
             issueMessage != null -> TrackedRowState.Failed
+            symbol in refreshAttemptedSymbols -> TrackedRowState.Failed
             else -> TrackedRowState.Loading
         }
         val freshness = rowFreshnessFor(
@@ -2181,10 +2305,21 @@ class DefaultDashboardRepository(
     }
 
     internal fun isSuppressibleQuoteHtml404(diagnostic: ProviderDiagnostic): Boolean =
-        diagnostic.component == "quoteHtml" &&
-            diagnostic.kind == "error" &&
-            diagnostic.detail.contains("HTTP 404") &&
-            diagnostic.detail.contains("finance.yahoo.com/quote/")
+        (
+            diagnostic.component == "quoteHtml" &&
+                diagnostic.kind == "error" &&
+                diagnostic.detail.contains("HTTP 404") &&
+                diagnostic.detail.contains("finance.yahoo.com/quote/")
+            ) ||
+            (
+                diagnostic.component == "quoteSummary" &&
+                    diagnostic.kind == "error" &&
+                    (
+                        diagnostic.detail.contains("Invalid Crumb", ignoreCase = true) ||
+                            diagnostic.detail.contains("Invalid Cookie", ignoreCase = true)
+                        ) &&
+                    diagnostic.retryable
+                )
 
     internal fun isSuppressibleCoreMissing(diagnostic: ProviderDiagnostic): Boolean =
         diagnostic.component == "core" &&
@@ -2213,15 +2348,20 @@ class DefaultDashboardRepository(
             ?: return null
         val derivedFundamentals = FundamentalSnapshot(
             symbol = symbol,
-            marketCapDollars = providerFundamentals?.marketCapDollars
-                ?: ((marketPriceCents / 100.0) * latestShares).roundToLong().takeIf { it > 0L },
+            // Keep market cap only when the provider reported it. Otherwise let DCF
+            // derive price×shares with WaccFieldSource.DerivedPriceTimesShares.
+            marketCapDollars = providerFundamentals?.marketCapDollars?.takeIf { it > 0L },
             sharesOutstanding = providerFundamentals?.sharesOutstanding ?: latestShares.roundToLong().takeIf { it > 0L },
             freeCashFlowDollars = timeseries.freeCashFlow.lastOrNull()?.value?.roundToLong(),
             operatingCashFlowDollars = timeseries.operatingCashFlow.lastOrNull()?.value?.roundToLong(),
             trailingEpsCents = ((latestNetIncome / latestShares) * 100.0).roundToLong(),
         )
         val fundamentals = mergeFundamentals(providerFundamentals, derivedFundamentals)
-        val analysis = DcfAnalysisEngine.compute(fundamentals, timeseries).getOrNull() ?: return null
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = fundamentals,
+            timeseries = timeseries,
+            marketPriceCents = marketPriceCents,
+        ).getOrNull() ?: return null
         return TimeseriesFallback(
             snapshot = MarketSnapshot(
                 symbol = symbol,
@@ -2343,25 +2483,45 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun runEnrichment(symbols: List<String>, generation: Long) = coroutineScope {
-        symbols
-            .asFlow()
-            .flatMapMerge(concurrency = REFRESH_CONCURRENCY) { symbol ->
-                flow { emit(enrichSymbol(symbol, generation)) }
+        val pending = symbols.toMutableList()
+        var round = 0
+        while (pending.isNotEmpty() && round <= MAX_RETRY_ROUNDS) {
+            if (round > 0) {
+                delay(retryBackoffMillis(round - 1))
             }
-            .collect { result ->
-                val isActiveGeneration = stateMutex.withLock { result.generation == activeProfileGeneration }
-                if (!isActiveGeneration) {
-                    return@collect
+            val batch = pending.toList()
+            pending.clear()
+            val finalRound = round == MAX_RETRY_ROUNDS
+            batch
+                .asFlow()
+                .flatMapMerge(concurrency = ENRICHMENT_CONCURRENCY) { symbol ->
+                    flow { emit(enrichSymbol(symbol, generation, recordErrors = finalRound)) }
                 }
-                val delta = stateMutex.withLock { applyEnrichmentResultLocked(result) }
-                if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-                    queuePersist(delta)
+                .collect { result ->
+                    val isActiveGeneration = stateMutex.withLock { result.generation == activeProfileGeneration }
+                    if (!isActiveGeneration) {
+                        return@collect
+                    }
+                    if (!finalRound && result.errors.any { it.retryable }) {
+                        pending += result.symbol
+                    }
+                    // Persist recovered charts immediately; only surface issues on the final round.
+                    val toApply = if (finalRound) result else result.copy(errors = emptyList())
+                    val delta = stateMutex.withLock { applyEnrichmentResultLocked(toApply) }
+                    if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
+                        queuePersist(delta)
+                    }
+                    emitUpdate()
                 }
-                emitUpdate()
-            }
+            round += 1
+        }
     }
 
-    private suspend fun enrichSymbol(symbol: String, generation: Long): EnrichmentResult {
+    private suspend fun enrichSymbol(
+        symbol: String,
+        generation: Long,
+        recordErrors: Boolean,
+    ): EnrichmentResult {
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
         val errors = mutableListOf<ProviderDiagnostic>()
 
@@ -2383,7 +2543,7 @@ class DefaultDashboardRepository(
                     component = "enrichment",
                     kind = "error",
                     detail = "chart ${range.name} for $symbol: ${error.message ?: "failed"}",
-                    retryable = false,
+                    retryable = isRetryable(error),
                 )
             }
         }
@@ -2394,10 +2554,12 @@ class DefaultDashboardRepository(
         val needsTimeseries = stateMutex.withLock { timeseriesCache[symbol] == null }
         if (needsTimeseries) {
             try {
-                val fundamentals = stateMutex.withLock { engine.detail(symbol)?.fundamentals }
+                val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
+                val fundamentals = detailForDcf?.fundamentals
+                val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
                 if (fundamentals != null) {
                     val selection = dcfSourceCoordinator.resolve(symbol) { selectedTimeseries ->
-                        DcfAnalysisEngine.compute(fundamentals, selectedTimeseries).getOrNull()
+                        DcfAnalysisEngine.compute(fundamentals, selectedTimeseries, marketPriceCents).getOrNull()
                     }
                     timeseries = selection.timeseries
                     dcfAnalysis = selection.analysis
@@ -2408,7 +2570,7 @@ class DefaultDashboardRepository(
                     component = "enrichment",
                     kind = "error",
                     detail = "timeseries for $symbol: ${error.message ?: "failed"}",
-                    retryable = false,
+                    retryable = isRetryable(error),
                 )
             }
         }
@@ -2419,7 +2581,12 @@ class DefaultDashboardRepository(
             chartCaptures = chartCaptures,
             timeseries = timeseries,
             dcfAnalysis = dcfAnalysis,
-            errors = errors,
+            // Caller drops errors on non-final rounds; keep retryable markers for queue detection.
+            errors = if (recordErrors) {
+                errors
+            } else {
+                errors.filter { it.retryable }
+            },
         )
     }
 
@@ -2460,9 +2627,21 @@ class DefaultDashboardRepository(
             dcfCache[result.symbol] = analysis
         }
 
+        // Clear prior enrichment issues when this pass recovered chart/DCF data.
+        if (result.chartCaptures.isNotEmpty() || result.timeseries != null || result.dcfAnalysis != null) {
+            issues.keys
+                .filter { key -> key.startsWith("${result.symbol}:enrichment:") }
+                .forEach { key -> issues[key]?.let { issue -> issues[key] = issue.copy(active = false) } }
+        }
+
         for (error in result.errors) {
+            // Skip pure rate-limit noise when we already have Year candles from refresh.
+            val hasYearChart = chartCache[chartKey(result.symbol, ChartRange.Year)].orEmpty().isNotEmpty()
+            if (hasYearChart && error.retryable && isRateLimitDetail(error.detail)) {
+                continue
+            }
             recordIssueLocked(
-                key = "${result.symbol}:${error.component}:${error.kind}",
+                key = "${result.symbol}:${error.component}:${error.kind}:${error.detail.hashCode()}",
                 severity = PersistenceIssueSeverity.Warning,
                 title = "Enrichment failed",
                 detail = error.detail,
@@ -2471,6 +2650,28 @@ class DefaultDashboardRepository(
 
         appendRevisionLocked(result.symbol)
         return snapshotPersistenceDeltaLocked(rawCaptures, result.symbol)
+    }
+
+    private fun recomputeCachedDcfLocked(
+        symbol: String,
+        fundamentals: FundamentalSnapshot,
+    ) {
+        val cachedAnalysis = dcfCache[symbol] ?: return
+        val selectedTimeseries = timeseriesCache[symbol] ?: return
+        val marketPriceCents = engine.detail(symbol)?.marketPriceCents?.takeIf { it > 0L }
+        val recomputed = DcfAnalysisEngine.compute(
+            fundamentals = fundamentals,
+            timeseries = selectedTimeseries,
+            marketPriceCents = marketPriceCents,
+        ).getOrNull() ?: return
+        dcfCache[symbol] = recomputed.copy(
+            source = cachedAnalysis.source,
+            sourceFingerprint = cachedAnalysis.sourceFingerprint,
+            resolverState = cachedAnalysis.resolverState,
+            decisionFingerprint = cachedAnalysis.decisionFingerprint,
+            provenance = cachedAnalysis.provenance,
+            providerReasons = cachedAnalysis.providerReasons,
+        )
     }
 
     private fun resetInMemoryLocked() {
@@ -2546,10 +2747,17 @@ class DefaultDashboardRepository(
 
     companion object {
         private const val DEFAULT_PROFILE = "sp500"
-        private const val REFRESH_CONCURRENCY = 8
-        private const val MAX_RETRY_ROUNDS = 2
+        private const val REFRESH_CONCURRENCY = 4
+        private const val ENRICHMENT_CONCURRENCY = 2
+        private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
         private const val TAG = "DiscountScreener"
+
+        private fun retryBackoffMillis(round: Int): Long = when (round) {
+            0 -> 1_500L
+            1 -> 4_000L
+            else -> 8_000L
+        }
     }
 }
 
@@ -2629,6 +2837,8 @@ internal fun quantLensRevisionFingerprint(history: List<SymbolRevision>): String
             revision.dcfAnalysis?.bearIntrinsicValueCents,
             revision.dcfAnalysis?.baseIntrinsicValueCents,
             revision.dcfAnalysis?.bullIntrinsicValueCents,
+            revision.dcfAnalysis?.waccBps,
+            revision.dcfAnalysis?.waccInputs?.isProvisional(),
             revision.dcfAnalysis?.source,
             revision.dcfAnalysis?.sourceFingerprint,
             revision.chartSummaries.entries.sortedBy { it.key.name }.joinToString(",") { (range, summary) ->

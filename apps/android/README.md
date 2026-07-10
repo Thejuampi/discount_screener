@@ -11,7 +11,7 @@ This directory contains the native Android client for Discount Screener.
 
 - `app/` — composition root and Android entrypoints
 - `domain/` — repository contracts and use cases
-- `data/` — Yahoo client, profile loading, persistence, and repository implementation
+- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), profile loading, persistence, and repository implementation
 - `presentation/` — `DashboardViewModel`, UI state, and actions
 - `ui/` — Compose screens, dialogs, and detail/chart components
 
@@ -29,6 +29,8 @@ This directory contains the native Android client for Discount Screener.
 - opportunities can switch in-place among Legacy, Aggressive, Aggressive V2, and Aggressive V3 ranking models from the opportunities tab
 - Aggressive V3 keeps V2's continuous evidence math and adds blended valuation multiples (forward PE / EV/EBITDA / P/B), RSI regime + volume confirmation on chart summaries, analyst recommendation skew, DCF scenario-width uncertainty, and a beta risk haircut on the composite; Act/Avoid cutoffs are model-aware (±100 scale for V2/V3)
 - startup splash during warm restore plus a one-time disclaimer acceptance gate before entering the app
+- DCF WACC is resilient and transparent: missing market cap falls back to price × shares when possible; beta / debt / cash / cost of debt / tax defaults are recorded on each analysis; detail Valuation shows `WACC x.xx%`, marks `· provisional` when assumptions were used, and lists `WACC inputs: …` (for example `beta=default`, `market cap=price×shares`)
+- legacy warm-start DCF payloads without `waccInputs` still restore as non-provisional; live refresh may recompute and mark provisional from current fundamentals
 
 ## Prerequisites
 

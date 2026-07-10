@@ -255,7 +255,11 @@ private fun SymbolCompanyTitle(
     companyName: String?,
     modifier: Modifier = Modifier,
 ) {
-    val normalizedCompanyName = companyName?.trim().orEmpty()
+    val normalizedCompanyName = companyName
+        ?.trim()
+        .orEmpty()
+        .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        .orEmpty()
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
