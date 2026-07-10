@@ -50,6 +50,30 @@ class ReportingEngineTest {
     }
 
     @Test
+    fun discount_is_one_minus_price_over_fair_while_upside_is_return_to_fair() {
+        // Price $10, fair $12 → upside 20%, discount 1 - 10/12 ≈ 16.67%
+        assertEquals(2_000, checkedUpsideBps(marketPriceCents = 1_000, fairValueCents = 1_200))
+        assertEquals(1_666, checkedGapBps(marketPriceCents = 1_000, fairValueCents = 1_200))
+    }
+
+    @Test
+    fun symbol_detail_keeps_discount_and_upside_distinct() {
+        val detail = buildSymbolDetail(
+            snapshot = MarketSnapshot(
+                symbol = "ACME",
+                profitable = true,
+                marketPriceCents = 1_000,
+                intrinsicValueCents = 1_200,
+            ),
+            externalSignal = null,
+            fundamentals = null,
+        )
+        requireNotNull(detail)
+        assertEquals(1_666, detail.gapBps)
+        assertEquals(2_000, detail.upsideBps)
+    }
+
+    @Test
     fun filters_rows_by_watchlist_and_query() {
         val engine = ReportingEngine()
         engine.ingestSnapshot(snapshot("ALFA", true, 7_000, 10_000))

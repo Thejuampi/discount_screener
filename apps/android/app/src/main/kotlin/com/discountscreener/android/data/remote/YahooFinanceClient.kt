@@ -66,6 +66,11 @@ internal data class QuoteContext(
     val companyName: String? = null,
 )
 
+internal data class ChartMetaProbe(
+    val marketPriceCents: Long?,
+    val companyName: String?,
+)
+
 private data class RecommendationPeriod(
     val period: String,
     val strongBuy: Int,
@@ -79,6 +84,7 @@ private data class RecommendationPeriod(
 
 private const val QUOTE_PAGE_URL = "https://finance.yahoo.com/quote/"
 private const val CHART_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+private const val QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
 private const val FUNDAMENTALS_TIMESERIES_URL =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
 private const val USER_AGENT =
@@ -87,8 +93,11 @@ private const val QUOTE_PAGE_ACCEPT =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 private const val QUOTE_PAGE_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
+private const val QUOTE_SUMMARY_MODULES =
+    "price,financialData,defaultKeyStatistics,assetProfile,recommendationTrend"
 
 private const val QUOTE_HTML_COMPONENT = "quoteHtml"
+internal const val QUOTE_SUMMARY_COMPONENT = "quoteSummary"
 private const val CHART_COMPONENT = "chart"
 private const val CORE_COMPONENT = "core"
 private const val EXTERNAL_COMPONENT = "external"
@@ -131,30 +140,20 @@ open class YahooFinanceClient(
         .addInterceptor(BROWSER_DEFAULT_HEADERS_INTERCEPTOR)
         .build(),
     private val json: Json = Json { ignoreUnknownKeys = true },
+    /** When true, fall back to multi-MB HTML scrape if quoteSummary fails. Off by default. */
+    private val htmlFallback: Boolean = false,
 ) {
+    private val session = YahooSession(httpClient = httpClient, userAgent = USER_AGENT)
+
     open suspend fun fetchSymbol(symbol: String): ProviderFetchResult = withContext(Dispatchers.IO) {
         val diagnostics = mutableListOf<ProviderDiagnostic>()
-        val quoteBody = try {
-            fetchQuotePage(symbol)
-        } catch (error: IOException) {
-            diagnostics += ProviderDiagnostic(
-                component = QUOTE_HTML_COMPONENT,
-                kind = ERROR_KIND,
-                detail = error.message ?: "quote page request failed",
-                retryable = isRetryable(error),
-            )
-            null
-        }
+        val requestSymbol = yahooRequestSymbol(symbol)
 
-        val quoteMarketPriceCents = quoteBody?.let { body ->
-            parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics)?.rawMoney("currentPrice")
-        }
-
-        val chartMarketPriceCents = if (quoteMarketPriceCents != null) {
-            null
-        } else {
-            try {
-                fetchLiveChartProbe(symbol)
+        var chartProbe: ChartMetaProbe? = null
+        fun loadChartProbe(): ChartMetaProbe {
+            chartProbe?.let { return it }
+            val probe = try {
+                fetchChartMetaProbe(requestSymbol, displaySymbol = symbol)
             } catch (error: IOException) {
                 diagnostics += ProviderDiagnostic(
                     component = CHART_COMPONENT,
@@ -162,46 +161,129 @@ open class YahooFinanceClient(
                     detail = error.message ?: "chart probe failed",
                     retryable = isRetryable(error),
                 )
-                null
-            } ?: run {
+                ChartMetaProbe(marketPriceCents = null, companyName = null)
+            }
+            chartProbe = probe
+            return probe
+        }
+
+        // Primary path: JSON quoteSummary (same modules Yahoo's web JS uses).
+        var quoteContext = try {
+            val root = fetchQuoteSummaryJson(requestSymbol)
+            parseQuoteSummary(
+                root = root,
+                symbol = symbol,
+                chartMarketPriceCents = null,
+                diagnostics = diagnostics,
+            )
+        } catch (error: IOException) {
+            diagnostics += ProviderDiagnostic(
+                component = QUOTE_SUMMARY_COMPONENT,
+                kind = ERROR_KIND,
+                detail = error.message ?: "quoteSummary request failed",
+                retryable = isRetryable(error) || isAuthError(error),
+            )
+            null
+        }
+
+        // Optional legacy HTML scrape (off by default).
+        if (quoteContext == null && htmlFallback) {
+            quoteContext = try {
+                val body = fetchQuotePage(requestSymbol)
+                val quotePrice = parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics)
+                    ?.rawMoney("currentPrice")
+                parseQuotePage(
+                    symbol = symbol,
+                    body = body,
+                    chartMarketPriceCents = quotePrice,
+                    diagnostics = diagnostics,
+                )
+            } catch (error: IOException) {
                 diagnostics += ProviderDiagnostic(
-                    component = CHART_COMPONENT,
-                    kind = MISSING_KIND,
-                    detail = "chart API returned no recent price candles",
-                    retryable = false,
+                    component = QUOTE_HTML_COMPONENT,
+                    kind = ERROR_KIND,
+                    detail = error.message ?: "quote page request failed",
+                    retryable = isRetryable(error),
                 )
                 null
             }
         }
 
-        val quoteContext = quoteBody?.let { body ->
-            parseQuotePage(
-                symbol = symbol,
-                body = body,
-                chartMarketPriceCents = quoteMarketPriceCents ?: chartMarketPriceCents,
-                diagnostics = diagnostics,
-            )
-        } ?: QuoteContext()
+        var context = quoteContext ?: QuoteContext()
+
+        // Fill name (and price on existing snapshots) from chart meta when needed.
+        if (context.companyName.isNullOrBlank() || context.snapshot == null) {
+            val probe = loadChartProbe()
+            val companyName = mergeCompanyName(context.companyName, probe.companyName)
+            val snapshot = context.snapshot?.let { snap ->
+                var updated = snap
+                if (updated.companyName.isNullOrBlank() && !companyName.isNullOrBlank()) {
+                    updated = updated.copy(companyName = companyName)
+                }
+                if (probe.marketPriceCents != null && updated.marketPriceCents <= 0L) {
+                    updated = updated.copy(marketPriceCents = probe.marketPriceCents)
+                }
+                updated
+            }
+            context = context.copy(snapshot = snapshot, companyName = companyName)
+        }
+
+        // Recovery: suppress transient rate-limit noise when we still recovered usable name data.
+        val filteredDiagnostics = if (!context.companyName.isNullOrBlank() || context.snapshot != null) {
+            diagnostics.filterNot { diagnostic ->
+                diagnostic.retryable && isRateLimitDetail(diagnostic.detail)
+            }
+        } else {
+            diagnostics
+        }
 
         ProviderFetchResult(
             symbol = symbol,
-            snapshot = quoteContext.snapshot,
-            externalSignal = quoteContext.externalSignal,
-            fundamentals = quoteContext.fundamentals,
-            companyName = quoteContext.companyName,
+            snapshot = context.snapshot,
+            externalSignal = context.externalSignal,
+            fundamentals = context.fundamentals,
+            companyName = context.companyName,
             coverage = ProviderCoverage(
-                core = componentState(quoteContext.snapshot != null, diagnostics, CORE_COMPONENT),
-                external = componentState(quoteContext.externalSignal != null, diagnostics, EXTERNAL_COMPONENT),
-                fundamentals = componentState(quoteContext.fundamentals != null, diagnostics, FUNDAMENTALS_COMPONENT),
+                core = componentState(context.snapshot != null, filteredDiagnostics, CORE_COMPONENT),
+                external = componentState(context.externalSignal != null, filteredDiagnostics, EXTERNAL_COMPONENT),
+                fundamentals = componentState(context.fundamentals != null, filteredDiagnostics, FUNDAMENTALS_COMPONENT),
             ),
-            diagnostics = diagnostics,
+            diagnostics = filteredDiagnostics,
         )
     }
 
+    private fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
+        fun once(): JsonObject {
+            val crumb = session.ensureCrumb()
+            val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
+                .addPathSegment(requestSymbol)
+                .addQueryParameter("modules", QUOTE_SUMMARY_MODULES)
+                .addQueryParameter("crumb", crumb)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+                .build()
+            val body = executeText(request)
+            return json.parseToJsonElement(body).jsonObject
+        }
+
+        return try {
+            once()
+        } catch (error: IOException) {
+            if (!isAuthError(error)) throw error
+            session.clear()
+            once()
+        }
+    }
+
     open suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> = withContext(Dispatchers.IO) {
+        val requestSymbol = yahooRequestSymbol(symbol)
         val (rangeToken, interval) = chartRangeSpec(range)
         val url = CHART_API_URL.toHttpUrl().newBuilder()
-            .addPathSegment(symbol)
+            .addPathSegment(requestSymbol)
             .addQueryParameter("range", rangeToken)
             .addQueryParameter("interval", interval)
             .addQueryParameter("includePrePost", "false")
@@ -235,6 +317,7 @@ open class YahooFinanceClient(
     }
 
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {
+        val requestSymbol = yahooRequestSymbol(symbol)
         val types = listOf(
             "annualFreeCashFlow",
             "annualOperatingCashFlow",
@@ -247,7 +330,7 @@ open class YahooFinanceClient(
         ).joinToString(",")
 
         val url = FUNDAMENTALS_TIMESERIES_URL.toHttpUrl().newBuilder()
-            .addPathSegment(symbol)
+            .addPathSegment(requestSymbol)
             .addQueryParameter("type", types)
             .addQueryParameter("period1", "1262304000")
             .addQueryParameter("period2", "2524608000")
@@ -266,9 +349,9 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun fetchQuotePage(symbol: String): String {
+    private fun fetchQuotePage(requestSymbol: String): String {
         val url = QUOTE_PAGE_URL.toHttpUrl().newBuilder()
-            .addPathSegment(symbol)
+            .addPathSegment(requestSymbol)
             .build()
         val request = Request.Builder()
             .url(url)
@@ -280,55 +363,60 @@ open class YahooFinanceClient(
         return executeText(request)
     }
 
-    private fun fetchLiveChartProbe(symbol: String): Long? {
+    private fun fetchChartMetaProbe(requestSymbol: String, displaySymbol: String): ChartMetaProbe {
         val (rangeToken, interval) = chartRangeSpec(ChartRange.Day)
-        return fetchHistoricalCandlesBlocking(symbol, rangeToken, interval)
-            .lastOrNull()
-            ?.closeCents
-    }
-
-    private fun fetchHistoricalCandlesBlocking(symbol: String, range: String, interval: String): List<HistoricalCandle> {
         val url = CHART_API_URL.toHttpUrl().newBuilder()
-            .addPathSegment(symbol)
-            .addQueryParameter("range", range)
+            .addPathSegment(requestSymbol)
+            .addQueryParameter("range", rangeToken)
             .addQueryParameter("interval", interval)
             .addQueryParameter("includePrePost", "false")
             .build()
         val root = getJson(url.toString())
-        val result = root.child("chart").childArray("result").firstOrNull()?.jsonObject ?: return emptyList()
-        val timestamps = result["timestamp"]?.jsonArray ?: return emptyList()
-        val quote = result.child("indicators").childArray("quote").firstOrNull()?.jsonObject ?: return emptyList()
-        val opens = quote["open"]?.jsonArray ?: JsonArray(emptyList())
-        val highs = quote["high"]?.jsonArray ?: JsonArray(emptyList())
-        val lows = quote["low"]?.jsonArray ?: JsonArray(emptyList())
-        val closes = quote["close"]?.jsonArray ?: JsonArray(emptyList())
-        val volumes = quote["volume"]?.jsonArray ?: JsonArray(emptyList())
-
-        return timestamps.indices.mapNotNull { index ->
-            val close = closes.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
-            val open = opens.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
-            val high = highs.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
-            val low = lows.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
-            val volume = volumes.getOrNull(index)?.jsonPrimitive?.longOrNull ?: 0L
-            val timestamp = timestamps[index].jsonPrimitive.longOrNull ?: return@mapNotNull null
-            HistoricalCandle(
-                epochSeconds = timestamp,
-                openCents = dollarsToCents(open) ?: return@mapNotNull null,
-                highCents = dollarsToCents(high) ?: return@mapNotNull null,
-                lowCents = dollarsToCents(low) ?: return@mapNotNull null,
-                closeCents = dollarsToCents(close) ?: return@mapNotNull null,
-                volume = volume,
-            )
-        }
+        val marketPriceCents = parseChartLatestCloseCents(root)
+            ?: parseChartRegularMarketPriceCents(root)
+        return ChartMetaProbe(
+            marketPriceCents = marketPriceCents,
+            companyName = parseChartCompanyName(root, displaySymbol),
+        )
     }
 
-    private fun executeText(request: Request): String =
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code} for ${request.url}")
+    private fun executeText(request: Request, maxAttempts: Int = 4): String {
+        var attempt = 0
+        var lastError: IOException? = null
+        while (attempt < maxAttempts) {
+            attempt += 1
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val code = response.code
+                    if (code == 429 || code >= 500) {
+                        val retryAfterSeconds = response.header("Retry-After")?.toLongOrNull()
+                        val delayMs = ((retryAfterSeconds?.times(1_000L))
+                            ?: (400L * (1L shl (attempt - 1).coerceAtMost(4))))
+                            .coerceAtMost(12_000L)
+                        response.body?.close()
+                        lastError = IOException("HTTP $code for ${request.url}")
+                        if (attempt >= maxAttempts) {
+                            throw lastError!!
+                        }
+                        Thread.sleep(delayMs)
+                        return@use
+                    }
+                    if (!response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        throw IOException("HTTP $code for ${request.url}: $body")
+                    }
+                    return response.body?.string() ?: throw IOException("empty response body")
+                }
+            } catch (error: IOException) {
+                lastError = error
+                if (!isRetryable(error) || attempt >= maxAttempts) {
+                    throw error
+                }
+                Thread.sleep((400L * (1L shl (attempt - 1).coerceAtMost(4))).coerceAtMost(12_000L))
             }
-            response.body?.string() ?: throw IOException("empty response body")
         }
+        throw lastError ?: IOException("request failed")
+    }
 
     private fun getJson(url: String): JsonObject {
         val request = Request.Builder()
@@ -342,9 +430,47 @@ open class YahooFinanceClient(
 
     private fun isRetryable(error: IOException): Boolean {
         val message = error.message.orEmpty()
-        return message.contains("HTTP 429") || message.contains("HTTP 5")
+        return message.contains("HTTP 429") ||
+            message.contains("Too Many Requests", ignoreCase = true) ||
+            message.contains("HTTP 5")
     }
 
+    private fun isAuthError(error: IOException): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("Invalid Crumb", ignoreCase = true) ||
+            message.contains("Invalid Cookie", ignoreCase = true) ||
+            message.contains("HTTP 401")
+    }
+}
+
+/**
+ * Map app/profile symbols onto Yahoo request symbols.
+ * Share classes use hyphens on Yahoo (BF.B → BF-B). Multi-letter suffixes are exchanges (YPFD.BA).
+ */
+internal fun yahooRequestSymbol(symbol: String): String {
+    val normalized = symbol.trim().uppercase()
+    val dot = normalized.lastIndexOf('.')
+    if (dot <= 0 || dot == normalized.lastIndex) {
+        return normalized
+    }
+    val suffix = normalized.substring(dot + 1)
+    return if (suffix.length == 1 && suffix[0].isLetter()) {
+        normalized.substring(0, dot) + "-" + suffix
+    } else {
+        normalized
+    }
+}
+
+internal fun isRateLimitDetail(detail: String): Boolean {
+    val normalized = detail.lowercase()
+    return normalized.contains("http 429") ||
+        normalized.contains("too many requests") ||
+        normalized.contains("rate limit")
+}
+
+internal fun isUsableCompanyName(name: String?): Boolean {
+    val normalized = name?.trim().orEmpty()
+    return normalized.isNotBlank() && !normalized.equals("null", ignoreCase = true)
 }
 
 internal fun parseQuotePage(
@@ -356,24 +482,96 @@ internal fun parseQuotePage(
     val financialData = parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics) ?: JsonObject(emptyMap())
     val statistics = parseEmbeddedJsonObject(body, DEFAULT_KEY_STATISTICS_MARKER, diagnostics) ?: JsonObject(emptyMap())
     val recommendationTrend = parseEmbeddedJsonObject(body, RECOMMENDATION_TREND_MARKER, diagnostics)
-    val currentRecommendation = recommendationTrend
-        ?.childArray("trend")
-        ?.mapNotNull(::toRecommendationPeriod)
-        ?.let { periods -> periods.firstOrNull { it.period == "0m" } ?: periods.firstOrNull() }
     val price = parseQuoteSummaryPrice(body, diagnostics)
     val assetProfile = parseEmbeddedJsonObject(body, ASSET_PROFILE_MARKER, diagnostics)
-
-    val marketPriceCents = financialData.rawMoney("currentPrice") ?: chartMarketPriceCents
-    val intrinsicValueCents = financialData.rawMoney("targetMeanPrice")
-    val fairValueCents = financialData.rawMoney("targetMedianPrice")
-    val lowFairValueCents = financialData.rawMoney("targetLowPrice")
-    val highFairValueCents = financialData.rawMoney("targetHighPrice")
-    val profitable = statistics.rawDouble("trailingEps")?.let { it > 0.0 }
     val companyName = resolveCompanyName(
         body = body,
         symbol = symbol,
         assetProfile = assetProfile,
     )
+    return buildQuoteContext(
+        symbol = symbol,
+        financialData = financialData,
+        statistics = statistics,
+        recommendationTrend = recommendationTrend,
+        price = price,
+        assetProfile = assetProfile,
+        companyName = companyName,
+        chartMarketPriceCents = chartMarketPriceCents,
+        diagnostics = diagnostics,
+    )
+}
+
+/**
+ * Parse a live Yahoo `v10/finance/quoteSummary` JSON payload into domain quote context.
+ * Fixtures under `test/resources/yahoo/quoteSummary/` were captured from production.
+ */
+internal fun parseQuoteSummary(
+    root: JsonObject,
+    symbol: String,
+    chartMarketPriceCents: Long?,
+    diagnostics: MutableList<ProviderDiagnostic>,
+): QuoteContext {
+    val result = root.child("quoteSummary").childArray("result").firstOrNull()?.jsonObject
+    if (result == null) {
+        val errorDescription = root.child("quoteSummary").child("error").string("description")
+            ?: root.child("finance").child("error").string("description")
+        diagnostics += ProviderDiagnostic(
+            component = QUOTE_SUMMARY_COMPONENT,
+            kind = ERROR_KIND,
+            detail = errorDescription ?: "quoteSummary result is empty",
+            retryable = false,
+        )
+        return QuoteContext()
+    }
+
+    val financialData = result.child("financialData")
+    val statistics = result.child("defaultKeyStatistics")
+    val recommendationTrend = result["recommendationTrend"]?.jsonObject
+    val price = result.child("price")
+    val assetProfile = result["assetProfile"]?.jsonObject
+    val companyName = listOfNotNull(price.string("longName"), price.string("shortName"))
+        .mapNotNull { candidate -> normalizeCompanyNameCandidate(candidate, symbol) }
+        .firstOrNull()
+
+    return buildQuoteContext(
+        symbol = symbol,
+        financialData = financialData,
+        statistics = statistics,
+        recommendationTrend = recommendationTrend,
+        price = price,
+        assetProfile = assetProfile,
+        companyName = companyName,
+        chartMarketPriceCents = chartMarketPriceCents
+            ?: price.rawMoney("regularMarketPrice"),
+        diagnostics = diagnostics,
+    )
+}
+
+private fun buildQuoteContext(
+    symbol: String,
+    financialData: JsonObject,
+    statistics: JsonObject,
+    recommendationTrend: JsonObject?,
+    price: JsonObject,
+    assetProfile: JsonObject?,
+    companyName: String?,
+    chartMarketPriceCents: Long?,
+    diagnostics: MutableList<ProviderDiagnostic>,
+): QuoteContext {
+    val currentRecommendation = recommendationTrend
+        ?.childArray("trend")
+        ?.mapNotNull(::toRecommendationPeriod)
+        ?.let { periods -> periods.firstOrNull { it.period == "0m" } ?: periods.firstOrNull() }
+
+    val marketPriceCents = financialData.rawMoney("currentPrice")
+        ?: price.rawMoney("regularMarketPrice")
+        ?: chartMarketPriceCents
+    val intrinsicValueCents = financialData.rawMoney("targetMeanPrice")
+    val fairValueCents = financialData.rawMoney("targetMedianPrice")
+    val lowFairValueCents = financialData.rawMoney("targetLowPrice")
+    val highFairValueCents = financialData.rawMoney("targetHighPrice")
+    val profitable = statistics.rawDouble("trailingEps")?.let { it > 0.0 }
     val analystOpinionCount = financialData.rawInt("numberOfAnalystOpinions")
         ?: currentRecommendation?.totalCount()
     val recommendationMeanHundredths = financialData.rawDouble("recommendationMean")
@@ -388,7 +586,13 @@ internal fun parseQuotePage(
         sectorName = assetProfile.string("sectorDisp") ?: assetProfile.string("sector"),
         industryKey = assetProfile.string("industryKey"),
         industryName = assetProfile.string("industryDisp") ?: assetProfile.string("industry"),
-        marketCapDollars = price.rawDouble("marketCap")?.toLong(),
+        marketCapDollars = resolveMarketCapDollars(
+            reportedMarketCap = price.rawDouble("marketCap"),
+            sharesOutstanding = statistics.rawDouble("sharesOutstanding"),
+            marketPriceDollars = financialData.rawDouble("currentPrice")
+                ?: price.rawDouble("regularMarketPrice")
+                ?: chartMarketPriceCents?.let { it / 100.0 },
+        ),
         sharesOutstanding = statistics.rawDouble("sharesOutstanding")?.toLong(),
         trailingPeHundredths = statistics.rawDouble("trailingPE")?.times(100.0)?.roundToLong()?.toInt(),
         forwardPeHundredths = statistics.rawDouble("forwardPE")?.times(100.0)?.roundToLong()?.toInt(),
@@ -556,13 +760,48 @@ internal fun resolveCompanyName(
     val candidates = listOfNotNull(
         parseMetaTitle(body)?.let { parseCompanyNameFromTitle(it, symbol) },
         parseHtmlTitle(body)?.let { parseCompanyNameFromTitle(it, symbol) },
-        assetProfile?.string("longName")?.let(::normalizeCompanyName),
-        assetProfile?.string("shortName")?.let(::normalizeCompanyName),
-        parseEmbeddedStringField(body, LONG_NAME_MARKER)?.let(::normalizeCompanyName),
+        assetProfile?.string("longName")?.let { normalizeCompanyNameCandidate(it, symbol) },
+        assetProfile?.string("shortName")?.let { normalizeCompanyNameCandidate(it, symbol) },
+        parseEmbeddedStringField(body, LONG_NAME_MARKER)?.let { normalizeCompanyNameCandidate(it, symbol) },
     )
-    return candidates.firstOrNull { candidate ->
-        candidate.isNotBlank() && !candidate.equals(symbol, ignoreCase = true)
+    return candidates.firstOrNull()
+}
+
+internal fun mergeCompanyName(
+    quoteCompanyName: String?,
+    chartCompanyName: String?,
+): String? = quoteCompanyName?.takeIf(String::isNotBlank) ?: chartCompanyName?.takeIf(String::isNotBlank)
+
+/**
+ * Extract a usable company name from Yahoo chart API meta.
+ * Live samples: L/C/F/V/T/AAPL expose longName; junk numeric shortName (e.g. N) is rejected.
+ */
+internal fun parseChartCompanyName(root: JsonObject, symbol: String): String? {
+    val meta = root.child("chart").childArray("result").firstOrNull()?.jsonObject?.get("meta")?.jsonObject
+        ?: return null
+    return listOfNotNull(meta.string("longName"), meta.string("shortName"))
+        .mapNotNull { candidate -> normalizeCompanyNameCandidate(candidate, symbol) }
+        .firstOrNull()
+}
+
+internal fun parseChartLatestCloseCents(root: JsonObject): Long? {
+    val result = root.child("chart").childArray("result").firstOrNull()?.jsonObject ?: return null
+    val closes = result.child("indicators").childArray("quote").firstOrNull()?.jsonObject
+        ?.get("close")
+        ?.jsonArray
+        ?: return null
+    for (index in closes.indices.reversed()) {
+        val close = closes[index].jsonPrimitive.doubleOrNull ?: continue
+        dollarsToCents(close)?.let { return it }
     }
+    return null
+}
+
+internal fun parseChartRegularMarketPriceCents(root: JsonObject): Long? {
+    val meta = root.child("chart").childArray("result").firstOrNull()?.jsonObject?.get("meta")?.jsonObject
+        ?: return null
+    val price = meta.get("regularMarketPrice")?.jsonPrimitive?.doubleOrNull ?: return null
+    return dollarsToCents(price)
 }
 
 private fun parseMetaTitle(body: String): String? {
@@ -611,6 +850,17 @@ private fun normalizeCompanyName(raw: String): String? = raw
     .replace("&gt;", ">")
     .takeIf(String::isNotBlank)
 
+internal fun normalizeCompanyNameCandidate(raw: String, symbol: String): String? {
+    val normalized = normalizeCompanyName(raw) ?: return null
+    if (normalized.equals(symbol, ignoreCase = true)) return null
+    if (normalized.equals("Symbol Lookup from Yahoo Finance", ignoreCase = true)) return null
+    // Reject pure numeric junk sometimes returned as shortName for dead/invalid symbols.
+    if (normalized.all { character -> character.isDigit() || character.isWhitespace() || character == '.' || character == ',' }) {
+        return null
+    }
+    return normalized
+}
+
 private fun toRecommendationPeriod(element: JsonElement): RecommendationPeriod? {
     val obj = element.jsonObject
     return RecommendationPeriod(
@@ -651,6 +901,18 @@ private fun chartRangeSpec(range: ChartRange): Pair<String, String> = when (rang
     ChartRange.Year -> "1y" to "1wk"
     ChartRange.FiveYears -> "5y" to "1mo"
     ChartRange.TenYears -> "10y" to "1mo"
+}
+
+internal fun resolveMarketCapDollars(
+    reportedMarketCap: Double?,
+    sharesOutstanding: Double?,
+    marketPriceDollars: Double?,
+): Long? {
+    reportedMarketCap?.takeIf { it.isFinite() && it > 0.0 }?.toLong()?.let { return it }
+    val shares = sharesOutstanding?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+    val price = marketPriceDollars?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+    val derived = shares * price
+    return derived.takeIf { it.isFinite() && it > 0.0 }?.toLong()
 }
 
 private fun dollarsToCents(value: Double): Long? =

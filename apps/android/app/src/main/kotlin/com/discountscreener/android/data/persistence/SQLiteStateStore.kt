@@ -767,7 +767,21 @@ class SQLiteStateStore(
     private fun persistPricingCandles(db: SQLiteDatabase, capture: RawCapture) {
         if (capture.captureKind != CaptureKind.ChartCandles) return
         val payload = capture.payload as? RawCapturePayload.Chart ?: return
-        payload.candles.forEach { candle ->
+        val existingCandles = loadPricingCandleCache(db, capture.symbol)
+            .firstOrNull { record -> record.range == payload.range }
+            ?.candles
+            .orEmpty()
+        val mergedCandles = PricingHistoryMerge.merge(
+            existing = existingCandles.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
+            incoming = payload.candles.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
+        ).map { candle -> candle.candle }
+
+        db.delete(
+            "pricing_candle",
+            "symbol = ? AND chart_range = ?",
+            arrayOf(capture.symbol, payload.range.name),
+        )
+        mergedCandles.forEach { candle ->
             db.insertWithOnConflict(
                 "pricing_candle",
                 null,

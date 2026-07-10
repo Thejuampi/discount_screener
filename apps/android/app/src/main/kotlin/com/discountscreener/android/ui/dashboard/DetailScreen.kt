@@ -86,6 +86,10 @@ import com.discountscreener.android.domain.model.preferredAnalystTargetFairValue
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.core.engine.ReplayWindow
 import com.discountscreener.core.engine.checkedUpsideBps
+import com.discountscreener.core.engine.macdHistogramDerivatives
+import com.discountscreener.core.engine.macdReadingScale
+import com.discountscreener.core.engine.plainMacdReading
+import com.discountscreener.core.engine.plainRsiReading
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.ProjectedDetailData
@@ -240,6 +244,7 @@ fun DetailScreen(
                     alerts = alerts,
                     quantLens = quantLens,
                     projectedDetail = routeProjectedDetail,
+                    detailNotice = detailNotice,
                     onAction = onAction,
                 )
                 DetailSubtab.Lens -> QuantLensContent(
@@ -270,6 +275,7 @@ private fun SnapshotContent(
     alerts: List<String>,
     quantLens: QuantLensUiState?,
     projectedDetail: ProjectedDetailData?,
+    detailNotice: DashboardNotice? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
     var chartModelCache = remember(candles, chartRange, projectedDetail?.chart) {
@@ -305,7 +311,28 @@ private fun SnapshotContent(
         item {
             var currentDetail = displayedDetail
             if (currentDetail == null) {
-                Text("Loading detail...", style = MaterialTheme.typography.bodyMedium)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (detailNotice != null) {
+                        Text(
+                            text = detailNotice.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            text = detailNotice.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = "No chart data",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text("Loading detail...", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
                 return@item
             }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -715,7 +742,35 @@ private fun ValuationSection(
             }
         }
     }
+    WaccAssumptionsSection(projectedDetail = projectedDetail)
     AnalystConcentrationSection(detail = detail)
+}
+
+@Composable
+private fun WaccAssumptionsSection(projectedDetail: ProjectedDetailData?) {
+    val waccBps = projectedDetail?.waccBps ?: return
+    val provisional = projectedDetail.waccProvisional
+    val labels = projectedDetail.waccAssumptionLabels
+    val waccPercent = waccBps / 100.0
+    Text(
+        text = buildString {
+            append("WACC ${"%.2f".format(java.util.Locale.US, waccPercent)}%")
+            if (provisional) append(" · provisional")
+        },
+        style = MaterialTheme.typography.labelMedium,
+        color = if (provisional) {
+            MaterialTheme.colorScheme.tertiary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    )
+    if (labels.isNotEmpty()) {
+        Text(
+            text = "WACC inputs: ${labels.joinToString("; ")}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -1061,56 +1116,77 @@ private fun HistoryContent(
     val showTrendSummary = changeEvents.size >= 2
     val showChartToggle = changeEvents.size >= 2
     val showChangeLog = changeEvents.isNotEmpty()
+    val reversedChangeEvents = remember(changeEvents) { changeEvents.asReversed() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ChartRange.entries.forEach { window ->
-                FilterChip(
-                    selected = route.historyTimeWindow == window,
-                    onClick = { onAction(DashboardAction.SetHistoryTimeWindow(window)) },
-                    label = { Text(chartRangeLabel(window), maxLines = 1) },
-                )
+    // Single outer scroll for the whole History tab — no nested LazyColumns.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ChartRange.entries.forEach { window ->
+                    FilterChip(
+                        selected = route.historyTimeWindow == window,
+                        onClick = { onAction(DashboardAction.SetHistoryTimeWindow(window)) },
+                        label = { Text(chartRangeLabel(window), maxLines = 1) },
+                    )
+                }
             }
         }
 
-        SavedPriceHistoryCard(
-            range = route.historyTimeWindow,
-            candles = historyCandles,
-            status = priceHistoryStatus,
-        )
+        item {
+            SavedPriceHistoryCard(
+                range = route.historyTimeWindow,
+                candles = historyCandles,
+                status = priceHistoryStatus,
+            )
+        }
 
-        historyStatus?.let { HistoryStatusCard(it) }
+        historyStatus?.let { status ->
+            item { HistoryStatusCard(status) }
+        }
 
         historyOverview?.let { overview ->
-            HistoryOverviewCard(overview = overview)
+            item { HistoryOverviewCard(overview = overview) }
         }
 
         if (showTrendSummary) {
-            TrendSummaryCard(summary = trendSummary)
+            item { TrendSummaryCard(summary = trendSummary) }
         }
+
         if (showChartToggle) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(
-                    selected = route.historySubview == HistorySubview.Graphs,
-                    onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Graphs)) },
-                    label = { Text("Chart") },
-                )
-                FilterChip(
-                    selected = route.historySubview == HistorySubview.Table,
-                    onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Table)) },
-                    label = { Text("Changes") },
-                )
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = route.historySubview == HistorySubview.Graphs,
+                        onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Graphs)) },
+                        label = { Text("Chart") },
+                    )
+                    FilterChip(
+                        selected = route.historySubview == HistorySubview.Table,
+                        onClick = { onAction(DashboardAction.SetHistorySubview(HistorySubview.Table)) },
+                        label = { Text("Changes") },
+                    )
+                }
             }
         }
+
         if (showChangeLog) {
-            if (route.historySubview == HistorySubview.Graphs) {
-                if (showChartToggle) {
+            val showGraph = route.historySubview == HistorySubview.Graphs && showChartToggle
+            if (showGraph) {
+                item {
                     HistoryGraph(episodes = targetEpisodes, summary = trendSummary)
-                } else {
-                    HistoryTable(changeEvents = changeEvents, summary = trendSummary)
                 }
             } else {
-                HistoryTable(changeEvents = changeEvents, summary = trendSummary)
+                items(
+                    items = reversedChangeEvents,
+                    key = { event ->
+                        "${event.current.endRevision.evaluatedAtEpochSeconds}-${event.current.targetFairValueCents}"
+                    },
+                ) { event ->
+                    HistoryChangeEventRow(event = event, summary = trendSummary)
+                }
             }
         }
     }
@@ -1160,13 +1236,11 @@ private fun SavedPriceHistoryCard(
                 HistoryMetaChip("Latest ${money(candles.last().closeCents)}")
                 HistoryMetaChip("${candleDateLabel(candles.first())} -> ${candleDateLabel(candles.last())}")
             }
-            LineChart(
+            ResponsiveHistoryLineChart(
                 values = candles.map { it.closeCents.toFloat() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(120.dp)
-                    .background(MaterialTheme.colorScheme.surface),
                 lineColor = status.color,
+                lowLabel = money(candles.minOf { it.closeCents }),
+                highLabel = money(candles.maxOf { it.closeCents }),
             )
         }
     }
@@ -1178,70 +1252,133 @@ private fun HistoryGraph(
     summary: ValuationTrendSummary,
 ) {
     val targetValues = episodes.map { it.targetFairValueCents.toFloat() }
-    LineChart(
-        values = targetValues,
+    val lowCents = episodes.minOfOrNull { it.targetFairValueCents } ?: 0L
+    val highCents = episodes.maxOfOrNull { it.targetFairValueCents } ?: 0L
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(140.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-        lineColor = summary.color,
-    )
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "Analyst target path",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "${episodes.size} target levels · ${money(lowCents)} – ${money(highCents)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ResponsiveHistoryLineChart(
+            values = targetValues,
+            lineColor = summary.color,
+            lowLabel = money(lowCents),
+            highLabel = money(highCents),
+        )
+    }
 }
 
 @Composable
-private fun HistoryTable(
-    changeEvents: List<AnalystTargetChangeEvent>,
-    summary: ValuationTrendSummary,
+private fun ResponsiveHistoryLineChart(
+    values: List<Float>,
+    lineColor: Color,
+    lowLabel: String,
+    highLabel: String,
 ) {
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        items(changeEvents.asReversed()) { event ->
-            val revision = event.current.endRevision
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val chartHeight = (maxWidth * 0.42f).coerceIn(148.dp, 240.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(chartHeight)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                    .widthIn(min = 40.dp, max = 64.dp)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.End,
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        java.time.Instant.ofEpochSecond(revision.evaluatedAtEpochSeconds)
-                            .atZone(java.time.ZoneId.systemDefault())
-                            .toLocalDate()
-                            .toString(),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        money(event.current.targetFairValueCents),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = summary.color,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "${money(event.previous.targetFairValueCents)} -> ${money(event.current.targetFairValueCents)}  ${signedPercentLabel(event.changeBps)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    val color = valuationChangeColorForBps(event.changeBps, event.significantChange)
-                    Text(
-                        text = event.significantChange?.let { valuationChangeLabel(it) } ?: signedPercentLabel(event.changeBps),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = color,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                Text(
+                    text = highLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Text(
+                    text = lowLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
             }
+            LineChart(
+                values = values,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                lineColor = lineColor,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryChangeEventRow(
+    event: AnalystTargetChangeEvent,
+    summary: ValuationTrendSummary,
+) {
+    val revision = event.current.endRevision
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                java.time.Instant.ofEpochSecond(revision.evaluatedAtEpochSeconds)
+                    .atZone(java.time.ZoneId.systemDefault())
+                    .toLocalDate()
+                    .toString(),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                money(event.current.targetFairValueCents),
+                style = MaterialTheme.typography.labelMedium,
+                color = summary.color,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "${money(event.previous.targetFairValueCents)} -> ${money(event.current.targetFairValueCents)}  ${signedPercentLabel(event.changeBps)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val color = valuationChangeColorForBps(event.changeBps, event.significantChange)
+            Text(
+                text = event.significantChange?.let { valuationChangeLabel(it) } ?: signedPercentLabel(event.changeBps),
+                style = MaterialTheme.typography.bodySmall,
+                color = color,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }
@@ -1975,13 +2112,29 @@ private fun MacdChartSection(
     axisWidth: Dp,
     dateTicks: List<ChartDateTick>,
 ) {
-    ChartPane(
-        axisLabels = model?.axisLabels,
-        axisWidth = axisWidth,
-        chartHeight = 80.dp,
-        bottomTicks = dateTicks,
-    ) { chartModifier ->
-        MacdChart(candles = candles, model = model, modifier = chartModifier)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("MACD", fontWeight = FontWeight.Bold)
+        Text(
+            text = macdSummaryText(model),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = macdAnalysisText(model),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        model?.trendSignal?.let { signal ->
+            TrendSignalsSection(signals = listOf(signal))
+        }
+        ChartPane(
+            axisLabels = model?.axisLabels,
+            axisWidth = axisWidth,
+            chartHeight = 80.dp,
+            bottomTicks = dateTicks,
+        ) { chartModifier ->
+            MacdChart(candles = candles, model = model, modifier = chartModifier)
+        }
     }
 }
 
@@ -1998,7 +2151,11 @@ private fun RsiChartSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = "RSI compares recent gains versus losses. The slope shows whether momentum is strengthening or fading. The acceleration shows whether that change is speeding up or rolling over.",
+            text = plainRsiReading(
+                level = model?.latestSignalRsi,
+                slope = model?.latestSlope,
+                acceleration = model?.latestAcceleration,
+            ),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2084,6 +2241,28 @@ private fun rsiSummaryText(model: RsiChartModel?): String {
     val slope = model.latestSlope?.let { String.format("%.2f", it) } ?: "n/a"
     val acceleration = model.latestAcceleration?.let { String.format("%.2f", it) } ?: "n/a"
     return "Wilder $classic  Signal $signal  Slope $slope  Accel $acceleration"
+}
+
+private fun macdSummaryText(model: MacdChartModel?): String {
+    model ?: return "MACD needs at least 26 candles."
+    val (slope, _) = macdHistogramDerivatives(model.histogram)
+    val macd = model.macdLine.lastOrNull()?.let { compactMoney(it.roundToLong()) } ?: "n/a"
+    val signal = model.signalLine.lastOrNull()?.let { compactMoney(it.roundToLong()) } ?: "n/a"
+    val hist = model.histogram.lastOrNull()?.let { compactMoney(it.roundToLong()) } ?: "n/a"
+    val slopeText = slope?.let { compactMoney(it.roundToLong()) } ?: "n/a"
+    return "MACD $macd  Signal $signal  Hist $hist  Slope $slopeText"
+}
+
+private fun macdAnalysisText(model: MacdChartModel?): String {
+    model ?: return plainMacdReading(null, null, null, null, null)
+    val (slope, accel) = macdHistogramDerivatives(model.histogram)
+    return plainMacdReading(
+        macd = model.macdLine.lastOrNull(),
+        histogram = model.histogram.lastOrNull(),
+        histogramSlope = slope,
+        histogramAccel = accel,
+        scale = macdReadingScale(model.macdLine, model.signalLine, model.histogram),
+    )
 }
 
 internal fun chartAxisLabelTexts(vararg axisLabels: ChartAxisLabels?): List<String> = axisLabels
@@ -2462,10 +2641,11 @@ internal fun LineChart(
     lineColor: Color = Color.Unspecified,
 ) {
     val resolvedLineColor = if (lineColor != Color.Unspecified) lineColor else MaterialTheme.colorScheme.primary
-    val axisColor = MaterialTheme.colorScheme.outline
+    val axisColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
+    val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
     if (values.size < 2) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            Text("Not enough points")
+            Text("Not enough points", style = MaterialTheme.typography.bodySmall)
         }
         return
     }
@@ -2473,15 +2653,25 @@ internal fun LineChart(
     val max = values.maxOrNull() ?: 0f
     val span = (max - min).takeIf { it > 0f } ?: 1f
 
-    Canvas(modifier = modifier.padding(8.dp)) {
+    Canvas(modifier = modifier.padding(horizontal = 4.dp, vertical = 6.dp)) {
+        // Light mid/high guides so tall charts read better on phones.
+        val midY = size.height * 0.5f
+        drawLine(color = gridColor, start = Offset(0f, midY), end = Offset(size.width, midY), strokeWidth = 1f)
+        drawLine(color = gridColor, start = Offset(0f, 0f), end = Offset(size.width, 0f), strokeWidth = 1f)
+
         val path = Path()
         values.forEachIndexed { index, value ->
             val x = size.width * index / values.lastIndex.toFloat()
             val y = size.height - ((value - min) / span * size.height)
             if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
-        drawPath(path = path, color = resolvedLineColor, style = Stroke(width = 2f))
-        drawLine(color = axisColor, start = Offset(0f, size.height), end = Offset(size.width, size.height))
+        drawPath(path = path, color = resolvedLineColor, style = Stroke(width = 3f))
+        drawLine(
+            color = axisColor,
+            start = Offset(0f, size.height),
+            end = Offset(size.width, size.height),
+            strokeWidth = 1.5f,
+        )
     }
 }
 

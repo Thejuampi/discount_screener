@@ -6,6 +6,8 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class DcfSourceModelTest {
     private val json = Json { encodeDefaults = true }
@@ -53,5 +55,40 @@ class DcfSourceModelTest {
             listOf(ProviderDecisionReasonCode.LegacySourceFreePayload, ProviderDecisionReasonCode.RestoredWithoutLiveRefresh),
             decoded.providerReasons.map { it.code },
         )
+        assertEquals(WaccInputProvenance(), decoded.waccInputs)
+        assertFalse(decoded.waccInputs.isProvisional())
+    }
+
+    @Test
+    fun provisional_wacc_inputs_round_trip_without_encode_defaults() {
+        val sparseJson = Json { ignoreUnknownKeys = true; encodeDefaults = false }
+        val analysis = DcfAnalysis(
+            bearIntrinsicValueCents = 8_000L,
+            baseIntrinsicValueCents = 10_000L,
+            bullIntrinsicValueCents = 12_000L,
+            waccBps = 900,
+            baseGrowthBps = 500,
+            netDebtDollars = 0L,
+            source = DcfSource.YahooFinance,
+            resolverState = ResolverState.Selected,
+            waccInputs = WaccInputProvenance(
+                marketCap = WaccFieldSource.DerivedPriceTimesShares,
+                beta = WaccFieldSource.Default,
+                taxRate = WaccFieldSource.Default,
+                waccClamped = true,
+            ),
+        )
+
+        val encoded = sparseJson.encodeToString(analysis)
+        val decoded = sparseJson.decodeFromString<DcfAnalysis>(encoded)
+
+        assertEquals(WaccFieldSource.DerivedPriceTimesShares, decoded.waccInputs.marketCap)
+        assertEquals(WaccFieldSource.Default, decoded.waccInputs.beta)
+        assertEquals(WaccFieldSource.Default, decoded.waccInputs.taxRate)
+        assertTrue(decoded.waccInputs.waccClamped)
+        assertTrue(decoded.waccInputs.isProvisional())
+        assertContains(encoded, "DerivedPriceTimesShares")
+        assertContains(encoded, "\"beta\":\"Default\"")
+        assertContains(encoded, "\"taxRate\":\"Default\"")
     }
 }
