@@ -65,6 +65,7 @@ fun DashboardScreen(
     val tickerSearchActive = state.tickerSearchExpanded ||
         state.tickerSearchQuery.isNotBlank() ||
         state.tickerSearchSuggestions.isNotEmpty() ||
+        state.tickerSearchLoading ||
         state.tickerSearchNotice != null
 
     BackHandler(enabled = tickerSearchActive) {
@@ -128,9 +129,9 @@ fun DashboardScreen(
             query = state.tickerSearchQuery,
             suggestions = state.tickerSearchSuggestions,
             expanded = state.tickerSearchExpanded,
+            loading = state.tickerSearchLoading,
             notice = state.tickerSearchNotice,
-            label = "Ticker",
-            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it.uppercase())) },
+            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it)) },
             onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
             onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
             onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },

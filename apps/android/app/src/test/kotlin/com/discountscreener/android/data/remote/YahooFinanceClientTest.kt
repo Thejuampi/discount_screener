@@ -329,6 +329,16 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun parse_search_fixture_returns_meli_for_mercado_query() {
+        val root = loadSearchFixture("mercado")
+        val quotes = parseSearchQuotes(root)
+
+        assertEquals("MELI", quotes.first().symbol)
+        assertEquals("MercadoLibre, Inc.", quotes.first().companyName)
+        assertEquals("NASDAQ", quotes.first().exchange)
+    }
+
+    @Test
     fun interceptor_adds_accept_language_when_absent() {
         val request = Request.Builder()
             .url("https://query1.finance.yahoo.com/v8/finance/chart/AAPL")
@@ -376,6 +386,14 @@ class YahooFinanceClientTest {
         val stream = requireNotNull(
             javaClass.classLoader?.getResourceAsStream("yahoo/quoteSummary/$symbol.json"),
         ) { "missing fixture yahoo/quoteSummary/$symbol.json" }
+        val body = stream.bufferedReader().use { it.readText() }
+        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+    }
+
+    private fun loadSearchFixture(query: String): kotlinx.serialization.json.JsonObject {
+        val stream = requireNotNull(
+            javaClass.classLoader?.getResourceAsStream("yahoo/search/$query.json"),
+        ) { "missing fixture yahoo/search/$query.json" }
         val body = stream.bufferedReader().use { it.readText() }
         return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
     }

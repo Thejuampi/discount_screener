@@ -48,6 +48,9 @@ import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.ScreenDataProjectionEngine
+import com.discountscreener.core.engine.TickerSearchCandidate
+import com.discountscreener.core.engine.TickerSearchEngine
+import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.CandidateRow
@@ -163,6 +166,14 @@ private data class ProfileSwitchRequest(
     val symbols: List<String>,
 )
 
+private data class RemoteSearchCacheEntry(
+    val results: List<TickerSearchCandidate>,
+    val cachedAtEpochSeconds: Long,
+)
+
+private const val REMOTE_SEARCH_CACHE_MAX_ENTRIES = 50
+private const val REMOTE_SEARCH_CACHE_TTL_SECONDS = 300L
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class DefaultDashboardRepository(
     private val stateStore: SQLiteStateStore,
@@ -201,6 +212,7 @@ class DefaultDashboardRepository(
     private val comparisonBaselineMarketPriceBySymbol = linkedMapOf<String, Long>()
     private val freshnessTimestampBySymbol = linkedMapOf<String, Long>()
     private val companyNameBySymbol = linkedMapOf<String, String>()
+    private val remoteSearchCache = linkedMapOf<String, RemoteSearchCacheEntry>()
 
     private var currentProfile = DEFAULT_PROFILE
     private var lastUpdatedAtEpochSeconds: Long? = null
@@ -329,30 +341,47 @@ class DefaultDashboardRepository(
         currentProfile: String,
         limit: Int,
     ): List<TickerSearchSuggestion> {
-        val localSuggestions = profileCatalog.searchTickers(query, currentProfile, limit)
-        // Include single-letter queries (e.g. L / Loews) so names can be filled from Yahoo chart meta
-        // when quote HTML 404s.
-        if (query.trim().isNotEmpty()) {
-            localSuggestions
-                .take(4)
-                .filter { suggestion -> localCompanyNameFor(suggestion.symbol).isNullOrBlank() }
-                .forEach { suggestion ->
-                    runCatching {
-                        yahooClient.fetchSymbol(suggestion.symbol).companyName
-                    }.getOrNull()?.takeIf(String::isNotBlank)?.let { companyName ->
-                        stateMutex.withLock {
-                            companyNameBySymbol[suggestion.symbol] = companyName
-                        }
-                    }
-                }
-        }
-        return localSuggestions.map { suggestion ->
-            TickerSearchSuggestion(
+        val trimmedQuery = query.trim()
+        if (trimmedQuery.isBlank()) return emptyList()
+
+        val normalizedCurrentProfile = currentProfile.trim().lowercase()
+        val localProfileSuggestions = profileCatalog.searchTickers(query, currentProfile, limit)
+        val candidates = mutableListOf<TickerSearchCandidate>()
+
+        localProfileSuggestions.forEach { suggestion ->
+            candidates += TickerSearchCandidate(
                 symbol = suggestion.symbol,
                 companyName = localCompanyNameFor(suggestion.symbol),
                 profiles = suggestion.profiles,
                 inCurrentProfile = suggestion.inCurrentProfile,
+                matchRank = TickerSearchEngine.remapProfileMatchRank(suggestion.matchRank),
             )
+        }
+
+        companyNameIndexLocked().forEach { (symbol, companyName) ->
+            val matchRank = TickerSearchEngine.companyNameMatchRank(query, companyName) ?: return@forEach
+            val profiles = profileCatalog.profileMembership(symbol)
+            candidates += TickerSearchCandidate(
+                symbol = symbol,
+                companyName = companyName,
+                profiles = profiles,
+                inCurrentProfile = normalizedCurrentProfile in profiles,
+                matchRank = matchRank,
+            )
+        }
+
+        var rankedResults = TickerSearchEngine.mergeAndRank(candidates, limit)
+        if (TickerSearchEngine.shouldTriggerRemoteSearch(query, rankedResults)) {
+            val remoteCandidates = remoteSearchCandidates(query, limit)
+            rankedResults = TickerSearchEngine.mergeAndRank(candidates + remoteCandidates, limit)
+        }
+
+        hydrateMissingCompanyNames(rankedResults)
+
+        return buildList {
+            rankedResults.forEach { result ->
+                add(toTickerSearchSuggestion(result))
+            }
         }
     }
 
@@ -2302,6 +2331,91 @@ class DefaultDashboardRepository(
 
     private suspend fun localCompanyNameFor(symbol: String): String? = stateMutex.withLock {
         resolvedCompanyNameLocked(symbol, engine.detail(symbol))
+    }
+
+    private suspend fun companyNameIndexLocked(): List<Pair<String, String>> = stateMutex.withLock {
+        buildList {
+            companyNameBySymbol.forEach { (symbol, name) ->
+                if (name.isNotBlank()) add(symbol to name)
+            }
+            trackedSymbols.forEach { symbol ->
+                val detailName = engine.detail(symbol)?.companyName?.takeIf(String::isNotBlank)
+                if (detailName != null && companyNameBySymbol[symbol].isNullOrBlank()) {
+                    add(symbol to detailName)
+                }
+            }
+        }.distinctBy { (symbol, _) -> symbol.uppercase() }
+    }
+
+    private suspend fun remoteSearchCandidates(query: String, limit: Int): List<TickerSearchCandidate> {
+        val cacheKey = TickerSearchEngine.normalizeSearchQueryKey(query)
+        val now = nowProvider()
+        stateMutex.withLock {
+            remoteSearchCache[cacheKey]?.let { entry ->
+                if (now - entry.cachedAtEpochSeconds <= REMOTE_SEARCH_CACHE_TTL_SECONDS) {
+                    return entry.results
+                }
+                remoteSearchCache.remove(cacheKey)
+            }
+        }
+
+        val remoteQuotes = runCatching {
+            yahooClient.searchSymbols(query, limit)
+        }.getOrElse { emptyList() }
+
+        val candidates = remoteQuotes.map { quote ->
+            TickerSearchCandidate(
+                symbol = quote.symbol,
+                companyName = quote.companyName,
+                exchange = quote.exchange,
+                matchRank = TickerSearchEngine.remoteMatchRank(quote.symbol, query),
+                isRemote = true,
+            )
+        }
+
+        stateMutex.withLock {
+            remoteSearchCache[cacheKey] = RemoteSearchCacheEntry(
+                results = candidates,
+                cachedAtEpochSeconds = now,
+            )
+            while (remoteSearchCache.size > REMOTE_SEARCH_CACHE_MAX_ENTRIES) {
+                remoteSearchCache.remove(remoteSearchCache.keys.first())
+            }
+            candidates.forEach { candidate ->
+                candidate.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
+                    companyNameBySymbol.putIfAbsent(candidate.symbol, companyName)
+                }
+            }
+        }
+
+        return candidates
+    }
+
+    private suspend fun hydrateMissingCompanyNames(results: List<TickerSearchResult>) {
+        results
+            .take(4)
+            .filter { result -> result.companyName.isNullOrBlank() && !result.isRemote }
+            .forEach { result ->
+                runCatching {
+                    yahooClient.fetchSymbol(result.symbol).companyName
+                }.getOrNull()?.takeIf(String::isNotBlank)?.let { companyName ->
+                    stateMutex.withLock {
+                        companyNameBySymbol[result.symbol] = companyName
+                    }
+                }
+            }
+    }
+
+    private suspend fun toTickerSearchSuggestion(result: TickerSearchResult): TickerSearchSuggestion {
+        val companyName = result.companyName ?: localCompanyNameFor(result.symbol)
+        return TickerSearchSuggestion(
+            symbol = result.symbol,
+            companyName = companyName,
+            profiles = result.profiles,
+            inCurrentProfile = result.inCurrentProfile,
+            exchange = result.exchange,
+            isRemote = result.isRemote,
+        )
     }
 
     internal fun isSuppressibleQuoteHtml404(diagnostic: ProviderDiagnostic): Boolean =

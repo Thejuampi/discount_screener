@@ -51,6 +51,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -352,10 +353,112 @@ class DashboardViewModelTest {
         val viewModel = testViewModel(repository)
 
         viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("MS"))
+        advanceTimeBy(300)
         advanceUntilIdle()
 
         assertEquals("MS", repository.lastTickerSuggestionQuery)
         assertEquals(listOf("MSFT", "MSTR"), viewModel.state.value.tickerSearchSuggestions.map { it.symbol })
+        assertFalse(viewModel.state.value.tickerSearchLoading)
+    }
+
+    @Test
+    fun update_ticker_search_query_debounces_stale_queries() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            tickerSuggestions = listOf(tickerSuggestion("MELI", emptyList(), inCurrentProfile = false)),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("ME"))
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("MEL"))
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        assertEquals("MEL", repository.lastTickerSuggestionQuery)
+        assertEquals(1, repository.searchTickersCallCount)
+    }
+
+    @Test
+    fun submit_uppercase_meli_direct_opens_detail() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("MELI"),
+            tickerSuggestions = listOf(
+                TickerSearchSuggestion(symbol = "MELI", companyName = "MercadoLibre, Inc.", isRemote = true),
+                TickerSearchSuggestion(symbol = "MELI.BA", companyName = "MercadoLibre, Inc.", isRemote = true),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("MELI"))
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SubmitTickerSearch)
+        advanceUntilIdle()
+
+        assertEquals("MELI", repository.lastOpenedSymbol)
+        assertEquals("MELI", viewModel.state.value.detailRoute?.symbol)
+    }
+
+    @Test
+    fun submit_lowercase_mercado_with_multiple_matches_expands_pick_list() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            tickerSuggestions = listOf(
+                TickerSearchSuggestion(
+                    symbol = "MELI",
+                    companyName = "MercadoLibre, Inc.",
+                    exchange = "NASDAQ",
+                    isRemote = true,
+                ),
+                TickerSearchSuggestion(
+                    symbol = "MELI.BA",
+                    companyName = "MercadoLibre, Inc.",
+                    exchange = "Buenos Aires",
+                    isRemote = true,
+                ),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("mercado"))
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SubmitTickerSearch)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.detailRoute)
+        assertNull(repository.lastOpenedSymbol)
+        assertEquals("Pick a match", viewModel.state.value.tickerSearchNotice?.title)
+        assertTrue(viewModel.state.value.tickerSearchExpanded)
+    }
+
+    @Test
+    fun submit_company_name_with_multiple_matches_expands_pick_list() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            tickerSuggestions = listOf(
+                TickerSearchSuggestion(
+                    symbol = "MELI",
+                    companyName = "MercadoLibre, Inc.",
+                    isRemote = true,
+                ),
+                TickerSearchSuggestion(
+                    symbol = "MELI.BA",
+                    companyName = "MercadoLibre, Inc.",
+                    exchange = "Buenos Aires",
+                    isRemote = true,
+                ),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("mercado libre"))
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SubmitTickerSearch)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.detailRoute)
+        assertNull(repository.lastOpenedSymbol)
+        assertEquals("Pick a match", viewModel.state.value.tickerSearchNotice?.title)
+        assertTrue(viewModel.state.value.tickerSearchExpanded)
     }
 
     @Test
@@ -751,6 +854,7 @@ class DashboardViewModelTest {
         var lastCurrentFilter: ViewFilter? = null
         var lastRequestedOpportunityModel: OpportunityScoringModel? = null
         var lastTickerSuggestionQuery: String? = null
+        var searchTickersCallCount = 0
         var lastOpenedSymbol: String? = null
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
@@ -813,6 +917,7 @@ class DashboardViewModelTest {
             currentProfile: String,
             limit: Int,
         ): List<TickerSearchSuggestion> {
+            searchTickersCallCount++
             lastTickerSuggestionQuery = query
             return tickerSuggestions.take(limit)
         }
