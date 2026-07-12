@@ -16,6 +16,7 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.YahooSearchQuote
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -1865,6 +1866,74 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun search_meli_returns_remote_suggestion() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = FakeYahooFinanceClient().apply {
+                registerSearch(
+                    "meli",
+                    listOf(YahooSearchQuote("MELI", "MercadoLibre, Inc.", "NASDAQ", "EQUITY")),
+                )
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val results = repository.searchTickers("MELI", "sp500")
+
+            assertEquals("MELI", results.first().symbol)
+            assertEquals("MercadoLibre, Inc.", results.first().companyName)
+            assertTrue(results.first().isRemote)
+            assertEquals(1, client.searchSymbolsCallCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun search_mercado_returns_meli_from_remote_lookup() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = FakeYahooFinanceClient().apply {
+                registerSearch(
+                    "mercado",
+                    listOf(
+                        YahooSearchQuote("MELI", "MercadoLibre, Inc.", "NASDAQ", "EQUITY"),
+                        YahooSearchQuote("MERC.CN", "Mercado Minerals Ltd.", "CNQ", "EQUITY"),
+                    ),
+                )
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val results = repository.searchTickers("mercado", "sp500")
+
+            assertEquals("MELI", results.first().symbol)
+            assertEquals(1, client.searchSymbolsCallCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun search_ms_stays_local_without_remote_lookup() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("sp500", ViewFilter(), ChartRange.Year, legacyModel)
+
+            val results = repository.searchTickers("MS", "sp500")
+
+            assertTrue(results.isNotEmpty())
+            assertTrue(results.all { "MS" in it.symbol })
+            assertEquals(0, client.searchSymbolsCallCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun ensure_detail_loaded_fetches_ad_hoc_symbol_without_tracking_it() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
@@ -1948,6 +2017,18 @@ class DefaultDashboardRepositoryTest {
     private open class FakeYahooFinanceClient(
         private val delayMs: Long = 0,
     ) : YahooFinanceClient() {
+        var searchSymbolsCallCount = 0
+        private val searchResponses = linkedMapOf<String, List<YahooSearchQuote>>()
+
+        fun registerSearch(query: String, quotes: List<YahooSearchQuote>) {
+            searchResponses[query.trim().lowercase()] = quotes
+        }
+
+        override suspend fun searchSymbols(query: String, limit: Int): List<YahooSearchQuote> {
+            searchSymbolsCallCount++
+            return searchResponses[query.trim().lowercase()].orEmpty().take(limit)
+        }
+
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
             delay(delayMs)
             val price = 10_000L + symbol.sumOf { it.code }.toLong()

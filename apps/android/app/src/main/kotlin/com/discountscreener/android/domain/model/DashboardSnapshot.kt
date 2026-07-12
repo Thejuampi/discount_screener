@@ -198,6 +198,8 @@ data class TickerSearchSuggestion(
     val companyName: String? = null,
     val profiles: List<String> = emptyList(),
     val inCurrentProfile: Boolean = false,
+    val exchange: String? = null,
+    val isRemote: Boolean = false,
 ) {
     init {
         require(symbol.isNotBlank()) { "Ticker search suggestion symbol is required." }

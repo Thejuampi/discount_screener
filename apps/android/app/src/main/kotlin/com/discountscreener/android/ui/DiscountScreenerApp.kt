@@ -75,6 +75,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             tickerSearchQuery = state.tickerSearchQuery,
                             tickerSearchSuggestions = state.tickerSearchSuggestions,
                             tickerSearchExpanded = state.tickerSearchExpanded,
+                            tickerSearchLoading = state.tickerSearchLoading,
                             tickerSearchNotice = state.tickerSearchNotice,
                             projectedDetail = state.projectedDetailData,
                             onAction = viewModel::dispatch,

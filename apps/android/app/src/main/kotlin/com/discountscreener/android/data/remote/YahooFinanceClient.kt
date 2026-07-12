@@ -59,6 +59,13 @@ data class ProviderFetchResult(
     val diagnostics: List<ProviderDiagnostic>,
 )
 
+data class YahooSearchQuote(
+    val symbol: String,
+    val companyName: String,
+    val exchange: String?,
+    val quoteType: String,
+)
+
 internal data class QuoteContext(
     val snapshot: MarketSnapshot? = null,
     val externalSignal: ExternalValuationSignal? = null,
@@ -87,6 +94,7 @@ private const val CHART_API_URL = "https://query1.finance.yahoo.com/v8/finance/c
 private const val QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
 private const val FUNDAMENTALS_TIMESERIES_URL =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
+private const val SEARCH_API_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 private const val USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 private const val QUOTE_PAGE_ACCEPT =
@@ -316,6 +324,24 @@ open class YahooFinanceClient(
         }
     }
 
+    open suspend fun searchSymbols(query: String, limit: Int = 8): List<YahooSearchQuote> = withContext(Dispatchers.IO) {
+        val trimmedQuery = query.trim()
+        if (trimmedQuery.isBlank()) return@withContext emptyList()
+        val url = SEARCH_API_URL.toHttpUrl().newBuilder()
+            .addQueryParameter("q", trimmedQuery)
+            .addQueryParameter("quotesCount", limit.coerceAtLeast(1).toString())
+            .addQueryParameter("newsCount", "0")
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json,text/plain,*/*")
+            .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+            .build()
+        val body = executeText(request)
+        parseSearchQuotes(json.parseToJsonElement(body).jsonObject)
+    }
+
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {
         val requestSymbol = yahooRequestSymbol(symbol)
         val types = listOf(
@@ -472,6 +498,28 @@ internal fun isUsableCompanyName(name: String?): Boolean {
     val normalized = name?.trim().orEmpty()
     return normalized.isNotBlank() && !normalized.equals("null", ignoreCase = true)
 }
+
+internal fun parseSearchQuotes(root: JsonObject): List<YahooSearchQuote> =
+    root.childArray("quotes").mapNotNull { element ->
+        val quote = element.jsonObject
+        val quoteType = quote.stringValue("quoteType") ?: return@mapNotNull null
+        if (quoteType !in TRADABLE_SEARCH_QUOTE_TYPES) return@mapNotNull null
+        val symbol = quote.stringValue("symbol")?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val companyName = listOf(
+            quote.stringValue("longname"),
+            quote.stringValue("longName"),
+            quote.stringValue("shortname"),
+            quote.stringValue("shortName"),
+        ).firstOrNull(::isUsableCompanyName) ?: symbol
+        YahooSearchQuote(
+            symbol = symbol,
+            companyName = companyName,
+            exchange = quote.stringValue("exchDisp") ?: quote.stringValue("exchange"),
+            quoteType = quoteType,
+        )
+    }
+
+private val TRADABLE_SEARCH_QUOTE_TYPES = setOf("EQUITY", "ETF")
 
 internal fun parseQuotePage(
     symbol: String,

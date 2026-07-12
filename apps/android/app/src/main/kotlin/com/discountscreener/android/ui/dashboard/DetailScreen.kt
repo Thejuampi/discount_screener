@@ -117,6 +117,7 @@ fun DetailScreen(
     tickerSearchQuery: String = "",
     tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),
     tickerSearchExpanded: Boolean = false,
+    tickerSearchLoading: Boolean = false,
     tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
     onAction: (DashboardAction) -> Unit,
@@ -124,6 +125,7 @@ fun DetailScreen(
     val tickerSearchActive = tickerSearchExpanded ||
         tickerSearchQuery.isNotBlank() ||
         tickerSearchSuggestions.isNotEmpty() ||
+        tickerSearchLoading ||
         tickerSearchNotice != null
 
     BackHandler(enabled = tickerSearchActive) {
@@ -195,10 +197,10 @@ fun DetailScreen(
             query = tickerSearchQuery,
             suggestions = tickerSearchSuggestions,
             expanded = tickerSearchExpanded,
+            loading = tickerSearchLoading,
             notice = tickerSearchNotice,
-            label = "Search ticker",
             placeholder = "Ticker or company",
-            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it.uppercase())) },
+            onQueryChange = { onAction(DashboardAction.UpdateTickerSearchQuery(it)) },
             onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
             onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
             onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },

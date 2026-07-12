@@ -7,9 +7,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -28,8 +30,9 @@ internal fun TickerSearchBar(
     query: String,
     suggestions: List<TickerSearchSuggestion>,
     expanded: Boolean,
+    loading: Boolean = false,
     notice: DashboardNotice?,
-    label: String = "Ticker",
+    label: String = "Ticker or company",
     placeholder: String? = null,
     onQueryChange: (String) -> Unit,
     onExpandedChange: (Boolean) -> Unit,
@@ -53,6 +56,12 @@ internal fun TickerSearchBar(
                 label = { Text(label) },
                 placeholder = placeholder?.let { value -> ({ Text(value) }) },
             )
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                )
+            }
             Button(onClick = onSubmit) {
                 Text("Open")
             }
@@ -87,11 +96,20 @@ internal fun TickerSearchBar(
                                 )
                             },
                             supportingContent = {
-                                Text(
-                                    text = suggestion.profiles.joinToString(" · ") { profile -> profile.uppercase() },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                val supportingText = when {
+                                    suggestion.profiles.isNotEmpty() ->
+                                        suggestion.profiles.joinToString(" · ") { profile -> profile.uppercase() }
+                                    !suggestion.exchange.isNullOrBlank() -> suggestion.exchange
+                                    suggestion.isRemote -> "Outside profiles"
+                                    else -> null
+                                }
+                                supportingText?.let { text ->
+                                    Text(
+                                        text = text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             },
                             overlineContent = if (suggestion.inCurrentProfile) {
                                 { Text("Current profile") }

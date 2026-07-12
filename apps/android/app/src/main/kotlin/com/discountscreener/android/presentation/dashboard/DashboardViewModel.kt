@@ -29,6 +29,11 @@ import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
+import com.discountscreener.core.engine.TickerSearchEngine
+import com.discountscreener.core.engine.TickerSearchRank
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import java.util.Locale
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.model.AlertEvent
@@ -137,6 +142,7 @@ data class DashboardUiState(
     val tickerSearchQuery: String = "",
     val tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),
     val tickerSearchExpanded: Boolean = false,
+    val tickerSearchLoading: Boolean = false,
     val tickerSearchNotice: DashboardNotice? = null,
     val trackedSymbols: List<String> = emptyList(),
     val trackedRows: List<TrackedSymbolRow> = emptyList(),
@@ -192,6 +198,7 @@ class DashboardViewModel(
 
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
+    private var tickerSearchJob: Job? = null
 
     fun dispatch(action: DashboardAction) {
         when (action) {
@@ -312,16 +319,24 @@ class DashboardViewModel(
             tickerSearchQuery = query,
             tickerSearchExpanded = query.isNotBlank(),
             tickerSearchNotice = null,
+            tickerSearchLoading = query.isNotBlank(),
         )
-        viewModelScope.launch {
-            val suggestions = if (query.isBlank()) {
-                emptyList()
-            } else {
-                searchTickers(query, _state.value.currentProfile)
+        tickerSearchJob?.cancel()
+        tickerSearchJob = viewModelScope.launch {
+            if (query.isBlank()) {
+                _state.value = _state.value.copy(
+                    tickerSearchSuggestions = emptyList(),
+                    tickerSearchLoading = false,
+                )
+                return@launch
             }
+            delay(TICKER_SEARCH_DEBOUNCE_MS)
+            val suggestions = searchTickers(query, _state.value.currentProfile)
+            if (_state.value.tickerSearchQuery != query) return@launch
             _state.value = _state.value.copy(
                 tickerSearchSuggestions = suggestions,
-                tickerSearchExpanded = query.isNotBlank() && suggestions.isNotEmpty(),
+                tickerSearchExpanded = query.isNotBlank(),
+                tickerSearchLoading = false,
             )
         }
     }
@@ -337,9 +352,63 @@ class DashboardViewModel(
     }
 
     private fun submitTickerSearch() {
-        val symbol = _state.value.tickerSearchQuery.trim().uppercase()
-        if (symbol.isBlank()) return
-        selectTickerSuggestion(symbol)
+        val query = _state.value.tickerSearchQuery.trim()
+        if (query.isBlank()) return
+
+        viewModelScope.launch {
+            val suggestions = suggestionsForSubmit(query)
+            if (TickerSearchEngine.shouldDirectOpenTickerOnSubmit(
+                    query,
+                    suggestions.map(TickerSearchSuggestion::symbol),
+                )
+            ) {
+                selectTickerSuggestion(query.uppercase(Locale.US))
+                return@launch
+            }
+
+            val highConfidence = suggestions.filter { suggestion ->
+                isHighConfidenceTickerMatch(query, suggestion)
+            }
+            when {
+                highConfidence.size == 1 -> selectTickerSuggestion(highConfidence.single().symbol)
+                suggestions.isEmpty() -> _state.value = _state.value.copy(
+                    tickerSearchExpanded = false,
+                    tickerSearchNotice = DashboardNotice(
+                        title = "Ticker unavailable",
+                        message = "No matches found for \"$query\".",
+                        severity = DashboardNoticeSeverity.Warning,
+                    ),
+                )
+                else -> _state.value = _state.value.copy(
+                    tickerSearchSuggestions = suggestions,
+                    tickerSearchExpanded = true,
+                    tickerSearchNotice = DashboardNotice(
+                        title = "Pick a match",
+                        message = "Several companies match \"$query\". Select one from the list.",
+                        severity = DashboardNoticeSeverity.Info,
+                    ),
+                )
+            }
+        }
+    }
+
+    private suspend fun suggestionsForSubmit(query: String): List<TickerSearchSuggestion> {
+        if (_state.value.tickerSearchQuery.trim() == query &&
+            _state.value.tickerSearchSuggestions.isNotEmpty()
+        ) {
+            return _state.value.tickerSearchSuggestions
+        }
+        return searchTickers(query, _state.value.currentProfile)
+    }
+
+    private fun isHighConfidenceTickerMatch(
+        query: String,
+        suggestion: TickerSearchSuggestion,
+    ): Boolean {
+        val trimmed = query.trim()
+        if (suggestion.symbol.equals(trimmed, ignoreCase = true)) return true
+        val companyName = suggestion.companyName ?: return false
+        return TickerSearchEngine.companyNameMatchRank(trimmed, companyName) == TickerSearchRank.NAME_EXACT
     }
 
     private fun setTickerSearchExpanded(expanded: Boolean) {
@@ -737,6 +806,8 @@ class DashboardViewModel(
     }
 
     companion object {
+        private const val TICKER_SEARCH_DEBOUNCE_MS = 300L
+
         fun factory(useCases: DashboardUseCases): ViewModelProvider.Factory =
             viewModelFactory {
                 initializer {
