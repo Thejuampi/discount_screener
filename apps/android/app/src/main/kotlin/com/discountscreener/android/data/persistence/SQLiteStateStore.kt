@@ -914,27 +914,57 @@ class SQLiteStateStore(
         else -> PersistenceIssueSeverity.Error
     }
 
-    suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) = withContext(Dispatchers.IO) {
+    /**
+     * Persists an estimates snapshot.
+     * When [replaceSameDay] is true, removes any existing rows for the same profile + UTC day first
+     * so each calendar day keeps a single durable point.
+     */
+    suspend fun saveEstimatesSnapshot(
+        report: IndexEstimatesReport,
+        replaceSameDay: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
         val db = writableDatabase
-        db.insertOrThrow(
-            "estimates_snapshot",
-            null,
-            ContentValues().apply {
-                put("profile_name", report.profileName)
-                put("computed_at_epoch", report.computedAtEpochSeconds)
-                put("payload_json", json.encodeToString(report))
-            },
-        )
+        db.beginTransaction()
+        try {
+            if (replaceSameDay) {
+                db.execSQL(
+                    """
+                    DELETE FROM estimates_snapshot
+                    WHERE profile_name = ?
+                      AND date(computed_at_epoch, 'unixepoch') = date(?, 'unixepoch')
+                    """.trimIndent(),
+                    arrayOf(report.profileName, report.computedAtEpochSeconds.toString()),
+                )
+            }
+            db.insertOrThrow(
+                "estimates_snapshot",
+                null,
+                ContentValues().apply {
+                    put("profile_name", report.profileName)
+                    put("computed_at_epoch", report.computedAtEpochSeconds)
+                    put("payload_json", json.encodeToString(report))
+                },
+            )
+            pruneEstimatesHistoryLocked(db, report.profileName)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     suspend fun getEstimatesHistory(profileName: String): List<IndexEstimatesReport> =
         withContext(Dispatchers.IO) {
+            // Newest N first, then reverse to chronological order for charts.
             readableDatabase.rawQuery(
                 """
-                SELECT payload_json FROM estimates_snapshot
-                WHERE profile_name = ?
+                SELECT payload_json FROM (
+                    SELECT payload_json, computed_at_epoch, id
+                    FROM estimates_snapshot
+                    WHERE profile_name = ?
+                    ORDER BY computed_at_epoch DESC, id DESC
+                    LIMIT $ESTIMATES_HISTORY_LIMIT
+                )
                 ORDER BY computed_at_epoch ASC, id ASC
-                LIMIT $ESTIMATES_HISTORY_LIMIT
                 """.trimIndent(),
                 arrayOf(profileName),
             ).useRows { cursor ->
@@ -946,6 +976,52 @@ class SQLiteStateStore(
             }
         }
 
+    /**
+     * Replaces all estimates history for [profileName] with [reports]
+     * (used to collapse legacy multi-row days into one point per UTC day).
+     */
+    suspend fun replaceEstimatesHistory(
+        profileName: String,
+        reports: List<IndexEstimatesReport>,
+    ) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("estimates_snapshot", "profile_name = ?", arrayOf(profileName))
+            for (report in reports) {
+                db.insertOrThrow(
+                    "estimates_snapshot",
+                    null,
+                    ContentValues().apply {
+                        put("profile_name", report.profileName)
+                        put("computed_at_epoch", report.computedAtEpochSeconds)
+                        put("payload_json", json.encodeToString(report))
+                    },
+                )
+            }
+            pruneEstimatesHistoryLocked(db, profileName)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun pruneEstimatesHistoryLocked(db: SQLiteDatabase, profileName: String) {
+        db.execSQL(
+            """
+            DELETE FROM estimates_snapshot
+            WHERE profile_name = ?
+              AND id NOT IN (
+                SELECT id FROM estimates_snapshot
+                WHERE profile_name = ?
+                ORDER BY computed_at_epoch DESC, id DESC
+                LIMIT $ESTIMATES_HISTORY_LIMIT
+              )
+            """.trimIndent(),
+            arrayOf(profileName, profileName),
+        )
+    }
+
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
@@ -953,7 +1029,8 @@ class SQLiteStateStore(
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
-        private const val ESTIMATES_HISTORY_LIMIT = 365
+        /** Daily points retained per profile (see EstimatesHistoryPolicy.MAX_DAILY_POINTS). */
+        private const val ESTIMATES_HISTORY_LIMIT = 180
         private val TABLE_NAMES = listOf(
             "meta", "tracked_symbol", "watchlist", "raw_capture",
             "raw_latest", "pricing_candle", "symbol_revision", "symbol_latest", "issue_state",

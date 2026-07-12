@@ -27,7 +27,12 @@ interface DashboardRepository {
     suspend fun dcfSnapshot(): Map<String, DcfAnalysis>
     suspend fun trackedSymbolDetails(): List<SymbolDetail>
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
-    suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport)
+    /**
+     * Records an estimates snapshot using [com.discountscreener.core.engine.EstimatesHistoryPolicy]
+     * (one durable point per UTC day; skips enrichment noise).
+     * @return true when a row was written or replaced
+     */
+    suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean
     suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport>
     suspend fun searchTickers(query: String, currentProfile: String, limit: Int = 8): List<TickerSearchSuggestion>
 }
