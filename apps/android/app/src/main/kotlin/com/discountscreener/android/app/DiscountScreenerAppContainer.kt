@@ -4,21 +4,29 @@ import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.profile.ProfileCatalog
+import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
 import com.discountscreener.android.domain.logging.AndroidAppLogger
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
+import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
+import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
+import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
+import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
+import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
@@ -34,6 +42,7 @@ class DiscountScreenerAppContainer(context: Context) {
             stateStore = SQLiteStateStore(appContext),
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = YahooFinanceClient(),
+            universeCatalog = UniverseCatalog(appContext.assets),
             secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
             logger = AndroidAppLogger(),
         )
@@ -56,6 +65,13 @@ class DiscountScreenerAppContainer(context: Context) {
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
             searchTickers = SearchTickersUseCase(repository),
+            loadDiscoverySnapshot = LoadDiscoverySnapshotUseCase(repository),
+            saveDiscoveryConfig = SaveDiscoveryConfigUseCase(repository),
+            recreateDiscoveryUniverse = RecreateDiscoveryUniverseUseCase(repository),
+            refreshDiscoveryScores = RefreshDiscoveryScoresUseCase(repository),
+            cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
+            clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
+            observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
         )
     }
 

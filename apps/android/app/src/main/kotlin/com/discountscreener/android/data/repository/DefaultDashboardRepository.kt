@@ -12,7 +12,10 @@ import com.discountscreener.android.data.persistence.RawCapturePayload
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
+import com.discountscreener.android.data.profile.UniverseCatalog
+import com.discountscreener.android.data.profile.UniverseSeedResolver
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
+import com.discountscreener.android.data.remote.NasdaqTraderSymbolDirectoryClient
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
@@ -22,6 +25,8 @@ import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
 import com.discountscreener.android.domain.model.ProfileTransitionFeedback
@@ -179,6 +184,11 @@ class DefaultDashboardRepository(
     private val stateStore: SQLiteStateStore,
     private val profileCatalog: ProfileCatalog,
     private val yahooClient: YahooFinanceClient,
+    private val universeCatalog: UniverseCatalog,
+    private val universeSeedResolver: UniverseSeedResolver = UniverseSeedResolver(
+        universeCatalog = universeCatalog,
+        remoteDirectoryClient = NasdaqTraderSymbolDirectoryClient(),
+    ),
     private val secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
     private val nowProvider: () -> Long = { System.currentTimeMillis() / 1_000 },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -191,6 +201,13 @@ class DefaultDashboardRepository(
     private val updates = MutableStateFlow(0L)
     private val dcfSourceCoordinator = DcfSourceCoordinator(yahooClient, secondaryTimeseriesProvider)
     private val screenDataProjectionEngine = ScreenDataProjectionEngine()
+    private val discoveryCoordinator = DiscoveryCoordinator(
+        stateStore = stateStore,
+        universeSeedResolver = universeSeedResolver,
+        yahooClient = yahooClient,
+        nowProvider = nowProvider,
+        ioDispatcher = ioDispatcher,
+    )
 
     private var engine = ReportingEngine()
     private var trackedSymbols = mutableListOf<String>()
@@ -2832,10 +2849,34 @@ class DefaultDashboardRepository(
 
     override suspend fun clearAllData() {
         cancelActiveProfileWork()
+        discoveryCoordinator.cancelActiveJob()
         stateStore.resetWarmStartState()
         stateMutex.withLock { resetInMemoryLocked() }
         emitUpdate()
     }
+
+    override suspend fun loadDiscoverySnapshot(): DiscoverySnapshot =
+        discoveryCoordinator.loadSnapshot()
+
+    override suspend fun saveDiscoveryConfig(config: DiscoveryConfig): DiscoverySnapshot =
+        discoveryCoordinator.saveConfig(config)
+
+    override suspend fun recreateDiscoveryUniverse(): DiscoverySnapshot =
+        discoveryCoordinator.recreateUniverse()
+
+    override suspend fun refreshDiscoveryScores(): DiscoverySnapshot =
+        discoveryCoordinator.refreshScores()
+
+    override suspend fun cancelDiscoveryJob(): DiscoverySnapshot {
+        discoveryCoordinator.cancelActiveJob()
+        return discoveryCoordinator.loadSnapshot()
+    }
+
+    override suspend fun clearDiscoveryData(): DiscoverySnapshot =
+        discoveryCoordinator.clearDiscoveryData()
+
+    override fun observeDiscoveryProgress(): Flow<Unit> =
+        discoveryCoordinator.progressTicks
 
     override suspend fun dcfSnapshot(): Map<String, DcfAnalysis> = stateMutex.withLock { dcfCache.toMap() }
 

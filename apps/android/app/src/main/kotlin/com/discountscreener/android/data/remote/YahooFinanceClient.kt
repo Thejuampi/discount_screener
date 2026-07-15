@@ -578,7 +578,13 @@ internal fun parseQuoteSummary(
     val recommendationTrend = result["recommendationTrend"]?.jsonObject
     val price = result.child("price")
     val assetProfile = result["assetProfile"]?.jsonObject
-    val companyName = listOfNotNull(price.string("longName"), price.string("shortName"))
+    val companyName = listOfNotNull(
+        price.string("longName"),
+        price.string("shortName"),
+        assetProfile?.string("longName"),
+        assetProfile?.string("shortName"),
+        assetProfile?.string("name"),
+    )
         .mapNotNull { candidate -> normalizeCompanyNameCandidate(candidate, symbol) }
         .firstOrNull()
 
@@ -818,7 +824,9 @@ internal fun resolveCompanyName(
 internal fun mergeCompanyName(
     quoteCompanyName: String?,
     chartCompanyName: String?,
-): String? = quoteCompanyName?.takeIf(String::isNotBlank) ?: chartCompanyName?.takeIf(String::isNotBlank)
+): String? =
+    quoteCompanyName?.takeIf(::isUsableCompanyName)
+        ?: chartCompanyName?.takeIf(::isUsableCompanyName)
 
 /**
  * Extract a usable company name from Yahoo chart API meta.
@@ -900,6 +908,7 @@ private fun normalizeCompanyName(raw: String): String? = raw
 
 internal fun normalizeCompanyNameCandidate(raw: String, symbol: String): String? {
     val normalized = normalizeCompanyName(raw) ?: return null
+    if (!isUsableCompanyName(normalized)) return null
     if (normalized.equals(symbol, ignoreCase = true)) return null
     if (normalized.equals("Symbol Lookup from Yahoo Finance", ignoreCase = true)) return null
     // Reject pure numeric junk sometimes returned as shortName for dead/invalid symbols.

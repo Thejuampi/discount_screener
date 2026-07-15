@@ -22,8 +22,18 @@ import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.android.domain.model.DatabaseTableInfo
+import com.discountscreener.android.domain.model.DiscoveryJobKind
+import com.discountscreener.android.domain.model.DiscoveryJobRecord
+import com.discountscreener.android.domain.model.DiscoveryJobStatus
+import com.discountscreener.android.data.remote.isUsableCompanyName
+import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
+import com.discountscreener.core.engine.DiscoveryMembershipMerge
+import com.discountscreener.core.engine.DiscoveryScoreRow
+import com.discountscreener.core.engine.DiscoveryUniverseEngine
+import com.discountscreener.core.engine.OpportunityEngine
+import com.discountscreener.core.model.OpportunityScoringModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -195,6 +205,9 @@ class SQLiteStateStore(
                 "CREATE INDEX estimates_snapshot_profile_idx ON estimates_snapshot(profile_name, computed_at_epoch, id)",
             )
         }
+        if (oldVersion < 6 && newVersion >= 6) {
+            createDiscoverySchema(db)
+        }
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -226,7 +239,14 @@ class SQLiteStateStore(
             db.delete("symbol_revision", null, null)
             db.delete("symbol_latest", null, null)
             db.delete("issue_state", null, null)
+            db.delete("discovery_score", null, null)
+            db.delete("discovery_symbol", null, null)
+            db.delete("discovery_job", null, null)
             db.delete("meta", "key = ?", arrayOf(META_KEY_LAST_PERSISTED_AT))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_MIN_SCORE))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_SCORING_MODEL))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_UNIVERSE_NAME))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_LAST_SOURCE_HINT))
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -577,6 +597,7 @@ class SQLiteStateStore(
         db.execSQL(
             "CREATE INDEX estimates_snapshot_profile_idx ON estimates_snapshot(profile_name, computed_at_epoch, id)",
         )
+        createDiscoverySchema(db)
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -946,23 +967,400 @@ class SQLiteStateStore(
             }
         }
 
+    suspend fun loadDiscoveryConfig(): DiscoveryConfig = withContext(Dispatchers.IO) {
+        val db = readableDatabase
+        val scoringModel = loadMetaValue(db, META_KEY_DISCOVERY_SCORING_MODEL)
+            ?.let { raw -> OpportunityScoringModel.entries.firstOrNull { it.name == raw } }
+            ?: DiscoveryConfig.DEFAULT_SCORING_MODEL
+        val defaultMin = OpportunityEngine.actAtOrAboveScore(scoringModel)
+        DiscoveryConfig(
+            minScore = loadMetaValue(db, META_KEY_DISCOVERY_MIN_SCORE)?.toIntOrNull() ?: defaultMin,
+            scoringModel = scoringModel,
+            universeName = loadMetaValue(db, META_KEY_DISCOVERY_UNIVERSE_NAME)
+                ?: DiscoveryConfig.DEFAULT_UNIVERSE_NAME,
+        )
+    }
+
+    suspend fun saveDiscoveryConfig(config: DiscoveryConfig) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            setMetaValue(db, META_KEY_DISCOVERY_MIN_SCORE, config.minScore.toString())
+            setMetaValue(db, META_KEY_DISCOVERY_SCORING_MODEL, config.scoringModel.name)
+            setMetaValue(db, META_KEY_DISCOVERY_UNIVERSE_NAME, config.universeName)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    suspend fun discoverySymbolCount(): Int = withContext(Dispatchers.IO) {
+        readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_symbol").simpleQueryForLong().toInt()
+    }
+
+    suspend fun loadDiscoverySymbols(): List<String> = withContext(Dispatchers.IO) {
+        readableDatabase.rawQuery(
+            "SELECT symbol FROM discovery_symbol ORDER BY symbol ASC",
+            emptyArray(),
+        ).useRows { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(cursor.getString(0))
+                }
+            }
+        }
+    }
+
+    /**
+     * Applies membership merge from a seed list. Returns the merge plan that was applied.
+     * Does not fetch market data. Preserves scores for kept symbols; drops scores for removed ones.
+     */
+    suspend fun applyDiscoveryMembershipMerge(
+        seed: Collection<String>,
+        sourceUniverse: String,
+    ): DiscoveryMembershipMerge = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        val existing = db.rawQuery(
+            "SELECT symbol FROM discovery_symbol",
+            emptyArray(),
+        ).useRows { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(cursor.getString(0))
+                }
+            }
+        }
+        val plan = DiscoveryUniverseEngine.mergeMembership(seed = seed, existing = existing)
+        val now = nowEpochSeconds()
+        db.beginTransaction()
+        try {
+            plan.toRemove.forEach { symbol ->
+                db.delete("discovery_score", "symbol = ?", arrayOf(symbol))
+                db.delete("discovery_symbol", "symbol = ?", arrayOf(symbol))
+            }
+            plan.toAdd.forEach { symbol ->
+                db.insertWithOnConflict(
+                    "discovery_symbol",
+                    null,
+                    ContentValues().apply {
+                        put("symbol", symbol)
+                        putNull("company_name")
+                        put("added_at", now)
+                        put("source_universe", sourceUniverse)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        plan
+    }
+
+    suspend fun upsertDiscoveryScores(rows: List<DiscoveryScoreRow>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            rows.forEach { row ->
+                db.insertWithOnConflict(
+                    "discovery_score",
+                    null,
+                    ContentValues().apply {
+                        put("symbol", row.symbol)
+                        put("composite_score", row.compositeScore)
+                        putNullableInt("fundamentals_score", row.fundamentalsScore)
+                        putNullableInt("technical_score", row.technicalScore)
+                        putNullableInt("forecast_score", row.forecastScore)
+                        put("coverage_count", row.coverageCount)
+                        putNullableLong("market_price_cents", row.marketPriceCents)
+                        putNullableInt("upside_bps", row.upsideBps)
+                        putNullableInt("gap_bps", row.gapBps)
+                        putNullableString("confidence", row.confidence)
+                        put("is_qualified", if (row.isQualified) 1 else 0)
+                        put("scoring_model", row.scoringModel)
+                        put("scored_at", row.scoredAtEpochSeconds)
+                        putNullableString("last_error", row.lastError)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+                row.companyName?.takeIf(::isUsableCompanyName)?.let { companyName ->
+                    db.update(
+                        "discovery_symbol",
+                        ContentValues().apply { put("company_name", companyName) },
+                        "symbol = ?",
+                        arrayOf(row.symbol),
+                    )
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    suspend fun queryDiscoveryScores(
+        minScore: Int,
+        limit: Int,
+        offset: Int = 0,
+        qualifiedOnly: Boolean = true,
+    ): List<DiscoveryScoreRow> = withContext(Dispatchers.IO) {
+        val qualifiedClause = if (qualifiedOnly) "AND s.is_qualified = 1" else ""
+        readableDatabase.rawQuery(
+            """
+            SELECT s.symbol, d.company_name, s.composite_score, s.fundamentals_score, s.technical_score,
+                   s.forecast_score, s.coverage_count, s.market_price_cents, s.upside_bps, s.gap_bps,
+                   s.confidence, s.is_qualified, s.scoring_model, s.scored_at, s.last_error
+            FROM discovery_score s
+            LEFT JOIN discovery_symbol d ON d.symbol = s.symbol
+            WHERE s.composite_score >= ?
+              $qualifiedClause
+            ORDER BY s.composite_score DESC, s.coverage_count DESC, s.symbol ASC
+            LIMIT ? OFFSET ?
+            """.trimIndent(),
+            arrayOf(minScore.toString(), limit.toString(), offset.toString()),
+        ).useRows { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        DiscoveryScoreRow(
+                            symbol = cursor.getString(0),
+                            companyName = cursor.getNullableString(1)?.takeIf(::isUsableCompanyName),
+                            compositeScore = cursor.getInt(2),
+                            fundamentalsScore = cursor.getNullableInt(3),
+                            technicalScore = cursor.getNullableInt(4),
+                            forecastScore = cursor.getNullableInt(5),
+                            coverageCount = cursor.getInt(6),
+                            marketPriceCents = cursor.getNullableLong(7),
+                            upsideBps = cursor.getNullableInt(8),
+                            gapBps = cursor.getNullableInt(9),
+                            confidence = cursor.getNullableString(10),
+                            isQualified = cursor.getInt(11) != 0,
+                            scoringModel = cursor.getString(12),
+                            scoredAtEpochSeconds = cursor.getLong(13),
+                            lastError = cursor.getNullableString(14),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun countDiscoveryScores(
+        minScore: Int,
+        qualifiedOnly: Boolean = true,
+    ): Int = withContext(Dispatchers.IO) {
+        val qualifiedClause = if (qualifiedOnly) "AND is_qualified = 1" else ""
+        readableDatabase.compileStatement(
+            """
+            SELECT COUNT(*) FROM discovery_score
+            WHERE composite_score >= ?
+              $qualifiedClause
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindLong(1, minScore.toLong())
+            statement.simpleQueryForLong().toInt()
+        }
+    }
+
+    suspend fun discoveryScoredSymbolCount(): Int = withContext(Dispatchers.IO) {
+        readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_score").simpleQueryForLong().toInt()
+    }
+
+    suspend fun loadDiscoveryMaxScoredAt(): Long? = withContext(Dispatchers.IO) {
+        readableDatabase.rawQuery(
+            "SELECT MAX(scored_at) FROM discovery_score",
+            emptyArray(),
+        ).useRows { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) {
+                null
+            } else {
+                cursor.getLong(0)
+            }
+        }
+    }
+
+    suspend fun loadDiscoveryLastSourceHint(): String? = withContext(Dispatchers.IO) {
+        loadMetaValue(readableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT)
+    }
+
+    suspend fun saveDiscoveryLastSourceHint(hint: String) = withContext(Dispatchers.IO) {
+        setMetaValue(writableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT, hint)
+    }
+
+    suspend fun createDiscoveryJob(
+        kind: DiscoveryJobKind,
+        totalSymbols: Int,
+    ): Long = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.insertOrThrow(
+            "discovery_job",
+            null,
+            ContentValues().apply {
+                put("kind", kind.storageValue)
+                put("status", DiscoveryJobStatus.Running.storageValue)
+                put("started_at", nowEpochSeconds())
+                putNull("finished_at")
+                put("total_symbols", totalSymbols)
+                put("completed_symbols", 0)
+                putNull("error_summary")
+            },
+        )
+    }
+
+    suspend fun updateDiscoveryJobProgress(
+        jobId: Long,
+        completedSymbols: Int,
+        totalSymbols: Int? = null,
+    ) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            put("completed_symbols", completedSymbols)
+            if (totalSymbols != null) {
+                put("total_symbols", totalSymbols)
+            }
+        }
+        writableDatabase.update("discovery_job", values, "job_id = ?", arrayOf(jobId.toString()))
+    }
+
+    suspend fun finishDiscoveryJob(
+        jobId: Long,
+        status: DiscoveryJobStatus,
+        completedSymbols: Int? = null,
+        errorSummary: String? = null,
+    ) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            put("status", status.storageValue)
+            put("finished_at", nowEpochSeconds())
+            if (completedSymbols != null) {
+                put("completed_symbols", completedSymbols)
+            }
+            put("error_summary", errorSummary)
+        }
+        writableDatabase.update("discovery_job", values, "job_id = ?", arrayOf(jobId.toString()))
+    }
+
+    suspend fun loadLatestDiscoveryJob(): DiscoveryJobRecord? = withContext(Dispatchers.IO) {
+        readableDatabase.rawQuery(
+            """
+            SELECT job_id, kind, status, started_at, finished_at, total_symbols, completed_symbols, error_summary
+            FROM discovery_job
+            ORDER BY job_id DESC
+            LIMIT 1
+            """.trimIndent(),
+            emptyArray(),
+        ).useRows { cursor ->
+            if (!cursor.moveToFirst()) {
+                null
+            } else {
+                DiscoveryJobRecord(
+                    jobId = cursor.getLong(0),
+                    kind = DiscoveryJobKind.fromStorage(cursor.getString(1)),
+                    status = DiscoveryJobStatus.fromStorage(cursor.getString(2)),
+                    startedAtEpochSeconds = cursor.getLong(3),
+                    finishedAtEpochSeconds = cursor.getNullableLong(4),
+                    totalSymbols = cursor.getInt(5),
+                    completedSymbols = cursor.getInt(6),
+                    errorSummary = cursor.getNullableString(7),
+                )
+            }
+        }
+    }
+
+    suspend fun clearDiscoveryData() = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("discovery_score", null, null)
+            db.delete("discovery_symbol", null, null)
+            db.delete("discovery_job", null, null)
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_MIN_SCORE))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_SCORING_MODEL))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_UNIVERSE_NAME))
+            db.delete("meta", "key = ?", arrayOf(META_KEY_DISCOVERY_LAST_SOURCE_HINT))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun createDiscoverySchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE discovery_symbol (
+                symbol TEXT PRIMARY KEY,
+                company_name TEXT,
+                added_at INTEGER NOT NULL,
+                source_universe TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE discovery_score (
+                symbol TEXT PRIMARY KEY,
+                composite_score INTEGER NOT NULL,
+                fundamentals_score INTEGER,
+                technical_score INTEGER,
+                forecast_score INTEGER,
+                coverage_count INTEGER NOT NULL,
+                market_price_cents INTEGER,
+                upside_bps INTEGER,
+                gap_bps INTEGER,
+                confidence TEXT,
+                is_qualified INTEGER NOT NULL,
+                scoring_model TEXT NOT NULL,
+                scored_at INTEGER NOT NULL,
+                last_error TEXT,
+                FOREIGN KEY (symbol) REFERENCES discovery_symbol(symbol)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE INDEX discovery_score_rank_idx
+            ON discovery_score(is_qualified, composite_score DESC)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE discovery_job (
+                job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                total_symbols INTEGER NOT NULL DEFAULT 0,
+                completed_symbols INTEGER NOT NULL DEFAULT 0,
+                error_summary TEXT
+            )
+            """.trimIndent(),
+        )
+    }
+
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 5
+        private const val SQLITE_SCHEMA_VERSION = 6
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
+        private const val META_KEY_DISCOVERY_MIN_SCORE = "discovery.min_score"
+        private const val META_KEY_DISCOVERY_SCORING_MODEL = "discovery.scoring_model"
+        private const val META_KEY_DISCOVERY_UNIVERSE_NAME = "discovery.universe_name"
+        private const val META_KEY_DISCOVERY_LAST_SOURCE_HINT = "discovery.last_source_hint"
         private const val ESTIMATES_HISTORY_LIMIT = 365
         private val TABLE_NAMES = listOf(
             "meta", "tracked_symbol", "watchlist", "raw_capture",
             "raw_latest", "pricing_candle", "symbol_revision", "symbol_latest", "issue_state",
             "estimates_snapshot",
+            "discovery_symbol", "discovery_score", "discovery_job",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
             LogTableQuery("pricing_candle", "captured_at"),
             LogTableQuery("symbol_revision", "evaluated_at"),
+            LogTableQuery("discovery_job", "started_at"),
         )
     }
 
@@ -974,3 +1372,21 @@ private inline fun <T> Cursor.useRows(block: (Cursor) -> T): T =
 
 private fun Cursor.getNullableString(index: Int): String? =
     if (isNull(index)) null else getString(index)
+
+private fun Cursor.getNullableInt(index: Int): Int? =
+    if (isNull(index)) null else getInt(index)
+
+private fun Cursor.getNullableLong(index: Int): Long? =
+    if (isNull(index)) null else getLong(index)
+
+private fun ContentValues.putNullableInt(key: String, value: Int?) {
+    if (value == null) putNull(key) else put(key, value)
+}
+
+private fun ContentValues.putNullableLong(key: String, value: Long?) {
+    if (value == null) putNull(key) else put(key, value)
+}
+
+private fun ContentValues.putNullableString(key: String, value: String?) {
+    if (value == null) putNull(key) else put(key, value)
+}

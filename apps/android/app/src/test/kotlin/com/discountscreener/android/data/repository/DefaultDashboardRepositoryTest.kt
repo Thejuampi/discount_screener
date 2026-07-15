@@ -10,6 +10,7 @@ import com.discountscreener.android.data.persistence.RawCapturePayload
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
+import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
@@ -1446,6 +1447,7 @@ class DefaultDashboardRepositoryTest {
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
         yahooClient = client,
+        universeCatalog = UniverseCatalog(context.assets),
         secondaryTimeseriesProvider = secondaryTimeseriesProvider,
         nowProvider = { 1_700_000_000L },
         ioDispatcher = dispatcher,

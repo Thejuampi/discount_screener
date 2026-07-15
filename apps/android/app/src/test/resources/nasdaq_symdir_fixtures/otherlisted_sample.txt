@@ -1,0 +1,6 @@
+ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
+BRK.B|Berkshire Hathaway Inc. New Common Stock|N|BRK.B|N|40|N|BRK.B
+IBM|International Business Machines Corporation Common Stock|N|IBM|N|100|N|IBM
+SPY|SPDR S&P 500 ETF Trust|P|SPY|Y|100|N|SPY
+ZXIET|IEX Test Company Test Symbol Three for IEX|V|ZXIET|N|100|Y|ZXIET
+File Creation Time: 0710202621:31|||||||

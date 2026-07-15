@@ -1,6 +1,8 @@
 package com.discountscreener.android.domain.repository
 
 import com.discountscreener.android.domain.model.DashboardSnapshot
+import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.core.model.ChartRange
@@ -30,4 +32,13 @@ interface DashboardRepository {
     suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport)
     suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport>
     suspend fun searchTickers(query: String, currentProfile: String, limit: Int = 8): List<TickerSearchSuggestion>
+
+    /** Discovery membership + scores (separate from tracked profile book). */
+    suspend fun loadDiscoverySnapshot(): DiscoverySnapshot
+    suspend fun saveDiscoveryConfig(config: DiscoveryConfig): DiscoverySnapshot
+    suspend fun recreateDiscoveryUniverse(): DiscoverySnapshot
+    suspend fun refreshDiscoveryScores(): DiscoverySnapshot
+    suspend fun cancelDiscoveryJob(): DiscoverySnapshot
+    suspend fun clearDiscoveryData(): DiscoverySnapshot
+    fun observeDiscoveryProgress(): Flow<Unit>
 }
