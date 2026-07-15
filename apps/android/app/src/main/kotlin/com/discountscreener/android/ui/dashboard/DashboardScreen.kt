@@ -33,11 +33,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
-import com.discountscreener.core.engine.DiscoveryScoreRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -689,12 +687,22 @@ private fun DiscoveryContent(
     onAction: (DashboardAction) -> Unit,
 ) {
     var pendingAction by remember { mutableStateOf<DiscoveryPendingAction?>(null) }
+    // Filters stay collapsed when results are present so the ranked list owns the viewport.
     var filtersExpanded by remember { mutableStateOf(false) }
     val job = state.discoveryJob
     val jobRunning = state.discoveryBusy || job?.status == DiscoveryJobStatus.Running
     val hasMembership = state.discoveryMembershipCount > 0
     val hasAnyScores = state.discoveryScoredSymbolCount > 0
     val hasVisibleScores = state.discoveryScores.isNotEmpty()
+    val listMode = hasVisibleScores || (jobRunning && hasAnyScores)
+
+    fun requestScoreList() {
+        if (state.discoveryMembershipCount > 500 || !hasAnyScores) {
+            pendingAction = DiscoveryPendingAction.ScoreList
+        } else {
+            onAction(DashboardAction.RefreshDiscoveryScores)
+        }
+    }
 
     pendingAction?.let { action ->
         DiscoveryConfirmDialog(
@@ -717,26 +725,23 @@ private fun DiscoveryContent(
 
     Column(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        DiscoveryControlCard(
-            state = state,
-            jobRunning = jobRunning,
-            hasMembership = hasMembership,
-            filtersExpanded = filtersExpanded,
-            onToggleFilters = { filtersExpanded = !filtersExpanded },
-            onRequestUpdateList = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
-            onRequestScoreList = {
-                if (state.discoveryMembershipCount > 500 || !hasAnyScores) {
-                    pendingAction = DiscoveryPendingAction.ScoreList
-                } else {
-                    onAction(DashboardAction.RefreshDiscoveryScores)
-                }
-            },
-            onCancel = { onAction(DashboardAction.CancelDiscoveryJob) },
-            onRequestClear = { pendingAction = DiscoveryPendingAction.ClearAll },
-            onAction = onAction,
-        )
+        // Compact chrome only — never a tall control card competing with the list.
+        if (hasMembership || jobRunning || hasAnyScores) {
+            DiscoveryCompactChrome(
+                state = state,
+                jobRunning = jobRunning,
+                filtersExpanded = filtersExpanded,
+                listMode = listMode,
+                onToggleFilters = { filtersExpanded = !filtersExpanded },
+                onRequestUpdateList = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
+                onRequestScoreList = { requestScoreList() },
+                onCancel = { onAction(DashboardAction.CancelDiscoveryJob) },
+                onRequestClear = { pendingAction = DiscoveryPendingAction.ClearAll },
+                onAction = onAction,
+            )
+        }
 
         when {
             !hasMembership && !jobRunning -> {
@@ -747,30 +752,24 @@ private fun DiscoveryContent(
                     onPrimary = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
                     secondaryLabel = null,
                     onSecondary = null,
-                    primaryEnabled = !jobRunning,
+                    primaryEnabled = true,
                 )
             }
             hasMembership && !hasAnyScores && !jobRunning -> {
                 DiscoveryEmptyPanel(
                     title = "List ready · not scored",
-                    detail = "${"%,d".format(state.discoveryMembershipCount)} symbols in membership. Score the list to rank high-upside names. Keep the app open while scoring; cancel anytime.",
+                    detail = "${"%,d".format(state.discoveryMembershipCount)} symbols ready. Score to rank high-upside names. Keep the app open; cancel anytime.",
                     primaryLabel = "Score list",
-                    onPrimary = {
-                        if (state.discoveryMembershipCount > 500) {
-                            pendingAction = DiscoveryPendingAction.ScoreList
-                        } else {
-                            onAction(DashboardAction.RefreshDiscoveryScores)
-                        }
-                    },
+                    onPrimary = { requestScoreList() },
                     secondaryLabel = "Update list",
                     onSecondary = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
-                    primaryEnabled = !jobRunning,
+                    primaryEnabled = true,
                 )
             }
             hasMembership && hasAnyScores && !hasVisibleScores && !jobRunning -> {
                 DiscoveryEmptyPanel(
                     title = "No symbols above min score",
-                    detail = "Try lowering the min score filter. This does not re-download prices.",
+                    detail = "Lower the min filter — this does not re-download prices.",
                     primaryLabel = "Min −5",
                     onPrimary = {
                         onAction(DashboardAction.SetDiscoveryMinScore(state.discoveryConfig.minScore - 5))
@@ -780,42 +779,44 @@ private fun DiscoveryContent(
                     primaryEnabled = true,
                 )
             }
-            else -> {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
+            hasVisibleScores -> {
+                // List owns remaining height (same density language as Opps / Upside).
+                DiscoveryList(
+                    rows = state.discoveryScores,
+                    scoringModel = state.discoveryConfig.scoringModel,
+                    onAction = onAction,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                )
+            }
+            jobRunning -> {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    if (hasVisibleScores) {
-                        itemsIndexed(
-                            items = state.discoveryScores,
-                            key = { _, row -> row.symbol },
-                        ) { index, row ->
-                            DiscoveryScoreCard(
-                                rank = index + 1,
-                                row = row,
-                                onClick = { onAction(DashboardAction.OpenDetail(row.symbol)) },
-                            )
-                        }
-                    } else if (jobRunning) {
-                        item {
-                            EmptyState(
-                                title = "Working…",
-                                detail = discoveryJobProgressLabel(job),
-                            )
-                        }
-                    }
+                    EmptyState(
+                        title = "Scoring…",
+                        detail = discoveryJobProgressLabel(job),
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * Thin Discovery toolbar: summary + text actions. Expanded filters only when the user asks.
+ * Intentionally not a padded Card — keeps vertical budget for ranked rows.
+ */
 @Composable
-private fun DiscoveryControlCard(
+private fun DiscoveryCompactChrome(
     state: DashboardUiState,
     jobRunning: Boolean,
-    hasMembership: Boolean,
     filtersExpanded: Boolean,
+    listMode: Boolean,
     onToggleFilters: () -> Unit,
     onRequestUpdateList: () -> Unit,
     onRequestScoreList: () -> Unit,
@@ -824,146 +825,163 @@ private fun DiscoveryControlCard(
     onAction: (DashboardAction) -> Unit,
 ) {
     val job = state.discoveryJob
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = "US Discovery",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
                 text = buildString {
-                    append("${"%,d".format(state.discoveryResultCount)} above min")
-                    append(" · ${"%,d".format(state.discoveryMembershipCount)} in list")
+                    append("${"%,d".format(state.discoveryResultCount)} ≥${state.discoveryConfig.minScore}")
+                    append(" · ${"%,d".format(state.discoveryMembershipCount)}")
                 },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
-            val metaBits = listOfNotNull(
-                state.discoveryLastScoredAtEpochSeconds?.let { "Last scored · ${formatRelativeTime(it)}" },
-                state.discoveryLastSourceHint,
-            )
-            if (metaBits.isNotEmpty()) {
-                Text(
-                    text = metaBits.joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            state.discoveryStatusMessage?.let { message ->
-                Text(text = message, style = MaterialTheme.typography.bodySmall)
-            }
-
-            if (jobRunning || job?.status == DiscoveryJobStatus.Running) {
-                val total = (job?.totalSymbols ?: 0).coerceAtLeast(0)
-                val done = (job?.completedSymbols ?: 0).coerceAtLeast(0)
-                if (total > 0) {
-                    LinearProgressIndicator(
-                        progress = { (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-                Text(
-                    text = discoveryJobProgressLabel(job),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Button(
+            if (!jobRunning) {
+                TextButton(
+                    onClick = onRequestScoreList,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("Score") }
+                TextButton(
+                    onClick = onRequestUpdateList,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("Update") }
+            } else {
+                TextButton(
                     onClick = onCancel,
-                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                 ) { Text("Cancel") }
             }
-
-            if (hasMembership && !jobRunning) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onRequestScoreList,
-                        enabled = !jobRunning,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (state.discoveryScoredSymbolCount > 0) "Score again" else "Score list") }
-                    OutlinedButton(
-                        onClick = onRequestUpdateList,
-                        enabled = !jobRunning,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (state.discoveryMembershipCount > 0) "Update list" else "Create US list") }
-                }
-            } else if (!hasMembership && !jobRunning) {
-                Button(
-                    onClick = onRequestUpdateList,
-                    enabled = !jobRunning,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Create US list") }
-            }
-
-            if (hasMembership && !jobRunning) {
-                TextButton(
-                    onClick = onRequestClear,
-                    enabled = !jobRunning,
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
-                ) {
-                    Text(
-                        text = "Clear all discovery data",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-
             TextButton(
                 onClick = onToggleFilters,
-                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
             ) {
-                Text(if (filtersExpanded) "Hide filters" else "Filters · min ${state.discoveryConfig.minScore}")
+                Text(if (filtersExpanded) "Less" else "Filter")
             }
+        }
 
-            if (filtersExpanded) {
+        if (!listMode) {
+            // One quiet meta line only when list is not filling the screen.
+            val meta = listOfNotNull(
+                state.discoveryLastSourceHint,
+                state.discoveryLastScoredAtEpochSeconds?.let { formatRelativeTime(it) },
+            ).joinToString(" · ")
+            if (meta.isNotBlank()) {
                 Text(
-                    text = "Min score",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = meta,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(listOf(20, 30, 40, 50), key = { it }) { preset ->
-                        val selected = state.discoveryConfig.minScore == preset
-                        FilterChip(
-                            selected = selected,
-                            onClick = {
-                                onAction(DashboardAction.SetDiscoveryMinScore(preset))
-                            },
-                            label = { Text(preset.toString()) },
-                            enabled = !jobRunning,
-                            modifier = Modifier.semantics { this.selected = selected },
+            }
+        }
+
+        state.discoveryStatusMessage?.takeIf { it.isNotBlank() }?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = if (listMode) 1 else 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (jobRunning) {
+            val total = (job?.totalSymbols ?: 0).coerceAtLeast(0)
+            val done = (job?.completedSymbols ?: 0).coerceAtLeast(0)
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Text(
+                text = discoveryJobProgressLabel(job),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (filtersExpanded) {
+            Surface(
+                tonalElevation = 1.dp,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(listOf(20, 30, 40, 50), key = { it }) { preset ->
+                            val selected = state.discoveryConfig.minScore == preset
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onAction(DashboardAction.SetDiscoveryMinScore(preset)) },
+                                label = { Text(preset.toString()) },
+                                enabled = !jobRunning,
+                                modifier = Modifier.semantics { this.selected = selected },
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    onAction(
+                                        DashboardAction.SetDiscoveryMinScore(
+                                            state.discoveryConfig.minScore - 5,
+                                        ),
+                                    )
+                                },
+                                label = { Text("−5") },
+                                enabled = !jobRunning,
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    onAction(
+                                        DashboardAction.SetDiscoveryMinScore(
+                                            state.discoveryConfig.minScore + 5,
+                                        ),
+                                    )
+                                },
+                                label = { Text("+5") },
+                                enabled = !jobRunning,
+                            )
+                        }
+                    }
+                    DiscoveryScoringModelToggle(
+                        selected = state.discoveryConfig.scoringModel,
+                        enabled = !jobRunning,
+                        onAction = onAction,
+                    )
+                    TextButton(
+                        onClick = onRequestClear,
+                        enabled = !jobRunning,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            text = "Clear all discovery data",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelMedium,
                         )
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            onAction(DashboardAction.SetDiscoveryMinScore(state.discoveryConfig.minScore - 5))
-                        },
-                        enabled = !jobRunning,
-                    ) { Text("Min −5") }
-                    OutlinedButton(
-                        onClick = {
-                            onAction(DashboardAction.SetDiscoveryMinScore(state.discoveryConfig.minScore + 5))
-                        },
-                        enabled = !jobRunning,
-                    ) { Text("Min +5") }
-                }
-                Text(
-                    text = "Scoring model",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                DiscoveryScoringModelToggle(
-                    selected = state.discoveryConfig.scoringModel,
-                    enabled = !jobRunning,
-                    onAction = onAction,
-                )
             }
         }
     }
@@ -990,72 +1008,6 @@ private fun DiscoveryEmptyPanel(
         Button(onClick = onPrimary, enabled = primaryEnabled) { Text(primaryLabel) }
         if (secondaryLabel != null && onSecondary != null) {
             OutlinedButton(onClick = onSecondary) { Text(secondaryLabel) }
-        }
-    }
-}
-
-@Composable
-private fun DiscoveryScoreCard(
-    rank: Int,
-    row: DiscoveryScoreRow,
-    onClick: () -> Unit,
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "#$rank  ${row.symbol}",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    row.companyName?.takeIf(::isUsableCompanyName)?.let { name ->
-                        Text(
-                            text = name,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                Text(
-                    text = row.compositeScore.toString(),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            Text(
-                text = listOfNotNull(
-                    row.marketPriceCents?.let { formatDiscoveryPrice(it) },
-                    row.upsideBps?.let { "upside ${formatBpsPercent(it)}" },
-                ).joinToString(" · ").ifBlank { "—" },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = listOf(
-                    "Fund ${row.fundamentalsScore ?: "—"}",
-                    "Tech ${row.technicalScore ?: "—"}",
-                    "Fcst ${row.forecastScore ?: "—"}",
-                    formatRelativeTime(row.scoredAtEpochSeconds),
-                ).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

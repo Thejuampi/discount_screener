@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.OpportunityScoringModel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -70,6 +71,17 @@ class DiscoveryUniverseEngineTest {
         val ranked = DiscoveryUniverseEngine.filterAndRank(rows, minScore = 0)
 
         assertEquals(listOf("AAA", "MMM", "ZZZ"), ranked.map { it.symbol })
+    }
+
+    @Test
+    fun triage_uses_opportunity_engine_cutoffs() {
+        val model = OpportunityScoringModel.AggressiveV2
+        val actAt = OpportunityEngine.actAtOrAboveScore(model)
+        val avoidBelow = OpportunityEngine.avoidBelowScore(model)
+
+        assertEquals(DiscoveryTriage.Act, DiscoveryUniverseEngine.triage(actAt, model))
+        assertEquals(DiscoveryTriage.Watch, DiscoveryUniverseEngine.triage(avoidBelow, model))
+        assertEquals(DiscoveryTriage.Avoid, DiscoveryUniverseEngine.triage(avoidBelow - 1, model))
     }
 
     private fun discoveryRow(

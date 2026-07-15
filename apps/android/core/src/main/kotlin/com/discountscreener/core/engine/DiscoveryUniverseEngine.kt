@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.OpportunityScoringModel
 import java.util.Locale
 
 /**
@@ -34,10 +35,30 @@ object DiscoveryUniverseEngine {
             )
             .toList()
 
+    /**
+     * Same Act / Watch / Avoid cutoffs as OpportunityEngine for the chosen scoring model.
+     * Discovery does not have live freshness/trust context, so triage is score-only.
+     */
+    fun triage(
+        compositeScore: Int,
+        scoringModel: OpportunityScoringModel,
+    ): DiscoveryTriage =
+        when {
+            compositeScore >= OpportunityEngine.actAtOrAboveScore(scoringModel) -> DiscoveryTriage.Act
+            compositeScore < OpportunityEngine.avoidBelowScore(scoringModel) -> DiscoveryTriage.Avoid
+            else -> DiscoveryTriage.Watch
+        }
+
     fun normalizeSymbol(raw: String): String? {
         val normalized = raw.trim().uppercase(Locale.US)
         return normalized.takeIf { it.isNotEmpty() }
     }
+}
+
+enum class DiscoveryTriage {
+    Act,
+    Watch,
+    Avoid,
 }
 
 data class DiscoveryMembershipMerge(
