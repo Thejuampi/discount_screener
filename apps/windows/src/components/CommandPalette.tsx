@@ -3,7 +3,7 @@ import { api } from "../api";
 import type { OpportunityRow, TickerSearchSuggestion } from "../api";
 import { useT } from "../i18n";
 
-type ViewMode = "screener" | "congress" | "advisor" | "scalping";
+type ViewMode = "screener" | "congress" | "advisor" | "scalping" | "estimates";
 
 interface Action {
   id: string;
@@ -89,6 +89,7 @@ export function CommandPalette({ rows, onNavigate, onOpenSymbol, onOpenSettings,
 
   const nav: Action[] = [
     { id: "nav-screener", icon: "📈", label: t("view.screener"), kind: "nav", run: () => onNavigate("screener") },
+    { id: "nav-estimates", icon: "Σ", label: t("view.estimates"), kind: "nav", run: () => onNavigate("estimates") },
     { id: "nav-scalping", icon: "⚡", label: t("view.scalping"), kind: "nav", run: () => onNavigate("scalping") },
     { id: "nav-congress", icon: "🏛", label: t("view.congress"), kind: "nav", run: () => onNavigate("congress") },
     { id: "nav-advisor", icon: "🧭", label: t("view.advisor"), kind: "nav", run: () => onNavigate("advisor") },

@@ -13,6 +13,10 @@ use crate::engine::{
     composite_score_v2, compute_chart_summary, compute_sector_benchmarks, compute_setup_score,
     decision_state, score_fundamentals_v2, score_technicals_v3, score_forecast_v2,
 };
+use crate::opportunity_v3::{
+    composite_score_v3, decision_state_v3, score_forecast_v3, score_fundamentals_v3,
+    score_opportunity_technicals_v3, ScoringModel,
+};
 use crate::fetcher::{
     asset_type, is_crypto, is_etf, YahooClient, CRYPTO_SYMBOLS, DEFAULT_LIVE_SYMBOLS, ETF_SYMBOLS,
 };
@@ -83,18 +87,48 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             let daily_candles_ref = screener.daily_candles.get(&row.symbol)
                 .unwrap_or(&daily_candles_default);
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
-            let (fund_score, fund_signals) = score_fundamentals_v2(&row, bench);
-            let (tech_score, tech_signals, tech_breakdown) =
-                score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
-            let (fore_score, fore_signals) = score_forecast_v2(&row);
-            let composite = composite_score_v2(fund_score, tech_score, fore_score);
+            let model = if screener.scoring_model == "aggressive_v2" {
+                ScoringModel::AggressiveV2
+            } else {
+                ScoringModel::AggressiveV3
+            };
+            let dcf_analysis = screener.dcf_analyses.get(&row.symbol);
+            let (fund_score, fund_signals, tech_score, tech_signals, tech_breakdown, fore_score, fore_signals, composite, decision) =
+                match model {
+                    ScoringModel::AggressiveV2 => {
+                        let (fs, fsig) = score_fundamentals_v2(&row, bench);
+                        let (ts, tsig, tb) =
+                            score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
+                        let (fr, frsig) = score_forecast_v2(&row);
+                        let comp = composite_score_v2(fs, ts, fr);
+                        let tech_only = is_crypto(row.symbol.as_str()) || is_etf(row.symbol.as_str());
+                        let dec = decision_state(
+                            row.confidence, row.gap_bps, comp,
+                            row.free_cash_flow_dollars, row.market_cap_dollars,
+                            tech_only, ts,
+                        );
+                        (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    }
+                    ScoringModel::AggressiveV3 => {
+                        let (fs, fsig) = score_fundamentals_v3(&row);
+                        // Keep multi-TF tech for Windows depth; also blend Android-style RSI path.
+                        let (ts_mtf, tsig_mtf, tb) =
+                            score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
+                        let (ts_opp, mut tsig_opp) = score_opportunity_technicals_v3(daily);
+                        let ts = match (ts_mtf, ts_opp) {
+                            (Some(a), Some(b)) => Some(((a + b) / 2).clamp(-100, 100)),
+                            (a, b) => a.or(b),
+                        };
+                        let mut tsig = tsig_mtf;
+                        tsig.append(&mut tsig_opp);
+                        let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
+                        let comp = composite_score_v3(fs, ts, fr, row.beta_millis);
+                        let dec = decision_state_v3(comp);
+                        (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    }
+                };
             let sym_str = row.symbol.as_str();
             let technical_only = is_crypto(sym_str) || is_etf(sym_str);
-            let decision  = decision_state(
-                row.confidence, row.gap_bps, composite,
-                row.free_cash_flow_dollars, row.market_cap_dollars,
-                technical_only, tech_score,
-            );
 
             // ── Crypto-specific override ──────────────────────────────────────
             // For crypto symbols, we use the cycle-aware score (halving + drawdown
@@ -205,6 +239,58 @@ pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, 
     if let Some(sig)  = result.signal   { screener.ingest_signal(sig);   }
     if let Some(fund) = result.fundamentals { screener.ingest_fundamentals(fund); }
     Ok(symbol)
+}
+
+#[tauri::command]
+pub fn get_scoring_model(state: State<AppState>) -> String {
+    state.screener.lock().unwrap().scoring_model.clone()
+}
+
+#[tauri::command]
+pub fn set_scoring_model(model: String, state: State<AppState>) -> Result<String, String> {
+    let normalized = match model.as_str() {
+        "aggressive_v2" | "v2" => "aggressive_v2".to_string(),
+        "aggressive_v3" | "v3" | _ => "aggressive_v3".to_string(),
+    };
+    state.screener.lock().unwrap().scoring_model = normalized.clone();
+    Ok(normalized)
+}
+
+#[tauri::command]
+pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::IndexEstimatesReport {
+    let screener = state.screener.lock().unwrap();
+    let rows = screener.candidate_rows();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::index_estimates::compute(&rows, &screener.dcf_analyses, "universe", now)
+}
+
+#[tauri::command]
+pub fn get_quant_lens(symbol: String, state: State<AppState>) -> Result<crate::quant_lens::QuantLensReport, String> {
+    let screener = state.screener.lock().unwrap();
+    let detail = screener
+        .detail(&symbol)
+        .ok_or_else(|| format!("no detail for {symbol}"))?;
+    let candles = screener.daily_candles.get(&symbol).map(|c| c.as_slice());
+    let dcf = screener.dcf_analyses.get(&symbol);
+    let rows = screener.candidate_rows();
+    let opp = rows.iter().find(|r| r.symbol == symbol);
+    let peers: Vec<(String, Vec<crate::engine::HistoricalCandle>)> = screener
+        .daily_candles
+        .iter()
+        .filter(|(s, _)| *s != &symbol)
+        .take(40)
+        .map(|(s, c)| (s.clone(), c.clone()))
+        .collect();
+    Ok(crate::quant_lens::analyze(
+        &detail,
+        candles,
+        dcf,
+        opp,
+        &peers,
+    ))
 }
 
 /// Local + optional remote Yahoo search (Android ticker/company search parity).
@@ -572,10 +658,23 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
 
                         if shares == 0 { continue; }
 
-                        match edgar::fetch_dcf(&edgar_client, sym, cik, shares) {
-                            Ok(Some(dcf)) => {
-                                screener.lock().unwrap()
-                                    .ingest_dcf(sym.to_string(), dcf.value_per_share_cents);
+                        // Transparent multi-scenario DCF (CAPM WACC + provenance).
+                        match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
+                            Ok(Some(fcf)) => {
+                                let mut s = screener.lock().unwrap();
+                                let fund = s.fundamentals.get(sym).cloned();
+                                let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                                if let Some(fund) = fund {
+                                    if let Ok(analysis) =
+                                        crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar")
+                                    {
+                                        s.ingest_dcf_analysis(sym.to_string(), analysis);
+                                    }
+                                } else if let Ok(Some(legacy)) =
+                                    edgar::fetch_dcf(&edgar_client, sym, cik, shares)
+                                {
+                                    s.ingest_dcf(sym.to_string(), legacy.value_per_share_cents);
+                                }
                             }
                             Ok(None) => {}
                             Err(_) => {} // silently skip (many symbols 404)

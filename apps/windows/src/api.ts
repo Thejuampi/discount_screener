@@ -106,6 +106,7 @@ export interface SymbolDetail {
   monthly_summary: ChartSummary | null;
   technical_breakdown: TechnicalBreakdown | null;
   dcf_value_cents: number | null;
+  dcf_analysis: DcfAnalysis | null;
   insider_net_shares_90d: number | null;
   insider_buy_count: number | null;
   insider_sell_count: number | null;
@@ -242,6 +243,61 @@ export interface HistoryStatus {
   snapshot_count: number;
 }
 
+export interface DcfAnalysis {
+  bear_intrinsic_value_cents: number;
+  base_intrinsic_value_cents: number;
+  bull_intrinsic_value_cents: number;
+  wacc_bps: number;
+  base_growth_bps: number;
+  net_debt_dollars: number;
+  wacc_inputs: {
+    market_cap: string;
+    beta: string;
+    total_debt: string;
+    total_cash: string;
+    cost_of_debt: string;
+    tax_rate: string;
+    wacc_clamped: boolean;
+  };
+  source: string;
+}
+
+export interface ScenarioEstimate {
+  scenario: string;
+  weighted_price_cents: number;
+  coverage_count: number;
+  implied_upside_bps: number;
+}
+
+export interface IndexEstimatesReport {
+  profile_name: string;
+  current_weighted_price_cents: number;
+  total_symbols: number;
+  scenarios: ScenarioEstimate[];
+  computed_at_epoch_seconds: number;
+  dcf_coverage: {
+    total_eligible_symbols: number;
+    covered_symbols: number;
+    coverage_bps: number;
+    status: string;
+  };
+}
+
+export interface QuantLensSection {
+  id: string;
+  title: string;
+  status: string;
+  summary: string;
+  metrics: [string, string][];
+}
+
+export interface QuantLensReport {
+  symbol: string;
+  primary_status: string;
+  sections: QuantLensSection[];
+  model_version: number;
+}
+
 export interface TickerSearchSuggestion {
   symbol: string;
   company_name: string | null;
@@ -268,6 +324,10 @@ export const api = {
   resolveTickerSearchSubmit: (query: string, suggestions: TickerSearchSuggestion[]) =>
     invoke<SearchSubmitOutcome>("resolve_ticker_search_submit", { query, suggestions }),
   ensureSymbolLoaded: (symbol: string) => invoke<string>("ensure_symbol_loaded", { symbol }),
+  getScoringModel: () => invoke<string>("get_scoring_model"),
+  setScoringModel: (model: string) => invoke<string>("set_scoring_model", { model }),
+  getIndexEstimates: () => invoke<IndexEstimatesReport>("get_index_estimates"),
+  getQuantLens: (symbol: string) => invoke<QuantLensReport>("get_quant_lens", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
   getSymbolHistory: (symbol: string, days: number) =>

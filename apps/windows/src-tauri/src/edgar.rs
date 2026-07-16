@@ -380,14 +380,12 @@ pub fn fetch_insider_activity(
     }))
 }
 
-/// Fetch EDGAR data for a symbol and compute DCF intrinsic value.
-/// Returns None if the symbol has no EDGAR data or DCF can't be computed.
-pub fn fetch_dcf(
+/// Fetch EDGAR annual FCF series (OCF − CapEx) for transparent multi-scenario DCF.
+pub fn fetch_fcf_history(
     client: &Client,
     symbol: &str,
     cik: u64,
-    shares_outstanding: u64,
-) -> Result<Option<DcfResult>, String> {
+) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
     let cik_padded = format!("{:010}", cik);
     let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json", cik_padded);
 
@@ -399,7 +397,7 @@ pub fn fetch_dcf(
         .json()
         .map_err(|e| format!("EDGAR parse {}: {}", symbol, e))?;
 
-    let ocf  = extract_annual(&body, "NetCashProvidedByUsedInOperatingActivities");
+    let ocf = extract_annual(&body, "NetCashProvidedByUsedInOperatingActivities");
     let capex = extract_annual(&body, "PaymentsToAcquirePropertyPlantAndEquipment");
 
     if ocf.is_empty() {
@@ -407,5 +405,36 @@ pub fn fetch_dcf(
     }
 
     let fcf = fcf_history(&ocf, &capex);
-    Ok(compute_dcf(&fcf, shares_outstanding))
+    if fcf.len() < 3 {
+        return Ok(None);
+    }
+    Ok(Some(
+        fcf.into_iter()
+            .map(|v| crate::dcf_model::FcfPoint {
+                year: v.year,
+                value_dollars: v.value_dollars as f64,
+            })
+            .collect(),
+    ))
+}
+
+/// Fetch EDGAR data for a symbol and compute legacy fixed-10% DCF intrinsic value.
+/// Prefer `fetch_fcf_history` + `dcf_model::compute` for transparent WACC.
+pub fn fetch_dcf(
+    client: &Client,
+    symbol: &str,
+    cik: u64,
+    shares_outstanding: u64,
+) -> Result<Option<DcfResult>, String> {
+    let Some(points) = fetch_fcf_history(client, symbol, cik)? else {
+        return Ok(None);
+    };
+    let annual: Vec<AnnualValue> = points
+        .iter()
+        .map(|p| AnnualValue {
+            year: p.year,
+            value_dollars: p.value_dollars as i64,
+        })
+        .collect();
+    Ok(compute_dcf(&annual, shares_outstanding))
 }

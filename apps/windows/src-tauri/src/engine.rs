@@ -267,6 +267,9 @@ pub struct CandidateRow {
     pub total_cash_dollars: Option<i64>,
     pub total_debt_dollars: Option<i64>,
     pub forward_pe_hundredths: Option<u32>,
+    pub price_to_book_hundredths: Option<u32>,
+    pub enterprise_to_ebitda_hundredths: Option<i32>,
+    pub beta_millis: Option<i32>,
     pub shares_outstanding: Option<u64>,
     // DCF intrinsic value computed from SEC EDGAR (cents per share)
     pub dcf_value_cents: Option<i64>,
@@ -303,6 +306,7 @@ pub struct SymbolDetail {
     pub monthly_summary: Option<ChartSummary>,
     pub technical_breakdown: Option<TechnicalBreakdown>,
     pub dcf_value_cents: Option<i64>,
+    pub dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
     pub insider_net_shares_90d: Option<i64>,
     pub insider_buy_count: Option<u32>,
     pub insider_sell_count: Option<u32>,
@@ -898,13 +902,13 @@ fn classify_alignment(w: &'static str, d: &'static str, h: &'static str) -> &'st
 // ── AggressiveV2 Scoring ──────────────────────────────────────────────────────
 
 /// Smooth piecewise-linear ramp: -1 at or below lower, +1 at or above upper.
-fn smooth_ramp(observed: f64, lower: f64, upper: f64) -> f64 {
+pub fn smooth_ramp(observed: f64, lower: f64, upper: f64) -> f64 {
     if observed <= lower { return -1.0; }
     if observed >= upper { return 1.0; }
     2.0 * (observed - lower) / (upper - lower) - 1.0
 }
 
-struct EvidenceAccumulator {
+pub struct EvidenceAccumulator {
     norm_weight: f64,
     weighted_sum: f64,
     evidence_weight: f64,
@@ -912,11 +916,11 @@ struct EvidenceAccumulator {
 }
 
 impl EvidenceAccumulator {
-    fn new(norm_weight: f64) -> Self {
+    pub fn new(norm_weight: f64) -> Self {
         Self { norm_weight, weighted_sum: 0.0, evidence_weight: 0.0, signals: Vec::new() }
     }
 
-    fn add(&mut self, weight: f64, ramp: f64, label: &str) {
+    pub fn add(&mut self, weight: f64, ramp: f64, label: &str) {
         let clamped = ramp.clamp(-1.0, 1.0);
         self.weighted_sum += weight * clamped;
         self.evidence_weight += weight;
@@ -924,7 +928,7 @@ impl EvidenceAccumulator {
         self.signals.push(format!("{}{}", label, suffix));
     }
 
-    fn normalized_score(&self) -> Option<i32> {
+    pub fn normalized_score(&self) -> Option<i32> {
         if self.evidence_weight == 0.0 { return None; }
         let n = (self.weighted_sum / self.norm_weight * 100.0).clamp(-100.0, 100.0);
         Some(n.round() as i32)
@@ -1584,11 +1588,14 @@ pub struct ScreenerState {
     pub daily_candles: HashMap<String, Vec<HistoricalCandle>>,    // for pattern detection
     pub weekly_candles: HashMap<String, Vec<HistoricalCandle>>,   // for crypto ATH/drawdown
     pub crypto_metrics: HashMap<String, crate::crypto_cycle::CryptoMetrics>,
-    pub dcf_values: HashMap<String, i64>, // symbol → dcf value in cents/share
+    pub dcf_values: HashMap<String, i64>, // symbol → base dcf value in cents/share
+    pub dcf_analyses: HashMap<String, crate::dcf_model::DcfAnalysis>,
     pub insider_data: HashMap<String, InsiderData>, // symbol → insider activity
     pub alerts: Vec<AlertEvent>,
     pub min_gap_bps: i32,
     pub signal_max_age_seconds: u64,
+    /// Opportunity scoring model: aggressive_v2 | aggressive_v3
+    pub scoring_model: String,
 }
 
 impl ScreenerState {
@@ -1596,6 +1603,7 @@ impl ScreenerState {
         Self {
             min_gap_bps: DEFAULT_MIN_GAP_BPS,
             signal_max_age_seconds: DEFAULT_SIGNAL_MAX_AGE_SECONDS,
+            scoring_model: "aggressive_v3".into(),
             ..Default::default()
         }
     }
@@ -1681,6 +1689,12 @@ impl ScreenerState {
         self.dcf_values.insert(symbol, value_cents);
     }
 
+    pub fn ingest_dcf_analysis(&mut self, symbol: String, analysis: crate::dcf_model::DcfAnalysis) {
+        self.dcf_values
+            .insert(symbol.clone(), analysis.base_intrinsic_value_cents);
+        self.dcf_analyses.insert(symbol, analysis);
+    }
+
     pub fn ingest_insider(&mut self, symbol: String, data: InsiderData) {
         self.insider_data.insert(symbol, data);
     }
@@ -1727,6 +1741,9 @@ impl ScreenerState {
                     total_cash_dollars: fund.and_then(|f| f.total_cash_dollars),
                     total_debt_dollars: fund.and_then(|f| f.total_debt_dollars),
                     forward_pe_hundredths: fund.and_then(|f| f.forward_pe_hundredths),
+                    price_to_book_hundredths: fund.and_then(|f| f.price_to_book_hundredths),
+                    enterprise_to_ebitda_hundredths: fund.and_then(|f| f.enterprise_to_ebitda_hundredths),
+                    beta_millis: fund.and_then(|f| f.beta_millis),
                     shares_outstanding: fund.and_then(|f| f.shares_outstanding),
                     dcf_value_cents: self.dcf_values.get(&snap.symbol).copied(),
                     insider_net_shares_90d: self.insider_data.get(&snap.symbol).map(|i| i.net_shares_90d),
@@ -1799,6 +1816,7 @@ impl ScreenerState {
                 }
             },
             dcf_value_cents: self.dcf_values.get(symbol).copied(),
+            dcf_analysis: self.dcf_analyses.get(symbol).cloned(),
             insider_net_shares_90d: self.insider_data.get(symbol).map(|i| i.net_shares_90d),
             insider_buy_count: self.insider_data.get(symbol).map(|i| i.buy_count),
             insider_sell_count: self.insider_data.get(symbol).map(|i| i.sell_count),

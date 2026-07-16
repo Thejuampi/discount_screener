@@ -11,11 +11,12 @@ import { DashboardPanel } from "./components/DashboardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { TickerSearch } from "./components/TickerSearch";
+import { EstimatesPanel } from "./components/EstimatesPanel";
 import { Toaster } from "./toast";
 import { StatusBar } from "./components/StatusBar";
 import type { Profile } from "./components/TechnicalAnalysisPanel";
 
-type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings";
+type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings" | "estimates";
 import { api } from "./api";
 import type { OpportunityRow } from "./api";
 import { useT } from "./i18n";
@@ -58,8 +59,9 @@ export default function App() {
   });
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem("ds_view_mode");
-    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings") ? saved : "dashboard";
+    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
   });
+  const [scoringModel, setScoringModel] = useState<string>("aggressive_v3");
   const handleViewModeChange = (v: ViewMode) => {
     setViewMode(v);
     localStorage.setItem("ds_view_mode", v);
@@ -77,7 +79,19 @@ export default function App() {
 
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
+    api.getScoringModel().then(setScoringModel).catch(console.error);
   }, []);
+
+  const toggleScoringModel = async () => {
+    const next = scoringModel === "aggressive_v2" ? "aggressive_v3" : "aggressive_v2";
+    try {
+      const m = await api.setScoringModel(next);
+      setScoringModel(m);
+      refresh();
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const toggleAutostart = async () => {
     const next = !autostartOn;
@@ -140,7 +154,7 @@ export default function App() {
         </div>
         <nav className="sidebar-nav">
           {([
-            ["dashboard", "🏠"], ["screener", "📈"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
+            ["dashboard", "🏠"], ["screener", "📈"], ["estimates", "Σ"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
           ] as [ViewMode, string][]).map(([id, icon]) => (
             <button
               key={id}
@@ -170,6 +184,14 @@ export default function App() {
             onOpenSymbol={openSymbol}
             onQueryChange={setFilter}
           />
+          <button
+            type="button"
+            className="btn-ghost scoring-toggle"
+            title={t("scoring.toggle")}
+            onClick={() => void toggleScoringModel()}
+          >
+            {scoringModel === "aggressive_v2" ? "V2" : "V3"}
+          </button>
           <select
             className="filter-select"
             value={confidenceFilter}
@@ -267,6 +289,10 @@ export default function App() {
               </div>
             )}
           </>
+        ) : viewMode === "estimates" ? (
+          <div className="congress-pane">
+            <EstimatesPanel />
+          </div>
         ) : viewMode === "congress" ? (
           <div className="congress-pane">
             <CongressOverviewPanel />

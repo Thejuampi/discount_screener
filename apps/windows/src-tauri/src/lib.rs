@@ -12,6 +12,10 @@ mod fetcher;
 mod fibonacci;
 mod quote_summary;
 mod yahoo_session;
+mod dcf_model;
+mod opportunity_v3;
+mod index_estimates;
+mod quant_lens;
 mod news;
 mod regime;
 mod risk;
@@ -132,6 +136,10 @@ pub fn run() {
             commands::search_tickers,
             commands::resolve_ticker_search_submit,
             commands::ensure_symbol_loaded,
+            commands::get_scoring_model,
+            commands::set_scoring_model,
+            commands::get_index_estimates,
+            commands::get_quant_lens,
             commands::start_feed,
             commands::get_feed_status,
             commands::get_symbol_history,

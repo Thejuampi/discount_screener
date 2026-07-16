@@ -11,7 +11,22 @@ import { CongressStockPanel } from "./CongressStockPanel";
 import { CryptoCyclePanel } from "./CryptoCyclePanel";
 import { ChartPatterns } from "./ChartPatterns";
 import { FibLevels } from "./FibLevels";
+import { QuantLensPanel } from "./QuantLensPanel";
 import { useT } from "../i18n";
+import type { DcfAnalysis } from "../api";
+
+function waccLabels(a: DcfAnalysis): string[] {
+  const labels: string[] = [];
+  const i = a.wacc_inputs;
+  if (i.market_cap === "derived_price_times_shares") labels.push("market cap=price×shares");
+  if (i.beta === "default") labels.push("beta=default");
+  if (i.total_debt === "assumed_zero") labels.push("debt=assumed 0");
+  if (i.total_cash === "assumed_zero") labels.push("cash=assumed 0");
+  if (i.cost_of_debt === "default") labels.push("cost of debt=default");
+  if (i.tax_rate === "default") labels.push("tax=default");
+  if (i.wacc_clamped) labels.push("wacc=clamped");
+  return labels;
+}
 
 interface Props {
   symbol: string;
@@ -82,6 +97,7 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
   const gap = row?.gap_bps ?? detail?.gap_bps ?? 0;
   const confidence = row?.confidence ?? detail?.confidence ?? "Low";
   const dcfValue = row?.dcf_value_cents ?? detail?.dcf_value_cents ?? null;
+  const dcfAnalysis = detail?.dcf_analysis ?? null;
 
   const f = detail?.fundamentals;
   const gapPct = (gap / 100).toFixed(1);
@@ -144,6 +160,26 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
                 {fmt.dollars(dcfValue)}
               </span>
               <span className="price-label">{t("detail.dcfValue")}</span>
+              {dcfAnalysis && (
+                <div className="wacc-block">
+                  <div>
+                    WACC {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
+                    {waccLabels(dcfAnalysis).length > 0 && (
+                      <span className="wacc-provisional"> · {t("detail.provisional")}</span>
+                    )}
+                  </div>
+                  <div className="muted small">
+                    Bear {fmt.dollars(dcfAnalysis.bear_intrinsic_value_cents)} · Base{" "}
+                    {fmt.dollars(dcfAnalysis.base_intrinsic_value_cents)} · Bull{" "}
+                    {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
+                  </div>
+                  {waccLabels(dcfAnalysis).length > 0 && (
+                    <div className="muted small">
+                      {t("detail.waccInputs")}: {waccLabels(dcfAnalysis).join("; ")}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </>
         )}
@@ -295,6 +331,8 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
           </div>
         </div>
       )}
+
+      <QuantLensPanel symbol={symbol} />
 
       {/* ── Full analysis breakdown (bottom) ── */}
       {row && detail && <AnalysisBuckets row={row} detail={detail} />}
