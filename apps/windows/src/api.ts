@@ -242,12 +242,32 @@ export interface HistoryStatus {
   snapshot_count: number;
 }
 
+export interface TickerSearchSuggestion {
+  symbol: string;
+  company_name: string | null;
+  profiles: string[];
+  in_current_profile: boolean;
+  exchange: string | null;
+  is_remote: boolean;
+  match_rank: number;
+}
+
+export type SearchSubmitOutcome =
+  | { kind: "open"; symbol: string }
+  | { kind: "pick_match" }
+  | { kind: "unavailable" };
+
 export const api = {
   getOpportunities: () => invoke<OpportunityRow[]>("get_opportunities"),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),
+  searchTickers: (query: string, limit?: number) =>
+    invoke<TickerSearchSuggestion[]>("search_tickers", { query, limit: limit ?? 8 }),
+  resolveTickerSearchSubmit: (query: string, suggestions: TickerSearchSuggestion[]) =>
+    invoke<SearchSubmitOutcome>("resolve_ticker_search_submit", { query, suggestions }),
+  ensureSymbolLoaded: (symbol: string) => invoke<string>("ensure_symbol_loaded", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
   getSymbolHistory: (symbol: string, days: number) =>

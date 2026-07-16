@@ -10,6 +10,7 @@ import { ScalpingPanel } from "./components/ScalpingPanel";
 import { DashboardPanel } from "./components/DashboardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
+import { TickerSearch } from "./components/TickerSearch";
 import { Toaster } from "./toast";
 import { StatusBar } from "./components/StatusBar";
 import type { Profile } from "./components/TechnicalAnalysisPanel";
@@ -68,6 +69,11 @@ export default function App() {
     setProfile(p);
     localStorage.setItem("ds_profile", p);
   };
+
+  const openSymbol = useCallback((symbol: string) => {
+    handleViewModeChange("screener");
+    setSelectedSymbol(symbol);
+  }, []);
 
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
@@ -160,15 +166,10 @@ export default function App() {
       <header className="app-header">
         <div className="header-left">
           {viewMode === "screener" && (<>
-          <div className="search-wrap">
-            <span className="search-icon">⌕</span>
-            <input
-              className="search"
-              placeholder={t("search.placeholder")}
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-          </div>
+          <TickerSearch
+            onOpenSymbol={openSymbol}
+            onQueryChange={setFilter}
+          />
           <select
             className="filter-select"
             value={confidenceFilter}
@@ -231,7 +232,7 @@ export default function App() {
             <DashboardPanel
               rows={rows}
               onNavigate={handleViewModeChange}
-              onOpenSymbol={(s) => { handleViewModeChange("screener"); setSelectedSymbol(s); }}
+              onOpenSymbol={openSymbol}
             />
           </div>
         ) : viewMode === "settings" ? (
@@ -278,10 +279,7 @@ export default function App() {
           <div className="congress-pane">
             <AdvisorPanel
               rows={rows}
-              onOpenSymbol={(s) => {
-                handleViewModeChange("screener");
-                setSelectedSymbol(s);
-              }}
+              onOpenSymbol={openSymbol}
             />
           </div>
         )}
@@ -306,7 +304,7 @@ export default function App() {
       <CommandPalette
         rows={rows}
         onNavigate={handleViewModeChange}
-        onOpenSymbol={(s) => { handleViewModeChange("screener"); setSelectedSymbol(s); }}
+        onOpenSymbol={openSymbol}
         onOpenSettings={() => handleViewModeChange("settings")}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />

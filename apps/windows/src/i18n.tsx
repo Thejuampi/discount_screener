@@ -10,7 +10,14 @@ const STORAGE_KEY = "ds_lang";
 const T: Record<string, { es: string; en: string }> = {
   // ── App / Header ─────────────────────────────────────────────────────────
   "app.title":                  { es: "Vantage", en: "Vantage" },
-  "search.placeholder":         { es: "Buscar símbolo o empresa…", en: "Search symbol or company…" },
+  "search.placeholder":         { es: "Ticker o empresa…", en: "Ticker or company…" },
+  "search.open":                { es: "Abrir", en: "Open" },
+  "search.loading":             { es: "Buscando…", en: "Searching…" },
+  "search.pickMatch":           { es: "Elegí un resultado de la lista", en: "Pick a match" },
+  "search.unavailable":         { es: "Ticker no disponible", en: "Ticker unavailable" },
+  "search.outsideUniverse":     { es: "Fuera del universo", en: "Outside universe" },
+  "search.currentUniverse":     { es: "Universo", en: "Universe" },
+  "search.remote":              { es: "Yahoo", en: "Yahoo" },
   "filter.all":                 { es: "Todas", en: "All" },
   "filter.high":                { es: "Confianza alta", en: "High confidence" },
   "filter.provisional":         { es: "Provisional", en: "Provisional" },

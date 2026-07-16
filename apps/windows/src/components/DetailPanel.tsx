@@ -47,11 +47,27 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
       })
       .catch(console.error);
 
-    // Background refresh + re-fetch
-    api.refreshSymbol(symbol)
+    // Full ad-hoc load (quote + multi-TF charts) then re-fetch detail.
+    // Works for symbols outside the continuous feed universe.
+    api.ensureSymbolLoaded(symbol)
       .then(() => api.getSymbolDetail(symbol))
-      .then((d) => { if (!cancelled && d) setDetail(d); })
-      .catch(console.error);
+      .then((d) => {
+        if (!cancelled) {
+          if (d) setDetail(d);
+          setLoading(false);
+        }
+      })
+      .catch(() =>
+        api.refreshSymbol(symbol)
+          .then(() => api.getSymbolDetail(symbol))
+          .then((d) => {
+            if (!cancelled) {
+              if (d) setDetail(d);
+              setLoading(false);
+            }
+          })
+          .catch(console.error),
+      );
 
     return () => { cancelled = true; };
   }, [symbol]);

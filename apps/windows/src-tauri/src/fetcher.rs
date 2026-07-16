@@ -1,23 +1,33 @@
-/// Yahoo Finance fetcher — same approach as the Android app:
-/// scrapes finance.yahoo.com/quote/{symbol} and extracts embedded JSON blobs.
-/// No API key, no crumb, no batching — but gets ALL data (price + analyst + fundamentals)
-/// in a single request per symbol.
+//! Yahoo Finance fetcher.
+//!
+//! Primary path (Android parity): authenticated JSON `v10/finance/quoteSummary`
+//! via cookie + crumb session. Chart / search remain public REST endpoints.
+//! HTML quote-page scrape is optional fallback only (`html_fallback`, default off).
+
 use std::io;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde_json::Value;
 
-use crate::engine::{
-    ExternalValuationSignal, FundamentalSnapshot, HistoricalCandle, MarketSnapshot,
+use crate::engine::HistoricalCandle;
+use crate::quote_summary::{
+    apply_asset_class_overrides, parse_quote_summary, with_price_fallback, yahoo_request_symbol,
+    QUOTE_SUMMARY_MODULES,
 };
+use crate::ticker_search::{parse_search_quotes, YahooSearchQuote};
+use crate::yahoo_session::{is_auth_error, YahooSession};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const QUOTE_PAGE_URL: &str = "https://finance.yahoo.com/quote/";
 const CHART_API_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
+const QUOTE_SUMMARY_URL: &str = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/";
+const SEARCH_API_URL: &str = "https://query2.finance.yahoo.com/v1/finance/search";
 
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+
+pub use crate::quote_summary::FetchResult;
 
 // Markers for JSON blobs embedded in the Yahoo Finance quote page HTML.
 // Yahoo serialises the store data as an escaped JSON string, so all key quotes
@@ -204,18 +214,17 @@ pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
 
 pub struct YahooClient {
     client: Client,
-}
-
-/// One symbol's worth of ingestion-ready data
-pub struct FetchResult {
-    pub symbol: String,
-    pub snapshot: Option<MarketSnapshot>,
-    pub signal: Option<ExternalValuationSignal>,
-    pub fundamentals: Option<FundamentalSnapshot>,
+    session: YahooSession,
+    /// When true, fall back to multi-MB HTML scrape if quoteSummary fails. Off by default.
+    html_fallback: bool,
 }
 
 impl YahooClient {
     pub fn new() -> io::Result<Self> {
+        Self::with_options(false)
+    }
+
+    pub fn with_options(html_fallback: bool) -> io::Result<Self> {
         let client = Client::builder()
             .timeout(HTTP_TIMEOUT)
             .user_agent(USER_AGENT)
@@ -223,12 +232,92 @@ impl YahooClient {
             .gzip(true)
             .build()
             .map_err(io::Error::other)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            session: YahooSession::new(),
+            html_fallback,
+        })
     }
 
-    /// Fetch all data for a single symbol by scraping the Yahoo Finance quote page —
-    /// identical strategy to the Android app.
+    /// Fetch quote + analyst + fundamentals via quoteSummary JSON (primary).
     pub fn fetch_symbol(&self, symbol: &str) -> io::Result<FetchResult> {
+        let display = symbol.trim().to_uppercase();
+        let request_symbol = yahoo_request_symbol(&display);
+
+        let mut result = match self.fetch_quote_summary_json(&request_symbol) {
+            Ok(root) => parse_quote_summary(&root, &display),
+            Err(e) => {
+                if self.html_fallback {
+                    match self.fetch_symbol_html(&display) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    // Soft-empty on total failure: chart/stooq may still fill price.
+                    FetchResult {
+                        symbol: display.clone(),
+                        snapshot: None,
+                        signal: None,
+                        fundamentals: None,
+                    }
+                }
+            }
+        };
+
+        if result.snapshot.is_none() {
+            let fallback = self
+                .fetch_candles(&display, "1d", "5m")
+                .ok()
+                .and_then(|c| c.last().map(|x| x.close_cents))
+                .or_else(|| crate::stooq::fetch_quote_cents(&display));
+            result = with_price_fallback(result, fallback, is_crypto(&display));
+        }
+
+        result = apply_asset_class_overrides(result, is_crypto(&display), etf_sector(&display));
+        Ok(result)
+    }
+
+    fn fetch_quote_summary_json(&self, request_symbol: &str) -> io::Result<Value> {
+        let once = || -> io::Result<Value> {
+            let crumb = self.session.ensure_crumb(&self.client, USER_AGENT)?;
+            let url = format!(
+                "{QUOTE_SUMMARY_URL}{}?modules={}&crumb={}",
+                urlencoding_minimal(request_symbol),
+                urlencoding_minimal(QUOTE_SUMMARY_MODULES),
+                urlencoding_minimal(&crumb),
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .send()
+                .map_err(io::Error::other)?;
+            let status = resp.status();
+            let body = resp.text().map_err(io::Error::other)?;
+            if !status.is_success() {
+                return Err(io::Error::other(format!(
+                    "HTTP {status} for quoteSummary {request_symbol}: {}",
+                    body.chars().take(200).collect::<String>()
+                )));
+            }
+            serde_json::from_str(&body).map_err(io::Error::other)
+        };
+
+        match once() {
+            Ok(v) => Ok(v),
+            Err(e) if is_auth_error(&e) => {
+                self.session.clear();
+                once()
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Legacy HTML scrape path (optional; Android default is off).
+    fn fetch_symbol_html(&self, symbol: &str) -> io::Result<FetchResult> {
         let url = format!("{}{}", QUOTE_PAGE_URL, symbol);
         let body = self
             .client
@@ -244,196 +333,84 @@ impl YahooClient {
             .and_then(|r| r.text())
             .map_err(io::Error::other)?;
 
-        let fd   = extract_json(&body, FINANCIAL_DATA_MARKER);
+        // Reuse the same field mapping by synthesizing a quoteSummary-shaped JSON
+        // from embedded HTML blobs when present.
+        let fd = extract_json(&body, FINANCIAL_DATA_MARKER);
         let stat = extract_json(&body, KEY_STATISTICS_MARKER);
-        let rec  = extract_json(&body, RECOMMENDATION_TREND_MARKER);
-        // Sector/industry can live in assetProfile (stocks) or summaryProfile (ETFs/funds).
-        // Some pages also expose quoteType which has sector for ETFs.
-        let ap   = extract_json(&body, ASSET_PROFILE_MARKER)
+        let rec = extract_json(&body, RECOMMENDATION_TREND_MARKER);
+        let ap = extract_json(&body, ASSET_PROFILE_MARKER)
             .or_else(|| extract_json(&body, SUMMARY_PROFILE_MARKER))
             .or_else(|| extract_json(&body, QUOTE_TYPE_MARKER));
-        let price_obj = extract_price_json(&body); // special: multiple occurrences
-        let cal  = extract_json(&body, CALENDAR_EVENTS_MARKER);
+        let price_obj = extract_price_json(&body);
+        let cal = extract_json(&body, CALENDAR_EVENTS_MARKER);
 
-        // ── Market price (multi-source, Yahoo → chart API → Stooq) ───────────
-        // Redundancy so Yahoo is no longer a single point of failure: if the
-        // scraped price is missing we try Yahoo's chart API, then Stooq (keyless).
-        let market_price_cents = fd
-            .as_ref()
-            .and_then(|f| raw_money(f, "currentPrice"))
-            .or_else(|| {
-                self.fetch_candles(symbol, "1d", "5m")
-                    .ok()
-                    .and_then(|c| c.last().map(|x| x.close_cents))
-            })
-            .or_else(|| crate::stooq::fetch_quote_cents(symbol));
-
-        let market_price_cents = match market_price_cents {
-            Some(p) => p,
-            None => {
-                return Ok(FetchResult {
-                    symbol: symbol.to_string(),
-                    snapshot: None,
-                    signal: None,
-                    fundamentals: None,
-                })
+        let mut root = serde_json::Map::new();
+        let mut qs = serde_json::Map::new();
+        let mut result_obj = serde_json::Map::new();
+        if let Some(v) = fd {
+            result_obj.insert("financialData".into(), v);
+        }
+        if let Some(v) = stat {
+            result_obj.insert("defaultKeyStatistics".into(), v);
+        }
+        if let Some(v) = rec {
+            result_obj.insert("recommendationTrend".into(), v);
+        }
+        if let Some(v) = ap {
+            result_obj.insert("assetProfile".into(), v);
+        }
+        if let Some(v) = price_obj {
+            result_obj.insert("price".into(), v);
+        }
+        if let Some(v) = cal {
+            result_obj.insert("calendarEvents".into(), v);
+        }
+        // Company name from meta when price.longName missing
+        if !result_obj.contains_key("price") {
+            if let Some(name) = parse_company_name(&body, symbol) {
+                let mut price = serde_json::Map::new();
+                price.insert("longName".into(), Value::String(name));
+                result_obj.insert("price".into(), Value::Object(price));
             }
-        };
-
-        // ── Analyst targets ───────────────────────────────────────────────────
-        let target_mean_cents   = fd.as_ref().and_then(|f| raw_money(f, "targetMeanPrice"));
-        let target_median_cents = fd.as_ref().and_then(|f| raw_money(f, "targetMedianPrice"));
-        let target_low_cents    = fd.as_ref().and_then(|f| raw_money(f, "targetLowPrice"));
-        let target_high_cents   = fd.as_ref().and_then(|f| raw_money(f, "targetHighPrice"));
-
-        // ── Profitability ─────────────────────────────────────────────────────
-        // Crypto has no EPS concept — treat as always "profitable" for qualification flow.
-        let trailing_eps = stat.as_ref().and_then(|s| raw_double(s, "trailingEps"));
-        let profitable   = if is_crypto(symbol) {
-            true
-        } else {
-            trailing_eps.map(|e| e > 0.0).unwrap_or(false)
-        };
-
-        // ── Company name ──────────────────────────────────────────────────────
-        let company_name = parse_company_name(&body, symbol);
-
-        // ── Snapshot (always built if we have a price) ────────────────────────
-        // Previous close enables daily % change in the UI.
-        let previous_close_cents = price_obj.as_ref()
-            .and_then(|p| raw_money(p, "regularMarketPreviousClose"))
-            .unwrap_or(0);
-        // Next earnings date: calendarEvents.earnings.earningsDate is an array of
-        // {raw: epoch}. Prefer the first date in the future; else the latest known.
-        let next_earnings_epoch = cal.as_ref()
-            .and_then(|c| c.get("earnings"))
-            .and_then(|e| e.get("earningsDate"))
-            .and_then(|d| d.as_array())
-            .and_then(|arr| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64).unwrap_or(0);
-                let epochs: Vec<i64> = arr.iter()
-                    .filter_map(|d| d.get("raw").and_then(|v| v.as_i64()))
-                    .collect();
-                epochs.iter().filter(|&&e| e >= now).min().copied()
-                    .or_else(|| epochs.iter().max().copied())
-            });
-
-        let snapshot = Some(MarketSnapshot {
-            symbol: symbol.to_string(),
-            company_name: company_name.clone(),
-            profitable,
-            market_price_cents,
-            intrinsic_value_cents: target_mean_cents.unwrap_or(0),
-            previous_close_cents,
-            next_earnings_epoch,
-        });
-
-        // ── Recommendation trend (current month = period "0m") ────────────────
-        let trend = rec
-            .as_ref()
-            .and_then(|r| r.get("trend"))
-            .and_then(|t| t.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|p| p.get("period").and_then(|v| v.as_str()) == Some("0m"))
-                    .or_else(|| arr.first())
-            })
-            .cloned();
-
-        let analyst_count = fd
-            .as_ref()
-            .and_then(|f| raw_int(f, "numberOfAnalystOpinions"))
-            .or_else(|| {
-                trend.as_ref().map(|t| {
-                    let sum = ["strongBuy", "buy", "hold", "sell", "strongSell"]
-                        .iter()
-                        .map(|k| t.get(k).and_then(|v| v.as_i64()).unwrap_or(0))
-                        .sum::<i64>();
-                    sum as u32
-                })
-            });
-
-        // ── Signal (only when we have an analyst target) ──────────────────────
-        let signal = target_median_cents.or(target_mean_cents).map(|fair| {
-            ExternalValuationSignal {
-                symbol: symbol.to_string(),
-                fair_value_cents: fair,
-                age_seconds: 0,
-                low_fair_value_cents:  target_low_cents,
-                high_fair_value_cents: target_high_cents,
-                analyst_opinion_count: analyst_count,
-                recommendation_mean_hundredths: fd
-                    .as_ref()
-                    .and_then(|f| raw_double(f, "recommendationMean"))
-                    .map(|r| (r * 100.0).round() as u16),
-                strong_buy_count:  trend_count(&trend, "strongBuy"),
-                buy_count:         trend_count(&trend, "buy"),
-                hold_count:        trend_count(&trend, "hold"),
-                sell_count:        trend_count(&trend, "sell"),
-                strong_sell_count: trend_count(&trend, "strongSell"),
-                weighted_fair_value_cents: None,
-                weighted_analyst_count: None,
+        } else if let Some(Value::Object(price)) = result_obj.get_mut("price") {
+            if price.get("longName").is_none() {
+                if let Some(name) = parse_company_name(&body, symbol) {
+                    price.insert("longName".into(), Value::String(name));
+                }
             }
-        });
+        }
+        qs.insert(
+            "result".into(),
+            Value::Array(vec![Value::Object(result_obj)]),
+        );
+        root.insert("quoteSummary".into(), Value::Object(qs));
+        let mut result = parse_quote_summary(&Value::Object(root), symbol);
+        result = apply_asset_class_overrides(result, is_crypto(symbol), etf_sector(symbol));
+        Ok(result)
+    }
 
-        // ── Fundamentals ──────────────────────────────────────────────────────
-        let fundamentals = Some(FundamentalSnapshot {
-            symbol: symbol.to_string(),
-            sector_key: ap.as_ref().and_then(|a| a.get("sectorKey")).and_then(|v| v.as_str()).map(str::to_string),
-            // Crypto: always "Cryptocurrency". ETFs: hardcoded mapping. Stocks: from assetProfile.
-            sector_name: if is_crypto(symbol) {
-                Some("Cryptocurrency".to_string())
-            } else if let Some(s) = etf_sector(symbol) {
-                Some(s.to_string())
-            } else {
-                ap.as_ref()
-                    .and_then(|a| {
-                        a.get("sectorDisp")
-                            .or_else(|| a.get("sector"))
-                            .or_else(|| a.get("category"))
-                            .or_else(|| a.get("legalType"))
-                    })
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            },
-            industry_key: ap.as_ref().and_then(|a| a.get("industryKey")).and_then(|v| v.as_str()).map(str::to_string),
-            industry_name: ap.as_ref()
-                .and_then(|a| {
-                    a.get("industryDisp")
-                        .or_else(|| a.get("industry"))
-                        .or_else(|| a.get("fundFamily"))
-                })
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            market_cap_dollars: price_obj.as_ref().and_then(|p| raw_double(p, "marketCap")).map(|v| v as u64),
-            shares_outstanding: stat.as_ref().and_then(|s| raw_double(s, "sharesOutstanding")).map(|v| v as u64),
-            trailing_pe_hundredths: stat.as_ref().and_then(|s| raw_double(s, "trailingPE")).map(|v| (v * 100.0) as u32),
-            forward_pe_hundredths:  stat.as_ref().and_then(|s| raw_double(s, "forwardPE")).map(|v| (v * 100.0) as u32),
-            price_to_book_hundredths: stat.as_ref().and_then(|s| raw_double(s, "priceToBook")).map(|v| (v * 100.0) as u32),
-            return_on_equity_bps: fd.as_ref().and_then(|f| raw_double(f, "returnOnEquity")).map(|v| (v * 10_000.0) as i32),
-            ebitda_dollars: fd.as_ref().and_then(|f| raw_double(f, "ebitda")).map(|v| v as i64),
-            enterprise_value_dollars: stat.as_ref().and_then(|s| raw_double(s, "enterpriseValue")).map(|v| v as i64),
-            enterprise_to_ebitda_hundredths: stat.as_ref().and_then(|s| raw_double(s, "enterpriseToEbitda")).map(|v| (v * 100.0) as i32),
-            total_debt_dollars: fd.as_ref().and_then(|f| raw_double(f, "totalDebt")).map(|v| v as i64),
-            total_cash_dollars: fd.as_ref().and_then(|f| raw_double(f, "totalCash")).map(|v| v as i64),
-            debt_to_equity_hundredths: fd.as_ref().and_then(|f| raw_double(f, "debtToEquity")).map(|v| (v * 100.0) as i32),
-            free_cash_flow_dollars: fd.as_ref().and_then(|f| raw_double(f, "freeCashflow")).map(|v| v as i64),
-            operating_cash_flow_dollars: fd.as_ref().and_then(|f| raw_double(f, "operatingCashflow")).map(|v| v as i64),
-            beta_millis: stat.as_ref().and_then(|s| raw_double(s, "beta")).map(|v| (v * 1000.0) as i32),
-            trailing_eps_cents: trailing_eps.map(|e| (e * 100.0).round() as i64),
-            earnings_growth_bps: fd.as_ref().and_then(|f| raw_double(f, "earningsGrowth")).map(|v| (v * 10_000.0) as i32),
-        });
-
-        Ok(FetchResult {
-            symbol: symbol.to_string(),
-            snapshot,
-            signal,
-            fundamentals,
-        })
+    /// Yahoo `v1/finance/search` — EQUITY/ETF quotes only after parse.
+    pub fn search_symbols(&self, query: &str, limit: usize) -> io::Result<Vec<YahooSearchQuote>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let quotes_count = limit.max(1);
+        let url = format!(
+            "{SEARCH_API_URL}?q={}&quotesCount={quotes_count}&newsCount=0",
+            urlencoding_minimal(trimmed)
+        );
+        let body = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json,text/plain,*/*")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
+            .map_err(io::Error::other)?;
+        let root: Value = serde_json::from_str(&body).map_err(io::Error::other)?;
+        Ok(parse_search_quotes(&root))
     }
 
     pub fn fetch_candles(
@@ -474,6 +451,21 @@ impl YahooClient {
             }
         }
     }
+}
+
+/// Minimal application/x-www-form-urlencoded for Yahoo search `q`.
+fn urlencoding_minimal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 3);
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 // ── HTML extraction helpers ────────────────────────────────────────────────────
@@ -535,29 +527,6 @@ fn parse_company_name(body: &str, symbol: &str) -> Option<String> {
             .replace("&lt;", "<")
             .replace("&gt;", ">"),
     )
-}
-
-// ── Value accessors ────────────────────────────────────────────────────────────
-
-/// Yahoo wraps numeric values as `{"raw": X, "fmt": "..."}`.
-fn raw_double(obj: &Value, field: &str) -> Option<f64> {
-    obj.get(field)?.get("raw")?.as_f64()
-}
-
-fn raw_money(obj: &Value, field: &str) -> Option<i64> {
-    let d = raw_double(obj, field)?;
-    if !d.is_finite() || d <= 0.0 {
-        return None;
-    }
-    Some((d * 100.0).round() as i64)
-}
-
-fn raw_int(obj: &Value, field: &str) -> Option<u32> {
-    raw_double(obj, field).map(|v| v as u32)
-}
-
-fn trend_count(trend: &Option<Value>, key: &str) -> Option<u32> {
-    trend.as_ref()?.get(key)?.as_u64().map(|n| n as u32)
 }
 
 // ── Candle parsing ─────────────────────────────────────────────────────────────

@@ -13,8 +13,14 @@ use crate::engine::{
     composite_score_v2, compute_chart_summary, compute_sector_benchmarks, compute_setup_score,
     decision_state, score_fundamentals_v2, score_technicals_v3, score_forecast_v2,
 };
-use crate::fetcher::{YahooClient, DEFAULT_LIVE_SYMBOLS, CRYPTO_SYMBOLS, ETF_SYMBOLS, is_crypto, is_etf, asset_type};
+use crate::fetcher::{
+    asset_type, is_crypto, is_etf, YahooClient, CRYPTO_SYMBOLS, DEFAULT_LIVE_SYMBOLS, ETF_SYMBOLS,
+};
 use crate::state::AppState;
+use crate::ticker_search::{
+    local_universe_candidates, merge_and_rank, normalize_search_query_key, remote_candidates,
+    resolve_search_submit, should_trigger_remote_search, SearchSubmitOutcome, TickerSearchResult,
+};
 
 const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
 
@@ -198,6 +204,149 @@ pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, 
     if let Some(snap) = result.snapshot { screener.ingest_snapshot(snap); }
     if let Some(sig)  = result.signal   { screener.ingest_signal(sig);   }
     if let Some(fund) = result.fundamentals { screener.ingest_fundamentals(fund); }
+    Ok(symbol)
+}
+
+/// Local + optional remote Yahoo search (Android ticker/company search parity).
+#[tauri::command]
+pub fn search_tickers(
+    query: String,
+    limit: Option<usize>,
+    state: State<AppState>,
+) -> Vec<TickerSearchResult> {
+    let limit = limit.unwrap_or(8).max(1);
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut company_names = HashMap::new();
+    {
+        let screener = state.screener.lock().unwrap();
+        for (sym, snap) in &screener.snapshots {
+            if let Some(name) = &snap.company_name {
+                company_names.insert(sym.to_uppercase(), name.clone());
+            }
+        }
+    }
+
+    let mut universe: Vec<&str> = Vec::with_capacity(
+        DEFAULT_LIVE_SYMBOLS.len() + ETF_SYMBOLS.len() + CRYPTO_SYMBOLS.len(),
+    );
+    universe.extend_from_slice(&DEFAULT_LIVE_SYMBOLS[..]);
+    universe.extend_from_slice(ETF_SYMBOLS);
+    universe.extend_from_slice(CRYPTO_SYMBOLS);
+
+    let local = local_universe_candidates(trimmed, &universe, &company_names);
+    let mut ranked = merge_and_rank(&local, limit);
+
+    if should_trigger_remote_search(trimmed, &ranked) {
+        let cache_key = normalize_search_query_key(trimmed);
+        let cached = state
+            .remote_search_cache
+            .lock()
+            .unwrap()
+            .get(&cache_key);
+
+        let remote_quotes = match cached {
+            Some(q) => q,
+            None => {
+                let fetched = YahooClient::new()
+                    .ok()
+                    .and_then(|c| c.search_symbols(trimmed, limit).ok())
+                    .unwrap_or_default();
+                state
+                    .remote_search_cache
+                    .lock()
+                    .unwrap()
+                    .put(cache_key, fetched.clone());
+                fetched
+            }
+        };
+
+        let mut combined = local;
+        combined.extend(remote_candidates(trimmed, &remote_quotes));
+        ranked = merge_and_rank(&combined, limit);
+    }
+
+    ranked
+}
+
+#[tauri::command]
+pub fn resolve_ticker_search_submit(
+    query: String,
+    suggestions: Vec<TickerSearchResult>,
+) -> SearchSubmitOutcome {
+    resolve_search_submit(&query, &suggestions)
+}
+
+/// One-shot load for ad-hoc detail (quote + multi-TF charts). Does not join the feed loop.
+#[tauri::command]
+pub fn ensure_symbol_loaded(symbol: String, state: State<AppState>) -> Result<String, String> {
+    let symbol = symbol.trim().to_uppercase();
+    if symbol.is_empty() {
+        return Err("empty symbol".into());
+    }
+
+    let client = YahooClient::new().map_err(|e| e.to_string())?;
+
+    match client.fetch_symbol(&symbol) {
+        Ok(result) => {
+            let mut screener = state.screener.lock().unwrap();
+            if let Some(snap) = result.snapshot {
+                screener.ingest_snapshot(snap);
+            }
+            if let Some(sig) = result.signal {
+                screener.ingest_signal(sig);
+            }
+            if let Some(fund) = result.fundamentals {
+                screener.ingest_fundamentals(fund);
+            }
+        }
+        Err(e) => {
+            // Still try candles; quote HTML can 404 for some symbols.
+            let msg = e.to_string();
+            if !(msg.contains("404") || msg.contains("401") || msg.contains("403")) {
+                // Keep going; candles may still work.
+            }
+        }
+    }
+
+    if let Ok(candles) = client.fetch_candles(&symbol, "1y", "1d") {
+        if let Some(summary) = compute_chart_summary(&candles) {
+            let mut s = state.screener.lock().unwrap();
+            s.ingest_chart_summary(symbol.clone(), summary);
+            s.ingest_daily_candles(symbol.clone(), candles);
+        }
+    }
+    if let Ok(candles) = client.fetch_candles(&symbol, "5y", "1wk") {
+        if let Some(summary) = compute_chart_summary(&candles) {
+            state
+                .screener
+                .lock()
+                .unwrap()
+                .ingest_weekly_summary(symbol.clone(), summary);
+        }
+    }
+    if let Ok(candles) = client.fetch_candles(&symbol, "1mo", "1h") {
+        if let Some(summary) = compute_chart_summary(&candles) {
+            state
+                .screener
+                .lock()
+                .unwrap()
+                .ingest_hourly_summary(symbol.clone(), summary);
+        }
+    }
+    if let Ok(candles) = client.fetch_candles(&symbol, "10y", "1mo") {
+        if let Some(summary) = compute_chart_summary(&candles) {
+            state
+                .screener
+                .lock()
+                .unwrap()
+                .ingest_monthly_summary(symbol.clone(), summary);
+        }
+    }
+
     Ok(symbol)
 }
 

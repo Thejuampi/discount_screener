@@ -10,6 +10,8 @@ mod edgar;
 mod engine;
 mod fetcher;
 mod fibonacci;
+mod quote_summary;
+mod yahoo_session;
 mod news;
 mod regime;
 mod risk;
@@ -20,6 +22,7 @@ mod schwab_api;
 mod smc;
 mod stooq;
 mod state;
+mod ticker_search;
 
 use state::AppState;
 use tauri::{
@@ -126,6 +129,9 @@ pub fn run() {
             commands::get_candles,
             commands::get_alerts,
             commands::refresh_symbol,
+            commands::search_tickers,
+            commands::resolve_ticker_search_submit,
+            commands::ensure_symbol_loaded,
             commands::start_feed,
             commands::get_feed_status,
             commands::get_symbol_history,
