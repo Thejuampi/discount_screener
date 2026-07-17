@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 310" width="480" height="310" role="img" aria-labelledby="title desc">
+  <title id="title">Tradeoff sesgo-varianza</title>
+  <desc id="desc">Error de predicción frente a complejidad del modelo; la curva de entrenamiento cae y la de prueba tiene forma de U.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4b5563"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="480" height="310" fill="white"/>
+  <rect x="14" y="18" width="452" height="252" fill="white" stroke="#9ca3af"/>
+  <line x1="54" y1="250" x2="430" y2="250" stroke="#374151" stroke-width="2"/>
+  <line x1="54" y1="250" x2="54" y2="48" stroke="#374151" stroke-width="2"/>
+  <text x="242" y="292" text-anchor="middle" font-size="21" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Complejidad del modelo</text>
+  <text x="24" y="158" transform="rotate(-90 24 158)" text-anchor="middle" font-size="21" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Error de predicción</text>
+  <text x="68" y="40" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Alto sesgo</text>
+  <text x="66" y="61" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Baja varianza</text>
+  <text x="390" y="40" font-size="18" text-anchor="end" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Bajo sesgo</text>
+  <text x="392" y="61" font-size="18" text-anchor="end" font-family="Georgia, 'Times New Roman', serif" fill="#4b5563">Alta varianza</text>
+  <path d="M90 85 C150 140 165 186 190 205 C220 228 265 228 310 214 C352 202 389 177 426 142" fill="none" stroke="#ef4444" stroke-width="4"/>
+  <path d="M90 96 C126 130 155 166 180 200 C220 248 300 270 420 282" fill="none" stroke="#22d3ee" stroke-width="4"/>
+  <text x="272" y="194" font-size="17" font-family="Georgia, 'Times New Roman', serif" fill="#6b7280">Muestra de prueba</text>
+  <text x="132" y="230" font-size="16" font-family="Georgia, 'Times New Roman', serif" fill="#6b7280">Muestra de entrenamiento</text>
+  <path d="M90 78 H145" stroke="#4b5563" stroke-dasharray="6 6" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M378 78 H430" stroke="#4b5563" stroke-dasharray="6 6" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="66" y="274" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#6b7280">Baja</text>
+  <text x="406" y="274" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#6b7280">Alta</text>
+</svg>

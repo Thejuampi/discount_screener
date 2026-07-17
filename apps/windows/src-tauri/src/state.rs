@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use crate::engine::ScreenerState;
-use crate::db::Db;
-use crate::news::NewsCache;
+use std::time::{Duration, Instant};
+
 use crate::crypto_cycle::FngCache;
+use crate::db::Db;
+use crate::engine::ScreenerState;
+use crate::news::NewsCache;
+use crate::ticker_search::YahooSearchQuote;
 
 #[derive(Clone)]
 pub struct FeedStatus {
@@ -14,7 +18,11 @@ pub struct FeedStatus {
 
 impl Default for FeedStatus {
     fn default() -> Self {
-        Self { running: false, symbols_loaded: 0, last_error: None }
+        Self {
+            running: false,
+            symbols_loaded: 0,
+            last_error: None,
+        }
     }
 }
 
@@ -31,6 +39,50 @@ pub struct CongressSyncProgress {
     pub last_error: Option<String>,
 }
 
+/// TTL cache for Yahoo remote search (mirrors Android: 300s, max 50 keys).
+pub struct RemoteSearchCache {
+    entries: HashMap<String, (Instant, Vec<YahooSearchQuote>)>,
+    max_entries: usize,
+    ttl: Duration,
+}
+
+impl RemoteSearchCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_entries: 50,
+            ttl: Duration::from_secs(300),
+        }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<Vec<YahooSearchQuote>> {
+        let now = Instant::now();
+        if let Some((at, quotes)) = self.entries.get(key) {
+            if now.duration_since(*at) < self.ttl {
+                return Some(quotes.clone());
+            }
+        }
+        self.entries.remove(key);
+        None
+    }
+
+    pub fn put(&mut self, key: String, quotes: Vec<YahooSearchQuote>) {
+        if self.entries.len() >= self.max_entries {
+            // Drop an arbitrary oldest-ish entry (first key) — good enough for v1.
+            if let Some(evict) = self.entries.keys().next().cloned() {
+                self.entries.remove(&evict);
+            }
+        }
+        self.entries.insert(key, (Instant::now(), quotes));
+    }
+}
+
+impl Default for RemoteSearchCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AppState {
     pub screener: Arc<Mutex<ScreenerState>>,
     pub feed_status: Arc<Mutex<FeedStatus>>,
@@ -40,6 +92,7 @@ pub struct AppState {
     pub fng_cache: Arc<FngCache>,
     /// Carries the active scalping product to the WebSocket background task.
     pub scalp_ws_tx: tokio::sync::watch::Sender<String>,
+    pub remote_search_cache: Arc<Mutex<RemoteSearchCache>>,
 }
 
 impl AppState {
@@ -54,6 +107,7 @@ impl AppState {
             congress_sync: Arc::new(Mutex::new(CongressSyncProgress::default())),
             fng_cache: Arc::new(FngCache::new()),
             scalp_ws_tx,
+            remote_search_cache: Arc::new(Mutex::new(RemoteSearchCache::new())),
         }
     }
 }

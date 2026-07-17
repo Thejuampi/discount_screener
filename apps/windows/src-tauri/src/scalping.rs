@@ -16,7 +16,9 @@ fn closes_f64(c: &[HistoricalCandle]) -> Vec<f64> {
 }
 
 fn ema_series(v: &[f64], period: usize) -> Vec<f64> {
-    if v.is_empty() { return vec![]; }
+    if v.is_empty() {
+        return vec![];
+    }
     let k = 2.0 / (period as f64 + 1.0);
     let mut out = Vec::with_capacity(v.len());
     let mut e = v[0];
@@ -29,13 +31,17 @@ fn ema_series(v: &[f64], period: usize) -> Vec<f64> {
 }
 
 fn ema_last(v: &[f64], period: usize) -> Option<f64> {
-    if v.len() < period { return None; }
+    if v.len() < period {
+        return None;
+    }
     ema_series(v, period).last().copied()
 }
 
 /// (macd, signal, histogram) on the last bar.
 fn macd_hist(closes: &[f64]) -> Option<f64> {
-    if closes.len() < 35 { return None; }
+    if closes.len() < 35 {
+        return None;
+    }
     let fast = ema_series(closes, 12);
     let slow = ema_series(closes, 26);
     let macd: Vec<f64> = fast.iter().zip(slow.iter()).map(|(f, s)| f - s).collect();
@@ -46,12 +52,22 @@ fn macd_hist(closes: &[f64]) -> Option<f64> {
 /// Stochastic RSI on the last bar, 0..100.
 fn stoch_rsi(candles: &[HistoricalCandle]) -> Option<f64> {
     let closes: Vec<i64> = candles.iter().map(|c| c.close_cents).collect();
-    let rsi: Vec<f64> = compute_rsi_series(&closes, 14).into_iter().flatten().collect();
-    if rsi.len() < 14 { return None; }
+    let rsi: Vec<f64> = compute_rsi_series(&closes, 14)
+        .into_iter()
+        .flatten()
+        .collect();
+    if rsi.len() < 14 {
+        return None;
+    }
     let win = &rsi[rsi.len() - 14..];
     let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-    for &r in win { lo = lo.min(r); hi = hi.max(r); }
-    if hi - lo <= 0.0 { return Some(50.0); }
+    for &r in win {
+        lo = lo.min(r);
+        hi = hi.max(r);
+    }
+    if hi - lo <= 0.0 {
+        return Some(50.0);
+    }
     Some(((rsi.last()? - lo) / (hi - lo)) * 100.0)
 }
 
@@ -69,14 +85,18 @@ fn vwap(candles: &[HistoricalCandle]) -> Option<i64> {
         pv += typical * v;
         vol += v;
     }
-    if vol <= 0.0 { return None; }
+    if vol <= 0.0 {
+        return None;
+    }
     Some((pv / vol).round() as i64)
 }
 
 /// Supertrend direction: +1 (up), -1 (down), 0 (n/a). period=10, mult=3.
 fn supertrend_dir(candles: &[HistoricalCandle]) -> i8 {
     let n = candles.len();
-    if n < 12 { return 0; }
+    if n < 12 {
+        return 0;
+    }
     let period = 10usize;
     let mult = 3.0f64;
     let mut tr = vec![0.0f64; n];
@@ -101,8 +121,11 @@ fn supertrend_dir(candles: &[HistoricalCandle]) -> i8 {
         let pclose = candles[i - 1].close_cents as f64;
         fub = if bub < fub || pclose > fub { bub } else { fub };
         flb = if blb > flb || pclose < flb { blb } else { flb };
-        if close > fub { dir = 1; }
-        else if close < flb { dir = -1; }
+        if close > fub {
+            dir = 1;
+        } else if close < flb {
+            dir = -1;
+        }
     }
     dir
 }
@@ -136,11 +159,23 @@ fn analyze_tf(tf: &str, c: &[HistoricalCandle]) -> TimeframeAnalysis {
     // Trend from EMA stack (price-relative), reinforced by Supertrend.
     let trend = match (ema9, ema21, ema50) {
         (Some(e9), Some(e21), Some(e50)) => {
-            if e9 > e21 && e21 > e50 && st >= 0 { "Bull" }
-            else if e9 < e21 && e21 < e50 && st <= 0 { "Bear" }
-            else { "Neutral" }
+            if e9 > e21 && e21 > e50 && st >= 0 {
+                "Bull"
+            } else if e9 < e21 && e21 < e50 && st <= 0 {
+                "Bear"
+            } else {
+                "Neutral"
+            }
         }
-        _ => if st > 0 { "Bull" } else if st < 0 { "Bear" } else { "Neutral" },
+        _ => {
+            if st > 0 {
+                "Bull"
+            } else if st < 0 {
+                "Bear"
+            } else {
+                "Neutral"
+            }
+        }
     };
 
     TimeframeAnalysis {
@@ -164,7 +199,9 @@ fn analyze_tf(tf: &str, c: &[HistoricalCandle]) -> TimeframeAnalysis {
 /// Basic HH/HL vs LH/LL read from the last swing pivots.
 fn market_structure(c: &[HistoricalCandle]) -> &'static str {
     let n = c.len();
-    if n < 20 { return "Mixed"; }
+    if n < 20 {
+        return "Mixed";
+    }
     // Compare the two most recent ~10-bar swing highs and lows.
     let half = &c[n - 20..n - 10];
     let recent = &c[n - 10..];
@@ -172,9 +209,13 @@ fn market_structure(c: &[HistoricalCandle]) -> &'static str {
     let min = |s: &[HistoricalCandle]| s.iter().map(|x| x.low_cents).min().unwrap_or(0);
     let (h1, h2) = (max(half), max(recent));
     let (l1, l2) = (min(half), min(recent));
-    if h2 > h1 && l2 > l1 { "HH-HL" }
-    else if h2 < h1 && l2 < l1 { "LH-LL" }
-    else { "Mixed" }
+    if h2 > h1 && l2 > l1 {
+        "HH-HL"
+    } else if h2 < h1 && l2 < l1 {
+        "LH-LL"
+    } else {
+        "Mixed"
+    }
 }
 
 // ── Scoring ─────────────────────────────────────────────────────────────────────
@@ -224,27 +265,51 @@ pub struct ScalpAnalysis {
 }
 
 fn dir_of(trend: &str) -> i32 {
-    match trend { "Bull" => 1, "Bear" => -1, _ => 0 }
+    match trend {
+        "Bull" => 1,
+        "Bear" => -1,
+        _ => 0,
+    }
 }
 
 /// Build the weighted score + signal from the per-TF reads.
 /// Hierarchy: 4H/1H bias, 15m setup, 5m entry, 1m timing.
-fn score_and_signal(product: &str, tfs: &[TimeframeAnalysis], rr: f64, fee_pct: f64, smc: &crate::smc::SmcAnalysis) -> (ScalpScore, ScalpSignal) {
+fn score_and_signal(
+    product: &str,
+    tfs: &[TimeframeAnalysis],
+    rr: f64,
+    fee_pct: f64,
+    smc: &crate::smc::SmcAnalysis,
+) -> (ScalpScore, ScalpSignal) {
     let get = |name: &str| tfs.iter().find(|t| t.tf == name);
-    let h4 = get("4h"); let h1 = get("1h"); let m15 = get("15m");
-    let m5 = get("5m"); let m1 = get("1m");
+    let h4 = get("4h");
+    let h1 = get("1h");
+    let m15 = get("15m");
+    let m5 = get("5m");
+    let m1 = get("1m");
     let mut reasons: Vec<String> = Vec::new();
 
     // ── Directional consensus (higher TFs weigh more) ──
-    let weighted: i32 =
-        h4.map(|t| dir_of(t.trend) * 3).unwrap_or(0) +
-        h1.map(|t| dir_of(t.trend) * 3).unwrap_or(0) +
-        m15.map(|t| dir_of(t.trend) * 2).unwrap_or(0) +
-        m5.map(|t| dir_of(t.trend) * 1).unwrap_or(0) +
-        m1.map(|t| dir_of(t.trend) * 1).unwrap_or(0);
+    let weighted: i32 = h4.map(|t| dir_of(t.trend) * 3).unwrap_or(0)
+        + h1.map(|t| dir_of(t.trend) * 3).unwrap_or(0)
+        + m15.map(|t| dir_of(t.trend) * 2).unwrap_or(0)
+        + m5.map(|t| dir_of(t.trend) * 1).unwrap_or(0)
+        + m1.map(|t| dir_of(t.trend) * 1).unwrap_or(0);
     let max_w = 10;
-    let bias: &'static str = if weighted >= 3 { "Long" } else if weighted <= -3 { "Short" } else { "Neutral" };
-    let dir: i32 = if bias == "Long" { 1 } else if bias == "Short" { -1 } else { 0 };
+    let bias: &'static str = if weighted >= 3 {
+        "Long"
+    } else if weighted <= -3 {
+        "Short"
+    } else {
+        "Neutral"
+    };
+    let dir: i32 = if bias == "Long" {
+        1
+    } else if bias == "Short" {
+        -1
+    } else {
+        0
+    };
 
     // ── Trend (0..100): magnitude of alignment ──
     let trend_score = ((weighted.abs() as f64 / max_w as f64) * 100.0).round() as i32;
@@ -255,39 +320,76 @@ fn score_and_signal(product: &str, tfs: &[TimeframeAnalysis], rr: f64, fee_pct: 
     }
 
     // ── Momentum (0..100) on the entry TF (5m) ──
-    let momentum = m5.map(|t| {
-        let mut s = 50i32;
-        if let Some(h) = t.macd_hist_cents { if (h > 0) == (dir > 0) && dir != 0 { s += 20; reasons.push("MACD a favor en 5m".into()); } else if dir != 0 { s -= 15; } }
-        if let Some(r) = t.rsi {
-            if dir > 0 && r > 50.0 { s += 15; } else if dir < 0 && r < 50.0 { s += 15; }
-            if r > 80.0 || r < 20.0 { s -= 10; } // exhaustion
-        }
-        if let Some(sr) = t.stoch_rsi {
-            if dir > 0 && sr < 80.0 && sr > 20.0 { s += 10; }
-            if dir < 0 && sr > 20.0 && sr < 80.0 { s += 10; }
-        }
-        s.clamp(0, 100)
-    }).unwrap_or(50);
+    let momentum = m5
+        .map(|t| {
+            let mut s = 50i32;
+            if let Some(h) = t.macd_hist_cents {
+                if (h > 0) == (dir > 0) && dir != 0 {
+                    s += 20;
+                    reasons.push("MACD a favor en 5m".into());
+                } else if dir != 0 {
+                    s -= 15;
+                }
+            }
+            if let Some(r) = t.rsi {
+                if dir > 0 && r > 50.0 {
+                    s += 15;
+                } else if dir < 0 && r < 50.0 {
+                    s += 15;
+                }
+                if r > 80.0 || r < 20.0 {
+                    s -= 10;
+                } // exhaustion
+            }
+            if let Some(sr) = t.stoch_rsi {
+                if dir > 0 && sr < 80.0 && sr > 20.0 {
+                    s += 10;
+                }
+                if dir < 0 && sr > 20.0 && sr < 80.0 {
+                    s += 10;
+                }
+            }
+            s.clamp(0, 100)
+        })
+        .unwrap_or(50);
 
     // ── Volume (0..100): price vs VWAP on entry TF ──
-    let volume = m5.map(|t| {
-        let mut s = 50i32;
-        if let Some(vw) = t.vwap_cents {
-            if dir > 0 && t.close_cents > vw { s += 25; reasons.push("Precio sobre VWAP (5m)".into()); }
-            else if dir < 0 && t.close_cents < vw { s += 25; reasons.push("Precio bajo VWAP (5m)".into()); }
-            else if dir != 0 { s -= 15; }
-        }
-        s.clamp(0, 100)
-    }).unwrap_or(50);
+    let volume = m5
+        .map(|t| {
+            let mut s = 50i32;
+            if let Some(vw) = t.vwap_cents {
+                if dir > 0 && t.close_cents > vw {
+                    s += 25;
+                    reasons.push("Precio sobre VWAP (5m)".into());
+                } else if dir < 0 && t.close_cents < vw {
+                    s += 25;
+                    reasons.push("Precio bajo VWAP (5m)".into());
+                } else if dir != 0 {
+                    s -= 15;
+                }
+            }
+            s.clamp(0, 100)
+        })
+        .unwrap_or(50);
 
     // ── Structure (0..100) on 15m + 1h ──
     let structure = {
-        let want = if dir > 0 { "HH-HL" } else if dir < 0 { "LH-LL" } else { "" };
+        let want = if dir > 0 {
+            "HH-HL"
+        } else if dir < 0 {
+            "LH-LL"
+        } else {
+            ""
+        };
         let mut s = 50i32;
         for t in [m15, h1].into_iter().flatten() {
-            if !want.is_empty() && t.structure == want { s += 20; }
-            else if t.structure == "Mixed" { s -= 5; }
-            else if !want.is_empty() { s -= 15; }
+            if !want.is_empty() && t.structure == want {
+                s += 20;
+            } else if t.structure == "Mixed" {
+                s -= 5;
+            } else if !want.is_empty() {
+                s -= 15;
+            }
         }
         if m15.map(|t| t.structure) == Some(want) && !want.is_empty() {
             reasons.push(format!("Estructura {} en 15m", want));
@@ -296,10 +398,21 @@ fn score_and_signal(product: &str, tfs: &[TimeframeAnalysis], rr: f64, fee_pct: 
         for e in &smc.events {
             let with_bias = (e.direction == "Bullish") == (dir > 0) && dir != 0;
             match e.kind {
-                "BOS" if with_bias => { s += 12; reasons.push(format!("BOS {} confirma la estructura", e.direction)); }
-                "BOS" if dir != 0 => { s -= 8; }
-                "CHoCH" if !with_bias && dir != 0 => { s -= 12; reasons.push(format!("⚠️ CHoCH {} — posible reversión", e.direction)); }
-                "LiquiditySweep" if with_bias => { s += 6; reasons.push("Liquidity sweep a favor (stop hunt)".into()); }
+                "BOS" if with_bias => {
+                    s += 12;
+                    reasons.push(format!("BOS {} confirma la estructura", e.direction));
+                }
+                "BOS" if dir != 0 => {
+                    s -= 8;
+                }
+                "CHoCH" if !with_bias && dir != 0 => {
+                    s -= 12;
+                    reasons.push(format!("⚠️ CHoCH {} — posible reversión", e.direction));
+                }
+                "LiquiditySweep" if with_bias => {
+                    s += 6;
+                    reasons.push("Liquidity sweep a favor (stop hunt)".into());
+                }
                 _ => {}
             }
         }
@@ -307,28 +420,58 @@ fn score_and_signal(product: &str, tfs: &[TimeframeAnalysis], rr: f64, fee_pct: 
     };
 
     // ── Risk (0..100): ATR sanity on entry TF ──
-    let entry = m5.and_then(|t| if t.close_cents > 0 { Some(t.close_cents) } else { None }).unwrap_or(0);
+    let entry = m5
+        .and_then(|t| {
+            if t.close_cents > 0 {
+                Some(t.close_cents)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
     let atr = m5.and_then(|t| t.atr_cents).unwrap_or(0);
-    let atr_pct = if entry > 0 { atr as f64 / entry as f64 * 100.0 } else { 0.0 };
+    let atr_pct = if entry > 0 {
+        atr as f64 / entry as f64 * 100.0
+    } else {
+        0.0
+    };
     let risk = {
         // Sweet spot ~0.15%..0.8% ATR per 5m candle for scalping.
-        if atr_pct == 0.0 { 40 }
-        else if atr_pct < 0.05 { 30 }            // too quiet
-        else if atr_pct <= 0.8 { 90 }            // healthy
-        else if atr_pct <= 1.5 { 60 }            // wide
-        else { 35 }                              // wild
+        if atr_pct == 0.0 {
+            40
+        } else if atr_pct < 0.05 {
+            30
+        }
+        // too quiet
+        else if atr_pct <= 0.8 {
+            90
+        }
+        // healthy
+        else if atr_pct <= 1.5 {
+            60
+        }
+        // wide
+        else {
+            35
+        } // wild
     };
 
     let total = ((trend_score as f64) * 0.30
         + (momentum as f64) * 0.20
         + (volume as f64) * 0.20
         + (structure as f64) * 0.20
-        + (risk as f64) * 0.10).round() as i32;
+        + (risk as f64) * 0.10)
+        .round() as i32;
 
-    let label = if total >= 90 { "High-Conviction" }
-        else if total >= 75 { "Strong" }
-        else if total >= 50 { "Weak" }
-        else { "No-Trade" };
+    let label = if total >= 90 {
+        "High-Conviction"
+    } else if total >= 75 {
+        "Strong"
+    } else if total >= 50 {
+        "Weak"
+    } else {
+        "No-Trade"
+    };
 
     // Round-trip fee = fee on entry + fee on exit.
     let round_trip_fee_pct = (fee_pct * 2.0 * 100.0).round() / 100.0;
@@ -340,48 +483,112 @@ fn score_and_signal(product: &str, tfs: &[TimeframeAnalysis], rr: f64, fee_pct: 
         let reward1 = (stop_dist as f64 * rr).round() as i64;
         let reward2 = (stop_dist as f64 * rr * 2.0).round() as i64;
         let (stop, tp1, tp2, entry_lo, entry_hi) = if dir > 0 {
-            (entry - stop_dist, entry + reward1, entry + reward2,
-             entry - (atr as f64 * 0.25) as i64, entry + (atr as f64 * 0.1) as i64)
+            (
+                entry - stop_dist,
+                entry + reward1,
+                entry + reward2,
+                entry - (atr as f64 * 0.25) as i64,
+                entry + (atr as f64 * 0.1) as i64,
+            )
         } else {
-            (entry + stop_dist, entry - reward1, entry - reward2,
-             entry - (atr as f64 * 0.1) as i64, entry + (atr as f64 * 0.25) as i64)
+            (
+                entry + stop_dist,
+                entry - reward1,
+                entry - reward2,
+                entry - (atr as f64 * 0.1) as i64,
+                entry + (atr as f64 * 0.25) as i64,
+            )
         };
         let entry_mid = (entry_lo + entry_hi) as f64 / 2.0;
-        let gross = |tp: i64| if entry_mid > 0.0 {
-            (if dir > 0 { tp as f64 - entry_mid } else { entry_mid - tp as f64 }) / entry_mid * 100.0
-        } else { 0.0 };
+        let gross = |tp: i64| {
+            if entry_mid > 0.0 {
+                (if dir > 0 {
+                    tp as f64 - entry_mid
+                } else {
+                    entry_mid - tp as f64
+                }) / entry_mid
+                    * 100.0
+            } else {
+                0.0
+            }
+        };
         let tp1_gross = gross(tp1);
         let tp1_net = tp1_gross - round_trip_fee_pct;
         let tp2_net = gross(tp2) - round_trip_fee_pct;
         let fee_viable = tp1_net > 0.0;
 
-        reasons.push(format!("Stop 1.5×ATR ({:.2}%), objetivo {:.1}:1", atr_pct * 1.5, rr));
+        reasons.push(format!(
+            "Stop 1.5×ATR ({:.2}%), objetivo {:.1}:1",
+            atr_pct * 1.5,
+            rr
+        ));
         if fee_viable {
-            reasons.push(format!("Neto tras fees ({:.2}% round-trip): TP1 +{:.2}%", round_trip_fee_pct, tp1_net));
+            reasons.push(format!(
+                "Neto tras fees ({:.2}% round-trip): TP1 +{:.2}%",
+                round_trip_fee_pct, tp1_net
+            ));
         } else {
-            reasons.push(format!("⚠️ TP1 ({:.2}%) NO supera fees round-trip ({:.2}%) — no rentable", tp1_gross, round_trip_fee_pct));
+            reasons.push(format!(
+                "⚠️ TP1 ({:.2}%) NO supera fees round-trip ({:.2}%) — no rentable",
+                tp1_gross, round_trip_fee_pct
+            ));
         }
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         ScalpSignal {
-            side, entry_low_cents: entry_lo, entry_high_cents: entry_hi,
-            stop_cents: stop, tp1_cents: tp1, tp2_cents: tp2,
-            risk_reward: (rr * 100.0).round() / 100.0, confidence: total,
-            fee_pct: r2(fee_pct), round_trip_fee_pct,
-            tp1_gross_pct: r2(tp1_gross), tp1_net_pct: r2(tp1_net), tp2_net_pct: r2(tp2_net),
-            fee_viable, reasons,
+            side,
+            entry_low_cents: entry_lo,
+            entry_high_cents: entry_hi,
+            stop_cents: stop,
+            tp1_cents: tp1,
+            tp2_cents: tp2,
+            risk_reward: (rr * 100.0).round() / 100.0,
+            confidence: total,
+            fee_pct: r2(fee_pct),
+            round_trip_fee_pct,
+            tp1_gross_pct: r2(tp1_gross),
+            tp1_net_pct: r2(tp1_net),
+            tp2_net_pct: r2(tp2_net),
+            fee_viable,
+            reasons,
         }
     } else {
         ScalpSignal {
-            side: "NONE", entry_low_cents: 0, entry_high_cents: 0, stop_cents: 0,
-            tp1_cents: 0, tp2_cents: 0, risk_reward: 0.0, confidence: total,
-            fee_pct: (fee_pct * 100.0).round() / 100.0, round_trip_fee_pct,
-            tp1_gross_pct: 0.0, tp1_net_pct: 0.0, tp2_net_pct: 0.0, fee_viable: false,
-            reasons: if total < 50 { vec![format!("Score {} < 50: sin trade", total)] } else { vec!["Sin bias direccional claro".into()] },
+            side: "NONE",
+            entry_low_cents: 0,
+            entry_high_cents: 0,
+            stop_cents: 0,
+            tp1_cents: 0,
+            tp2_cents: 0,
+            risk_reward: 0.0,
+            confidence: total,
+            fee_pct: (fee_pct * 100.0).round() / 100.0,
+            round_trip_fee_pct,
+            tp1_gross_pct: 0.0,
+            tp1_net_pct: 0.0,
+            tp2_net_pct: 0.0,
+            fee_viable: false,
+            reasons: if total < 50 {
+                vec![format!("Score {} < 50: sin trade", total)]
+            } else {
+                vec!["Sin bias direccional claro".into()]
+            },
         }
     };
     let _ = product;
 
-    (ScalpScore { trend: trend_score, momentum, volume, structure, risk, total, label, bias }, signal)
+    (
+        ScalpScore {
+            trend: trend_score,
+            momentum,
+            volume,
+            structure,
+            risk,
+            total,
+            label,
+            bias,
+        },
+        signal,
+    )
 }
 
 /// Full scalping analysis for `product` across all 6 timeframes.
@@ -394,8 +601,11 @@ pub fn analyze(product: &str, rr: f64, fee_pct: f64) -> Result<ScalpAnalysis, St
     for tf in crypto_md::SCALP_TIMEFRAMES {
         match crypto_md::fetch_candles(product, tf) {
             Ok(c) if c.len() >= 15 => {
-                if *tf == "15m" { smc_candles = Some(("15m".into(), c.clone())); }
-                else if *tf == "5m" && smc_candles.is_none() { smc_candles = Some(("5m".into(), c.clone())); }
+                if *tf == "15m" {
+                    smc_candles = Some(("15m".into(), c.clone()));
+                } else if *tf == "5m" && smc_candles.is_none() {
+                    smc_candles = Some(("5m".into(), c.clone()));
+                }
                 tfs.push(analyze_tf(tf, &c));
             }
             Ok(_) => {}
@@ -416,6 +626,17 @@ pub fn analyze(product: &str, rr: f64, fee_pct: f64) -> Result<ScalpAnalysis, St
     };
     let (score, signal) = score_and_signal(product, &tfs, rr, fee_pct, &smc);
     let generated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    Ok(ScalpAnalysis { product: product.to_uppercase(), timeframes: tfs, score, signal, smc, patterns, fib, generated_at })
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(ScalpAnalysis {
+        product: product.to_uppercase(),
+        timeframes: tfs,
+        score,
+        signal,
+        smc,
+        patterns,
+        fib,
+        generated_at,
+    })
 }

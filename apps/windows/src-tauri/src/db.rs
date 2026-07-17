@@ -4,7 +4,6 @@
 /// can later ask "what happened to stocks that were Act on YYYY-MM-DD?".
 ///
 /// Storage: a single file in the OS-appropriate app data directory.
-
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -244,36 +243,51 @@ impl Db {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
         }
-        let conn = Connection::open(&path)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
-        conn.execute_batch(SCHEMA).map_err(|e| format!("schema: {}", e))?;
+        let conn =
+            Connection::open(&path).map_err(|e| format!("open {}: {}", path.display(), e))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| format!("schema: {}", e))?;
         // WAL mode: better concurrent reads while writer is active
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Insert a batch of snapshots in a single transaction (much faster than row-by-row).
     /// ON CONFLICT (same symbol + captured_at) → ignore: we never overwrite history.
     pub fn insert_snapshots(&self, rows: &[SnapshotInsert]) -> Result<usize, String> {
-        if rows.is_empty() { return Ok(0); }
+        if rows.is_empty() {
+            return Ok(0);
+        }
         let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let tx = conn.transaction().map_err(|e| format!("begin: {}", e))?;
         {
-            let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO snapshots \
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO snapshots \
                  (symbol, captured_at, market_price_cents, intrinsic_value_cents, gap_bps, \
                   decision, composite_score, fundamentals_score, technical_score, \
                   forecast_score, confidence) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-            ).map_err(|e| format!("prepare: {}", e))?;
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )
+                .map_err(|e| format!("prepare: {}", e))?;
             for r in rows {
                 stmt.execute(params![
-                    r.symbol, r.captured_at, r.market_price_cents, r.intrinsic_value_cents,
-                    r.gap_bps, r.decision, r.composite_score,
-                    r.fundamentals_score, r.technical_score, r.forecast_score,
+                    r.symbol,
+                    r.captured_at,
+                    r.market_price_cents,
+                    r.intrinsic_value_cents,
+                    r.gap_bps,
+                    r.decision,
+                    r.composite_score,
+                    r.fundamentals_score,
+                    r.technical_score,
+                    r.forecast_score,
                     r.confidence,
-                ]).map_err(|e| format!("insert {}: {}", r.symbol, e))?;
+                ])
+                .map_err(|e| format!("insert {}: {}", r.symbol, e))?;
             }
         }
         tx.commit().map_err(|e| format!("commit: {}", e))?;
@@ -284,29 +298,33 @@ impl Db {
     pub fn symbol_history(&self, symbol: &str, days: i64) -> Result<Vec<HistorySnapshot>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let cutoff = now_secs() - days * 86_400;
-        let mut stmt = conn.prepare(
-            "SELECT symbol, captured_at, market_price_cents, intrinsic_value_cents, gap_bps, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT symbol, captured_at, market_price_cents, intrinsic_value_cents, gap_bps, \
                     decision, composite_score, fundamentals_score, technical_score, \
                     forecast_score, confidence \
              FROM snapshots \
              WHERE symbol = ?1 AND captured_at >= ?2 \
-             ORDER BY captured_at ASC"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![symbol, cutoff], |r| {
-            Ok(HistorySnapshot {
-                symbol: r.get(0)?,
-                captured_at: r.get(1)?,
-                market_price_cents: r.get(2)?,
-                intrinsic_value_cents: r.get(3)?,
-                gap_bps: r.get(4)?,
-                decision: r.get(5)?,
-                composite_score: r.get(6)?,
-                fundamentals_score: r.get(7)?,
-                technical_score: r.get(8)?,
-                forecast_score: r.get(9)?,
-                confidence: r.get(10)?,
+             ORDER BY captured_at ASC",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![symbol, cutoff], |r| {
+                Ok(HistorySnapshot {
+                    symbol: r.get(0)?,
+                    captured_at: r.get(1)?,
+                    market_price_cents: r.get(2)?,
+                    intrinsic_value_cents: r.get(3)?,
+                    gap_bps: r.get(4)?,
+                    decision: r.get(5)?,
+                    composite_score: r.get(6)?,
+                    fundamentals_score: r.get(7)?,
+                    technical_score: r.get(8)?,
+                    forecast_score: r.get(9)?,
+                    confidence: r.get(10)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| format!("row: {}", e))?);
@@ -324,8 +342,9 @@ impl Db {
 
         // For each symbol: find the snapshot closest to cutoff_target with the matching decision,
         // and the most recent snapshot overall.
-        let mut stmt = conn.prepare(
-            "WITH entries AS (
+        let mut stmt = conn
+            .prepare(
+                "WITH entries AS (
                  SELECT symbol, market_price_cents AS entry_price, captured_at AS entry_at,
                         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY captured_at ASC) AS rn
                  FROM snapshots
@@ -340,23 +359,31 @@ impl Db {
              SELECT e.symbol, e.entry_price, e.entry_at, l.now_price
              FROM entries e
              JOIN latest l ON l.symbol = e.symbol AND l.rn = 1
-             WHERE e.rn = 1"
-        ).map_err(|e| format!("prepare: {}", e))?;
+             WHERE e.rn = 1",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
 
-        let rows = stmt.query_map(params![decision, cutoff_target - 86_400, cutoff_window], |r| {
-            let entry_price: i64 = r.get(1)?;
-            let now_price: i64 = r.get(3)?;
-            let return_bps = if entry_price > 0 {
-                ((now_price - entry_price) as f64 / entry_price as f64 * 10_000.0) as i32
-            } else { 0 };
-            Ok(BacktestEntry {
-                symbol: r.get(0)?,
-                entry_price_cents: entry_price,
-                entry_at: r.get(2)?,
-                current_price_cents: now_price,
-                return_bps,
-            })
-        }).map_err(|e| format!("query: {}", e))?;
+        let rows = stmt
+            .query_map(
+                params![decision, cutoff_target - 86_400, cutoff_window],
+                |r| {
+                    let entry_price: i64 = r.get(1)?;
+                    let now_price: i64 = r.get(3)?;
+                    let return_bps = if entry_price > 0 {
+                        ((now_price - entry_price) as f64 / entry_price as f64 * 10_000.0) as i32
+                    } else {
+                        0
+                    };
+                    Ok(BacktestEntry {
+                        symbol: r.get(0)?,
+                        entry_price_cents: entry_price,
+                        entry_at: r.get(2)?,
+                        current_price_cents: now_price,
+                        return_bps,
+                    })
+                },
+            )
+            .map_err(|e| format!("query: {}", e))?;
 
         let mut entries: Vec<BacktestEntry> = Vec::new();
         for r in rows {
@@ -376,8 +403,8 @@ impl Db {
             });
         }
 
-        let mean_return_bps = entries.iter().map(|e| e.return_bps as i64).sum::<i64>() as i32
-            / entries.len() as i32;
+        let mean_return_bps =
+            entries.iter().map(|e| e.return_bps as i64).sum::<i64>() as i32 / entries.len() as i32;
         let wins = entries.iter().filter(|e| e.return_bps > 0).count();
         let win_rate_pct = (wins * 100 / entries.len()) as i32;
 
@@ -425,18 +452,42 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
-                r.symbol, r.company_name, r.exchange, r.rating, r.rating_label, r.percentile, r.previous_rating,
-                r.report_date, r.data_as_of, r.price_at_report_cents, r.market_cap_billions, r.beta,
-                r.sector, r.industry, r.price_volatility,
-                r.growth_grade, r.quality_grade, r.sentiment_grade, r.stability_grade, r.valuation_grade,
-                r.eps_forecast_y1, r.eps_forecast_y2, r.eps_growth_5yr_pct, r.esg_rating,
-                r.source_filename, r.imported_at_epoch,
+                r.symbol,
+                r.company_name,
+                r.exchange,
+                r.rating,
+                r.rating_label,
+                r.percentile,
+                r.previous_rating,
+                r.report_date,
+                r.data_as_of,
+                r.price_at_report_cents,
+                r.market_cap_billions,
+                r.beta,
+                r.sector,
+                r.industry,
+                r.price_volatility,
+                r.growth_grade,
+                r.quality_grade,
+                r.sentiment_grade,
+                r.stability_grade,
+                r.valuation_grade,
+                r.eps_forecast_y1,
+                r.eps_forecast_y2,
+                r.eps_growth_5yr_pct,
+                r.esg_rating,
+                r.source_filename,
+                r.imported_at_epoch,
             ],
-        ).map_err(|e| format!("upsert schwab: {}", e))?;
+        )
+        .map_err(|e| format!("upsert schwab: {}", e))?;
         Ok(())
     }
 
-    pub fn get_schwab_report(&self, symbol: &str) -> Result<Option<crate::schwab::SchwabReport>, String> {
+    pub fn get_schwab_report(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<crate::schwab::SchwabReport>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let mut stmt = conn.prepare(
             "SELECT symbol, company_name, exchange, rating, rating_label, percentile, previous_rating,
@@ -447,38 +498,40 @@ impl Db {
                     source_filename, imported_at_epoch
              FROM schwab_reports WHERE symbol = ?1"
         ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![symbol], |row| {
-            Ok(crate::schwab::SchwabReport {
-                symbol:               row.get(0)?,
-                company_name:         row.get(1)?,
-                exchange:             row.get(2)?,
-                rating:               row.get(3)?,
-                rating_label:         row.get(4)?,
-                percentile:           row.get(5)?,
-                previous_rating:      row.get(6)?,
-                report_date:          row.get(7)?,
-                data_as_of:           row.get(8)?,
-                price_at_report_cents: row.get(9)?,
-                market_cap_billions:  row.get(10)?,
-                beta:                 row.get(11)?,
-                sector:               row.get(12)?,
-                industry:             row.get(13)?,
-                price_volatility:     row.get(14)?,
-                growth_grade:         row.get(15)?,
-                quality_grade:        row.get(16)?,
-                sentiment_grade:      row.get(17)?,
-                stability_grade:      row.get(18)?,
-                valuation_grade:      row.get(19)?,
-                eps_forecast_y1:      row.get(20)?,
-                eps_forecast_y2:      row.get(21)?,
-                eps_growth_5yr_pct:   row.get(22)?,
-                esg_rating:           row.get(23)?,
-                cfra_stars:           None,
-                morningstar_stars:    None,
-                source_filename:      row.get(24)?,
-                imported_at_epoch:    row.get(25)?,
+        let rows = stmt
+            .query_map(params![symbol], |row| {
+                Ok(crate::schwab::SchwabReport {
+                    symbol: row.get(0)?,
+                    company_name: row.get(1)?,
+                    exchange: row.get(2)?,
+                    rating: row.get(3)?,
+                    rating_label: row.get(4)?,
+                    percentile: row.get(5)?,
+                    previous_rating: row.get(6)?,
+                    report_date: row.get(7)?,
+                    data_as_of: row.get(8)?,
+                    price_at_report_cents: row.get(9)?,
+                    market_cap_billions: row.get(10)?,
+                    beta: row.get(11)?,
+                    sector: row.get(12)?,
+                    industry: row.get(13)?,
+                    price_volatility: row.get(14)?,
+                    growth_grade: row.get(15)?,
+                    quality_grade: row.get(16)?,
+                    sentiment_grade: row.get(17)?,
+                    stability_grade: row.get(18)?,
+                    valuation_grade: row.get(19)?,
+                    eps_forecast_y1: row.get(20)?,
+                    eps_forecast_y2: row.get(21)?,
+                    eps_growth_5yr_pct: row.get(22)?,
+                    esg_rating: row.get(23)?,
+                    cfra_stars: None,
+                    morningstar_stars: None,
+                    source_filename: row.get(24)?,
+                    imported_at_epoch: row.get(25)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         for r in rows {
             return Ok(Some(r.map_err(|e| format!("row: {}", e))?));
         }
@@ -493,8 +546,11 @@ impl Db {
 
     pub fn delete_schwab_report(&self, symbol: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        conn.execute("DELETE FROM schwab_reports WHERE symbol = ?1", params![symbol])
-            .map_err(|e| format!("delete schwab: {}", e))?;
+        conn.execute(
+            "DELETE FROM schwab_reports WHERE symbol = ?1",
+            params![symbol],
+        )
+        .map_err(|e| format!("delete schwab: {}", e))?;
         Ok(())
     }
 
@@ -515,7 +571,8 @@ impl Db {
              (symbol, quantity, avg_cost_cents, opened_at, notes, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
             params![symbol, quantity, avg_cost_cents, opened_at, notes, now],
-        ).map_err(|e| format!("portfolio add: {}", e))?;
+        )
+        .map_err(|e| format!("portfolio add: {}", e))?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -533,7 +590,8 @@ impl Db {
              SET quantity = ?2, avg_cost_cents = ?3, opened_at = ?4, notes = ?5, updated_at = ?6
              WHERE id = ?1",
             params![id, quantity, avg_cost_cents, opened_at, notes, now_secs()],
-        ).map_err(|e| format!("portfolio update: {}", e))?;
+        )
+        .map_err(|e| format!("portfolio update: {}", e))?;
         Ok(())
     }
 
@@ -547,11 +605,14 @@ impl Db {
         opened_at: Option<String>,
     ) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let existing: Option<i64> = conn.query_row(
-            "SELECT id FROM portfolio_positions WHERE symbol = ?1 LIMIT 1",
-            params![symbol],
-            |r| r.get(0),
-        ).optional().map_err(|e| format!("portfolio lookup: {}", e))?;
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM portfolio_positions WHERE symbol = ?1 LIMIT 1",
+                params![symbol],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("portfolio lookup: {}", e))?;
         let now = now_secs();
         match existing {
             Some(id) => {
@@ -560,7 +621,8 @@ impl Db {
                      SET quantity = ?2, avg_cost_cents = ?3, opened_at = ?4, updated_at = ?5
                      WHERE id = ?1",
                     params![id, quantity, avg_cost_cents, opened_at, now],
-                ).map_err(|e| format!("portfolio upsert-update: {}", e))?;
+                )
+                .map_err(|e| format!("portfolio upsert-update: {}", e))?;
                 Ok(false)
             }
             None => {
@@ -569,7 +631,8 @@ impl Db {
                      (symbol, quantity, avg_cost_cents, opened_at, notes, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
                     params![symbol, quantity, avg_cost_cents, opened_at, now],
-                ).map_err(|e| format!("portfolio upsert-insert: {}", e))?;
+                )
+                .map_err(|e| format!("portfolio upsert-insert: {}", e))?;
                 Ok(true)
             }
         }
@@ -584,22 +647,28 @@ impl Db {
 
     pub fn portfolio_list(&self) -> Result<Vec<PortfolioPosition>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, symbol, quantity, avg_cost_cents, opened_at, notes
-             FROM portfolio_positions ORDER BY symbol ASC"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map([], |r| {
-            Ok(PortfolioPosition {
-                id: r.get(0)?,
-                symbol: r.get(1)?,
-                quantity: r.get(2)?,
-                avg_cost_cents: r.get(3)?,
-                opened_at: r.get(4)?,
-                notes: r.get(5)?,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, symbol, quantity, avg_cost_cents, opened_at, notes
+             FROM portfolio_positions ORDER BY symbol ASC",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PortfolioPosition {
+                    id: r.get(0)?,
+                    symbol: r.get(1)?,
+                    quantity: r.get(2)?,
+                    avg_cost_cents: r.get(3)?,
+                    opened_at: r.get(4)?,
+                    notes: r.get(5)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
@@ -619,8 +688,17 @@ impl Db {
             "INSERT INTO journal_entries
              (symbol, action, thesis, price_cents, setup_score, setup_label, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![symbol, action, thesis, price_cents, setup_score, setup_label, now_secs()],
-        ).map_err(|e| format!("journal add: {}", e))?;
+            params![
+                symbol,
+                action,
+                thesis,
+                price_cents,
+                setup_score,
+                setup_label,
+                now_secs()
+            ],
+        )
+        .map_err(|e| format!("journal add: {}", e))?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -637,7 +715,8 @@ impl Db {
              SET outcome = ?2, exit_price_cents = ?3, closed_at = ?4
              WHERE id = ?1",
             params![id, outcome, exit_price_cents, now_secs()],
-        ).map_err(|e| format!("journal close: {}", e))?;
+        )
+        .map_err(|e| format!("journal close: {}", e))?;
         Ok(())
     }
 
@@ -650,28 +729,34 @@ impl Db {
 
     pub fn journal_list(&self) -> Result<Vec<JournalEntry>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, symbol, action, thesis, price_cents, setup_score, setup_label,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, symbol, action, thesis, price_cents, setup_score, setup_label,
                     created_at, outcome, exit_price_cents, closed_at
-             FROM journal_entries ORDER BY created_at DESC"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map([], |r| {
-            Ok(JournalEntry {
-                id: r.get(0)?,
-                symbol: r.get(1)?,
-                action: r.get(2)?,
-                thesis: r.get(3)?,
-                price_cents: r.get(4)?,
-                setup_score: r.get(5)?,
-                setup_label: r.get(6)?,
-                created_at: r.get(7)?,
-                outcome: r.get(8)?,
-                exit_price_cents: r.get(9)?,
-                closed_at: r.get(10)?,
+             FROM journal_entries ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(JournalEntry {
+                    id: r.get(0)?,
+                    symbol: r.get(1)?,
+                    action: r.get(2)?,
+                    thesis: r.get(3)?,
+                    price_cents: r.get(4)?,
+                    setup_score: r.get(5)?,
+                    setup_label: r.get(6)?,
+                    created_at: r.get(7)?,
+                    outcome: r.get(8)?,
+                    exit_price_cents: r.get(9)?,
+                    closed_at: r.get(10)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
@@ -684,20 +769,29 @@ impl Db {
                     access_expires_at, refresh_expires_at
              FROM schwab_auth WHERE id = 1",
             [],
-            |r| Ok(SchwabAuth {
-                app_key: r.get(0)?,
-                secret: r.get(1)?,
-                callback: r.get(2)?,
-                access_token: r.get(3)?,
-                refresh_token: r.get(4)?,
-                access_expires_at: r.get(5)?,
-                refresh_expires_at: r.get(6)?,
-            }),
-        ).optional().map_err(|e| format!("schwab auth get: {}", e))
+            |r| {
+                Ok(SchwabAuth {
+                    app_key: r.get(0)?,
+                    secret: r.get(1)?,
+                    callback: r.get(2)?,
+                    access_token: r.get(3)?,
+                    refresh_token: r.get(4)?,
+                    access_expires_at: r.get(5)?,
+                    refresh_expires_at: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("schwab auth get: {}", e))
     }
 
     /// Store/replace the developer app credentials, clearing any existing tokens.
-    pub fn schwab_set_credentials(&self, app_key: &str, secret: &str, callback: &str) -> Result<(), String> {
+    pub fn schwab_set_credentials(
+        &self,
+        app_key: &str,
+        secret: &str,
+        callback: &str,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         conn.execute(
             "INSERT INTO schwab_auth (id, app_key, secret, callback, updated_at)
@@ -708,12 +802,17 @@ impl Db {
                access_expires_at = NULL, refresh_expires_at = NULL,
                updated_at = ?4",
             params![app_key, secret, callback, now_secs()],
-        ).map_err(|e| format!("schwab set creds: {}", e))?;
+        )
+        .map_err(|e| format!("schwab set creds: {}", e))?;
         Ok(())
     }
 
     pub fn schwab_set_tokens(
-        &self, access: &str, refresh: &str, access_exp: i64, refresh_exp: i64,
+        &self,
+        access: &str,
+        refresh: &str,
+        access_exp: i64,
+        refresh_exp: i64,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         conn.execute(
@@ -722,7 +821,8 @@ impl Db {
                access_expires_at = ?3, refresh_expires_at = ?4, updated_at = ?5
              WHERE id = 1",
             params![access, refresh, access_exp, refresh_exp, now_secs()],
-        ).map_err(|e| format!("schwab set tokens: {}", e))?;
+        )
+        .map_err(|e| format!("schwab set tokens: {}", e))?;
         Ok(())
     }
 
@@ -737,26 +837,36 @@ impl Db {
 
     pub fn email_config_get(&self) -> Result<EmailConfig, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let cfg = conn.query_row(
-            "SELECT smtp_host, smtp_port, username, password, from_email, to_email,
+        let cfg = conn
+            .query_row(
+                "SELECT smtp_host, smtp_port, username, password, from_email, to_email,
                     enabled, daily_digest, digest_hour, instant_alerts, last_digest_date
              FROM email_config WHERE id = 1",
-            [],
-            |r| Ok(EmailConfig {
-                smtp_host: r.get(0)?,
-                smtp_port: r.get(1)?,
-                username: r.get(2)?,
-                password: r.get(3)?,
-                from_email: r.get(4)?,
-                to_email: r.get(5)?,
-                enabled: r.get::<_, i64>(6)? != 0,
-                daily_digest: r.get::<_, i64>(7)? != 0,
-                digest_hour: r.get(8)?,
-                instant_alerts: r.get::<_, i64>(9)? != 0,
-                last_digest_date: r.get(10)?,
-            }),
-        ).optional().map_err(|e| format!("email config get: {}", e))?;
-        Ok(cfg.unwrap_or_else(|| EmailConfig { digest_hour: 8, daily_digest: true, instant_alerts: true, ..Default::default() }))
+                [],
+                |r| {
+                    Ok(EmailConfig {
+                        smtp_host: r.get(0)?,
+                        smtp_port: r.get(1)?,
+                        username: r.get(2)?,
+                        password: r.get(3)?,
+                        from_email: r.get(4)?,
+                        to_email: r.get(5)?,
+                        enabled: r.get::<_, i64>(6)? != 0,
+                        daily_digest: r.get::<_, i64>(7)? != 0,
+                        digest_hour: r.get(8)?,
+                        instant_alerts: r.get::<_, i64>(9)? != 0,
+                        last_digest_date: r.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("email config get: {}", e))?;
+        Ok(cfg.unwrap_or_else(|| EmailConfig {
+            digest_hour: 8,
+            daily_digest: true,
+            instant_alerts: true,
+            ..Default::default()
+        }))
     }
 
     /// Upsert settings. `password` of None preserves the stored one (so the UI
@@ -764,17 +874,29 @@ impl Db {
     #[allow(clippy::too_many_arguments)]
     pub fn email_config_set(
         &self,
-        smtp_host: &str, smtp_port: i64, username: &str, password: Option<String>,
-        from_email: &str, to_email: &str, enabled: bool,
-        daily_digest: bool, digest_hour: i64, instant_alerts: bool,
+        smtp_host: &str,
+        smtp_port: i64,
+        username: &str,
+        password: Option<String>,
+        from_email: &str,
+        to_email: &str,
+        enabled: bool,
+        daily_digest: bool,
+        digest_hour: i64,
+        instant_alerts: bool,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let now = now_secs();
         // Resolve password: keep existing when None given.
         let pass: Option<String> = match password {
             Some(p) => Some(p),
-            None => conn.query_row("SELECT password FROM email_config WHERE id = 1", [], |r| r.get(0)).optional()
-                .map_err(|e| format!("email pass read: {}", e))?.flatten(),
+            None => conn
+                .query_row("SELECT password FROM email_config WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(|e| format!("email pass read: {}", e))?
+                .flatten(),
         };
         conn.execute(
             "INSERT INTO email_config
@@ -785,16 +907,31 @@ impl Db {
                smtp_host=?1, smtp_port=?2, username=?3, password=?4, from_email=?5,
                to_email=?6, enabled=?7, daily_digest=?8, digest_hour=?9,
                instant_alerts=?10, updated_at=?11",
-            params![smtp_host, smtp_port, username, pass, from_email, to_email,
-                    enabled as i64, daily_digest as i64, digest_hour, instant_alerts as i64, now],
-        ).map_err(|e| format!("email config set: {}", e))?;
+            params![
+                smtp_host,
+                smtp_port,
+                username,
+                pass,
+                from_email,
+                to_email,
+                enabled as i64,
+                daily_digest as i64,
+                digest_hour,
+                instant_alerts as i64,
+                now
+            ],
+        )
+        .map_err(|e| format!("email config set: {}", e))?;
         Ok(())
     }
 
     pub fn email_mark_digest_sent(&self, date: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        conn.execute("UPDATE email_config SET last_digest_date = ?1 WHERE id = 1", params![date])
-            .map_err(|e| format!("email mark digest: {}", e))?;
+        conn.execute(
+            "UPDATE email_config SET last_digest_date = ?1 WHERE id = 1",
+            params![date],
+        )
+        .map_err(|e| format!("email mark digest: {}", e))?;
         Ok(())
     }
 
@@ -813,8 +950,7 @@ impl Db {
 
         // Shared FROM/JOIN clause: daily-deduped entry snapshots joined to the
         // first snapshot at or after entry + horizon.
-        const BODY: &str =
-            "FROM snapshots s1
+        const BODY: &str = "FROM snapshots s1
              JOIN snapshots s2
                ON s2.symbol = s1.symbol
               AND s2.captured_at = (
@@ -837,17 +973,23 @@ impl Db {
              {BODY}
              GROUP BY s1.decision"
         );
-        let mut stmt = conn.prepare(&sql_decision).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![horizon_secs], |r| {
-            Ok(AccuracyRow {
-                bucket_type: "decision".to_string(),
-                bucket: r.get(0)?,
-                samples: r.get(1)?,
-                avg_return_bps: r.get(2)?,
-                win_rate_pct: r.get(3)?,
+        let mut stmt = conn
+            .prepare(&sql_decision)
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![horizon_secs], |r| {
+                Ok(AccuracyRow {
+                    bucket_type: "decision".to_string(),
+                    bucket: r.get(0)?,
+                    samples: r.get(1)?,
+                    avg_return_bps: r.get(2)?,
+                    win_rate_pct: r.get(3)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+            .map_err(|e| format!("query: {}", e))?;
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
 
         // Pass 2: by composite score bucket
         let sql_score = format!(
@@ -863,17 +1005,23 @@ impl Db {
              {BODY}
              GROUP BY 1"
         );
-        let mut stmt = conn.prepare(&sql_score).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![horizon_secs], |r| {
-            Ok(AccuracyRow {
-                bucket_type: "score".to_string(),
-                bucket: r.get(0)?,
-                samples: r.get(1)?,
-                avg_return_bps: r.get(2)?,
-                win_rate_pct: r.get(3)?,
+        let mut stmt = conn
+            .prepare(&sql_score)
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![horizon_secs], |r| {
+                Ok(AccuracyRow {
+                    bucket_type: "score".to_string(),
+                    bucket: r.get(0)?,
+                    samples: r.get(1)?,
+                    avg_return_bps: r.get(2)?,
+                    win_rate_pct: r.get(3)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+            .map_err(|e| format!("query: {}", e))?;
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
 
         Ok(out)
     }
@@ -892,7 +1040,8 @@ impl Db {
             "SELECT id FROM politicians WHERE full_name = ?1",
             params![p.full_name],
             |r| r.get(0),
-        ).map_err(|e| format!("politician lookup: {}", e))
+        )
+        .map_err(|e| format!("politician lookup: {}", e))
     }
 
     pub fn insert_congressional_trade(
@@ -902,27 +1051,39 @@ impl Db {
     ) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let now = now_secs();
-        let affected = conn.execute(
-            "INSERT OR IGNORE INTO congressional_trades
+        let affected = conn
+            .execute(
+                "INSERT OR IGNORE INTO congressional_trades
              (doc_id, politician_id, owner, asset_name, symbol, asset_type,
               transaction_type, transaction_date, disclosure_date,
               amount_range_min, amount_range_max, cap_gains_over_200, imported_at_epoch)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                t.doc_id, politician_id, t.owner, t.asset_name, t.symbol, t.asset_type,
-                t.transaction_type, t.transaction_date, t.disclosure_date,
-                t.amount_range_min, t.amount_range_max,
-                t.cap_gains_over_200.map(|b| if b {1} else {0}),
-                now,
-            ],
-        ).map_err(|e| format!("insert trade: {}", e))?;
+                params![
+                    t.doc_id,
+                    politician_id,
+                    t.owner,
+                    t.asset_name,
+                    t.symbol,
+                    t.asset_type,
+                    t.transaction_type,
+                    t.transaction_date,
+                    t.disclosure_date,
+                    t.amount_range_min,
+                    t.amount_range_max,
+                    t.cap_gains_over_200.map(|b| if b { 1 } else { 0 }),
+                    now,
+                ],
+            )
+            .map_err(|e| format!("insert trade: {}", e))?;
         Ok(affected > 0)
     }
 
     pub fn count_congressional_trades(&self) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        conn.query_row("SELECT COUNT(*) FROM congressional_trades", [], |r| r.get(0))
-            .map_err(|e| format!("count: {}", e))
+        conn.query_row("SELECT COUNT(*) FROM congressional_trades", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| format!("count: {}", e))
     }
 
     pub fn count_politicians(&self) -> Result<i64, String> {
@@ -932,13 +1093,18 @@ impl Db {
     }
 
     /// Top tickers by congressional activity over the trailing `days` window.
-    pub fn top_congress_tickers(&self, days: i64, limit: i64) -> Result<Vec<CongressTickerRow>, String> {
+    pub fn top_congress_tickers(
+        &self,
+        days: i64,
+        limit: i64,
+    ) -> Result<Vec<CongressTickerRow>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let cutoff = (now_secs() - days * 86_400) as i64;
         // We use disclosure_date for cutoff (ISO YYYY-MM-DD lexicographic comparable).
         let cutoff_iso = civil_from_days(cutoff / 86_400);
-        let mut stmt = conn.prepare(
-            "SELECT symbol,
+        let mut stmt = conn
+            .prepare(
+                "SELECT symbol,
                     SUM(CASE WHEN transaction_type='P' THEN 1 ELSE 0 END) AS buys,
                     SUM(CASE WHEN transaction_type LIKE 'S%' THEN 1 ELSE 0 END) AS sells,
                     COUNT(DISTINCT politician_id) AS politicians,
@@ -952,28 +1118,38 @@ impl Db {
              GROUP BY symbol
              ORDER BY (buys + sells) DESC, politicians DESC
              LIMIT ?2",
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![cutoff_iso, limit], |r| {
-            Ok(CongressTickerRow {
-                symbol:           r.get(0)?,
-                buy_count:        r.get::<_, i64>(1)? as u32,
-                sell_count:       r.get::<_, i64>(2)? as u32,
-                unique_politicians: r.get::<_, i64>(3)? as u32,
-                last_disclosure_date: r.get(4)?,
-                total_amount_min: r.get(5)?,
-                total_amount_max: r.get(6)?,
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![cutoff_iso, limit], |r| {
+                Ok(CongressTickerRow {
+                    symbol: r.get(0)?,
+                    buy_count: r.get::<_, i64>(1)? as u32,
+                    sell_count: r.get::<_, i64>(2)? as u32,
+                    unique_politicians: r.get::<_, i64>(3)? as u32,
+                    last_disclosure_date: r.get(4)?,
+                    total_amount_min: r.get(5)?,
+                    total_amount_max: r.get(6)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// All congressional trades for a specific ticker, ordered newest-first by disclosure.
-    pub fn trades_for_symbol(&self, symbol: &str, limit: i64) -> Result<Vec<CongressTradeWithPolitician>, String> {
+    pub fn trades_for_symbol(
+        &self,
+        symbol: &str,
+        limit: i64,
+    ) -> Result<Vec<CongressTradeWithPolitician>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT ct.id, p.full_name, p.chamber, p.state, p.district,
+        let mut stmt = conn
+            .prepare(
+                "SELECT ct.id, p.full_name, p.chamber, p.state, p.district,
                     ct.owner, ct.asset_name, ct.symbol, ct.asset_type,
                     ct.transaction_type, ct.transaction_date, ct.disclosure_date,
                     ct.amount_range_min, ct.amount_range_max
@@ -982,65 +1158,81 @@ impl Db {
              WHERE ct.symbol = ?1
              ORDER BY ct.disclosure_date DESC, ct.id DESC
              LIMIT ?2",
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![symbol, limit], |r| {
-            Ok(CongressTradeWithPolitician {
-                trade_id:           r.get(0)?,
-                politician_name:    r.get(1)?,
-                chamber:            r.get(2)?,
-                state:              r.get(3)?,
-                district:           r.get(4)?,
-                owner:              r.get(5)?,
-                asset_name:         r.get(6)?,
-                symbol:             r.get(7)?,
-                asset_type:         r.get(8)?,
-                transaction_type:   r.get(9)?,
-                transaction_date:   r.get(10)?,
-                disclosure_date:    r.get(11)?,
-                amount_range_min:   r.get(12)?,
-                amount_range_max:   r.get(13)?,
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![symbol, limit], |r| {
+                Ok(CongressTradeWithPolitician {
+                    trade_id: r.get(0)?,
+                    politician_name: r.get(1)?,
+                    chamber: r.get(2)?,
+                    state: r.get(3)?,
+                    district: r.get(4)?,
+                    owner: r.get(5)?,
+                    asset_name: r.get(6)?,
+                    symbol: r.get(7)?,
+                    asset_type: r.get(8)?,
+                    transaction_type: r.get(9)?,
+                    transaction_date: r.get(10)?,
+                    disclosure_date: r.get(11)?,
+                    amount_range_min: r.get(12)?,
+                    amount_range_max: r.get(13)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// All distinct symbols with at least one congressional trade.
     pub fn congress_symbols(&self) -> Result<Vec<String>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT symbol FROM congressional_trades
-             WHERE symbol IS NOT NULL AND symbol != ''"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT symbol FROM congressional_trades
+             WHERE symbol IS NOT NULL AND symbol != ''",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
             .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// All trades for a symbol along with politician_id, transaction details.
     pub fn trades_with_meta_for_symbol(&self, symbol: &str) -> Result<Vec<TradeMeta>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, politician_id, transaction_type, disclosure_date,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, politician_id, transaction_type, disclosure_date,
                     amount_range_min, amount_range_max
              FROM congressional_trades
-             WHERE symbol = ?1 AND disclosure_date IS NOT NULL"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![symbol], |r| {
-            Ok(TradeMeta {
-                trade_id: r.get(0)?,
-                politician_id: r.get(1)?,
-                transaction_type: r.get(2)?,
-                disclosure_date: r.get(3)?,
-                amount_range_min: r.get(4)?,
-                amount_range_max: r.get(5)?,
+             WHERE symbol = ?1 AND disclosure_date IS NOT NULL",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![symbol], |r| {
+                Ok(TradeMeta {
+                    trade_id: r.get(0)?,
+                    politician_id: r.get(1)?,
+                    transaction_type: r.get(2)?,
+                    disclosure_date: r.get(3)?,
+                    amount_range_min: r.get(4)?,
+                    amount_range_max: r.get(5)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
@@ -1055,18 +1247,33 @@ impl Db {
               estimated_gain_180d_cents, computed_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
-                o.trade_id, o.base_price_cents,
-                o.price_5d_cents, o.price_30d_cents, o.price_90d_cents, o.price_180d_cents,
-                o.return_5d_bps, o.return_30d_bps, o.return_90d_bps, o.return_180d_bps,
-                o.spy_return_5d_bps, o.spy_return_30d_bps, o.spy_return_90d_bps, o.spy_return_180d_bps,
-                o.estimated_gain_180d_cents, now_secs(),
+                o.trade_id,
+                o.base_price_cents,
+                o.price_5d_cents,
+                o.price_30d_cents,
+                o.price_90d_cents,
+                o.price_180d_cents,
+                o.return_5d_bps,
+                o.return_30d_bps,
+                o.return_90d_bps,
+                o.return_180d_bps,
+                o.spy_return_5d_bps,
+                o.spy_return_30d_bps,
+                o.spy_return_90d_bps,
+                o.spy_return_180d_bps,
+                o.estimated_gain_180d_cents,
+                now_secs(),
             ],
-        ).map_err(|e| format!("upsert outcome: {}", e))?;
+        )
+        .map_err(|e| format!("upsert outcome: {}", e))?;
         Ok(())
     }
 
     /// Fetch all outcomes joined with trade metadata for politician aggregation.
-    pub fn outcomes_for_politician(&self, politician_id: i64) -> Result<Vec<crate::congress_scoring::OutcomeForAggregation>, String> {
+    pub fn outcomes_for_politician(
+        &self,
+        politician_id: i64,
+    ) -> Result<Vec<crate::congress_scoring::OutcomeForAggregation>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let mut stmt = conn.prepare(
             "SELECT ct.id, ct.transaction_type,
@@ -1079,36 +1286,43 @@ impl Db {
              JOIN trade_outcomes o ON o.trade_id = ct.id
              WHERE ct.politician_id = ?1"
         ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![politician_id], |r| {
-            let tt: String = r.get(1)?;
-            let is_purchase = tt == "P";
-            Ok(crate::congress_scoring::OutcomeForAggregation {
-                outcome: crate::congress_scoring::TradeOutcome {
-                    trade_id: r.get(0)?,
-                    base_price_cents: r.get(2)?,
-                    price_5d_cents: r.get(3)?,
-                    price_30d_cents: r.get(4)?,
-                    price_90d_cents: r.get(5)?,
-                    price_180d_cents: r.get(6)?,
-                    return_5d_bps: r.get(7)?,
-                    return_30d_bps: r.get(8)?,
-                    return_90d_bps: r.get(9)?,
-                    return_180d_bps: r.get(10)?,
-                    spy_return_5d_bps: r.get(11)?,
-                    spy_return_30d_bps: r.get(12)?,
-                    spy_return_90d_bps: r.get(13)?,
-                    spy_return_180d_bps: r.get(14)?,
-                    estimated_gain_180d_cents: r.get(15)?,
-                },
-                is_purchase,
+        let rows = stmt
+            .query_map(params![politician_id], |r| {
+                let tt: String = r.get(1)?;
+                let is_purchase = tt == "P";
+                Ok(crate::congress_scoring::OutcomeForAggregation {
+                    outcome: crate::congress_scoring::TradeOutcome {
+                        trade_id: r.get(0)?,
+                        base_price_cents: r.get(2)?,
+                        price_5d_cents: r.get(3)?,
+                        price_30d_cents: r.get(4)?,
+                        price_90d_cents: r.get(5)?,
+                        price_180d_cents: r.get(6)?,
+                        return_5d_bps: r.get(7)?,
+                        return_30d_bps: r.get(8)?,
+                        return_90d_bps: r.get(9)?,
+                        return_180d_bps: r.get(10)?,
+                        spy_return_5d_bps: r.get(11)?,
+                        spy_return_30d_bps: r.get(12)?,
+                        spy_return_90d_bps: r.get(13)?,
+                        spy_return_180d_bps: r.get(14)?,
+                        estimated_gain_180d_cents: r.get(15)?,
+                    },
+                    is_purchase,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
-    pub fn upsert_politician_metrics(&self, m: &crate::congress_scoring::PoliticianMetrics) -> Result<(), String> {
+    pub fn upsert_politician_metrics(
+        &self,
+        m: &crate::congress_scoring::PoliticianMetrics,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         conn.execute(
             "INSERT OR REPLACE INTO politician_metrics
@@ -1119,39 +1333,60 @@ impl Db {
               estimated_total_gain_cents, confidence_score, qualifying_trades, updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
-                m.politician_id, m.total_trades, m.purchase_count, m.sale_count,
-                m.avg_return_30d_bps, m.avg_return_90d_bps, m.avg_return_180d_bps,
-                m.win_rate_30d_pct, m.win_rate_90d_pct, m.win_rate_180d_pct,
-                m.avg_alpha_90d_bps, m.avg_alpha_180d_bps,
-                m.estimated_total_gain_cents, m.confidence_score, m.qualifying_trades, now_secs(),
+                m.politician_id,
+                m.total_trades,
+                m.purchase_count,
+                m.sale_count,
+                m.avg_return_30d_bps,
+                m.avg_return_90d_bps,
+                m.avg_return_180d_bps,
+                m.win_rate_30d_pct,
+                m.win_rate_90d_pct,
+                m.win_rate_180d_pct,
+                m.avg_alpha_90d_bps,
+                m.avg_alpha_180d_bps,
+                m.estimated_total_gain_cents,
+                m.confidence_score,
+                m.qualifying_trades,
+                now_secs(),
             ],
-        ).map_err(|e| format!("upsert metrics: {}", e))?;
+        )
+        .map_err(|e| format!("upsert metrics: {}", e))?;
         Ok(())
     }
 
     /// Get all politician_ids that have at least one trade outcome.
     pub fn politicians_with_outcomes(&self) -> Result<Vec<i64>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT politician_id FROM congressional_trades
-             WHERE id IN (SELECT trade_id FROM trade_outcomes)"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT politician_id FROM congressional_trades
+             WHERE id IN (SELECT trade_id FROM trade_outcomes)",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
             .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// Politicians ranked with metrics (joined).
-    pub fn top_politicians_with_metrics(&self, sort_key: &str, limit: i64) -> Result<Vec<PoliticianWithMetrics>, String> {
+    pub fn top_politicians_with_metrics(
+        &self,
+        sort_key: &str,
+        limit: i64,
+    ) -> Result<Vec<PoliticianWithMetrics>, String> {
         let order_clause = match sort_key {
-            "gain"           => "m.estimated_total_gain_cents DESC",
-            "alpha"          => "m.avg_alpha_180d_bps DESC",
-            "winrate"        => "m.win_rate_180d_pct DESC",
-            "trades"         => "m.total_trades DESC",
-            "confidence"     => "m.confidence_score DESC",
-            _                => "m.estimated_total_gain_cents DESC",
+            "gain" => "m.estimated_total_gain_cents DESC",
+            "alpha" => "m.avg_alpha_180d_bps DESC",
+            "winrate" => "m.win_rate_180d_pct DESC",
+            "trades" => "m.total_trades DESC",
+            "confidence" => "m.confidence_score DESC",
+            _ => "m.estimated_total_gain_cents DESC",
         };
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let sql = format!(
@@ -1164,38 +1399,48 @@ impl Db {
              FROM politicians p
              JOIN politician_metrics m ON m.politician_id = p.id
              ORDER BY {} NULLS LAST
-             LIMIT ?1", order_clause);
+             LIMIT ?1",
+            order_clause
+        );
         let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![limit], |r| {
-            Ok(PoliticianWithMetrics {
-                politician_id: r.get(0)?,
-                full_name: r.get(1)?,
-                chamber: r.get(2)?,
-                state: r.get(3)?,
-                district: r.get(4)?,
-                total_trades: r.get::<_, i64>(5)? as u32,
-                purchase_count: r.get::<_, i64>(6)? as u32,
-                sale_count: r.get::<_, i64>(7)? as u32,
-                avg_return_30d_bps: r.get(8)?,
-                avg_return_90d_bps: r.get(9)?,
-                avg_return_180d_bps: r.get(10)?,
-                win_rate_30d_pct: r.get(11)?,
-                win_rate_90d_pct: r.get(12)?,
-                win_rate_180d_pct: r.get(13)?,
-                avg_alpha_90d_bps: r.get(14)?,
-                avg_alpha_180d_bps: r.get(15)?,
-                estimated_total_gain_cents: r.get(16)?,
-                confidence_score: r.get::<_, i64>(17)? as u32,
-                qualifying_trades: r.get::<_, i64>(18)? as u32,
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(PoliticianWithMetrics {
+                    politician_id: r.get(0)?,
+                    full_name: r.get(1)?,
+                    chamber: r.get(2)?,
+                    state: r.get(3)?,
+                    district: r.get(4)?,
+                    total_trades: r.get::<_, i64>(5)? as u32,
+                    purchase_count: r.get::<_, i64>(6)? as u32,
+                    sale_count: r.get::<_, i64>(7)? as u32,
+                    avg_return_30d_bps: r.get(8)?,
+                    avg_return_90d_bps: r.get(9)?,
+                    avg_return_180d_bps: r.get(10)?,
+                    win_rate_30d_pct: r.get(11)?,
+                    win_rate_90d_pct: r.get(12)?,
+                    win_rate_180d_pct: r.get(13)?,
+                    avg_alpha_90d_bps: r.get(14)?,
+                    avg_alpha_180d_bps: r.get(15)?,
+                    estimated_total_gain_cents: r.get(16)?,
+                    confidence_score: r.get::<_, i64>(17)? as u32,
+                    qualifying_trades: r.get::<_, i64>(18)? as u32,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// All trades by a politician (with outcomes if available).
-    pub fn trades_for_politician(&self, politician_id: i64, limit: i64) -> Result<Vec<PoliticianTradeRow>, String> {
+    pub fn trades_for_politician(
+        &self,
+        politician_id: i64,
+        limit: i64,
+    ) -> Result<Vec<PoliticianTradeRow>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
         let mut stmt = conn.prepare(
             "SELECT ct.id, ct.symbol, ct.asset_name, ct.owner, ct.transaction_type,
@@ -1207,37 +1452,48 @@ impl Db {
              ORDER BY ct.disclosure_date DESC, ct.id DESC
              LIMIT ?2"
         ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![politician_id, limit], |r| {
-            Ok(PoliticianTradeRow {
-                trade_id: r.get(0)?,
-                symbol: r.get(1)?,
-                asset_name: r.get(2)?,
-                owner: r.get(3)?,
-                transaction_type: r.get(4)?,
-                transaction_date: r.get(5)?,
-                disclosure_date: r.get(6)?,
-                amount_range_min: r.get(7)?,
-                amount_range_max: r.get(8)?,
-                return_30d_bps: r.get(9)?,
-                return_90d_bps: r.get(10)?,
-                return_180d_bps: r.get(11)?,
-                estimated_gain_cents: r.get(12)?,
+        let rows = stmt
+            .query_map(params![politician_id, limit], |r| {
+                Ok(PoliticianTradeRow {
+                    trade_id: r.get(0)?,
+                    symbol: r.get(1)?,
+                    asset_name: r.get(2)?,
+                    owner: r.get(3)?,
+                    transaction_type: r.get(4)?,
+                    transaction_date: r.get(5)?,
+                    disclosure_date: r.get(6)?,
+                    amount_range_min: r.get(7)?,
+                    amount_range_max: r.get(8)?,
+                    return_30d_bps: r.get(9)?,
+                    return_90d_bps: r.get(10)?,
+                    return_180d_bps: r.get(11)?,
+                    estimated_gain_cents: r.get(12)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
-    pub fn get_politician_metrics(&self, politician_id: i64) -> Result<Option<PoliticianWithMetrics>, String> {
+    pub fn get_politician_metrics(
+        &self,
+        politician_id: i64,
+    ) -> Result<Option<PoliticianWithMetrics>, String> {
         let v = self.top_politicians_with_metrics_by_id(politician_id)?;
         Ok(v.into_iter().next())
     }
 
-    fn top_politicians_with_metrics_by_id(&self, politician_id: i64) -> Result<Vec<PoliticianWithMetrics>, String> {
+    fn top_politicians_with_metrics_by_id(
+        &self,
+        politician_id: i64,
+    ) -> Result<Vec<PoliticianWithMetrics>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT p.id, p.full_name, p.chamber, p.state, p.district,
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.id, p.full_name, p.chamber, p.state, p.district,
                     m.total_trades, m.purchase_count, m.sale_count,
                     m.avg_return_30d_bps, m.avg_return_90d_bps, m.avg_return_180d_bps,
                     m.win_rate_30d_pct, m.win_rate_90d_pct, m.win_rate_180d_pct,
@@ -1245,41 +1501,50 @@ impl Db {
                     m.estimated_total_gain_cents, m.confidence_score, m.qualifying_trades
              FROM politicians p
              JOIN politician_metrics m ON m.politician_id = p.id
-             WHERE p.id = ?1"
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![politician_id], |r| {
-            Ok(PoliticianWithMetrics {
-                politician_id: r.get(0)?,
-                full_name: r.get(1)?,
-                chamber: r.get(2)?,
-                state: r.get(3)?,
-                district: r.get(4)?,
-                total_trades: r.get::<_, i64>(5)? as u32,
-                purchase_count: r.get::<_, i64>(6)? as u32,
-                sale_count: r.get::<_, i64>(7)? as u32,
-                avg_return_30d_bps: r.get(8)?,
-                avg_return_90d_bps: r.get(9)?,
-                avg_return_180d_bps: r.get(10)?,
-                win_rate_30d_pct: r.get(11)?,
-                win_rate_90d_pct: r.get(12)?,
-                win_rate_180d_pct: r.get(13)?,
-                avg_alpha_90d_bps: r.get(14)?,
-                avg_alpha_180d_bps: r.get(15)?,
-                estimated_total_gain_cents: r.get(16)?,
-                confidence_score: r.get::<_, i64>(17)? as u32,
-                qualifying_trades: r.get::<_, i64>(18)? as u32,
+             WHERE p.id = ?1",
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![politician_id], |r| {
+                Ok(PoliticianWithMetrics {
+                    politician_id: r.get(0)?,
+                    full_name: r.get(1)?,
+                    chamber: r.get(2)?,
+                    state: r.get(3)?,
+                    district: r.get(4)?,
+                    total_trades: r.get::<_, i64>(5)? as u32,
+                    purchase_count: r.get::<_, i64>(6)? as u32,
+                    sale_count: r.get::<_, i64>(7)? as u32,
+                    avg_return_30d_bps: r.get(8)?,
+                    avg_return_90d_bps: r.get(9)?,
+                    avg_return_180d_bps: r.get(10)?,
+                    win_rate_30d_pct: r.get(11)?,
+                    win_rate_90d_pct: r.get(12)?,
+                    win_rate_180d_pct: r.get(13)?,
+                    avg_alpha_90d_bps: r.get(14)?,
+                    avg_alpha_180d_bps: r.get(15)?,
+                    estimated_total_gain_cents: r.get(16)?,
+                    confidence_score: r.get::<_, i64>(17)? as u32,
+                    qualifying_trades: r.get::<_, i64>(18)? as u32,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 
     /// Most active politicians (by trade count).
-    pub fn top_politicians_by_activity(&self, limit: i64) -> Result<Vec<PoliticianActivityRow>, String> {
+    pub fn top_politicians_by_activity(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PoliticianActivityRow>, String> {
         let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
-        let mut stmt = conn.prepare(
-            "SELECT p.id, p.full_name, p.chamber, p.state, p.district,
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.id, p.full_name, p.chamber, p.state, p.district,
                     COUNT(*) AS trades,
                     SUM(CASE WHEN ct.transaction_type='P' THEN 1 ELSE 0 END) AS buys,
                     SUM(CASE WHEN ct.transaction_type LIKE 'S%' THEN 1 ELSE 0 END) AS sells,
@@ -1289,22 +1554,27 @@ impl Db {
              GROUP BY p.id
              ORDER BY trades DESC
              LIMIT ?1",
-        ).map_err(|e| format!("prepare: {}", e))?;
-        let rows = stmt.query_map(params![limit], |r| {
-            Ok(PoliticianActivityRow {
-                politician_id: r.get(0)?,
-                full_name:     r.get(1)?,
-                chamber:       r.get(2)?,
-                state:         r.get(3)?,
-                district:      r.get(4)?,
-                trade_count:   r.get::<_, i64>(5)? as u32,
-                buy_count:     r.get::<_, i64>(6)? as u32,
-                sell_count:    r.get::<_, i64>(7)? as u32,
-                last_disclosure_date: r.get(8)?,
+            )
+            .map_err(|e| format!("prepare: {}", e))?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(PoliticianActivityRow {
+                    politician_id: r.get(0)?,
+                    full_name: r.get(1)?,
+                    chamber: r.get(2)?,
+                    state: r.get(3)?,
+                    district: r.get(4)?,
+                    trade_count: r.get::<_, i64>(5)? as u32,
+                    buy_count: r.get::<_, i64>(6)? as u32,
+                    sell_count: r.get::<_, i64>(7)? as u32,
+                    last_disclosure_date: r.get(8)?,
+                })
             })
-        }).map_err(|e| format!("query: {}", e))?;
+            .map_err(|e| format!("query: {}", e))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {}", e))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {}", e))?);
+        }
         Ok(out)
     }
 }
@@ -1439,7 +1709,7 @@ pub struct JournalEntry {
 
 #[derive(Debug, Serialize)]
 pub struct AccuracyRow {
-    pub bucket_type: String,   // "decision" | "score"
+    pub bucket_type: String, // "decision" | "score"
     pub bucket: String,
     pub samples: i64,
     pub avg_return_bps: i64,
@@ -1494,7 +1764,11 @@ fn civil_from_days(days: i64) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp.saturating_sub(9) };
+    let m = if mp < 10 {
+        mp + 3
+    } else {
+        mp.saturating_sub(9)
+    };
     let y = y + if m <= 2 { 1 } else { 0 };
     format!("{:04}-{:02}-{:02}", y, m, d)
 }

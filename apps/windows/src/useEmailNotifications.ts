@@ -124,7 +124,7 @@ function buildDigestData(
   const opportunities: EmailOpportunity[] = rows
     .filter((r) => !held.has(r.symbol))
     .filter((r) => POS.includes(r.setup_label))
-    .sort((a, b) => b.setup_score - a.setup_score)
+    .sort((a, b) => b.composite_score - a.composite_score || b.setup_score - a.setup_score)
     .slice(0, 8)
     .map((r) => ({
       symbol: r.symbol, company: r.company_name, label: r.setup_label, score: r.setup_score,

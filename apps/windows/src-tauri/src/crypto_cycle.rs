@@ -1,3 +1,5 @@
+use crate::engine::HistoricalCandle;
+use reqwest::blocking::Client;
 /// Crypto-specific cycle analysis: Bitcoin halving cycles + drawdown from ATH
 /// + Fear & Greed sentiment + composite crypto scoring.
 ///
@@ -6,39 +8,36 @@
 /// markets generate persistent false "avoid" signals during what are
 /// historically the BEST accumulation zones in crypto. This module corrects
 /// for that by adding cycle-aware and sentiment-contrarian context.
-
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use std::sync::Mutex;
-use reqwest::blocking::Client;
-use crate::engine::HistoricalCandle;
+use std::time::Duration;
 
 // ── Bitcoin halving history (epoch seconds, UTC) ─────────────────────────────
 // Source: bitcoin.org, public blockchain history
 const HALVINGS_EPOCH: &[i64] = &[
-    1354060800,  // 2012-11-28  (1st halving)
-    1467974400,  // 2016-07-09  (2nd)
-    1589155200,  // 2020-05-11  (3rd)
-    1713484800,  // 2024-04-19  (4th — most recent)
-    // Next expected ~2028-04 (every ~210k blocks ≈ 4 years)
+    1354060800, // 2012-11-28  (1st halving)
+    1467974400, // 2016-07-09  (2nd)
+    1589155200, // 2020-05-11  (3rd)
+    1713484800, // 2024-04-19  (4th — most recent)
+                // Next expected ~2028-04 (every ~210k blocks ≈ 4 years)
 ];
-const NEXT_HALVING_ESTIMATE_EPOCH: i64 = 1839196800;  // 2028-04-13 est.
+const NEXT_HALVING_ESTIMATE_EPOCH: i64 = 1839196800; // 2028-04-13 est.
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize)]
 pub enum CyclePhase {
     PostHalvingExpansion,   // 0-200 days after halving
-    BullRun,                 // 200-500 days  (historic ATH zone)
-    BearMarket,              // 500-1000 days
-    AccumulationZone,        // 1000-1400 days (deep bear, smart money buying)
-    PreHalvingAccumulation,  // 1400+ days (close to next halving)
+    BullRun,                // 200-500 days  (historic ATH zone)
+    BearMarket,             // 500-1000 days
+    AccumulationZone,       // 1000-1400 days (deep bear, smart money buying)
+    PreHalvingAccumulation, // 1400+ days (close to next halving)
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FearGreed {
-    pub value: u32,                  // 0-100
-    pub classification: String,      // "Extreme Fear" | "Fear" | "Neutral" | "Greed" | "Extreme Greed"
+    pub value: u32,             // 0-100
+    pub classification: String, // "Extreme Fear" | "Fear" | "Neutral" | "Greed" | "Extreme Greed"
     pub fetched_at_epoch: i64,
 }
 
@@ -52,8 +51,8 @@ pub struct CryptoMetrics {
     pub phase_label_en: String,
     pub ath_price_cents: i64,
     pub current_price_cents: i64,
-    pub drawdown_from_ath_pct: f64,    // 0 (at ATH) to 100 (at zero)
-    pub drawdown_zone: String,           // "late-bull" | "correction" | "early-bear" | "deep-bear" | "capitulation"
+    pub drawdown_from_ath_pct: f64, // 0 (at ATH) to 100 (at zero)
+    pub drawdown_zone: String, // "late-bull" | "correction" | "early-bear" | "deep-bear" | "capitulation"
 
     pub fear_greed: Option<FearGreed>,
 
@@ -65,7 +64,7 @@ pub struct CryptoMetrics {
 
     // Final composite (-100..+100)
     pub crypto_score: i32,
-    pub crypto_label: &'static str,   // "StrongAccumulate" | "Accumulate" | "HoldWait" | "Neutral" | "Caution" | "Distribute" | "Avoid"
+    pub crypto_label: &'static str, // "StrongAccumulate" | "Accumulate" | "HoldWait" | "Neutral" | "Caution" | "Distribute" | "Avoid"
 
     pub explanation_es: String,
     pub explanation_en: String,
@@ -75,7 +74,11 @@ pub struct CryptoMetrics {
 
 /// Returns (days_since_last_halving, days_until_next_estimate).
 pub fn halving_cycle_position(now_epoch: i64) -> (i64, i64) {
-    let last = HALVINGS_EPOCH.iter().filter(|&&h| h <= now_epoch).max().copied()
+    let last = HALVINGS_EPOCH
+        .iter()
+        .filter(|&&h| h <= now_epoch)
+        .max()
+        .copied()
         .unwrap_or(HALVINGS_EPOCH[0]);
     let days_since = (now_epoch - last) / 86_400;
     let days_until = (NEXT_HALVING_ESTIMATE_EPOCH - now_epoch).max(0) / 86_400;
@@ -97,20 +100,23 @@ pub fn classify_phase(days_since: i64) -> CyclePhase {
 fn phase_score(p: &CyclePhase) -> i32 {
     match p {
         CyclePhase::PostHalvingExpansion => 35,
-        CyclePhase::BullRun              => 10,
-        CyclePhase::BearMarket           => 25,    // not zero — bear lows are good entry too
-        CyclePhase::AccumulationZone     => 60,
+        CyclePhase::BullRun => 10,
+        CyclePhase::BearMarket => 25, // not zero — bear lows are good entry too
+        CyclePhase::AccumulationZone => 60,
         CyclePhase::PreHalvingAccumulation => 75,
     }
 }
 
 fn phase_label(p: &CyclePhase) -> (&'static str, &'static str) {
     match p {
-        CyclePhase::PostHalvingExpansion   => ("Post-halving (expansión)", "Post-halving expansion"),
-        CyclePhase::BullRun                => ("Bull run", "Bull run"),
-        CyclePhase::BearMarket             => ("Bear market", "Bear market"),
-        CyclePhase::AccumulationZone       => ("Zona de acumulación", "Accumulation zone"),
-        CyclePhase::PreHalvingAccumulation => ("Pre-halving (acumulación profunda)", "Pre-halving (deep accumulation)"),
+        CyclePhase::PostHalvingExpansion => ("Post-halving (expansión)", "Post-halving expansion"),
+        CyclePhase::BullRun => ("Bull run", "Bull run"),
+        CyclePhase::BearMarket => ("Bear market", "Bear market"),
+        CyclePhase::AccumulationZone => ("Zona de acumulación", "Accumulation zone"),
+        CyclePhase::PreHalvingAccumulation => (
+            "Pre-halving (acumulación profunda)",
+            "Pre-halving (deep accumulation)",
+        ),
     }
 }
 
@@ -119,10 +125,14 @@ fn phase_label(p: &CyclePhase) -> (&'static str, &'static str) {
 /// Compute ATH (max close), current price, and drawdown pct from a series of
 /// weekly or daily candles. We use the FULL series available (5y typically).
 pub fn ath_and_drawdown(candles: &[HistoricalCandle]) -> (i64, i64, f64) {
-    if candles.is_empty() { return (0, 0, 0.0); }
+    if candles.is_empty() {
+        return (0, 0, 0.0);
+    }
     let ath = candles.iter().map(|c| c.close_cents).max().unwrap_or(0);
     let current = candles.last().map(|c| c.close_cents).unwrap_or(0);
-    if ath <= 0 { return (ath, current, 0.0); }
+    if ath <= 0 {
+        return (ath, current, 0.0);
+    }
     let dd = ((ath - current) as f64 / ath as f64 * 100.0).max(0.0);
     (ath, current, dd)
 }
@@ -145,11 +155,11 @@ fn drawdown_score(dd_pct: f64) -> (i32, &'static str) {
 
 fn drawdown_label(zone: &str) -> (&'static str, &'static str) {
     match zone {
-        "late-bull"     => ("Late bull (cuidado)",      "Late bull (caution)"),
-        "correction"    => ("Corrección normal",         "Normal correction"),
-        "early-bear"    => ("Bear temprano",             "Early bear"),
-        "deep-bear"     => ("Deep bear / acumulación",   "Deep bear / accumulation"),
-        "capitulation"  => ("Capitulación (raro)",       "Capitulation (rare)"),
+        "late-bull" => ("Late bull (cuidado)", "Late bull (caution)"),
+        "correction" => ("Corrección normal", "Normal correction"),
+        "early-bear" => ("Bear temprano", "Early bear"),
+        "deep-bear" => ("Deep bear / acumulación", "Deep bear / accumulation"),
+        "capitulation" => ("Capitulación (raro)", "Capitulation (rare)"),
         _ => ("?", "?"),
     }
 }
@@ -163,11 +173,17 @@ pub struct FngCache {
 }
 
 impl FngCache {
-    pub fn new() -> Self { Self { inner: Mutex::new(None) } }
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
     pub fn get_cached(&self) -> Option<FearGreed> {
         let guard = self.inner.lock().ok()?;
         let (v, at) = guard.as_ref()?;
-        if at.elapsed().as_secs() > FNG_CACHE_TTL_SECS { return None; }
+        if at.elapsed().as_secs() > FNG_CACHE_TTL_SECS {
+            return None;
+        }
         Some(v.clone())
     }
     pub fn put(&self, v: FearGreed) {
@@ -179,15 +195,24 @@ impl FngCache {
 
 pub fn fetch_fear_greed(client: &Client) -> Result<FearGreed, String> {
     #[derive(Deserialize)]
-    struct Resp { data: Vec<Entry> }
+    struct Resp {
+        data: Vec<Entry>,
+    }
     #[derive(Deserialize)]
-    struct Entry { value: String, value_classification: String, timestamp: String }
+    struct Entry {
+        value: String,
+        value_classification: String,
+        timestamp: String,
+    }
 
     let url = "https://api.alternative.me/fng/?limit=1";
-    let resp: Resp = client.get(url)
+    let resp: Resp = client
+        .get(url)
         .timeout(Duration::from_secs(10))
-        .send().map_err(|e| format!("F&G fetch: {}", e))?
-        .json().map_err(|e| format!("F&G parse: {}", e))?;
+        .send()
+        .map_err(|e| format!("F&G fetch: {}", e))?
+        .json()
+        .map_err(|e| format!("F&G parse: {}", e))?;
     let first = resp.data.into_iter().next().ok_or("F&G empty response")?;
     let value: u32 = first.value.parse().map_err(|_| "F&G value not number")?;
     let ts: i64 = first.timestamp.parse().unwrap_or(now_secs());
@@ -202,19 +227,33 @@ pub fn fetch_fear_greed(client: &Client) -> Result<FearGreed, String> {
 /// Extreme Greed is HISTORICALLY a sell signal.
 fn sentiment_score(fng: &FearGreed) -> i32 {
     let v = fng.value as i32;
-    if v <= 25 { 70 }          // Extreme Fear → strong contrarian buy
-    else if v <= 45 { 35 }     // Fear
-    else if v <= 55 { 0 }      // Neutral
-    else if v <= 75 { -35 }    // Greed
-    else { -70 }               // Extreme Greed → strong contrarian sell
+    if v <= 25 {
+        70
+    }
+    // Extreme Fear → strong contrarian buy
+    else if v <= 45 {
+        35
+    }
+    // Fear
+    else if v <= 55 {
+        0
+    }
+    // Neutral
+    else if v <= 75 {
+        -35
+    }
+    // Greed
+    else {
+        -70
+    } // Extreme Greed → strong contrarian sell
 }
 
 // ── Composite crypto score ──────────────────────────────────────────────────
 
-const W_TECHNICAL:    f64 = 0.30;
+const W_TECHNICAL: f64 = 0.30;
 const W_ACCUMULATION: f64 = 0.30;
-const W_HALVING:      f64 = 0.25;
-const W_SENTIMENT:    f64 = 0.15;
+const W_HALVING: f64 = 0.25;
+const W_SENTIMENT: f64 = 0.15;
 
 /// Compute the full crypto-aware score for a symbol.
 /// `weekly_candles` should be the 5y/1wk fetch (best long-term cycle context).
@@ -238,14 +277,22 @@ pub fn compute_crypto_score(
     // Compose: each component is -100..+100, weights sum to 1.0
     let tech_pts = technical_score.unwrap_or(0) as f64;
     let composite = tech_pts * W_TECHNICAL
-                  + dd_pts as f64 * W_ACCUMULATION
-                  + phase_pts as f64 * W_HALVING
-                  + sent_pts as f64 * W_SENTIMENT;
+        + dd_pts as f64 * W_ACCUMULATION
+        + phase_pts as f64 * W_HALVING
+        + sent_pts as f64 * W_SENTIMENT;
     let final_score = composite.round().clamp(-100.0, 100.0) as i32;
 
     let label = score_to_label(final_score);
     let (exp_es, exp_en) = build_explanation(
-        symbol, &phase, phase_es, phase_en, dd_pct, dd_zone, fng.as_ref(), final_score, label,
+        symbol,
+        &phase,
+        phase_es,
+        phase_en,
+        dd_pct,
+        dd_zone,
+        fng.as_ref(),
+        final_score,
+        label,
     );
 
     CryptoMetrics {
@@ -272,13 +319,21 @@ pub fn compute_crypto_score(
 }
 
 fn score_to_label(score: i32) -> &'static str {
-    if score >= 60 { "StrongAccumulate" }
-    else if score >= 30 { "Accumulate" }
-    else if score >= 10 { "HoldWait" }
-    else if score >= -10 { "Neutral" }
-    else if score >= -30 { "Caution" }
-    else if score >= -60 { "Distribute" }
-    else { "Avoid" }
+    if score >= 60 {
+        "StrongAccumulate"
+    } else if score >= 30 {
+        "Accumulate"
+    } else if score >= 10 {
+        "HoldWait"
+    } else if score >= -10 {
+        "Neutral"
+    } else if score >= -30 {
+        "Caution"
+    } else if score >= -60 {
+        "Distribute"
+    } else {
+        "Avoid"
+    }
 }
 
 fn build_explanation(
@@ -301,22 +356,22 @@ fn build_explanation(
 
     let label_es = match label {
         "StrongAccumulate" => "ACUMULAR FUERTE — zona histórica de mejor entrada",
-        "Accumulate"       => "ACUMULAR — DCA recomendado en este rango",
-        "HoldWait"         => "ESPERAR — mantener si tenés, no entrar agresivo",
-        "Neutral"          => "NEUTRAL — sin sesgo direccional claro",
-        "Caution"          => "PRECAUCIÓN — sesgo a tomar ganancias",
-        "Distribute"       => "DISTRIBUIR — empezar a reducir exposición",
-        "Avoid"            => "EVITAR — distribución total / late bull peligroso",
+        "Accumulate" => "ACUMULAR — DCA recomendado en este rango",
+        "HoldWait" => "ESPERAR — mantener si tenés, no entrar agresivo",
+        "Neutral" => "NEUTRAL — sin sesgo direccional claro",
+        "Caution" => "PRECAUCIÓN — sesgo a tomar ganancias",
+        "Distribute" => "DISTRIBUIR — empezar a reducir exposición",
+        "Avoid" => "EVITAR — distribución total / late bull peligroso",
         _ => "—",
     };
     let label_en = match label {
         "StrongAccumulate" => "STRONG ACCUMULATE — historic best-entry zone",
-        "Accumulate"       => "ACCUMULATE — DCA recommended in this range",
-        "HoldWait"         => "HOLD/WAIT — hold if owned, don't enter aggressively",
-        "Neutral"          => "NEUTRAL — no clear directional bias",
-        "Caution"          => "CAUTION — bias to take profits",
-        "Distribute"       => "DISTRIBUTE — start reducing exposure",
-        "Avoid"            => "AVOID — full distribution / dangerous late bull",
+        "Accumulate" => "ACCUMULATE — DCA recommended in this range",
+        "HoldWait" => "HOLD/WAIT — hold if owned, don't enter aggressively",
+        "Neutral" => "NEUTRAL — no clear directional bias",
+        "Caution" => "CAUTION — bias to take profits",
+        "Distribute" => "DISTRIBUTE — start reducing exposure",
+        "Avoid" => "AVOID — full distribution / dangerous late bull",
         _ => "—",
     };
 

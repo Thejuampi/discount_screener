@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1886 1592" width="1886" height="1592" role="img" aria-labelledby="title desc">
+<title id="title">Conditional Probability Definition</title>
+<desc id="desc">Conditional probability shown as a formula and a Venn diagram: P(A given B) equals the probability of A intersect B divided by the probability of B.</desc>
+<style><![CDATA[
+.bg{fill:#fff;}
+.black-bg{fill:#000;}
+.axis{stroke:#111;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.thin-axis{stroke:#333;stroke-width:1.2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.grid{stroke:#9a9a9a;stroke-width:0.8;stroke-dasharray:1.5 2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.text{font-family:Arial,Helvetica,sans-serif;fill:#111;font-size:14px;}
+.small{font-size:12px;}
+.tiny{font-size:10px;}
+.serif{font-family:'Times New Roman',Times,serif;}
+.math{font-family:'Times New Roman',Times,serif;font-style:italic;}
+.boundary{stroke:#666;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.blue-point{stroke:#78b6d6;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.orange-point{stroke:#d7ab4a;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.curve-red{stroke:#d06f62;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.curve-cyan{stroke:#55d6d6;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+]]></style>
+<metadata type="application/json"><![CDATA[
+{
+  "figure_id": "fig-0006-conditional-probability",
+  "source_page": 6,
+  "conversion_strategy": "semantic_svg_reconstruction",
+  "main_features": [
+    "black slide background",
+    "conditional probability formula",
+    "Venn diagram of A and B with intersection A\u2229B highlighted"
+  ]
+}
+]]></metadata>
+<rect x="0.00" y="0.00" width="1886.00" height="1592.00" class="" style="fill:#050505" /><text class="text serif" x="943.00" y="140.00" text-anchor="middle" style="font-size:82px;fill:#9ad3b4">Conditional Probability Definition</text><line class="thin-axis" x1="215.00" y1="178.00" x2="1670.00" y2="178.00" style="stroke:#9ad3b4;stroke-width:3"/><text class="math" x="120.00" y="380.00" text-anchor="start" style="font-size:100px;fill:#9ad3b4">P(A|B) =</text><text class="math" x="590.00" y="330.00" text-anchor="middle" style="font-size:86px;fill:#9ad3b4">P(A∩B)</text><line class="thin-axis" x1="420.00" y1="365.00" x2="760.00" y2="365.00" style="stroke:#9ad3b4;stroke-width:5"/><text class="math" x="590.00" y="460.00" text-anchor="middle" style="font-size:86px;fill:#9ad3b4">P(B)</text><text class="math" x="895.00" y="390.00" text-anchor="start" style="font-size:82px;fill:#9ad3b4">for  P(B) &gt; 0</text><rect x="310.00" y="620.00" width="1280.00" height="760.00" class="" style="fill:none;stroke:#222;stroke-width:8;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;" /><defs>
+<clipPath id="clipB"><ellipse cx="1050" cy="1000" rx="320" ry="285"/></clipPath>
+</defs>
+<ellipse cx="760.00" cy="1000.00" rx="320.00" ry="285.00" class="" style="fill:none;stroke:#5a5a5a;stroke-width:6;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/><ellipse cx="1050.00" cy="1000.00" rx="320.00" ry="285.00" class="" style="fill:none;stroke:#f5f5f5;stroke-width:6;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/><ellipse cx="760" cy="1000" rx="320" ry="285" style="fill:#70b95d;fill-opacity:0.72;stroke:none" clip-path="url(#clipB)"/><text class="math" x="575.00" y="1040.00" text-anchor="middle" style="font-size:58px;fill:#3a3a3a">A</text><text class="math" x="1250.00" y="930.00" text-anchor="middle" style="font-size:58px;fill:#ffffff">B</text><text class="math" x="900.00" y="1035.00" text-anchor="middle" style="font-size:62px;fill:#ffffff">A∩B</text></svg>

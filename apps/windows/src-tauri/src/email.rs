@@ -11,34 +11,63 @@ use crate::db::EmailConfig;
 
 /// Send an HTML email (with a plain-text fallback) using the stored SMTP config.
 pub fn send(cfg: &EmailConfig, subject: &str, html: &str, text: &str) -> Result<(), String> {
-    let host = cfg.smtp_host.as_deref().filter(|s| !s.is_empty())
+    let host = cfg
+        .smtp_host
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .ok_or("Falta el servidor SMTP")?;
-    let port = cfg.smtp_port.filter(|p| *p > 0).ok_or("Falta el puerto SMTP")? as u16;
-    let username = cfg.username.as_deref().filter(|s| !s.is_empty())
+    let port = cfg
+        .smtp_port
+        .filter(|p| *p > 0)
+        .ok_or("Falta el puerto SMTP")? as u16;
+    let username = cfg
+        .username
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .ok_or("Falta el usuario SMTP")?;
-    let password = cfg.password.as_deref().filter(|s| !s.is_empty())
+    let password = cfg
+        .password
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .ok_or("Falta la contraseña SMTP")?;
-    let from = cfg.from_email.as_deref().filter(|s| !s.is_empty())
+    let from = cfg
+        .from_email
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .unwrap_or(username);
-    let to = cfg.to_email.as_deref().filter(|s| !s.is_empty())
+    let to = cfg
+        .to_email
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .ok_or("Falta el email destino")?;
 
-    let from_mb: Mailbox = from.parse().map_err(|e| format!("Remitente inválido: {e}"))?;
+    let from_mb: Mailbox = from
+        .parse()
+        .map_err(|e| format!("Remitente inválido: {e}"))?;
 
     // Allow several recipients, comma- or semicolon-separated.
     let mut builder = Message::builder().from(from_mb).subject(subject);
     let mut any = false;
     for addr in to.split([',', ';']) {
         let a = addr.trim();
-        if a.is_empty() { continue; }
-        let mb: Mailbox = a.parse().map_err(|e| format!("Destino inválido '{a}': {e}"))?;
+        if a.is_empty() {
+            continue;
+        }
+        let mb: Mailbox = a
+            .parse()
+            .map_err(|e| format!("Destino inválido '{a}': {e}"))?;
         builder = builder.to(mb);
         any = true;
     }
-    if !any { return Err("Falta el email destino".into()); }
+    if !any {
+        return Err("Falta el email destino".into());
+    }
 
     let email = builder
-        .multipart(MultiPart::alternative_plain_html(text.to_string(), html.to_string()))
+        .multipart(MultiPart::alternative_plain_html(
+            text.to_string(),
+            html.to_string(),
+        ))
         .map_err(|e| format!("Construcción del mensaje: {e}"))?;
 
     let creds = Credentials::new(username.to_string(), password.to_string());
@@ -51,6 +80,8 @@ pub fn send(cfg: &EmailConfig, subject: &str, html: &str, text: &str) -> Result<
     };
     let mailer = builder.port(port).credentials(creds).build();
 
-    mailer.send(&email).map_err(|e| format!("Envío SMTP falló: {e}"))?;
+    mailer
+        .send(&email)
+        .map_err(|e| format!("Envío SMTP falló: {e}"))?;
     Ok(())
 }

@@ -12,25 +12,30 @@ use serde::Serialize;
 use crate::engine::HistoricalCandle;
 
 #[derive(Serialize, Clone, Debug)]
-pub struct PatternPoint { pub epoch: i64, pub price_cents: i64 }
+pub struct PatternPoint {
+    pub epoch: i64,
+    pub price_cents: i64,
+}
 
 #[derive(Serialize, Clone, Debug)]
-pub struct PatternLine { pub points: Vec<PatternPoint> }
+pub struct PatternLine {
+    pub points: Vec<PatternPoint>,
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ChartPattern {
-    pub kind: &'static str,       // machine id (e.g. "DoubleTop")
-    pub direction: &'static str,  // "Bullish" | "Bearish" | "Neutral"
-    pub confidence: i32,          // 0..100
-    pub key_level_cents: i64,     // neckline / breakout trigger
-    pub target_cents: i64,        // measured-move objective
+    pub kind: &'static str,      // machine id (e.g. "DoubleTop")
+    pub direction: &'static str, // "Bullish" | "Bearish" | "Neutral"
+    pub confidence: i32,         // 0..100
+    pub key_level_cents: i64,    // neckline / breakout trigger
+    pub target_cents: i64,       // measured-move objective
     pub label_es: String,
     pub label_en: String,
-    pub forming: bool,            // true = potential (forming), false = confirmed (broke level)
-    pub timeframe: String,        // TF the pattern was detected on (e.g. "15m", "1D")
+    pub forming: bool, // true = potential (forming), false = confirmed (broke level)
+    pub timeframe: String, // TF the pattern was detected on (e.g. "15m", "1D")
     pub explanation_es: String,
     pub explanation_en: String,
-    pub lines: Vec<PatternLine>,  // trendlines / necklines to draw on the chart
+    pub lines: Vec<PatternLine>, // trendlines / necklines to draw on the chart
 }
 
 /// Plain-language description + most-likely resolution for each pattern kind.
@@ -70,22 +75,44 @@ fn explain(kind: &str) -> (&'static str, &'static str) {
     }
 }
 
-struct Pivot { i: usize, price: f64, high: bool }
+struct Pivot {
+    i: usize,
+    price: f64,
+    high: bool,
+}
 
 /// Swing pivots: a high/low that dominates ±k neighbours.
 fn pivots(c: &[HistoricalCandle], k: usize) -> Vec<Pivot> {
     let n = c.len();
     let mut out = Vec::new();
-    if n < 2 * k + 1 { return out; }
+    if n < 2 * k + 1 {
+        return out;
+    }
     for i in k..n - k {
         let hi = c[i].high_cents as f64;
         let lo = c[i].low_cents as f64;
         let is_high = (i - k..=i + k).all(|j| c[j].high_cents as f64 <= hi)
-            && (i - k..i).chain(i + 1..=i + k).any(|j| (c[j].high_cents as f64) < hi);
+            && (i - k..i)
+                .chain(i + 1..=i + k)
+                .any(|j| (c[j].high_cents as f64) < hi);
         let is_low = (i - k..=i + k).all(|j| c[j].low_cents as f64 >= lo)
-            && (i - k..i).chain(i + 1..=i + k).any(|j| (c[j].low_cents as f64) > lo);
-        if is_high { out.push(Pivot { i, price: hi, high: true }); }
-        if is_low { out.push(Pivot { i, price: lo, high: false }); }
+            && (i - k..i)
+                .chain(i + 1..=i + k)
+                .any(|j| (c[j].low_cents as f64) > lo);
+        if is_high {
+            out.push(Pivot {
+                i,
+                price: hi,
+                high: true,
+            });
+        }
+        if is_low {
+            out.push(Pivot {
+                i,
+                price: lo,
+                high: false,
+            });
+        }
     }
     out
 }
@@ -98,39 +125,74 @@ fn eq(a: f64, b: f64, tol: f64) -> bool {
 /// Least-squares slope (price per bar) over (index, price) points.
 fn slope(pts: &[(f64, f64)]) -> f64 {
     let n = pts.len() as f64;
-    if n < 2.0 { return 0.0; }
-    let (sx, sy) = pts.iter().fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
+    if n < 2.0 {
+        return 0.0;
+    }
+    let (sx, sy) = pts
+        .iter()
+        .fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
     let sxy: f64 = pts.iter().map(|(x, y)| x * y).sum();
     let sxx: f64 = pts.iter().map(|(x, _)| x * x).sum();
     let den = n * sxx - sx * sx;
-    if den.abs() < 1e-9 { 0.0 } else { (n * sxy - sx * sy) / den }
+    if den.abs() < 1e-9 {
+        0.0
+    } else {
+        (n * sxy - sx * sy) / den
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mk(kind: &'static str, direction: &'static str, confidence: i32, key: f64, target: f64,
-      es: &str, en: &str, forming: bool, tf: &str, lines: Vec<PatternLine>) -> ChartPattern {
+fn mk(
+    kind: &'static str,
+    direction: &'static str,
+    confidence: i32,
+    key: f64,
+    target: f64,
+    es: &str,
+    en: &str,
+    forming: bool,
+    tf: &str,
+    lines: Vec<PatternLine>,
+) -> ChartPattern {
     let (ex_es, ex_en) = explain(kind);
     ChartPattern {
-        kind, direction, confidence: confidence.clamp(0, 100),
-        key_level_cents: key.round() as i64, target_cents: target.round() as i64,
-        label_es: es.to_string(), label_en: en.to_string(), forming,
-        timeframe: tf.to_string(), explanation_es: ex_es.to_string(), explanation_en: ex_en.to_string(),
+        kind,
+        direction,
+        confidence: confidence.clamp(0, 100),
+        key_level_cents: key.round() as i64,
+        target_cents: target.round() as i64,
+        label_es: es.to_string(),
+        label_en: en.to_string(),
+        forming,
+        timeframe: tf.to_string(),
+        explanation_es: ex_es.to_string(),
+        explanation_en: ex_en.to_string(),
         lines,
     }
 }
 
 fn seg(a: (i64, f64), b: (i64, f64)) -> PatternLine {
-    PatternLine { points: vec![
-        PatternPoint { epoch: a.0, price_cents: a.1.round() as i64 },
-        PatternPoint { epoch: b.0, price_cents: b.1.round() as i64 },
-    ] }
+    PatternLine {
+        points: vec![
+            PatternPoint {
+                epoch: a.0,
+                price_cents: a.1.round() as i64,
+            },
+            PatternPoint {
+                epoch: b.0,
+                price_cents: b.1.round() as i64,
+            },
+        ],
+    }
 }
 
 /// Detect chart patterns. `k` = pivot strength (2 intraday, 3 for daily/weekly).
 /// `tf` is a human label for the timeframe the candles represent (e.g. "15m", "1D").
 pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
     let n = c.len();
-    if n < 2 * k + 6 { return Vec::new(); }
+    if n < 2 * k + 6 {
+        return Vec::new();
+    }
     let pv = pivots(c, k);
     let highs: Vec<&Pivot> = pv.iter().filter(|p| p.high).collect();
     let lows: Vec<&Pivot> = pv.iter().filter(|p| !p.high).collect();
@@ -143,7 +205,11 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
     if highs.len() >= 2 && !lows.is_empty() {
         let h2 = highs[highs.len() - 1];
         let h1 = highs[highs.len() - 2];
-        if let Some(mid) = lows.iter().filter(|l| l.i > h1.i && l.i < h2.i).min_by(|a, b| a.price.partial_cmp(&b.price).unwrap()) {
+        if let Some(mid) = lows
+            .iter()
+            .filter(|l| l.i > h1.i && l.i < h2.i)
+            .min_by(|a, b| a.price.partial_cmp(&b.price).unwrap())
+        {
             let peak = h1.price.max(h2.price);
             if eq(h1.price, h2.price, 0.03) && (peak - mid.price) / peak > 0.025 {
                 let neck = mid.price;
@@ -152,8 +218,18 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
                     seg((ep(h1.i), h1.price), (ep(h2.i), h2.price)),
                     seg((ep(h1.i), neck), (last_ep, neck)),
                 ];
-                out.push(mk("DoubleTop", "Bearish", if forming { 60 } else { 78 }, neck, neck - (peak - neck),
-                    "Doble techo", "Double Top", forming, tf, lines));
+                out.push(mk(
+                    "DoubleTop",
+                    "Bearish",
+                    if forming { 60 } else { 78 },
+                    neck,
+                    neck - (peak - neck),
+                    "Doble techo",
+                    "Double Top",
+                    forming,
+                    tf,
+                    lines,
+                ));
             }
         }
     }
@@ -161,7 +237,11 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
     if lows.len() >= 2 && !highs.is_empty() {
         let l2 = lows[lows.len() - 1];
         let l1 = lows[lows.len() - 2];
-        if let Some(mid) = highs.iter().filter(|h| h.i > l1.i && h.i < l2.i).max_by(|a, b| a.price.partial_cmp(&b.price).unwrap()) {
+        if let Some(mid) = highs
+            .iter()
+            .filter(|h| h.i > l1.i && h.i < l2.i)
+            .max_by(|a, b| a.price.partial_cmp(&b.price).unwrap())
+        {
             let trough = l1.price.min(l2.price);
             if eq(l1.price, l2.price, 0.03) && (mid.price - trough) / mid.price > 0.025 {
                 let neck = mid.price;
@@ -170,16 +250,34 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
                     seg((ep(l1.i), l1.price), (ep(l2.i), l2.price)),
                     seg((ep(l1.i), neck), (last_ep, neck)),
                 ];
-                out.push(mk("DoubleBottom", "Bullish", if forming { 60 } else { 78 }, neck, neck + (neck - trough),
-                    "Doble piso", "Double Bottom", forming, tf, lines));
+                out.push(mk(
+                    "DoubleBottom",
+                    "Bullish",
+                    if forming { 60 } else { 78 },
+                    neck,
+                    neck + (neck - trough),
+                    "Doble piso",
+                    "Double Bottom",
+                    forming,
+                    tf,
+                    lines,
+                ));
             }
         }
     }
     // ── Head & Shoulders: 3 highs, middle highest, shoulders ~equal ──
     if highs.len() >= 3 {
-        let (l, h, r) = (highs[highs.len() - 3], highs[highs.len() - 2], highs[highs.len() - 1]);
+        let (l, h, r) = (
+            highs[highs.len() - 3],
+            highs[highs.len() - 2],
+            highs[highs.len() - 1],
+        );
         if h.price > l.price && h.price > r.price && eq(l.price, r.price, 0.04) {
-            let neck = lows.iter().filter(|x| x.i > l.i && x.i < r.i).map(|x| x.price).fold(f64::MAX, f64::min);
+            let neck = lows
+                .iter()
+                .filter(|x| x.i > l.i && x.i < r.i)
+                .map(|x| x.price)
+                .fold(f64::MAX, f64::min);
             if neck.is_finite() {
                 let forming = last > neck;
                 let lines = vec![
@@ -187,16 +285,34 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
                     seg((ep(h.i), h.price), (ep(r.i), r.price)),
                     seg((ep(l.i), neck), (last_ep, neck)),
                 ];
-                out.push(mk("HeadAndShoulders", "Bearish", if forming { 58 } else { 80 }, neck, neck - (h.price - neck),
-                    "Hombro-Cabeza-Hombro", "Head & Shoulders", forming, tf, lines));
+                out.push(mk(
+                    "HeadAndShoulders",
+                    "Bearish",
+                    if forming { 58 } else { 80 },
+                    neck,
+                    neck - (h.price - neck),
+                    "Hombro-Cabeza-Hombro",
+                    "Head & Shoulders",
+                    forming,
+                    tf,
+                    lines,
+                ));
             }
         }
     }
     // ── Inverse H&S: 3 lows, middle lowest, shoulders ~equal ──
     if lows.len() >= 3 {
-        let (l, h, r) = (lows[lows.len() - 3], lows[lows.len() - 2], lows[lows.len() - 1]);
+        let (l, h, r) = (
+            lows[lows.len() - 3],
+            lows[lows.len() - 2],
+            lows[lows.len() - 1],
+        );
         if h.price < l.price && h.price < r.price && eq(l.price, r.price, 0.04) {
-            let neck = highs.iter().filter(|x| x.i > l.i && x.i < r.i).map(|x| x.price).fold(f64::MIN, f64::max);
+            let neck = highs
+                .iter()
+                .filter(|x| x.i > l.i && x.i < r.i)
+                .map(|x| x.price)
+                .fold(f64::MIN, f64::max);
             if neck.is_finite() {
                 let forming = last < neck;
                 let lines = vec![
@@ -204,15 +320,37 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
                     seg((ep(h.i), h.price), (ep(r.i), r.price)),
                     seg((ep(l.i), neck), (last_ep, neck)),
                 ];
-                out.push(mk("InverseHeadAndShoulders", "Bullish", if forming { 58 } else { 80 }, neck, neck + (neck - h.price),
-                    "HCH invertido", "Inverse Head & Shoulders", forming, tf, lines));
+                out.push(mk(
+                    "InverseHeadAndShoulders",
+                    "Bullish",
+                    if forming { 58 } else { 80 },
+                    neck,
+                    neck + (neck - h.price),
+                    "HCH invertido",
+                    "Inverse Head & Shoulders",
+                    forming,
+                    tf,
+                    lines,
+                ));
             }
         }
     }
     // ── Triangles / Wedges / Channel: trendline fit on recent pivots ──
     if highs.len() >= 2 && lows.len() >= 2 {
-        let hp: Vec<(f64, f64)> = highs.iter().rev().take(4).rev().map(|p| (p.i as f64, p.price)).collect();
-        let lp: Vec<(f64, f64)> = lows.iter().rev().take(4).rev().map(|p| (p.i as f64, p.price)).collect();
+        let hp: Vec<(f64, f64)> = highs
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(|p| (p.i as f64, p.price))
+            .collect();
+        let lp: Vec<(f64, f64)> = lows
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(|p| (p.i as f64, p.price))
+            .collect();
         let sh = slope(&hp);
         let sl = slope(&lp);
         let span = (n as f64).max(1.0);
@@ -229,24 +367,54 @@ pub fn detect(c: &[HistoricalCandle], k: usize, tf: &str) -> Vec<ChartPattern> {
 
         let tri: Option<(&'static str, &'static str, &str, &str)> =
             if sh_pct.abs() < flat && sl_pct > flat {
-                Some(("AscendingTriangle", "Bullish", "Triángulo ascendente", "Ascending Triangle"))
+                Some((
+                    "AscendingTriangle",
+                    "Bullish",
+                    "Triángulo ascendente",
+                    "Ascending Triangle",
+                ))
             } else if sl_pct.abs() < flat && sh_pct < -flat {
-                Some(("DescendingTriangle", "Bearish", "Triángulo descendente", "Descending Triangle"))
+                Some((
+                    "DescendingTriangle",
+                    "Bearish",
+                    "Triángulo descendente",
+                    "Descending Triangle",
+                ))
             } else if sh_pct < -flat && sl_pct > flat {
-                Some(("SymmetricTriangle", "Neutral", "Triángulo simétrico", "Symmetric Triangle"))
+                Some((
+                    "SymmetricTriangle",
+                    "Neutral",
+                    "Triángulo simétrico",
+                    "Symmetric Triangle",
+                ))
             } else if sh_pct > flat && sl_pct > flat && sl > sh {
                 Some(("RisingWedge", "Bearish", "Cuña ascendente", "Rising Wedge"))
             } else if sh_pct < -flat && sl_pct < -flat && sl > sh {
-                Some(("FallingWedge", "Bullish", "Cuña descendente", "Falling Wedge"))
+                Some((
+                    "FallingWedge",
+                    "Bullish",
+                    "Cuña descendente",
+                    "Falling Wedge",
+                ))
             } else if (sh_pct - sl_pct).abs() < flat && sh_pct.abs() > flat {
-                let (d, es, en) = if sh > 0.0 { ("Bullish", "Canal alcista", "Bullish Channel") } else { ("Bearish", "Canal bajista", "Bearish Channel") };
+                let (d, es, en) = if sh > 0.0 {
+                    ("Bullish", "Canal alcista", "Bullish Channel")
+                } else {
+                    ("Bearish", "Canal bajista", "Bearish Channel")
+                };
                 Some(("Channel", d, es, en))
-            } else { None };
+            } else {
+                None
+            };
 
         if let Some((kind, dir, es, en)) = tri {
             let _ = conv;
             // Breakout direction's measured move = current ± triangle height.
-            let target = if dir == "Bearish" { last - height } else { last + height };
+            let target = if dir == "Bearish" {
+                last - height
+            } else {
+                last + height
+            };
             let hf = highs[highs.len().saturating_sub(4)];
             let lf = lows[lows.len().saturating_sub(4)];
             let hl = highs[highs.len() - 1];

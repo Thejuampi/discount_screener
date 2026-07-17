@@ -1,0 +1,30 @@
+{
+  "name": "find_references",
+  "description": "Find all references to a symbol across the project.\n\nUSAGE: Position on symbol, find all usages\nOUTPUT: List of reference locations with context\n\nIMPORTANT: Uses ZERO-BASED coordinates.\n\nRequires load_project to be called first.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "column": {
+        "type": "integer",
+        "description": "Zero-based column number"
+      },
+      "line": {
+        "type": "integer",
+        "description": "Zero-based line number"
+      },
+      "maxResults": {
+        "type": "integer",
+        "description": "Max references to return (default 100)"
+      },
+      "filePath": {
+        "type": "string",
+        "description": "Path to source file"
+      }
+    },
+    "required": [
+      "filePath",
+      "line",
+      "column"
+    ]
+  }
+}

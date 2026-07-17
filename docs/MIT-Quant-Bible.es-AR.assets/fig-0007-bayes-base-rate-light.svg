@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 280" width="440" height="280" role="img" aria-labelledby="title desc">
+  <title id="title">Ejemplo de Bayes con prior y base rate</title>
+  <desc id="desc">Dos rectángulos comparan H y ¬H, destacando cómo el prior grande de ¬H domina pese a una mayor verosimilitud bajo H.</desc>
+  <rect x="0" y="0" width="440" height="280" fill="white"/>
+  <rect x="28" y="72" width="100" height="140" fill="#384955" stroke="#94a3b8"/>
+  <rect x="28" y="156" width="100" height="56" fill="#d9c94f" stroke="#94a3b8"/>
+  <rect x="182" y="42" width="230" height="170" fill="#6b7280" opacity="0.72" stroke="#94a3b8"/>
+  <rect x="182" y="195" width="230" height="17" fill="#d9c94f" stroke="#94a3b8"/>
+  <text x="78" y="52" text-anchor="middle" font-size="20" font-family="Georgia, 'Times New Roman', serif" fill="#111827">P(H)=1/21</text>
+  <text x="297" y="28" text-anchor="middle" font-size="20" font-family="Georgia, 'Times New Roman', serif" fill="#111827">P(¬H)=20/21</text>
+  <text x="12" y="146" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#111827">P(E|H)=0.4</text>
+  <text x="422" y="206" text-anchor="end" font-size="18" font-family="Georgia, 'Times New Roman', serif" fill="#111827">P(E|¬H)=0.1</text>
+  <text x="220" y="244" text-anchor="middle" font-size="14" font-family="Georgia, 'Times New Roman', serif" fill="#475569">El posterior favorece a ¬H aunque E encaje mejor con H,</text>
+  <text x="220" y="261" text-anchor="middle" font-size="14" font-family="Georgia, 'Times New Roman', serif" fill="#475569">porque el prior de ¬H es mucho mayor.</text>
+</svg>

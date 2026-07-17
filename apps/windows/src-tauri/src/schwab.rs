@@ -5,7 +5,6 @@
 ///
 /// We parse the extracted text with line-based scanning + targeted patterns
 /// because Schwab's PDF template is highly consistent.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,14 +14,14 @@ pub struct SchwabReport {
     pub exchange: Option<String>,
 
     // Primary rating
-    pub rating: String,                      // "A" | "B" | "C" | "D" | "F"
-    pub rating_label: String,                // "Strongly Outperform" etc.
-    pub percentile: Option<u32>,             // 1-100
+    pub rating: String,          // "A" | "B" | "C" | "D" | "F"
+    pub rating_label: String,    // "Strongly Outperform" etc.
+    pub percentile: Option<u32>, // 1-100
     pub previous_rating: Option<String>,
 
     // Dates
-    pub report_date: Option<String>,         // "06/07/2026"
-    pub data_as_of: Option<String>,          // "06/05/2026"
+    pub report_date: Option<String>, // "06/07/2026"
+    pub data_as_of: Option<String>,  // "06/05/2026"
 
     // Price & overview
     pub price_at_report_cents: Option<i64>,
@@ -32,7 +31,7 @@ pub struct SchwabReport {
     pub industry: Option<String>,
 
     // Volatility
-    pub price_volatility: Option<String>,    // "Low" | "Medium" | "High" | "N/A"
+    pub price_volatility: Option<String>, // "Low" | "Medium" | "High" | "N/A"
 
     // Sub-grades (each A-F or none)
     pub growth_grade: Option<String>,
@@ -47,11 +46,11 @@ pub struct SchwabReport {
     pub eps_growth_5yr_pct: Option<f64>,
 
     // ESG
-    pub esg_rating: Option<String>,          // "AAA" | "AA" | "A" | "BBB" | "BB" | "B" | "CCC"
+    pub esg_rating: Option<String>, // "AAA" | "AA" | "A" | "BBB" | "BB" | "B" | "CCC"
 
     // Other opinions (raw — best-effort)
-    pub cfra_stars: Option<u32>,             // 1-5 if detectable
-    pub morningstar_stars: Option<u32>,      // 1-5 if detectable
+    pub cfra_stars: Option<u32>,        // 1-5 if detectable
+    pub morningstar_stars: Option<u32>, // 1-5 if detectable
 
     // Provenance
     pub source_filename: Option<String>,
@@ -61,7 +60,10 @@ pub struct SchwabReport {
 // ── Parsing ──────────────────────────────────────────────────────────────────
 
 /// Parse a Schwab Equity Ratings PDF given its raw bytes.
-pub fn parse_schwab_pdf(bytes: &[u8], source_filename: Option<String>) -> Result<SchwabReport, String> {
+pub fn parse_schwab_pdf(
+    bytes: &[u8],
+    source_filename: Option<String>,
+) -> Result<SchwabReport, String> {
     let text = pdf_extract::extract_text_from_mem(bytes)
         .map_err(|e| format!("PDF text extraction failed: {}", e))?;
 
@@ -75,7 +77,10 @@ pub fn parse_schwab_pdf(bytes: &[u8], source_filename: Option<String>) -> Result
 }
 
 /// Parse the already-extracted text. Exposed for testing.
-pub fn parse_schwab_text(text: &str, source_filename: Option<&str>) -> Result<SchwabReport, String> {
+pub fn parse_schwab_text(
+    text: &str,
+    source_filename: Option<&str>,
+) -> Result<SchwabReport, String> {
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
     // ── Symbol: try multiple fallbacks (no single point of failure) ─────────
@@ -90,8 +95,9 @@ pub fn parse_schwab_text(text: &str, source_filename: Option<&str>) -> Result<Sc
         })?;
 
     // ── Rating: search for description anywhere in text ─────────────────────
-    let (rating, rating_label) = extract_rating(text)
-        .ok_or_else(|| "Could not find Schwab rating (Strongly Outperform/etc.) in PDF text".to_string())?;
+    let (rating, rating_label) = extract_rating(text).ok_or_else(|| {
+        "Could not find Schwab rating (Strongly Outperform/etc.) in PDF text".to_string()
+    })?;
 
     // ── Company + exchange: best-effort, optional ───────────────────────────
     let (company, exchange) = find_company_and_exchange(&lines, &symbol);
@@ -109,8 +115,8 @@ pub fn parse_schwab_text(text: &str, source_filename: Option<&str>) -> Result<Sc
 
     let price_volatility = find_price_volatility(&lines);
 
-    let (growth_grade, quality_grade, sentiment_grade, stability_grade, valuation_grade)
-        = find_subgrades(&lines);
+    let (growth_grade, quality_grade, sentiment_grade, stability_grade, valuation_grade) =
+        find_subgrades(&lines);
 
     let (eps_y1, eps_y2, eps_5yr) = find_eps_forecasts(&lines);
 
@@ -141,7 +147,7 @@ pub fn parse_schwab_text(text: &str, source_filename: Option<&str>) -> Result<Sc
         eps_forecast_y2: eps_y2,
         eps_growth_5yr_pct: eps_5yr,
         esg_rating,
-        cfra_stars: None,         // hard to read from text reliably
+        cfra_stars: None, // hard to read from text reliably
         morningstar_stars: None,
         source_filename: None,
         imported_at_epoch: 0,
@@ -181,11 +187,16 @@ fn extract_symbol(text: &str, filename: Option<&str>) -> Option<String> {
     // Pass 2: filename
     if let Some(name) = filename {
         // Strip path components
-        let basename = name.rsplit('/').next()
+        let basename = name
+            .rsplit('/')
+            .next()
             .and_then(|s| s.rsplit('\\').next())
             .unwrap_or(name);
         // Strip extension
-        let stem = basename.rsplit_once('.').map(|(s, _)| s).unwrap_or(basename);
+        let stem = basename
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(basename);
         // Take leading ticker characters: uppercase letters / digits / '.' (e.g. BRK.B)
         let sym: String = stem
             .chars()
@@ -229,7 +240,13 @@ fn find_company_and_exchange(lines: &[&str], symbol: &str) -> (Option<String>, O
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(symbol) {
             let rest = rest.trim_start();
-            if !rest.is_empty() && rest.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+            if !rest.is_empty()
+                && rest
+                    .chars()
+                    .next()
+                    .map(|c| c.is_alphabetic())
+                    .unwrap_or(false)
+            {
                 // Try to find rating label in rest to split company from rating
                 for label in RATING_LABELS {
                     if let Some(idx) = rest.rfind(label) {
@@ -238,7 +255,9 @@ fn find_company_and_exchange(lines: &[&str], symbol: &str) -> (Option<String>, O
                             let letter_byte = rest.as_bytes()[idx - 1];
                             if (b'A'..=b'F').contains(&letter_byte) {
                                 let c = rest[..idx - 1].trim().to_string();
-                                if !c.is_empty() { company = Some(c); }
+                                if !c.is_empty() {
+                                    company = Some(c);
+                                }
                                 break;
                             }
                         }
@@ -247,7 +266,9 @@ fn find_company_and_exchange(lines: &[&str], symbol: &str) -> (Option<String>, O
                 if company.is_none() {
                     // No rating label found inline — just take everything after symbol
                     let c = rest.trim().to_string();
-                    if !c.is_empty() && c.len() < 100 { company = Some(c); }
+                    if !c.is_empty() && c.len() < 100 {
+                        company = Some(c);
+                    }
                 }
                 // Check the previous line for an exchange name
                 if i > 0 {
@@ -345,10 +366,15 @@ fn find_market_cap(lines: &[&str]) -> Option<f64> {
                 .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
                 .collect();
             let num_str = num_str.replace(',', "");
-            let multiplier = if trimmed.contains("Billion") { 1.0 }
-                else if trimmed.contains("Million") { 0.001 }
-                else if trimmed.contains("Trillion") { 1000.0 }
-                else { 1.0 };
+            let multiplier = if trimmed.contains("Billion") {
+                1.0
+            } else if trimmed.contains("Million") {
+                0.001
+            } else if trimmed.contains("Trillion") {
+                1000.0
+            } else {
+                1.0
+            };
             if let Ok(n) = num_str.parse::<f64>() {
                 return Some(n * multiplier);
             }
@@ -393,7 +419,9 @@ fn find_price_volatility(lines: &[&str]) -> Option<String> {
             in_section = true;
             continue;
         }
-        if !in_section { continue; }
+        if !in_section {
+            continue;
+        }
         // Skip empty / data-as-of lines
         if line.is_empty() || line.starts_with("Data as of") || line.starts_with("Source:") {
             continue;
@@ -405,26 +433,46 @@ fn find_price_volatility(lines: &[&str]) -> Option<String> {
             }
         }
         // If we hit the next section, give up
-        if line.contains("RATIONALE BEHIND") { break; }
+        if line.contains("RATIONALE BEHIND") {
+            break;
+        }
     }
     None
 }
 
 /// Find the 5 sub-grades from the rationale table.
-fn find_subgrades(lines: &[&str]) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
+fn find_subgrades(
+    lines: &[&str],
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let mut g = (None, None, None, None, None);
     for line in lines {
         // Lines like: "B Growth Grade Positive Positive Medium"
         let trimmed = line.trim();
-        if trimmed.len() < 3 { continue; }
+        if trimmed.len() < 3 {
+            continue;
+        }
         let first_char = trimmed.chars().next().unwrap();
-        if !('A'..='F').contains(&first_char) { continue; }
+        if !('A'..='F').contains(&first_char) {
+            continue;
+        }
         let after_letter = trimmed[1..].trim_start();
-        if      after_letter.starts_with("Growth Grade")    { g.0 = Some(first_char.to_string()); }
-        else if after_letter.starts_with("Quality Grade")   { g.1 = Some(first_char.to_string()); }
-        else if after_letter.starts_with("Sentiment Grade") { g.2 = Some(first_char.to_string()); }
-        else if after_letter.starts_with("Stability Grade") { g.3 = Some(first_char.to_string()); }
-        else if after_letter.starts_with("Valuation Grade") { g.4 = Some(first_char.to_string()); }
+        if after_letter.starts_with("Growth Grade") {
+            g.0 = Some(first_char.to_string());
+        } else if after_letter.starts_with("Quality Grade") {
+            g.1 = Some(first_char.to_string());
+        } else if after_letter.starts_with("Sentiment Grade") {
+            g.2 = Some(first_char.to_string());
+        } else if after_letter.starts_with("Stability Grade") {
+            g.3 = Some(first_char.to_string());
+        } else if after_letter.starts_with("Valuation Grade") {
+            g.4 = Some(first_char.to_string());
+        }
     }
     g
 }
@@ -443,13 +491,16 @@ fn find_eps_forecasts(lines: &[&str]) -> (Option<f64>, Option<f64>, Option<f64>)
             in_section = true;
             continue;
         }
-        if !in_section { continue; }
+        if !in_section {
+            continue;
+        }
         let trimmed = line.trim();
         // Date-prefixed line: starts with M/D/YY or MM/DD/YYYY
         if let Some(first_dollar) = trimmed.find('$') {
             // Crude: parse first dollar value
             let after = &trimmed[first_dollar + 1..];
-            let num_str: String = after.chars()
+            let num_str: String = after
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
                 .collect();
             let num_str = num_str.replace(',', "");
@@ -461,10 +512,14 @@ fn find_eps_forecasts(lines: &[&str]) -> (Option<f64>, Option<f64>, Option<f64>)
             // Find first percentage
             if let Some(pct_idx) = trimmed.find('%') {
                 let preceding = &trimmed[..pct_idx];
-                let num_str: String = preceding.chars().rev()
+                let num_str: String = preceding
+                    .chars()
+                    .rev()
                     .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',' || *c == '-')
                     .collect::<String>()
-                    .chars().rev().collect();
+                    .chars()
+                    .rev()
+                    .collect();
                 let num_str = num_str.replace(',', "");
                 if let Ok(n) = num_str.parse::<f64>() {
                     growth = Some(n);
@@ -473,7 +528,9 @@ fn find_eps_forecasts(lines: &[&str]) -> (Option<f64>, Option<f64>, Option<f64>)
             break;
         }
         // If section drifts too far, stop
-        if trimmed.contains("DIVIDENDS") || trimmed.contains("OTHER OPINIONS") { break; }
+        if trimmed.contains("DIVIDENDS") || trimmed.contains("OTHER OPINIONS") {
+            break;
+        }
     }
 
     let y1 = year_values.first().copied();
@@ -490,13 +547,17 @@ fn find_esg_rating(lines: &[&str]) -> Option<String> {
             after_esg_header = true;
             continue;
         }
-        if !after_esg_header { continue; }
+        if !after_esg_header {
+            continue;
+        }
         // Look for a standalone rating value on its own line
         let trimmed = line.trim();
         if VALID.contains(&trimmed) {
             return Some(trimmed.to_string());
         }
-        if trimmed.contains("EARNINGS PER SHARE") { break; }
+        if trimmed.contains("EARNINGS PER SHARE") {
+            break;
+        }
     }
     None
 }

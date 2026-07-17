@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { OpportunityList } from "./components/OpportunityList";
 import { DetailPanel } from "./components/DetailPanel";
 import { AlertsPanel } from "./components/AlertsPanel";
@@ -10,11 +10,14 @@ import { ScalpingPanel } from "./components/ScalpingPanel";
 import { DashboardPanel } from "./components/DashboardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
+import { singleFlight } from "./singleFlight";
+import { TickerSearch } from "./components/TickerSearch";
+import { EstimatesPanel } from "./components/EstimatesPanel";
 import { Toaster } from "./toast";
 import { StatusBar } from "./components/StatusBar";
 import type { Profile } from "./components/TechnicalAnalysisPanel";
 
-type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings";
+type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings" | "estimates";
 import { api } from "./api";
 import type { OpportunityRow } from "./api";
 import { useT } from "./i18n";
@@ -57,8 +60,9 @@ export default function App() {
   });
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem("ds_view_mode");
-    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings") ? saved : "dashboard";
+    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
   });
+  const [scoringModel, setScoringModel] = useState<string>("aggressive_v3");
   const handleViewModeChange = (v: ViewMode) => {
     setViewMode(v);
     localStorage.setItem("ds_view_mode", v);
@@ -69,9 +73,26 @@ export default function App() {
     localStorage.setItem("ds_profile", p);
   };
 
+  const openSymbol = useCallback((symbol: string) => {
+    handleViewModeChange("screener");
+    setSelectedSymbol(symbol);
+  }, []);
+
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
+    api.getScoringModel().then(setScoringModel).catch(console.error);
   }, []);
+
+  const toggleScoringModel = async () => {
+    const next = scoringModel === "aggressive_v2" ? "aggressive_v3" : "aggressive_v2";
+    try {
+      const m = await api.setScoringModel(next);
+      setScoringModel(m);
+      refresh();
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const toggleAutostart = async () => {
     const next = !autostartOn;
@@ -79,26 +100,37 @@ export default function App() {
     catch (e) { console.error(e); }
   };
 
-  const refresh = useCallback(async () => {
-    try {
-      const [data, status] = await Promise.all([
-        api.getOpportunities(),
-        api.getFeedStatus(),
-      ]);
-      setRows(data);
-      setSymbolsLoaded(status.symbols_loaded);
-      setSymbolsTotal(status.symbols_total);
-    } catch (e) {
-      console.error("refresh failed", e);
+  const refresh = useMemo(() => singleFlight(async () => {
+    const [opportunities, status] = await Promise.allSettled([
+      api.getOpportunities(),
+      api.getFeedStatus(),
+    ]);
+    if (opportunities.status === "fulfilled") {
+      setRows(opportunities.value);
+    } else {
+      console.error("opportunity refresh failed", opportunities.reason);
     }
-  }, []);
+
+    if (status.status === "fulfilled") {
+      setSymbolsLoaded(status.value.symbols_loaded);
+      setSymbolsTotal(status.value.symbols_total);
+    } else {
+      console.error("feed status refresh failed", status.reason);
+    }
+  }), []);
 
   useEffect(() => {
     api.startFeed().catch(console.error);
-    refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
+    void refresh();
   }, [refresh]);
+
+  // Fast poll while the feed is still filling rows; slower once full.
+  useEffect(() => {
+    const loading = symbolsTotal === 0 || (rows.length < 8 && symbolsLoaded < symbolsTotal);
+    const ms = loading ? 1500 : 5000;
+    const interval = window.setInterval(() => { void refresh(); }, ms);
+    return () => window.clearInterval(interval);
+  }, [refresh, rows.length, symbolsLoaded, symbolsTotal]);
 
   const filtered = rows.filter((r) => {
     const matchText =
@@ -134,7 +166,7 @@ export default function App() {
         </div>
         <nav className="sidebar-nav">
           {([
-            ["dashboard", "🏠"], ["screener", "📈"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
+            ["dashboard", "🏠"], ["screener", "📈"], ["estimates", "Σ"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
           ] as [ViewMode, string][]).map(([id, icon]) => (
             <button
               key={id}
@@ -160,15 +192,18 @@ export default function App() {
       <header className="app-header">
         <div className="header-left">
           {viewMode === "screener" && (<>
-          <div className="search-wrap">
-            <span className="search-icon">⌕</span>
-            <input
-              className="search"
-              placeholder={t("search.placeholder")}
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-          </div>
+          <TickerSearch
+            onOpenSymbol={openSymbol}
+            onQueryChange={setFilter}
+          />
+          <button
+            type="button"
+            className="btn-ghost scoring-toggle"
+            title={t("scoring.toggle")}
+            onClick={() => void toggleScoringModel()}
+          >
+            {scoringModel === "aggressive_v2" ? "V2" : "V3"}
+          </button>
           <select
             className="filter-select"
             value={confidenceFilter}
@@ -230,8 +265,10 @@ export default function App() {
           <div className="congress-pane">
             <DashboardPanel
               rows={rows}
+              symbolsLoaded={symbolsLoaded}
+              symbolsTotal={symbolsTotal}
               onNavigate={handleViewModeChange}
-              onOpenSymbol={(s) => { handleViewModeChange("screener"); setSelectedSymbol(s); }}
+              onOpenSymbol={openSymbol}
             />
           </div>
         ) : viewMode === "settings" ? (
@@ -266,6 +303,10 @@ export default function App() {
               </div>
             )}
           </>
+        ) : viewMode === "estimates" ? (
+          <div className="congress-pane">
+            <EstimatesPanel />
+          </div>
         ) : viewMode === "congress" ? (
           <div className="congress-pane">
             <CongressOverviewPanel />
@@ -278,10 +319,7 @@ export default function App() {
           <div className="congress-pane">
             <AdvisorPanel
               rows={rows}
-              onOpenSymbol={(s) => {
-                handleViewModeChange("screener");
-                setSelectedSymbol(s);
-              }}
+              onOpenSymbol={openSymbol}
             />
           </div>
         )}
@@ -306,7 +344,7 @@ export default function App() {
       <CommandPalette
         rows={rows}
         onNavigate={handleViewModeChange}
-        onOpenSymbol={(s) => { handleViewModeChange("screener"); setSelectedSymbol(s); }}
+        onOpenSymbol={openSymbol}
         onOpenSettings={() => handleViewModeChange("settings")}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
@@ -314,4 +352,3 @@ export default function App() {
     </div>
   );
 }
-

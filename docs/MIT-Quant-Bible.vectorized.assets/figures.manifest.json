@@ -1,0 +1,50 @@
+[
+    {
+        "figure_id": "fig-0028-08-opera-house-seating-map",
+        "source_asset": "docs/MIT-Quant-Bible.raster-backup.assets/MIT-Quant-Bible.pdf-0028-08.png",
+        "source_page": 28,
+        "source_dimensions_px": {
+            "width": 781,
+            "height": 445
+        },
+        "output_asset": "docs/MIT-Quant-Bible.vectorized.assets/fig-0028-08-opera-house-seating-map.svg",
+        "markdown_locations": [
+            {
+                "file": "docs/MIT-Quant-Bible.md",
+                "anchor": "5.2 QuantCo - Opera House"
+            },
+            {
+                "file": "docs/MIT-Quant-Bible.native.md",
+                "anchor": "5.2 QuantCo - Opera House"
+            }
+        ],
+        "classification": "logical_diagram",
+        "conversion_strategy": "manual_semantic_svg_reconstruction",
+        "status": "complete",
+        "notes": "Targeted reconstruction scope for the opera-house seating map screenshot. The deliverable preserves the full ticketing UI chrome, seating-bowl structure, highlighted section 118, popup card, and control toolbar as standalone SVG primitives with no raster content."
+    },
+    {
+        "figure_id": "fig-0047-04-hudson-river-joint-gaussian-surface",
+        "source_asset": "docs/MIT-Quant-Bible.raster-backup.assets/MIT-Quant-Bible.pdf-0047-04.png",
+        "source_page": 47,
+        "source_dimensions_px": {
+            "width": 586,
+            "height": 448
+        },
+        "output_asset": "docs/MIT-Quant-Bible.vectorized.assets/fig-0047-04-hudson-river-joint-gaussian-surface.svg",
+        "markdown_locations": [
+            {
+                "file": "docs/MIT-Quant-Bible.md",
+                "anchor": "7.7 HUDSON RIVER TRADING"
+            },
+            {
+                "file": "docs/MIT-Quant-Bible.native.md",
+                "anchor": "7.7 HUDSON RIVER TRADING"
+            }
+        ],
+        "classification": "surface_plot",
+        "conversion_strategy": "manual_semantic_svg_reconstruction",
+        "status": "complete",
+        "notes": "Standalone semantic SVG reconstruction of the 3D joint Gaussian density surface used to illustrate the symmetry argument for P(Y > 3X). The output preserves the original canvas size, perspective box, axis labels, tick labels, and stepped rainbow density mound without embedding raster content."
+    }
+]
