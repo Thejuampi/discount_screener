@@ -71,7 +71,8 @@ function sortRows(rows: OpportunityRow[], key: SortKey, asc: boolean): Opportuni
 
 export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded = 0, symbolsTotal = 528 }: Props) {
   const { t } = useT();
-  const [sortKey, setSortKey] = useState<SortKey>("setup_score");
+  // Default: Android V3 ranks by composite; setup_score mirrors composite under V3.
+  const [sortKey, setSortKey] = useState<SortKey>("composite_score");
   const [sortAsc, setSortAsc] = useState(false);
 
   const handleSort = (key: SortKey) => {
@@ -172,7 +173,7 @@ export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded 
                   {row.intrinsic_value_cents > 0 ? fmt.dollars(row.intrinsic_value_cents) : "—"}
                 </td>
                 <td className="num-cell gap-cell">
-                  <span className={row.gap_bps >= 1000 ? "gap-positive" : "gap-neutral"}>
+                  <span className={row.gap_bps != null && row.gap_bps >= 1000 ? "gap-positive" : "gap-neutral"}>
                     {fmt.gap(row.gap_bps)}
                   </span>
                 </td>
@@ -195,7 +196,7 @@ export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded 
 }
 
 function SetupBadge({ label, score, t }: { label: SetupLabel; score: number; t: (k: string, v?: Record<string, string | number>) => string }) {
-  const st = SETUP_STYLE[label];
+  const st = SETUP_STYLE[label] ?? SETUP_STYLE.Hold;
   return (
     <div
       className="setup-badge"
@@ -211,7 +212,7 @@ function SetupBadge({ label, score, t }: { label: SetupLabel; score: number; t: 
 
 
 function ScorePip({ v, title }: { v: number | null; title: string }) {
-  if (v === null) return <span className="pip pip-none" title={`${title}: no data`}>—</span>;
+  if (v == null) return <span className="pip pip-none" title={`${title}: no data`}>—</span>;
   const color = v >= 30 ? "#22c55e" : v >= 0 ? "#f59e0b" : "#ef4444";
   return (
     <span className="pip" title={`${title}: ${v}`} style={{ color }}>{v}</span>

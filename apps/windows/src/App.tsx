@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { OpportunityList } from "./components/OpportunityList";
 import { DetailPanel } from "./components/DetailPanel";
 import { AlertsPanel } from "./components/AlertsPanel";
@@ -10,6 +10,7 @@ import { ScalpingPanel } from "./components/ScalpingPanel";
 import { DashboardPanel } from "./components/DashboardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
+import { singleFlight } from "./singleFlight";
 import { TickerSearch } from "./components/TickerSearch";
 import { EstimatesPanel } from "./components/EstimatesPanel";
 import { Toaster } from "./toast";
@@ -99,26 +100,37 @@ export default function App() {
     catch (e) { console.error(e); }
   };
 
-  const refresh = useCallback(async () => {
-    try {
-      const [data, status] = await Promise.all([
-        api.getOpportunities(),
-        api.getFeedStatus(),
-      ]);
-      setRows(data);
-      setSymbolsLoaded(status.symbols_loaded);
-      setSymbolsTotal(status.symbols_total);
-    } catch (e) {
-      console.error("refresh failed", e);
+  const refresh = useMemo(() => singleFlight(async () => {
+    const [opportunities, status] = await Promise.allSettled([
+      api.getOpportunities(),
+      api.getFeedStatus(),
+    ]);
+    if (opportunities.status === "fulfilled") {
+      setRows(opportunities.value);
+    } else {
+      console.error("opportunity refresh failed", opportunities.reason);
     }
-  }, []);
+
+    if (status.status === "fulfilled") {
+      setSymbolsLoaded(status.value.symbols_loaded);
+      setSymbolsTotal(status.value.symbols_total);
+    } else {
+      console.error("feed status refresh failed", status.reason);
+    }
+  }), []);
 
   useEffect(() => {
     api.startFeed().catch(console.error);
-    refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
+    void refresh();
   }, [refresh]);
+
+  // Fast poll while the feed is still filling rows; slower once full.
+  useEffect(() => {
+    const loading = symbolsTotal === 0 || (rows.length < 8 && symbolsLoaded < symbolsTotal);
+    const ms = loading ? 1500 : 5000;
+    const interval = window.setInterval(() => { void refresh(); }, ms);
+    return () => window.clearInterval(interval);
+  }, [refresh, rows.length, symbolsLoaded, symbolsTotal]);
 
   const filtered = rows.filter((r) => {
     const matchText =
@@ -253,6 +265,8 @@ export default function App() {
           <div className="congress-pane">
             <DashboardPanel
               rows={rows}
+              symbolsLoaded={symbolsLoaded}
+              symbolsTotal={symbolsTotal}
               onNavigate={handleViewModeChange}
               onOpenSymbol={openSymbol}
             />
@@ -338,4 +352,3 @@ export default function App() {
     </div>
   );
 }
-

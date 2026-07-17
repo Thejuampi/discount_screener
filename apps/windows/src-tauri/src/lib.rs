@@ -1,22 +1,21 @@
 mod chart_patterns;
 mod commands;
 mod congress;
-mod email;
 mod congress_scoring;
 mod crypto_cycle;
 mod crypto_md;
 mod db;
+mod dcf_model;
 mod edgar;
+mod email;
 mod engine;
 mod fetcher;
 mod fibonacci;
-mod quote_summary;
-mod yahoo_session;
-mod dcf_model;
-mod opportunity_v3;
 mod index_estimates;
-mod quant_lens;
 mod news;
+mod opportunity_v3;
+mod quant_lens;
+mod quote_summary;
 mod regime;
 mod risk;
 mod scalp_ws;
@@ -24,9 +23,10 @@ mod scalping;
 mod schwab;
 mod schwab_api;
 mod smc;
-mod stooq;
 mod state;
+mod stooq;
 mod ticker_search;
+mod yahoo_session;
 
 use state::AppState;
 use tauri::{
@@ -53,9 +53,7 @@ pub fn run() {
         ))
         .setup(|app| {
             // ── State / DB ────────────────────────────────────────────────────
-            let app_data_dir = app.path()
-                .app_data_dir()
-                .expect("resolve app data dir");
+            let app_data_dir = app.path().app_data_dir().expect("resolve app data dir");
             let db_path = app_data_dir.join("history.sqlite");
             let app_state = AppState::new(db_path);
             app.manage(app_state);
@@ -84,7 +82,9 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
                     "hide" => {
-                        if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -100,8 +100,10 @@ pub fn run() {
                         let app = tray.app_handle();
                         if let Some(w) = app.get_webview_window("main") {
                             match w.is_visible() {
-                                Ok(true)  => { let _ = w.hide(); }
-                                _         => show_main_window(app),
+                                Ok(true) => {
+                                    let _ = w.hide();
+                                }
+                                _ => show_main_window(app),
                             }
                         }
                     }

@@ -11,7 +11,8 @@ export interface OpportunityRow {
   company_name: string | null;
   market_price_cents: number;
   intrinsic_value_cents: number;
-  gap_bps: number;
+  /** Discount to fair value in bps; null when no usable target. */
+  gap_bps: number | null;
   qualification: QualificationStatus;
   confidence: ConfidenceBand;
   signal_status: ExternalSignalStatus;
@@ -69,7 +70,8 @@ export interface SymbolDetail {
   company_name: string | null;
   market_price_cents: number;
   intrinsic_value_cents: number;
-  gap_bps: number;
+  /** Discount to fair value in bps; null when no usable target. */
+  gap_bps: number | null;
   qualification: QualificationStatus;
   confidence: ConfidenceBand;
   signal_status: ExternalSignalStatus;
@@ -856,7 +858,8 @@ export interface SchwabReport {
 // Formatting helpers
 export const fmt = {
   dollars: (cents: number) => `$${(cents / 100).toFixed(2)}`,
-  gap: (bps: number) => bps <= -2_000_000_000 ? "—" : `${(bps / 100).toFixed(1)}%`,
+  gap: (bps: number | null | undefined) =>
+    bps == null ? "—" : `${(bps / 100).toFixed(1)}%`,
   pe: (hundredths: number | null) => hundredths ? `${(hundredths / 100).toFixed(1)}x` : "—",
   roe: (bps: number | null) => bps ? `${(bps / 100).toFixed(1)}%` : "—",
   billions: (dollars: number | null) => {

@@ -90,17 +90,64 @@ pub fn company_name_match_rank(query: &str, company_name: &str) -> Option<i32> {
     if normalized_name.contains(&normalized_query) {
         return Some(rank::NAME_CONTAINS);
     }
+    // Multi-word / branding: "Mercado Libre" ↔ "MercadoLibre, Inc."
+    // Collapse alphanumerics so spaced queries still match camel/compound names.
+    let compact_query = compact_name_key(&normalized_query);
+    let compact_name = compact_name_key(&normalized_name);
+    if !compact_query.is_empty() && compact_query.len() >= 3 {
+        if compact_name == compact_query {
+            return Some(rank::NAME_EXACT);
+        }
+        if compact_name.starts_with(&compact_query) {
+            return Some(rank::NAME_WORD_START);
+        }
+        if compact_name.contains(&compact_query) {
+            return Some(rank::NAME_CONTAINS);
+        }
+    }
     None
 }
 
-pub fn merge_and_rank(candidates: &[TickerSearchCandidate], limit: usize) -> Vec<TickerSearchResult> {
+/// Yahoo `v1/finance/search` often returns empty for spaced brand queries
+/// ("Mercado Libre") while the compacted form ("MercadoLibre") hits.
+/// Try the original first, then compacted / first-token fallbacks.
+pub fn remote_search_query_variants(query: &str) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut variants = Vec::new();
+    let mut push_unique = |s: String| {
+        if !s.is_empty() && !variants.iter().any(|v: &String| v.eq_ignore_ascii_case(&s)) {
+            variants.push(s);
+        }
+    };
+    push_unique(trimmed.to_string());
+    let collapsed: String = trimmed.split_whitespace().collect();
+    if collapsed.len() != trimmed.len() {
+        push_unique(collapsed);
+    }
+    // First token only when multi-word (e.g. "mercado" from "mercado libre").
+    if let Some(first) = trimmed.split_whitespace().next() {
+        if first.len() >= 3 && first.len() < trimmed.len() {
+            push_unique(first.to_string());
+        }
+    }
+    variants
+}
+
+pub fn merge_and_rank(
+    candidates: &[TickerSearchCandidate],
+    limit: usize,
+) -> Vec<TickerSearchResult> {
     use std::collections::HashMap;
 
     let mut best_by_symbol: HashMap<String, TickerSearchCandidate> = HashMap::new();
     for candidate in candidates {
         let key = candidate.symbol.to_uppercase();
         match best_by_symbol.get(&key) {
-            Some(existing) if candidate_cmp(existing, candidate) != std::cmp::Ordering::Greater => {}
+            Some(existing) if candidate_cmp(existing, candidate) != std::cmp::Ordering::Greater => {
+            }
             _ => {
                 best_by_symbol.insert(key, candidate.clone());
             }
@@ -153,8 +200,7 @@ pub fn should_direct_open_ticker_on_submit(query: &str, suggestion_symbols: &[St
     }
 
     let upper = trimmed.to_uppercase();
-    let typed_as_ticker =
-        trimmed == upper && trimmed.chars().all(|c| c.is_ascii_alphanumeric());
+    let typed_as_ticker = trimmed == upper && trimmed.chars().all(|c| c.is_ascii_alphanumeric());
 
     if !suggestion_symbols.is_empty() {
         let exact_matches: Vec<_> = suggestion_symbols
@@ -173,8 +219,7 @@ pub fn should_direct_open_ticker_on_submit(query: &str, suggestion_symbols: &[St
 #[allow(dead_code)] // stricter core helper; submit path uses is_high_confidence_suggestion
 pub fn is_high_confidence_match(query: &str, result: &TickerSearchResult) -> bool {
     let trimmed = query.trim();
-    if result.symbol.eq_ignore_ascii_case(trimmed)
-        && result.match_rank <= rank::EXACT_TICKER_REMOTE
+    if result.symbol.eq_ignore_ascii_case(trimmed) && result.match_rank <= rank::EXACT_TICKER_REMOTE
     {
         return true;
     }
@@ -362,18 +407,35 @@ pub fn parse_search_quotes(root: &Value) -> Vec<YahooSearchQuote> {
 }
 
 fn json_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    obj.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
 fn normalize_name_query(value: &str) -> String {
-    value
+    // Drop punctuation so "Apple Inc." and "Apple Inc" normalize the same way.
+    let cleaned: String = value
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned
         .trim()
         .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn compact_name_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 fn candidate_cmp(a: &TickerSearchCandidate, b: &TickerSearchCandidate) -> std::cmp::Ordering {
@@ -423,7 +485,11 @@ mod tests {
         }
     }
 
-    fn remote_candidate(symbol: &str, company_name: &str, match_rank: i32) -> TickerSearchCandidate {
+    fn remote_candidate(
+        symbol: &str,
+        company_name: &str,
+        match_rank: i32,
+    ) -> TickerSearchCandidate {
         TickerSearchCandidate {
             symbol: symbol.to_string(),
             company_name: Some(company_name.to_string()),
@@ -445,7 +511,10 @@ mod tests {
             8,
         );
         assert_eq!(ranked.first().unwrap().symbol, "META");
-        assert_eq!(ranked.first().unwrap().match_rank, rank::EXACT_TICKER_CURRENT);
+        assert_eq!(
+            ranked.first().unwrap().match_rank,
+            rank::EXACT_TICKER_CURRENT
+        );
     }
 
     #[test]
@@ -458,7 +527,10 @@ mod tests {
             8,
         );
         assert_eq!(ranked.first().unwrap().symbol, "MELI");
-        assert_eq!(ranked.first().unwrap().match_rank, rank::EXACT_TICKER_REMOTE);
+        assert_eq!(
+            ranked.first().unwrap().match_rank,
+            rank::EXACT_TICKER_REMOTE
+        );
     }
 
     #[test]
@@ -466,19 +538,17 @@ mod tests {
         let ranked = merge_and_rank(
             &[
                 remote_candidate("MSFT", "Microsoft Corporation", rank::EXACT_TICKER_REMOTE),
-                profile_candidate(
-                    "MSFT",
-                    &["dow", "sp500"],
-                    true,
-                    rank::EXACT_TICKER_CURRENT,
-                ),
+                profile_candidate("MSFT", &["dow", "sp500"], true, rank::EXACT_TICKER_CURRENT),
             ],
             8,
         );
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].symbol, "MSFT");
         assert!(!ranked[0].is_remote);
-        assert_eq!(ranked[0].profiles, vec!["dow".to_string(), "sp500".to_string()]);
+        assert_eq!(
+            ranked[0].profiles,
+            vec!["dow".to_string(), "sp500".to_string()]
+        );
     }
 
     #[test]
@@ -633,7 +703,9 @@ mod tests {
         assert!(!quotes.is_empty());
         assert_eq!(quotes[0].symbol, "MELI");
         assert_eq!(quotes[0].company_name, "MercadoLibre, Inc.");
-        assert!(quotes.iter().all(|q| q.quote_type == "EQUITY" || q.quote_type == "ETF"));
+        assert!(quotes
+            .iter()
+            .all(|q| q.quote_type == "EQUITY" || q.quote_type == "ETF"));
     }
 
     #[test]
@@ -665,5 +737,39 @@ mod tests {
         let root = load_fixture("microsoft_corporation.json");
         let quotes = parse_search_quotes(&root);
         assert_eq!(quotes[0].symbol, "MSFT");
+    }
+
+    #[test]
+    fn mercado_libre_spaced_matches_mercadolibre_inc() {
+        assert_eq!(
+            company_name_match_rank("Mercado Libre", "MercadoLibre, Inc."),
+            Some(rank::NAME_WORD_START)
+        );
+        assert_eq!(
+            company_name_match_rank("mercado libre", "MercadoLibre, Inc."),
+            Some(rank::NAME_WORD_START)
+        );
+    }
+
+    #[test]
+    fn apple_inc_with_punctuation_is_exact_name_match() {
+        assert_eq!(
+            company_name_match_rank("apple inc", "Apple Inc."),
+            Some(rank::NAME_EXACT)
+        );
+    }
+
+    #[test]
+    fn remote_search_variants_collapse_mercado_libre() {
+        let variants = remote_search_query_variants("Mercado Libre");
+        assert_eq!(variants[0], "Mercado Libre");
+        assert!(variants.iter().any(|v| v == "MercadoLibre"));
+        assert!(variants.iter().any(|v| v.eq_ignore_ascii_case("mercado")));
+    }
+
+    #[test]
+    fn remote_search_variants_single_token_unchanged() {
+        let variants = remote_search_query_variants("MELI");
+        assert_eq!(variants, vec!["MELI".to_string()]);
     }
 }

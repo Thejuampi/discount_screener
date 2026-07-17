@@ -131,13 +131,14 @@ pub fn compute(
     let raw_base_growth = derive_base_growth_bps(&fcf_ps)
         .ok_or_else(|| "insufficient positive free cash flow per share history".to_string())?;
     let resolved = derive_wacc(fundamentals, market_price_cents)?;
-    let net_debt = fundamentals.total_debt_dollars.unwrap_or(0)
-        - fundamentals.total_cash_dollars.unwrap_or(0);
+    let net_debt =
+        fundamentals.total_debt_dollars.unwrap_or(0) - fundamentals.total_cash_dollars.unwrap_or(0);
 
     let bear_g = (raw_base_growth - SCENARIO_GROWTH_SPREAD_BPS)
         .clamp(BEAR_GROWTH_MIN_BPS, BEAR_GROWTH_MAX_BPS);
     let base_g = raw_base_growth.clamp(BASE_GROWTH_MIN_BPS, BASE_GROWTH_MAX_BPS);
-    let bull_g = (base_g + SCENARIO_GROWTH_SPREAD_BPS).clamp(BULL_GROWTH_MIN_BPS, BULL_GROWTH_MAX_BPS);
+    let bull_g =
+        (base_g + SCENARIO_GROWTH_SPREAD_BPS).clamp(BULL_GROWTH_MIN_BPS, BULL_GROWTH_MAX_BPS);
 
     let bear = discounted_per_share(
         latest,
@@ -259,8 +260,7 @@ fn derive_wacc(
     let tax_rate_source = WaccFieldSource::Default;
     let after_tax_debt =
         (cost_of_debt_bps as f64 * (1.0 - tax_rate_bps as f64 / 10_000.0)).round() as i32;
-    let weighted =
-        (equity_w * cost_of_equity_bps as f64) + (debt_w * after_tax_debt as f64);
+    let weighted = (equity_w * cost_of_equity_bps as f64) + (debt_w * after_tax_debt as f64);
     let unclamped = weighted.round() as i32;
     let wacc_bps = unclamped.clamp(MIN_WACC_BPS, MAX_WACC_BPS);
 

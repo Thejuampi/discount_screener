@@ -1,0 +1,24 @@
+{
+  "name": "get_complexity_metrics",
+  "description": "Get cyclomatic complexity, cognitive complexity, LOC.\n\nUSAGE: get_complexity_metrics(filePath=\"path/to/File.java\")\nOUTPUT: Complexity metrics with risk assessment\n\nMetrics:\n- Cyclomatic Complexity: Count of decision points (+1 for if/for/while/case/catch)\n- Cognitive Complexity: Penalizes nesting and breaks in linear flow\n- LOC: Physical and logical lines of code\n\nRisk levels:\n- High: CC > 10\n- Medium: CC 6-10\n- Low: CC <= 5\n\nRequires load_project to be called first.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "granularity": {
+        "type": "string",
+        "description": "Level of detail: 'file', 'type', or 'method' (default: 'file')"
+      },
+      "includeDetails": {
+        "type": "boolean",
+        "description": "Include per-method breakdown (default: true)"
+      },
+      "filePath": {
+        "type": "string",
+        "description": "Path to source file"
+      }
+    },
+    "required": [
+      "filePath"
+    ]
+  }
+}

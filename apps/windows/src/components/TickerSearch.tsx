@@ -23,18 +23,17 @@ export function TickerSearch({ onOpenSymbol, onQueryChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
   const openSymbol = useCallback(
-    async (symbol: string) => {
+    (symbol: string) => {
       setExpanded(false);
       setNotice(null);
       setQuery("");
       onQueryChange?.("");
       setSuggestions([]);
+      // Open UI immediately; detail panel drives the load + progressive refresh.
       onOpenSymbol(symbol);
-      try {
-        await api.ensureSymbolLoaded(symbol);
-      } catch (e) {
+      void api.ensureSymbolLoaded(symbol).catch((e) => {
         console.error("ensureSymbolLoaded failed", e);
-      }
+      });
     },
     [onOpenSymbol, onQueryChange],
   );
@@ -95,7 +94,7 @@ export function TickerSearch({ onOpenSymbol, onQueryChange }: Props) {
       }
       const outcome = await api.resolveTickerSearchSubmit(q, list);
       if (outcome.kind === "open") {
-        await openSymbol(outcome.symbol);
+        openSymbol(outcome.symbol);
       } else if (outcome.kind === "pick_match") {
         setExpanded(true);
         setNotice(t("search.pickMatch"));

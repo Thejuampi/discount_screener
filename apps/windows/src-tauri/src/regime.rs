@@ -42,10 +42,15 @@ pub struct MarketRegime {
 }
 
 fn vix_state(vix: f64) -> &'static str {
-    if vix < 15.0 { "Calm" }
-    else if vix < 20.0 { "Normal" }
-    else if vix < 28.0 { "Elevated" }
-    else { "Fear" }
+    if vix < 15.0 {
+        "Calm"
+    } else if vix < 20.0 {
+        "Normal"
+    } else if vix < 28.0 {
+        "Elevated"
+    } else {
+        "Fear"
+    }
 }
 
 /// Compute the current market regime from cached technicals + a live VIX quote.
@@ -60,20 +65,36 @@ pub fn get_market_regime(state: State<AppState>) -> Result<MarketRegime, String>
         let mut have50 = 0usize;
         for (sym, cs) in screener.chart_summaries.iter() {
             // Equities only — breadth is an S&P concept, not crypto/ETF.
-            if is_crypto(sym) || is_etf(sym) { continue; }
+            if is_crypto(sym) || is_etf(sym) {
+                continue;
+            }
             let price = cs.latest_close_cents;
-            if price <= 0 { continue; }
+            if price <= 0 {
+                continue;
+            }
             if let Some(ma) = cs.ema200_cents {
                 have200 += 1;
-                if price > ma { above200 += 1; }
+                if price > ma {
+                    above200 += 1;
+                }
             }
             if let Some(ma) = cs.ema50_cents {
                 have50 += 1;
-                if price > ma { above50 += 1; }
+                if price > ma {
+                    above50 += 1;
+                }
             }
         }
-        let b200 = if have200 > 0 { Some(above200 as f64 / have200 as f64 * 100.0) } else { None };
-        let b50 = if have50 > 0 { Some(above50 as f64 / have50 as f64 * 100.0) } else { None };
+        let b200 = if have200 > 0 {
+            Some(above200 as f64 / have200 as f64 * 100.0)
+        } else {
+            None
+        };
+        let b50 = if have50 > 0 {
+            Some(above50 as f64 / have50 as f64 * 100.0)
+        } else {
+            None
+        };
         let spy = screener.chart_summaries.get("SPY");
         let spy_price = spy.map(|s| s.latest_close_cents).filter(|p| *p > 0);
         let spy_ma200 = spy.and_then(|s| s.ema200_cents);
@@ -101,27 +122,50 @@ pub fn get_market_regime(state: State<AppState>) -> Result<MarketRegime, String>
 
     if let Some(v) = vix {
         axes += 1;
-        if v < 18.0 { score += 1; }
-        else if v > 26.0 { score -= 1; }
-        notes_es.push(format!("VIX en {:.1} ({})", v, match vix_state(v) {
-            "Calm" => "calma", "Normal" => "normal", "Elevated" => "elevado", _ => "miedo",
-        }));
+        if v < 18.0 {
+            score += 1;
+        } else if v > 26.0 {
+            score -= 1;
+        }
+        notes_es.push(format!(
+            "VIX en {:.1} ({})",
+            v,
+            match vix_state(v) {
+                "Calm" => "calma",
+                "Normal" => "normal",
+                "Elevated" => "elevado",
+                _ => "miedo",
+            }
+        ));
         notes_en.push(format!("VIX at {:.1} ({})", v, vix_state(v).to_lowercase()));
     }
     if let Some(b) = breadth200 {
         axes += 1;
-        if b > 55.0 { score += 1; }
-        else if b < 40.0 { score -= 1; }
+        if b > 55.0 {
+            score += 1;
+        } else if b < 40.0 {
+            score -= 1;
+        }
         notes_es.push(format!("{:.0}% de las acciones sobre su MA200", b));
         notes_en.push(format!("{:.0}% of stocks above their 200-day MA", b));
     }
     if let Some(up) = spy_above_ma200 {
         axes += 1;
-        if up { score += 1; } else { score -= 1; }
-        notes_es.push(if up { "S&P 500 sobre su MA200 (tendencia alcista)".into() }
-                      else { "S&P 500 bajo su MA200 (tendencia bajista)".into() });
-        notes_en.push(if up { "S&P 500 above its 200-day MA (uptrend)".into() }
-                      else { "S&P 500 below its 200-day MA (downtrend)".into() });
+        if up {
+            score += 1;
+        } else {
+            score -= 1;
+        }
+        notes_es.push(if up {
+            "S&P 500 sobre su MA200 (tendencia alcista)".into()
+        } else {
+            "S&P 500 bajo su MA200 (tendencia bajista)".into()
+        });
+        notes_en.push(if up {
+            "S&P 500 above its 200-day MA (uptrend)".into()
+        } else {
+            "S&P 500 below its 200-day MA (downtrend)".into()
+        });
     }
 
     let (regime, exposure): (&'static str, u32) = if axes == 0 {

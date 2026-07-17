@@ -16,7 +16,9 @@ use crate::quote_summary::{
     QUOTE_SUMMARY_MODULES,
 };
 use crate::ticker_search::{parse_search_quotes, YahooSearchQuote};
-use crate::yahoo_session::{is_auth_error, YahooSession};
+use crate::yahoo_session::{is_auth_error, is_rate_limit_error, YahooSession};
+
+pub use crate::quote_summary::{is_enrichment_complete, is_list_ready};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const QUOTE_PAGE_URL: &str = "https://finance.yahoo.com/quote/";
@@ -29,18 +31,24 @@ const USER_AGENT: &str =
 
 pub use crate::quote_summary::FetchResult;
 
+/// Android `ChartMetaProbe` — lightweight recovery from chart meta.
+struct ChartMetaProbe {
+    market_price_cents: Option<i64>,
+    company_name: Option<String>,
+}
+
 // Markers for JSON blobs embedded in the Yahoo Finance quote page HTML.
 // Yahoo serialises the store data as an escaped JSON string, so all key quotes
 // appear as \" in the raw HTML — that's what we search for.
-const FINANCIAL_DATA_MARKER: &str      = r#"\"financialData\":"#;
-const KEY_STATISTICS_MARKER: &str      = r#"\"defaultKeyStatistics\":"#;
-const PRICE_MARKER: &str               = r#"\"price\":"#;
-const ASSET_PROFILE_MARKER: &str       = r#"\"assetProfile\":"#;
-const SUMMARY_PROFILE_MARKER: &str     = r#"\"summaryProfile\":"#;
-const QUOTE_TYPE_MARKER: &str          = r#"\"quoteType\":"#;
+const FINANCIAL_DATA_MARKER: &str = r#"\"financialData\":"#;
+const KEY_STATISTICS_MARKER: &str = r#"\"defaultKeyStatistics\":"#;
+const PRICE_MARKER: &str = r#"\"price\":"#;
+const ASSET_PROFILE_MARKER: &str = r#"\"assetProfile\":"#;
+const SUMMARY_PROFILE_MARKER: &str = r#"\"summaryProfile\":"#;
+const QUOTE_TYPE_MARKER: &str = r#"\"quoteType\":"#;
 const RECOMMENDATION_TREND_MARKER: &str = r#"\"recommendationTrend\":"#;
-const CALENDAR_EVENTS_MARKER: &str     = r#"\"calendarEvents\":"#;
-const META_TITLE_MARKER: &str          = r#"<meta property="og:title" content=""#;
+const CALENDAR_EVENTS_MARKER: &str = r#"\"calendarEvents\":"#;
+const META_TITLE_MARKER: &str = r#"<meta property="og:title" content=""#;
 
 /// Top market cap cryptocurrencies (non-stablecoin) on Yahoo Finance.
 /// All use the `-USD` suffix for spot price in dollars.
@@ -81,24 +89,15 @@ pub fn is_crypto(symbol: &str) -> bool {
 /// (no XBRL filings) and base their Act/Watch/Avoid on technicals only.
 pub const ETF_SYMBOLS: &[&str] = &[
     // Broad market / S&P 500
-    "SPY", "IVV", "VOO", "VTI", "SCHB",
-    // Nasdaq / large growth
-    "QQQ", "QQQM", "VUG",
-    // Small / mid cap
-    "IWM", "IJR", "VB",
-    // Dow Jones / value
-    "DIA", "VTV",
-    // International
-    "VEA", "VWO", "EFA", "EEM",
-    // Bonds
-    "AGG", "BND", "LQD", "HYG", "TLT", "IEF", "SHY",
-    // Commodities
-    "GLD", "SLV", "USO",
-    // Real estate
-    "VNQ", "IYR",
-    // Sector SPDRs
-    "XLE", "XLF", "XLK", "XLV", "XLI",
-    "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+    "SPY", "IVV", "VOO", "VTI", "SCHB", // Nasdaq / large growth
+    "QQQ", "QQQM", "VUG", // Small / mid cap
+    "IWM", "IJR", "VB", // Dow Jones / value
+    "DIA", "VTV", // International
+    "VEA", "VWO", "EFA", "EEM", // Bonds
+    "AGG", "BND", "LQD", "HYG", "TLT", "IEF", "SHY", // Commodities
+    "GLD", "SLV", "USO", // Real estate
+    "VNQ", "IYR", // Sector SPDRs
+    "XLE", "XLF", "XLK", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
     // Thematic / dividend
     "ARKK", "ARKG", "ARKQ", "VYM", "DVY", "SCHD",
 ];
@@ -110,9 +109,13 @@ pub fn is_etf(symbol: &str) -> bool {
 
 /// Classify a symbol into one of: "crypto" | "etf" | "stock".
 pub fn asset_type(symbol: &str) -> &'static str {
-    if is_crypto(symbol) { "crypto" }
-    else if is_etf(symbol) { "etf" }
-    else { "stock" }
+    if is_crypto(symbol) {
+        "crypto"
+    } else if is_etf(symbol) {
+        "etf"
+    } else {
+        "stock"
+    }
 }
 
 /// Map an ETF ticker to a human-readable description of the segment it covers.
@@ -122,49 +125,49 @@ pub fn etf_sector(symbol: &str) -> Option<&'static str> {
         // Broad market
         "SPY" | "IVV" | "VOO" | "VTI" | "SCHB" => "Broad Market (US)",
         // Nasdaq / Tech
-        "QQQ" | "QQQM"                          => "Technology / Nasdaq 100",
+        "QQQ" | "QQQM" => "Technology / Nasdaq 100",
         // Style: growth / value
-        "VUG"                                   => "Large-cap Growth",
-        "VTV"                                   => "Large-cap Value",
+        "VUG" => "Large-cap Growth",
+        "VTV" => "Large-cap Value",
         // Small / mid cap
-        "IWM" | "IJR" | "VB"                    => "Small Cap",
+        "IWM" | "IJR" | "VB" => "Small Cap",
         // Blue chips
-        "DIA"                                   => "Dow Jones Industrial",
+        "DIA" => "Dow Jones Industrial",
         // International
-        "VEA" | "EFA"                           => "Developed Markets ex-US",
-        "VWO" | "EEM"                           => "Emerging Markets",
+        "VEA" | "EFA" => "Developed Markets ex-US",
+        "VWO" | "EEM" => "Emerging Markets",
         // Bonds
-        "AGG" | "BND"                           => "Aggregate Bonds",
-        "LQD"                                   => "Investment Grade Corp Bonds",
-        "HYG"                                   => "High Yield Corp Bonds",
-        "TLT"                                   => "Long-Term Treasury",
-        "IEF"                                   => "Mid-Term Treasury",
-        "SHY"                                   => "Short-Term Treasury",
+        "AGG" | "BND" => "Aggregate Bonds",
+        "LQD" => "Investment Grade Corp Bonds",
+        "HYG" => "High Yield Corp Bonds",
+        "TLT" => "Long-Term Treasury",
+        "IEF" => "Mid-Term Treasury",
+        "SHY" => "Short-Term Treasury",
         // Commodities
-        "GLD"                                   => "Gold",
-        "SLV"                                   => "Silver",
-        "USO"                                   => "Oil",
+        "GLD" => "Gold",
+        "SLV" => "Silver",
+        "USO" => "Oil",
         // Real estate
-        "VNQ" | "IYR"                           => "Real Estate",
+        "VNQ" | "IYR" => "Real Estate",
         // Sector SPDRs (S&P 500 by sector)
-        "XLE"                                   => "Energy Sector",
-        "XLF"                                   => "Financial Sector",
-        "XLK"                                   => "Technology Sector",
-        "XLV"                                   => "Healthcare Sector",
-        "XLI"                                   => "Industrial Sector",
-        "XLY"                                   => "Consumer Discretionary",
-        "XLP"                                   => "Consumer Staples",
-        "XLU"                                   => "Utilities Sector",
-        "XLB"                                   => "Materials Sector",
-        "XLRE"                                  => "Real Estate Sector",
-        "XLC"                                   => "Communication Services",
+        "XLE" => "Energy Sector",
+        "XLF" => "Financial Sector",
+        "XLK" => "Technology Sector",
+        "XLV" => "Healthcare Sector",
+        "XLI" => "Industrial Sector",
+        "XLY" => "Consumer Discretionary",
+        "XLP" => "Consumer Staples",
+        "XLU" => "Utilities Sector",
+        "XLB" => "Materials Sector",
+        "XLRE" => "Real Estate Sector",
+        "XLC" => "Communication Services",
         // Thematic
-        "ARKK"                                  => "Disruptive Innovation",
-        "ARKG"                                  => "Genomics & Biotech",
-        "ARKQ"                                  => "Autonomous Tech & Robotics",
+        "ARKK" => "Disruptive Innovation",
+        "ARKG" => "Genomics & Biotech",
+        "ARKQ" => "Autonomous Tech & Robotics",
         // Dividend / income
-        "VYM" | "DVY" | "SCHD"                  => "Dividend Income",
-        _                                       => return None,
+        "VYM" | "DVY" | "SCHD" => "Dividend Income",
+        _ => return None,
     })
 }
 
@@ -172,44 +175,42 @@ pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
     "MMM", "AOS", "ABT", "ABBV", "ACN", "ADBE", "AMD", "AES", "AFL", "A", "APD", "ABNB", "AKAM",
     "ALB", "ARE", "ALGN", "ALLE", "LNT", "ALL", "GOOGL", "GOOG", "MO", "AMZN", "AMCR", "AEE",
     "AEP", "AXP", "AIG", "AMT", "AWK", "AMP", "AME", "AMGN", "APH", "ADI", "AON", "APA", "APO",
-    "AAPL", "AMAT", "APP", "APTV", "ACGL", "ADM", "ARES", "ANET", "AJG", "AIZ", "T", "ATO",
-    "ADSK", "ADP", "AZO", "AVB", "AVY", "AXON", "BKR", "BALL", "BAC", "BAX", "BDX", "BRK.B",
-    "BBY", "TECH", "BIIB", "BLK", "BX", "XYZ", "BK", "BA", "BKNG", "BSX", "BMY", "AVGO", "BR",
-    "BRO", "BF.B", "BLDR", "BG", "BXP", "CHRW", "CDNS", "CPT", "CPB", "COF", "CAH", "CCL",
-    "CARR", "CVNA", "CAT", "CBOE", "CBRE", "CDW", "COR", "CNC", "CNP", "CF", "CRL", "SCHW",
-    "CHTR", "CVX", "CMG", "CB", "CHD", "CIEN", "CI", "CINF", "CTAS", "CSCO", "C", "CFG", "CLX",
-    "CME", "CMS", "KO", "CTSH", "COHR", "COIN", "CL", "CMCSA", "FIX", "CAG", "COP", "ED",
-    "STZ", "CEG", "COO", "CPRT", "GLW", "CPAY", "CTVA", "CSGP", "COST", "CTRA", "CRH", "CRWD",
-    "CCI", "CSX", "CMI", "CVS", "DHR", "DRI", "DDOG", "DVA", "DECK", "DE", "DELL", "DAL",
-    "DVN", "DXCM", "FANG", "DLR", "DG", "DLTR", "D", "DPZ", "DASH", "DOV", "DOW", "DHI",
-    "DTE", "DUK", "DD", "ETN", "EBAY", "SATS", "ECL", "EIX", "EW", "EA", "ELV", "EME", "EMR",
-    "ETR", "EOG", "EPAM", "EQT", "EFX", "EQIX", "EQR", "ERIE", "ESS", "EL", "EG", "EVRG",
-    "ES", "EXC", "EXE", "EXPE", "EXPD", "EXR", "XOM", "FFIV", "FDS", "FICO", "FAST", "FRT",
-    "FDX", "FIS", "FITB", "FSLR", "FE", "FISV", "F", "FTNT", "FTV", "FOXA", "FOX", "BEN",
-    "FCX", "GRMN", "IT", "GE", "GEHC", "GEV", "GEN", "GNRC", "GD", "GIS", "GM", "GPC", "GILD",
-    "GPN", "GL", "GDDY", "GS", "HAL", "HIG", "HAS", "HCA", "DOC", "HSIC", "HSY", "HPE", "HLT",
-    "HOLX", "HD", "HON", "HRL", "HST", "HWM", "HPQ", "HUBB", "HUM", "HBAN", "HII", "IBM",
-    "IEX", "IDXX", "ITW", "INCY", "IR", "PODD", "INTC", "IBKR", "ICE", "IFF", "IP", "INTU",
-    "ISRG", "IVZ", "INVH", "IQV", "IRM", "JBHT", "JBL", "JKHY", "J", "JNJ", "JCI", "JPM",
-    "KVUE", "KDP", "KEY", "KEYS", "KMB", "KIM", "KMI", "KKR", "KLAC", "KHC", "KR", "LHX",
-    "LH", "LRCX", "LVS", "LDOS", "LEN", "LII", "LLY", "LIN", "LYV", "LMT", "L", "LOW", "LULU",
-    "LITE", "LYB", "MTB", "MPC", "MAR", "MRSH", "MLM", "MAS", "MA", "MKC", "MCD", "MCK", "MDT",
-    "MRK", "META", "MET", "MTD", "MGM", "MCHP", "MU", "MSFT", "MAA", "MRNA", "TAP", "MDLZ",
-    "MPWR", "MNST", "MCO", "MS", "MOS", "MSI", "MSCI", "NDAQ", "NTAP", "NFLX", "NEM", "NWSA",
-    "NWS", "NEE", "NKE", "NI", "NDSN", "NSC", "NTRS", "NOC", "NCLH", "NRG", "NUE", "NVDA",
-    "NVR", "NXPI", "ORLY", "OXY", "ODFL", "OMC", "ON", "OKE", "ORCL", "OTIS", "PCAR", "PKG",
-    "PLTR", "PANW", "PSKY", "PH", "PAYX", "PYPL", "PNR", "PEP", "PFE", "PCG", "PM", "PSX",
-    "PNW", "PNC", "POOL", "PPG", "PPL", "PFG", "PG", "PGR", "PLD", "PRU", "PEG", "PTC", "PSA",
-    "PHM", "PWR", "QCOM", "DGX", "Q", "RL", "RJF", "RTX", "O", "REG", "REGN", "RF", "RSG",
-    "RMD", "RVTY", "HOOD", "ROK", "ROL", "ROP", "ROST", "RCL", "SPGI", "CRM", "SNDK", "SBAC",
-    "SLB", "STX", "SRE", "NOW", "SHW", "SPG", "SWKS", "SJM", "SW", "SNA", "SOLV", "SO", "LUV",
-    "SWK", "SBUX", "STT", "STLD", "STE", "SYK", "SMCI", "SYF", "SNPS", "SYY", "TMUS", "TROW",
-    "TTWO", "TPR", "TRGP", "TGT", "TEL", "TDY", "TER", "TSLA", "TXN", "TPL", "TXT", "TMO",
-    "TJX", "TKO", "TTD", "TSCO", "TT", "TDG", "TRV", "TRMB", "TFC", "TYL", "TSN", "USB",
-    "UBER", "UDR", "ULTA", "UNP", "UAL", "UPS", "URI", "UNH", "UHS", "VLO", "VTR", "VLTO",
-    "VRSN", "VRSK", "VZ", "VRTX", "VRT", "VTRS", "VICI", "V", "VST", "VMC", "WRB", "GWW",
-    "WAB", "WMT", "DIS", "WBD", "WM", "WAT", "WEC", "WFC", "WELL", "WST", "WDC", "WY", "WSM",
-    "WMB", "WTW", "WDAY", "WYNN", "XEL", "XYL", "YUM", "ZBRA", "ZBH", "ZTS",
+    "AAPL", "AMAT", "APP", "APTV", "ACGL", "ADM", "ARES", "ANET", "AJG", "AIZ", "T", "ATO", "ADSK",
+    "ADP", "AZO", "AVB", "AVY", "AXON", "BKR", "BALL", "BAC", "BAX", "BDX", "BRK.B", "BBY", "TECH",
+    "BIIB", "BLK", "BX", "XYZ", "BK", "BA", "BKNG", "BSX", "BMY", "AVGO", "BR", "BRO", "BF.B",
+    "BLDR", "BG", "BXP", "CHRW", "CDNS", "CPT", "CPB", "COF", "CAH", "CCL", "CARR", "CVNA", "CAT",
+    "CBOE", "CBRE", "CDW", "COR", "CNC", "CNP", "CF", "CRL", "SCHW", "CHTR", "CVX", "CMG", "CB",
+    "CHD", "CIEN", "CI", "CINF", "CTAS", "CSCO", "C", "CFG", "CLX", "CME", "CMS", "KO", "CTSH",
+    "COHR", "COIN", "CL", "CMCSA", "FIX", "CAG", "COP", "ED", "STZ", "CEG", "COO", "CPRT", "GLW",
+    "CPAY", "CTVA", "CSGP", "COST", "CTRA", "CRH", "CRWD", "CCI", "CSX", "CMI", "CVS", "DHR",
+    "DRI", "DDOG", "DVA", "DECK", "DE", "DELL", "DAL", "DVN", "DXCM", "FANG", "DLR", "DG", "DLTR",
+    "D", "DPZ", "DASH", "DOV", "DOW", "DHI", "DTE", "DUK", "DD", "ETN", "EBAY", "SATS", "ECL",
+    "EIX", "EW", "EA", "ELV", "EME", "EMR", "ETR", "EOG", "EPAM", "EQT", "EFX", "EQIX", "EQR",
+    "ERIE", "ESS", "EL", "EG", "EVRG", "ES", "EXC", "EXE", "EXPE", "EXPD", "EXR", "XOM", "FFIV",
+    "FDS", "FICO", "FAST", "FRT", "FDX", "FIS", "FITB", "FSLR", "FE", "FISV", "F", "FTNT", "FTV",
+    "FOXA", "FOX", "BEN", "FCX", "GRMN", "IT", "GE", "GEHC", "GEV", "GEN", "GNRC", "GD", "GIS",
+    "GM", "GPC", "GILD", "GPN", "GL", "GDDY", "GS", "HAL", "HIG", "HAS", "HCA", "DOC", "HSIC",
+    "HSY", "HPE", "HLT", "HOLX", "HD", "HON", "HRL", "HST", "HWM", "HPQ", "HUBB", "HUM", "HBAN",
+    "HII", "IBM", "IEX", "IDXX", "ITW", "INCY", "IR", "PODD", "INTC", "IBKR", "ICE", "IFF", "IP",
+    "INTU", "ISRG", "IVZ", "INVH", "IQV", "IRM", "JBHT", "JBL", "JKHY", "J", "JNJ", "JCI", "JPM",
+    "KVUE", "KDP", "KEY", "KEYS", "KMB", "KIM", "KMI", "KKR", "KLAC", "KHC", "KR", "LHX", "LH",
+    "LRCX", "LVS", "LDOS", "LEN", "LII", "LLY", "LIN", "LYV", "LMT", "L", "LOW", "LULU", "LITE",
+    "LYB", "MTB", "MPC", "MAR", "MRSH", "MLM", "MAS", "MA", "MKC", "MCD", "MCK", "MDT", "MRK",
+    "META", "MET", "MTD", "MGM", "MCHP", "MU", "MSFT", "MAA", "MRNA", "TAP", "MDLZ", "MPWR",
+    "MNST", "MCO", "MS", "MOS", "MSI", "MSCI", "NDAQ", "NTAP", "NFLX", "NEM", "NWSA", "NWS", "NEE",
+    "NKE", "NI", "NDSN", "NSC", "NTRS", "NOC", "NCLH", "NRG", "NUE", "NVDA", "NVR", "NXPI", "ORLY",
+    "OXY", "ODFL", "OMC", "ON", "OKE", "ORCL", "OTIS", "PCAR", "PKG", "PLTR", "PANW", "PSKY", "PH",
+    "PAYX", "PYPL", "PNR", "PEP", "PFE", "PCG", "PM", "PSX", "PNW", "PNC", "POOL", "PPG", "PPL",
+    "PFG", "PG", "PGR", "PLD", "PRU", "PEG", "PTC", "PSA", "PHM", "PWR", "QCOM", "DGX", "Q", "RL",
+    "RJF", "RTX", "O", "REG", "REGN", "RF", "RSG", "RMD", "RVTY", "HOOD", "ROK", "ROL", "ROP",
+    "ROST", "RCL", "SPGI", "CRM", "SNDK", "SBAC", "SLB", "STX", "SRE", "NOW", "SHW", "SPG", "SWKS",
+    "SJM", "SW", "SNA", "SOLV", "SO", "LUV", "SWK", "SBUX", "STT", "STLD", "STE", "SYK", "SMCI",
+    "SYF", "SNPS", "SYY", "TMUS", "TROW", "TTWO", "TPR", "TRGP", "TGT", "TEL", "TDY", "TER",
+    "TSLA", "TXN", "TPL", "TXT", "TMO", "TJX", "TKO", "TTD", "TSCO", "TT", "TDG", "TRV", "TRMB",
+    "TFC", "TYL", "TSN", "USB", "UBER", "UDR", "ULTA", "UNP", "UAL", "UPS", "URI", "UNH", "UHS",
+    "VLO", "VTR", "VLTO", "VRSN", "VRSK", "VZ", "VRTX", "VRT", "VTRS", "VICI", "V", "VST", "VMC",
+    "WRB", "GWW", "WAB", "WMT", "DIS", "WBD", "WM", "WAT", "WEC", "WFC", "WELL", "WST", "WDC",
+    "WY", "WSM", "WMB", "WTW", "WDAY", "WYNN", "XEL", "XYL", "YUM", "ZBRA", "ZBH", "ZTS",
 ];
 
 pub struct YahooClient {
@@ -239,7 +240,17 @@ impl YahooClient {
         })
     }
 
-    /// Fetch quote + analyst + fundamentals via quoteSummary JSON (primary).
+    /// Bootstrap cookie + crumb once so parallel workers share a warm session.
+    pub fn warm_session(&self) -> io::Result<()> {
+        self.session
+            .ensure_crumb(&self.client, USER_AGENT)
+            .map(|_| ())
+    }
+
+    /// Android `YahooFinanceClient.fetchSymbol` parity:
+    /// 1) quoteSummary JSON (primary)
+    /// 2) optional HTML (off by default)
+    /// 3) lightweight chart meta probe for missing price/name
     pub fn fetch_symbol(&self, symbol: &str) -> io::Result<FetchResult> {
         let display = symbol.trim().to_uppercase();
         let request_symbol = yahoo_request_symbol(&display);
@@ -251,11 +262,17 @@ impl YahooClient {
                     match self.fetch_symbol_html(&display) {
                         Ok(r) => r,
                         Err(_) => {
-                            return Err(e);
+                            let _ = e;
+                            FetchResult {
+                                symbol: display.clone(),
+                                snapshot: None,
+                                signal: None,
+                                fundamentals: None,
+                            }
                         }
                     }
                 } else {
-                    // Soft-empty on total failure: chart/stooq may still fill price.
+                    let _ = e;
                     FetchResult {
                         symbol: display.clone(),
                         snapshot: None,
@@ -266,17 +283,76 @@ impl YahooClient {
             }
         };
 
-        if result.snapshot.is_none() {
-            let fallback = self
-                .fetch_candles(&display, "1d", "5m")
-                .ok()
-                .and_then(|c| c.last().map(|x| x.close_cents))
-                .or_else(|| crate::stooq::fetch_quote_cents(&display));
-            result = with_price_fallback(result, fallback, is_crypto(&display));
+        // Android: fill name / price from chart meta when quoteSummary is thin or missing.
+        let needs_probe = result.snapshot.is_none()
+            || result
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.market_price_cents <= 0)
+            || result
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.company_name.as_ref())
+                .map(|n| n.trim().is_empty())
+                .unwrap_or(true);
+        if needs_probe {
+            if let Some(probe) = self.fetch_chart_meta_probe(&request_symbol, &display) {
+                result = with_price_fallback(result, probe.market_price_cents, is_crypto(&display));
+                if let Some(snap) = result.snapshot.as_mut() {
+                    if snap
+                        .company_name
+                        .as_ref()
+                        .map(|n| n.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        snap.company_name = probe.company_name;
+                    }
+                }
+            } else {
+                // Last resort: stooq cents (Windows-only soft recovery).
+                let stooq = crate::stooq::fetch_quote_cents(&display);
+                result = with_price_fallback(result, stooq, is_crypto(&display));
+            }
         }
 
         result = apply_asset_class_overrides(result, is_crypto(&display), etf_sector(&display));
         Ok(result)
+    }
+
+    /// Android `fetchChartMetaProbe` — Day range chart, price + company name only.
+    fn fetch_chart_meta_probe(
+        &self,
+        request_symbol: &str,
+        display_symbol: &str,
+    ) -> Option<ChartMetaProbe> {
+        let url =
+            format!("{CHART_API_URL}{request_symbol}?range=1d&interval=5m&includePrePost=false");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("Origin", "https://finance.yahoo.com")
+            .header("Referer", "https://finance.yahoo.com/")
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .ok()?;
+        Some(ChartMetaProbe {
+            market_price_cents: parse_chart_latest_close_cents(&resp)
+                .or_else(|| parse_chart_regular_market_price_cents(&resp)),
+            company_name: parse_chart_company_name(&resp, display_symbol),
+        })
+    }
+
+    /// Seconds left on Yahoo rate-limit cooldown (0 if clear).
+    pub fn rate_limit_remaining_secs(&self) -> u64 {
+        self.session.rate_limit_remaining_secs()
+    }
+
+    pub fn is_rate_limited(&self) -> bool {
+        self.session.is_rate_limited()
     }
 
     fn fetch_quote_summary_json(&self, request_symbol: &str) -> io::Result<Value> {
@@ -293,10 +369,19 @@ impl YahooClient {
                 .get(&url)
                 .header("Accept", "application/json,text/plain,*/*")
                 .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Origin", "https://finance.yahoo.com")
+                .header("Referer", "https://finance.yahoo.com/")
+                .timeout(Duration::from_secs(12))
                 .send()
                 .map_err(io::Error::other)?;
             let status = resp.status();
             let body = resp.text().map_err(io::Error::other)?;
+            if status.as_u16() == 429 {
+                self.session.mark_rate_limited();
+                return Err(io::Error::other(format!(
+                    "HTTP 429 for quoteSummary {request_symbol}"
+                )));
+            }
             if !status.is_success() {
                 return Err(io::Error::other(format!(
                     "HTTP {status} for quoteSummary {request_symbol}: {}",
@@ -307,12 +392,26 @@ impl YahooClient {
         };
 
         match once() {
-            Ok(v) => Ok(v),
-            Err(e) if is_auth_error(&e) => {
-                self.session.clear();
-                once()
+            Ok(v) => {
+                self.session.mark_request_succeeded();
+                Ok(v)
             }
-            Err(e) => Err(e),
+            // Retry once only on true auth expiry — not on 429 (that makes the hang worse).
+            Err(e) if is_auth_error(&e) && !is_rate_limit_error(&e) => {
+                self.session.clear();
+                let value = once()?;
+                self.session.mark_request_succeeded();
+                Ok(value)
+            }
+            Err(e) => {
+                if is_rate_limit_error(&e) {
+                    // ensure_crumb may already have marked; double-safe for quoteSummary 429.
+                    if !self.session.is_rate_limited() {
+                        self.session.mark_rate_limited();
+                    }
+                }
+                Err(e)
+            }
         }
     }
 
@@ -485,7 +584,7 @@ fn extract_json_at(body: &str, start: usize) -> Option<Value> {
     // This is the same O(n²) strategy as the Android app.
     for (i, _) in obj_str.match_indices('}') {
         let fragment = &obj_str[..=i];
-        let decoded  = fragment.replace("\\\"", "\"").replace("\\'", "'");
+        let decoded = fragment.replace("\\\"", "\"").replace("\\'", "'");
         if let Ok(val) = serde_json::from_str::<Value>(&decoded) {
             return Some(val);
         }
@@ -512,9 +611,9 @@ fn extract_price_json(body: &str) -> Option<Value> {
 fn parse_company_name(body: &str, symbol: &str) -> Option<String> {
     let start = body.find(META_TITLE_MARKER)?;
     let content_start = start + META_TITLE_MARKER.len();
-    let content_end   = body[content_start..].find('"')? + content_start;
-    let meta_title    = &body[content_start..content_end];
-    let pattern       = format!(" ({}) ", symbol);
+    let content_end = body[content_start..].find('"')? + content_start;
+    let meta_title = &body[content_start..content_end];
+    let pattern = format!(" ({}) ", symbol);
     let name = meta_title.split(&pattern).next()?.trim();
     if name.is_empty() {
         return None;
@@ -527,6 +626,52 @@ fn parse_company_name(body: &str, symbol: &str) -> Option<String> {
             .replace("&lt;", "<")
             .replace("&gt;", ">"),
     )
+}
+
+// ── Chart meta helpers (Android YahooFinanceClient parity) ─────────────────────
+
+fn parse_chart_company_name(root: &Value, symbol: &str) -> Option<String> {
+    let meta = root.pointer("/chart/result/0/meta").or_else(|| {
+        root.get("chart")?
+            .get("result")?
+            .as_array()?
+            .first()?
+            .get("meta")
+    })?;
+    for key in ["longName", "shortName"] {
+        if let Some(name) = meta.get(key).and_then(|v| v.as_str()) {
+            let n = name.trim();
+            if !n.is_empty() && !n.eq_ignore_ascii_case("null") && !n.eq_ignore_ascii_case(symbol) {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_chart_latest_close_cents(root: &Value) -> Option<i64> {
+    let closes = root
+        .pointer("/chart/result/0/indicators/quote/0/close")
+        .and_then(|v| v.as_array())?;
+    for v in closes.iter().rev() {
+        if let Some(p) = v.as_f64() {
+            if p.is_finite() && p > 0.0 {
+                return Some((p * 100.0).round() as i64);
+            }
+        }
+    }
+    None
+}
+
+fn parse_chart_regular_market_price_cents(root: &Value) -> Option<i64> {
+    let p = root
+        .pointer("/chart/result/0/meta/regularMarketPrice")
+        .and_then(|v| v.as_f64())?;
+    if p.is_finite() && p > 0.0 {
+        Some((p * 100.0).round() as i64)
+    } else {
+        None
+    }
 }
 
 // ── Candle parsing ─────────────────────────────────────────────────────────────
@@ -551,28 +696,151 @@ fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
         .and_then(|a| a.first())
         .ok_or_else(|| io::Error::other("no quote indicators"))?;
 
-    let opens   = quote.get("open").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let highs   = quote.get("high").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let lows    = quote.get("low").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let closes  = quote.get("close").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let volumes = quote.get("volume").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let opens = quote
+        .get("open")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let highs = quote
+        .get("high")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let lows = quote
+        .get("low")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let closes = quote
+        .get("close")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let volumes = quote
+        .get("volume")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     let mut candles = Vec::new();
     for (i, ts) in timestamps.iter().enumerate() {
-        let epoch       = ts.as_i64().unwrap_or(0);
-        let close_cents = closes.get(i).and_then(|v| v.as_f64()).map(|p| (p * 100.0).round() as i64).unwrap_or(0);
+        let epoch = ts.as_i64().unwrap_or(0);
+        let close_cents = closes
+            .get(i)
+            .and_then(|v| v.as_f64())
+            .map(|p| (p * 100.0).round() as i64)
+            .unwrap_or(0);
         if close_cents <= 0 {
             continue;
         }
         candles.push(HistoricalCandle {
             epoch_seconds: epoch,
-            open_cents:  opens.get(i).and_then(|v| v.as_f64()).map(|p| (p * 100.0).round() as i64).unwrap_or(close_cents),
-            high_cents:  highs.get(i).and_then(|v| v.as_f64()).map(|p| (p * 100.0).round() as i64).unwrap_or(close_cents),
-            low_cents:   lows.get(i).and_then(|v| v.as_f64()).map(|p| (p * 100.0).round() as i64).unwrap_or(close_cents),
+            open_cents: opens
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .map(|p| (p * 100.0).round() as i64)
+                .unwrap_or(close_cents),
+            high_cents: highs
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .map(|p| (p * 100.0).round() as i64)
+                .unwrap_or(close_cents),
+            low_cents: lows
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .map(|p| (p * 100.0).round() as i64)
+                .unwrap_or(close_cents),
             close_cents,
-            volume:      volumes.get(i).and_then(|v| v.as_u64()).unwrap_or(0),
+            volume: volumes.get(i).and_then(|v| v.as_u64()).unwrap_or(0),
         });
     }
 
     Ok(candles)
+}
+
+#[cfg(test)]
+mod list_ready_tests {
+    use super::*;
+    use crate::engine::{FundamentalSnapshot, MarketSnapshot};
+    use crate::quote_summary::{is_enrichment_complete, is_list_ready, FetchResult};
+
+    fn price_only(sym: &str) -> FetchResult {
+        FetchResult {
+            symbol: sym.to_string(),
+            snapshot: Some(MarketSnapshot {
+                symbol: sym.to_string(),
+                company_name: Some("Acme".into()),
+                profitable: true,
+                market_price_cents: 10_000,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+            }),
+            signal: None,
+            fundamentals: None,
+        }
+    }
+
+    #[test]
+    fn stock_price_only_is_list_ready_but_still_needs_enrichment() {
+        let result = price_only("AAPL");
+        assert!(is_list_ready(&result, false, false));
+        assert!(!is_enrichment_complete(&result, false, false));
+    }
+
+    #[test]
+    fn stock_with_fundamentals_is_list_ready() {
+        let mut r = price_only("AAPL");
+        r.fundamentals = Some(FundamentalSnapshot {
+            symbol: "AAPL".into(),
+            sector_name: Some("Technology".into()),
+            ..Default::default()
+        });
+        r.snapshot.as_mut().unwrap().intrinsic_value_cents = 12_000;
+        assert!(is_list_ready(&r, false, false));
+    }
+
+    #[test]
+    fn crypto_price_only_is_list_ready() {
+        assert!(is_list_ready(&price_only("BTC-USD"), true, false));
+    }
+
+    #[test]
+    fn asset_override_creates_crypto_sector_when_fundamentals_missing() {
+        let r = apply_asset_class_overrides(price_only("BTC-USD"), true, None);
+        assert_eq!(
+            r.fundamentals
+                .as_ref()
+                .and_then(|f| f.sector_name.as_deref()),
+            Some("Cryptocurrency")
+        );
+        assert!(is_list_ready(&r, true, false));
+    }
+
+    #[test]
+    #[ignore = "live Yahoo verification"]
+    fn five_live_stocks_have_progressive_rows_and_enrichment() {
+        let client = YahooClient::new().expect("Yahoo client");
+        for symbol in ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"] {
+            let result = client.fetch_symbol(symbol).expect("live symbol fetch");
+            assert!(
+                is_list_ready(&result, false, false),
+                "{symbol} should have a usable live price"
+            );
+            let snapshot = result.snapshot.as_ref().expect("priced snapshot");
+            assert!(snapshot.market_price_cents > 0, "{symbol} price");
+            assert!(
+                snapshot
+                    .company_name
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty()),
+                "{symbol} company name"
+            );
+            assert!(
+                is_enrichment_complete(&result, false, false),
+                "{symbol} should eventually include target, analyst count, and sector"
+            );
+            eprintln!("{symbol}: price/name visible and enrichment complete");
+        }
+    }
 }

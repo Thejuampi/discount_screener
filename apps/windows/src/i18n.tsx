@@ -83,6 +83,7 @@ const T: Record<string, { es: string; en: string }> = {
   },
   "ia.why.lowConfidence":       { es: "baja confianza en la valuación", en: "low valuation confidence" },
   "ia.why.priceExceedsTarget":  { es: "el precio ya superó el target de analistas", en: "price already exceeds analyst target" },
+  "ia.why.noTarget":            { es: "sin target de analistas usable", en: "no usable analyst target" },
   "ia.why.lowScore":            { es: "score compuesto bajo ({cs})", en: "low composite score ({cs})" },
 
   "ia.fund.noData":             { es: "Datos de fundamentals no disponibles aún.", en: "Fundamentals data not yet available." },
@@ -115,6 +116,7 @@ const T: Record<string, { es: string; en: string }> = {
   "ia.tech.macdNeg":            { es: "MACD por debajo de su línea de señal: señal bajista.", en: "MACD below signal line: bearish signal." },
 
   "ia.fore.noCoverage":         { es: "Sin cobertura de analistas — valuación no confirmada externamente.", en: "No analyst coverage — valuation not externally confirmed." },
+  "ia.fore.noTarget":           { es: "Sin target de analistas usable para calcular gap/upside.", en: "No usable analyst target to compute gap/upside." },
   "ia.fore.coverage":           { es: "{n} analistas cubren esta acción con consenso \"{rec}\".", en: "{n} analysts cover this stock with \"{rec}\" consensus." },
   "ia.fore.upside":             { es: "El precio objetivo promedio implica un upside de {gap}% desde el precio actual.", en: "The average price target implies {gap}% upside from current price." },
   "ia.fore.downside":           { es: "El precio actual ya superó el objetivo promedio de analistas (downside {gap}%).", en: "Current price already exceeds the average analyst target (downside {gap}%)." },
@@ -266,6 +268,8 @@ const T: Record<string, { es: string; en: string }> = {
   "dash.losers":                { es: "Bajas del día", en: "Top losers" },
   "dash.alerts":                { es: "Alertas recientes", en: "Recent alerts" },
   "dash.noAlerts":              { es: "Sin alertas todavía", en: "No alerts yet" },
+  "dash.noMarketData":          { es: "Datos de mercado no disponibles", en: "Market data unavailable" },
+  "dash.noOpportunities":       { es: "Sin oportunidades calificadas todavía", en: "No qualified opportunities yet" },
   "dash.entered":               { es: "entró en zona", en: "entered zone" },
   "dash.exited":                { es: "salió de zona", en: "exited zone" },
   "dash.upgraded":              { es: "confianza ↑", en: "confidence ↑" },
@@ -786,6 +790,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Cumple todos los criterios: score alto ({cs}), gap positivo ({gap}%) y confianza adecuada — el precio aún tiene espacio para subir hacia el target de analistas.",
     en: "Meets all criteria: high score ({cs}), positive gap ({gap}%) and adequate confidence — the price still has room to move toward the analyst target.",
   },
+  "reason.act.noTarget":        {
+    es: "Score alto ({cs}) y señales técnicas/fundamentales favorables, pero no hay target de analistas usable para medir el gap.",
+    en: "High score ({cs}) with favorable technical/fundamental signals, but there is no usable analyst target to measure the gap.",
+  },
   "reason.watch":               {
     es: "Score moderado ({cs}). Hay algo de momentum pero no es suficientemente fuerte para comprar hoy.",
     en: "Moderate score ({cs}). There is some momentum but not strong enough to buy today.",
@@ -793,6 +801,10 @@ const T: Record<string, { es: string; en: string }> = {
   "reason.avoid.gap":           {
     es: "El precio actual ya superó el target de analistas ({gap}%). El descuento ya se consumió — entrar ahora sería comprar premium.",
     en: "Current price already exceeds the analyst target ({gap}%). The discount is gone — buying now would be paying a premium.",
+  },
+  "reason.avoid.noTarget":      {
+    es: "No hay target de analistas usable; sin ancla de valuación no se puede justificar Act.",
+    en: "No usable analyst target; without a valuation anchor Act is not justified.",
   },
   "reason.avoid.confLow":       {
     es: "Confianza baja: la señal de valuación está stale o diverge del consenso. No confiamos en el target para tomar decisión.",

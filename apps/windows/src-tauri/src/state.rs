@@ -18,7 +18,11 @@ pub struct FeedStatus {
 
 impl Default for FeedStatus {
     fn default() -> Self {
-        Self { running: false, symbols_loaded: 0, last_error: None }
+        Self {
+            running: false,
+            symbols_loaded: 0,
+            last_error: None,
+        }
     }
 }
 

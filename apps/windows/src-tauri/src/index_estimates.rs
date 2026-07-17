@@ -210,7 +210,7 @@ mod tests {
             previous_close_cents: price,
             next_earnings_epoch: None,
             intrinsic_value_cents: (low + high) / 2,
-            gap_bps: 0,
+            gap_bps: Some(0),
             qualification: QualificationStatus::Qualified,
             confidence: ConfidenceBand::High,
             signal_status: ExternalSignalStatus::Supportive,

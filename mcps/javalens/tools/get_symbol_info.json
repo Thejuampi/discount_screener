@@ -1,0 +1,26 @@
+{
+  "name": "get_symbol_info",
+  "description": "Get detailed information about any symbol at a position.\n\nUSAGE: Position on any symbol (type, method, field, variable)\nOUTPUT: Comprehensive info including kind, modifiers, signature, location\n\nIMPORTANT: Uses ZERO-BASED coordinates.\n\nRequires load_project to be called first.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "line": {
+        "type": "integer",
+        "description": "Zero-based line number"
+      },
+      "column": {
+        "type": "integer",
+        "description": "Zero-based column number"
+      },
+      "filePath": {
+        "type": "string",
+        "description": "Path to source file"
+      }
+    },
+    "required": [
+      "filePath",
+      "line",
+      "column"
+    ]
+  }
+}

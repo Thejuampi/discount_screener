@@ -1,3 +1,5 @@
+use reqwest::blocking::Client;
+use serde::Deserialize;
 /// SEC EDGAR integration — ticker→CIK lookup + DCF valuation from annual filings.
 ///
 /// Uses two public EDGAR endpoints (no auth required, 10 req/s limit):
@@ -9,11 +11,8 @@
 ///   Stage 2: terminal value at 3% perpetuity growth
 ///   Discount rate: 10% (conservative WACC)
 ///   Result: intrinsic value per share in cents
-
 use std::collections::HashMap;
 use std::time::Duration;
-use reqwest::blocking::Client;
-use serde::Deserialize;
 
 const EDGAR_USER_AGENT: &str = "DiscountScreener/1.0 contact@example.com";
 const DCF_DISCOUNT_RATE: f64 = 0.10;
@@ -77,8 +76,7 @@ pub struct AnnualValue {
 /// Extract annual values for a given XBRL concept from the companyfacts JSON.
 /// Filters to 10-K filings and de-dupes by fiscal year (takes the most-recently filed).
 fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> {
-    let units = facts
-        .pointer(&format!("/facts/us-gaap/{}/units/USD", concept));
+    let units = facts.pointer(&format!("/facts/us-gaap/{}/units/USD", concept));
     let arr = match units.and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return vec![],
@@ -88,7 +86,9 @@ fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> 
     let mut by_year: HashMap<String, (i64, String)> = HashMap::new();
     for entry in arr {
         let form = entry["form"].as_str().unwrap_or("");
-        if form != "10-K" { continue; }
+        if form != "10-K" {
+            continue;
+        }
         let end = entry["end"].as_str().unwrap_or("").to_string();
         let val = match entry["val"].as_i64() {
             Some(v) => v,
@@ -105,7 +105,10 @@ fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> 
         .into_iter()
         .filter_map(|(end, (val, _))| {
             let year = end.get(..4)?.parse::<i32>().ok()?;
-            Some(AnnualValue { year, value_dollars: val })
+            Some(AnnualValue {
+                year,
+                value_dollars: val,
+            })
         })
         .collect();
     result.sort_by_key(|v| v.year);
@@ -118,7 +121,10 @@ fn fcf_history(ocf: &[AnnualValue], capex: &[AnnualValue]) -> Vec<AnnualValue> {
     ocf.iter()
         .filter_map(|o| {
             let cx = capex_map.get(&o.year).copied().unwrap_or(0).abs();
-            Some(AnnualValue { year: o.year, value_dollars: o.value_dollars - cx })
+            Some(AnnualValue {
+                year: o.year,
+                value_dollars: o.value_dollars - cx,
+            })
         })
         .collect()
 }
@@ -178,14 +184,18 @@ fn compute_dcf(fcf: &[AnnualValue], shares_outstanding: u64) -> Option<DcfResult
     let terminal_value = terminal_fcf / (DCF_DISCOUNT_RATE - DCF_TERMINAL_GROWTH);
     pv += terminal_value / (1.0 + DCF_DISCOUNT_RATE).powi(DCF_PROJECTION_YEARS as i32);
 
-    if pv <= 0.0 { return None; }
+    if pv <= 0.0 {
+        return None;
+    }
 
     let value_per_share_dollars = pv / shares_outstanding as f64;
     let value_per_share_cents = (value_per_share_dollars * 100.0).round() as i64;
 
     // Sanity cap: if DCF is >10x or <0.1x market-implied, something is off
     // (we'll let callers decide what to do with extreme values)
-    if value_per_share_cents <= 0 { return None; }
+    if value_per_share_cents <= 0 {
+        return None;
+    }
 
     Some(DcfResult {
         value_per_share_cents,
@@ -237,7 +247,11 @@ fn civil_from_days(days: i64) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp.saturating_sub(9) };
+    let m = if mp < 10 {
+        mp + 3
+    } else {
+        mp.saturating_sub(9)
+    };
     let y = y + if m <= 2 { 1 } else { 0 };
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
@@ -267,11 +281,17 @@ fn parse_form4_xml(xml: &str) -> (u32, u32, i64) {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
         // Extract transactionAcquiredDisposedCode: A=acquired, D=disposed
-        let direction = extract_nested_value(block, "transactionAcquiredDisposedCode")
-            .unwrap_or_default();
+        let direction =
+            extract_nested_value(block, "transactionAcquiredDisposedCode").unwrap_or_default();
 
-        if shares <= 0.0 { continue; }
-        let signed = if direction == "A" { shares as i64 } else { -(shares as i64) };
+        if shares <= 0.0 {
+            continue;
+        }
+        let signed = if direction == "A" {
+            shares as i64
+        } else {
+            -(shares as i64)
+        };
         net_shares += signed;
 
         match code.trim() {
@@ -303,10 +323,7 @@ fn extract_nested_value(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// Fetch recent Form 4 filings for a CIK and aggregate insider activity.
-pub fn fetch_insider_activity(
-    client: &Client,
-    cik: u64,
-) -> Result<Option<InsiderSummary>, String> {
+pub fn fetch_insider_activity(client: &Client, cik: u64) -> Result<Option<InsiderSummary>, String> {
     let url = format!("https://data.sec.gov/submissions/CIK{:010}.json", cik);
     let body: serde_json::Value = client
         .get(&url)
@@ -320,29 +337,57 @@ pub fn fetch_insider_activity(
         Some(v) => v,
         None => return Ok(None),
     };
-    let forms = match recent["form"].as_array() { Some(a) => a, None => return Ok(None) };
-    let dates = match recent["filingDate"].as_array() { Some(a) => a, None => return Ok(None) };
-    let accessions = match recent["accessionNumber"].as_array() { Some(a) => a, None => return Ok(None) };
-    let primary_docs = match recent["primaryDocument"].as_array() { Some(a) => a, None => return Ok(None) };
+    let forms = match recent["form"].as_array() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dates = match recent["filingDate"].as_array() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let accessions = match recent["accessionNumber"].as_array() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let primary_docs = match recent["primaryDocument"].as_array() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
 
     let cutoff = cutoff_date_iso(INSIDER_WINDOW_DAYS);
 
     // Collect Form 4 filings within window, capped
     let mut targets: Vec<(String, String)> = Vec::new(); // (accession, primary_doc)
-    for i in 0..forms.len().min(dates.len()).min(accessions.len()).min(primary_docs.len()) {
-        if forms[i].as_str() != Some("4") { continue; }
+    for i in 0..forms
+        .len()
+        .min(dates.len())
+        .min(accessions.len())
+        .min(primary_docs.len())
+    {
+        if forms[i].as_str() != Some("4") {
+            continue;
+        }
         let date = dates[i].as_str().unwrap_or("");
-        if date < cutoff.as_str() { continue; }
+        if date < cutoff.as_str() {
+            continue;
+        }
         let acc = accessions[i].as_str().unwrap_or("").to_string();
         let doc = primary_docs[i].as_str().unwrap_or("").to_string();
-        if acc.is_empty() || doc.is_empty() { continue; }
+        if acc.is_empty() || doc.is_empty() {
+            continue;
+        }
         targets.push((acc, doc));
-        if targets.len() >= INSIDER_MAX_FORM4_PER_SYMBOL { break; }
+        if targets.len() >= INSIDER_MAX_FORM4_PER_SYMBOL {
+            break;
+        }
     }
 
     if targets.is_empty() {
         return Ok(Some(InsiderSummary {
-            net_shares_90d: 0, buy_count: 0, sell_count: 0, filing_count: 0,
+            net_shares_90d: 0,
+            buy_count: 0,
+            sell_count: 0,
+            filing_count: 0,
         }));
     }
 
@@ -387,7 +432,10 @@ pub fn fetch_fcf_history(
     cik: u64,
 ) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
     let cik_padded = format!("{:010}", cik);
-    let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json", cik_padded);
+    let url = format!(
+        "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
+        cik_padded
+    );
 
     let body: serde_json::Value = client
         .get(&url)

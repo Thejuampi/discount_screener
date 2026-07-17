@@ -1,8 +1,11 @@
-//! Android AggressiveV3 opportunity scoring (not Windows multi-TF technicals).
+//! Android AggressiveV3 opportunity scoring (parity with OpportunityEngine.kt).
+//!
+//! Do not mix Windows multi-TF technicals into this path — Android ranks on a
+//! single preferred daily chart summary + the three V3 buckets only.
 
 use crate::dcf_model::DcfAnalysis;
 use crate::engine::{
-    composite_score_v2, smooth_ramp, CandidateRow, ChartSummary, EvidenceAccumulator,
+    smooth_ramp, CandidateRow, ChartSummary, EvidenceAccumulator, ExternalSignalStatus,
 };
 
 // ── V3 constants (Android OpportunityEngine) ─────────────────────────────────
@@ -53,6 +56,7 @@ const V3_FORECAST_SKEW_WEIGHT: f64 = 12.0;
 const V3_FORECAST_MIN_ANALYST_OPINIONS: u32 = 3;
 const V3_FORECAST_FULL_ANALYST_OPINIONS: f64 = 15.0;
 const V3_FORECAST_BREADTH_WEIGHT: f64 = 14.0;
+const V3_FORECAST_UNCERTAINTY_BOUND: f64 = 0.6;
 const V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT: f64 = 8.0;
 const V3_FORECAST_DCF_UNCERTAINTY_WEIGHT: f64 = 8.0;
 const V3_FORECAST_DCF_WIDTH_LOWER: f64 = 0.2;
@@ -68,6 +72,8 @@ const V3_FORECAST_FULL_WEIGHT: f64 = V3_FORECAST_VALUATION_WEIGHT
     + V3_FORECAST_DCF_UNCERTAINTY_WEIGHT
     + V3_FORECAST_FRESHNESS_WEIGHT;
 
+const V3_COMPOSITE_COVERAGE_BONUS: f64 = 5.0;
+const V3_COMPOSITE_BOUND: i32 = 110;
 const V3_BETA_HAIRCUT_MAX: f64 = 10.0;
 const V3_BETA_LOW_MILLIS: f64 = 800.0;
 const V3_BETA_HIGH_MILLIS: f64 = 1_600.0;
@@ -146,7 +152,11 @@ pub fn score_fundamentals_v3(row: &CandidateRow) -> (Option<i32>, Vec<String>) {
             "D/E",
         );
     } else if let (Some(c), Some(d)) = (row.total_cash_dollars, row.total_debt_dollars) {
-        acc.add(V3_FUND_BALANCE_WEIGHT, if c >= d { 1.0 } else { -0.5 }, "Bal");
+        acc.add(
+            V3_FUND_BALANCE_WEIGHT,
+            if c >= d { 1.0 } else { -0.5 },
+            "Bal",
+        );
     }
 
     let mut valuation = Vec::new();
@@ -184,7 +194,10 @@ pub fn score_fundamentals_v3(row: &CandidateRow) -> (Option<i32>, Vec<String>) {
 }
 
 /// Android-style V3 technicals on a single daily chart summary (+ RSI/volume).
-pub fn score_opportunity_technicals_v3(summary: Option<&ChartSummary>) -> (Option<i32>, Vec<String>) {
+/// Pure V3 — do not blend with multi-TF Windows technicals.
+pub fn score_opportunity_technicals_v3(
+    summary: Option<&ChartSummary>,
+) -> (Option<i32>, Vec<String>) {
     let Some(s) = summary else {
         return (None, vec![]);
     };
@@ -238,11 +251,15 @@ pub fn score_opportunity_technicals_v3(summary: Option<&ChartSummary>) -> (Optio
     }
     if let Some(rsi) = s.rsi {
         let level = v3_rsi_level_ramp(rsi);
-        // No separate RSI slope on Windows ChartSummary yet → level only.
-        acc.add(V3_TECH_RSI_WEIGHT, level.coerce_like(), "RSI");
+        let slope_ramp = s
+            .rsi_slope
+            .map(|slope| smooth_ramp(slope, -V3_TECH_RSI_SLOPE_BOUND, V3_TECH_RSI_SLOPE_BOUND))
+            .unwrap_or(0.0);
+        let combined = (0.65 * level + 0.35 * slope_ramp).clamp(-1.0, 1.0);
+        acc.add(V3_TECH_RSI_WEIGHT, combined, "RSI");
     }
     if let Some(vr) = s.volume_ratio {
-        // Windows volume_ratio is ratio (1.0 = median); Android uses hundredths.
+        // ChartSummary stores ratio (1.0 = median); Android uses hundredths.
         let hundredths = vr * 100.0;
         acc.add(
             V3_TECH_VOLUME_WEIGHT,
@@ -258,16 +275,7 @@ pub fn score_opportunity_technicals_v3(summary: Option<&ChartSummary>) -> (Optio
     (acc.normalized_score(), acc.signals)
 }
 
-trait Coerce {
-    fn coerce_like(self) -> f64;
-}
-impl Coerce for f64 {
-    fn coerce_like(self) -> f64 {
-        self.clamp(-1.0, 1.0)
-    }
-}
-
-fn v3_rsi_level_ramp(rsi: f64) -> f64 {
+pub fn v3_rsi_level_ramp(rsi: f64) -> f64 {
     if rsi <= 30.0 {
         -1.0
     } else if rsi <= 55.0 {
@@ -280,116 +288,182 @@ fn v3_rsi_level_ramp(rsi: f64) -> f64 {
     }
 }
 
+struct WeightedForecastRamp {
+    ramp: f64,
+    reliability: f64,
+}
+
+/// Android AggressiveV3 forecast: reliability-weighted valuation blend + gates.
 pub fn score_forecast_v3(
     row: &CandidateRow,
     dcf: Option<&DcfAnalysis>,
 ) -> (Option<i32>, Vec<String>) {
     let mut acc = EvidenceAccumulator::new(V3_FORECAST_FULL_WEIGHT);
     let mut sufficiency = Vec::new();
-    let mut reliable = 0.0;
+    let mut reliable = 0.0_f64;
     let mut has_anchor = false;
 
-    // Analyst mean target upside
-    if row.intrinsic_value_cents > 0 && row.market_price_cents > 0 {
-        let count = row.analyst_opinion_count;
-        if count.unwrap_or(0) < V3_FORECAST_MIN_ANALYST_OPINIONS {
-            sufficiency.push(if count.is_none() {
-                "Cov?".into()
-            } else {
-                format!("Cov<{V3_FORECAST_MIN_ANALYST_OPINIONS}")
-            });
-        } else {
-            let upside = ((row.intrinsic_value_cents - row.market_price_cents) as f64
-                / row.market_price_cents as f64)
-                * 10_000.0;
-            let cov_rel = (count.unwrap_or(0) as f64 / V3_FORECAST_FULL_ANALYST_OPINIONS).min(1.0);
-            reliable += V3_FORECAST_VALUATION_WEIGHT * 0.5 * cov_rel;
-            has_anchor = true;
-            acc.add(
-                V3_FORECAST_VALUATION_WEIGHT * 0.55 * cov_rel,
-                smooth_ramp(
-                    upside,
-                    V3_FORECAST_UPSIDE_LOWER_BPS,
-                    V3_FORECAST_UPSIDE_UPPER_BPS,
-                ),
-                "Tgt",
-            );
+    let target_fair = preferred_forecast_fair_value_cents(row);
+    let target_count = target_analyst_count(row);
+    let recommendation_count = recommendation_analyst_count(row);
+    let broadest = [target_count, recommendation_count]
+        .into_iter()
+        .flatten()
+        .max();
+    // Live feed → treat as fresh (age unknown on Windows candidate rows).
+    let external_freshness = 1.0_f64;
+    let status_rel = external_status_reliability(row.signal_status);
+
+    let mut valuation_inputs: Vec<WeightedForecastRamp> = Vec::new();
+
+    if let Some(fair) = target_fair {
+        if let Some(upside_bps) = checked_upside_bps(row.market_price_cents, fair) {
+            let target_rel =
+                v3_analyst_coverage_reliability(target_count) * external_freshness * status_rel;
+            if !v3_has_sufficient_analyst_coverage(target_count) {
+                sufficiency.push(if target_count.is_none() {
+                    "Cov?".into()
+                } else {
+                    format!("Cov<{V3_FORECAST_MIN_ANALYST_OPINIONS}")
+                });
+            } else if target_rel > 0.0 {
+                valuation_inputs.push(WeightedForecastRamp {
+                    ramp: smooth_ramp(
+                        upside_bps as f64,
+                        V3_FORECAST_UPSIDE_LOWER_BPS,
+                        V3_FORECAST_UPSIDE_UPPER_BPS,
+                    ),
+                    reliability: target_rel,
+                });
+            }
         }
     }
 
     if let Some(analysis) = dcf {
         if analysis.base_intrinsic_value_cents > 0 && row.market_price_cents > 0 {
-            let mos = ((analysis.base_intrinsic_value_cents - row.market_price_cents) as f64
-                / row.market_price_cents as f64)
-                * 10_000.0;
-            reliable += V3_FORECAST_VALUATION_WEIGHT * 0.45 * V3_FORECAST_DCF_RELIABILITY;
-            has_anchor = true;
-            acc.add(
-                V3_FORECAST_VALUATION_WEIGHT * 0.45 * V3_FORECAST_DCF_RELIABILITY,
-                smooth_ramp(mos, V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
-                "DCF",
-            );
-            if analysis.base_intrinsic_value_cents > 0 {
-                let width = (analysis.bull_intrinsic_value_cents
-                    - analysis.bear_intrinsic_value_cents) as f64
-                    / analysis.base_intrinsic_value_cents as f64;
-                acc.add(
-                    V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
-                    -smooth_ramp(width, V3_FORECAST_DCF_WIDTH_LOWER, V3_FORECAST_DCF_WIDTH_UPPER),
-                    "DcfUnc",
-                );
+            if let Some(margin_bps) =
+                checked_upside_bps(row.market_price_cents, analysis.base_intrinsic_value_cents)
+            {
+                valuation_inputs.push(WeightedForecastRamp {
+                    ramp: smooth_ramp(
+                        margin_bps as f64,
+                        V3_FORECAST_UPSIDE_LOWER_BPS,
+                        V3_FORECAST_UPSIDE_UPPER_BPS,
+                    ),
+                    reliability: V3_FORECAST_DCF_RELIABILITY,
+                });
             }
         }
     }
 
-    if let Some(rec) = row.recommendation_mean_hundredths {
-        acc.add(
-            V3_FORECAST_REC_WEIGHT,
-            -smooth_ramp(
-                rec as f64,
-                V3_FORECAST_REC_LOW_HUNDREDTHS,
-                V3_FORECAST_REC_HIGH_HUNDREDTHS,
-            ),
-            "Rec",
-        );
-    }
-
-    let bull = row.strong_buy_count.unwrap_or(0) + row.buy_count.unwrap_or(0);
-    let bear = row.sell_count.unwrap_or(0) + row.strong_sell_count.unwrap_or(0);
-    let total = bull + bear + row.hold_count.unwrap_or(0);
-    if total > 0 {
-        let skew = (bull as f64 - bear as f64) / total as f64;
-        acc.add(V3_FORECAST_SKEW_WEIGHT, skew.clamp(-1.0, 1.0), "Skew");
-    }
-
-    if let Some(n) = row.analyst_opinion_count {
-        acc.add(
-            V3_FORECAST_BREADTH_WEIGHT,
-            smooth_ramp(n as f64, 3.0, V3_FORECAST_FULL_ANALYST_OPINIONS),
-            "Breadth",
-        );
-    }
-
-    if let (Some(lo), Some(hi), true) = (
-        row.low_fair_value_cents,
-        row.high_fair_value_cents,
-        row.intrinsic_value_cents > 0,
-    ) {
-        if hi > lo {
-            let spread = (hi - lo) as f64 / row.intrinsic_value_cents as f64;
-            acc.add(
-                V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT,
-                -smooth_ramp(spread, 0.1, 0.6),
-                "Unc",
-            );
+    if !valuation_inputs.is_empty() {
+        let reliability_sum: f64 = valuation_inputs.iter().map(|v| v.reliability).sum();
+        if reliability_sum > 0.0 {
+            let blended = valuation_inputs
+                .iter()
+                .map(|v| v.ramp * v.reliability)
+                .sum::<f64>()
+                / reliability_sum;
+            let weight = V3_FORECAST_VALUATION_WEIGHT * reliability_sum.min(1.0);
+            acc.add(weight, blended, "Val");
+            reliable += weight;
+            has_anchor = true;
         }
     }
 
-    // Freshness assumed live for Windows feed
-    acc.add(V3_FORECAST_FRESHNESS_WEIGHT, 1.0, "Fresh");
+    if let Some(rec) = row.recommendation_mean_hundredths {
+        let rec_rel =
+            v3_analyst_coverage_reliability(recommendation_count) * external_freshness * status_rel;
+        if !v3_has_sufficient_analyst_coverage(recommendation_count) {
+            sufficiency.push(if recommendation_count.is_none() {
+                "RecCov?".into()
+            } else {
+                format!("RecCov<{V3_FORECAST_MIN_ANALYST_OPINIONS}")
+            });
+        } else if rec_rel > 0.0 {
+            let weight = V3_FORECAST_REC_WEIGHT * rec_rel;
+            acc.add(
+                weight,
+                -smooth_ramp(
+                    rec as f64,
+                    V3_FORECAST_REC_LOW_HUNDREDTHS,
+                    V3_FORECAST_REC_HIGH_HUNDREDTHS,
+                ),
+                "Rec",
+            );
+            reliable += weight;
+        }
+    }
+
+    if let Some(skew) = v3_recommendation_skew(row) {
+        let skew_rel =
+            v3_analyst_coverage_reliability(recommendation_count) * external_freshness * status_rel;
+        if v3_has_sufficient_analyst_coverage(recommendation_count) && skew_rel > 0.0 {
+            let weight = V3_FORECAST_SKEW_WEIGHT * skew_rel;
+            acc.add(weight, skew, "Skew");
+            reliable += weight;
+        }
+    }
+
+    if let Some(count) = broadest {
+        acc.add(
+            V3_FORECAST_BREADTH_WEIGHT,
+            v3_analyst_breadth_ramp(count),
+            "Cov",
+        );
+        reliable += V3_FORECAST_BREADTH_WEIGHT * v3_analyst_coverage_reliability(Some(count));
+    }
+
+    let target_rel_no_fresh = v3_analyst_coverage_reliability(target_count) * status_rel;
+    if let (Some(lo), Some(hi), Some(centre)) = (
+        row.low_fair_value_cents,
+        row.high_fair_value_cents,
+        target_fair,
+    ) {
+        if centre > 0 && hi > lo && target_rel_no_fresh > 0.0 {
+            let spread = (hi - lo) as f64 / centre as f64;
+            let weight = V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT * target_rel_no_fresh;
+            acc.add(
+                weight,
+                -smooth_ramp(spread, 0.0, V3_FORECAST_UNCERTAINTY_BOUND),
+                "Unc",
+            );
+            reliable += weight * external_freshness;
+        }
+    }
+
+    if let Some(analysis) = dcf {
+        let base = analysis.base_intrinsic_value_cents;
+        let bear = analysis.bear_intrinsic_value_cents;
+        let bull = analysis.bull_intrinsic_value_cents;
+        if base > 0 && bull >= base && base >= bear && bull > bear {
+            let width = (bull - bear) as f64 / base as f64;
+            acc.add(
+                V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
+                -smooth_ramp(
+                    width,
+                    V3_FORECAST_DCF_WIDTH_LOWER,
+                    V3_FORECAST_DCF_WIDTH_UPPER,
+                ),
+                "DcfUnc",
+            );
+            reliable += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT;
+        }
+    }
+
+    if target_fair.is_some() && v3_has_sufficient_analyst_coverage(target_count) {
+        let weight = V3_FORECAST_FRESHNESS_WEIGHT * v3_analyst_coverage_reliability(target_count);
+        // freshnessRamp(1.0) = 1.0
+        acc.add(weight, freshness_ramp(external_freshness), "Fresh");
+        reliable += weight * external_freshness;
+    }
 
     let mut signals = acc.signals.clone();
-    signals.extend(sufficiency);
+    for s in sufficiency {
+        if !signals.contains(&s) {
+            signals.push(s);
+        }
+    }
     if !has_anchor || reliable < V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT {
         return (None, signals);
     }
@@ -399,15 +473,122 @@ pub fn score_forecast_v3(
     }
 }
 
+fn preferred_forecast_fair_value_cents(row: &CandidateRow) -> Option<i64> {
+    // Windows maps Yahoo target mean into intrinsic_value_cents on the snapshot.
+    if row.intrinsic_value_cents > 0 {
+        Some(row.intrinsic_value_cents)
+    } else {
+        None
+    }
+}
+
+fn target_analyst_count(row: &CandidateRow) -> Option<u32> {
+    if preferred_forecast_fair_value_cents(row).is_some() {
+        row.analyst_opinion_count
+    } else {
+        None
+    }
+}
+
+fn recommendation_analyst_count(row: &CandidateRow) -> Option<u32> {
+    let trend_sum = [
+        row.strong_buy_count,
+        row.buy_count,
+        row.hold_count,
+        row.sell_count,
+        row.strong_sell_count,
+    ]
+    .iter()
+    .filter_map(|&x| x)
+    .sum::<u32>();
+    let trend = if trend_sum > 0 { Some(trend_sum) } else { None };
+    [row.analyst_opinion_count, trend]
+        .into_iter()
+        .flatten()
+        .max()
+}
+
+fn checked_upside_bps(market_price_cents: i64, fair_value_cents: i64) -> Option<i32> {
+    if market_price_cents <= 0 || fair_value_cents <= 0 {
+        return None;
+    }
+    let bps =
+        ((fair_value_cents - market_price_cents) as f64 / market_price_cents as f64) * 10_000.0;
+    Some(bps.round() as i32)
+}
+
+fn v3_recommendation_skew(row: &CandidateRow) -> Option<f64> {
+    let strong_buy = row.strong_buy_count.unwrap_or(0);
+    let buy = row.buy_count.unwrap_or(0);
+    let hold = row.hold_count.unwrap_or(0);
+    let sell = row.sell_count.unwrap_or(0);
+    let strong_sell = row.strong_sell_count.unwrap_or(0);
+    let total = strong_buy + buy + hold + sell + strong_sell;
+    if total == 0 {
+        return None;
+    }
+    let bullish = (strong_buy + buy) as f64;
+    let bearish = (sell + strong_sell) as f64;
+    Some(((bullish - bearish) / total as f64).clamp(-1.0, 1.0))
+}
+
+fn v3_has_sufficient_analyst_coverage(count: Option<u32>) -> bool {
+    count.is_some_and(|c| c >= V3_FORECAST_MIN_ANALYST_OPINIONS)
+}
+
+fn v3_analyst_coverage_reliability(count: Option<u32>) -> f64 {
+    if !v3_has_sufficient_analyst_coverage(count) {
+        return 0.0;
+    }
+    let c = count.unwrap() as f64;
+    let progress = ((c - V3_FORECAST_MIN_ANALYST_OPINIONS as f64)
+        / (V3_FORECAST_FULL_ANALYST_OPINIONS - V3_FORECAST_MIN_ANALYST_OPINIONS as f64))
+        .clamp(0.0, 1.0);
+    0.35 + 0.65 * progress
+}
+
+fn v3_analyst_breadth_ramp(count: u32) -> f64 {
+    if count < V3_FORECAST_MIN_ANALYST_OPINIONS {
+        return -1.0;
+    }
+    let progress = ((count as f64 - V3_FORECAST_MIN_ANALYST_OPINIONS as f64)
+        / (V3_FORECAST_FULL_ANALYST_OPINIONS - V3_FORECAST_MIN_ANALYST_OPINIONS as f64))
+        .clamp(0.0, 1.0);
+    (-0.5 + 1.5 * progress).clamp(-1.0, 1.0)
+}
+
+fn external_status_reliability(status: ExternalSignalStatus) -> f64 {
+    match status {
+        ExternalSignalStatus::Supportive | ExternalSignalStatus::Divergent => 1.0,
+        ExternalSignalStatus::Stale => 0.25,
+        ExternalSignalStatus::Missing => 0.0,
+    }
+}
+
+fn freshness_ramp(multiplier: f64) -> f64 {
+    (2.0 * multiplier - 1.0).clamp(-1.0, 1.0)
+}
+
+/// Android V3 composite: coverage-weighted mean + bonus, then beta haircut.
 pub fn composite_score_v3(
     fund: Option<i32>,
     tech: Option<i32>,
     forecast: Option<i32>,
     beta_millis: Option<i32>,
 ) -> i32 {
-    let base = composite_score_v2(fund, tech, forecast);
+    let coverage = [fund, tech, forecast]
+        .iter()
+        .filter(|x| x.is_some())
+        .count();
+    if coverage == 0 {
+        return 0;
+    }
+    let sum = fund.unwrap_or(0) + tech.unwrap_or(0) + forecast.unwrap_or(0);
+    let mean = sum as f64 / coverage as f64;
+    let bonus = V3_COMPOSITE_COVERAGE_BONUS * (coverage as f64 - 1.0);
+    let base = (mean + bonus).clamp(-V3_COMPOSITE_BOUND as f64, V3_COMPOSITE_BOUND as f64);
     let haircut = beta_risk_haircut(beta_millis);
-    (base as f64 - haircut).round() as i32
+    ((base - haircut).round() as i32).clamp(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
 }
 
 fn beta_risk_haircut(beta_millis: Option<i32>) -> f64 {
@@ -415,7 +596,6 @@ fn beta_risk_haircut(beta_millis: Option<i32>) -> f64 {
         return 0.0;
     };
     let t = smooth_ramp(b as f64, V3_BETA_LOW_MILLIS, V3_BETA_HIGH_MILLIS);
-    // ramp 0..1 → haircut 0..max (high beta worse)
     ((t + 1.0) / 2.0) * V3_BETA_HAIRCUT_MAX
 }
 
@@ -427,6 +607,26 @@ pub fn decision_state_v3(composite: i32) -> &'static str {
     } else {
         "Watch"
     }
+}
+
+/// Setup column for V3 = pure composite (no Windows multi-TF setup adjustments).
+pub fn setup_from_v3_composite(composite: i32) -> (i32, &'static str) {
+    let label = if composite >= 50 {
+        "StrongBuy"
+    } else if composite >= V3_ACT_AT_OR_ABOVE {
+        "Buy"
+    } else if composite >= 15 {
+        "Accumulate"
+    } else if composite >= 0 {
+        "Watch"
+    } else if composite >= -20 {
+        "Hold"
+    } else if composite >= -40 {
+        "Avoid"
+    } else {
+        "StrongAvoid"
+    };
+    (composite, label)
 }
 
 #[cfg(test)]
@@ -445,5 +645,31 @@ mod tests {
         assert_eq!(decision_state_v3(30), "Act");
         assert_eq!(decision_state_v3(29), "Watch");
         assert_eq!(decision_state_v3(-1), "Avoid");
+    }
+
+    #[test]
+    fn composite_coverage_bonus_three_buckets() {
+        // mean of 40,40,40 = 40 + bonus 10 = 50
+        assert_eq!(composite_score_v3(Some(40), Some(40), Some(40), None), 50);
+    }
+
+    #[test]
+    fn high_beta_haircuts_composite() {
+        let low = composite_score_v3(Some(40), Some(40), Some(40), Some(700));
+        let high = composite_score_v3(Some(40), Some(40), Some(40), Some(1_800));
+        assert!(low > high, "low={low} high={high}");
+    }
+
+    #[test]
+    fn missing_beta_not_penalized() {
+        let a = composite_score_v3(Some(40), Some(40), None, None);
+        let b = composite_score_v3(Some(40), Some(40), None, Some(700));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn setup_from_v3_equals_composite() {
+        let (s, _) = setup_from_v3_composite(42);
+        assert_eq!(s, 42);
     }
 }

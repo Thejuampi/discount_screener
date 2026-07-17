@@ -28,7 +28,12 @@ pub fn yahoo_request_symbol(symbol: &str) -> String {
         return normalized;
     }
     let suffix = &normalized[dot + 1..];
-    if suffix.len() == 1 && suffix.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+    if suffix.len() == 1
+        && suffix
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
         format!("{}-{}", &normalized[..dot], suffix)
     } else {
         normalized
@@ -37,16 +42,13 @@ pub fn yahoo_request_symbol(symbol: &str) -> String {
 
 /// Parse a live/fixture quoteSummary payload into ingestion-ready data.
 pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
-    let result = root
-        .pointer("/quoteSummary/result/0")
-        .cloned()
-        .or_else(|| {
-            root.get("quoteSummary")
-                .and_then(|qs| qs.get("result"))
-                .and_then(|r| r.as_array())
-                .and_then(|a| a.first())
-                .cloned()
-        });
+    let result = root.pointer("/quoteSummary/result/0").cloned().or_else(|| {
+        root.get("quoteSummary")
+            .and_then(|qs| qs.get("result"))
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .cloned()
+    });
 
     let Some(result) = result else {
         return FetchResult {
@@ -142,8 +144,9 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             })
         });
 
-    let signal = target_median_cents.or(target_mean_cents).map(|fair| {
-        ExternalValuationSignal {
+    let signal = target_median_cents
+        .or(target_mean_cents)
+        .map(|fair| ExternalValuationSignal {
             symbol: display_symbol.to_string(),
             fair_value_cents: fair,
             age_seconds: 0,
@@ -160,8 +163,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             strong_sell_count: trend_count(&trend, "strongSell"),
             weighted_fair_value_cents: None,
             weighted_analyst_count: None,
-        }
-    });
+        });
 
     let sector_name = asset_profile
         .and_then(|a| {
@@ -258,18 +260,21 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
     }
 }
 
-/// Fill missing market price from chart/stooq without re-fetching quoteSummary.
+/// Fill missing/zero market price from chart/stooq without re-fetching quoteSummary.
 pub fn with_price_fallback(
     mut result: FetchResult,
     fallback_cents: Option<i64>,
     force_profitable: bool,
 ) -> FetchResult {
-    if result.snapshot.is_some() {
-        return result;
-    }
-    let Some(price) = fallback_cents else {
+    let Some(price) = fallback_cents.filter(|&p| p > 0) else {
         return result;
     };
+    if let Some(snap) = result.snapshot.as_mut() {
+        if snap.market_price_cents <= 0 {
+            snap.market_price_cents = price;
+        }
+        return result;
+    }
     result.snapshot = Some(MarketSnapshot {
         symbol: result.symbol.clone(),
         company_name: None,
@@ -283,6 +288,8 @@ pub fn with_price_fallback(
 }
 
 /// Apply Windows-specific sector labels for crypto / ETF after pure parse.
+/// Creates a fundamentals shell when quoteSummary was missing so sector columns
+/// still populate for non-stock asset classes.
 pub fn apply_asset_class_overrides(
     mut result: FetchResult,
     is_crypto_sym: bool,
@@ -292,17 +299,56 @@ pub fn apply_asset_class_overrides(
         if let Some(snap) = result.snapshot.as_mut() {
             snap.profitable = true;
         }
-        if let Some(fund) = result.fundamentals.as_mut() {
-            fund.sector_name = Some("Cryptocurrency".to_string());
-        }
+        let fund = result
+            .fundamentals
+            .get_or_insert_with(|| FundamentalSnapshot {
+                symbol: result.symbol.clone(),
+                ..Default::default()
+            });
+        fund.sector_name = Some("Cryptocurrency".to_string());
     } else if let Some(sector) = etf_sector_name {
-        if let Some(fund) = result.fundamentals.as_mut() {
-            if fund.sector_name.is_none() {
-                fund.sector_name = Some(sector.to_string());
-            }
+        let fund = result
+            .fundamentals
+            .get_or_insert_with(|| FundamentalSnapshot {
+                symbol: result.symbol.clone(),
+                ..Default::default()
+            });
+        if fund.sector_name.is_none() {
+            fund.sector_name = Some(sector.to_string());
         }
     }
     result
+}
+
+/// True when a fetch has enough data to appear in the opportunity list.
+///
+/// Visibility only requires a usable price. Enrichment is deliberately tracked by
+/// `is_enrichment_complete` so chart-recovered stocks can render immediately.
+pub fn is_list_ready(result: &FetchResult, is_crypto_sym: bool, is_etf_sym: bool) -> bool {
+    let has_price = result
+        .snapshot
+        .as_ref()
+        .is_some_and(|s| s.market_price_cents > 0);
+    if !has_price {
+        return false;
+    }
+    let _ = (is_crypto_sym, is_etf_sym);
+    true
+}
+
+/// True when no further list-column enrichment is needed for this result.
+/// Crypto and ETFs do not depend on analyst coverage. For stocks, a successfully
+/// parsed fundamentals payload completes the attempt even when Yahoo legitimately
+/// has no target, analyst coverage, or sector; those sparse fields render as `—`.
+pub fn is_enrichment_complete(result: &FetchResult, is_crypto_sym: bool, is_etf_sym: bool) -> bool {
+    if !is_list_ready(result, is_crypto_sym, is_etf_sym) {
+        return false;
+    }
+    if is_crypto_sym || is_etf_sym {
+        return true;
+    }
+
+    result.fundamentals.is_some()
 }
 
 fn resolve_market_cap_dollars(
@@ -323,14 +369,16 @@ fn resolve_market_cap_dollars(
 
 fn is_usable_name(name: &str, symbol: &str) -> bool {
     let n = name.trim();
-    !n.is_empty()
-        && !n.eq_ignore_ascii_case("null")
-        && !n.eq_ignore_ascii_case(symbol)
+    !n.is_empty() && !n.eq_ignore_ascii_case("null") && !n.eq_ignore_ascii_case(symbol)
 }
 
-/// Yahoo wraps numeric values as `{"raw": X, "fmt": "..."}`.
+/// Yahoo usually wraps numerics as `{"raw": X, "fmt": "..."}`; some payloads use a bare number.
 pub fn raw_double(obj: &Value, field: &str) -> Option<f64> {
-    obj.get(field)?.get("raw")?.as_f64()
+    let v = obj.get(field)?;
+    if let Some(raw) = v.get("raw") {
+        return raw.as_f64();
+    }
+    v.as_f64()
 }
 
 pub fn raw_money(obj: &Value, field: &str) -> Option<i64> {
@@ -386,7 +434,9 @@ mod tests {
         assert!(result.signal.is_some());
         let fund = result.fundamentals.expect("fundamentals");
         assert!(fund.market_cap_dollars.unwrap_or(0) > 0);
-        assert!(fund.free_cash_flow_dollars.is_some() || fund.operating_cash_flow_dollars.is_some());
+        assert!(
+            fund.free_cash_flow_dollars.is_some() || fund.operating_cash_flow_dollars.is_some()
+        );
     }
 
     #[test]
@@ -399,7 +449,14 @@ mod tests {
 
     #[test]
     fn parse_all_live_fixtures() {
-        for name in ["AAPL.json", "BRK-B.json", "C.json", "F.json", "L.json", "T.json"] {
+        for name in [
+            "AAPL.json",
+            "BRK-B.json",
+            "C.json",
+            "F.json",
+            "L.json",
+            "T.json",
+        ] {
             let root = fixture(name);
             let sym = name.trim_end_matches(".json").replace('-', ".");
             let result = parse_quote_summary(&root, &sym);
@@ -408,5 +465,61 @@ mod tests {
                 "{name} should yield usable data"
             );
         }
+    }
+
+    #[test]
+    fn aapl_fixture_is_list_ready_with_sector_and_target() {
+        let root = fixture("AAPL.json");
+        let result = parse_quote_summary(&root, "AAPL");
+        assert!(is_list_ready(&result, false, false));
+        let snap = result.snapshot.expect("snapshot");
+        assert!(snap.intrinsic_value_cents > 0, "objetivo/target");
+        let fund = result.fundamentals.expect("fundamentals");
+        assert_eq!(fund.sector_name.as_deref(), Some("Technology"));
+        let sig = result.signal.expect("signal");
+        assert!(sig.analyst_opinion_count.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn chart_only_priced_stock_is_list_ready_for_progressive_hydration() {
+        let result = with_price_fallback(
+            FetchResult {
+                symbol: "AAPL".into(),
+                snapshot: None,
+                signal: None,
+                fundamentals: None,
+            },
+            Some(32_750),
+            false,
+        );
+        assert!(result.snapshot.is_some());
+        assert!(is_list_ready(&result, false, false));
+        assert!(!is_enrichment_complete(&result, false, false));
+    }
+
+    #[test]
+    fn stock_with_target_analysts_and_sector_is_enrichment_complete() {
+        let result = parse_quote_summary(&fixture("AAPL.json"), "AAPL");
+        assert!(is_enrichment_complete(&result, false, false));
+    }
+
+    #[test]
+    fn successful_sparse_stock_response_does_not_retry_forever() {
+        let mut result = with_price_fallback(
+            FetchResult {
+                symbol: "SPARSE".into(),
+                snapshot: None,
+                signal: None,
+                fundamentals: Some(FundamentalSnapshot {
+                    symbol: "SPARSE".into(),
+                    ..Default::default()
+                }),
+            },
+            Some(10_000),
+            false,
+        );
+        result.snapshot.as_mut().unwrap().company_name = Some("Sparse Corp".into());
+
+        assert!(is_enrichment_complete(&result, false, false));
     }
 }

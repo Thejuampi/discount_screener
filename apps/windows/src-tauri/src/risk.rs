@@ -94,107 +94,107 @@ pub async fn get_portfolio_risk(
     // Heavy (network + correlation math) → run off the UI thread.
     let screener_arc = state.screener.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<PortfolioRiskResponse, String> {
-    // Normalize + dedupe, preserving order.
-    let mut syms: Vec<String> = Vec::new();
-    for s in symbols {
-        let k = s.trim().to_uppercase();
-        if !k.is_empty() && !syms.contains(&k) {
-            syms.push(k);
+        // Normalize + dedupe, preserving order.
+        let mut syms: Vec<String> = Vec::new();
+        for s in symbols {
+            let k = s.trim().to_uppercase();
+            if !k.is_empty() && !syms.contains(&k) {
+                syms.push(k);
+            }
         }
-    }
 
-    // Gather candles: cache first, fetch what's missing.
-    let mut candles_by_sym: BTreeMap<String, Vec<HistoricalCandle>> = BTreeMap::new();
-    let mut missing: Vec<String> = Vec::new();
-    {
-        let screener = screener_arc.lock().map_err(|_| "screener lock")?;
+        // Gather candles: cache first, fetch what's missing.
+        let mut candles_by_sym: BTreeMap<String, Vec<HistoricalCandle>> = BTreeMap::new();
+        let mut missing: Vec<String> = Vec::new();
+        {
+            let screener = screener_arc.lock().map_err(|_| "screener lock")?;
+            for sym in &syms {
+                match screener.daily_candles.get(sym) {
+                    Some(c) if c.len() >= CORR_MIN_OVERLAP + 1 => {
+                        candles_by_sym.insert(sym.clone(), c.clone());
+                    }
+                    _ => missing.push(sym.clone()),
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
+            for sym in &missing {
+                if let Ok(c) = client.fetch_candles(sym, "1y", "1d") {
+                    if c.len() >= 2 {
+                        candles_by_sym.insert(sym.clone(), c);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+
+        // Per-symbol ATR + last close.
+        let mut per_symbol = Vec::with_capacity(syms.len());
         for sym in &syms {
-            match screener.daily_candles.get(sym) {
-                Some(c) if c.len() >= CORR_MIN_OVERLAP + 1 => {
-                    candles_by_sym.insert(sym.clone(), c.clone());
+            let (last_close_cents, atr_cents) = match candles_by_sym.get(sym) {
+                Some(c) => {
+                    let last = c.last().map(|x| x.close_cents).unwrap_or(0);
+                    (last, compute_atr(c, 14))
                 }
-                _ => missing.push(sym.clone()),
-            }
-        }
-    }
-    if !missing.is_empty() {
-        let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
-        for sym in &missing {
-            if let Ok(c) = client.fetch_candles(sym, "1y", "1d") {
-                if c.len() >= 2 {
-                    candles_by_sym.insert(sym.clone(), c);
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
-    }
-
-    // Per-symbol ATR + last close.
-    let mut per_symbol = Vec::with_capacity(syms.len());
-    for sym in &syms {
-        let (last_close_cents, atr_cents) = match candles_by_sym.get(sym) {
-            Some(c) => {
-                let last = c.last().map(|x| x.close_cents).unwrap_or(0);
-                (last, compute_atr(c, 14))
-            }
-            None => (0, None),
-        };
-        let atr_pct_bps = match (atr_cents, last_close_cents) {
-            (Some(a), p) if p > 0 => Some(((a as f64 / p as f64) * 10_000.0).round() as i32),
-            _ => None,
-        };
-        per_symbol.push(SymbolRisk {
-            symbol: sym.clone(),
-            last_close_cents,
-            atr_cents,
-            atr_pct_bps,
-        });
-    }
-
-    // Pairwise correlation over aligned daily returns.
-    let returns: BTreeMap<String, BTreeMap<i64, f64>> = candles_by_sym
-        .iter()
-        .map(|(s, c)| (s.clone(), daily_returns(c)))
-        .collect();
-
-    let mut correlation = Vec::new();
-    let mut high_corr_pairs = Vec::new();
-    for i in 0..syms.len() {
-        for j in (i + 1)..syms.len() {
-            let (sa, sb) = (&syms[i], &syms[j]);
-            let (ra, rb) = match (returns.get(sa), returns.get(sb)) {
-                (Some(a), Some(b)) => (a, b),
-                _ => continue,
+                None => (0, None),
             };
-            // Intersect on common days.
-            let (mut xs, mut ys) = (Vec::new(), Vec::new());
-            for (day, va) in ra {
-                if let Some(vb) = rb.get(day) {
-                    xs.push(*va);
-                    ys.push(*vb);
-                }
-            }
-            if let Some(c) = pearson(&xs, &ys) {
-                let pair = CorrPair {
-                    a: sa.clone(),
-                    b: sb.clone(),
-                    corr_milli: (c * 1000.0).round() as i32,
+            let atr_pct_bps = match (atr_cents, last_close_cents) {
+                (Some(a), p) if p > 0 => Some(((a as f64 / p as f64) * 10_000.0).round() as i32),
+                _ => None,
+            };
+            per_symbol.push(SymbolRisk {
+                symbol: sym.clone(),
+                last_close_cents,
+                atr_cents,
+                atr_pct_bps,
+            });
+        }
+
+        // Pairwise correlation over aligned daily returns.
+        let returns: BTreeMap<String, BTreeMap<i64, f64>> = candles_by_sym
+            .iter()
+            .map(|(s, c)| (s.clone(), daily_returns(c)))
+            .collect();
+
+        let mut correlation = Vec::new();
+        let mut high_corr_pairs = Vec::new();
+        for i in 0..syms.len() {
+            for j in (i + 1)..syms.len() {
+                let (sa, sb) = (&syms[i], &syms[j]);
+                let (ra, rb) = match (returns.get(sa), returns.get(sb)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
                 };
-                if pair.corr_milli.abs() >= HIGH_CORR_MILLI {
-                    high_corr_pairs.push(pair.clone());
+                // Intersect on common days.
+                let (mut xs, mut ys) = (Vec::new(), Vec::new());
+                for (day, va) in ra {
+                    if let Some(vb) = rb.get(day) {
+                        xs.push(*va);
+                        ys.push(*vb);
+                    }
                 }
-                correlation.push(pair);
+                if let Some(c) = pearson(&xs, &ys) {
+                    let pair = CorrPair {
+                        a: sa.clone(),
+                        b: sb.clone(),
+                        corr_milli: (c * 1000.0).round() as i32,
+                    };
+                    if pair.corr_milli.abs() >= HIGH_CORR_MILLI {
+                        high_corr_pairs.push(pair.clone());
+                    }
+                    correlation.push(pair);
+                }
             }
         }
-    }
-    high_corr_pairs.sort_by(|a, b| b.corr_milli.abs().cmp(&a.corr_milli.abs()));
+        high_corr_pairs.sort_by(|a, b| b.corr_milli.abs().cmp(&a.corr_milli.abs()));
 
-    Ok(PortfolioRiskResponse {
-        per_symbol,
-        correlation,
-        high_corr_pairs,
-        lookback_days: CORR_LOOKBACK,
-    })
+        Ok(PortfolioRiskResponse {
+            per_symbol,
+            correlation,
+            high_corr_pairs,
+            lookback_days: CORR_LOOKBACK,
+        })
     })
     .await
     .map_err(|e| e.to_string())?

@@ -34,7 +34,10 @@ pub fn analyze(
     sections.push(evidence_strength(detail, daily_candles, dcf, opportunity));
     sections.push(expected_value_range(detail, dcf));
     sections.push(correlation_risk(daily_candles, peers));
-    sections.push(trend_reliability(daily_candles, detail.chart_summary.as_ref()));
+    sections.push(trend_reliability(
+        daily_candles,
+        detail.chart_summary.as_ref(),
+    ));
     sections.push(horizon_context(daily_candles));
     sections.push(similar_setups(opportunity, peers.len()));
 
@@ -55,10 +58,10 @@ fn evidence_strength(
 ) -> QuantLensSection {
     let mut support = 0;
     let mut conflict = 0;
-    if detail.gap_bps >= 1000 {
-        support += 1;
-    } else if detail.gap_bps < 0 {
-        conflict += 1;
+    match detail.gap_bps {
+        Some(g) if g >= 1000 => support += 1,
+        Some(g) if g < 0 => conflict += 1,
+        _ => {}
     }
     if detail.low_fair_value_cents.is_some() && detail.high_fair_value_cents.is_some() {
         support += 1;
@@ -87,7 +90,13 @@ fn evidence_strength(
         metrics: vec![
             ("support".into(), support.to_string()),
             ("conflict".into(), conflict.to_string()),
-            ("gap_bps".into(), detail.gap_bps.to_string()),
+            (
+                "gap_bps".into(),
+                detail
+                    .gap_bps
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| "null".into()),
+            ),
         ],
     }
 }
@@ -159,7 +168,11 @@ fn correlation_risk(
             pairs.push((sym.clone(), rho));
         }
     }
-    pairs.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_by(|a, b| {
+        b.1.abs()
+            .partial_cmp(&a.1.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     pairs.truncate(3);
     let high = pairs.iter().filter(|(_, r)| r.abs() >= 0.85).count()
         + if pairs.iter().filter(|(_, r)| r.abs() >= 0.70).count() >= 2 {
@@ -215,7 +228,10 @@ fn trend_reliability(
     } else {
         "Noisy"
     };
-    let rsi = summary.and_then(|s| s.rsi).map(|r| format!("{r:.1}")).unwrap_or_else(|| "—".into());
+    let rsi = summary
+        .and_then(|s| s.rsi)
+        .map(|r| format!("{r:.1}"))
+        .unwrap_or_else(|| "—".into());
     QuantLensSection {
         id: "trend".into(),
         title: "Trend reliability".into(),
@@ -253,7 +269,12 @@ fn horizon_context(candles: Option<&[HistoricalCandle]>) -> QuantLensSection {
     QuantLensSection {
         id: "horizon".into(),
         title: "Horizon context".into(),
-        status: if moves.len() >= 3 { "Available" } else { "Partial" }.into(),
+        status: if moves.len() >= 3 {
+            "Available"
+        } else {
+            "Partial"
+        }
+        .into(),
         summary: format!("Median absolute move across 1w/1m/3m windows: {med} bps"),
         metrics: moves
             .into_iter()
@@ -269,12 +290,15 @@ fn similar_setups(opp: Option<&CandidateRow>, peer_count: usize) -> QuantLensSec
     } else {
         "Partial"
     };
-    let score = opp.map(|o| o.gap_bps).unwrap_or(0);
+    let score = opp.and_then(|o| o.gap_bps);
+    let gap_ctx = score
+        .map(|g| format!("{g} bps"))
+        .unwrap_or_else(|| "n/a".into());
     QuantLensSection {
         id: "similar".into(),
         title: "Similar setups".into(),
         status: status.into(),
-        summary: format!("Universe peers available: {peer_count} · gap context {score} bps"),
+        summary: format!("Universe peers available: {peer_count} · gap context {gap_ctx}"),
         metrics: vec![("peers".into(), peer_count.to_string())],
     }
 }

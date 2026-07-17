@@ -62,29 +62,32 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
       })
       .catch(console.error);
 
-    // Full ad-hoc load (quote + multi-TF charts) then re-fetch detail.
-    // Works for symbols outside the continuous feed universe.
-    api.ensureSymbolLoaded(symbol)
-      .then(() => api.getSymbolDetail(symbol))
-      .then((d) => {
+    // Fast path (quote + daily) returns ASAP; multi-TF continues in background.
+    // Poll a few times so weekly/hourly/monthly sections fill in without blocking.
+    const refreshDetail = () =>
+      api.getSymbolDetail(symbol).then((d) => {
         if (!cancelled) {
           if (d) setDetail(d);
           setLoading(false);
         }
-      })
+      });
+
+    api.ensureSymbolLoaded(symbol)
+      .then(() => refreshDetail())
       .catch(() =>
         api.refreshSymbol(symbol)
-          .then(() => api.getSymbolDetail(symbol))
-          .then((d) => {
-            if (!cancelled) {
-              if (d) setDetail(d);
-              setLoading(false);
-            }
-          })
+          .then(() => refreshDetail())
           .catch(console.error),
       );
 
-    return () => { cancelled = true; };
+    const t1 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 1200);
+    const t2 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 3500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
   }, [symbol]);
 
   // ── Render with whatever data is available immediately ──────────────────────
@@ -94,14 +97,13 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
   const companyName = row?.company_name ?? detail?.company_name ?? "";
   const marketPrice = row?.market_price_cents ?? detail?.market_price_cents ?? 0;
   const targetPrice = row?.intrinsic_value_cents ?? detail?.intrinsic_value_cents ?? 0;
-  const gap = row?.gap_bps ?? detail?.gap_bps ?? 0;
+  const gap = row?.gap_bps ?? detail?.gap_bps ?? null;
   const confidence = row?.confidence ?? detail?.confidence ?? "Low";
   const dcfValue = row?.dcf_value_cents ?? detail?.dcf_value_cents ?? null;
   const dcfAnalysis = detail?.dcf_analysis ?? null;
 
   const f = detail?.fundamentals;
-  const gapPct = (gap / 100).toFixed(1);
-  const isOpportunity = gap >= 1000;
+  const isOpportunity = gap != null && gap >= 1000;
   const hasValidData = marketPrice > 0;
 
   // If we have absolutely nothing yet (no row, no detail) show a loader
@@ -185,7 +187,8 @@ export function DetailPanel({ symbol, row, profile, onProfileChange, onClose }: 
         )}
         {hasValidData && (
           <div className={`gap-pill ${isOpportunity ? "gap-green" : "gap-grey"}`}>
-            {isOpportunity ? "▲" : "▼"} {gapPct}% {t("detail.gap")}
+            {gap == null ? "—" : `${isOpportunity ? "▲" : "▼"} ${fmt.gap(gap)}`}{" "}
+            {t("detail.gap")}
           </div>
         )}
         <div className={`conf-pill conf-${confidence.toLowerCase()}`}>
@@ -391,7 +394,13 @@ function AnalysisSummary({ row, detail }: { row: OpportunityRow; detail: SymbolD
   const dh = DECISION_HEADER[row.decision];
   const { summary } = buildReasons(row, detail, t);
   const reason = decisionReason(row, detail, t);
-  const gapPct = (row.gap_bps / 100).toFixed(1);
+  const gapLabel = fmt.gap(row.gap_bps);
+  const gapColor =
+    row.gap_bps == null
+      ? "var(--text-4)"
+      : row.gap_bps > 0
+        ? "var(--success)"
+        : "var(--danger)";
 
   return (
     <div className="analysis-box" style={{ borderColor: dh.color }}>
@@ -408,7 +417,7 @@ function AnalysisSummary({ row, detail }: { row: OpportunityRow; detail: SymbolD
           <div className="decision-reason-meta">
             <span>Score: <strong style={{ color: dh.color }}>{row.composite_score}</strong></span>
             <span>·</span>
-            <span>Gap: <strong style={{ color: row.gap_bps > 0 ? "var(--success)" : "var(--danger)" }}>{gapPct}%</strong></span>
+            <span>Gap: <strong style={{ color: gapColor }}>{gapLabel}</strong></span>
             <span>·</span>
             <span>Confianza: <strong>{t(`conf.${detail.confidence}`)}</strong></span>
           </div>
@@ -421,7 +430,7 @@ function AnalysisSummary({ row, detail }: { row: OpportunityRow; detail: SymbolD
 /** Build a Spanish/English explanation of WHY the verdict came out the way it did. */
 function decisionReason(row: OpportunityRow, detail: SymbolDetail, t: TFn): string {
   const cs = row.composite_score;
-  const gap = (row.gap_bps / 100).toFixed(1);
+  const gapPts = row.gap_bps == null ? null : (row.gap_bps / 100).toFixed(1);
   const ts = row.technical_score ?? 0;
   const isCryptoOrEtf = row.asset_type === "crypto" || row.asset_type === "etf";
 
@@ -435,13 +444,17 @@ function decisionReason(row: OpportunityRow, detail: SymbolDetail, t: TFn): stri
   // Stock path — multi-criteria
   if (row.decision === "Avoid") {
     // Priority: gap, confidence, score — pick the most informative
-    if (row.gap_bps <= 0)             return t("reason.avoid.gap",     { gap });
+    if (row.gap_bps == null)          return t("reason.avoid.noTarget");
+    if (row.gap_bps <= 0)             return t("reason.avoid.gap",     { gap: gapPts! });
     if (detail.confidence === "Low")  return t("reason.avoid.confLow");
     if (cs < 8)                       return t("reason.avoid.score",   { cs });
     return t("reason.avoid.score", { cs });
   }
   if (row.decision === "Watch") return t("reason.watch", { cs });
-  return t("reason.act", { cs, gap });
+  if (gapPts != null && row.gap_bps != null && row.gap_bps > 0) {
+    return t("reason.act", { cs, gap: gapPts });
+  }
+  return t("reason.act.noTarget", { cs });
 }
 
 /** Bottom section: 3-column breakdown */
@@ -517,7 +530,8 @@ type TFn = (key: string, vars?: Record<string, string | number>) => string;
 function buildReasons(row: OpportunityRow, detail: SymbolDetail, t: TFn): Reasons {
   const f = detail.fundamentals;
   const name = detail.company_name ?? row.symbol;
-  const gapPct = Math.abs(row.gap_bps / 100).toFixed(0);
+  const gapPct =
+    row.gap_bps == null ? null : Math.abs(row.gap_bps / 100).toFixed(0);
   const analystCount = detail.analyst_opinion_count ?? 0;
   const recLabel = fmt.recMean(detail.recommendation_mean_hundredths);
   const cs = row.composite_score;
@@ -526,14 +540,17 @@ function buildReasons(row: OpportunityRow, detail: SymbolDetail, t: TFn): Reason
   let summary = "";
   if (row.decision === "Act") {
     summary = t("ia.summary.act", { name, cs }) + " ";
-    if (row.gap_bps >= 1000) summary += t("ia.summary.act.gap", { gap: gapPct });
+    if (row.gap_bps != null && row.gap_bps >= 1000 && gapPct != null) {
+      summary += t("ia.summary.act.gap", { gap: gapPct });
+    }
   } else if (row.decision === "Watch") {
     summary = t("ia.summary.watch", { name, cs });
   } else {
     const why: string[] = [];
     if (detail.confidence === "Low") why.push(t("ia.why.lowConfidence"));
-    if (row.gap_bps <= 0)            why.push(t("ia.why.priceExceedsTarget"));
-    if (cs < 8)                       why.push(t("ia.why.lowScore", { cs }));
+    if (row.gap_bps == null)         why.push(t("ia.why.noTarget"));
+    else if (row.gap_bps <= 0)       why.push(t("ia.why.priceExceedsTarget"));
+    if (cs < 8)                      why.push(t("ia.why.lowScore", { cs }));
     summary = t("ia.summary.avoid", { name, why: why.join(", ") });
   }
 
@@ -599,9 +616,13 @@ function buildReasons(row: OpportunityRow, detail: SymbolDetail, t: TFn): Reason
     forePoints.push(t("ia.fore.noCoverage"));
   } else {
     forePoints.push(t("ia.fore.coverage", { n: analystCount, rec: recLabel }));
-    forePoints.push(row.gap_bps > 0
-      ? t("ia.fore.upside",   { gap: gapPct })
-      : t("ia.fore.downside", { gap: gapPct }));
+    if (row.gap_bps != null && gapPct != null) {
+      forePoints.push(row.gap_bps > 0
+        ? t("ia.fore.upside",   { gap: gapPct })
+        : t("ia.fore.downside", { gap: gapPct }));
+    } else {
+      forePoints.push(t("ia.fore.noTarget"));
+    }
     if (detail.low_fair_value_cents && detail.high_fair_value_cents && detail.intrinsic_value_cents > 0) {
       const sNum = Math.abs(
         (detail.high_fair_value_cents - detail.low_fair_value_cents) / detail.intrinsic_value_cents * 100
