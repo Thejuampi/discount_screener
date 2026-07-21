@@ -52,32 +52,34 @@ const META_TITLE_MARKER: &str = r#"<meta property="og:title" content=""#;
 
 /// Top market cap cryptocurrencies (non-stablecoin) on Yahoo Finance.
 /// All use the `-USD` suffix for spot price in dollars.
+/// Yahoo Finance crypto symbols. Prefer Yahoo's disambiguated IDs when the short
+/// form collides with unrelated tokens (e.g. `UNI-USD` = UNICORN Token, not Uniswap).
 pub const CRYPTO_SYMBOLS: &[&str] = &[
-    "BTC-USD",  // Bitcoin
-    "ETH-USD",  // Ethereum
-    "BNB-USD",  // Binance Coin
-    "SOL-USD",  // Solana
-    "XRP-USD",  // Ripple
-    "DOGE-USD", // Dogecoin
-    "ADA-USD",  // Cardano
-    "TRX-USD",  // TRON
-    "AVAX-USD", // Avalanche
-    "DOT-USD",  // Polkadot
-    "LINK-USD", // Chainlink
-    "LTC-USD",  // Litecoin
-    "SHIB-USD", // Shiba Inu
-    "ATOM-USD", // Cosmos
-    "UNI-USD",  // Uniswap
-    "BCH-USD",  // Bitcoin Cash
-    "XLM-USD",  // Stellar
-    "NEAR-USD", // NEAR Protocol
-    "ETC-USD",  // Ethereum Classic
-    "APT-USD",  // Aptos
-    "HBAR-USD", // Hedera
-    "FIL-USD",  // Filecoin
-    "ARB-USD",  // Arbitrum
-    "OP-USD",   // Optimism
-    "ICP-USD",  // Internet Computer
+    "BTC-USD",      // Bitcoin
+    "ETH-USD",      // Ethereum
+    "BNB-USD",      // Binance Coin
+    "SOL-USD",      // Solana
+    "XRP-USD",      // Ripple
+    "DOGE-USD",     // Dogecoin
+    "ADA-USD",      // Cardano
+    "TRX-USD",      // TRON
+    "AVAX-USD",     // Avalanche
+    "DOT-USD",      // Polkadot
+    "LINK-USD",     // Chainlink
+    "LTC-USD",      // Litecoin
+    "SHIB-USD",     // Shiba Inu (sub-cent; see dollars_to_cents floor)
+    "ATOM-USD",     // Cosmos
+    "UNI7083-USD",  // Uniswap (not UNI-USD / UNICORN Token)
+    "BCH-USD",      // Bitcoin Cash
+    "XLM-USD",      // Stellar
+    "NEAR-USD",     // NEAR Protocol
+    "ETC-USD",      // Ethereum Classic
+    "APT21794-USD", // Aptos (not APT-USD / Apricot Finance)
+    "HBAR-USD",     // Hedera
+    "FIL-USD",      // Filecoin
+    "ARB11841-USD", // Arbitrum (not ARB-USD / ARbit)
+    "OP-USD",       // Optimism
+    "ICP-USD",      // Internet Computer
 ];
 
 /// True if a symbol is a Yahoo-style crypto ticker (suffix `-USD`).
@@ -171,7 +173,7 @@ pub fn etf_sector(symbol: &str) -> Option<&'static str> {
     })
 }
 
-pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
+pub const DEFAULT_LIVE_SYMBOLS: [&str; 501] = [
     "MMM", "AOS", "ABT", "ABBV", "ACN", "ADBE", "AMD", "AES", "AFL", "A", "APD", "ABNB", "AKAM",
     "ALB", "ARE", "ALGN", "ALLE", "LNT", "ALL", "GOOGL", "GOOG", "MO", "AMZN", "AMCR", "AEE",
     "AEP", "AXP", "AIG", "AMT", "AWK", "AMP", "AME", "AMGN", "APH", "ADI", "AON", "APA", "APO",
@@ -182,35 +184,35 @@ pub const DEFAULT_LIVE_SYMBOLS: [&str; 503] = [
     "CBOE", "CBRE", "CDW", "COR", "CNC", "CNP", "CF", "CRL", "SCHW", "CHTR", "CVX", "CMG", "CB",
     "CHD", "CIEN", "CI", "CINF", "CTAS", "CSCO", "C", "CFG", "CLX", "CME", "CMS", "KO", "CTSH",
     "COHR", "COIN", "CL", "CMCSA", "FIX", "CAG", "COP", "ED", "STZ", "CEG", "COO", "CPRT", "GLW",
-    "CPAY", "CTVA", "CSGP", "COST", "CTRA", "CRH", "CRWD", "CCI", "CSX", "CMI", "CVS", "DHR",
-    "DRI", "DDOG", "DVA", "DECK", "DE", "DELL", "DAL", "DVN", "DXCM", "FANG", "DLR", "DG", "DLTR",
-    "D", "DPZ", "DASH", "DOV", "DOW", "DHI", "DTE", "DUK", "DD", "ETN", "EBAY", "SATS", "ECL",
-    "EIX", "EW", "EA", "ELV", "EME", "EMR", "ETR", "EOG", "EPAM", "EQT", "EFX", "EQIX", "EQR",
-    "ERIE", "ESS", "EL", "EG", "EVRG", "ES", "EXC", "EXE", "EXPE", "EXPD", "EXR", "XOM", "FFIV",
-    "FDS", "FICO", "FAST", "FRT", "FDX", "FIS", "FITB", "FSLR", "FE", "FISV", "F", "FTNT", "FTV",
-    "FOXA", "FOX", "BEN", "FCX", "GRMN", "IT", "GE", "GEHC", "GEV", "GEN", "GNRC", "GD", "GIS",
-    "GM", "GPC", "GILD", "GPN", "GL", "GDDY", "GS", "HAL", "HIG", "HAS", "HCA", "DOC", "HSIC",
-    "HSY", "HPE", "HLT", "HOLX", "HD", "HON", "HRL", "HST", "HWM", "HPQ", "HUBB", "HUM", "HBAN",
-    "HII", "IBM", "IEX", "IDXX", "ITW", "INCY", "IR", "PODD", "INTC", "IBKR", "ICE", "IFF", "IP",
-    "INTU", "ISRG", "IVZ", "INVH", "IQV", "IRM", "JBHT", "JBL", "JKHY", "J", "JNJ", "JCI", "JPM",
-    "KVUE", "KDP", "KEY", "KEYS", "KMB", "KIM", "KMI", "KKR", "KLAC", "KHC", "KR", "LHX", "LH",
-    "LRCX", "LVS", "LDOS", "LEN", "LII", "LLY", "LIN", "LYV", "LMT", "L", "LOW", "LULU", "LITE",
-    "LYB", "MTB", "MPC", "MAR", "MRSH", "MLM", "MAS", "MA", "MKC", "MCD", "MCK", "MDT", "MRK",
-    "META", "MET", "MTD", "MGM", "MCHP", "MU", "MSFT", "MAA", "MRNA", "TAP", "MDLZ", "MPWR",
-    "MNST", "MCO", "MS", "MOS", "MSI", "MSCI", "NDAQ", "NTAP", "NFLX", "NEM", "NWSA", "NWS", "NEE",
-    "NKE", "NI", "NDSN", "NSC", "NTRS", "NOC", "NCLH", "NRG", "NUE", "NVDA", "NVR", "NXPI", "ORLY",
-    "OXY", "ODFL", "OMC", "ON", "OKE", "ORCL", "OTIS", "PCAR", "PKG", "PLTR", "PANW", "PSKY", "PH",
-    "PAYX", "PYPL", "PNR", "PEP", "PFE", "PCG", "PM", "PSX", "PNW", "PNC", "POOL", "PPG", "PPL",
-    "PFG", "PG", "PGR", "PLD", "PRU", "PEG", "PTC", "PSA", "PHM", "PWR", "QCOM", "DGX", "Q", "RL",
-    "RJF", "RTX", "O", "REG", "REGN", "RF", "RSG", "RMD", "RVTY", "HOOD", "ROK", "ROL", "ROP",
-    "ROST", "RCL", "SPGI", "CRM", "SNDK", "SBAC", "SLB", "STX", "SRE", "NOW", "SHW", "SPG", "SWKS",
-    "SJM", "SW", "SNA", "SOLV", "SO", "LUV", "SWK", "SBUX", "STT", "STLD", "STE", "SYK", "SMCI",
-    "SYF", "SNPS", "SYY", "TMUS", "TROW", "TTWO", "TPR", "TRGP", "TGT", "TEL", "TDY", "TER",
-    "TSLA", "TXN", "TPL", "TXT", "TMO", "TJX", "TKO", "TTD", "TSCO", "TT", "TDG", "TRV", "TRMB",
-    "TFC", "TYL", "TSN", "USB", "UBER", "UDR", "ULTA", "UNP", "UAL", "UPS", "URI", "UNH", "UHS",
-    "VLO", "VTR", "VLTO", "VRSN", "VRSK", "VZ", "VRTX", "VRT", "VTRS", "VICI", "V", "VST", "VMC",
-    "WRB", "GWW", "WAB", "WMT", "DIS", "WBD", "WM", "WAT", "WEC", "WFC", "WELL", "WST", "WDC",
-    "WY", "WSM", "WMB", "WTW", "WDAY", "WYNN", "XEL", "XYL", "YUM", "ZBRA", "ZBH", "ZTS",
+    "CPAY", "CTVA", "CSGP", "COST", "CRH", "CRWD", "CCI", "CSX", "CMI", "CVS", "DHR", "DRI",
+    "DDOG", "DVA", "DECK", "DE", "DELL", "DAL", "DVN", "DXCM", "FANG", "DLR", "DG", "DLTR", "D",
+    "DPZ", "DASH", "DOV", "DOW", "DHI", "DTE", "DUK", "DD", "ETN", "EBAY", "SATS", "ECL", "EIX",
+    "EW", "EA", "ELV", "EME", "EMR", "ETR", "EOG", "EPAM", "EQT", "EFX", "EQIX", "EQR", "ERIE",
+    "ESS", "EL", "EG", "EVRG", "ES", "EXC", "EXE", "EXPE", "EXPD", "EXR", "XOM", "FFIV", "FDS",
+    "FICO", "FAST", "FRT", "FDX", "FIS", "FITB", "FSLR", "FE", "FISV", "F", "FTNT", "FTV", "FOXA",
+    "FOX", "BEN", "FCX", "GRMN", "IT", "GE", "GEHC", "GEV", "GEN", "GNRC", "GD", "GIS", "GM",
+    "GPC", "GILD", "GPN", "GL", "GDDY", "GS", "HAL", "HIG", "HAS", "HCA", "DOC", "HSIC", "HSY",
+    "HPE", "HLT", "HD", "HON", "HRL", "HST", "HWM", "HPQ", "HUBB", "HUM", "HBAN", "HII", "IBM",
+    "IEX", "IDXX", "ITW", "INCY", "IR", "PODD", "INTC", "IBKR", "ICE", "IFF", "IP", "INTU", "ISRG",
+    "IVZ", "INVH", "IQV", "IRM", "JBHT", "JBL", "JKHY", "J", "JNJ", "JCI", "JPM", "KVUE", "KDP",
+    "KEY", "KEYS", "KMB", "KIM", "KMI", "KKR", "KLAC", "KHC", "KR", "LHX", "LH", "LRCX", "LVS",
+    "LDOS", "LEN", "LII", "LLY", "LIN", "LYV", "LMT", "L", "LOW", "LULU", "LITE", "LYB", "MTB",
+    "MPC", "MAR", "MRSH", "MLM", "MAS", "MA", "MKC", "MCD", "MCK", "MDT", "MRK", "META", "MET",
+    "MTD", "MGM", "MCHP", "MU", "MSFT", "MAA", "MRNA", "TAP", "MDLZ", "MPWR", "MNST", "MCO", "MS",
+    "MOS", "MSI", "MSCI", "NDAQ", "NTAP", "NFLX", "NEM", "NWSA", "NWS", "NEE", "NKE", "NI", "NDSN",
+    "NSC", "NTRS", "NOC", "NCLH", "NRG", "NUE", "NVDA", "NVR", "NXPI", "ORLY", "OXY", "ODFL",
+    "OMC", "ON", "OKE", "ORCL", "OTIS", "PCAR", "PKG", "PLTR", "PANW", "PSKY", "PH", "PAYX",
+    "PYPL", "PNR", "PEP", "PFE", "PCG", "PM", "PSX", "PNW", "PNC", "POOL", "PPG", "PPL", "PFG",
+    "PG", "PGR", "PLD", "PRU", "PEG", "PTC", "PSA", "PHM", "PWR", "QCOM", "DGX", "Q", "RL", "RJF",
+    "RTX", "O", "REG", "REGN", "RF", "RSG", "RMD", "RVTY", "HOOD", "ROK", "ROL", "ROP", "ROST",
+    "RCL", "SPGI", "CRM", "SNDK", "SBAC", "SLB", "STX", "SRE", "NOW", "SHW", "SPG", "SWKS", "SJM",
+    "SW", "SNA", "SOLV", "SO", "LUV", "SWK", "SBUX", "STT", "STLD", "STE", "SYK", "SMCI", "SYF",
+    "SNPS", "SYY", "TMUS", "TROW", "TTWO", "TPR", "TRGP", "TGT", "TEL", "TDY", "TER", "TSLA",
+    "TXN", "TPL", "TXT", "TMO", "TJX", "TKO", "TTD", "TSCO", "TT", "TDG", "TRV", "TRMB", "TFC",
+    "TYL", "TSN", "USB", "UBER", "UDR", "ULTA", "UNP", "UAL", "UPS", "URI", "UNH", "UHS", "VLO",
+    "VTR", "VLTO", "VRSN", "VRSK", "VZ", "VRTX", "VRT", "VTRS", "VICI", "V", "VST", "VMC", "WRB",
+    "GWW", "WAB", "WMT", "DIS", "WBD", "WM", "WAT", "WEC", "WFC", "WELL", "WST", "WDC", "WY",
+    "WSM", "WMB", "WTW", "WDAY", "WYNN", "XEL", "XYL", "YUM", "ZBRA", "ZBH", "ZTS",
 ];
 
 pub struct YahooClient {
@@ -255,29 +257,40 @@ impl YahooClient {
         let display = symbol.trim().to_uppercase();
         let request_symbol = yahoo_request_symbol(&display);
 
-        let mut result = match self.fetch_quote_summary_json(&request_symbol) {
-            Ok(root) => parse_quote_summary(&root, &display),
-            Err(e) => {
-                if self.html_fallback {
-                    match self.fetch_symbol_html(&display) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            let _ = e;
-                            FetchResult {
-                                symbol: display.clone(),
-                                snapshot: None,
-                                signal: None,
-                                fundamentals: None,
+        // Do not thrash crumb/quoteSummary while Yahoo is in cooldown. Chart meta
+        // (below) can still recover price for progressive list rows.
+        let mut result = if self.is_rate_limited() {
+            FetchResult {
+                symbol: display.clone(),
+                snapshot: None,
+                signal: None,
+                fundamentals: None,
+            }
+        } else {
+            match self.fetch_quote_summary_json(&request_symbol) {
+                Ok(root) => parse_quote_summary(&root, &display),
+                Err(e) => {
+                    if self.html_fallback {
+                        match self.fetch_symbol_html(&display) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = e;
+                                FetchResult {
+                                    symbol: display.clone(),
+                                    snapshot: None,
+                                    signal: None,
+                                    fundamentals: None,
+                                }
                             }
                         }
-                    }
-                } else {
-                    let _ = e;
-                    FetchResult {
-                        symbol: display.clone(),
-                        snapshot: None,
-                        signal: None,
-                        fundamentals: None,
+                    } else {
+                        let _ = e;
+                        FetchResult {
+                            symbol: display.clone(),
+                            snapshot: None,
+                            signal: None,
+                            fundamentals: None,
+                        }
                     }
                 }
             }
@@ -518,9 +531,12 @@ impl YahooClient {
         range: &str,
         interval: &str,
     ) -> io::Result<Vec<HistoricalCandle>> {
+        // Share-class dots must be Yahoo path form (`BRK.B` → `BRK-B`); Stooq still
+        // receives the display ticker and applies its own dash mapping.
+        let request_symbol = yahoo_request_symbol(symbol);
         let url = format!(
             "{}{}?range={}&interval={}&includePrePost=false",
-            CHART_API_URL, symbol, range, interval
+            CHART_API_URL, request_symbol, range, interval
         );
         let yahoo: io::Result<Vec<HistoricalCandle>> = self
             .client
@@ -655,8 +671,8 @@ fn parse_chart_latest_close_cents(root: &Value) -> Option<i64> {
         .and_then(|v| v.as_array())?;
     for v in closes.iter().rev() {
         if let Some(p) = v.as_f64() {
-            if p.is_finite() && p > 0.0 {
-                return Some((p * 100.0).round() as i64);
+            if let Some(cents) = crate::quote_summary::dollars_to_cents(p) {
+                return Some(cents);
             }
         }
     }
@@ -667,11 +683,7 @@ fn parse_chart_regular_market_price_cents(root: &Value) -> Option<i64> {
     let p = root
         .pointer("/chart/result/0/meta/regularMarketPrice")
         .and_then(|v| v.as_f64())?;
-    if p.is_finite() && p > 0.0 {
-        Some((p * 100.0).round() as i64)
-    } else {
-        None
-    }
+    crate::quote_summary::dollars_to_cents(p)
 }
 
 // ── Candle parsing ─────────────────────────────────────────────────────────────

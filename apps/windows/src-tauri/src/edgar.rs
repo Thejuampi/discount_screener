@@ -136,12 +136,6 @@ fn fcf_history(ocf: &[AnnualValue], capex: &[AnnualValue]) -> Vec<AnnualValue> {
 pub struct DcfResult {
     /// Intrinsic value per share in cents.
     pub value_per_share_cents: i64,
-    /// Historical FCF CAGR used (0.10 = 10%).
-    pub fcf_cagr: f64,
-    /// Base FCF used (most recent annual, dollars).
-    pub base_fcf_dollars: i64,
-    /// Number of annual FCF data points used.
-    pub history_years: usize,
 }
 
 fn compute_dcf(fcf: &[AnnualValue], shares_outstanding: u64) -> Option<DcfResult> {
@@ -199,9 +193,6 @@ fn compute_dcf(fcf: &[AnnualValue], shares_outstanding: u64) -> Option<DcfResult
 
     Some(DcfResult {
         value_per_share_cents,
-        fcf_cagr: cagr,
-        base_fcf_dollars: base_fcf,
-        history_years: window.len(),
     })
 }
 

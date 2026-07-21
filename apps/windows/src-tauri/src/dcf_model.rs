@@ -9,8 +9,6 @@ const RISK_FREE_RATE_BPS: i32 = 400;
 const EQUITY_RISK_PREMIUM_BPS: i32 = 500;
 const DEFAULT_TAX_RATE_BPS: i32 = 2_100;
 const DEFAULT_COST_OF_DEBT_BPS: i32 = 550;
-const MIN_COST_OF_DEBT_BPS: i32 = 200;
-const MAX_COST_OF_DEBT_BPS: i32 = 1_200;
 const MIN_WACC_BPS: i32 = 500;
 const MAX_WACC_BPS: i32 = 1_800;
 const DCF_PROJECTION_YEARS: i32 = 5;
@@ -47,6 +45,8 @@ pub struct WaccInputProvenance {
 }
 
 impl WaccInputProvenance {
+    /// Human-readable WACC input caveats (used by tests and future UI badges).
+    #[allow(dead_code)]
     pub fn summary_labels(&self) -> Vec<String> {
         let mut labels = Vec::new();
         if self.market_cap == WaccFieldSource::DerivedPriceTimesShares {
@@ -73,6 +73,8 @@ impl WaccInputProvenance {
         labels
     }
 
+    /// True when any WACC input used a default/derived/assumed value.
+    #[allow(dead_code)]
     pub fn is_provisional(&self) -> bool {
         !self.summary_labels().is_empty()
     }

@@ -47,7 +47,6 @@ pub struct SmcAnalysis {
 
 struct Swing {
     price: i64,
-    epoch: i64,
     high: bool,
 }
 
@@ -71,14 +70,12 @@ fn swings(c: &[HistoricalCandle]) -> Vec<Swing> {
         if is_high {
             out.push(Swing {
                 price: hi,
-                epoch: c[i].epoch_seconds,
                 high: true,
             });
         }
         if is_low {
             out.push(Swing {
                 price: lo,
-                epoch: c[i].epoch_seconds,
                 high: false,
             });
         }

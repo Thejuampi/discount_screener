@@ -34,11 +34,6 @@ fn tf_plan(tf: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Final candle width in seconds for a timeframe (used for bucket alignment).
-pub fn tf_seconds(tf: &str) -> Option<i64> {
-    tf_plan(tf).map(|(g, f)| (g * f) as i64)
-}
-
 fn client() -> io::Result<Client> {
     Client::builder()
         .timeout(HTTP_TIMEOUT)

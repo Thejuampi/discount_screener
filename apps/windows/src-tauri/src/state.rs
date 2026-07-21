@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::crypto_cycle::FngCache;
 use crate::db::Db;
 use crate::engine::ScreenerState;
+use crate::feed_log::FeedLog;
 use crate::news::NewsCache;
 use crate::ticker_search::YahooSearchQuote;
 
@@ -87,6 +88,8 @@ pub struct AppState {
     pub screener: Arc<Mutex<ScreenerState>>,
     pub feed_status: Arc<Mutex<FeedStatus>>,
     pub db: Arc<Db>,
+    /// Append-only diagnostics next to the DB (`feed.log`).
+    pub feed_log: Arc<FeedLog>,
     pub news_cache: Arc<NewsCache>,
     pub congress_sync: Arc<Mutex<CongressSyncProgress>>,
     pub fng_cache: Arc<FngCache>,
@@ -97,12 +100,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db_path: PathBuf) -> Self {
+        let log_path = db_path
+            .parent()
+            .map(|p| p.join("feed.log"))
+            .unwrap_or_else(|| PathBuf::from("feed.log"));
         let db = Db::open(db_path).expect("open history db");
         let (scalp_ws_tx, _) = tokio::sync::watch::channel(String::new());
         Self {
             screener: Arc::new(Mutex::new(ScreenerState::new())),
             feed_status: Arc::new(Mutex::new(FeedStatus::default())),
             db: Arc::new(db),
+            feed_log: Arc::new(FeedLog::new(log_path)),
             news_cache: Arc::new(NewsCache::new()),
             congress_sync: Arc::new(Mutex::new(CongressSyncProgress::default())),
             fng_cache: Arc::new(FngCache::new()),

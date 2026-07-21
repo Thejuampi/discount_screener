@@ -90,7 +90,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 .get(&row.symbol)
                 .unwrap_or(&daily_candles_default);
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
-            let model = if screener.scoring_model == "aggressive_v2" {
+            let model = if screener.scoring_model == ScoringModel::AggressiveV2.as_str() {
                 ScoringModel::AggressiveV2
             } else {
                 ScoringModel::AggressiveV3
@@ -559,7 +559,7 @@ pub fn ensure_symbol_loaded(symbol: String, state: State<AppState>) -> Result<St
 pub fn get_candles(
     symbol: String,
     range: String,
-    state: State<AppState>,
+    _state: State<AppState>,
 ) -> Result<Vec<HistoricalCandle>, String> {
     let client = YahooClient::new().map_err(|e| e.to_string())?;
     let (range_str, interval_str) = match range.as_str() {
@@ -610,9 +610,63 @@ fn batch_retry_delay_ms(rate_limit_secs: u64, completed_round: usize) -> u64 {
     }
 }
 
+/// Short status-bar summary. Kept ≤60 chars — `StatusBar` truncates `last_error`
+/// at that length. Full pending sets still go to the diagnostics log on disk.
+fn format_incomplete_retry_status(round: usize, max_rounds: usize, pending: &[&str]) -> String {
+    let tail = format_pending_tail(pending);
+    format!("Quotes retry {round}/{max_rounds}: {tail}")
+}
+
+fn format_terminal_incomplete_status(pending: &[&str]) -> String {
+    format!("Quotes incomplete: {}", format_pending_tail(pending))
+}
+
+/// Compact pending-ticker summary that fits the status bar.
+fn format_pending_tail(pending: &[&str]) -> String {
+    match pending.len() {
+        0 => "0 pending".into(),
+        1 => pending[0].to_string(),
+        2 => format!("{}, {}", pending[0], pending[1]),
+        3 => format!("{}, {}, {}", pending[0], pending[1], pending[2]),
+        n => format!("{}, {} +{}", pending[0], pending[1], n - 2),
+    }
+}
+
+/// True when screener already has list-column enrichment for `sym` (price for
+/// crypto/ETF; fundamentals payload for stocks). Used so a rate-limited
+/// price-only re-fetch does not re-queue symbols that already completed earlier.
+fn symbol_state_enrichment_complete(state: &crate::engine::ScreenerState, sym: &str) -> bool {
+    let has_price = state
+        .snapshots
+        .get(sym)
+        .is_some_and(|s| s.market_price_cents > 0);
+    if !has_price {
+        return false;
+    }
+    if is_crypto(sym) || is_etf(sym) {
+        return true;
+    }
+    state.fundamentals.contains_key(sym)
+}
+
+fn needs_enrichment_retry(
+    outcome: RefreshOutcome,
+    state: &crate::engine::ScreenerState,
+    sym: &str,
+) -> bool {
+    if outcome.enriched {
+        return false;
+    }
+    !symbol_state_enrichment_complete(state, sym)
+}
+
 #[cfg(test)]
 mod feed_coordinator_tests {
-    use super::{batch_retry_delay_ms, ingest_fetch_result};
+    use super::{
+        batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
+        ingest_fetch_result, needs_enrichment_retry, symbol_state_enrichment_complete,
+        RefreshOutcome,
+    };
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
 
@@ -621,6 +675,101 @@ mod feed_coordinator_tests {
         assert_eq!(batch_retry_delay_ms(37, 0), 38_000);
         assert_eq!(batch_retry_delay_ms(0, 0), 2_000);
         assert_eq!(batch_retry_delay_ms(0, 2), 12_000);
+    }
+
+    #[test]
+    fn incomplete_retry_status_is_short_for_status_bar() {
+        let pending = ["APT-USD", "ARB-USD", "CTRA", "HOLX", "SHIB-USD", "UNI-USD"];
+        let msg = format_incomplete_retry_status(4, 6, &pending);
+        assert_eq!(msg, "Quotes retry 4/6: APT-USD, ARB-USD +4");
+        assert!(
+            msg.len() <= 60,
+            "status bar truncates at 60 chars; got {}",
+            msg.len()
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("feed.log"),
+            "status bar must not mention diagnostics file path"
+        );
+    }
+
+    #[test]
+    fn terminal_incomplete_status_lists_few_tickers() {
+        let msg = format_terminal_incomplete_status(&["CTRA", "HOLX"]);
+        assert_eq!(msg, "Quotes incomplete: CTRA, HOLX");
+        assert!(msg.len() <= 60, "status bar truncates at 60 chars");
+        assert!(!msg.to_ascii_lowercase().contains("feed.log"));
+    }
+
+    #[test]
+    fn price_only_refetch_does_not_requeue_when_state_already_enriched() {
+        let mut state = ScreenerState::new();
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AAPL".into(),
+            company_name: Some("Apple Inc.".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 24_000,
+            previous_close_cents: 19_500,
+            next_earnings_epoch: Some(1_800_000_000),
+        });
+        state.ingest_fundamentals(FundamentalSnapshot {
+            symbol: "AAPL".into(),
+            sector_name: Some("Technology".into()),
+            ..Default::default()
+        });
+
+        let outcome = ingest_fetch_result(
+            &mut state,
+            FetchResult {
+                symbol: "AAPL".into(),
+                snapshot: Some(MarketSnapshot {
+                    symbol: "AAPL".into(),
+                    company_name: None,
+                    profitable: false,
+                    market_price_cents: 20_500,
+                    intrinsic_value_cents: 0,
+                    previous_close_cents: 0,
+                    next_earnings_epoch: None,
+                }),
+                signal: None,
+                fundamentals: None,
+            },
+            false,
+            false,
+        );
+
+        assert!(outcome.visible);
+        assert!(!outcome.enriched);
+        assert!(symbol_state_enrichment_complete(&state, "AAPL"));
+        assert!(!needs_enrichment_retry(outcome, &state, "AAPL"));
+        let merged = state.snapshots.get("AAPL").unwrap();
+        assert_eq!(merged.company_name.as_deref(), Some("Apple Inc."));
+        assert_eq!(merged.market_price_cents, 20_500);
+        assert_eq!(merged.intrinsic_value_cents, 24_000);
+        assert_eq!(
+            state.fundamentals["AAPL"].sector_name.as_deref(),
+            Some("Technology")
+        );
+    }
+
+    #[test]
+    fn chart_only_stock_without_fundamentals_still_needs_retry() {
+        let mut state = ScreenerState::new();
+        let outcome = RefreshOutcome {
+            visible: true,
+            enriched: false,
+        };
+        state.ingest_partial_snapshot(MarketSnapshot {
+            symbol: "SPARSE".into(),
+            company_name: None,
+            profitable: false,
+            market_price_cents: 10_000,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+        });
+        assert!(needs_enrichment_retry(outcome, &state, "SPARSE"));
     }
 
     #[test]
@@ -836,12 +985,18 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
         let client = Arc::clone(&shared_client);
         let screener = Arc::clone(&state.screener);
         let feed_status = Arc::clone(&state.feed_status);
+        let feed_log = Arc::clone(&state.feed_log);
         let loaded = Arc::clone(&loaded);
         let completed = Arc::clone(&completed);
 
         thread::Builder::new()
             .name("feed-refresh".into())
             .spawn(move || {
+                feed_log.info(&format!(
+                    "feed refresh started: {} symbols, log={}",
+                    symbols.len(),
+                    feed_log.path().display()
+                ));
                 let mut pending: Vec<&'static str> = symbols.iter().copied().collect();
 
                 for round in 0..=MAX_RETRY_ROUNDS {
@@ -852,11 +1007,10 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         // Prefer Yahoo cooldown over fixed backoff so we don't thrash crumb.
                         let cool = client.rate_limit_remaining_secs();
                         let wait_ms = batch_retry_delay_ms(cool, round - 1);
-                        feed_status.lock().unwrap().last_error = Some(format!(
-                            "Retrying incomplete quotes (round {round}/{}): {} symbols pending",
-                            MAX_RETRY_ROUNDS,
-                            pending.len()
-                        ));
+                        feed_log.log_pending_retry(round, MAX_RETRY_ROUNDS, &pending);
+                        feed_status.lock().unwrap().last_error = Some(
+                            format_incomplete_retry_status(round, MAX_RETRY_ROUNDS, &pending),
+                        );
                         thread::sleep(std::time::Duration::from_millis(wait_ms));
                     }
 
@@ -879,6 +1033,20 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                             thread::Builder::new()
                                 .name(format!("refresh-{w}"))
                                 .spawn(move || loop {
+                                    // Once Yahoo is cooling down, re-queue the rest of this
+                                    // batch without more I/O. That keeps the pending set
+                                    // stable (same tickers) instead of thrashing charts.
+                                    if client.is_rate_limited() {
+                                        loop {
+                                            let j = cursor.fetch_add(1, Ordering::Relaxed);
+                                            if j >= batch.len() {
+                                                break;
+                                            }
+                                            failed.lock().unwrap().push(batch[j]);
+                                        }
+                                        break;
+                                    }
+
                                     let i = cursor.fetch_add(1, Ordering::Relaxed);
                                     if i >= batch.len() {
                                         break;
@@ -894,7 +1062,11 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                                 n.min(total);
                                         }
                                     }
-                                    if !outcome.enriched {
+                                    let retry = {
+                                        let s = screener.lock().unwrap();
+                                        needs_enrichment_retry(outcome, &s, sym)
+                                    };
+                                    if retry {
                                         failed.lock().unwrap().push(sym);
                                     }
                                 })
@@ -906,6 +1078,17 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         let _ = h.join();
                     }
                     pending = failed.lock().unwrap().clone();
+                    // Stable order for status + next round (same sticky set is obvious).
+                    pending.sort_unstable();
+                    pending.dedup();
+                }
+
+                if !pending.is_empty() {
+                    feed_log.log_terminal_incomplete(&pending);
+                    feed_status.lock().unwrap().last_error =
+                        Some(format_terminal_incomplete_status(&pending));
+                } else {
+                    feed_log.info("feed initial enrichment complete: no pending symbols");
                 }
 
                 // Continuous refresh is deliberately infrequent; a full sweep already

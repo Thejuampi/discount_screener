@@ -27,16 +27,6 @@ const V2_FUND_PE_HIGH: f64 = 3_500.0;
 const V2_FUND_PE_WEIGHT: f64 = 20.0;
 const V2_FUNDAMENTALS_FULL_WEIGHT: f64 = 100.0;
 
-// AggressiveV2 technicals weights
-const V2_TECH_TREND_DELTA_BOUND: f64 = 0.10;
-const V2_TECH_TREND_20_50_WEIGHT: f64 = 24.0;
-const V2_TECH_TREND_50_200_WEIGHT: f64 = 21.0;
-const V2_TECH_TREND_PRICE_20_WEIGHT: f64 = 15.0;
-const V2_TECH_HISTOGRAM_BOUND: f64 = 0.005;
-const V2_TECH_HISTOGRAM_WEIGHT: f64 = 25.0;
-const V2_TECH_MACD_DIRECTION_WEIGHT: f64 = 15.0;
-const V2_TECHNICALS_FULL_WEIGHT: f64 = 100.0;
-
 // AggressiveV2 forecast weights
 const V2_FORECAST_UPSIDE_LOWER_BPS: f64 = -2_000.0;
 const V2_FORECAST_UPSIDE_UPPER_BPS: f64 = 5_000.0;
@@ -1677,82 +1667,11 @@ pub fn score_technicals_v3(
     (composite, signals, breakdown)
 }
 
-pub fn score_technicals_v2(chart: &ChartSummary) -> (Option<i32>, Vec<String>) {
-    let close = chart.latest_close_cents;
-    if close <= 0 {
-        return (None, vec![]);
-    }
-
-    let mut acc = EvidenceAccumulator::new(V2_TECHNICALS_FULL_WEIGHT);
-
-    if let Some(ema20) = chart.ema20_cents {
-        if ema20 > 0 {
-            let delta = (close - ema20) as f64 / ema20 as f64;
-            acc.add(
-                V2_TECH_TREND_PRICE_20_WEIGHT,
-                smooth_ramp(delta, -V2_TECH_TREND_DELTA_BOUND, V2_TECH_TREND_DELTA_BOUND),
-                "Px/20",
-            );
-        }
-        if let Some(ema50) = chart.ema50_cents {
-            if ema50 > 0 {
-                let delta = (ema20 - ema50) as f64 / ema50 as f64;
-                acc.add(
-                    V2_TECH_TREND_20_50_WEIGHT,
-                    smooth_ramp(delta, -V2_TECH_TREND_DELTA_BOUND, V2_TECH_TREND_DELTA_BOUND),
-                    "20/50",
-                );
-                if let Some(ema200) = chart.ema200_cents {
-                    if ema200 > 0 {
-                        let delta = (ema50 - ema200) as f64 / ema200 as f64;
-                        acc.add(
-                            V2_TECH_TREND_50_200_WEIGHT,
-                            smooth_ramp(
-                                delta,
-                                -V2_TECH_TREND_DELTA_BOUND,
-                                V2_TECH_TREND_DELTA_BOUND,
-                            ),
-                            "50/200",
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(hist) = chart.histogram_cents {
-        let ratio = hist as f64 / close as f64;
-        acc.add(
-            V2_TECH_HISTOGRAM_WEIGHT,
-            smooth_ramp(ratio, -V2_TECH_HISTOGRAM_BOUND, V2_TECH_HISTOGRAM_BOUND),
-            "Hist",
-        );
-    }
-
-    if let (Some(macd), Some(signal)) = (chart.macd_cents, chart.signal_cents) {
-        let dir = if macd > signal {
-            1.0
-        } else if macd < signal {
-            -1.0
-        } else {
-            0.0
-        };
-        acc.add(V2_TECH_MACD_DIRECTION_WEIGHT, dir, "MACD");
-    }
-
-    (acc.normalized_score(), acc.signals)
-}
-
 pub fn score_forecast_v2(row: &CandidateRow) -> (Option<i32>, Vec<String>) {
     let mut acc = EvidenceAccumulator::new(V2_FORECAST_FULL_WEIGHT);
     let mut reliable_evidence_weight = 0.0f64;
     let mut has_valuation_anchor = false;
 
-    let target_fair = row
-        .intrinsic_value_cents
-        .checked_sub(0)
-        .filter(|&v| v > 0)
-        .map(|_| row.intrinsic_value_cents);
     let target_fair = if row.intrinsic_value_cents > 0 {
         Some(row.intrinsic_value_cents)
     } else {

@@ -9,6 +9,7 @@ mod dcf_model;
 mod edgar;
 mod email;
 mod engine;
+mod feed_log;
 mod fetcher;
 mod fibonacci;
 mod index_estimates;
