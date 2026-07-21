@@ -382,11 +382,20 @@ pub fn raw_double(obj: &Value, field: &str) -> Option<f64> {
 }
 
 pub fn raw_money(obj: &Value, field: &str) -> Option<i64> {
-    let d = raw_double(obj, field)?;
+    dollars_to_cents(raw_double(obj, field)?)
+}
+
+/// Convert a positive dollar price to integer cents.
+///
+/// Sub-cent assets (e.g. SHIB ≈ $0.000004) would otherwise round to 0 and never
+/// satisfy `market_price_cents > 0`, leaving them stuck in the incomplete-retry
+/// queue forever. Floor those to 1 cent so list readiness can complete.
+pub fn dollars_to_cents(d: f64) -> Option<i64> {
     if !d.is_finite() || d <= 0.0 {
         return None;
     }
-    Some((d * 100.0).round() as i64)
+    let cents = (d * 100.0).round() as i64;
+    Some(if cents > 0 { cents } else { 1 })
 }
 
 pub fn raw_int(obj: &Value, field: &str) -> Option<u32> {
@@ -415,6 +424,16 @@ mod tests {
     fn yahoo_request_symbol_maps_share_class_dot_to_hyphen() {
         assert_eq!(yahoo_request_symbol("BF.B"), "BF-B");
         assert_eq!(yahoo_request_symbol("BRK.B"), "BRK-B");
+    }
+
+    #[test]
+    fn dollars_to_cents_floors_sub_cent_crypto_so_list_ready_can_complete() {
+        assert_eq!(dollars_to_cents(4.26e-6), Some(1)); // SHIB-scale
+        assert_eq!(dollars_to_cents(0.0049), Some(1));
+        assert_eq!(dollars_to_cents(0.01), Some(1));
+        assert_eq!(dollars_to_cents(12.345), Some(1_235));
+        assert_eq!(dollars_to_cents(0.0), None);
+        assert_eq!(dollars_to_cents(-1.0), None);
     }
 
     #[test]

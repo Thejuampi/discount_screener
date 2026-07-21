@@ -8,7 +8,6 @@ use serde::Serialize;
 /// strategy, and avoids lookahead bias.
 ///
 /// We benchmark against SPY to compute alpha.
-use std::collections::HashMap;
 
 const HORIZONS_DAYS: [(i64, &str); 4] = [(5, "5d"), (30, "30d"), (90, "90d"), (180, "180d")];
 

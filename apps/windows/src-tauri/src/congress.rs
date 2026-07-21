@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 ///   4. Parse PDF text to extract structured trades (symbol, type, date, amount)
 ///
 /// All data is officially published. No scraping of third-party sites, no auth.
-use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
 
@@ -32,7 +31,6 @@ pub struct PoliticianStub {
 #[derive(Clone, Debug)]
 pub struct PtrFiling {
     pub politician: PoliticianStub,
-    pub year: u32,
     pub doc_id: String,
     pub filing_date: String, // raw MM/DD/YYYY
 }
@@ -100,7 +98,8 @@ pub fn fetch_year_index(client: &Client, year: u32) -> Result<String, String> {
 // ── Step 2: parse XML for PTR filings ────────────────────────────────────────
 
 /// Extract all PTR (FilingType=P) filings from the year XML index.
-pub fn parse_ptr_filings(xml: &str, year: u32) -> Vec<PtrFiling> {
+/// `year` is accepted for call-site clarity (index is per calendar year) but is not stored.
+pub fn parse_ptr_filings(xml: &str, _year: u32) -> Vec<PtrFiling> {
     let mut out = Vec::new();
     // The XML is regular. Each <Member> block has consistent fields.
     let mut cursor = 0usize;
@@ -142,7 +141,6 @@ pub fn parse_ptr_filings(xml: &str, year: u32) -> Vec<PtrFiling> {
                 state,
                 district,
             },
-            year,
             doc_id,
             filing_date,
         });
@@ -386,7 +384,10 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
             asset_type,
             transaction_type: tx_type.unwrap_or_else(|| "?".to_string()),
             transaction_date: tx_date_raw.and_then(|d| to_iso(&d)),
-            disclosure_date: disc_date_raw.and_then(|d| to_iso(&d)),
+            // Prefer dates from the PDF row; fall back to the filing index date.
+            disclosure_date: disc_date_raw
+                .and_then(|d| to_iso(&d))
+                .or_else(|| to_iso(&filing.filing_date)),
             amount_range_min: amt_min,
             amount_range_max: amt_max,
             cap_gains_over_200: None,
@@ -448,58 +449,4 @@ fn to_iso(d: &str) -> Option<String> {
     let day: u32 = parts[1].parse().ok()?;
     let y: u32 = parts[2].parse().ok()?;
     Some(format!("{:04}-{:02}-{:02}", y, m, day))
-}
-
-// ── Step 4: aggregate ingestion ─────────────────────────────────────────────
-
-/// Result of a full year sync operation.
-#[derive(Clone, Debug, Serialize)]
-pub struct CongressSyncResult {
-    pub year: u32,
-    pub ptr_count: usize,
-    pub processed: usize,
-    pub skipped: usize,
-    pub failed: usize,
-    pub trades_imported: usize,
-    pub errors_sample: Vec<String>,
-}
-
-/// Aggregate trades by ticker for the overview dashboard.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct TickerActivity {
-    pub symbol: String,
-    pub buy_count: u32,
-    pub sell_count: u32,
-    pub unique_politicians: u32,
-    pub last_disclosure_date: Option<String>,
-    pub total_amount_min: i64,
-    pub total_amount_max: i64,
-}
-
-pub fn aggregate_by_ticker(trades: &[CongressTrade]) -> Vec<TickerActivity> {
-    let mut map: HashMap<String, TickerActivity> = HashMap::new();
-    for t in trades {
-        let Some(sym) = &t.symbol else {
-            continue;
-        };
-        let entry = map.entry(sym.clone()).or_insert_with(|| TickerActivity {
-            symbol: sym.clone(),
-            ..Default::default()
-        });
-        match t.transaction_type.as_str() {
-            "P" => entry.buy_count += 1,
-            "S" | "S (partial)" => entry.sell_count += 1,
-            _ => {}
-        }
-        entry.total_amount_min += t.amount_range_min.unwrap_or(0);
-        entry.total_amount_max += t.amount_range_max.unwrap_or(0);
-        if let Some(d) = &t.disclosure_date {
-            entry.last_disclosure_date = match &entry.last_disclosure_date {
-                Some(existing) if existing.as_str() > d.as_str() => Some(existing.clone()),
-                _ => Some(d.clone()),
-            };
-        }
-    }
-    // unique_politicians not computed here — would require politician_id grouping
-    map.into_values().collect()
 }

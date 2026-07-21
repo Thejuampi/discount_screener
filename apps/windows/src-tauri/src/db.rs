@@ -1624,6 +1624,8 @@ pub struct PoliticianActivityRow {
 #[derive(Debug)]
 pub struct TradeMeta {
     pub trade_id: i64,
+    /// Loaded for join context; scoring currently keys off trade_id only.
+    #[allow(dead_code)]
     pub politician_id: i64,
     pub transaction_type: String,
     pub disclosure_date: String,
