@@ -19,7 +19,7 @@ export interface OpportunityRow {
   analyst_opinion_count: number | null;
   recommendation_mean_hundredths: number | null;
   sector_name: string | null;
-  // AggressiveV2 scoring
+  // Opportunity scoring buckets (-100..+100; inverted under short_v3)
   fundamentals_score: number | null;
   technical_score: number | null;
   forecast_score: number | null;
@@ -206,6 +206,19 @@ export interface FeedStatus {
   symbols_loaded: number;
   symbols_total: number;
   last_error: string | null;
+  profile_name: string;
+}
+
+export interface UniverseProfileInfo {
+  name: string;
+  description: string;
+  symbol_count: number;
+}
+
+export interface UniverseProfileStatus {
+  name: string;
+  symbols_total: number;
+  symbols_loaded: number;
 }
 
 export interface HistorySnapshot {
@@ -332,6 +345,10 @@ export const api = {
   getQuantLens: (symbol: string) => invoke<QuantLensReport>("get_quant_lens", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
+  listUniverseProfiles: () => invoke<UniverseProfileInfo[]>("list_universe_profiles"),
+  getUniverseProfile: () => invoke<UniverseProfileStatus>("get_universe_profile"),
+  setUniverseProfile: (name: string) =>
+    invoke<UniverseProfileStatus>("set_universe_profile", { name }),
   getSymbolHistory: (symbol: string, days: number) =>
     invoke<HistorySnapshot[]>("get_symbol_history", { symbol, days }),
   getBacktest: (decision: Decision, daysAgo: number) =>

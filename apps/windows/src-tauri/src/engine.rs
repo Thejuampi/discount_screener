@@ -2040,7 +2040,7 @@ pub struct ScreenerState {
     pub alerts: Vec<AlertEvent>,
     pub min_gap_bps: i32,
     pub signal_max_age_seconds: u64,
-    /// Opportunity scoring model: aggressive_v2 | aggressive_v3
+    /// Opportunity scoring model: aggressive_v2 | aggressive_v3 | short_v3
     pub scoring_model: String,
 }
 
@@ -2052,6 +2052,19 @@ impl ScreenerState {
             scoring_model: "aggressive_v3".into(),
             ..Default::default()
         }
+    }
+
+    /// Drop all per-symbol market state while keeping scoring preferences.
+    pub fn clear_universe(&mut self) {
+        let scoring_model = self.scoring_model.clone();
+        let min_gap_bps = self.min_gap_bps;
+        let signal_max_age_seconds = self.signal_max_age_seconds;
+        *self = Self {
+            scoring_model,
+            min_gap_bps,
+            signal_max_age_seconds,
+            ..Default::default()
+        };
     }
 
     pub fn ingest_snapshot(&mut self, snap: MarketSnapshot) {

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use crate::db::Db;
 use crate::engine::ScreenerState;
 use crate::feed_log::FeedLog;
 use crate::news::NewsCache;
+use crate::profiles::compose_universe;
 use crate::ticker_search::YahooSearchQuote;
 
 #[derive(Clone)]
@@ -15,6 +17,7 @@ pub struct FeedStatus {
     pub running: bool,
     pub symbols_loaded: usize,
     pub last_error: Option<String>,
+    pub profile_name: String,
 }
 
 impl Default for FeedStatus {
@@ -23,6 +26,7 @@ impl Default for FeedStatus {
             running: false,
             symbols_loaded: 0,
             last_error: None,
+            profile_name: "sp500".into(),
         }
     }
 }
@@ -96,6 +100,12 @@ pub struct AppState {
     /// Carries the active scalping product to the WebSocket background task.
     pub scalp_ws_tx: tokio::sync::watch::Sender<String>,
     pub remote_search_cache: Arc<Mutex<RemoteSearchCache>>,
+    /// Active index / universe profile id (`sp500`, `dow`, …).
+    pub active_profile: Mutex<String>,
+    /// Symbols currently tracked by the feed for `active_profile`.
+    pub active_symbols: Mutex<Arc<Vec<String>>>,
+    /// Bumped on each universe switch so stale feed workers exit.
+    pub feed_generation: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -106,9 +116,13 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from("feed.log"));
         let db = Db::open(db_path).expect("open history db");
         let (scalp_ws_tx, _) = tokio::sync::watch::channel(String::new());
+        let (profile, symbols) = compose_universe("sp500").expect("default sp500 universe");
         Self {
             screener: Arc::new(Mutex::new(ScreenerState::new())),
-            feed_status: Arc::new(Mutex::new(FeedStatus::default())),
+            feed_status: Arc::new(Mutex::new(FeedStatus {
+                profile_name: profile.clone(),
+                ..FeedStatus::default()
+            })),
             db: Arc::new(db),
             feed_log: Arc::new(FeedLog::new(log_path)),
             news_cache: Arc::new(NewsCache::new()),
@@ -116,6 +130,13 @@ impl AppState {
             fng_cache: Arc::new(FngCache::new()),
             scalp_ws_tx,
             remote_search_cache: Arc::new(Mutex::new(RemoteSearchCache::new())),
+            active_profile: Mutex::new(profile),
+            active_symbols: Mutex::new(Arc::new(symbols)),
+            feed_generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub fn feed_generation_arc(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.feed_generation)
     }
 }

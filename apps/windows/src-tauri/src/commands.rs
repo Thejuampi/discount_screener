@@ -15,12 +15,12 @@ use crate::engine::{
 };
 use crate::fetcher::{
     asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready, YahooClient,
-    CRYPTO_SYMBOLS, DEFAULT_LIVE_SYMBOLS, ETF_SYMBOLS,
 };
 use crate::opportunity_v3::{
-    composite_score_v3, decision_state_v3, score_forecast_v3, score_fundamentals_v3,
-    score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
+    composite_score_v3, decision_state_v3, invert_bucket, invert_composite, score_forecast_v3,
+    score_fundamentals_v3, score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
 };
+use crate::profiles::{compose_universe, profile_definitions, profile_symbols};
 use crate::state::AppState;
 use crate::ticker_search::{
     local_universe_candidates, merge_and_rank, normalize_search_query_key, remote_candidates,
@@ -36,7 +36,7 @@ const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
 pub struct OpportunityRow {
     #[serde(flatten)]
     pub row: CandidateRow,
-    // AggressiveV2 scores (-100..+100 each, null = insufficient data)
+    // Bucket scores (-100..+100 each, null = insufficient data). Under short_v3 these are inverted.
     pub fundamentals_score: Option<i32>,
     pub technical_score: Option<i32>,
     pub forecast_score: Option<i32>,
@@ -70,6 +70,21 @@ pub struct FeedStatusResponse {
     pub symbols_loaded: usize,
     pub symbols_total: usize,
     pub last_error: Option<String>,
+    pub profile_name: String,
+}
+
+#[derive(Serialize)]
+pub struct UniverseProfileInfo {
+    pub name: String,
+    pub description: String,
+    pub symbol_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct UniverseProfileStatus {
+    pub name: String,
+    pub symbols_total: usize,
+    pub symbols_loaded: usize,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -90,11 +105,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 .get(&row.symbol)
                 .unwrap_or(&daily_candles_default);
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
-            let model = if screener.scoring_model == ScoringModel::AggressiveV2.as_str() {
-                ScoringModel::AggressiveV2
-            } else {
-                ScoringModel::AggressiveV3
-            };
+            let model = ScoringModel::parse(&screener.scoring_model);
             let dcf_analysis = screener.dcf_analyses.get(&row.symbol);
             let (
                 fund_score,
@@ -137,6 +148,20 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                     let dec = decision_state_v3(comp);
                     (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
                 }
+                ScoringModel::ShortV3 => {
+                    // Pure inverse of Aggressive V3: invert buckets + final composite.
+                    let (fs, fsig) = score_fundamentals_v3(&row);
+                    let (ts, tsig) = score_opportunity_technicals_v3(daily);
+                    let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
+                    let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
+                    let long_comp = composite_score_v3(fs, ts, fr, row.beta_millis);
+                    let fs = invert_bucket(fs);
+                    let ts = invert_bucket(ts);
+                    let fr = invert_bucket(fr);
+                    let comp = invert_composite(long_comp);
+                    let dec = decision_state_v3(comp);
+                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                }
             };
             let sym_str = row.symbol.as_str();
             let technical_only = is_crypto(sym_str) || is_etf(sym_str);
@@ -161,7 +186,8 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                         technical_only,
                     )
                 }
-            } else if model == ScoringModel::AggressiveV3 {
+            } else if model == ScoringModel::AggressiveV3 || model == ScoringModel::ShortV3 {
+                // V3 long and short: setup mirrors composite (short uses inverted composite).
                 setup_from_v3_composite(composite)
             } else {
                 compute_setup_score(
@@ -256,12 +282,93 @@ pub fn get_alerts(state: State<AppState>) -> Vec<AlertEvent> {
 #[tauri::command]
 pub fn get_feed_status(state: State<AppState>) -> FeedStatusResponse {
     let status = state.feed_status.lock().unwrap();
+    let symbols_total = state.active_symbols.lock().unwrap().len();
     FeedStatusResponse {
         running: status.running,
         symbols_loaded: status.symbols_loaded,
-        symbols_total: DEFAULT_LIVE_SYMBOLS.len() + CRYPTO_SYMBOLS.len() + ETF_SYMBOLS.len(),
+        symbols_total,
         last_error: status.last_error.clone(),
+        profile_name: status.profile_name.clone(),
     }
+}
+
+#[tauri::command]
+pub fn list_universe_profiles() -> Vec<UniverseProfileInfo> {
+    profile_definitions()
+        .iter()
+        .map(|def| {
+            let symbol_count = profile_symbols(def.name).map(|s| s.len()).unwrap_or(0);
+            // sp500 live feed is larger (ETFs + crypto); report composed size for UI.
+            let symbol_count = if def.name == "sp500" {
+                compose_universe("sp500")
+                    .map(|(_, u)| u.len())
+                    .unwrap_or(symbol_count)
+            } else {
+                symbol_count
+            };
+            UniverseProfileInfo {
+                name: def.name.to_string(),
+                description: def.description.to_string(),
+                symbol_count,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn get_universe_profile(state: State<AppState>) -> UniverseProfileStatus {
+    let name = state.active_profile.lock().unwrap().clone();
+    let symbols_total = state.active_symbols.lock().unwrap().len();
+    let symbols_loaded = state.feed_status.lock().unwrap().symbols_loaded;
+    UniverseProfileStatus {
+        name,
+        symbols_total,
+        symbols_loaded,
+    }
+}
+
+#[tauri::command]
+pub fn set_universe_profile(
+    name: String,
+    state: State<AppState>,
+) -> Result<UniverseProfileStatus, String> {
+    apply_universe_profile(&name, &state)?;
+    let symbols_total = state.active_symbols.lock().unwrap().len();
+    let profile_name = state.active_profile.lock().unwrap().clone();
+    Ok(UniverseProfileStatus {
+        name: profile_name,
+        symbols_total,
+        symbols_loaded: 0,
+    })
+}
+
+/// Validate, clear screener, install new universe, bump generation, and start feed workers.
+fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String> {
+    let (canonical, symbols) = compose_universe(raw_name)?;
+    let symbols = Arc::new(symbols);
+
+    // Invalidate any in-flight workers from the previous universe.
+    let generation = state
+        .feed_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+
+    {
+        let mut screener = state.screener.lock().unwrap();
+        screener.clear_universe();
+    }
+    *state.active_profile.lock().unwrap() = canonical.clone();
+    *state.active_symbols.lock().unwrap() = Arc::clone(&symbols);
+
+    {
+        let mut status = state.feed_status.lock().unwrap();
+        status.running = true;
+        status.symbols_loaded = 0;
+        status.last_error = None;
+        status.profile_name = canonical;
+    }
+
+    spawn_feed_workers(state, symbols, generation)
 }
 
 fn ingest_fetch_result(
@@ -310,23 +417,21 @@ pub fn get_scoring_model(state: State<AppState>) -> String {
 
 #[tauri::command]
 pub fn set_scoring_model(model: String, state: State<AppState>) -> Result<String, String> {
-    let normalized = match model.as_str() {
-        "aggressive_v2" | "v2" => "aggressive_v2".to_string(),
-        "aggressive_v3" | "v3" | _ => "aggressive_v3".to_string(),
-    };
+    let normalized = ScoringModel::parse(&model).as_str().to_string();
     state.screener.lock().unwrap().scoring_model = normalized.clone();
     Ok(normalized)
 }
 
 #[tauri::command]
 pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::IndexEstimatesReport {
+    let profile_name = state.active_profile.lock().unwrap().clone();
     let screener = state.screener.lock().unwrap();
     let rows = screener.candidate_rows();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    crate::index_estimates::compute(&rows, &screener.dcf_analyses, "universe", now)
+    crate::index_estimates::compute(&rows, &screener.dcf_analyses, &profile_name, now)
 }
 
 #[tauri::command]
@@ -377,13 +482,11 @@ pub fn search_tickers(
         }
     }
 
-    let mut universe: Vec<&str> =
-        Vec::with_capacity(DEFAULT_LIVE_SYMBOLS.len() + ETF_SYMBOLS.len() + CRYPTO_SYMBOLS.len());
-    universe.extend_from_slice(&DEFAULT_LIVE_SYMBOLS[..]);
-    universe.extend_from_slice(ETF_SYMBOLS);
-    universe.extend_from_slice(CRYPTO_SYMBOLS);
+    let active = state.active_symbols.lock().unwrap().clone();
+    let profile_name = state.active_profile.lock().unwrap().clone();
+    let universe: Vec<&str> = active.iter().map(|s| s.as_str()).collect();
 
-    let local = local_universe_candidates(trimmed, &universe, &company_names);
+    let local = local_universe_candidates(trimmed, &universe, &company_names, &profile_name);
     let mut ranked = merge_and_rank(&local, limit);
 
     if should_trigger_remote_search(trimmed, &ranked) {
@@ -578,19 +681,20 @@ pub fn get_candles(
         .map_err(|e| e.to_string())
 }
 
-// High-priority symbols fetched first so the UI shows useful data within seconds
-const PRIORITY_SYMBOLS: &[&str] = &[
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK.B", "JPM", "V", "UNH", "LLY",
-    "XOM", "MA", "AVGO", "PG", "HD", "COST", "JNJ", "ABBV", "MRK", "WMT", "BAC", "NFLX", "CRM",
-    "ORCL", "AMD", "ACN", "TMO", "CSCO",
-];
-
 // Android DefaultDashboardRepository constants — concurrency kept modest so
 // quoteSummary/crumb is not thrashed (429 leaves rows without target/gap/sector).
 const REFRESH_CONCURRENCY: usize = 2;
 const ENRICHMENT_CONCURRENCY: usize = 2;
 const MAX_RETRY_ROUNDS: usize = 6;
 const FULL_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
+
+fn generation_is_current(state_gen: &std::sync::atomic::AtomicU64, gen: u64) -> bool {
+    state_gen.load(std::sync::atomic::Ordering::SeqCst) == gen
+}
+
+fn pending_as_refs(pending: &[String]) -> Vec<&str> {
+    pending.iter().map(|s| s.as_str()).collect()
+}
 
 fn retry_backoff_ms(round: usize) -> u64 {
     match round {
@@ -612,20 +716,20 @@ fn batch_retry_delay_ms(rate_limit_secs: u64, completed_round: usize) -> u64 {
 
 /// Short status-bar summary. Kept ≤60 chars — `StatusBar` truncates `last_error`
 /// at that length. Full pending sets still go to the diagnostics log on disk.
-fn format_incomplete_retry_status(round: usize, max_rounds: usize, pending: &[&str]) -> String {
+fn format_incomplete_retry_status(round: usize, max_rounds: usize, pending: &[String]) -> String {
     let tail = format_pending_tail(pending);
     format!("Quotes retry {round}/{max_rounds}: {tail}")
 }
 
-fn format_terminal_incomplete_status(pending: &[&str]) -> String {
+fn format_terminal_incomplete_status(pending: &[String]) -> String {
     format!("Quotes incomplete: {}", format_pending_tail(pending))
 }
 
 /// Compact pending-ticker summary that fits the status bar.
-fn format_pending_tail(pending: &[&str]) -> String {
+fn format_pending_tail(pending: &[String]) -> String {
     match pending.len() {
         0 => "0 pending".into(),
-        1 => pending[0].to_string(),
+        1 => pending[0].clone(),
         2 => format!("{}, {}", pending[0], pending[1]),
         3 => format!("{}, {}, {}", pending[0], pending[1], pending[2]),
         n => format!("{}, {} +{}", pending[0], pending[1], n - 2),
@@ -679,7 +783,9 @@ mod feed_coordinator_tests {
 
     #[test]
     fn incomplete_retry_status_is_short_for_status_bar() {
-        let pending = ["APT-USD", "ARB-USD", "CTRA", "HOLX", "SHIB-USD", "UNI-USD"];
+        let pending = ["APT-USD", "ARB-USD", "CTRA", "HOLX", "SHIB-USD", "UNI-USD"]
+            .map(String::from)
+            .to_vec();
         let msg = format_incomplete_retry_status(4, 6, &pending);
         assert_eq!(msg, "Quotes retry 4/6: APT-USD, ARB-USD +4");
         assert!(
@@ -695,10 +801,36 @@ mod feed_coordinator_tests {
 
     #[test]
     fn terminal_incomplete_status_lists_few_tickers() {
-        let msg = format_terminal_incomplete_status(&["CTRA", "HOLX"]);
+        let pending = ["CTRA".into(), "HOLX".into()];
+        let msg = format_terminal_incomplete_status(&pending);
         assert_eq!(msg, "Quotes incomplete: CTRA, HOLX");
         assert!(msg.len() <= 60, "status bar truncates at 60 chars");
         assert!(!msg.to_ascii_lowercase().contains("feed.log"));
+    }
+
+    #[test]
+    fn generation_is_current_detects_stale_workers() {
+        let gen = std::sync::atomic::AtomicU64::new(3);
+        assert!(super::generation_is_current(&gen, 3));
+        assert!(!super::generation_is_current(&gen, 2));
+    }
+
+    #[test]
+    fn clear_universe_preserves_scoring_model() {
+        let mut state = ScreenerState::new();
+        state.scoring_model = "aggressive_v2".into();
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AAPL".into(),
+            company_name: Some("Apple".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 24_000,
+            previous_close_cents: 19_500,
+            next_earnings_epoch: None,
+        });
+        state.clear_universe();
+        assert!(state.snapshots.is_empty());
+        assert_eq!(state.scoring_model, "aggressive_v2");
     }
 
     #[test]
@@ -939,29 +1071,25 @@ fn refresh_one_symbol(
 #[tauri::command]
 pub fn start_feed(state: State<AppState>) -> Result<(), String> {
     {
-        let mut status = state.feed_status.lock().unwrap();
+        let status = state.feed_status.lock().unwrap();
         if status.running {
             return Ok(());
         }
-        status.running = true;
-        status.last_error = None;
     }
+    // Cold start with the already-selected (or default) universe.
+    let profile = state.active_profile.lock().unwrap().clone();
+    apply_universe_profile(&profile, &state)
+}
 
-    // Build ordered symbol list: priority first, then ETFs, then crypto, then the rest
-    let mut symbols: Vec<&'static str> = PRIORITY_SYMBOLS.to_vec();
-    for s in ETF_SYMBOLS.iter() {
-        symbols.push(s);
-    }
-    for s in CRYPTO_SYMBOLS.iter() {
-        symbols.push(s);
-    }
-    for s in DEFAULT_LIVE_SYMBOLS.iter() {
-        if !PRIORITY_SYMBOLS.contains(s) {
-            symbols.push(s);
-        }
-    }
-    let symbols = Arc::new(symbols);
+/// Spawn refresh / enrich / EDGAR / snapshot workers for symbols at generation.
+/// Workers exit when eed_generation no longer matches generation.
+fn spawn_feed_workers(
+    state: &AppState,
+    symbols: Arc<Vec<String>>,
+    generation: u64,
+) -> Result<(), String> {
     let total = symbols.len();
+    let feed_gen = state.feed_generation_arc();
 
     // One shared client + session (Android: single YahooSession / OkHttp client).
     let shared_client = match YahooClient::new() {
@@ -978,8 +1106,6 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
     ));
 
     // ── Android-style refresh coordinator ───────────────────────────────────
-    // Rounds: all symbols, then retries with backoff (MAX_RETRY_ROUNDS).
-    // Concurrency: REFRESH_CONCURRENCY workers per round.
     {
         let symbols = Arc::clone(&symbols);
         let client = Arc::clone(&shared_client);
@@ -988,35 +1114,45 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
         let feed_log = Arc::clone(&state.feed_log);
         let loaded = Arc::clone(&loaded);
         let completed = Arc::clone(&completed);
+        let feed_gen = Arc::clone(&feed_gen);
 
         thread::Builder::new()
             .name("feed-refresh".into())
             .spawn(move || {
+                if !generation_is_current(&feed_gen, generation) {
+                    return;
+                }
                 feed_log.info(&format!(
-                    "feed refresh started: {} symbols, log={}",
+                    "feed refresh started gen={generation}: {} symbols, log={}",
                     symbols.len(),
                     feed_log.path().display()
                 ));
-                let mut pending: Vec<&'static str> = symbols.iter().copied().collect();
+                let mut pending: Vec<String> = symbols.iter().cloned().collect();
 
                 for round in 0..=MAX_RETRY_ROUNDS {
+                    if !generation_is_current(&feed_gen, generation) {
+                        return;
+                    }
                     if pending.is_empty() {
                         break;
                     }
                     if round > 0 {
-                        // Prefer Yahoo cooldown over fixed backoff so we don't thrash crumb.
                         let cool = client.rate_limit_remaining_secs();
                         let wait_ms = batch_retry_delay_ms(cool, round - 1);
-                        feed_log.log_pending_retry(round, MAX_RETRY_ROUNDS, &pending);
+                        let pending_refs = pending_as_refs(&pending);
+                        feed_log.log_pending_retry(round, MAX_RETRY_ROUNDS, &pending_refs);
                         feed_status.lock().unwrap().last_error = Some(
                             format_incomplete_retry_status(round, MAX_RETRY_ROUNDS, &pending),
                         );
                         thread::sleep(std::time::Duration::from_millis(wait_ms));
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
                     }
 
                     let batch = Arc::new(pending);
                     let cursor = Arc::new(AtomicUsize::new(0));
-                    let failed = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+                    let failed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                     let mut handles = Vec::new();
 
                     for w in 0..REFRESH_CONCURRENCY {
@@ -1028,21 +1164,22 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         let feed_status = Arc::clone(&feed_status);
                         let loaded = Arc::clone(&loaded);
                         let completed = Arc::clone(&completed);
+                        let feed_gen = Arc::clone(&feed_gen);
 
                         handles.push(
                             thread::Builder::new()
                                 .name(format!("refresh-{w}"))
                                 .spawn(move || loop {
-                                    // Once Yahoo is cooling down, re-queue the rest of this
-                                    // batch without more I/O. That keeps the pending set
-                                    // stable (same tickers) instead of thrashing charts.
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        break;
+                                    }
                                     if client.is_rate_limited() {
                                         loop {
                                             let j = cursor.fetch_add(1, Ordering::Relaxed);
                                             if j >= batch.len() {
                                                 break;
                                             }
-                                            failed.lock().unwrap().push(batch[j]);
+                                            failed.lock().unwrap().push(batch[j].clone());
                                         }
                                         break;
                                     }
@@ -1051,9 +1188,12 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                     if i >= batch.len() {
                                         break;
                                     }
-                                    let sym = batch[i];
+                                    let sym = batch[i].as_str();
                                     let outcome =
                                         refresh_one_symbol(&client, &screener, &feed_status, sym);
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        break;
+                                    }
                                     if outcome.visible {
                                         let mut done = completed.lock().unwrap();
                                         if done.insert(sym.to_string()) {
@@ -1067,7 +1207,7 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                         needs_enrichment_retry(outcome, &s, sym)
                                     };
                                     if retry {
-                                        failed.lock().unwrap().push(sym);
+                                        failed.lock().unwrap().push(sym.to_string());
                                     }
                                 })
                                 .expect("spawn refresh worker"),
@@ -1077,24 +1217,32 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                     for h in handles {
                         let _ = h.join();
                     }
+                    if !generation_is_current(&feed_gen, generation) {
+                        return;
+                    }
                     pending = failed.lock().unwrap().clone();
-                    // Stable order for status + next round (same sticky set is obvious).
                     pending.sort_unstable();
                     pending.dedup();
                 }
 
+                if !generation_is_current(&feed_gen, generation) {
+                    return;
+                }
+
                 if !pending.is_empty() {
-                    feed_log.log_terminal_incomplete(&pending);
+                    let pending_refs = pending_as_refs(&pending);
+                    feed_log.log_terminal_incomplete(&pending_refs);
                     feed_status.lock().unwrap().last_error =
                         Some(format_terminal_incomplete_status(&pending));
                 } else {
                     feed_log.info("feed initial enrichment complete: no pending symbols");
                 }
 
-                // Continuous refresh is deliberately infrequent; a full sweep already
-                // performs quote + daily-chart I/O for the entire universe.
                 loop {
                     thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
+                    if !generation_is_current(&feed_gen, generation) {
+                        return;
+                    }
                     let cursor = Arc::new(AtomicUsize::new(0));
                     let mut handles = Vec::new();
                     for w in 0..REFRESH_CONCURRENCY {
@@ -1105,17 +1253,24 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         let feed_status = Arc::clone(&feed_status);
                         let loaded = Arc::clone(&loaded);
                         let completed = Arc::clone(&completed);
+                        let feed_gen = Arc::clone(&feed_gen);
                         handles.push(
                             thread::Builder::new()
                                 .name(format!("refresh-loop-{w}"))
                                 .spawn(move || loop {
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        break;
+                                    }
                                     let i = cursor.fetch_add(1, Ordering::Relaxed);
                                     if i >= symbols.len() {
                                         break;
                                     }
-                                    let sym = symbols[i];
+                                    let sym = symbols[i].as_str();
                                     let outcome =
                                         refresh_one_symbol(&client, &screener, &feed_status, sym);
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        break;
+                                    }
                                     if outcome.visible {
                                         let mut done = completed.lock().unwrap();
                                         if done.insert(sym.to_string()) {
@@ -1142,7 +1297,7 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
             })?;
     }
 
-    // ── Enrichment (Android ENRICHMENT_CONCURRENCY=2): multi-TF after price ──
+    // ── Enrichment ──────────────────────────────────────────────────────────
     {
         let symbols = Arc::clone(&symbols);
         let client = Arc::clone(&shared_client);
@@ -1150,6 +1305,7 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
         let fng_cache = Arc::clone(&state.fng_cache);
         let completed = Arc::clone(&completed);
         let enrich_cursor = Arc::new(AtomicUsize::new(0));
+        let feed_gen = Arc::clone(&feed_gen);
 
         for w in 0..ENRICHMENT_CONCURRENCY {
             let symbols = Arc::clone(&symbols);
@@ -1158,20 +1314,26 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
             let fng_cache = Arc::clone(&fng_cache);
             let completed = Arc::clone(&completed);
             let cursor = Arc::clone(&enrich_cursor);
+            let feed_gen = Arc::clone(&feed_gen);
 
             if let Err(e) = thread::Builder::new()
                 .name(format!("enrich-{w}"))
                 .spawn(move || {
-                    // Wait for the first visible row, then perform one bounded pass.
                     while completed.lock().unwrap().is_empty() {
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
                         thread::sleep(std::time::Duration::from_millis(500));
                     }
                     loop {
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
                         let i = cursor.fetch_add(1, Ordering::Relaxed);
                         if i >= symbols.len() {
                             break;
                         }
-                        let sym = symbols[i];
+                        let sym = symbols[i].as_str();
                         if !completed.lock().unwrap().contains(sym) {
                             continue;
                         }
@@ -1180,6 +1342,9 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         }
 
                         if let Ok(candles) = client.fetch_candles(sym, "5y", "1wk") {
+                            if !generation_is_current(&feed_gen, generation) {
+                                return;
+                            }
                             if let Some(summary) = compute_chart_summary(&candles) {
                                 let mut s = screener.lock().unwrap();
                                 s.ingest_weekly_summary(sym.to_string(), summary);
@@ -1205,14 +1370,19 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                         fng,
                                         now_e,
                                     );
-                                    screener
-                                        .lock()
-                                        .unwrap()
-                                        .ingest_crypto_metrics(sym.to_string(), metrics);
+                                    if generation_is_current(&feed_gen, generation) {
+                                        screener
+                                            .lock()
+                                            .unwrap()
+                                            .ingest_crypto_metrics(sym.to_string(), metrics);
+                                    }
                                 }
                             }
                         }
                         if let Ok(candles) = client.fetch_candles(sym, "1mo", "1h") {
+                            if !generation_is_current(&feed_gen, generation) {
+                                return;
+                            }
                             if let Some(summary) = compute_chart_summary(&candles) {
                                 screener
                                     .lock()
@@ -1221,6 +1391,9 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                             }
                         }
                         if let Ok(candles) = client.fetch_candles(sym, "10y", "1mo") {
+                            if !generation_is_current(&feed_gen, generation) {
+                                return;
+                            }
                             if let Some(summary) = compute_chart_summary(&candles) {
                                 screener
                                     .lock()
@@ -1238,37 +1411,44 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
         }
     }
 
-    // ── EDGAR DCF worker (separate, low-frequency) ────────────────────────────
-    // Fetches SEC EDGAR companyfacts for each symbol once per cycle.
-    // Rate-limited to ~8 req/s (SEC allows 10/s). Full cycle ~60-90s.
+    // ── EDGAR DCF worker ────────────────────────────────────────────────────
     {
         let symbols = Arc::clone(&symbols);
         let screener = Arc::clone(&state.screener);
         let feed_status = Arc::clone(&state.feed_status);
+        let feed_gen = Arc::clone(&feed_gen);
 
         thread::Builder::new()
             .name("edgar-dcf".to_string())
             .spawn(move || {
                 let edgar_client = edgar::edgar_client();
 
-                // Fetch CIK map once at startup
                 let cik_map: HashMap<String, u64> = match edgar::fetch_cik_map(&edgar_client) {
                     Ok(m) => m,
                     Err(e) => {
-                        feed_status.lock().unwrap().last_error = Some(format!("EDGAR CIK: {}", e));
+                        if generation_is_current(&feed_gen, generation) {
+                            feed_status.lock().unwrap().last_error =
+                                Some(format!("EDGAR CIK: {}", e));
+                        }
                         return;
                     }
                 };
 
                 loop {
-                    for &sym in symbols.iter() {
-                        // Crypto and ETFs are not on SEC EDGAR — skip without lookup
+                    if !generation_is_current(&feed_gen, generation) {
+                        return;
+                    }
+                    for sym in symbols.iter() {
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
+                        let sym = sym.as_str();
                         if is_crypto(sym) || is_etf(sym) {
                             continue;
                         }
                         let cik = match cik_map.get(sym) {
                             Some(&c) => c,
-                            None => continue, // not on EDGAR (ETFs, foreign listings, etc.)
+                            None => continue,
                         };
 
                         let shares = screener
@@ -1283,9 +1463,11 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                             continue;
                         }
 
-                        // Transparent multi-scenario DCF (CAPM WACC + provenance).
                         match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
                             Ok(Some(fcf)) => {
+                                if !generation_is_current(&feed_gen, generation) {
+                                    return;
+                                }
                                 let mut s = screener.lock().unwrap();
                                 let fund = s.fundamentals.get(sym).cloned();
                                 let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
@@ -1302,12 +1484,14 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                 }
                             }
                             Ok(None) => {}
-                            Err(_) => {} // silently skip (many symbols 404)
+                            Err(_) => {}
                         }
                         thread::sleep(std::time::Duration::from_millis(125));
 
-                        // Insider activity (Form 4) — fetches submissions + each Form 4 XML
                         if let Ok(Some(ins)) = edgar::fetch_insider_activity(&edgar_client, cik) {
+                            if !generation_is_current(&feed_gen, generation) {
+                                return;
+                            }
                             screener.lock().unwrap().ingest_insider(
                                 sym.to_string(),
                                 InsiderData {
@@ -1324,24 +1508,25 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
-    // ── Snapshot worker (history persistence) ─────────────────────────────────
-    // Captures the full set of opportunity rows once per hour.
+    // ── Snapshot worker (one per generation; exits when generation changes) ─
     {
         let screener = Arc::clone(&state.screener);
         let db = Arc::clone(&state.db);
+        let feed_gen = Arc::clone(&feed_gen);
 
         thread::Builder::new()
             .name("snapshot".to_string())
             .spawn(move || {
-                // Initial delay: wait for first data load before snapshotting
                 thread::sleep(std::time::Duration::from_secs(120));
                 loop {
+                    if !generation_is_current(&feed_gen, generation) {
+                        return;
+                    }
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
 
-                    // Build snapshot rows from current screener state
                     let rows = {
                         let s = screener.lock().unwrap();
                         let candidates = s.candidate_rows();
@@ -1349,7 +1534,6 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                         candidates
                             .into_iter()
                             .filter_map(|row| {
-                                // Skip rows that don't have a real price yet
                                 if row.market_price_cents <= 0 {
                                     return None;
                                 }
@@ -1381,7 +1565,6 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
                                     captured_at: now,
                                     market_price_cents: row.market_price_cents,
                                     intrinsic_value_cents: row.intrinsic_value_cents,
-                                    // DB column is NOT NULL; missing target → 0 (not a display path).
                                     gap_bps: row.gap_bps.unwrap_or(0),
                                     decision: decision.to_string(),
                                     composite_score: composite,
