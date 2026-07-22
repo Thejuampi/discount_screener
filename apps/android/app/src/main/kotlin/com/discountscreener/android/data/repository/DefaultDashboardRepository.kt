@@ -2673,8 +2673,9 @@ class DefaultDashboardRepository(
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
         val errors = mutableListOf<ProviderDiagnostic>()
 
+        // Bulk enrichment hydrates Year only (IO Opt A). Other ranges load on detail open.
         val missingRanges = stateMutex.withLock {
-            ChartRange.entries.filter { range ->
+            listOf(ChartRange.Year).filter { range ->
                 chartCache[chartKey(symbol, range)] == null
             }
         }

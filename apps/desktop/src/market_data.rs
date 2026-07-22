@@ -1790,8 +1790,8 @@ mod tests {
         let has = |symbol: &str| symbols.iter().any(|value| value == symbol);
 
         assert!(
-            symbols.len() == 503
-                && unique_symbols.len() == 503
+            symbols.len() == 501
+                && unique_symbols.len() == 501
                 && has("GOOGL")
                 && has("GOOG")
                 && has("BRK.B")
