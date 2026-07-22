@@ -1,3 +1,5 @@
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 /// Congressional trading data ingestion (US House STOCK Act).
 ///
 /// Pipeline:
@@ -7,15 +9,10 @@
 ///   4. Parse PDF text to extract structured trades (symbol, type, date, amount)
 ///
 /// All data is officially published. No scraping of third-party sites, no auth.
-
-use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
-use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
 
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Discount Screener) DiscountScreenerCongressIngest/1.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Discount Screener) DiscountScreenerCongressIngest/1.0";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -24,7 +21,7 @@ pub struct PoliticianStub {
     pub full_name: String,
     pub last_name: String,
     pub first_name: String,
-    pub chamber: String,            // "House" or "Senate"
+    pub chamber: String, // "House" or "Senate"
     pub state: Option<String>,
     pub district: Option<String>,
 }
@@ -34,9 +31,8 @@ pub struct PoliticianStub {
 #[derive(Clone, Debug)]
 pub struct PtrFiling {
     pub politician: PoliticianStub,
-    pub year: u32,
     pub doc_id: String,
-    pub filing_date: String,        // raw MM/DD/YYYY
+    pub filing_date: String, // raw MM/DD/YYYY
 }
 
 /// A single trade row parsed from a PTR PDF.
@@ -47,15 +43,15 @@ pub struct CongressTrade {
     pub chamber: String,
     pub state: Option<String>,
     pub district: Option<String>,
-    pub owner: Option<String>,          // SP, JT, DC, or None (self)
+    pub owner: Option<String>, // SP, JT, DC, or None (self)
     pub asset_name: String,
-    pub symbol: Option<String>,         // ticker if present
-    pub asset_type: Option<String>,     // ST, GS, OP, etc.
-    pub transaction_type: String,       // "P" | "S" | "S (partial)" | "E"
-    pub transaction_date: Option<String>,   // ISO YYYY-MM-DD
-    pub disclosure_date: Option<String>,    // ISO YYYY-MM-DD
-    pub amount_range_min: Option<i64>,      // USD
-    pub amount_range_max: Option<i64>,      // USD
+    pub symbol: Option<String>,           // ticker if present
+    pub asset_type: Option<String>,       // ST, GS, OP, etc.
+    pub transaction_type: String,         // "P" | "S" | "S (partial)" | "E"
+    pub transaction_date: Option<String>, // ISO YYYY-MM-DD
+    pub disclosure_date: Option<String>,  // ISO YYYY-MM-DD
+    pub amount_range_min: Option<i64>,    // USD
+    pub amount_range_max: Option<i64>,    // USD
     pub cap_gains_over_200: Option<bool>,
 }
 
@@ -76,21 +72,25 @@ pub fn fetch_year_index(client: &Client, year: u32) -> Result<String, String> {
         "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{}FD.zip",
         year
     );
-    let bytes = client.get(&url).send()
+    let bytes = client
+        .get(&url)
+        .send()
         .map_err(|e| format!("FD.zip fetch {}: {}", year, e))?
         .bytes()
         .map_err(|e| format!("FD.zip body {}: {}", year, e))?;
 
     // Unzip in memory
     let cursor = std::io::Cursor::new(bytes);
-    let mut zip = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("FD.zip parse {}: {}", year, e))?;
+    let mut zip =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("FD.zip parse {}: {}", year, e))?;
 
     let xml_name = format!("{}FD.xml", year);
-    let mut xml_file = zip.by_name(&xml_name)
+    let mut xml_file = zip
+        .by_name(&xml_name)
         .map_err(|e| format!("XML not found in zip {}: {}", year, e))?;
     let mut xml = String::new();
-    xml_file.read_to_string(&mut xml)
+    xml_file
+        .read_to_string(&mut xml)
         .map_err(|e| format!("read XML {}: {}", year, e))?;
     Ok(xml)
 }
@@ -98,7 +98,8 @@ pub fn fetch_year_index(client: &Client, year: u32) -> Result<String, String> {
 // ── Step 2: parse XML for PTR filings ────────────────────────────────────────
 
 /// Extract all PTR (FilingType=P) filings from the year XML index.
-pub fn parse_ptr_filings(xml: &str, year: u32) -> Vec<PtrFiling> {
+/// `year` is accepted for call-site clarity (index is per calendar year) but is not stored.
+pub fn parse_ptr_filings(xml: &str, _year: u32) -> Vec<PtrFiling> {
     let mut out = Vec::new();
     // The XML is regular. Each <Member> block has consistent fields.
     let mut cursor = 0usize;
@@ -113,7 +114,9 @@ pub fn parse_ptr_filings(xml: &str, year: u32) -> Vec<PtrFiling> {
 
         // Only keep PTRs
         let filing_type = inner(block, "FilingType");
-        if filing_type.as_deref() != Some("P") { continue; }
+        if filing_type.as_deref() != Some("P") {
+            continue;
+        }
 
         let last = inner(block, "Last").unwrap_or_default();
         let first = inner(block, "First").unwrap_or_default();
@@ -138,7 +141,6 @@ pub fn parse_ptr_filings(xml: &str, year: u32) -> Vec<PtrFiling> {
                 state,
                 district,
             },
-            year,
             doc_id,
             filing_date,
         });
@@ -151,7 +153,9 @@ fn inner(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{}>", tag);
     let close = format!("</{}>", tag);
     let self_close = format!("<{} />", tag);
-    if xml.contains(&self_close) { return Some(String::new()); }
+    if xml.contains(&self_close) {
+        return Some(String::new());
+    }
     let s = xml.find(&open)? + open.len();
     let e = xml[s..].find(&close)? + s;
     Some(xml[s..e].trim().to_string())
@@ -159,17 +163,29 @@ fn inner(xml: &str, tag: &str) -> Option<String> {
 
 fn build_full_name(prefix: &str, first: &str, last: &str, suffix: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
-    if !prefix.is_empty() { parts.push(prefix); }
-    if !first.is_empty() { parts.push(first); }
-    if !last.is_empty() { parts.push(last); }
-    if !suffix.is_empty() { parts.push(suffix); }
+    if !prefix.is_empty() {
+        parts.push(prefix);
+    }
+    if !first.is_empty() {
+        parts.push(first);
+    }
+    if !last.is_empty() {
+        parts.push(last);
+    }
+    if !suffix.is_empty() {
+        parts.push(suffix);
+    }
     parts.join(" ")
 }
 
 fn split_state_district(state_dst: &str) -> (Option<String>, Option<String>) {
     if state_dst.len() >= 2 {
         let st = state_dst[..2].to_string();
-        let dst = if state_dst.len() > 2 { Some(state_dst[2..].to_string()) } else { None };
+        let dst = if state_dst.len() > 2 {
+            Some(state_dst[2..].to_string())
+        } else {
+            None
+        };
         (Some(st), dst)
     } else {
         (None, None)
@@ -183,19 +199,22 @@ pub fn fetch_ptr_pdf(client: &Client, year: u32, doc_id: &str) -> Result<Vec<u8>
         "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{}/{}.pdf",
         year, doc_id
     );
-    let resp = client.get(&url).send()
+    let resp = client
+        .get(&url)
+        .send()
         .map_err(|e| format!("PTR {} fetch: {}", doc_id, e))?;
     if !resp.status().is_success() {
         return Err(format!("PTR {} HTTP {}", doc_id, resp.status()));
     }
-    let bytes = resp.bytes()
+    let bytes = resp
+        .bytes()
         .map_err(|e| format!("PTR {} body: {}", doc_id, e))?;
     Ok(bytes.to_vec())
 }
 
 pub fn parse_ptr_pdf(bytes: &[u8], filing: &PtrFiling) -> Result<Vec<CongressTrade>, String> {
-    let text = pdf_extract::extract_text_from_mem(bytes)
-        .map_err(|e| format!("PTR PDF extract: {}", e))?;
+    let text =
+        pdf_extract::extract_text_from_mem(bytes).map_err(|e| format!("PTR PDF extract: {}", e))?;
     Ok(parse_ptr_text(&text, filing))
 }
 
@@ -230,7 +249,9 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
                 let mut slashes = 0;
                 let mut j = i;
                 while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'/') {
-                    if bytes[j] == b'/' { slashes += 1; }
+                    if bytes[j] == b'/' {
+                        slashes += 1;
+                    }
                     j += 1;
                 }
                 if slashes == 2 && j - start >= 6 && j - start <= 10 {
@@ -256,7 +277,8 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
         let mut nums: Vec<i64> = Vec::new();
         while let Some((idx, _)) = iter.next() {
             let rest = &s[idx + 1..];
-            let n_str: String = rest.chars()
+            let n_str: String = rest
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == ',')
                 .collect();
             let n_str = n_str.replace(',', "");
@@ -275,7 +297,9 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
         // Tickers are usually 1-6 uppercase letters, sometimes with a dot (BRK.B)
         if !ticker.is_empty()
             && ticker.len() <= 8
-            && ticker.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.')
+            && ticker
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.')
         {
             Some(ticker.to_string())
         } else {
@@ -296,11 +320,19 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
     for (i, line) in lines.iter().enumerate() {
         let ticker = extract_ticker(line);
         let asset_type = extract_asset_type(line);
-        if ticker.is_none() && asset_type.is_none() { continue; }
+        if ticker.is_none() && asset_type.is_none() {
+            continue;
+        }
         // Heuristic: ticker may live on a line with the asset name, while the
         // [code] appears on the same or next line. We'll join the current line
         // with the next 1-2 lines to capture date + amount.
-        let window = lines.iter().skip(i).take(3).cloned().collect::<Vec<_>>().join(" ");
+        let window = lines
+            .iter()
+            .skip(i)
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
 
         // Owner: look at start of the joined window for SP / JT / DC patterns,
         // or the previous line. PDFs put Owner before Asset cell.
@@ -322,7 +354,9 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
         // Cap gains > $200 detection: simple presence of "X" or check marks is unreliable
         // from PDF text extraction; we leave as None for now.
 
-        if ticker.is_none() && asset_type.is_none() { continue; }
+        if ticker.is_none() && asset_type.is_none() {
+            continue;
+        }
 
         // Asset name: text before "(" on the current line (if ticker is here)
         let asset_name = if let Some(open) = line.find('(') {
@@ -350,7 +384,10 @@ pub fn parse_ptr_text(text: &str, filing: &PtrFiling) -> Vec<CongressTrade> {
             asset_type,
             transaction_type: tx_type.unwrap_or_else(|| "?".to_string()),
             transaction_date: tx_date_raw.and_then(|d| to_iso(&d)),
-            disclosure_date: disc_date_raw.and_then(|d| to_iso(&d)),
+            // Prefer dates from the PDF row; fall back to the filing index date.
+            disclosure_date: disc_date_raw
+                .and_then(|d| to_iso(&d))
+                .or_else(|| to_iso(&filing.filing_date)),
             amount_range_min: amt_min,
             amount_range_max: amt_max,
             cap_gains_over_200: None,
@@ -364,7 +401,8 @@ fn detect_owner(line: &str, _prev: Option<&str>) -> Option<String> {
     // Look for SP, JT, DC tokens as whole-word at the start
     for token in &["SP", "JT", "DC"] {
         let needle_with_space = format!("{} ", token);
-        if line.starts_with(&needle_with_space) || line.trim_start().starts_with(&needle_with_space) {
+        if line.starts_with(&needle_with_space) || line.trim_start().starts_with(&needle_with_space)
+        {
             return Some(token.to_string());
         }
     }
@@ -375,9 +413,15 @@ fn detect_tx_type(window: &str) -> Option<String> {
     // Patterns like " P " or " S " or " E " appearing near dates in the row.
     // We look for whitespace-delimited single letters P/S/E within a small radius.
     // Fallback: search for "Purchase", "Sale", "Exchange" full words.
-    if window.contains(" Purchase ") || window.contains("\nPurchase") { return Some("P".to_string()); }
-    if window.contains(" Sale ") || window.contains("\nSale") { return Some("S".to_string()); }
-    if window.contains(" Exchange ") { return Some("E".to_string()); }
+    if window.contains(" Purchase ") || window.contains("\nPurchase") {
+        return Some("P".to_string());
+    }
+    if window.contains(" Sale ") || window.contains("\nSale") {
+        return Some("S".to_string());
+    }
+    if window.contains(" Exchange ") {
+        return Some("E".to_string());
+    }
 
     // Look for single-letter codes
     let chars: Vec<char> = window.chars().collect();
@@ -398,61 +442,11 @@ fn detect_tx_type(window: &str) -> Option<String> {
 /// Convert MM/DD/YYYY → ISO YYYY-MM-DD.
 fn to_iso(d: &str) -> Option<String> {
     let parts: Vec<&str> = d.split('/').collect();
-    if parts.len() != 3 { return None; }
+    if parts.len() != 3 {
+        return None;
+    }
     let m: u32 = parts[0].parse().ok()?;
     let day: u32 = parts[1].parse().ok()?;
     let y: u32 = parts[2].parse().ok()?;
     Some(format!("{:04}-{:02}-{:02}", y, m, day))
-}
-
-// ── Step 4: aggregate ingestion ─────────────────────────────────────────────
-
-/// Result of a full year sync operation.
-#[derive(Clone, Debug, Serialize)]
-pub struct CongressSyncResult {
-    pub year: u32,
-    pub ptr_count: usize,
-    pub processed: usize,
-    pub skipped: usize,
-    pub failed: usize,
-    pub trades_imported: usize,
-    pub errors_sample: Vec<String>,
-}
-
-/// Aggregate trades by ticker for the overview dashboard.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct TickerActivity {
-    pub symbol: String,
-    pub buy_count: u32,
-    pub sell_count: u32,
-    pub unique_politicians: u32,
-    pub last_disclosure_date: Option<String>,
-    pub total_amount_min: i64,
-    pub total_amount_max: i64,
-}
-
-pub fn aggregate_by_ticker(trades: &[CongressTrade]) -> Vec<TickerActivity> {
-    let mut map: HashMap<String, TickerActivity> = HashMap::new();
-    for t in trades {
-        let Some(sym) = &t.symbol else { continue; };
-        let entry = map.entry(sym.clone()).or_insert_with(|| TickerActivity {
-            symbol: sym.clone(),
-            ..Default::default()
-        });
-        match t.transaction_type.as_str() {
-            "P" => entry.buy_count += 1,
-            "S" | "S (partial)" => entry.sell_count += 1,
-            _ => {}
-        }
-        entry.total_amount_min += t.amount_range_min.unwrap_or(0);
-        entry.total_amount_max += t.amount_range_max.unwrap_or(0);
-        if let Some(d) = &t.disclosure_date {
-            entry.last_disclosure_date = match &entry.last_disclosure_date {
-                Some(existing) if existing.as_str() > d.as_str() => Some(existing.clone()),
-                _ => Some(d.clone()),
-            };
-        }
-    }
-    // unique_politicians not computed here — would require politician_id grouping
-    map.into_values().collect()
 }

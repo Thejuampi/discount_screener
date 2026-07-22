@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 319" width="470" height="319" role="img" aria-labelledby="title desc">
+<title id="title">Bias-variance tradeoff</title>
+<desc id="desc">Prediction error versus model complexity. Training error decreases monotonically, while test error is U-shaped as model complexity increases.</desc>
+<style><![CDATA[
+.text{font-family:'Times New Roman',Times,serif;fill:#555;font-size:14px;}
+.axis{stroke:#777;stroke-width:1.8;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.line{fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+]]></style>
+<metadata type="application/json"><![CDATA[
+{"figure_id":"fig-0015-bias-variance-tradeoff","source_page":15,"classification":"line_chart","conversion_strategy":"semantic_svg_reconstruction","x_axis":{"label":"Model Complexity","qualitative_range":["Low","High"]},"y_axis":{"label":"Prediction Error"},"main_features":["test error U-shaped","training error decreases with model complexity"]}
+]]></metadata>
+<rect x="0" y="0" width="470" height="319" fill="#fff"/>
+<rect x="52.5" y="10.5" width="396.5" height="258.5" fill="none" stroke="#777" stroke-width="1.8" style="vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/>
+<text class="text" x="235" y="309" text-anchor="middle" style="font-size:18px">Model Complexity</text>
+<text class="text" x="23" y="151" text-anchor="middle" transform="rotate(-90 23 151)" style="font-size:18px">Prediction Error</text>
+<text class="text" x="74" y="287" text-anchor="middle" style="font-size:14px">Low</text>
+<text class="text" x="426" y="287" text-anchor="middle" style="font-size:14px">High</text>
+<text class="text" x="87" y="33" text-anchor="start" style="font-size:14px;font-weight:bold;fill:#666">High Bias</text>
+<text class="text" x="87" y="50" text-anchor="start" style="font-size:14px;font-weight:bold;fill:#666">Low Variance</text>
+<text class="text" x="346" y="33" text-anchor="start" style="font-size:14px;font-weight:bold;fill:#666">Low Bias</text>
+<text class="text" x="346" y="50" text-anchor="start" style="font-size:14px;font-weight:bold;fill:#666">High Variance</text>
+<line x1="86" y1="65" x2="150" y2="65" stroke="#222" stroke-width="1.4" stroke-dasharray="4 4" style="vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/>
+<polygon points="85,65 96,61 96,69" fill="#222"/>
+<line x1="348" y1="65" x2="412" y2="65" stroke="#222" stroke-width="1.4" stroke-dasharray="4 4" style="vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/>
+<polygon points="412,65 401,61 401,69" fill="#222"/>
+<path class="line" d="M 85 84 C 135 125, 176 166, 226 180 C 287 197, 351 160, 419 122" stroke="#ff2337" stroke-width="3"/>
+<path class="line" d="M 86 96 C 135 132, 165 176, 204 209 C 259 252, 344 256, 422 261" stroke="#1fe6e6" stroke-width="3"/>
+<line x1="268" y1="159" x2="248" y2="177" stroke="#555" stroke-width="1.4" style="vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/>
+<polygon points="247,178 252,168 257,174" fill="#555"/>
+<text class="text" x="274" y="151" text-anchor="start" style="font-size:14px">Test Sample</text>
+<line x1="155" y1="220" x2="178" y2="202" stroke="#555" stroke-width="1.4" style="vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;"/>
+<polygon points="179,201 174,211 169,205" fill="#555"/>
+<text class="text" x="123" y="236" text-anchor="start" style="font-size:14px">Training Sample</text>
+</svg>

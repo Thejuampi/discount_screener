@@ -25,9 +25,9 @@ const REFRESH_TOKEN_TTL: i64 = 7 * 24 * 3600; // Schwab refresh tokens last 7 da
 
 #[derive(Debug)]
 pub enum SchwabError {
-    NotConfigured,   // no app key/secret stored
-    NotConnected,    // creds set but never authorized
-    NeedsReauth,     // refresh token expired → user must log in again
+    NotConfigured, // no app key/secret stored
+    NotConnected,  // creds set but never authorized
+    NeedsReauth,   // refresh token expired → user must log in again
     Network(String),
 }
 
@@ -43,11 +43,17 @@ impl std::fmt::Display for SchwabError {
 }
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn client() -> io::Result<Client> {
-    Client::builder().timeout(HTTP_TIMEOUT).build().map_err(io::Error::other)
+    Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(io::Error::other)
 }
 
 struct TokenSet {
@@ -77,33 +83,44 @@ pub fn build_auth_url(app_key: &str, callback: &str) -> String {
 // ── Public: complete auth from the pasted redirect URL ─────────────────────────
 
 pub fn complete_auth(db: &Db, redirect_url: &str) -> Result<(), SchwabError> {
-    let auth = db.schwab_auth_get().map_err(SchwabError::Network)?.ok_or(SchwabError::NotConfigured)?;
+    let auth = db
+        .schwab_auth_get()
+        .map_err(SchwabError::Network)?
+        .ok_or(SchwabError::NotConfigured)?;
     let (app_key, secret, callback) = match (auth.app_key, auth.secret, auth.callback) {
         (Some(k), Some(s), Some(c)) => (k, s, c),
         _ => return Err(SchwabError::NotConfigured),
     };
-    let code = extract_code(redirect_url).ok_or_else(|| SchwabError::Network(
-        "No se encontró 'code' en la URL pegada".into()))?;
+    let code = extract_code(redirect_url)
+        .ok_or_else(|| SchwabError::Network("No se encontró 'code' en la URL pegada".into()))?;
 
     let body = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}",
-        urlencode(&code), urlencode(&callback)
+        urlencode(&code),
+        urlencode(&callback)
     );
     let resp = post_token(&app_key, &secret, body)?;
     let tok = parse_token_response(&resp)
         .ok_or_else(|| SchwabError::Network(format!("Respuesta de token inválida: {resp}")))?;
 
     let n = now();
-    db.schwab_set_tokens(&tok.access_token, &tok.refresh_token,
-        n + tok.expires_in, n + REFRESH_TOKEN_TTL)
-        .map_err(SchwabError::Network)?;
+    db.schwab_set_tokens(
+        &tok.access_token,
+        &tok.refresh_token,
+        n + tok.expires_in,
+        n + REFRESH_TOKEN_TTL,
+    )
+    .map_err(SchwabError::Network)?;
     Ok(())
 }
 
 // ── Public: a valid access token (auto-refresh) ────────────────────────────────
 
 pub fn valid_access_token(db: &Db) -> Result<String, SchwabError> {
-    let auth = db.schwab_auth_get().map_err(SchwabError::Network)?.ok_or(SchwabError::NotConfigured)?;
+    let auth = db
+        .schwab_auth_get()
+        .map_err(SchwabError::Network)?
+        .ok_or(SchwabError::NotConfigured)?;
     let (app_key, secret) = match (auth.app_key, auth.secret) {
         (Some(k), Some(s)) => (k, s),
         _ => return Err(SchwabError::NotConfigured),
@@ -121,19 +138,27 @@ pub fn valid_access_token(db: &Db) -> Result<String, SchwabError> {
         return Err(SchwabError::NeedsReauth);
     }
     // Refresh.
-    let body = format!("grant_type=refresh_token&refresh_token={}", urlencode(&refresh));
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}",
+        urlencode(&refresh)
+    );
     let resp = post_token(&app_key, &secret, body)?;
     let tok = parse_token_response(&resp)
         .ok_or_else(|| SchwabError::Network(format!("Refresh inválido: {resp}")))?;
     // Refreshing does NOT extend the 7-day window → preserve refresh_exp.
-    db.schwab_set_tokens(&tok.access_token, &tok.refresh_token,
-        n + tok.expires_in, refresh_exp)
-        .map_err(SchwabError::Network)?;
+    db.schwab_set_tokens(
+        &tok.access_token,
+        &tok.refresh_token,
+        n + tok.expires_in,
+        refresh_exp,
+    )
+    .map_err(SchwabError::Network)?;
     Ok(tok.access_token)
 }
 
 fn post_token(app_key: &str, secret: &str, body: String) -> Result<Value, SchwabError> {
-    client().map_err(|e| SchwabError::Network(e.to_string()))?
+    client()
+        .map_err(|e| SchwabError::Network(e.to_string()))?
         .post(TOKEN_URL)
         .basic_auth(app_key, Some(secret))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -154,16 +179,22 @@ pub fn quote_cents(db: &Db, symbol: &str) -> Option<i64> {
     }
     let token = valid_access_token(db).ok()?;
     let url = format!("{QUOTES_URL}?symbols={}&fields=quote", urlencode(symbol));
-    let resp: Value = client().ok()?
+    let resp: Value = client()
+        .ok()?
         .get(&url)
         .bearer_auth(token)
         .header("Accept", "application/json")
-        .send().ok()?
-        .error_for_status().ok()?
-        .json().ok()?;
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .ok()?;
     let q = resp.get(symbol)?.get("quote")?;
     // Prefer last trade; fall back to mark/close.
-    let price = q.get("lastPrice").and_then(|v| v.as_f64())
+    let price = q
+        .get("lastPrice")
+        .and_then(|v| v.as_f64())
         .or_else(|| q.get("mark").and_then(|v| v.as_f64()))
         .or_else(|| q.get("closePrice").and_then(|v| v.as_f64()))?;
     if price.is_finite() && price > 0.0 {
@@ -192,7 +223,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }

@@ -10,7 +10,56 @@ const STORAGE_KEY = "ds_lang";
 const T: Record<string, { es: string; en: string }> = {
   // ── App / Header ─────────────────────────────────────────────────────────
   "app.title":                  { es: "Vantage", en: "Vantage" },
-  "search.placeholder":         { es: "Buscar símbolo o empresa…", en: "Search symbol or company…" },
+  "search.placeholder":         { es: "Ticker o empresa…", en: "Ticker or company…" },
+  "search.open":                { es: "Abrir", en: "Open" },
+  "search.loading":             { es: "Buscando…", en: "Searching…" },
+  "search.pickMatch":           { es: "Elegí un resultado de la lista", en: "Pick a match" },
+  "search.unavailable":         { es: "Ticker no disponible", en: "Ticker unavailable" },
+  "search.outsideUniverse":     { es: "Fuera del universo", en: "Outside universe" },
+  "search.currentUniverse":     { es: "Universo", en: "Universe" },
+  "search.remote":              { es: "Yahoo", en: "Yahoo" },
+  "view.estimates":             { es: "Estimados", en: "Estimates" },
+  "estimates.loading":          { es: "Cargando estimados…", en: "Loading estimates…" },
+  "estimates.error":            { es: "Error", en: "Error" },
+  "estimates.symbols":          { es: "símbolos", en: "symbols" },
+  "estimates.baseUpside":       { es: "Upside base (DCF ponderado)", en: "Base upside (cap-weighted DCF)" },
+  "estimates.coverageBanner":   { es: "Cobertura DCF en construcción:", en: "Building live DCF coverage:" },
+  "estimates.internalDcf":      { es: "Modelo DCF interno", en: "Internal DCF model" },
+  "estimates.wallStreet":       { es: "Analistas Wall Street", en: "Wall Street analysts" },
+  "estimates.bear":             { es: "Bear", en: "Bear" },
+  "estimates.base":             { es: "Base", en: "Base" },
+  "estimates.bull":             { es: "Bull", en: "Bull" },
+  "estimates.analystLow":       { es: "Analyst low", en: "Analyst low" },
+  "estimates.analystHigh":      { es: "Analyst high", en: "Analyst high" },
+  "detail.provisional":         { es: "provisional", en: "provisional" },
+  "detail.waccInputs":          { es: "WACC inputs", en: "WACC inputs" },
+  "quant.title":                { es: "Quant Lens", en: "Quant Lens" },
+  "quant.loading":              { es: "Calculando Quant Lens…", en: "Computing Quant Lens…" },
+  "scoring.group":              { es: "Modelo de scoring", en: "Scoring model" },
+  "scoring.longV2":             { es: "Long V2", en: "Long V2" },
+  "scoring.longV3":             { es: "Long V3", en: "Long V3" },
+  "scoring.short":              { es: "Short", en: "Short" },
+  "scoring.longV2.hint":        {
+    es: "Long — Aggressive V2 (fundamentales sector-relative + multi-TF técnico)",
+    en: "Long — Aggressive V2 (sector-relative fundamentals + multi-TF technicals)",
+  },
+  "scoring.longV3.hint":        {
+    es: "Long — Aggressive V3 (múltiplos + RSI/volumen + forecast/DCF + haircut de beta)",
+    en: "Long — Aggressive V3 (multiples + RSI/volume + forecast/DCF + beta haircut)",
+  },
+  "scoring.short.hint":         {
+    es: "Short — inversa de V3: prioriza mal forecast, caros y bajistas",
+    en: "Short — inverse of V3: prioritizes weak forecasts, rich valuation, bearish setups",
+  },
+  "scoring.banner.short.tag":   { es: "SHORT DESK", en: "SHORT DESK" },
+  "scoring.banner.short":       {
+    es: "Ranking invertido de V3 · Act = candidato short · Setup alto = mejor short",
+    en: "Inverted V3 ranking · Act = short candidate · High setup = better short",
+  },
+  "scoring.toggle":             {
+    es: "Modelo de scoring: Long V2 · Long V3 · Short",
+    en: "Scoring model: Long V2 · Long V3 · Short",
+  },
   "filter.all":                 { es: "Todas", en: "All" },
   "filter.high":                { es: "Confianza alta", en: "High confidence" },
   "filter.provisional":         { es: "Provisional", en: "Provisional" },
@@ -19,6 +68,8 @@ const T: Record<string, { es: string; en: string }> = {
   "filter.type.stocks":         { es: "Acciones", en: "Stocks" },
   "filter.type.etfs":           { es: "ETFs", en: "ETFs" },
   "filter.type.crypto":         { es: "Cripto", en: "Crypto" },
+  "universe.label":             { es: "Universo", en: "Universe" },
+  "universe.hint":              { es: "Lista de índices / mercados a seguir", en: "Index / market list to track" },
 
   // ── News ────────────────────────────────────────────────────────────────
   "news.title":                 { es: "📰 Noticias recientes", en: "📰 Recent news" },
@@ -58,6 +109,7 @@ const T: Record<string, { es: string; en: string }> = {
   },
   "ia.why.lowConfidence":       { es: "baja confianza en la valuación", en: "low valuation confidence" },
   "ia.why.priceExceedsTarget":  { es: "el precio ya superó el target de analistas", en: "price already exceeds analyst target" },
+  "ia.why.noTarget":            { es: "sin target de analistas usable", en: "no usable analyst target" },
   "ia.why.lowScore":            { es: "score compuesto bajo ({cs})", en: "low composite score ({cs})" },
 
   "ia.fund.noData":             { es: "Datos de fundamentals no disponibles aún.", en: "Fundamentals data not yet available." },
@@ -90,6 +142,7 @@ const T: Record<string, { es: string; en: string }> = {
   "ia.tech.macdNeg":            { es: "MACD por debajo de su línea de señal: señal bajista.", en: "MACD below signal line: bearish signal." },
 
   "ia.fore.noCoverage":         { es: "Sin cobertura de analistas — valuación no confirmada externamente.", en: "No analyst coverage — valuation not externally confirmed." },
+  "ia.fore.noTarget":           { es: "Sin target de analistas usable para calcular gap/upside.", en: "No usable analyst target to compute gap/upside." },
   "ia.fore.coverage":           { es: "{n} analistas cubren esta acción con consenso \"{rec}\".", en: "{n} analysts cover this stock with \"{rec}\" consensus." },
   "ia.fore.upside":             { es: "El precio objetivo promedio implica un upside de {gap}% desde el precio actual.", en: "The average price target implies {gap}% upside from current price." },
   "ia.fore.downside":           { es: "El precio actual ya superó el objetivo promedio de analistas (downside {gap}%).", en: "Current price already exceeds the average analyst target (downside {gap}%)." },
@@ -241,6 +294,8 @@ const T: Record<string, { es: string; en: string }> = {
   "dash.losers":                { es: "Bajas del día", en: "Top losers" },
   "dash.alerts":                { es: "Alertas recientes", en: "Recent alerts" },
   "dash.noAlerts":              { es: "Sin alertas todavía", en: "No alerts yet" },
+  "dash.noMarketData":          { es: "Datos de mercado no disponibles", en: "Market data unavailable" },
+  "dash.noOpportunities":       { es: "Sin oportunidades calificadas todavía", en: "No qualified opportunities yet" },
   "dash.entered":               { es: "entró en zona", en: "entered zone" },
   "dash.exited":                { es: "salió de zona", en: "exited zone" },
   "dash.upgraded":              { es: "confianza ↑", en: "confidence ↑" },
@@ -742,6 +797,42 @@ const T: Record<string, { es: string; en: string }> = {
   "setup.Hold.desc":            { es: "Sin sesgo claro",                                     en: "No clear bias" },
   "setup.Avoid.desc":           { es: "Algún factor negativo dominante",                     en: "Some dominant negative factor" },
   "setup.StrongAvoid.desc":     { es: "Múltiples alertas — evitar entrada",                  en: "Multiple red flags — avoid entry" },
+  // Short mode (inverse V3): same tokens, short-oriented copy
+  "setup.short.StrongBuy":      { es: "Strong Short", en: "Strong Short" },
+  "setup.short.Buy":            { es: "Short", en: "Short" },
+  "setup.short.Accumulate":     { es: "Mild Short", en: "Mild Short" },
+  "setup.short.Watch":          { es: "Watch", en: "Watch" },
+  "setup.short.Hold":           { es: "Hold", en: "Hold" },
+  "setup.short.Avoid":          { es: "Avoid Short", en: "Avoid Short" },
+  "setup.short.StrongAvoid":    { es: "Strong Avoid Short", en: "Strong Avoid Short" },
+  "setup.short.StrongBuy.desc": {
+    es: "Setup short fuerte — forecast débil, valoración cara y/o técnicos bajistas alineados",
+    en: "Strong short setup — weak forecast, rich valuation and/or bearish technicals aligned",
+  },
+  "setup.short.Buy.desc": {
+    es: "Buen candidato short — la mayoría de factores favorecen la baja",
+    en: "Solid short candidate — most factors favor the downside",
+  },
+  "setup.short.Accumulate.desc": {
+    es: "Short tentativo — falta alguna confirmación",
+    en: "Tentative short — still missing confirmation",
+  },
+  "setup.short.Watch.desc": {
+    es: "En radar short — no actuar todavía",
+    en: "On short radar — don't act yet",
+  },
+  "setup.short.Hold.desc": {
+    es: "Sin sesgo short claro",
+    en: "No clear short bias",
+  },
+  "setup.short.Avoid.desc": {
+    es: "Poco atractivo para short — factores mixtos o favorables al long",
+    en: "Poor short — mixed or long-friendly factors",
+  },
+  "setup.short.StrongAvoid.desc": {
+    es: "No short — setup largo fuerte o downside limitado",
+    en: "Do not short — strong long setup or limited downside",
+  },
   "col.decision.tooltip":       {
     es: "Recomendación final del screener. Combina el score con reglas de protección: si el precio ya superó el target de analistas (gap ≤ 0), o la confianza es baja, o el score es < 8 → Avoid aunque la empresa sea excelente.",
     en: "Screener's final recommendation. Combines score with safety rules: if price already exceeds analyst target (gap ≤ 0), or confidence is low, or score is < 8 → Avoid even if the company is excellent.",
@@ -761,6 +852,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Cumple todos los criterios: score alto ({cs}), gap positivo ({gap}%) y confianza adecuada — el precio aún tiene espacio para subir hacia el target de analistas.",
     en: "Meets all criteria: high score ({cs}), positive gap ({gap}%) and adequate confidence — the price still has room to move toward the analyst target.",
   },
+  "reason.act.noTarget":        {
+    es: "Score alto ({cs}) y señales técnicas/fundamentales favorables, pero no hay target de analistas usable para medir el gap.",
+    en: "High score ({cs}) with favorable technical/fundamental signals, but there is no usable analyst target to measure the gap.",
+  },
   "reason.watch":               {
     es: "Score moderado ({cs}). Hay algo de momentum pero no es suficientemente fuerte para comprar hoy.",
     en: "Moderate score ({cs}). There is some momentum but not strong enough to buy today.",
@@ -768,6 +863,10 @@ const T: Record<string, { es: string; en: string }> = {
   "reason.avoid.gap":           {
     es: "El precio actual ya superó el target de analistas ({gap}%). El descuento ya se consumió — entrar ahora sería comprar premium.",
     en: "Current price already exceeds the analyst target ({gap}%). The discount is gone — buying now would be paying a premium.",
+  },
+  "reason.avoid.noTarget":      {
+    es: "No hay target de analistas usable; sin ancla de valuación no se puede justificar Act.",
+    en: "No usable analyst target; without a valuation anchor Act is not justified.",
   },
   "reason.avoid.confLow":       {
     es: "Confianza baja: la señal de valuación está stale o diverge del consenso. No confiamos en el target para tomar decisión.",

@@ -46,6 +46,7 @@ import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.EstimatesHistoryPolicy
 import com.discountscreener.core.engine.IndexEstimatesEngine
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
@@ -66,6 +67,8 @@ import com.discountscreener.core.model.ComputationFailure
 import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.DcfSource
+import com.discountscreener.core.model.DcfSourceSelection
 import com.discountscreener.core.model.DataProvenance
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
@@ -89,6 +92,10 @@ import com.discountscreener.core.model.ProjectionComparisonBaselines
 import com.discountscreener.core.model.ProjectionProfileFacts
 import com.discountscreener.core.model.ProjectionRoute
 import com.discountscreener.core.model.ProjectionSymbolState
+import com.discountscreener.core.model.ProviderDecisionReason
+import com.discountscreener.core.model.ProviderDecisionReasonCode
+import com.discountscreener.core.model.ProviderState
+import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.getOrNull
 import com.discountscreener.core.model.QuantLensComparable
 import com.discountscreener.core.model.QuantLensCorrelationSeries
@@ -325,22 +332,30 @@ class DefaultDashboardRepository(
         val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
         val fundamentals = detailForDcf?.fundamentals
         val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
-        val needsTimeseries = stateMutex.withLock { fundamentals != null && timeseriesCache[symbol] == null }
-        if (fundamentals != null && needsTimeseries) {
+        val needsDcfResolve = stateMutex.withLock {
+            fundamentals != null && needsDcfResolutionLocked(symbol)
+        }
+        if (fundamentals != null && needsDcfResolve) {
             val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
                 DcfAnalysisEngine.compute(fundamentals, timeseries, marketPriceCents).getOrNull()
             }
+            val resolvedAnalysis = analysisFromSelection(selection, fundamentals)
             selection.timeseries?.let { timeseries ->
                 stateMutex.withLock {
                     timeseriesCache[symbol] = timeseries
-                    selection.analysis?.let { analysis -> dcfCache[symbol] = analysis }
+                    resolvedAnalysis?.let { analysis -> dcfCache[symbol] = analysis }
                 }
                 captures += fundamentalTimeseriesCapture(
                     symbol = symbol,
                     timeseries = timeseries,
-                    analysis = selection.analysis,
+                    analysis = resolvedAnalysis,
                     capturedAt = now(),
                 )
+            } ?: run {
+                // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
+                resolvedAnalysis?.let { analysis ->
+                    stateMutex.withLock { dcfCache[symbol] = analysis }
+                }
             }
         }
 
@@ -2599,6 +2614,8 @@ class DefaultDashboardRepository(
     private suspend fun startEnrichment(symbols: List<String>, generation: Long) {
         if (symbols.isEmpty()) return
         stateMutex.withLock {
+            // Re-open NotEligible once per enrichment cycle (FCF may have improved upstream).
+            clearNotEligibleTimeseriesLocked(symbols)
             activeEnrichmentJob = repositoryScope.launch {
                 try {
                     runEnrichment(symbols, generation)
@@ -2682,8 +2699,8 @@ class DefaultDashboardRepository(
         var timeseries: FundamentalTimeseries? = null
         var dcfAnalysis: DcfAnalysis? = null
 
-        val needsTimeseries = stateMutex.withLock { timeseriesCache[symbol] == null }
-        if (needsTimeseries) {
+        val needsDcfResolve = stateMutex.withLock { needsDcfResolutionLocked(symbol) }
+        if (needsDcfResolve) {
             try {
                 val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
                 val fundamentals = detailForDcf?.fundamentals
@@ -2693,7 +2710,7 @@ class DefaultDashboardRepository(
                         DcfAnalysisEngine.compute(fundamentals, selectedTimeseries, marketPriceCents).getOrNull()
                     }
                     timeseries = selection.timeseries
-                    dcfAnalysis = selection.analysis
+                    dcfAnalysis = analysisFromSelection(selection, fundamentals)
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -2788,6 +2805,8 @@ class DefaultDashboardRepository(
         fundamentals: FundamentalSnapshot,
     ) {
         val cachedAnalysis = dcfCache[symbol] ?: return
+        // NotEligible stays until a live resolve reopens it (see needsDcfResolutionLocked).
+        if (cachedAnalysis.resolverState == ResolverState.NotEligible) return
         val selectedTimeseries = timeseriesCache[symbol] ?: return
         val marketPriceCents = engine.detail(symbol)?.marketPriceCents?.takeIf { it > 0L }
         val recomputed = DcfAnalysisEngine.compute(
@@ -2795,6 +2814,8 @@ class DefaultDashboardRepository(
             timeseries = selectedTimeseries,
             marketPriceCents = marketPriceCents,
         ).getOrNull() ?: return
+        // Update numeric DCF only. Never promote RestoredOnly → Selected from cache-only recompute;
+        // live Selected requires dcfSourceCoordinator.resolve (enrichment / ensureDetailLoaded).
         dcfCache[symbol] = recomputed.copy(
             source = cachedAnalysis.source,
             sourceFingerprint = cachedAnalysis.sourceFingerprint,
@@ -2803,6 +2824,115 @@ class DefaultDashboardRepository(
             provenance = cachedAnalysis.provenance,
             providerReasons = cachedAnalysis.providerReasons,
         )
+    }
+
+    private fun needsDcfResolutionLocked(symbol: String): Boolean {
+        val analysis = dcfCache[symbol] ?: return true
+        return when (analysis.resolverState) {
+            ResolverState.Selected ->
+                analysis.bearIntrinsicValueCents <= 0L ||
+                    analysis.baseIntrinsicValueCents <= 0L ||
+                    analysis.bullIntrinsicValueCents <= 0L
+            // Terminal until inputs change: re-open when fundamentals fingerprint moves or
+            // timeseries was cleared (e.g. start of enrichment after a full refresh).
+            ResolverState.NotEligible -> shouldReevaluateNotEligibleLocked(symbol, analysis)
+            // Restored / unavailable / uncertain still need a live resolve pass.
+            ResolverState.RestoredOnly,
+            ResolverState.Unavailable,
+            ResolverState.ProviderUncertain,
+            ResolverState.Cancelled -> true
+        }
+    }
+
+    private fun shouldReevaluateNotEligibleLocked(
+        symbol: String,
+        analysis: DcfAnalysis,
+    ): Boolean {
+        val fundamentals = engine.detail(symbol)?.fundamentals
+        if (fundamentals == null) return true
+        val currentFundFp = fundamentalsInputFingerprint(fundamentals)
+        val storedFundFp = notEligibleFundamentalsFingerprint(analysis)
+        if (storedFundFp == null || storedFundFp != currentFundFp) return true
+        // Same fundamentals: only re-fetch if we dropped timeseries (new enrichment cycle).
+        return timeseriesCache[symbol] == null
+    }
+
+    private fun analysisFromSelection(
+        selection: DcfSourceSelection,
+        fundamentals: FundamentalSnapshot?,
+    ): DcfAnalysis? {
+        selection.analysis?.let { return it }
+        return when (selection.resolverState) {
+            ResolverState.NotEligible -> terminalNotEligibleAnalysis(selection, fundamentals)
+            else -> null
+        }
+    }
+
+    private fun terminalNotEligibleAnalysis(
+        selection: DcfSourceSelection,
+        fundamentals: FundamentalSnapshot?,
+    ): DcfAnalysis {
+        val source = selection.providerQualities.firstOrNull()?.source
+            ?: selection.reasons.firstOrNull()?.provider
+            ?: DcfSource.Unknown
+        val reasons = selection.reasons.ifEmpty {
+            listOf(
+                ProviderDecisionReason(
+                    code = ProviderDecisionReasonCode.MissingAnnualFcf,
+                    provider = source,
+                ),
+            )
+        }
+        val fundFp = fundamentals?.let(::fundamentalsInputFingerprint).orEmpty()
+        return DcfAnalysis(
+            bearIntrinsicValueCents = 0L,
+            baseIntrinsicValueCents = 0L,
+            bullIntrinsicValueCents = 0L,
+            waccBps = 0,
+            baseGrowthBps = 0,
+            netDebtDollars = 0L,
+            source = source,
+            sourceFingerprint = selection.inputFingerprint ?: selection.decisionFingerprint,
+            resolverState = ResolverState.NotEligible,
+            // Encode fundamentals fingerprint so we can re-open when inputs change.
+            decisionFingerprint = notEligibleDecisionFingerprint(fundFp, selection.decisionFingerprint),
+            provenance = DataProvenance(
+                source = source,
+                providerState = ProviderState.NotEligible,
+                fallbackReason = reasons.firstOrNull()?.code,
+            ),
+            providerReasons = reasons,
+        )
+    }
+
+    private fun fundamentalsInputFingerprint(fundamentals: FundamentalSnapshot): String =
+        listOf(
+            fundamentals.marketCapDollars,
+            fundamentals.sharesOutstanding,
+            fundamentals.betaMillis,
+            fundamentals.totalDebtDollars,
+            fundamentals.totalCashDollars,
+        ).joinToString("|")
+
+    private fun notEligibleDecisionFingerprint(
+        fundamentalsFingerprint: String,
+        selectionDecisionFingerprint: String?,
+    ): String = "ne|$fundamentalsFingerprint|${selectionDecisionFingerprint.orEmpty()}"
+
+    private fun notEligibleFundamentalsFingerprint(analysis: DcfAnalysis): String? {
+        val raw = analysis.decisionFingerprint ?: return null
+        if (!raw.startsWith("ne|")) return null
+        val parts = raw.split('|', limit = 3)
+        return parts.getOrNull(1)?.takeIf { it.isNotEmpty() }
+    }
+
+    /** Drop cached timeseries for NotEligible names so each enrichment cycle re-checks FCF. */
+    private fun clearNotEligibleTimeseriesLocked(symbols: Collection<String>) {
+        for (symbol in symbols) {
+            if (dcfCache[symbol]?.resolverState == ResolverState.NotEligible) {
+                timeseriesCache.remove(symbol)
+            }
+        }
     }
 
     private fun resetInMemoryLocked() {
@@ -2884,17 +3014,34 @@ class DefaultDashboardRepository(
         trackedSymbols.mapNotNull { engine.detail(it) }
     }
 
-    override suspend fun saveEstimatesSnapshot(report: IndexEstimatesReport) {
-        try {
-            stateStore.saveEstimatesSnapshot(report)
+    override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {
+        return try {
+            val rawHistory = stateStore.getEstimatesHistory(report.profileName)
+            val history = EstimatesHistoryPolicy.coalesceDaily(rawHistory)
+            // One-shot cleanup of legacy enrichment spam (many rows per day).
+            if (rawHistory.size > history.size) {
+                stateStore.replaceEstimatesHistory(report.profileName, history)
+            }
+            val previous = history.lastOrNull()
+            when (EstimatesHistoryPolicy.decide(previous, report)) {
+                EstimatesHistoryPolicy.PersistAction.Skip -> false
+                EstimatesHistoryPolicy.PersistAction.ReplaceDay,
+                EstimatesHistoryPolicy.PersistAction.AppendDay,
+                -> {
+                    // Always same-day replace so a race can't insert two rows for the day.
+                    stateStore.saveEstimatesSnapshot(report, replaceSameDay = true)
+                    true
+                }
+            }
         } catch (error: Throwable) {
-            logger.error(TAG, "Failed to save estimates snapshot for ${report.profileName}", error)
+            logger.error(TAG, "Failed to record estimates snapshot for ${report.profileName}", error)
             throw error
         }
     }
 
     override suspend fun estimatesHistory(profileName: String): List<IndexEstimatesReport> = try {
-        stateStore.getEstimatesHistory(profileName)
+        // Collapse legacy multi-row days so charts stay readable without a DB wipe.
+        EstimatesHistoryPolicy.coalesceDaily(stateStore.getEstimatesHistory(profileName))
     } catch (error: Throwable) {
         logger.error(TAG, "Failed to load estimates history for $profileName", error)
         throw error

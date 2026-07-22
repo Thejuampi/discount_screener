@@ -1,0 +1,26 @@
+{
+  "name": "get_method_at_position",
+  "description": "Get method information at a specific position.\n\nUSAGE: Position on a method reference or declaration\nOUTPUT: Method signature, parameters, return type, modifiers, exceptions\n\nIMPORTANT: Uses ZERO-BASED coordinates.\n\nRequires load_project to be called first.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "line": {
+        "type": "integer",
+        "description": "Zero-based line number"
+      },
+      "column": {
+        "type": "integer",
+        "description": "Zero-based column number"
+      },
+      "filePath": {
+        "type": "string",
+        "description": "Path to source file"
+      }
+    },
+    "required": [
+      "filePath",
+      "line",
+      "column"
+    ]
+  }
+}

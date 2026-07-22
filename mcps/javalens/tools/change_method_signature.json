@@ -1,0 +1,55 @@
+{
+  "name": "change_method_signature",
+  "description": "Change method signature (parameters, return type, or name) and update all call sites.\n\nReturns text edits for the method declaration and all call sites.\nThe caller should apply these edits to perform the change.\n\nUSAGE: Position on method declaration, provide changes\nOUTPUT: Edits for declaration and all call sites\n\nPARAMETER OPERATIONS:\n- Add new parameter with default value for existing calls\n- Remove parameter (will remove from calls)\n- Rename parameter\n- Reorder parameters (specify all parameters in new order)\n\nIMPORTANT: Uses ZERO-BASED coordinates.\n\nRequires load_project to be called first.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "filePath": {
+        "type": "string",
+        "description": "Path to source file containing the method"
+      },
+      "line": {
+        "type": "integer",
+        "description": "Zero-based line number of method declaration"
+      },
+      "column": {
+        "type": "integer",
+        "description": "Zero-based column number"
+      },
+      "newName": {
+        "type": "string",
+        "description": "New method name (optional, omit to keep current)"
+      },
+      "newReturnType": {
+        "type": "string",
+        "description": "New return type (optional, omit to keep current)"
+      },
+      "newParameters": {
+        "items": {
+          "type": "object",
+          "properties": {
+            "defaultValue": {
+              "type": "string",
+              "description": "Default value for new params at call sites"
+            },
+            "name": {
+              "type": "string",
+              "description": "Parameter name"
+            },
+            "type": {
+              "type": "string",
+              "description": "Parameter type"
+            }
+          }
+        },
+        "description": "New parameter list. Each item: {name, type, defaultValue?}. Order matters.",
+        "type": "array"
+      }
+    },
+    "required": [
+      "filePath",
+      "line",
+      "column"
+    ]
+  }
+}

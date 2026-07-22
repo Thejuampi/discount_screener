@@ -27,7 +27,10 @@ pub fn spawn(app: AppHandle, rx: watch::Receiver<String>) {
     std::thread::Builder::new()
         .name("scalp-ws".into())
         .spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 rt.block_on(run(app, rx));
             }
         })
@@ -39,7 +42,9 @@ async fn run(app: AppHandle, mut rx: watch::Receiver<String>) {
         let product = rx.borrow().clone();
         if product.is_empty() {
             // No product yet — wait for the first subscription.
-            if rx.changed().await.is_err() { return; }
+            if rx.changed().await.is_err() {
+                return;
+            }
             continue;
         }
         let _ = stream_product(&app, &product, &mut rx).await;
@@ -50,8 +55,14 @@ async fn run(app: AppHandle, mut rx: watch::Receiver<String>) {
 
 /// Connect, subscribe to `product`'s ticker, and pump ticks until the connection
 /// drops or the desired product changes.
-async fn stream_product(app: &AppHandle, product: &str, rx: &mut watch::Receiver<String>) -> Result<(), ()> {
-    let (ws, _) = tokio_tungstenite::connect_async(WS_URL).await.map_err(|_| ())?;
+async fn stream_product(
+    app: &AppHandle,
+    product: &str,
+    rx: &mut watch::Receiver<String>,
+) -> Result<(), ()> {
+    let (ws, _) = tokio_tungstenite::connect_async(WS_URL)
+        .await
+        .map_err(|_| ())?;
     let (mut write, mut read) = ws.split();
     let sub = format!(
         r#"{{"type":"subscribe","product_ids":["{}"],"channels":["ticker"]}}"#,
@@ -81,11 +92,16 @@ async fn stream_product(app: &AppHandle, product: &str, rx: &mut watch::Receiver
 
 fn parse_tick(txt: &str) -> Option<ScalpTick> {
     let v: Value = serde_json::from_str(txt).ok()?;
-    if v.get("type")?.as_str()? != "ticker" { return None; }
-    let to_cents = |k: &str| v.get(k).and_then(|x| x.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|f| f.is_finite() && *f > 0.0)
-        .map(|f| (f * 100.0).round() as i64);
+    if v.get("type")?.as_str()? != "ticker" {
+        return None;
+    }
+    let to_cents = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .map(|f| (f * 100.0).round() as i64)
+    };
     Some(ScalpTick {
         product: v.get("product_id")?.as_str()?.to_string(),
         price_cents: to_cents("price")?,

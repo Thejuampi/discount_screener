@@ -11,14 +11,15 @@ export interface OpportunityRow {
   company_name: string | null;
   market_price_cents: number;
   intrinsic_value_cents: number;
-  gap_bps: number;
+  /** Discount to fair value in bps; null when no usable target. */
+  gap_bps: number | null;
   qualification: QualificationStatus;
   confidence: ConfidenceBand;
   signal_status: ExternalSignalStatus;
   analyst_opinion_count: number | null;
   recommendation_mean_hundredths: number | null;
   sector_name: string | null;
-  // AggressiveV2 scoring
+  // Opportunity scoring buckets (-100..+100; inverted under short_v3)
   fundamentals_score: number | null;
   technical_score: number | null;
   forecast_score: number | null;
@@ -69,7 +70,8 @@ export interface SymbolDetail {
   company_name: string | null;
   market_price_cents: number;
   intrinsic_value_cents: number;
-  gap_bps: number;
+  /** Discount to fair value in bps; null when no usable target. */
+  gap_bps: number | null;
   qualification: QualificationStatus;
   confidence: ConfidenceBand;
   signal_status: ExternalSignalStatus;
@@ -106,6 +108,7 @@ export interface SymbolDetail {
   monthly_summary: ChartSummary | null;
   technical_breakdown: TechnicalBreakdown | null;
   dcf_value_cents: number | null;
+  dcf_analysis: DcfAnalysis | null;
   insider_net_shares_90d: number | null;
   insider_buy_count: number | null;
   insider_sell_count: number | null;
@@ -203,6 +206,19 @@ export interface FeedStatus {
   symbols_loaded: number;
   symbols_total: number;
   last_error: string | null;
+  profile_name: string;
+}
+
+export interface UniverseProfileInfo {
+  name: string;
+  description: string;
+  symbol_count: number;
+}
+
+export interface UniverseProfileStatus {
+  name: string;
+  symbols_total: number;
+  symbols_loaded: number;
 }
 
 export interface HistorySnapshot {
@@ -242,14 +258,97 @@ export interface HistoryStatus {
   snapshot_count: number;
 }
 
+export interface DcfAnalysis {
+  bear_intrinsic_value_cents: number;
+  base_intrinsic_value_cents: number;
+  bull_intrinsic_value_cents: number;
+  wacc_bps: number;
+  base_growth_bps: number;
+  net_debt_dollars: number;
+  wacc_inputs: {
+    market_cap: string;
+    beta: string;
+    total_debt: string;
+    total_cash: string;
+    cost_of_debt: string;
+    tax_rate: string;
+    wacc_clamped: boolean;
+  };
+  source: string;
+}
+
+export interface ScenarioEstimate {
+  scenario: string;
+  weighted_price_cents: number;
+  coverage_count: number;
+  implied_upside_bps: number;
+}
+
+export interface IndexEstimatesReport {
+  profile_name: string;
+  current_weighted_price_cents: number;
+  total_symbols: number;
+  scenarios: ScenarioEstimate[];
+  computed_at_epoch_seconds: number;
+  dcf_coverage: {
+    total_eligible_symbols: number;
+    covered_symbols: number;
+    coverage_bps: number;
+    status: string;
+  };
+}
+
+export interface QuantLensSection {
+  id: string;
+  title: string;
+  status: string;
+  summary: string;
+  metrics: [string, string][];
+}
+
+export interface QuantLensReport {
+  symbol: string;
+  primary_status: string;
+  sections: QuantLensSection[];
+  model_version: number;
+}
+
+export interface TickerSearchSuggestion {
+  symbol: string;
+  company_name: string | null;
+  profiles: string[];
+  in_current_profile: boolean;
+  exchange: string | null;
+  is_remote: boolean;
+  match_rank: number;
+}
+
+export type SearchSubmitOutcome =
+  | { kind: "open"; symbol: string }
+  | { kind: "pick_match" }
+  | { kind: "unavailable" };
+
 export const api = {
   getOpportunities: () => invoke<OpportunityRow[]>("get_opportunities"),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),
+  searchTickers: (query: string, limit?: number) =>
+    invoke<TickerSearchSuggestion[]>("search_tickers", { query, limit: limit ?? 8 }),
+  resolveTickerSearchSubmit: (query: string, suggestions: TickerSearchSuggestion[]) =>
+    invoke<SearchSubmitOutcome>("resolve_ticker_search_submit", { query, suggestions }),
+  ensureSymbolLoaded: (symbol: string) => invoke<string>("ensure_symbol_loaded", { symbol }),
+  getScoringModel: () => invoke<string>("get_scoring_model"),
+  setScoringModel: (model: string) => invoke<string>("set_scoring_model", { model }),
+  getIndexEstimates: () => invoke<IndexEstimatesReport>("get_index_estimates"),
+  getQuantLens: (symbol: string) => invoke<QuantLensReport>("get_quant_lens", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
+  listUniverseProfiles: () => invoke<UniverseProfileInfo[]>("list_universe_profiles"),
+  getUniverseProfile: () => invoke<UniverseProfileStatus>("get_universe_profile"),
+  setUniverseProfile: (name: string) =>
+    invoke<UniverseProfileStatus>("set_universe_profile", { name }),
   getSymbolHistory: (symbol: string, days: number) =>
     invoke<HistorySnapshot[]>("get_symbol_history", { symbol, days }),
   getBacktest: (decision: Decision, daysAgo: number) =>
@@ -776,7 +875,8 @@ export interface SchwabReport {
 // Formatting helpers
 export const fmt = {
   dollars: (cents: number) => `$${(cents / 100).toFixed(2)}`,
-  gap: (bps: number) => bps <= -2_000_000_000 ? "—" : `${(bps / 100).toFixed(1)}%`,
+  gap: (bps: number | null | undefined) =>
+    bps == null ? "—" : `${(bps / 100).toFixed(1)}%`,
   pe: (hundredths: number | null) => hundredths ? `${(hundredths / 100).toFixed(1)}x` : "—",
   roe: (bps: number | null) => bps ? `${(bps / 100).toFixed(1)}%` : "—",
   billions: (dollars: number | null) => {

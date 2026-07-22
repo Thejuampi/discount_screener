@@ -505,7 +505,7 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
     rows
       .filter(r => !ownedSymbols.has(r.symbol))
       .filter(r => POSITIVE_LABELS.includes(r.setup_label) || MILD_POSITIVE.includes(r.setup_label))
-      .sort((a, b) => b.setup_score - a.setup_score)
+      .sort((a, b) => b.composite_score - a.composite_score || b.setup_score - a.setup_score)
       .slice(0, 6),
     [rows, ownedSymbols]
   );

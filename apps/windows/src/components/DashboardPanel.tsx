@@ -11,6 +11,8 @@ const POSITIVE: SetupLabel[] = ["StrongBuy", "Buy", "Accumulate", "StrongAccumul
 
 interface Props {
   rows: OpportunityRow[];
+  symbolsLoaded: number;
+  symbolsTotal: number;
   onOpenSymbol: (s: string) => void;
   onNavigate: (v: ViewMode) => void;
 }
@@ -21,14 +23,20 @@ const day = (bps: number | null) => {
   return { v, col: v > 0 ? "var(--success)" : v < 0 ? "var(--danger)" : "var(--text-4)", arrow: v > 0 ? "▲" : v < 0 ? "▼" : "" };
 };
 
-export function DashboardPanel({ rows, onOpenSymbol, onNavigate }: Props) {
+export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol, onNavigate }: Props) {
   const { t } = useT();
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const isLoading = symbolsTotal === 0 || symbolsLoaded < symbolsTotal;
+  const marketPlaceholder = isLoading
+    ? `${t("empty.loading")} (${symbolsLoaded}/${symbolsTotal})`
+    : t("dash.noMarketData");
 
   useEffect(() => { api.getAlerts().then(setAlerts).catch(() => {}); }, []);
 
   const opportunities = useMemo(() =>
-    rows.filter((r) => POSITIVE.includes(r.setup_label)).sort((a, b) => b.setup_score - a.setup_score).slice(0, 6),
+    rows.filter((r) => POSITIVE.includes(r.setup_label) || r.decision === "Act")
+      .sort((a, b) => b.composite_score - a.composite_score || b.setup_score - a.setup_score)
+      .slice(0, 6),
     [rows]);
   const withDay = useMemo(() => rows.filter((r) => r.daily_change_bps != null), [rows]);
   const gainers = useMemo(() => [...withDay].sort((a, b) => (b.daily_change_bps ?? 0) - (a.daily_change_bps ?? 0)).slice(0, 5), [withDay]);
@@ -65,7 +73,9 @@ export function DashboardPanel({ rows, onOpenSymbol, onNavigate }: Props) {
           <button className="btn-ghost" onClick={() => onNavigate("screener")}>{t("dash.viewAll")} →</button>
         </div>
         {opportunities.length === 0 ? (
-          <div style={{ color: "var(--text-4)", fontSize: 13 }}>—</div>
+          <div style={{ color: "var(--text-4)", fontSize: 13 }}>
+            {rows.length === 0 ? marketPlaceholder : t("dash.noOpportunities")}
+          </div>
         ) : (
           <div className="dash-opps">
             {opportunities.map((r) => {
@@ -95,11 +105,15 @@ export function DashboardPanel({ rows, onOpenSymbol, onNavigate }: Props) {
       <div className="dash-grid">
         <div className="info-section">
           <h3>{t("dash.gainers")}</h3>
-          {gainers.map(moverRow)}
+          {gainers.length > 0 ? gainers.map(moverRow) : (
+            <div style={{ color: "var(--text-4)", fontSize: 13 }}>{marketPlaceholder}</div>
+          )}
         </div>
         <div className="info-section">
           <h3>{t("dash.losers")}</h3>
-          {losers.map(moverRow)}
+          {losers.length > 0 ? losers.map(moverRow) : (
+            <div style={{ color: "var(--text-4)", fontSize: 13 }}>{marketPlaceholder}</div>
+          )}
         </div>
         <div className="info-section">
           <div className="dash-sec-head">

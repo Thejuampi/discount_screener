@@ -1,3 +1,6 @@
+use crate::engine::HistoricalCandle;
+use crate::fetcher::YahooClient;
+use serde::Serialize;
 /// Backtest framework for congressional trades + politician metrics aggregation.
 ///
 /// For each trade we compute forward returns from the **disclosure date** (not
@@ -5,11 +8,6 @@
 /// strategy, and avoids lookahead bias.
 ///
 /// We benchmark against SPY to compute alpha.
-
-use std::collections::HashMap;
-use serde::Serialize;
-use crate::fetcher::YahooClient;
-use crate::engine::HistoricalCandle;
 
 const HORIZONS_DAYS: [(i64, &str); 4] = [(5, "5d"), (30, "30d"), (90, "90d"), (180, "180d")];
 
@@ -49,8 +47,8 @@ pub struct PoliticianMetrics {
     pub avg_alpha_90d_bps: Option<i32>,
     pub avg_alpha_180d_bps: Option<i32>,
     pub estimated_total_gain_cents: i64,
-    pub confidence_score: u32,         // 0-100
-    pub qualifying_trades: u32,        // trades with full 90-day window
+    pub confidence_score: u32,  // 0-100
+    pub qualifying_trades: u32, // trades with full 90-day window
 }
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
@@ -58,7 +56,9 @@ pub struct PoliticianMetrics {
 /// Parse ISO "YYYY-MM-DD" → epoch seconds at 00:00 UTC.
 pub fn iso_to_epoch(iso: &str) -> Option<i64> {
     let parts: Vec<&str> = iso.split('-').collect();
-    if parts.len() != 3 { return None; }
+    if parts.len() != 3 {
+        return None;
+    }
     let y: i32 = parts[0].parse().ok()?;
     let m: u32 = parts[1].parse().ok()?;
     let d: u32 = parts[2].parse().ok()?;
@@ -80,7 +80,8 @@ fn civil_to_epoch(y: i32, m: u32, d: u32) -> i64 {
 /// Find the closing price on or after a given target epoch.
 /// Returns the close in cents, or None if the candles end before the target.
 fn price_on_or_after(candles: &[HistoricalCandle], target_epoch: i64) -> Option<i64> {
-    candles.iter()
+    candles
+        .iter()
         .find(|c| c.epoch_seconds >= target_epoch)
         .map(|c| c.close_cents)
 }
@@ -90,14 +91,18 @@ fn price_on_or_after(candles: &[HistoricalCandle], target_epoch: i64) -> Option<
 fn price_on_or_before(candles: &[HistoricalCandle], target_epoch: i64) -> Option<i64> {
     let mut last: Option<i64> = None;
     for c in candles {
-        if c.epoch_seconds > target_epoch { break; }
+        if c.epoch_seconds > target_epoch {
+            break;
+        }
         last = Some(c.close_cents);
     }
     last
 }
 
 fn return_bps(base: i64, end: i64) -> i32 {
-    if base <= 0 { return 0; }
+    if base <= 0 {
+        return 0;
+    }
     ((end - base) as f64 / base as f64 * 10_000.0).round() as i32
 }
 
@@ -113,12 +118,17 @@ pub fn compute_outcome(
     transaction_type: &str,
     amount_mid_dollars: i64,
 ) -> TradeOutcome {
-    let mut out = TradeOutcome { trade_id, ..Default::default() };
+    let mut out = TradeOutcome {
+        trade_id,
+        ..Default::default()
+    };
 
-    let Some(disc_epoch) = iso_to_epoch(disclosure_date_iso) else { return out; };
+    let Some(disc_epoch) = iso_to_epoch(disclosure_date_iso) else {
+        return out;
+    };
 
-    let base = price_on_or_before(candles, disc_epoch)
-        .or_else(|| price_on_or_after(candles, disc_epoch));
+    let base =
+        price_on_or_before(candles, disc_epoch).or_else(|| price_on_or_after(candles, disc_epoch));
     let spy_base = price_on_or_before(spy_candles, disc_epoch)
         .or_else(|| price_on_or_after(spy_candles, disc_epoch));
     out.base_price_cents = base;
@@ -132,19 +142,31 @@ pub fn compute_outcome(
             if let Some(p) = p_target {
                 let r = return_bps(base, p);
                 match days {
-                    5   => { out.price_5d_cents = Some(p);   out.return_5d_bps = Some(r); }
-                    30  => { out.price_30d_cents = Some(p);  out.return_30d_bps = Some(r); }
-                    90  => { out.price_90d_cents = Some(p);  out.return_90d_bps = Some(r); }
-                    180 => { out.price_180d_cents = Some(p); out.return_180d_bps = Some(r); }
+                    5 => {
+                        out.price_5d_cents = Some(p);
+                        out.return_5d_bps = Some(r);
+                    }
+                    30 => {
+                        out.price_30d_cents = Some(p);
+                        out.return_30d_bps = Some(r);
+                    }
+                    90 => {
+                        out.price_90d_cents = Some(p);
+                        out.return_90d_bps = Some(r);
+                    }
+                    180 => {
+                        out.price_180d_cents = Some(p);
+                        out.return_180d_bps = Some(r);
+                    }
                     _ => {}
                 }
             }
             if let Some(sp) = spy_target {
                 let r = return_bps(spy_base, sp);
                 match days {
-                    5   => out.spy_return_5d_bps = Some(r),
-                    30  => out.spy_return_30d_bps = Some(r),
-                    90  => out.spy_return_90d_bps = Some(r),
+                    5 => out.spy_return_5d_bps = Some(r),
+                    30 => out.spy_return_30d_bps = Some(r),
+                    90 => out.spy_return_90d_bps = Some(r),
                     180 => out.spy_return_180d_bps = Some(r),
                     _ => {}
                 }
@@ -155,7 +177,11 @@ pub fn compute_outcome(
         // For purchases: gain ≈ amount × return_pct
         // For sales: we don't estimate gain (a sale closes a position, not opens one).
         if transaction_type == "P" {
-            if let Some(r) = out.return_180d_bps.or(out.return_90d_bps).or(out.return_30d_bps) {
+            if let Some(r) = out
+                .return_180d_bps
+                .or(out.return_90d_bps)
+                .or(out.return_30d_bps)
+            {
                 let gain = (amount_mid_dollars as f64 * r as f64 / 10_000.0).round() as i64;
                 out.estimated_gain_180d_cents = Some(gain * 100); // cents
             }
@@ -177,29 +203,52 @@ pub fn aggregate_metrics(
     let sales = total - purchases;
 
     fn mean(vals: &[i32]) -> Option<i32> {
-        if vals.is_empty() { return None; }
+        if vals.is_empty() {
+            return None;
+        }
         Some((vals.iter().map(|&v| v as i64).sum::<i64>() / vals.len() as i64) as i32)
     }
     fn win_rate(vals: &[i32]) -> Option<i32> {
-        if vals.is_empty() { return None; }
+        if vals.is_empty() {
+            return None;
+        }
         let wins = vals.iter().filter(|&&v| v > 0).count();
         Some(((wins * 100) / vals.len()) as i32)
     }
 
     // Only count purchases for return metrics (sales don't have a meaningful "return").
-    let r30:  Vec<i32> = outcomes_with_meta.iter().filter(|o| o.is_purchase).filter_map(|o| o.outcome.return_30d_bps).collect();
-    let r90:  Vec<i32> = outcomes_with_meta.iter().filter(|o| o.is_purchase).filter_map(|o| o.outcome.return_90d_bps).collect();
-    let r180: Vec<i32> = outcomes_with_meta.iter().filter(|o| o.is_purchase).filter_map(|o| o.outcome.return_180d_bps).collect();
+    let r30: Vec<i32> = outcomes_with_meta
+        .iter()
+        .filter(|o| o.is_purchase)
+        .filter_map(|o| o.outcome.return_30d_bps)
+        .collect();
+    let r90: Vec<i32> = outcomes_with_meta
+        .iter()
+        .filter(|o| o.is_purchase)
+        .filter_map(|o| o.outcome.return_90d_bps)
+        .collect();
+    let r180: Vec<i32> = outcomes_with_meta
+        .iter()
+        .filter(|o| o.is_purchase)
+        .filter_map(|o| o.outcome.return_180d_bps)
+        .collect();
 
     // Alpha = return - SPY return at same horizon
-    let alpha_90: Vec<i32> = outcomes_with_meta.iter().filter(|o| o.is_purchase)
+    let alpha_90: Vec<i32> = outcomes_with_meta
+        .iter()
+        .filter(|o| o.is_purchase)
         .filter_map(|o| Some(o.outcome.return_90d_bps? - o.outcome.spy_return_90d_bps.unwrap_or(0)))
         .collect();
-    let alpha_180: Vec<i32> = outcomes_with_meta.iter().filter(|o| o.is_purchase)
-        .filter_map(|o| Some(o.outcome.return_180d_bps? - o.outcome.spy_return_180d_bps.unwrap_or(0)))
+    let alpha_180: Vec<i32> = outcomes_with_meta
+        .iter()
+        .filter(|o| o.is_purchase)
+        .filter_map(|o| {
+            Some(o.outcome.return_180d_bps? - o.outcome.spy_return_180d_bps.unwrap_or(0))
+        })
         .collect();
 
-    let estimated_gain: i64 = outcomes_with_meta.iter()
+    let estimated_gain: i64 = outcomes_with_meta
+        .iter()
         .filter_map(|o| o.outcome.estimated_gain_180d_cents)
         .sum();
 

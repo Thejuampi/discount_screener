@@ -16,8 +16,7 @@ use crate::engine::HistoricalCandle;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const CANDLES_URL: &str = "https://api.exchange.coinbase.com/products";
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscountScreener/1.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscountScreener/1.0";
 
 /// Timeframes offered by the scalping module.
 pub const SCALP_TIMEFRAMES: &[&str] = &["1m", "3m", "5m", "15m", "1h", "4h"];
@@ -26,7 +25,7 @@ pub const SCALP_TIMEFRAMES: &[&str] = &["1m", "3m", "5m", "15m", "1h", "4h"];
 fn tf_plan(tf: &str) -> Option<(u32, u32)> {
     match tf {
         "1m" => Some((60, 1)),
-        "3m" => Some((60, 3)),   // aggregate 3×1m
+        "3m" => Some((60, 3)), // aggregate 3×1m
         "5m" => Some((300, 1)),
         "15m" => Some((900, 1)),
         "1h" => Some((3600, 1)),
@@ -35,13 +34,11 @@ fn tf_plan(tf: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Final candle width in seconds for a timeframe (used for bucket alignment).
-pub fn tf_seconds(tf: &str) -> Option<i64> {
-    tf_plan(tf).map(|(g, f)| (g * f) as i64)
-}
-
 fn client() -> io::Result<Client> {
-    Client::builder().timeout(HTTP_TIMEOUT).build().map_err(io::Error::other)
+    Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(io::Error::other)
 }
 
 /// Fetch candles for `product` (e.g. "BTC-USD") at `tf`, ascending by time.
@@ -51,35 +48,50 @@ pub fn fetch_candles(product: &str, tf: &str) -> Result<Vec<HistoricalCandle>, S
     let prod = product.trim().to_uppercase();
     let url = format!("{CANDLES_URL}/{prod}/candles?granularity={granularity}");
 
-    let resp: Value = client().map_err(|e| e.to_string())?
+    let resp: Value = client()
+        .map_err(|e| e.to_string())?
         .get(&url)
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/json")
-        .send().map_err(|e| e.to_string())?
-        .error_for_status().map_err(|e| e.to_string())?
-        .json().map_err(|e| e.to_string())?;
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
 
     let arr = resp.as_array().ok_or("respuesta inesperada de Coinbase")?;
     // Coinbase row: [time, low, high, open, close, volume] (newest first).
-    let mut base: Vec<HistoricalCandle> = arr.iter().filter_map(|row| {
-        let r = row.as_array()?;
-        if r.len() < 6 { return None; }
-        let to_cents = |v: &Value| -> Option<i64> {
-            let f = v.as_f64()?;
-            if f.is_finite() && f > 0.0 { Some((f * 100.0).round() as i64) } else { None }
-        };
-        Some(HistoricalCandle {
-            epoch_seconds: r[0].as_i64()?,
-            low_cents: to_cents(&r[1])?,
-            high_cents: to_cents(&r[2])?,
-            open_cents: to_cents(&r[3])?,
-            close_cents: to_cents(&r[4])?,
-            volume: r[5].as_f64().map(|v| v.max(0.0) as u64).unwrap_or(0),
+    let mut base: Vec<HistoricalCandle> = arr
+        .iter()
+        .filter_map(|row| {
+            let r = row.as_array()?;
+            if r.len() < 6 {
+                return None;
+            }
+            let to_cents = |v: &Value| -> Option<i64> {
+                let f = v.as_f64()?;
+                if f.is_finite() && f > 0.0 {
+                    Some((f * 100.0).round() as i64)
+                } else {
+                    None
+                }
+            };
+            Some(HistoricalCandle {
+                epoch_seconds: r[0].as_i64()?,
+                low_cents: to_cents(&r[1])?,
+                high_cents: to_cents(&r[2])?,
+                open_cents: to_cents(&r[3])?,
+                close_cents: to_cents(&r[4])?,
+                volume: r[5].as_f64().map(|v| v.max(0.0) as u64).unwrap_or(0),
+            })
         })
-    }).collect();
+        .collect();
 
     base.sort_by_key(|c| c.epoch_seconds); // ascending
-    if base.is_empty() { return Err("Coinbase no devolvió velas".into()); }
+    if base.is_empty() {
+        return Err("Coinbase no devolvió velas".into());
+    }
 
     if factor <= 1 {
         return Ok(base);

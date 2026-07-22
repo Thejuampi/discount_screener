@@ -326,4 +326,45 @@ class IndexEstimatesEngineTest {
 
         assertEquals(3_333, result.dcfCoverage.coverageBps)
     }
+
+    @Test
+    fun dcf_coverage_excludes_not_eligible_symbols_from_denominator() {
+        var symbols = (1..20).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        // 19 live complete + 1 terminal not-eligible → coverage is 100% of eligible, Ready
+        var dcfMap = (1..19).associate { index -> dcf("S$index", bear = 8_000L, base = 10_000L, bull = 12_000L) } +
+            mapOf("S20" to notEligible("S20"))
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(19, result.dcfCoverage.totalEligibleSymbols)
+        assertEquals(19, result.dcfCoverage.coveredSymbols)
+        assertEquals(10_000, result.dcfCoverage.coverageBps)
+        assertEquals(DcfCoverageStatus.Ready, result.dcfCoverage.status)
+        assertEquals(1, result.dcfCoverage.sourceDistribution.notEligibleCount)
+    }
+
+    @Test
+    fun dcf_coverage_stays_provisional_when_missing_symbols_are_not_marked_not_eligible() {
+        // Regression: without NotEligible markers, uncovered names drag the ratio below 95%.
+        var symbols = (1..20).map { index -> symbol("S$index", marketPriceCents = 10_000L, marketCapDollars = 1L) }
+        var dcfMap = (1..17).associate { index -> dcf("S$index", bear = 8_000L, base = 10_000L, bull = 12_000L) }
+
+        var result = IndexEstimatesEngine.compute(symbols, dcfMap, "test", 0L)
+
+        assertEquals(20, result.dcfCoverage.totalEligibleSymbols)
+        assertEquals(17, result.dcfCoverage.coveredSymbols)
+        assertEquals(DcfCoverageStatus.Provisional, result.dcfCoverage.status)
+    }
+
+    private fun notEligible(ticker: String) = DcfAnalysis(
+        bearIntrinsicValueCents = 0L,
+        baseIntrinsicValueCents = 0L,
+        bullIntrinsicValueCents = 0L,
+        waccBps = 0,
+        baseGrowthBps = 0,
+        netDebtDollars = 0L,
+        source = DcfSource.YahooFinance,
+        sourceFingerprint = "not-eligible:$ticker",
+        resolverState = ResolverState.NotEligible,
+    )
 }

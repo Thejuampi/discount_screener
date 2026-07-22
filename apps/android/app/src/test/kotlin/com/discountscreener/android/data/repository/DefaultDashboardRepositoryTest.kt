@@ -50,6 +50,7 @@ import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.model.getOrNull
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -1434,6 +1435,173 @@ class DefaultDashboardRepositoryTest {
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
 
             assertEquals(DcfSource.SecEdgar, awaitDcfSource(repository, "AAPL"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun enrichment_persists_not_eligible_marker_when_all_dcf_sources_are_unusable() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = dcfFundamentals(symbol),
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return unusableTimeseries()
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                secondaryTimeseriesProvider = FakeTimeseriesProvider(unusableTimeseries()),
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+
+            val analysis = awaitDcfAnalysis(repository, "AAPL") { candidate ->
+                candidate.resolverState == ResolverState.NotEligible
+            }
+            assertEquals(ResolverState.NotEligible, analysis.resolverState)
+            assertTrue(
+                "NotEligible markers must encode a fundamentals fingerprint for re-open",
+                analysis.decisionFingerprint.orEmpty().startsWith("ne|"),
+            )
+
+            val estimates = repository.currentIndexEstimates().getOrNull()
+            assertNotNull(estimates)
+            assertTrue(
+                "Not-eligible names must be excluded from the coverage denominator",
+                estimates!!.dcfCoverage.sourceDistribution.notEligibleCount >= 1,
+            )
+            assertTrue(
+                "Eligible denominator must drop not-eligible tickers",
+                estimates.dcfCoverage.totalEligibleSymbols < estimates.totalSymbols,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun recompute_preserves_restored_only_resolver_state() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                rawCaptures = emptyList(),
+                revisions = listOf(
+                    revision(
+                        symbol = "AAPL",
+                        marketPriceCents = 10_000,
+                        intrinsicValueCents = 15_000,
+                        gapBps = 3_333,
+                        fundamentals = dcfFundamentals("AAPL"),
+                        dcfAnalysis = DcfAnalysis(
+                            bearIntrinsicValueCents = 8_000L,
+                            baseIntrinsicValueCents = 12_000L,
+                            bullIntrinsicValueCents = 16_000L,
+                            waccBps = 800,
+                            baseGrowthBps = 500,
+                            netDebtDollars = 0L,
+                            source = null,
+                            resolverState = ResolverState.RestoredOnly,
+                        ),
+                    ),
+                ),
+            )
+            var aaplTimeseriesFetches = 0
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = dcfFundamentals(symbol).copy(
+                            betaMillis = 1_800,
+                            totalDebtDollars = 250_000_000_000L,
+                        ),
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    if (symbol == "AAPL") {
+                        aaplTimeseriesFetches += 1
+                        return richTimeseries()
+                    }
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            // Warm-start should keep RestoredOnly until live resolve.
+            assertEquals(ResolverState.RestoredOnly, repository.dcfSnapshot()["AAPL"]?.resolverState)
+
+            // Ensure detail loads timeseries + live resolve → Selected.
+            repository.ensureDetailLoaded("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+            val afterLive = awaitDcfAnalysis(repository, "AAPL") { it.resolverState == ResolverState.Selected }
+            assertEquals(ResolverState.Selected, afterLive.resolverState)
+            assertTrue(aaplTimeseriesFetches >= 1)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun not_eligible_reopens_when_fundamentals_fingerprint_changes() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            var useUnusable = true
+            var fundamentals = dcfFundamentals("AAPL")
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = if (symbol == "AAPL") fundamentals else null,
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = if (symbol == "AAPL") {
+                                ProviderComponentState.Fresh
+                            } else {
+                                ProviderComponentState.Missing
+                            },
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    return if (useUnusable) unusableTimeseries() else richTimeseries()
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            awaitDcfAnalysis(repository, "AAPL") { it.resolverState == ResolverState.NotEligible }
+
+            // Recover: FCF becomes usable and fundamentals fingerprint moves.
+            useUnusable = false
+            fundamentals = dcfFundamentals("AAPL").copy(
+                betaMillis = 1_500,
+                marketCapDollars = 650_000_000_000L,
+            )
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val recovered = awaitDcfAnalysis(repository, "AAPL") { analysis ->
+                analysis.resolverState == ResolverState.Selected && analysis.baseIntrinsicValueCents > 0L
+            }
+            assertEquals(ResolverState.Selected, recovered.resolverState)
+            assertTrue(recovered.baseIntrinsicValueCents > 0L)
         } finally {
             store.close()
         }

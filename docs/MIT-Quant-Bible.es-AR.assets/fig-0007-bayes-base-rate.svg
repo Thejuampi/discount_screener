@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2484 1224" width="2484" height="1224" role="img" aria-labelledby="title desc">
+<title id="title">Bayes theorem base-rate example</title>
+<desc id="desc">A visual Bayes theorem base-rate calculation for the librarian versus farmer example, with likelihood bars and base-rate denominators.</desc>
+<style><![CDATA[
+.bg{fill:#fff;}
+.black-bg{fill:#000;}
+.axis{stroke:#111;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.thin-axis{stroke:#333;stroke-width:1.2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.grid{stroke:#9a9a9a;stroke-width:0.8;stroke-dasharray:1.5 2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.text{font-family:Arial,Helvetica,sans-serif;fill:#111;font-size:14px;}
+.small{font-size:12px;}
+.tiny{font-size:10px;}
+.serif{font-family:'Times New Roman',Times,serif;}
+.math{font-family:'Times New Roman',Times,serif;font-style:italic;}
+.boundary{stroke:#666;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.blue-point{stroke:#78b6d6;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.orange-point{stroke:#d7ab4a;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.curve-red{stroke:#d06f62;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+.curve-cyan{stroke:#55d6d6;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;}
+]]></style>
+<metadata type="application/json"><![CDATA[
+{
+  "figure_id": "fig-0007-bayes-base-rate",
+  "source_page": 7,
+  "conversion_strategy": "semantic_svg_reconstruction",
+  "main_features": [
+    "black background",
+    "Bayes formula",
+    "likelihood bar P(E|H)=0.4",
+    "base rate P(H)=1/21 and P(~H)=20/21",
+    "posterior denominator"
+  ]
+}
+]]></metadata>
+<rect x="0.00" y="0.00" width="2484.00" height="1224.00" class="" style="fill:#050505" /><text class="math" x="140.00" y="300.00" text-anchor="start" style="font-size:90px;fill:#c2ead7">P(H|E) =</text><text class="math" x="950.00" y="230.00" text-anchor="middle" style="font-size:72px;fill:#f0e0a0">P(E|H)P(H)</text><line class="thin-axis" x1="560.00" y1="275.00" x2="1350.00" y2="275.00" style="stroke:#f0e0a0;stroke-width:4"/><text class="math" x="950.00" y="355.00" text-anchor="middle" style="font-size:58px;fill:#f0e0a0">P(E|H)P(H)+P(E|¬H)P(¬H)</text><text class="math" x="1510.00" y="305.00" text-anchor="middle" style="font-size:90px;fill:#ffffff">≈</text><text class="math" x="1730.00" y="235.00" text-anchor="middle" style="font-size:70px;fill:#ffffff">0.4 · 1/21</text><line class="thin-axis" x1="1560.00" y1="275.00" x2="1900.00" y2="275.00" style="stroke:#ffffff;stroke-width:4"/><text class="math" x="1730.00" y="355.00" text-anchor="middle" style="font-size:50px;fill:#ffffff">0.4 · 1/21 + 0.1 · 20/21</text><text class="math" x="2050.00" y="310.00" text-anchor="start" style="font-size:80px;fill:#ffffff">≈ 0.17</text><text class="text serif" x="170.00" y="780.00" text-anchor="start" style="font-size:70px;fill:#ffffff">'Likelihood'</text><text class="math" x="140.00" y="945.00" text-anchor="start" style="font-size:70px;fill:#ffffff">P(E|H)=0.4</text><rect x="560.00" y="675.00" width="360.00" height="450.00" class="" style="fill:#141414;stroke:#bfbfbf;stroke-width:4;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;" /><line class="thin-axis" x1="596.00" y1="675.00" x2="596.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="632.00" y1="675.00" x2="632.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="668.00" y1="675.00" x2="668.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="704.00" y1="675.00" x2="704.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="740.00" y1="675.00" x2="740.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="776.00" y1="675.00" x2="776.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="812.00" y1="675.00" x2="812.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="848.00" y1="675.00" x2="848.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="884.00" y1="675.00" x2="884.00" y2="1125.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="720.00" x2="920.00" y2="720.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="765.00" x2="920.00" y2="765.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="810.00" x2="920.00" y2="810.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="855.00" x2="920.00" y2="855.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="900.00" x2="920.00" y2="900.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="945.00" x2="920.00" y2="945.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="990.00" x2="920.00" y2="990.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="1035.00" x2="920.00" y2="1035.00" style="stroke:#333;stroke-width:2"/><line class="thin-axis" x1="560.00" y1="1080.00" x2="920.00" y2="1080.00" style="stroke:#333;stroke-width:2"/><rect x="560.00" y="945.00" width="360.00" height="180.00" class="" style="fill:#86d37d;stroke:none" /><text class="math" x="970.00" y="1110.00" text-anchor="start" style="font-size:56px;fill:#8ecf74">P(E|¬H)=0.1</text><line class="thin-axis" x1="1050.00" y1="105.00" x2="1050.00" y2="560.00" style="stroke:#6fc2c9;stroke-width:6"/><text class="math" x="1018.00" y="555.00" text-anchor="middle" style="font-size:58px;fill:#c2ead7">1</text><rect x="670.00" y="420.00" width="500.00" height="80.00" class="" style="fill:none;stroke:#c2ead7;stroke-width:4;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;" /><rect x="700.00" y="440.00" width="260.00" height="40.00" class="" style="fill:#73c65d;stroke:#e8cd62;stroke-width:4;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:miter;" /><text class="math" x="1240.00" y="515.00" text-anchor="start" style="font-size:54px;fill:#ffffff">P(¬H)=20/21</text></svg>
