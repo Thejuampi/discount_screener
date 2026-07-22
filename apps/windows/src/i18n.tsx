@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { SCORING_PRESENTATION_MESSAGES } from "./scoringPresentationMessages";
 
 export type Lang = "es" | "en";
 
@@ -8,6 +9,7 @@ const STORAGE_KEY = "ds_lang";
 // Keys grouped by area. Add new strings here.
 
 const T: Record<string, { es: string; en: string }> = {
+  ...SCORING_PRESENTATION_MESSAGES,
   // ── App / Header ─────────────────────────────────────────────────────────
   "app.title":                  { es: "Vantage", en: "Vantage" },
   "search.placeholder":         { es: "Ticker o empresa…", en: "Ticker or company…" },
@@ -797,42 +799,6 @@ const T: Record<string, { es: string; en: string }> = {
   "setup.Hold.desc":            { es: "Sin sesgo claro",                                     en: "No clear bias" },
   "setup.Avoid.desc":           { es: "Algún factor negativo dominante",                     en: "Some dominant negative factor" },
   "setup.StrongAvoid.desc":     { es: "Múltiples alertas — evitar entrada",                  en: "Multiple red flags — avoid entry" },
-  // Short mode (inverse V3): same tokens, short-oriented copy
-  "setup.short.StrongBuy":      { es: "Strong Short", en: "Strong Short" },
-  "setup.short.Buy":            { es: "Short", en: "Short" },
-  "setup.short.Accumulate":     { es: "Mild Short", en: "Mild Short" },
-  "setup.short.Watch":          { es: "Watch", en: "Watch" },
-  "setup.short.Hold":           { es: "Hold", en: "Hold" },
-  "setup.short.Avoid":          { es: "Avoid Short", en: "Avoid Short" },
-  "setup.short.StrongAvoid":    { es: "Strong Avoid Short", en: "Strong Avoid Short" },
-  "setup.short.StrongBuy.desc": {
-    es: "Setup short fuerte — forecast débil, valoración cara y/o técnicos bajistas alineados",
-    en: "Strong short setup — weak forecast, rich valuation and/or bearish technicals aligned",
-  },
-  "setup.short.Buy.desc": {
-    es: "Buen candidato short — la mayoría de factores favorecen la baja",
-    en: "Solid short candidate — most factors favor the downside",
-  },
-  "setup.short.Accumulate.desc": {
-    es: "Short tentativo — falta alguna confirmación",
-    en: "Tentative short — still missing confirmation",
-  },
-  "setup.short.Watch.desc": {
-    es: "En radar short — no actuar todavía",
-    en: "On short radar — don't act yet",
-  },
-  "setup.short.Hold.desc": {
-    es: "Sin sesgo short claro",
-    en: "No clear short bias",
-  },
-  "setup.short.Avoid.desc": {
-    es: "Poco atractivo para short — factores mixtos o favorables al long",
-    en: "Poor short — mixed or long-friendly factors",
-  },
-  "setup.short.StrongAvoid.desc": {
-    es: "No short — setup largo fuerte o downside limitado",
-    en: "Do not short — strong long setup or limited downside",
-  },
   "col.decision.tooltip":       {
     es: "Recomendación final del screener. Combina el score con reglas de protección: si el precio ya superó el target de analistas (gap ≤ 0), o la confianza es baja, o el score es < 8 → Avoid aunque la empresa sea excelente.",
     en: "Screener's final recommendation. Combines score with safety rules: if price already exceeds analyst target (gap ≤ 0), or confidence is low, or score is < 8 → Avoid even if the company is excellent.",

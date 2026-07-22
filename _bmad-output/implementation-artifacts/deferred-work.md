@@ -5,3 +5,7 @@
 - `apps/windows/src-tauri/src/commands.rs` / remote ticker search: distinguish transient failure from a successful empty Yahoo result before caching an empty response, so a temporary outage does not suppress results for the cache TTL.
 - `apps/windows/src-tauri/src/fetcher.rs` / candle requests: apply the existing Yahoo share-class symbol mapping to chart endpoints as well as quote-summary endpoints (for example `BRK.B` → `BRK-B`).
 - `apps/windows/src-tauri/src/engine.rs` / volume ratio: honor the requested recent lookback and ignore invalid zero-volume entries instead of taking the median across the complete candle history.
+
+## 2026-07-21 — Windows Short presentation review
+
+- `apps/windows` / ESLint baseline: the repository-wide `npm run lint` currently reports 41 pre-existing errors (primarily React hook purity/state-in-effect rules) and one warning across unrelated modules. The files newly introduced for model-aware presentation and the changed App/list/technical/alert/test files lint clean; schedule a separate lint-baseline cleanup rather than mixing it into the Short semantics fix.

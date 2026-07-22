@@ -4,6 +4,7 @@ import type { OpportunityRow, AlertEvent, SetupLabel } from "../api";
 import { useT } from "../i18n";
 import { RegimeBanner } from "./RegimeBanner";
 import { Sparkline } from "./Sparkline";
+import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
 
 type ViewMode = "screener" | "congress" | "advisor" | "scalping" | "dashboard";
 
@@ -15,6 +16,7 @@ interface Props {
   symbolsTotal: number;
   onOpenSymbol: (s: string) => void;
   onNavigate: (v: ViewMode) => void;
+  scoringModel: ScoringModelId;
 }
 
 const day = (bps: number | null) => {
@@ -23,8 +25,9 @@ const day = (bps: number | null) => {
   return { v, col: v > 0 ? "var(--success)" : v < 0 ? "var(--danger)" : "var(--text-4)", arrow: v > 0 ? "▲" : v < 0 ? "▼" : "" };
 };
 
-export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol, onNavigate }: Props) {
+export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol, onNavigate, scoringModel }: Props) {
   const { t } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const isLoading = symbolsTotal === 0 || symbolsLoaded < symbolsTotal;
   const marketPlaceholder = isLoading
@@ -69,12 +72,12 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
       {/* Top opportunities */}
       <div className="info-section">
         <div className="dash-sec-head">
-          <h3>{t("dash.opportunities")}</h3>
+          <h3>{t(presentation.dashboardOpportunityKey)}</h3>
           <button className="btn-ghost" onClick={() => onNavigate("screener")}>{t("dash.viewAll")} →</button>
         </div>
         {opportunities.length === 0 ? (
           <div style={{ color: "var(--text-4)", fontSize: 13 }}>
-            {rows.length === 0 ? marketPlaceholder : t("dash.noOpportunities")}
+            {rows.length === 0 ? marketPlaceholder : t(presentation.dashboardEmptyKey)}
           </div>
         ) : (
           <div className="dash-opps">
@@ -84,7 +87,7 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
                 <div key={r.symbol} className="dash-opp" onClick={() => onOpenSymbol(r.symbol)}>
                   <div className="dash-opp-top">
                     <strong>{r.symbol}</strong>
-                    <span className="dash-opp-score">{t(`setup.${r.setup_label}`)} +{r.setup_score}</span>
+                    <span className="dash-opp-score">{t(presentation.setupLabelKey(r.setup_label))} +{r.setup_score}</span>
                   </div>
                   <div className="dash-opp-meta">
                     <span>{r.company_name ?? "—"}</span>

@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { api, fmt } from "../api";
 import type { CryptoMetrics } from "../api";
 import { useT } from "../i18n";
+import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
 
 interface Props {
   symbol: string;
   isCrypto: boolean;
+  scoringModel: ScoringModelId;
 }
 
 // Approx phase ranges in days (from halving)
@@ -27,8 +29,9 @@ const LABEL_COLOR: Record<string, string> = {
   Avoid:            "#f43f5e",
 };
 
-export function CryptoCyclePanel({ symbol, isCrypto }: Props) {
+export function CryptoCyclePanel({ symbol, isCrypto, scoringModel }: Props) {
   const { t, lang } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const [m, setM] = useState<CryptoMetrics | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -48,6 +51,35 @@ export function CryptoCyclePanel({ symbol, isCrypto }: Props) {
   const cycleDay = m.days_since_last_halving;
   const cycleProgress = Math.max(0, Math.min(100, (cycleDay / 1460) * 100));
   const labelColor = LABEL_COLOR[m.crypto_label] ?? "var(--text-3)";
+
+  if (presentation.isShort) {
+    const tone = m.crypto_score > 10 ? "risk" : m.crypto_score < -10 ? "support" : "neutral";
+    const toneColor = tone === "risk" ? "var(--danger)" : tone === "support" ? "var(--success)" : "var(--warning)";
+    return (
+      <div className="info-section crypto-cycle-panel">
+        <h3>{t("presentation.short.crypto.title")}</h3>
+        <div className="crypto-verdict" style={{ borderLeftColor: toneColor }}>
+          <div className="crypto-verdict-head">
+            <span className="crypto-verdict-label" style={{ color: toneColor }}>{t(`presentation.short.crypto.${tone}`)}</span>
+            <span className="crypto-verdict-score">{t("presentation.short.crypto.rawScore")}: <strong>{m.crypto_score > 0 ? "+" : ""}{m.crypto_score}</strong></span>
+          </div>
+          <p className="crypto-verdict-text">{t(`presentation.short.crypto.${tone}.detail`)}</p>
+        </div>
+        <div className="crypto-components">
+          <Component label={t("presentation.short.crypto.technical")} value={m.technical_component ?? 0} weight={30} tooltip={t("presentation.short.crypto.componentHint")} invert />
+          <Component label={t("presentation.short.crypto.accumulation")} value={m.accumulation_component} weight={30} tooltip={t("presentation.short.crypto.componentHint")} invert />
+          <Component label={t("presentation.short.crypto.halving")} value={m.halving_component} weight={25} tooltip={t("presentation.short.crypto.componentHint")} invert />
+          <Component label={t("presentation.short.crypto.sentiment")} value={m.sentiment_component} weight={15} tooltip={t("presentation.short.crypto.componentHint")} invert />
+        </div>
+        <div className="kv-grid" style={{ marginTop: 10 }}>
+          <span>{t("presentation.short.crypto.cycleDay")}</span><span>{m.days_since_last_halving}</span>
+          <span>{t("presentation.short.crypto.drawdown")}</span><span>-{m.drawdown_from_ath_pct.toFixed(1)}%</span>
+          <span>{t("presentation.short.crypto.fearGreed")}</span><span>{m.fear_greed ? `${m.fear_greed.value}/100 · ${m.fear_greed.classification}` : "—"}</span>
+        </div>
+        <div className="crypto-disclaimer">{t("presentation.short.crypto.disclaimer")}</div>
+      </div>
+    );
+  }
 
   return (
     <div className="info-section crypto-cycle-panel">
@@ -196,8 +228,9 @@ export function CryptoCyclePanel({ symbol, isCrypto }: Props) {
   );
 }
 
-function Component({ label, value, weight, tooltip }: { label: string; value: number; weight: number; tooltip: string }) {
-  const color = value > 30 ? "#22c55e" : value > 0 ? "#4ade80" : value > -30 ? "#fbbf24" : value > -60 ? "#fb923c" : "#f43f5e";
+function Component({ label, value, weight, tooltip, invert = false }: { label: string; value: number; weight: number; tooltip: string; invert?: boolean }) {
+  const displayValue = invert ? -value : value;
+  const color = displayValue > 30 ? "#22c55e" : displayValue > 0 ? "#4ade80" : displayValue > -30 ? "#fbbf24" : displayValue > -60 ? "#fb923c" : "#f43f5e";
   return (
     <div className="crypto-component" title={tooltip}>
       <div className="crypto-component-head">
@@ -205,7 +238,7 @@ function Component({ label, value, weight, tooltip }: { label: string; value: nu
         <span className="crypto-component-weight">×{(weight / 100).toFixed(2)}</span>
       </div>
       <div className="crypto-component-value" style={{ color }}>
-        {value > 0 ? "+" : ""}{value}
+        {displayValue > 0 ? "+" : ""}{displayValue}
       </div>
     </div>
   );

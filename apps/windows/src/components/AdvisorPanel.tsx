@@ -3,15 +3,17 @@ import { api, fmt } from "../api";
 import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, ImportPosition, PortfolioRiskResponse } from "../api";
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
+import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
 
 interface Props {
   rows: OpportunityRow[];
   onOpenSymbol: (symbol: string) => void;
+  scoringModel: ScoringModelId;
 }
 
 // ── Recommendation engine (rule-based, explainable) ──────────────────────────
 
-type ActionKey = "addStrong" | "add" | "hold" | "trim" | "exit" | "concentration" | "noData";
+type ActionKey = "addStrong" | "add" | "hold" | "trim" | "exit" | "concentration" | "noData" | "shortRisk";
 
 const ACTION_STYLE: Record<ActionKey, { color: string; bg: string }> = {
   addStrong:     { color: "#fff",    bg: "linear-gradient(135deg, #16a34a, #15803d)" },
@@ -21,6 +23,7 @@ const ACTION_STYLE: Record<ActionKey, { color: string; bg: string }> = {
   exit:          { color: "#fff",    bg: "linear-gradient(135deg, #f43f5e, #be123c)" },
   concentration: { color: "#0a0e1c", bg: "linear-gradient(135deg, #fbbf24, #f59e0b)" },
   noData:        { color: "#64748b", bg: "rgba(100,116,139,0.12)" },
+  shortRisk:     { color: "#fda4af", bg: "rgba(244,63,94,0.14)" },
 };
 
 const POSITIVE_LABELS: SetupLabel[] = ["StrongBuy", "StrongAccumulate"];
@@ -316,8 +319,9 @@ function aggregateToPositions(txs: CsvTx[]): ImportPosition[] {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
+export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   const { t } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
   const [accuracy, setAccuracy] = useState<AccuracyRow[]>([]);
   const [horizon, setHorizon] = useState(30);
@@ -492,12 +496,15 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
     if (cryptoPct > 30) out.push(t("advisor.warn.crypto", { pct: cryptoPct.toFixed(0) }));
     for (const h of holdings) {
       const label = h.row?.setup_label;
-      if (label && (STRONG_NEGATIVE.includes(label) || NEGATIVE_LABELS.includes(label))) {
-        out.push(t("advisor.warn.negative", { symbol: h.pos.symbol, label: t(`setup.${label}`) }));
+      const adverseForHeldLong = presentation.isShort
+        ? label && (POSITIVE_LABELS.includes(label) || MILD_POSITIVE.includes(label))
+        : label && (STRONG_NEGATIVE.includes(label) || NEGATIVE_LABELS.includes(label));
+      if (label && adverseForHeldLong) {
+        out.push(t("advisor.warn.negative", { symbol: h.pos.symbol, label: t(presentation.setupLabelKey(label)) }));
       }
     }
     return out;
-  }, [holdings, t]);
+  }, [holdings, presentation, t]);
 
   // ── Opportunities not owned ───────────────────────────────────────────────
   const ownedSymbols = useMemo(() => new Set(positions.map(p => p.symbol)), [positions]);
@@ -624,6 +631,9 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
       {/* ── Portfolio table + form ── */}
       <div className="info-section">
         <h3>{t("advisor.portfolio")}</h3>
+        {presentation.isShort && (
+          <p className="analyst-perspective-note">{t("presentation.short.advisor.longActionsPaused")}</p>
+        )}
 
         <div className="advisor-form">
           <input
@@ -718,7 +728,7 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
             </thead>
             <tbody>
               {holdings.map((h) => {
-                const action = recommend(h.row?.setup_label ?? null, h.weightPct);
+                const action = presentation.isShort && h.row ? "shortRisk" : recommend(h.row?.setup_label ?? null, h.weightPct);
                 const st = ACTION_STYLE[action];
                 return (
                   <tr key={h.pos.id}>
@@ -755,13 +765,13 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
                     <td>
                       {h.row ? (
                         <span style={{ fontSize: 11, fontWeight: 700 }}>
-                          {t(`setup.${h.row.setup_label}`)} ({h.row.setup_score > 0 ? "+" : ""}{h.row.setup_score})
+                          {t(presentation.setupLabelKey(h.row.setup_label))} ({h.row.setup_score > 0 ? "+" : ""}{h.row.setup_score})
                         </span>
                       ) : "—"}
                     </td>
                     <td>
                       <span className="advisor-action-chip" style={{ background: st.bg, color: st.color }}>
-                        {t(`advisor.action.${action}`)}
+                        {action === "shortRisk" ? t("presentation.short.advisor.action") : t(`advisor.action.${action}`)}
                       </span>
                     </td>
                     <td>
@@ -888,9 +898,9 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
 
       {/* ── Opportunities not owned ── */}
       <div className="info-section">
-        <h3>{t("advisor.opportunities")}</h3>
+        <h3>{t(presentation.advisorOpportunityKey)}</h3>
         {opportunities.length === 0 ? (
-          <div style={{ color: "var(--text-4)", fontSize: 13 }}>{t("advisor.opportunities.empty")}</div>
+          <div style={{ color: "var(--text-4)", fontSize: 13 }}>{t(presentation.advisorEmptyKey)}</div>
         ) : (
           <div className="advisor-opps">
             {opportunities.map((r) => {
@@ -900,7 +910,7 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
                   <div className="advisor-opp-head">
                     <strong>{r.symbol}</strong>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "var(--success)" }}>
-                      {t(`setup.${r.setup_label}`)} +{r.setup_score}
+                      {t(presentation.setupLabelKey(r.setup_label))} +{r.setup_score}
                     </span>
                   </div>
                   <div className="advisor-opp-meta">
@@ -908,7 +918,7 @@ export function AdvisorPanel({ rows, onOpenSymbol }: Props) {
                     <span>{fmt.dollars(r.market_price_cents)}</span>
                   </div>
                   <div style={{ fontSize: 10, color: "var(--text-4)", marginTop: 6, borderTop: "1px solid var(--border)", paddingTop: 5 }}>
-                    {size ? (
+                    {presentation.isShort ? t("presentation.short.advisor.noSizing") : size ? (
                       <>
                         <span style={{ color: "var(--text-3)" }}>{t("advisor.risk.sizeHint")}: </span>
                         {t("advisor.risk.sizeDetail", {

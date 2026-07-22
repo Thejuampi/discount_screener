@@ -1,10 +1,11 @@
 # Discount Screener
 
-Discount Screener is a monorepo for two apps that rank undervalued public companies using Yahoo Finance data. Each company is evaluated through DCF analysis, analyst consensus, and a confidence-weighted forecast scoring model. Stocks are triaged into Act / Watch / Avoid buckets so you can focus on the most actionable candidates first.
+Discount Screener is a multi-app monorepo that ranks public-market opportunities using Yahoo Finance data. Each company is evaluated through DCF analysis, analyst consensus, and confidence-weighted scoring. Stocks are triaged into Act / Watch / Avoid buckets so you can focus on the most actionable candidates first.
 
 ## What's here
 
 - `apps/desktop` — Rust terminal workstation with candlestick charts, MACD, EMA overlays, volume profile, and DCF analysis
+- `apps/windows` — Tauri/React Windows workstation with model-aware opportunity scoring and live market detail
 - `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose
 - `shared/contracts` — shared fixtures and golden cases used by both apps
 
@@ -39,6 +40,15 @@ Discount Screener is a monorepo for two apps that rank undervalued public compan
 |---|---|
 | ![Candidates list](apps/desktop/docs/screenshots/main.png) | ![Ticker detail](apps/desktop/docs/screenshots/ticker-details.png) |
 
+## Windows scoring modes
+
+The Windows workstation treats scoring mode as part of the presentation state:
+
+- **Long V2 / Long V3** rank possible purchases. Upside, bullish technical signals, and intrinsic value above market are favorable.
+- **Short** ranks candidates for a bearish position—not purchases. Downside and bearish evidence support the thesis; analyst upside, bullish signals, insider buying, and intrinsic value above market are displayed as risks against it.
+
+Analyst targets remain explicitly labeled as external references in Short mode and are never presented as short profit targets. Missing targets remain missing. Short positions can lose more than the initial capital and require borrow, fee, squeeze, stop, and earnings-risk checks before trading.
+
 ## Commands
 
 All commands run from the repository root via `make`.
@@ -62,6 +72,16 @@ All commands run from the repository root via `make`.
 | `make android-release` | Build signed release APK → `dist/discount-screener-release.apk` |
 | `make android-signing-bootstrap` | First-time release-signing setup |
 
+### Windows
+
+From `apps/windows`, run `npm install`, then:
+
+| Command | Purpose |
+|---|---|
+| `npm test` | Run Windows frontend tests |
+| `npm run build` | Type-check and build the frontend |
+| `npm exec tauri dev` | Launch the live Tauri workstation |
+
 ### Cross-platform
 
 | Command | Purpose |
@@ -71,12 +91,14 @@ All commands run from the repository root via `make`.
 ## Requirements
 
 - **Desktop:** Rust toolchain (`rustup` + `cargo`)
+- **Windows:** Node.js, Rust toolchain, Tauri prerequisites, and Microsoft WebView2
 - **Android:** JDK 17+, an Android SDK — set `ANDROID_HOME` or add `sdk.dir=<path>` to `apps/android/local.properties`
 
 ## Documentation
 
 - [Desktop README](apps/desktop/README.md)
 - [Android README](apps/android/README.md)
+- [Windows README](apps/windows/README.md)
 - [Shared contracts](shared/contracts/README.md)
 - [Quick Start](docs/QUICK_START.md)
 - [User Manual](docs/USER_MANUAL.md)
