@@ -19,12 +19,21 @@ import type { Profile } from "./components/TechnicalAnalysisPanel";
 
 type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings" | "estimates";
 import { api } from "./api";
-import type { OpportunityRow } from "./api";
+import type { OpportunityRow, UniverseProfileInfo } from "./api";
 import { useT } from "./i18n";
 import { useTheme } from "./theme";
 import { useSignalAlerts } from "./useSignalAlerts";
 import { useEmailNotifications } from "./useEmailNotifications";
 import "./App.css";
+
+const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
+const SCORING_STORAGE_KEY = "ds_scoring_model";
+const SCORING_MODELS = ["aggressive_v2", "aggressive_v3", "short_v3"] as const;
+type ScoringModelId = (typeof SCORING_MODELS)[number];
+
+function isScoringModelId(value: string | null): value is ScoringModelId {
+  return value === "aggressive_v2" || value === "aggressive_v3" || value === "short_v3";
+}
 
 export default function App() {
   const { t } = useT();
@@ -39,6 +48,11 @@ export default function App() {
   const [autostartOn, setAutostartOn] = useState(false);
   const [filter, setFilter] = useState("");
   const [confidenceFilter, setConfidenceFilter] = useState<string>("all");
+  const [universeProfiles, setUniverseProfiles] = useState<UniverseProfileInfo[]>([]);
+  const [universeProfile, setUniverseProfile] = useState<string>(() => {
+    const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY);
+    return saved && saved.length > 0 ? saved : "sp500";
+  });
   const [assetFilter, setAssetFilter] = useState<"all" | "stock" | "etf" | "crypto">(() => {
     const saved = localStorage.getItem("ds_asset_filter");
     if (saved === "stock" || saved === "etf" || saved === "crypto" || saved === "all") return saved;
@@ -62,7 +76,10 @@ export default function App() {
     const saved = localStorage.getItem("ds_view_mode");
     return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
   });
-  const [scoringModel, setScoringModel] = useState<string>("aggressive_v3");
+  const [scoringModel, setScoringModel] = useState<string>(() => {
+    const saved = localStorage.getItem(SCORING_STORAGE_KEY);
+    return isScoringModelId(saved) ? saved : "aggressive_v3";
+  });
   const handleViewModeChange = (v: ViewMode) => {
     setViewMode(v);
     localStorage.setItem("ds_view_mode", v);
@@ -80,19 +97,26 @@ export default function App() {
 
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
-    api.getScoringModel().then(setScoringModel).catch(console.error);
+    api.listUniverseProfiles().then(setUniverseProfiles).catch(console.error);
+    // Restore preferred scoring model: localStorage wins if set, else backend default.
+    const saved = localStorage.getItem(SCORING_STORAGE_KEY);
+    if (isScoringModelId(saved)) {
+      api
+        .setScoringModel(saved)
+        .then((m) => {
+          setScoringModel(m);
+          localStorage.setItem(SCORING_STORAGE_KEY, m);
+        })
+        .catch(console.error);
+    } else {
+      api.getScoringModel().then((m) => {
+        setScoringModel(m);
+        localStorage.setItem(SCORING_STORAGE_KEY, m);
+      }).catch(console.error);
+    }
   }, []);
 
-  const toggleScoringModel = async () => {
-    const next = scoringModel === "aggressive_v2" ? "aggressive_v3" : "aggressive_v2";
-    try {
-      const m = await api.setScoringModel(next);
-      setScoringModel(m);
-      refresh();
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  const isShortMode = scoringModel === "short_v3";
 
   const toggleAutostart = async () => {
     const next = !autostartOn;
@@ -114,14 +138,63 @@ export default function App() {
     if (status.status === "fulfilled") {
       setSymbolsLoaded(status.value.symbols_loaded);
       setSymbolsTotal(status.value.symbols_total);
+      if (status.value.profile_name) {
+        setUniverseProfile(status.value.profile_name);
+      }
     } else {
       console.error("feed status refresh failed", status.reason);
     }
   }), []);
 
+  const selectScoringModel = async (next: ScoringModelId) => {
+    if (next === scoringModel) return;
+    try {
+      const m = await api.setScoringModel(next);
+      setScoringModel(m);
+      localStorage.setItem(SCORING_STORAGE_KEY, m);
+      refresh();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleUniverseChange = async (name: string) => {
+    if (!name || name === universeProfile) return;
+    setUniverseProfile(name);
+    localStorage.setItem(UNIVERSE_STORAGE_KEY, name);
+    setSelectedSymbol(null);
+    setRows([]);
+    setSymbolsLoaded(0);
+    try {
+      const status = await api.setUniverseProfile(name);
+      setSymbolsTotal(status.symbols_total);
+      setSymbolsLoaded(status.symbols_loaded);
+      setUniverseProfile(status.name);
+      localStorage.setItem(UNIVERSE_STORAGE_KEY, status.name);
+      void refresh();
+    } catch (e) {
+      console.error("universe switch failed", e);
+    }
+  };
+
   useEffect(() => {
-    api.startFeed().catch(console.error);
-    void refresh();
+    const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY) || "sp500";
+    // Apply saved universe (starts feed workers). startFeed is a no-op if already running.
+    api
+      .setUniverseProfile(saved)
+      .then((status) => {
+        setUniverseProfile(status.name);
+        setSymbolsTotal(status.symbols_total);
+        setSymbolsLoaded(status.symbols_loaded);
+        localStorage.setItem(UNIVERSE_STORAGE_KEY, status.name);
+      })
+      .catch((e) => {
+        console.error("universe restore failed", e);
+        api.startFeed().catch(console.error);
+      })
+      .finally(() => {
+        void refresh();
+      });
   }, [refresh]);
 
   // Fast poll while the feed is still filling rows; slower once full.
@@ -196,14 +269,34 @@ export default function App() {
             onOpenSymbol={openSymbol}
             onQueryChange={setFilter}
           />
-          <button
-            type="button"
-            className="btn-ghost scoring-toggle"
-            title={t("scoring.toggle")}
-            onClick={() => void toggleScoringModel()}
+          <div
+            className={`scoring-segment${isShortMode ? " scoring-segment--short" : ""}`}
+            role="radiogroup"
+            aria-label={t("scoring.group")}
           >
-            {scoringModel === "aggressive_v2" ? "V2" : "V3"}
-          </button>
+            {(
+              [
+                { id: "aggressive_v2" as const, labelKey: "scoring.longV2", titleKey: "scoring.longV2.hint" },
+                { id: "aggressive_v3" as const, labelKey: "scoring.longV3", titleKey: "scoring.longV3.hint" },
+                { id: "short_v3" as const, labelKey: "scoring.short", titleKey: "scoring.short.hint" },
+              ] as const
+            ).map((opt) => {
+              const active = scoringModel === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  className={`scoring-segment__btn${active ? " is-active" : ""}${opt.id === "short_v3" ? " is-short" : ""}`}
+                  title={t(opt.titleKey)}
+                  onClick={() => void selectScoringModel(opt.id)}
+                >
+                  {t(opt.labelKey)}
+                </button>
+              );
+            })}
+          </div>
           <select
             className="filter-select"
             value={confidenceFilter}
@@ -213,6 +306,24 @@ export default function App() {
             <option value="High">{t("filter.high")}</option>
             <option value="Provisional">{t("filter.provisional")}</option>
             <option value="qualified">{t("filter.qualified")}</option>
+          </select>
+
+          <select
+            className="filter-select universe-select"
+            value={universeProfile}
+            title={t("universe.hint")}
+            onChange={(e) => void handleUniverseChange(e.target.value)}
+            aria-label={t("universe.label")}
+          >
+            {(universeProfiles.length > 0
+              ? universeProfiles
+              : [{ name: universeProfile, description: "", symbol_count: symbolsTotal }]
+            ).map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name.toUpperCase()}
+                {p.symbol_count > 0 ? ` · ${p.symbol_count}` : ""}
+              </option>
+            ))}
           </select>
 
           {/* Asset type segmented filter */}
@@ -282,12 +393,19 @@ export default function App() {
           <>
             <div className={`list-pane ${selectedSymbol ? "narrow" : ""}`}>
               {!selectedSymbol && <RegimeBanner />}
+              {isShortMode && (
+                <div className="scoring-mode-banner scoring-mode-banner--short" role="status">
+                  <span className="scoring-mode-banner__tag">{t("scoring.banner.short.tag")}</span>
+                  <span className="scoring-mode-banner__text">{t("scoring.banner.short")}</span>
+                </div>
+              )}
               <OpportunityList
                 rows={filtered}
                 selectedSymbol={selectedSymbol}
                 onSelect={setSelectedSymbol}
                 symbolsLoaded={symbolsLoaded}
                 symbolsTotal={symbolsTotal}
+                scoringModel={scoringModel}
               />
             </div>
 

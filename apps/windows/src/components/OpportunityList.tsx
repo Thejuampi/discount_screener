@@ -10,6 +10,18 @@ interface Props {
   onSelect: (symbol: string) => void;
   symbolsLoaded?: number;
   symbolsTotal?: number;
+  /** Backend scoring model id: aggressive_v2 | aggressive_v3 | short_v3 */
+  scoringModel?: string;
+}
+
+const SHORT_SETUP_LABELS = new Set<SetupLabel>([
+  "StrongBuy", "Buy", "Accumulate", "Watch", "Hold", "Avoid", "StrongAvoid",
+]);
+
+function setupI18nKey(label: SetupLabel, shortMode: boolean, kind: "label" | "desc"): string {
+  const useShort = shortMode && SHORT_SETUP_LABELS.has(label);
+  const base = useShort ? `setup.short.${label}` : `setup.${label}`;
+  return kind === "desc" ? `${base}.desc` : base;
 }
 
 
@@ -69,9 +81,17 @@ function sortRows(rows: OpportunityRow[], key: SortKey, asc: boolean): Opportuni
   });
 }
 
-export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded = 0, symbolsTotal = 528 }: Props) {
+export function OpportunityList({
+  rows,
+  selectedSymbol,
+  onSelect,
+  symbolsLoaded = 0,
+  symbolsTotal = 528,
+  scoringModel = "aggressive_v3",
+}: Props) {
   const { t } = useT();
-  // Default: Android V3 ranks by composite; setup_score mirrors composite under V3.
+  const shortMode = scoringModel === "short_v3";
+  // Default: Android V3 ranks by composite; setup_score mirrors composite under V3/Short.
   const [sortKey, setSortKey] = useState<SortKey>("composite_score");
   const [sortAsc, setSortAsc] = useState(false);
 
@@ -153,7 +173,7 @@ export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded 
                   <strong>{row.symbol}</strong>
                 </td>
                 <td>
-                  <SetupBadge label={row.setup_label} score={row.setup_score} t={t} />
+                  <SetupBadge label={row.setup_label} score={row.setup_score} t={t} shortMode={shortMode} />
                 </td>
                 <td className="company-cell">{row.company_name ?? "—"}</td>
                 <td className="num-cell">{fmt.dollars(row.market_price_cents)}</td>
@@ -195,16 +215,28 @@ export function OpportunityList({ rows, selectedSymbol, onSelect, symbolsLoaded 
   );
 }
 
-function SetupBadge({ label, score, t }: { label: SetupLabel; score: number; t: (k: string, v?: Record<string, string | number>) => string }) {
+function SetupBadge({
+  label,
+  score,
+  t,
+  shortMode,
+}: {
+  label: SetupLabel;
+  score: number;
+  t: (k: string, v?: Record<string, string | number>) => string;
+  shortMode: boolean;
+}) {
   const st = SETUP_STYLE[label] ?? SETUP_STYLE.Hold;
+  const name = t(setupI18nKey(label, shortMode, "label"));
+  const desc = t(setupI18nKey(label, shortMode, "desc"));
   return (
     <div
       className="setup-badge"
       style={{ background: st.bg, color: st.color, boxShadow: st.shadow }}
-      title={`${t(`setup.${label}`)} (${score > 0 ? "+" : ""}${score}) — ${t(`setup.${label}.desc`)}`}
+      title={`${name} (${score > 0 ? "+" : ""}${score}) — ${desc}`}
     >
       <span className="setup-icon">{st.icon}</span>
-      <span className="setup-label">{t(`setup.${label}`)}</span>
+      <span className="setup-label">{name}</span>
       <span className="setup-score-num">{score > 0 ? "+" : ""}{score}</span>
     </div>
   );

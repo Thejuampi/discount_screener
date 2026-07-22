@@ -35,7 +35,31 @@ const T: Record<string, { es: string; en: string }> = {
   "detail.waccInputs":          { es: "WACC inputs", en: "WACC inputs" },
   "quant.title":                { es: "Quant Lens", en: "Quant Lens" },
   "quant.loading":              { es: "Calculando Quant Lens…", en: "Computing Quant Lens…" },
-  "scoring.toggle":             { es: "Cambiar modelo V2/V3", en: "Toggle V2/V3 scoring model" },
+  "scoring.group":              { es: "Modelo de scoring", en: "Scoring model" },
+  "scoring.longV2":             { es: "Long V2", en: "Long V2" },
+  "scoring.longV3":             { es: "Long V3", en: "Long V3" },
+  "scoring.short":              { es: "Short", en: "Short" },
+  "scoring.longV2.hint":        {
+    es: "Long — Aggressive V2 (fundamentales sector-relative + multi-TF técnico)",
+    en: "Long — Aggressive V2 (sector-relative fundamentals + multi-TF technicals)",
+  },
+  "scoring.longV3.hint":        {
+    es: "Long — Aggressive V3 (múltiplos + RSI/volumen + forecast/DCF + haircut de beta)",
+    en: "Long — Aggressive V3 (multiples + RSI/volume + forecast/DCF + beta haircut)",
+  },
+  "scoring.short.hint":         {
+    es: "Short — inversa de V3: prioriza mal forecast, caros y bajistas",
+    en: "Short — inverse of V3: prioritizes weak forecasts, rich valuation, bearish setups",
+  },
+  "scoring.banner.short.tag":   { es: "SHORT DESK", en: "SHORT DESK" },
+  "scoring.banner.short":       {
+    es: "Ranking invertido de V3 · Act = candidato short · Setup alto = mejor short",
+    en: "Inverted V3 ranking · Act = short candidate · High setup = better short",
+  },
+  "scoring.toggle":             {
+    es: "Modelo de scoring: Long V2 · Long V3 · Short",
+    en: "Scoring model: Long V2 · Long V3 · Short",
+  },
   "filter.all":                 { es: "Todas", en: "All" },
   "filter.high":                { es: "Confianza alta", en: "High confidence" },
   "filter.provisional":         { es: "Provisional", en: "Provisional" },
@@ -44,6 +68,8 @@ const T: Record<string, { es: string; en: string }> = {
   "filter.type.stocks":         { es: "Acciones", en: "Stocks" },
   "filter.type.etfs":           { es: "ETFs", en: "ETFs" },
   "filter.type.crypto":         { es: "Cripto", en: "Crypto" },
+  "universe.label":             { es: "Universo", en: "Universe" },
+  "universe.hint":              { es: "Lista de índices / mercados a seguir", en: "Index / market list to track" },
 
   // ── News ────────────────────────────────────────────────────────────────
   "news.title":                 { es: "📰 Noticias recientes", en: "📰 Recent news" },
@@ -771,6 +797,42 @@ const T: Record<string, { es: string; en: string }> = {
   "setup.Hold.desc":            { es: "Sin sesgo claro",                                     en: "No clear bias" },
   "setup.Avoid.desc":           { es: "Algún factor negativo dominante",                     en: "Some dominant negative factor" },
   "setup.StrongAvoid.desc":     { es: "Múltiples alertas — evitar entrada",                  en: "Multiple red flags — avoid entry" },
+  // Short mode (inverse V3): same tokens, short-oriented copy
+  "setup.short.StrongBuy":      { es: "Strong Short", en: "Strong Short" },
+  "setup.short.Buy":            { es: "Short", en: "Short" },
+  "setup.short.Accumulate":     { es: "Mild Short", en: "Mild Short" },
+  "setup.short.Watch":          { es: "Watch", en: "Watch" },
+  "setup.short.Hold":           { es: "Hold", en: "Hold" },
+  "setup.short.Avoid":          { es: "Avoid Short", en: "Avoid Short" },
+  "setup.short.StrongAvoid":    { es: "Strong Avoid Short", en: "Strong Avoid Short" },
+  "setup.short.StrongBuy.desc": {
+    es: "Setup short fuerte — forecast débil, valoración cara y/o técnicos bajistas alineados",
+    en: "Strong short setup — weak forecast, rich valuation and/or bearish technicals aligned",
+  },
+  "setup.short.Buy.desc": {
+    es: "Buen candidato short — la mayoría de factores favorecen la baja",
+    en: "Solid short candidate — most factors favor the downside",
+  },
+  "setup.short.Accumulate.desc": {
+    es: "Short tentativo — falta alguna confirmación",
+    en: "Tentative short — still missing confirmation",
+  },
+  "setup.short.Watch.desc": {
+    es: "En radar short — no actuar todavía",
+    en: "On short radar — don't act yet",
+  },
+  "setup.short.Hold.desc": {
+    es: "Sin sesgo short claro",
+    en: "No clear short bias",
+  },
+  "setup.short.Avoid.desc": {
+    es: "Poco atractivo para short — factores mixtos o favorables al long",
+    en: "Poor short — mixed or long-friendly factors",
+  },
+  "setup.short.StrongAvoid.desc": {
+    es: "No short — setup largo fuerte o downside limitado",
+    en: "Do not short — strong long setup or limited downside",
+  },
   "col.decision.tooltip":       {
     es: "Recomendación final del screener. Combina el score con reglas de protección: si el precio ya superó el target de analistas (gap ≤ 0), o la confianza es baja, o el score es < 8 → Avoid aunque la empresa sea excelente.",
     en: "Screener's final recommendation. Combines score with safety rules: if price already exceeds analyst target (gap ≤ 0), or confidence is low, or score is < 8 → Avoid even if the company is excellent.",

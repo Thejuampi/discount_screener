@@ -314,12 +314,18 @@ pub fn local_universe_candidates(
     query: &str,
     symbols: &[&str],
     company_names: &std::collections::HashMap<String, String>,
+    profile_name: &str,
 ) -> Vec<TickerSearchCandidate> {
     let mut out = Vec::new();
     let q = query.trim();
     if q.is_empty() {
         return out;
     }
+    let profile_label = if profile_name.is_empty() {
+        "universe".to_string()
+    } else {
+        profile_name.to_string()
+    };
 
     for &symbol in symbols {
         if let Some(match_rank) = local_symbol_match_rank(q, symbol) {
@@ -327,7 +333,7 @@ pub fn local_universe_candidates(
             out.push(TickerSearchCandidate {
                 symbol: symbol.to_string(),
                 company_name: company_names.get(&key).cloned(),
-                profiles: vec!["universe".to_string()],
+                profiles: vec![profile_label.clone()],
                 in_current_profile: true,
                 exchange: None,
                 match_rank,
@@ -338,7 +344,7 @@ pub fn local_universe_candidates(
                 out.push(TickerSearchCandidate {
                     symbol: symbol.to_string(),
                     company_name: Some(name.clone()),
-                    profiles: vec!["universe".to_string()],
+                    profiles: vec![profile_label.clone()],
                     in_current_profile: true,
                     exchange: None,
                     match_rank,
@@ -667,7 +673,8 @@ mod tests {
     #[test]
     fn local_universe_prefix_ms_finds_msft() {
         let names = std::collections::HashMap::new();
-        let candidates = local_universe_candidates("MS", &["AAPL", "MSFT", "MSTR", "NVDA"], &names);
+        let candidates =
+            local_universe_candidates("MS", &["AAPL", "MSFT", "MSTR", "NVDA"], &names, "sp500");
         let ranked = merge_and_rank(&candidates, 8);
         let symbols: Vec<_> = ranked.iter().map(|r| r.symbol.as_str()).collect();
         assert!(symbols.contains(&"MSFT"));

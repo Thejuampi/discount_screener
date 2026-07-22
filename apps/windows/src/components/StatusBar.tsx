@@ -22,11 +22,12 @@ export function StatusBar({ rowCount }: Props) {
   const loaded = status?.symbols_loaded ?? 0;
   const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
   const isFullyLoaded = status?.running && loaded >= total;
+  const profile = (status?.profile_name || "sp500").toUpperCase();
   const feedLabel = !status?.running
     ? t("status.starting")
     : isFullyLoaded
-    ? `${t("status.live")} · ${total} ${t("status.symbols")}`
-    : `${t("status.loading")} ${loaded}/${total} (${pct}%)`;
+    ? `${t("status.live")} · ${profile} · ${total} ${t("status.symbols")}`
+    : `${t("status.loading")} ${profile} ${loaded}/${total} (${pct}%)`;
 
   return (
     <footer className="status-bar">

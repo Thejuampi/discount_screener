@@ -86,6 +86,8 @@ pub const V3_ACT_AT_OR_ABOVE: i32 = 30;
 pub enum ScoringModel {
     AggressiveV2,
     AggressiveV3,
+    /// Inverse of AggressiveV3: ranks short opportunities (weak forecast / expensive / bearish).
+    ShortV3,
 }
 
 impl ScoringModel {
@@ -93,8 +95,28 @@ impl ScoringModel {
         match self {
             Self::AggressiveV2 => "aggressive_v2",
             Self::AggressiveV3 => "aggressive_v3",
+            Self::ShortV3 => "short_v3",
         }
     }
+
+    /// Parse a stored model id. Unknown values fall back to AggressiveV3.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "aggressive_v2" | "v2" => Self::AggressiveV2,
+            "short_v3" | "short" => Self::ShortV3,
+            _ => Self::AggressiveV3,
+        }
+    }
+}
+
+/// Negate a bucket score for short ranking. `None` stays missing (no evidence).
+pub fn invert_bucket(score: Option<i32>) -> Option<i32> {
+    score.map(|s| -s)
+}
+
+/// Pure inverse of a V3 composite so high-beta haircuts become short-friendly.
+pub fn invert_composite(composite: i32) -> i32 {
+    (-composite).clamp(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
 }
 
 pub fn score_fundamentals_v3(row: &CandidateRow) -> (Option<i32>, Vec<String>) {
@@ -671,5 +693,70 @@ mod tests {
     fn setup_from_v3_equals_composite() {
         let (s, _) = setup_from_v3_composite(42);
         assert_eq!(s, 42);
+    }
+
+    #[test]
+    fn scoring_model_parse_and_as_str_round_trip() {
+        assert_eq!(
+            ScoringModel::parse("aggressive_v2"),
+            ScoringModel::AggressiveV2
+        );
+        assert_eq!(ScoringModel::parse("v2"), ScoringModel::AggressiveV2);
+        assert_eq!(
+            ScoringModel::parse("aggressive_v3"),
+            ScoringModel::AggressiveV3
+        );
+        assert_eq!(ScoringModel::parse("short_v3"), ScoringModel::ShortV3);
+        assert_eq!(ScoringModel::parse("short"), ScoringModel::ShortV3);
+        assert_eq!(ScoringModel::parse("unknown"), ScoringModel::AggressiveV3);
+        assert_eq!(ScoringModel::ShortV3.as_str(), "short_v3");
+    }
+
+    #[test]
+    fn invert_bucket_negates_and_preserves_none() {
+        assert_eq!(invert_bucket(Some(40)), Some(-40));
+        assert_eq!(invert_bucket(Some(-25)), Some(25));
+        assert_eq!(invert_bucket(None), None);
+    }
+
+    #[test]
+    fn invert_composite_is_pure_negation() {
+        let long = composite_score_v3(Some(40), Some(40), Some(40), None);
+        assert_eq!(invert_composite(long), -long);
+        assert_eq!(invert_composite(0), 0);
+        assert_eq!(invert_composite(V3_COMPOSITE_BOUND), -V3_COMPOSITE_BOUND);
+    }
+
+    #[test]
+    fn short_decision_uses_same_cutoffs_on_inverted_composite() {
+        let long_strong = composite_score_v3(Some(50), Some(50), Some(50), None);
+        let short = invert_composite(long_strong);
+        // Strong long → weak short → Avoid
+        assert_eq!(decision_state_v3(short), "Avoid");
+
+        let long_weak = composite_score_v3(Some(-50), Some(-50), Some(-50), None);
+        let short_strong = invert_composite(long_weak);
+        assert!(short_strong >= V3_ACT_AT_OR_ABOVE);
+        assert_eq!(decision_state_v3(short_strong), "Act");
+    }
+
+    #[test]
+    fn high_beta_raises_short_composite_vs_low_beta() {
+        let low_long = composite_score_v3(Some(40), Some(40), Some(40), Some(700));
+        let high_long = composite_score_v3(Some(40), Some(40), Some(40), Some(1_800));
+        let low_short = invert_composite(low_long);
+        let high_short = invert_composite(high_long);
+        assert!(
+            high_short > low_short,
+            "high_short={high_short} low_short={low_short}"
+        );
+    }
+
+    #[test]
+    fn setup_labels_follow_short_composite() {
+        let (_, label) = setup_from_v3_composite(invert_composite(-55));
+        assert_eq!(label, "StrongBuy"); // best short candidates reuse long tokens
+        let (_, label) = setup_from_v3_composite(invert_composite(55));
+        assert_eq!(label, "StrongAvoid");
     }
 }

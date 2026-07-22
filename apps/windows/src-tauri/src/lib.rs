@@ -15,6 +15,7 @@ mod fibonacci;
 mod index_estimates;
 mod news;
 mod opportunity_v3;
+mod profiles;
 mod quant_lens;
 mod quote_summary;
 mod regime;
@@ -143,6 +144,9 @@ pub fn run() {
             commands::set_scoring_model,
             commands::get_index_estimates,
             commands::get_quant_lens,
+            commands::list_universe_profiles,
+            commands::get_universe_profile,
+            commands::set_universe_profile,
             commands::start_feed,
             commands::get_feed_status,
             commands::get_symbol_history,
