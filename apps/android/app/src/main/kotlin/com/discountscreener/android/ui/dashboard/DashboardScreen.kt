@@ -1,6 +1,7 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -11,9 +12,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -29,6 +33,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import com.discountscreener.android.domain.model.DiscoveryJobKind
+import com.discountscreener.android.domain.model.DiscoveryJobRecord
+import com.discountscreener.android.domain.model.DiscoveryJobStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -215,6 +222,7 @@ fun DashboardScreen(
                     }
                 }
 
+                DashboardTab.Discovery -> DiscoveryContent(state, onAction)
                 DashboardTab.System -> SystemContent(state, onAction)
                 DashboardTab.Estimates -> EstimatesScreen(
                     indexEstimates = state.indexEstimates,
@@ -647,8 +655,484 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.Tracked -> "Upside ${state.trackedRows.size}"
     DashboardTab.Opportunities -> "Opps ${state.opportunityRows.size}"
     DashboardTab.Watch -> "Watch ${state.watchlistSymbols.size}"
+    DashboardTab.Discovery -> discoveryTabLabel(state)
     DashboardTab.System -> "System"
     DashboardTab.Estimates -> "Estimates"
+}
+
+internal fun discoveryTabLabel(state: DashboardUiState): String {
+    val job = state.discoveryJob
+    if (state.discoveryBusy || job?.status == DiscoveryJobStatus.Running) {
+        val total = job?.totalSymbols ?: 0
+        val done = job?.completedSymbols ?: 0
+        return if (total > 0) {
+            val pct = ((done * 100L) / total).toInt().coerceIn(0, 100)
+            "Discovery $pct%"
+        } else {
+            "Discovery …"
+        }
+    }
+    return "Discovery ${state.discoveryResultCount}"
+}
+
+private enum class DiscoveryPendingAction {
+    CreateOrUpdateList,
+    ScoreList,
+    ClearAll,
+}
+
+@Composable
+private fun DiscoveryContent(
+    state: DashboardUiState,
+    onAction: (DashboardAction) -> Unit,
+) {
+    var pendingAction by remember { mutableStateOf<DiscoveryPendingAction?>(null) }
+    // Filters stay collapsed when results are present so the ranked list owns the viewport.
+    var filtersExpanded by remember { mutableStateOf(false) }
+    val job = state.discoveryJob
+    val jobRunning = state.discoveryBusy || job?.status == DiscoveryJobStatus.Running
+    val hasMembership = state.discoveryMembershipCount > 0
+    val hasAnyScores = state.discoveryScoredSymbolCount > 0
+    val hasVisibleScores = state.discoveryScores.isNotEmpty()
+    val listMode = hasVisibleScores || (jobRunning && hasAnyScores)
+
+    fun requestScoreList() {
+        if (state.discoveryMembershipCount > 500 || !hasAnyScores) {
+            pendingAction = DiscoveryPendingAction.ScoreList
+        } else {
+            onAction(DashboardAction.RefreshDiscoveryScores)
+        }
+    }
+
+    pendingAction?.let { action ->
+        DiscoveryConfirmDialog(
+            action = action,
+            membershipCount = state.discoveryMembershipCount,
+            onDismiss = { pendingAction = null },
+            onConfirm = {
+                pendingAction = null
+                when (action) {
+                    DiscoveryPendingAction.CreateOrUpdateList ->
+                        onAction(DashboardAction.RecreateDiscoveryUniverse)
+                    DiscoveryPendingAction.ScoreList ->
+                        onAction(DashboardAction.RefreshDiscoveryScores)
+                    DiscoveryPendingAction.ClearAll ->
+                        onAction(DashboardAction.ClearDiscoveryData)
+                }
+            },
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // Compact chrome only — never a tall control card competing with the list.
+        if (hasMembership || jobRunning || hasAnyScores) {
+            DiscoveryCompactChrome(
+                state = state,
+                jobRunning = jobRunning,
+                filtersExpanded = filtersExpanded,
+                listMode = listMode,
+                onToggleFilters = { filtersExpanded = !filtersExpanded },
+                onRequestUpdateList = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
+                onRequestScoreList = { requestScoreList() },
+                onCancel = { onAction(DashboardAction.CancelDiscoveryJob) },
+                onRequestClear = { pendingAction = DiscoveryPendingAction.ClearAll },
+                onAction = onAction,
+            )
+        }
+
+        when {
+            !hasMembership && !jobRunning -> {
+                DiscoveryEmptyPanel(
+                    title = "No discovery list yet",
+                    detail = "Create a broad US equity list (NASDAQ Trader when online, bundled seed offline). Scoring is manual and never runs at startup.",
+                    primaryLabel = "Create US list",
+                    onPrimary = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
+                    secondaryLabel = null,
+                    onSecondary = null,
+                    primaryEnabled = true,
+                )
+            }
+            hasMembership && !hasAnyScores && !jobRunning -> {
+                DiscoveryEmptyPanel(
+                    title = "List ready · not scored",
+                    detail = "${"%,d".format(state.discoveryMembershipCount)} symbols ready. Score to rank high-upside names. Keep the app open; cancel anytime.",
+                    primaryLabel = "Score list",
+                    onPrimary = { requestScoreList() },
+                    secondaryLabel = "Update list",
+                    onSecondary = { pendingAction = DiscoveryPendingAction.CreateOrUpdateList },
+                    primaryEnabled = true,
+                )
+            }
+            hasMembership && hasAnyScores && !hasVisibleScores && !jobRunning -> {
+                DiscoveryEmptyPanel(
+                    title = "No symbols above min score",
+                    detail = "Lower the min filter — this does not re-download prices.",
+                    primaryLabel = "Min −5",
+                    onPrimary = {
+                        onAction(DashboardAction.SetDiscoveryMinScore(state.discoveryConfig.minScore - 5))
+                    },
+                    secondaryLabel = "Min 20",
+                    onSecondary = { onAction(DashboardAction.SetDiscoveryMinScore(20)) },
+                    primaryEnabled = true,
+                )
+            }
+            hasVisibleScores -> {
+                // List owns remaining height (same density language as Opps / Upside).
+                DiscoveryList(
+                    rows = state.discoveryScores,
+                    scoringModel = state.discoveryConfig.scoringModel,
+                    onAction = onAction,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                )
+            }
+            jobRunning -> {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    EmptyState(
+                        title = "Scoring…",
+                        detail = discoveryJobProgressLabel(job),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Thin Discovery toolbar: summary + text actions. Expanded filters only when the user asks.
+ * Intentionally not a padded Card — keeps vertical budget for ranked rows.
+ */
+@Composable
+private fun DiscoveryCompactChrome(
+    state: DashboardUiState,
+    jobRunning: Boolean,
+    filtersExpanded: Boolean,
+    listMode: Boolean,
+    onToggleFilters: () -> Unit,
+    onRequestUpdateList: () -> Unit,
+    onRequestScoreList: () -> Unit,
+    onCancel: () -> Unit,
+    onRequestClear: () -> Unit,
+    onAction: (DashboardAction) -> Unit,
+) {
+    val job = state.discoveryJob
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = buildString {
+                    append("${"%,d".format(state.discoveryResultCount)} ≥${state.discoveryConfig.minScore}")
+                    append(" · ${"%,d".format(state.discoveryMembershipCount)}")
+                },
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (!jobRunning) {
+                TextButton(
+                    onClick = onRequestScoreList,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("Score") }
+                TextButton(
+                    onClick = onRequestUpdateList,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("Update") }
+            } else {
+                TextButton(
+                    onClick = onCancel,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("Cancel") }
+            }
+            TextButton(
+                onClick = onToggleFilters,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+            ) {
+                Text(if (filtersExpanded) "Less" else "Filter")
+            }
+        }
+
+        if (!listMode) {
+            // One quiet meta line only when list is not filling the screen.
+            val meta = listOfNotNull(
+                state.discoveryLastSourceHint,
+                state.discoveryLastScoredAtEpochSeconds?.let { formatRelativeTime(it) },
+            ).joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Text(
+                    text = meta,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        state.discoveryStatusMessage?.takeIf { it.isNotBlank() }?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = if (listMode) 1 else 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (jobRunning) {
+            val total = (job?.totalSymbols ?: 0).coerceAtLeast(0)
+            val done = (job?.completedSymbols ?: 0).coerceAtLeast(0)
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Text(
+                text = discoveryJobProgressLabel(job),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (filtersExpanded) {
+            Surface(
+                tonalElevation = 1.dp,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(listOf(20, 30, 40, 50), key = { it }) { preset ->
+                            val selected = state.discoveryConfig.minScore == preset
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onAction(DashboardAction.SetDiscoveryMinScore(preset)) },
+                                label = { Text(preset.toString()) },
+                                enabled = !jobRunning,
+                                modifier = Modifier.semantics { this.selected = selected },
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    onAction(
+                                        DashboardAction.SetDiscoveryMinScore(
+                                            state.discoveryConfig.minScore - 5,
+                                        ),
+                                    )
+                                },
+                                label = { Text("−5") },
+                                enabled = !jobRunning,
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    onAction(
+                                        DashboardAction.SetDiscoveryMinScore(
+                                            state.discoveryConfig.minScore + 5,
+                                        ),
+                                    )
+                                },
+                                label = { Text("+5") },
+                                enabled = !jobRunning,
+                            )
+                        }
+                    }
+                    DiscoveryScoringModelToggle(
+                        selected = state.discoveryConfig.scoringModel,
+                        enabled = !jobRunning,
+                        onAction = onAction,
+                    )
+                    TextButton(
+                        onClick = onRequestClear,
+                        enabled = !jobRunning,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            text = "Clear all discovery data",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryEmptyPanel(
+    title: String,
+    detail: String,
+    primaryLabel: String,
+    onPrimary: () -> Unit,
+    secondaryLabel: String?,
+    onSecondary: (() -> Unit)?,
+    primaryEnabled: Boolean,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        EmptyState(title = title, detail = detail)
+        Button(onClick = onPrimary, enabled = primaryEnabled) { Text(primaryLabel) }
+        if (secondaryLabel != null && onSecondary != null) {
+            OutlinedButton(onClick = onSecondary) { Text(secondaryLabel) }
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryScoringModelToggle(
+    selected: OpportunityScoringModel,
+    enabled: Boolean,
+    onAction: (DashboardAction) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val selectedIndex = opportunityScoringModelChipOrder.indexOf(selected).coerceAtLeast(0)
+    LaunchedEffect(selected) {
+        listState.animateScrollToItem(selectedIndex)
+    }
+    LazyRow(
+        state = listState,
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(
+            items = opportunityScoringModelChipOrder,
+            key = { _, model -> model.name },
+        ) { _, model ->
+            val isSelected = selected == model
+            FilterChip(
+                selected = isSelected,
+                onClick = {
+                    if (!isSelected && enabled) {
+                        onAction(DashboardAction.SetDiscoveryScoringModel(model))
+                    }
+                },
+                enabled = enabled,
+                label = { Text(model.chipLabel()) },
+                modifier = Modifier.semantics { this.selected = isSelected },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryConfirmDialog(
+    action: DiscoveryPendingAction,
+    membershipCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val (title, body, confirm) = when (action) {
+        DiscoveryPendingAction.CreateOrUpdateList -> Triple(
+            if (membershipCount == 0) "Create US list?" else "Update list?",
+            "Refreshes membership from NASDAQ Trader when online (~7k non-ETF equities). " +
+                "Does not download prices. Adds new tickers and removes delisted ones; " +
+                "existing scores for kept symbols stay.",
+            if (membershipCount == 0) "Create list" else "Update list",
+        )
+        DiscoveryPendingAction.ScoreList -> Triple(
+            "Score list?",
+            "Scoring ${"%,d".format(membershipCount)} symbols may take a long time. " +
+                "Partial results appear as it runs. Keep the app open; cancel anytime.",
+            "Start scoring",
+        )
+        DiscoveryPendingAction.ClearAll -> Triple(
+            "Clear all discovery data?",
+            "Deletes the discovery list and all scores. Cannot undo.",
+            "Clear",
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(body) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(confirm) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+internal fun discoveryJobProgressLabel(job: DiscoveryJobRecord?): String {
+    if (job == null) return "Working…"
+    val verb = when (job.kind) {
+        DiscoveryJobKind.Recreate -> "Updating list"
+        DiscoveryJobKind.Refresh -> "Scoring"
+    }
+    val total = job.totalSymbols
+    val done = job.completedSymbols
+    return if (total > 0) {
+        "$verb ${"%,d".format(done)} of ${"%,d".format(total)}"
+    } else {
+        "$verb…"
+    }
+}
+
+internal fun formatDiscoveryPrice(priceCents: Long): String {
+    val dollars = priceCents / 100.0
+    return "$" + String.format(java.util.Locale.US, "%,.2f", dollars)
+}
+
+internal fun formatBpsPercent(bps: Int): String {
+    val pct = bps / 100.0
+    val sign = if (pct > 0) "+" else ""
+    return sign + String.format(java.util.Locale.US, "%.1f%%", pct)
+}
+
+internal fun formatRelativeTime(
+    epochSeconds: Long,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1_000,
+): String {
+    val delta = (nowEpochSeconds - epochSeconds).coerceAtLeast(0)
+    return when {
+        delta < 60 -> "just now"
+        delta < 3_600 -> "${delta / 60}m ago"
+        delta < 86_400 -> "${delta / 3_600}h ago"
+        delta < 86_400 * 14 -> "${delta / 86_400}d ago"
+        else -> {
+            DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+                .format(
+                    Instant.ofEpochSecond(epochSeconds)
+                        .atZone(ZoneId.systemDefault())
+                        .toLocalDate(),
+                )
+        }
+    }
 }
 
 private fun formatUpdatedTime(epochSeconds: Long): String =

@@ -11,12 +11,13 @@ This directory contains the native Android client for Discount Screener.
 
 - `app/` — composition root and Android entrypoints
 - `domain/` — repository contracts and use cases
-- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), profile loading, persistence, and repository implementation
+- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), profile loading, Discovery universe seed loading, persistence, and repository implementation
 - `presentation/` — `DashboardViewModel`, UI state, and actions
 - `ui/` — Compose screens, dialogs, and detail/chart components
 
 ## Current implementation
 
+- **Discovery tab** (manual): broad US equity universe separate from startup profiles. **List-first UI** (same density language as Opps/Upside): compact toolbar + ranked rows with Act/Watch/Avoid, score badge, and F/T/Fc/Upside metrics; filters expand on demand. Guided empty states: **Create US list** → **Score list**. **Update list** prefers the live [NASDAQ Trader symbol directory](https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt) (~7k non-ETF equities; falls back to `assets/universes/us_total.txt`) and merges membership in SQLite (add/remove/keep; no quote scrape). **Score list** fetches only the minimum quote + 1Y chart data needed for `OpportunityEngine`, shows thin progress, keeps partial results, and never changes membership. Confirm dialogs guard list update, long scoring, and clear. Startup only **reads** Discovery state from the DB — it never auto-recreates or auto-refreshes. Min score and scoring model are persisted in SQLite meta. Offline asset refresh: `pwsh ./scripts/refresh-us-total-universe.ps1`.
 - live candidate and opportunity reporting
 - symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, chart range selection, and phone-native system back support to return to the dashboard
 - symbol detail chart replay with back/forward/live controls plus a right-side volume profile that bins visible replay-window volume by price and up/down candle direction

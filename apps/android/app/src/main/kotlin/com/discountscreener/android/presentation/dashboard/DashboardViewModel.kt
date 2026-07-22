@@ -9,26 +9,40 @@ import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.DiscoveryJobKind
+import com.discountscreener.android.domain.model.DiscoveryJobRecord
+import com.discountscreener.android.domain.model.DiscoveryJobStatus
+import com.discountscreener.android.domain.model.DiscoverySnapshot
+import com.discountscreener.android.domain.model.parseDiscoveryMembershipDelta
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
+import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
+import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
+import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
+import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
+import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
+import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.TickerSearchEngine
 import com.discountscreener.core.engine.TickerSearchRank
 import kotlinx.coroutines.Job
@@ -59,6 +73,7 @@ enum class DashboardTab {
     Opportunities,
     Tracked,
     Watch,
+    Discovery,
     System,
     Estimates,
 }
@@ -130,6 +145,13 @@ sealed interface DashboardAction {
     data object RefreshSystemStats : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
+    data object LoadDiscovery : DashboardAction
+    data object RecreateDiscoveryUniverse : DashboardAction
+    data object RefreshDiscoveryScores : DashboardAction
+    data object CancelDiscoveryJob : DashboardAction
+    data object ClearDiscoveryData : DashboardAction
+    data class SetDiscoveryMinScore(val minScore: Int) : DashboardAction
+    data class SetDiscoveryScoringModel(val model: OpportunityScoringModel) : DashboardAction
 }
 
 data class DashboardUiState(
@@ -173,6 +195,16 @@ data class DashboardUiState(
     val indexEstimatesLoading: Boolean = false,
     val estimatesHistory: List<IndexEstimatesReport> = emptyList(),
     val estimatesNotice: DashboardNotice? = null,
+    val discoveryConfig: DiscoveryConfig = DiscoveryConfig(),
+    val discoveryMembershipCount: Int = 0,
+    val discoveryJob: DiscoveryJobRecord? = null,
+    val discoveryScores: List<DiscoveryScoreRow> = emptyList(),
+    val discoveryResultCount: Int = 0,
+    val discoveryScoredSymbolCount: Int = 0,
+    val discoveryLastScoredAtEpochSeconds: Long? = null,
+    val discoveryLastSourceHint: String? = null,
+    val discoveryBusy: Boolean = false,
+    val discoveryStatusMessage: String? = null,
 )
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -192,6 +224,13 @@ class DashboardViewModel(
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
     private val searchTickers: SearchTickersUseCase,
+    private val loadDiscoverySnapshot: LoadDiscoverySnapshotUseCase,
+    private val saveDiscoveryConfig: SaveDiscoveryConfigUseCase,
+    private val recreateDiscoveryUniverse: RecreateDiscoveryUniverseUseCase,
+    private val refreshDiscoveryScores: RefreshDiscoveryScoresUseCase,
+    private val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
+    private val clearDiscoveryData: ClearDiscoveryDataUseCase,
+    private val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -199,6 +238,7 @@ class DashboardViewModel(
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
     private var tickerSearchJob: Job? = null
+    private var discoveryProgressJob: Job? = null
 
     fun dispatch(action: DashboardAction) {
         when (action) {
@@ -240,6 +280,13 @@ class DashboardViewModel(
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
+            DashboardAction.LoadDiscovery -> loadDiscovery()
+            DashboardAction.RecreateDiscoveryUniverse -> runRecreateDiscoveryUniverse()
+            DashboardAction.RefreshDiscoveryScores -> runRefreshDiscoveryScores()
+            DashboardAction.CancelDiscoveryJob -> runCancelDiscoveryJob()
+            DashboardAction.ClearDiscoveryData -> runClearDiscoveryData()
+            is DashboardAction.SetDiscoveryMinScore -> setDiscoveryMinScore(action.minScore)
+            is DashboardAction.SetDiscoveryScoringModel -> setDiscoveryScoringModel(action.model)
         }
     }
 
@@ -271,8 +318,16 @@ class DashboardViewModel(
                 _state.value.opportunityScoringModel,
             )
             render(initial)
+            // Load discovery state from DB only — never auto recreate/refresh.
+            applyDiscoverySnapshot(loadDiscoverySnapshot())
             refresh()
             loadEstimates()
+        }
+        discoveryProgressJob?.cancel()
+        discoveryProgressJob = viewModelScope.launch {
+            observeDiscoveryProgress().collectLatest {
+                applyDiscoverySnapshot(loadDiscoverySnapshot())
+            }
         }
     }
 
@@ -312,6 +367,121 @@ class DashboardViewModel(
         if (tab == DashboardTab.Estimates) {
             loadEstimates()
         }
+        if (tab == DashboardTab.Discovery) {
+            loadDiscovery()
+        }
+    }
+
+    private fun loadDiscovery() {
+        viewModelScope.launch {
+            applyDiscoverySnapshot(loadDiscoverySnapshot())
+        }
+    }
+
+    private fun runRecreateDiscoveryUniverse() {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                discoveryBusy = true,
+                discoveryStatusMessage = "Updating list from NASDAQ Trader (or bundled seed)…",
+            )
+            val snapshot = recreateDiscoveryUniverse()
+            applyDiscoverySnapshot(snapshot)
+            val delta = parseDiscoveryMembershipDelta(snapshot.job?.errorSummary)
+            val source = snapshot.lastSourceHint ?: "source unknown"
+            val deltaText = delta?.let { (added, removed) -> " · +$added −$removed" }.orEmpty()
+            _state.value = _state.value.copy(
+                discoveryBusy = false,
+                discoveryStatusMessage = "List updated · $source$deltaText (no prices downloaded).",
+            )
+        }
+    }
+
+    private fun runRefreshDiscoveryScores() {
+        viewModelScope.launch {
+            if (_state.value.discoveryMembershipCount == 0) {
+                _state.value = _state.value.copy(
+                    discoveryStatusMessage = "Create the US list first, then score it.",
+                )
+                return@launch
+            }
+            val membership = _state.value.discoveryMembershipCount
+            // Optimistic busy + 0/N so the tab badge/progress don't lag until first progress tick.
+            _state.value = _state.value.copy(
+                discoveryBusy = true,
+                discoveryStatusMessage = "Scoring list (minimal quote + 1Y chart)… Keep the app open.",
+                discoveryJob = DiscoveryJobRecord(
+                    jobId = _state.value.discoveryJob?.jobId ?: -1L,
+                    kind = DiscoveryJobKind.Refresh,
+                    status = DiscoveryJobStatus.Running,
+                    startedAtEpochSeconds = System.currentTimeMillis() / 1_000,
+                    finishedAtEpochSeconds = null,
+                    totalSymbols = membership,
+                    completedSymbols = 0,
+                    errorSummary = null,
+                ),
+            )
+            applyDiscoverySnapshot(refreshDiscoveryScores())
+            val aboveMin = _state.value.discoveryResultCount
+            val job = _state.value.discoveryJob
+            val completed = job?.completedSymbols ?: 0
+            _state.value = _state.value.copy(
+                discoveryBusy = false,
+                discoveryStatusMessage = "Scoring finished · $completed scanned · $aboveMin above min.",
+            )
+        }
+    }
+
+    private fun runCancelDiscoveryJob() {
+        viewModelScope.launch {
+            applyDiscoverySnapshot(cancelDiscoveryJob())
+            _state.value = _state.value.copy(
+                discoveryBusy = false,
+                discoveryStatusMessage = "Discovery job cancelled. Partial scores are kept.",
+            )
+        }
+    }
+
+    private fun runClearDiscoveryData() {
+        viewModelScope.launch {
+            applyDiscoverySnapshot(clearDiscoveryData())
+            _state.value = _state.value.copy(
+                discoveryBusy = false,
+                discoveryStatusMessage = "Discovery list and scores cleared.",
+            )
+        }
+    }
+
+    private fun setDiscoveryMinScore(minScore: Int) {
+        viewModelScope.launch {
+            val clamped = minScore.coerceIn(0, 100)
+            val config = _state.value.discoveryConfig.copy(minScore = clamped)
+            applyDiscoverySnapshot(saveDiscoveryConfig(config))
+        }
+    }
+
+    private fun setDiscoveryScoringModel(model: OpportunityScoringModel) {
+        viewModelScope.launch {
+            val config = _state.value.discoveryConfig.copy(scoringModel = model)
+            applyDiscoverySnapshot(saveDiscoveryConfig(config))
+            _state.value = _state.value.copy(
+                discoveryStatusMessage = "Model saved. Score list recommended to recompute.",
+            )
+        }
+    }
+
+    private fun applyDiscoverySnapshot(snapshot: DiscoverySnapshot) {
+        val running = snapshot.job?.status == DiscoveryJobStatus.Running
+        _state.value = _state.value.copy(
+            discoveryConfig = snapshot.config,
+            discoveryMembershipCount = snapshot.membershipCount,
+            discoveryJob = snapshot.job,
+            discoveryScores = snapshot.scores,
+            discoveryResultCount = snapshot.resultCount,
+            discoveryScoredSymbolCount = snapshot.scoredSymbolCount,
+            discoveryLastScoredAtEpochSeconds = snapshot.lastScoredAtEpochSeconds,
+            discoveryLastSourceHint = snapshot.lastSourceHint,
+            discoveryBusy = running,
+        )
     }
 
     private fun updateTickerSearchQuery(query: String) {
@@ -820,6 +990,13 @@ class DashboardViewModel(
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,
                         searchTickers = useCases.searchTickers,
+                        loadDiscoverySnapshot = useCases.loadDiscoverySnapshot,
+                        saveDiscoveryConfig = useCases.saveDiscoveryConfig,
+                        recreateDiscoveryUniverse = useCases.recreateDiscoveryUniverse,
+                        refreshDiscoveryScores = useCases.refreshDiscoveryScores,
+                        cancelDiscoveryJob = useCases.cancelDiscoveryJob,
+                        clearDiscoveryData = useCases.clearDiscoveryData,
+                        observeDiscoveryProgress = useCases.observeDiscoveryProgress,
                     )
                 }
             }

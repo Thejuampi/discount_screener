@@ -15,7 +15,7 @@ pub struct ProfileDefinition {
 const PROFILE_DEFINITIONS: [ProfileDefinition; 7] = [
     ProfileDefinition {
         name: "sp500",
-        description: "Built-in 503-symbol S&P 500 universe",
+        description: "Built-in 501-symbol S&P 500 universe",
     },
     ProfileDefinition {
         name: "dow",
@@ -97,7 +97,7 @@ mod tests {
         let asia = profile_symbols("Asia ex Japan").expect("asia alias should resolve");
 
         assert!(
-            sp500.len() == 503
+            sp500.len() == 501
                 && sp500.iter().any(|symbol| symbol == "AAPL")
                 && dow.len() == 30
                 && dow.iter().any(|symbol| symbol == "NVDA")

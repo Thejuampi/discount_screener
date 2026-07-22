@@ -3,6 +3,8 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
@@ -10,12 +12,19 @@ import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
+import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
+import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
+import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
+import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
+import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
@@ -50,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -143,9 +153,23 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Tracked", "Watch", "System", "Estimates"),
+            listOf("Opportunities", "Tracked", "Watch", "Discovery", "System", "Estimates"),
             DashboardTab.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun start_loads_discovery_snapshot_without_recreate_or_refresh() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository()
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(1, repository.loadDiscoveryCallCount)
+        assertEquals(0, repository.recreateDiscoveryCallCount)
+        assertEquals(0, repository.refreshDiscoveryCallCount)
+        assertEquals(0, viewModel.state.value.discoveryMembershipCount)
     }
 
     @Test
@@ -776,6 +800,13 @@ class DashboardViewModelTest {
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
             searchTickers = SearchTickersUseCase(repository),
+            loadDiscoverySnapshot = LoadDiscoverySnapshotUseCase(repository),
+            saveDiscoveryConfig = SaveDiscoveryConfigUseCase(repository),
+            recreateDiscoveryUniverse = RecreateDiscoveryUniverseUseCase(repository),
+            refreshDiscoveryScores = RefreshDiscoveryScoresUseCase(repository),
+            cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
+            clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
+            observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
         )
     }
 
@@ -856,6 +887,9 @@ class DashboardViewModelTest {
         var lastTickerSuggestionQuery: String? = null
         var searchTickersCallCount = 0
         var lastOpenedSymbol: String? = null
+        var loadDiscoveryCallCount = 0
+        var recreateDiscoveryCallCount = 0
+        var refreshDiscoveryCallCount = 0
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
 
@@ -1018,6 +1052,30 @@ class DashboardViewModelTest {
                 )
             }
         }
+
+        override suspend fun loadDiscoverySnapshot(): DiscoverySnapshot {
+            loadDiscoveryCallCount++
+            return DiscoverySnapshot()
+        }
+
+        override suspend fun saveDiscoveryConfig(config: DiscoveryConfig): DiscoverySnapshot =
+            DiscoverySnapshot(config = config)
+
+        override suspend fun recreateDiscoveryUniverse(): DiscoverySnapshot {
+            recreateDiscoveryCallCount++
+            return DiscoverySnapshot()
+        }
+
+        override suspend fun refreshDiscoveryScores(): DiscoverySnapshot {
+            refreshDiscoveryCallCount++
+            return DiscoverySnapshot()
+        }
+
+        override suspend fun cancelDiscoveryJob(): DiscoverySnapshot = DiscoverySnapshot()
+
+        override suspend fun clearDiscoveryData(): DiscoverySnapshot = DiscoverySnapshot()
+
+        override fun observeDiscoveryProgress(): Flow<Unit> = emptyFlow()
 
         private fun emptySnapshot(
             opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,6 +38,9 @@ import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.core.engine.DiscoveryScoreRow
+import com.discountscreener.core.engine.DiscoveryTriage
+import com.discountscreener.core.engine.DiscoveryUniverseEngine
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ConfidenceBand
@@ -159,6 +163,118 @@ internal fun OpportunityList(
         }
     }
 }
+
+/**
+ * Discovery ranked list — same visual density and triage vocabulary as Opportunities.
+ * Controls live outside this list so rows own the viewport.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun DiscoveryList(
+    rows: List<DiscoveryScoreRow>,
+    scoringModel: OpportunityScoringModel,
+    onAction: (DashboardAction) -> Unit,
+    rankOffset: Int = 0,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        itemsIndexed(rows, key = { _, row -> row.symbol }) { index, row ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onAction(DashboardAction.OpenDetail(row.symbol)) },
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "#${rankOffset + index + 1}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(end = 6.dp),
+                        )
+                        SymbolCompanyTitle(
+                            symbol = row.symbol,
+                            companyName = row.companyName,
+                            modifier = Modifier.weight(1f),
+                        )
+                        ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
+                    }
+                    DiscoveryRowSignals(row = row, scoringModel = scoringModel)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MetricToken(
+                            "F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}",
+                            fundamentalsMetricColor(),
+                        )
+                        MetricToken(
+                            "T ${formatOpportunityBucket(row.technicalScore, scoringModel)}",
+                            technicalMetricColor(),
+                        )
+                        MetricToken(
+                            "Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}",
+                            forecastMetricColor(),
+                        )
+                        row.gapBps?.let { MetricToken("Disc ${formatPct(it)}", discountColor()) }
+                        row.upsideBps?.let { MetricToken("Upside ${formatPct(it)}", upsideColor(it)) }
+                        row.marketPriceCents?.let {
+                            MetricToken("Price ${money(it)}", MaterialTheme.colorScheme.onSurface)
+                        }
+                        parseDiscoveryConfidence(row.confidence)?.let { conf ->
+                            MetricToken("Conf ${conf.name.lowercase()}", confidenceColor(conf))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DiscoveryRowSignals(
+    row: DiscoveryScoreRow,
+    scoringModel: OpportunityScoringModel,
+) {
+    val triage = DiscoveryUniverseEngine.triage(row.compositeScore, scoringModel)
+    val decisionState = when (triage) {
+        DiscoveryTriage.Act -> RowDecisionState.Act
+        DiscoveryTriage.Watch -> RowDecisionState.Watch
+        DiscoveryTriage.Avoid -> RowDecisionState.Avoid
+    }
+    val decisionLabel = decisionStateLabel(decisionState)
+    val decisionColors = decisionStateColors(decisionState)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (decisionLabel != null) {
+            ChangeBadge(
+                label = decisionLabel,
+                contentColor = decisionColors.first,
+                backgroundColor = decisionColors.second,
+            )
+        }
+        ChangeBadge(
+            label = "Discovery",
+            contentColor = MaterialTheme.colorScheme.tertiary,
+            backgroundColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f),
+        )
+        MetricToken(
+            text = freshnessTimeLabel(
+                freshness = RowFreshness.Updated,
+                freshnessAsOfEpochSeconds = row.scoredAtEpochSeconds,
+            ) ?: "scored",
+            color = MaterialTheme.colorScheme.outline,
+        )
+    }
+}
+
+internal fun parseDiscoveryConfidence(raw: String?): ConfidenceBand? =
+    raw?.trim()?.takeIf { it.isNotBlank() }?.let { value ->
+        ConfidenceBand.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }
+    }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

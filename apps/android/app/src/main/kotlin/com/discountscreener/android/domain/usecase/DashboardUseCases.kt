@@ -16,4 +16,11 @@ data class DashboardUseCases(
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     val getEstimatesHistory: GetEstimatesHistoryUseCase,
     val searchTickers: SearchTickersUseCase,
+    val loadDiscoverySnapshot: LoadDiscoverySnapshotUseCase,
+    val saveDiscoveryConfig: SaveDiscoveryConfigUseCase,
+    val recreateDiscoveryUniverse: RecreateDiscoveryUniverseUseCase,
+    val refreshDiscoveryScores: RefreshDiscoveryScoresUseCase,
+    val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
+    val clearDiscoveryData: ClearDiscoveryDataUseCase,
+    val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
 )
