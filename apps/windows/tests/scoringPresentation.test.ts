@@ -6,6 +6,7 @@ import { SCORING_PRESENTATION_MESSAGES, translateScoringMessage, type ScoringLan
 import {
   getScoringPresentation,
   renderText,
+  scoringDimensionsTooltipKey,
   type NarrativeContext,
   type TechnicalVerdict,
 } from "../src/scoringPresentation.ts";
@@ -44,6 +45,32 @@ test("long models share the long presentation and retain buy-side semantics", ()
   assert.equal(v2.side, "long");
   assert.equal(v3.side, "long");
   assert.equal(v3.summary({ ...baseContext, gapBps: 1700 })[0].key, "ia.summary.act");
+  assert.equal(scoringDimensionsTooltipKey("aggressive_v2"), "col.trio3.tooltip");
+  assert.equal(scoringDimensionsTooltipKey("aggressive_v3"), "col.trio.tooltip");
+  assert.equal(scoringDimensionsTooltipKey("short_v3"), "presentation.short.col.trio.tooltip");
+  for (const lang of ["es", "en"] as const) {
+    const longTooltip = translateScoringMessage(scoringDimensionsTooltipKey("aggressive_v3"), lang);
+    const shortTooltip = translateScoringMessage(scoringDimensionsTooltipKey("short_v3"), lang);
+    assert.match(`${longTooltip} ${shortTooltip}`, /ETF/i);
+    assert.match(
+      `${longTooltip} ${shortTooltip}`,
+      lang === "es" ? /acciones V3.*cripto/i : /V3 stocks.*crypto/i,
+    );
+  }
+});
+
+test("included market-context summaries avoid internal engine jargon", () => {
+  for (const model of ["aggressive_v3", "short_v3"] as const) {
+    for (const lang of ["es", "en"] as const) {
+      const copy = renderAll(model, {
+        ...baseContext,
+        regimeScoringEnabled: true,
+        regimeScore: 25,
+      }, lang);
+      assert.doesNotMatch(copy, /bucket|policy|tape|fortress/i);
+      assert.match(copy, lang === "es" ? /contexto de mercado/i : /market context/i);
+    }
+  }
 });
 
 test("short Act is explicitly a bearish position and never a purchase recommendation", () => {

@@ -47,6 +47,8 @@ The Windows workstation treats scoring mode as part of the presentation state:
 - **Long V2 / Long V3** rank possible purchases. Upside, bullish technical signals, and intrinsic value above market are favorable.
 - **Short** ranks candidates for a bearish position—not purchases. Downside and bearish evidence support the thesis; analyst upside, bullish signals, insider buying, and intrinsic value above market are displayed as risks against it.
 
+For equities, Long V3 and Short V3 can add **Market context** as a fourth dimension beside fundamentals, technicals, and forecast. It measures whether the asset's quality, valuation, beta, sector, and price extension fit the active market environment; it is not a market-direction forecast. Windows displays the three-dimensional base, the actual context adjustment, and the final score separately. A positive context score in Short V3 means better fit for the bearish thesis. V2, ETFs, crypto, and score History retain their existing semantics and do not use this dimension.
+
 Analyst targets remain explicitly labeled as external references in Short mode and are never presented as short profit targets. Missing targets remain missing. Short positions can lose more than the initial capital and require borrow, fee, squeeze, stop, and earnings-risk checks before trading.
 
 ## Commands

@@ -177,6 +177,8 @@ pub fn run() {
             commands::get_politician_detail,
             risk::get_portfolio_risk,
             regime::get_market_regime,
+            commands::get_regime_scoring_enabled,
+            commands::set_regime_scoring_enabled,
             commands::journal_list,
             commands::journal_add,
             commands::journal_close,

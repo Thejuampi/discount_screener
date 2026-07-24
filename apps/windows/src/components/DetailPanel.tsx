@@ -21,6 +21,12 @@ import {
   type ScoringModelId,
   type ScoringPresentationState,
 } from "../scoringPresentation";
+import {
+  createRegimePresentation,
+  regimeRowInput,
+  renderRegimeCause,
+  type RegimePresentation,
+} from "../regimePresentation";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -253,7 +259,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       <CryptoCyclePanel symbol={symbol} isCrypto={isCrypto} scoringModel={scoringModel} />
 
       {/* ── Analysis summary — needs both row and detail for full narrative ── */}
-      {row && detail && <AnalysisSummary row={row} detail={detail} presentation={presentation} />}
+      {row && detail && <AnalysisSummary row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
 
       {/* Chart */}
       <div className="chart-section">
@@ -372,7 +378,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       <QuantLensPanel symbol={symbol} />
 
       {/* ── Full analysis breakdown (bottom) ── */}
-      {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} />}
+      {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
     </div>
   );
 }
@@ -416,7 +422,11 @@ function ProvenanceBadge({ symbol }: { symbol: string }) {
 
 // ── Investment Analysis ───────────────────────────────────────────────────────
 
-function narrativeContext(row: OpportunityRow, detail: SymbolDetail) {
+function narrativeContext(
+  row: OpportunityRow,
+  detail: SymbolDetail,
+  marketContext: RegimePresentation,
+) {
   return {
     name: detail.company_name ?? row.symbol,
     decision: row.decision,
@@ -425,6 +435,8 @@ function narrativeContext(row: OpportunityRow, detail: SymbolDetail) {
     confidence: detail.confidence,
     technicalScore: row.technical_score,
     assetType: row.asset_type,
+    regimeScoringEnabled: marketContext.status === "Included",
+    regimeScore: marketContext.score,
   };
 }
 
@@ -433,15 +445,21 @@ function AnalysisSummary({
   row,
   detail,
   presentation,
+  scoringModel,
 }: {
   row: OpportunityRow;
   detail: SymbolDetail;
   presentation: ScoringPresentationState;
+  scoringModel: ScoringModelId;
 }) {
   const { t } = useT();
   const dh = presentation.decisionHeader(row.decision);
-  const { summary } = buildReasons(row, detail, t, presentation);
-  const reason = renderText(presentation.decisionReason(narrativeContext(row, detail)), t);
+  const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
+  const { summary } = buildReasons(row, detail, t, presentation, scoringModel);
+  const reason = renderText(
+    presentation.decisionReason(narrativeContext(row, detail, marketContext)),
+    t,
+  );
   const gap = presentation.gap(row.gap_bps);
   const technicalOnly = row.asset_type === "crypto" || row.asset_type === "etf";
 
@@ -450,18 +468,45 @@ function AnalysisSummary({
       <div className="analysis-header" style={{ color: dh.color }}>
         <span className="analysis-emoji">{dh.emoji}</span>
         <span className="analysis-title">{t(dh.titleKey)}</span>
-        <span className="analysis-score">{t("analysis.score")}: {row.composite_score}</span>
+        <span className="analysis-score">
+          {marketContext.visible ? (
+            <>
+              {t("analysis.marketContext.baseShort")}: {marketContext.composition.base}
+              <span className="score-composition-sep">·</span>
+              {t("analysis.marketContext.contextShort")}: {marketContext.composition.context}
+              <span className="score-composition-sep">·</span>
+              {t("analysis.marketContext.finalShort")}: {marketContext.composition.final}
+            </>
+          ) : `${t("analysis.score")}: ${row.composite_score}`}
+        </span>
       </div>
       <p className="analysis-summary">{summary}</p>
       <div className="decision-reason" style={{ borderTopColor: dh.color }}>
         <div className="decision-reason-label">{t("reason.title")}</div>
-        <p className="decision-reason-text">{reason}</p>
+        <p className="decision-reason-text">
+          {reason}
+          {marketContext.visible && (
+            <> {t(marketContext.impactKey, { impact: Math.abs(marketContext.impact) })}</>
+          )}
+        </p>
         <div className="decision-reason-meta">
           <span>Score: <strong style={{ color: dh.color }}>{row.composite_score}</strong></span>
           {technicalOnly ? (
             <><span>·</span><span>{t("analysis.technical")}: <strong>{row.technical_score ?? "—"}</strong></span></>
           ) : (
             <>
+              <span>·</span>
+              <span>{t(presentation.bucketLabelKeys[0])}: <strong>{row.fundamentals_score ?? "—"}</strong></span>
+              <span>·</span>
+              <span>{t(presentation.bucketLabelKeys[1])}: <strong>{row.technical_score ?? "—"}</strong></span>
+              <span>·</span>
+              <span>{t(presentation.bucketLabelKeys[2])}: <strong>{row.forecast_score ?? "—"}</strong></span>
+              {marketContext.visible && (
+                <>
+                  <span>·</span>
+                  <span>{t("analysis.marketContext.contextShort")}: <strong>{marketContext.score ?? "—"}</strong></span>
+                </>
+              )}
               <span>·</span>
               <span>{t(presentation.gapLabelKey)}: <strong style={{ color: toneColor(gap.tone) }}>{renderText(gap.text, t)}</strong></span>
               <span>·</span>
@@ -477,19 +522,22 @@ function AnalysisSummary({
   );
 }
 
-/** Bottom section: 3-column breakdown */
+/** Bottom section: 3- or 4-column breakdown (regime is the 4th V3 bucket). */
 function AnalysisBuckets({
   row,
   detail,
   presentation,
+  scoringModel,
 }: {
   row: OpportunityRow;
   detail: SymbolDetail;
   presentation: ScoringPresentationState;
+  scoringModel: ScoringModelId;
 }) {
   const { t } = useT();
-  const reasons = buildReasons(row, detail, t, presentation);
+  const reasons = buildReasons(row, detail, t, presentation, scoringModel);
   const technicalOnly = row.asset_type === "crypto" || row.asset_type === "etf";
+  const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
   if (technicalOnly) {
     return (
       <div className="analysis-buckets-wrap analysis-buckets-wrap--single">
@@ -498,22 +546,63 @@ function AnalysisBuckets({
     );
   }
   return (
-    <div className="analysis-buckets-wrap">
+    <div className={`analysis-buckets-wrap${marketContext.visible ? " analysis-buckets-wrap--four" : ""}`}>
       <AnalysisBucket label={t(presentation.bucketLabelKeys[0])} score={row.fundamentals_score} points={reasons.fundamentals} signals={row.fundamentals_signals} invertSignals={presentation.isShort} />
       <AnalysisBucket label={t(presentation.bucketLabelKeys[1])} score={row.technical_score} points={reasons.technical} signals={row.technical_signals} invertSignals={presentation.isShort} />
       <AnalysisBucket label={t(presentation.bucketLabelKeys[2])} score={row.forecast_score} points={reasons.forecast} signals={row.forecast_signals} invertSignals={presentation.isShort} />
+      {marketContext.visible && (
+        <MarketContextBucket
+          marketContext={marketContext}
+          points={reasons.regime}
+        />
+      )}
+    </div>
+  );
+}
+
+function MarketContextBucket({
+  marketContext,
+  points,
+}: {
+  marketContext: RegimePresentation;
+  points: string[];
+}) {
+  const { t } = useT();
+  const tone = marketContext.classification;
+  const color = tone === "favorable" ? "#22c55e"
+    : tone === "adverse" ? "#ef4444"
+      : "#f59e0b";
+  return (
+    <div className={`analysis-bucket market-context-bucket${marketContext.muted ? " is-muted" : ""}`}>
+      <div className="bucket-header">
+        <span className="bucket-label">{t(marketContext.bucketKey)}</span>
+        <span className="bucket-score" style={{ color: marketContext.score == null ? "#64748b" : color }}>
+          {marketContext.score == null
+            ? t(marketContext.statusKey)
+            : `${marketContext.score > 0 ? "+" : ""}${marketContext.score} · ${t(`analysis.marketContext.bucket.${marketContext.classification}`)}`}
+        </span>
+      </div>
+      <div className="market-context-explainer">
+        {t("analysis.marketContext.explainer")}
+      </div>
+      {points.length > 0 && (
+        <ul className="bucket-points">
+          {points.map((point, index) => <li key={index}>{point}</li>)}
+        </ul>
+      )}
     </div>
   );
 }
 
 function AnalysisBucket({
-  label, score, points, signals, invertSignals = false,
+  label, score, points, signals, invertSignals = false, subtitle,
 }: {
   label: string;
   score: number | null;
   points: string[];
   signals: string[];
   invertSignals?: boolean;
+  subtitle?: string;
 }) {
   const { t } = useT();
   const color = score == null ? "#64748b"
@@ -529,6 +618,11 @@ function AnalysisBucket({
           {score == null ? t("analysis.noData") : score > 0 ? `+${score}` : `${score}`}
         </span>
       </div>
+      {subtitle && (
+        <div style={{ fontSize: 10, color: "var(--text-5)", marginBottom: 8, lineHeight: 1.4 }}>
+          {subtitle}
+        </div>
+      )}
       {points.length > 0 && (
         <ul className="bucket-points">
           {points.map((p, i) => <li key={i}>{p}</li>)}
@@ -560,6 +654,7 @@ interface Reasons {
   fundamentals: string[];
   technical: string[];
   forecast: string[];
+  regime: string[];
 }
 
 type TFn = (key: string, vars?: Record<string, string | number>) => string;
@@ -569,6 +664,7 @@ function buildReasons(
   detail: SymbolDetail,
   t: TFn,
   presentation: ScoringPresentationState,
+  scoringModel: ScoringModelId,
 ): Reasons {
   const f = detail.fundamentals;
   const analystCount = detail.analyst_opinion_count ?? 0;
@@ -580,7 +676,8 @@ function buildReasons(
   ) => renderText(presentation.frameEvidence(t(key, vars), direction), t);
 
   // ── Summary sentence ─────────────────────────────────────────────────────
-  const summary = presentation.summary(narrativeContext(row, detail))
+  const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
+  const summary = presentation.summary(narrativeContext(row, detail, marketContext))
     .map((ref) => renderText(ref, t))
     .join(" ");
 
@@ -673,7 +770,24 @@ function buildReasons(
     else if (is_ >= 5 && ib === 0)    forePoints.push(t(presentation.insiderSignalKey("heavySell"), { n: is_ }));
   }
 
-  return { summary, fundamentals: fundPoints, technical: techPoints, forecast: forePoints };
+  // ── Regime (4th bucket) ──────────────────────────────────────────────────
+  const regimePoints: string[] = [];
+  if (marketContext.visible) {
+    if (marketContext.status !== "Included") {
+      regimePoints.push(t(marketContext.statusKey));
+    }
+    for (const sig of marketContext.causes) {
+      regimePoints.push(renderRegimeCause(sig, marketContext.side, t));
+    }
+  }
+
+  return {
+    summary,
+    fundamentals: fundPoints,
+    technical: techPoints,
+    forecast: forePoints,
+    regime: regimePoints,
+  };
 }
 
 // ── Insider activity ──────────────────────────────────────────────────────────

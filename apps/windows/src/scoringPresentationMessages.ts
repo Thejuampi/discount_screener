@@ -1,7 +1,62 @@
 export type ScoringLang = "es" | "en";
 
 export const SCORING_PRESENTATION_MESSAGES: Record<string, Record<ScoringLang, string>> = {
+  "col.trio.tooltip": {
+    es: "F · T · Fc · R: fundamentales, técnico, pronóstico y contexto de mercado. R aplica sólo a acciones V3; ETF y cripto siguen con evaluación técnica.",
+    en: "F · T · Fc · R: fundamentals, technicals, forecast, and market context. R applies only to V3 stocks; ETFs and crypto remain technical-only.",
+  },
+  "col.trio3.tooltip": {
+    es: "Fundamentales · Técnico · Pronóstico",
+    en: "Fundamentals · Technical · Forecast",
+  },
+  "ia.summary.act.regime": {
+    es: "{name} alcanza un score long accionable al considerar 4 dimensiones: fundamentales, técnico, pronóstico y contexto de mercado (score {cs}/110).",
+    en: "{name} reaches an actionable long score across 4 dimensions: fundamentals, technicals, forecast, and market context (score {cs}/110).",
+  },
+  "ia.summary.regime.fit": {
+    es: "El contexto puntúa {rs}: mide si el perfil del activo encaja con el entorno actual.",
+    en: "Market context scores {rs}: it measures whether the asset profile fits the current environment.",
+  },
+  "reason.act.noTarget.regime": {
+    es: "Score final {cs}/110 después de incorporar el contexto de mercado, aunque sin un target de analistas usable.",
+    en: "Final score {cs}/110 after incorporating market context, though without a usable analyst target.",
+  },
   "presentation.evidence.raw": { es: "{fact}", en: "{fact}" },
+  "presentation.context.cause.Quality": { es: "calidad financiera", en: "financial quality" },
+  "presentation.context.cause.LowBeta": { es: "perfil de beta", en: "beta profile" },
+  "presentation.context.cause.Value": { es: "valoración relativa", en: "relative valuation" },
+  "presentation.context.cause.OversoldQual": { es: "calidad con sobreventa", en: "oversold quality" },
+  "presentation.context.cause.Extension": { es: "extensión del precio", en: "price extension" },
+  "presentation.context.cause.Trend": { es: "tendencia del precio", en: "price trend" },
+  "presentation.context.cause.Defensive": { es: "sector defensivo", en: "defensive sector" },
+  "presentation.context.cause.Growth": { es: "sector cíclico o de crecimiento", en: "growth or cyclical sector" },
+  "presentation.context.cause.Liquidity": { es: "liquidez", en: "liquidity" },
+  "presentation.context.cause.RegimeFit": { es: "encaje general con el entorno", en: "overall environmental fit" },
+  "presentation.context.cause.RegimeNeutral": { es: "encaje neutral con el entorno", en: "neutral environmental fit" },
+  "presentation.short.context.support": {
+    es: "{cause} apoya la tesis bajista en el entorno actual.",
+    en: "{cause} supports the bearish thesis in the current environment.",
+  },
+  "presentation.short.context.risk": {
+    es: "{cause} representa un riesgo para la tesis bajista en el entorno actual.",
+    en: "{cause} is a risk to the bearish thesis in the current environment.",
+  },
+  "presentation.short.context.neutral": {
+    es: "{cause} no favorece ni contradice la tesis bajista.",
+    en: "{cause} neither supports nor contradicts the bearish thesis.",
+  },
+  "presentation.long.context.support": {
+    es: "{cause} favorece la tesis long en el entorno actual.",
+    en: "{cause} supports the long thesis in the current environment.",
+  },
+  "presentation.long.context.risk": {
+    es: "{cause} representa un riesgo para la tesis long en el entorno actual.",
+    en: "{cause} is a risk to the long thesis in the current environment.",
+  },
+  "presentation.long.context.neutral": {
+    es: "{cause} no favorece ni contradice la tesis long.",
+    en: "{cause} neither supports nor contradicts the long thesis.",
+  },
   "presentation.short.banner.tag": {
     es: "MESA SHORT",
     en: "SHORT DESK",
@@ -98,6 +153,10 @@ export const SCORING_PRESENTATION_MESSAGES: Record<string, Record<ScoringLang, s
   "presentation.long.summary.avoid": {
     es: "{name} no cumple los criterios para una posición long (score {cs}/110). Conviene esperar una mejor oportunidad de entrada.",
     en: "{name} does not meet the criteria for a long position (score {cs}/110). Wait for a better entry opportunity.",
+  },
+  "presentation.long.summary.avoid.regime": {
+    es: "{name} no reúne un setup long sólido al considerar fundamentales, técnico, pronóstico y contexto de mercado. Score {cs}/110.",
+    en: "{name} lacks a solid long setup after considering fundamentals, technicals, forecast, and market context. Score {cs}/110.",
   },
   "presentation.long.summary.act.technical": {
     es: "{name} muestra una configuración técnica alcista accionable (score {cs}/110). Este activo se evalúa sólo con señales de precio y volumen.",
@@ -254,8 +313,8 @@ export const SCORING_PRESENTATION_MESSAGES: Record<string, Record<ScoringLang, s
     en: "Unified short signal. A high score means stronger evidence for betting on downside; it is not a buy recommendation.",
   },
   "presentation.short.col.trio.tooltip": {
-    es: "Debilidad fundamental · Señal técnica bajista · Forecast desfavorable (scores positivos favorecen el short)",
-    en: "Fundamental weakness · Bearish technical signal · Unfavorable forecast (positive scores favor the short)",
+    es: "F · T · Fc · R desde la tesis bajista. R aplica sólo a acciones V3; ETF y cripto siguen con evaluación técnica.",
+    en: "F · T · Fc · R from the bearish perspective. R applies only to V3 stocks; ETFs and crypto remain technical-only.",
   },
   "presentation.short.bucket.fundamentals": {
     es: "Debilidad / valuación",
@@ -268,6 +327,38 @@ export const SCORING_PRESENTATION_MESSAGES: Record<string, Record<ScoringLang, s
   "presentation.short.bucket.forecast": {
     es: "Forecast desfavorable",
     en: "Unfavorable forecast",
+  },
+  "presentation.short.bucket.regime": {
+    es: "Contexto de mercado",
+    en: "Market context",
+  },
+  "presentation.short.summary.act.regime": {
+    es: "{name} alcanza un score bajista accionable al considerar fundamentales, técnico, pronóstico y contexto de mercado (score {cs}/110).",
+    en: "{name} reaches an actionable bearish score after considering fundamentals, technicals, forecast, and market context (score {cs}/110).",
+  },
+  "presentation.short.summary.watch.regime": {
+    es: "{name} presenta evidencia bajista mixta al considerar fundamentales, técnico, pronóstico y contexto de mercado. Score {cs}/110.",
+    en: "{name} has mixed bearish evidence after considering fundamentals, technicals, forecast, and market context. Score {cs}/110.",
+  },
+  "presentation.short.summary.avoid.regime": {
+    es: "{name} no reúne evidencia bajista suficiente después de considerar las cuatro dimensiones (score {cs}/110).",
+    en: "{name} lacks enough bearish evidence after considering all four dimensions (score {cs}/110).",
+  },
+  "presentation.short.summary.regime.fit": {
+    es: "El contexto puntúa {rs} desde la tesis bajista: un valor positivo indica mejor encaje con el entorno actual.",
+    en: "Market context scores {rs} from the bearish perspective: a positive value means a better fit with the current environment.",
+  },
+  "presentation.short.reason.act.regime": {
+    es: "El score short final es {cs}/110 después de incorporar el encaje con el contexto de mercado.",
+    en: "The final short score is {cs}/110 after incorporating fit with market context.",
+  },
+  "presentation.short.reason.watch.regime": {
+    es: "Score bajista moderado {cs}/110 después de considerar las cuatro dimensiones; la evidencia todavía no es concluyente.",
+    en: "Moderate bearish score {cs}/110 after considering all four dimensions; the evidence is not yet conclusive.",
+  },
+  "presentation.short.reason.avoid.regime": {
+    es: "Score short bajo {cs}/110: las 4 dimensiones no respaldan abrir un short aquí.",
+    en: "Low short score {cs}/110: the 4 dimensions do not support opening a short here.",
   },
   "presentation.short.tech.supporting": {
     es: "A favor del short",

@@ -25,10 +25,12 @@ import { useTheme } from "./theme";
 import { useSignalAlerts } from "./useSignalAlerts";
 import { useEmailNotifications } from "./useEmailNotifications";
 import { getScoringPresentation, isScoringModelId, type ScoringModelId } from "./scoringPresentation";
+import { warmMarketContext } from "./marketContextWarmup";
 import "./App.css";
 
 const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
 const SCORING_STORAGE_KEY = "ds_scoring_model";
+const REGIME_SCORING_KEY = "ds_regime_scoring";
 export default function App() {
   const { t } = useT();
   const { theme, setTheme } = useTheme();
@@ -72,6 +74,10 @@ export default function App() {
     const saved = localStorage.getItem(SCORING_STORAGE_KEY);
     return isScoringModelId(saved) ? saved : "aggressive_v3";
   });
+  const [regimeScoring, setRegimeScoring] = useState(() => {
+    const saved = localStorage.getItem(REGIME_SCORING_KEY);
+    return saved === null ? true : saved === "1";
+  });
   const [modelReady, setModelReady] = useState(false);
   const scoringModelRef = useRef(scoringModel);
   const requestedModelRef = useRef(scoringModel);
@@ -97,6 +103,7 @@ export default function App() {
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
     api.listUniverseProfiles().then(setUniverseProfiles).catch(console.error);
+    void warmMarketContext(api.getMarketRegime);
   }, []);
 
   const scoringPresentation = getScoringPresentation(scoringModel);
@@ -148,6 +155,18 @@ export default function App() {
         localStorage.setItem(SCORING_STORAGE_KEY, raw);
       } catch (error) {
         console.error(error);
+      }
+      // Regime toggle is best-effort — must not block modelReady / feed restore.
+      try {
+        const wantRegime = localStorage.getItem(REGIME_SCORING_KEY);
+        const enabled = wantRegime === null ? true : wantRegime === "1";
+        const backendRegime = await api.setRegimeScoringEnabled(enabled);
+        if (!cancelled) {
+          setRegimeScoring(backendRegime);
+          localStorage.setItem(REGIME_SCORING_KEY, backendRegime ? "1" : "0");
+        }
+      } catch (error) {
+        console.error("regime scoring toggle unavailable", error);
       } finally {
         if (!cancelled) setModelReady(true);
       }
@@ -155,6 +174,19 @@ export default function App() {
     void restore();
     return () => { cancelled = true; };
   }, []);
+
+  const toggleRegimeScoring = async () => {
+    const next = !regimeScoring;
+    try {
+      const enabled = await api.setRegimeScoringEnabled(next);
+      setRegimeScoring(enabled);
+      localStorage.setItem(REGIME_SCORING_KEY, enabled ? "1" : "0");
+      const nextRows = await api.getOpportunities();
+      setRows(nextRows);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const selectScoringModel = async (next: ScoringModelId) => {
     requestedModelRef.current = next;
@@ -333,6 +365,17 @@ export default function App() {
               );
             })}
           </div>
+          {(scoringModel === "aggressive_v3" || scoringModel === "short_v3") && (
+            <button
+              type="button"
+              className={`scoring-segment__btn${regimeScoring ? " is-active" : ""}`}
+              title={t("scoring.regime.hint")}
+              onClick={() => void toggleRegimeScoring()}
+              style={{ marginLeft: 4 }}
+            >
+              {regimeScoring ? t("scoring.regime.on") : t("scoring.regime.off")}
+            </button>
+          )}
           <select
             className="filter-select"
             value={confidenceFilter}

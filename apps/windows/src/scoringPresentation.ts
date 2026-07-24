@@ -22,6 +22,9 @@ export interface NarrativeContext {
   confidence: ConfidenceBand;
   technicalScore: number | null;
   assetType: AssetType;
+  /** True when V3 composite includes the 4th regime_fit bucket. */
+  regimeScoringEnabled?: boolean;
+  regimeScore?: number | null;
 }
 
 export interface DirectionalText {
@@ -59,7 +62,9 @@ export interface ScoringPresentationState {
   loadingHintKey: string;
   emptyKey: string;
   emptyHintKey: string;
-  bucketLabelKeys: readonly [string, string, string];
+  /** Fund / Tech / Forecast — and optionally Regime as 4th. */
+  bucketLabelKeys: readonly [string, string, string] | readonly [string, string, string, string];
+  regimeBucketLabelKey: string;
   riskNotice: TextRef;
   banner: { tagKey: string; textKey: string } | null;
   setupLabelKey(label: SetupLabel): string;
@@ -84,6 +89,12 @@ export interface ScoringPresentationState {
 
 export function isScoringModelId(value: string | null): value is ScoringModelId {
   return value != null && (SCORING_MODELS as readonly string[]).includes(value);
+}
+
+export function scoringDimensionsTooltipKey(model: ScoringModelId): string {
+  if (model === "aggressive_v2") return "col.trio3.tooltip";
+  if (model === "short_v3") return "presentation.short.col.trio.tooltip";
+  return "col.trio.tooltip";
 }
 
 export function renderText(
@@ -140,7 +151,13 @@ const longState: ScoringPresentationState = {
   loadingHintKey: "empty.loading.hint",
   emptyKey: "empty.nomatch",
   emptyHintKey: "empty.nomatch.hint",
-  bucketLabelKeys: ["analysis.fundamentals", "analysis.technical", "analysis.forecast"],
+  bucketLabelKeys: [
+    "analysis.fundamentals",
+    "analysis.technical",
+    "analysis.forecast",
+    "analysis.regime",
+  ],
+  regimeBucketLabelKey: "analysis.regime",
   riskNotice: { key: "" },
   banner: null,
   setupLabelKey: (label) => `setup.${label}`,
@@ -162,16 +179,29 @@ const longState: ScoringPresentationState = {
       return [{ key, vars: { name: context.name, cs: context.compositeScore } }];
     }
     if (context.decision === "Act") {
-      const refs: TextRef[] = [{ key: "ia.summary.act", vars: { name: context.name, cs: context.compositeScore } }];
+      const key = context.regimeScoringEnabled ? "ia.summary.act.regime" : "ia.summary.act";
+      const refs: TextRef[] = [{ key, vars: { name: context.name, cs: context.compositeScore } }];
       if (context.gapBps != null && context.gapBps >= 1000) {
         refs.push({ key: "ia.summary.act.gap", vars: { gap: gapValue(context.gapBps) } });
+      }
+      if (context.regimeScoringEnabled && context.regimeScore != null) {
+        refs.push({
+          key: "ia.summary.regime.fit",
+          vars: { rs: context.regimeScore },
+        });
       }
       return refs;
     }
     if (context.decision === "Watch") {
-      return [{ key: "ia.summary.watch", vars: { name: context.name, cs: context.compositeScore } }];
+      const key = context.regimeScoringEnabled ? "ia.summary.watch.regime" : "ia.summary.watch";
+      return [{ key, vars: { name: context.name, cs: context.compositeScore } }];
     }
-    return [{ key: "presentation.long.summary.avoid", vars: { name: context.name, cs: context.compositeScore } }];
+    return [{
+      key: context.regimeScoringEnabled
+        ? "presentation.long.summary.avoid.regime"
+        : "presentation.long.summary.avoid",
+      vars: { name: context.name, cs: context.compositeScore },
+    }];
   },
   decisionReason(context): TextRef {
     const technicalOnly = context.assetType === "crypto" || context.assetType === "etf";
@@ -185,13 +215,27 @@ const longState: ScoringPresentationState = {
       if (context.gapBps == null) return { key: "reason.avoid.noTarget" };
       if (context.gapBps <= 0) return { key: "reason.avoid.gap", vars: { gap: gapValue(context.gapBps) } };
       if (context.confidence === "Low") return { key: "reason.avoid.confLow" };
-      return { key: "reason.avoid.score", vars: { cs: context.compositeScore } };
+      return {
+        key: context.regimeScoringEnabled ? "reason.avoid.score.regime" : "reason.avoid.score",
+        vars: { cs: context.compositeScore },
+      };
     }
-    if (context.decision === "Watch") return { key: "reason.watch", vars: { cs: context.compositeScore } };
+    if (context.decision === "Watch") {
+      return {
+        key: context.regimeScoringEnabled ? "reason.watch.regime" : "reason.watch",
+        vars: { cs: context.compositeScore },
+      };
+    }
     if (context.gapBps != null && context.gapBps > 0) {
-      return { key: "reason.act", vars: { cs: context.compositeScore, gap: gapValue(context.gapBps) } };
+      return {
+        key: context.regimeScoringEnabled ? "reason.act.regime" : "reason.act",
+        vars: { cs: context.compositeScore, gap: gapValue(context.gapBps) },
+      };
     }
-    return { key: "reason.act.noTarget", vars: { cs: context.compositeScore } };
+    return {
+      key: context.regimeScoringEnabled ? "reason.act.noTarget.regime" : "reason.act.noTarget",
+      vars: { cs: context.compositeScore },
+    };
   },
   gap(gapBps) {
     if (gapBps == null || !Number.isFinite(gapBps)) return { text: { key: "presentation.long.gap.noTarget" }, compactText: { key: "presentation.long.gap.noTarget.compact" }, tone: "neutral", marker: "—" };
@@ -245,7 +289,9 @@ const shortState: ScoringPresentationState = {
     "presentation.short.bucket.fundamentals",
     "presentation.short.bucket.technical",
     "presentation.short.bucket.forecast",
+    "presentation.short.bucket.regime",
   ],
+  regimeBucketLabelKey: "presentation.short.bucket.regime",
   riskNotice: { key: "presentation.short.risk" },
   banner: {
     tagKey: "presentation.short.banner.tag",
@@ -282,9 +328,13 @@ const shortState: ScoringPresentationState = {
           : "presentation.short.summary.avoid.technical";
       return [{ key, vars: { name: context.name, cs: context.compositeScore } }];
     }
-    const key = context.decision === "Act" ? "presentation.short.summary.act"
+    const baseKey = context.decision === "Act" ? "presentation.short.summary.act"
       : context.decision === "Watch" ? "presentation.short.summary.watch" : "presentation.short.summary.avoid";
+    const key = context.regimeScoringEnabled ? `${baseKey}.regime` : baseKey;
     const refs: TextRef[] = [{ key, vars: { name: context.name, cs: context.compositeScore } }];
+    if (context.regimeScoringEnabled && context.regimeScore != null) {
+      refs.push({ key: "presentation.short.summary.regime.fit", vars: { rs: context.regimeScore } });
+    }
     if (context.confidence === "Low") refs.push({ key: "presentation.short.summary.lowConfidence" });
     if (context.gapBps == null) refs.push({ key: "presentation.short.summary.noTarget" });
     else if (context.gapBps < 0) refs.push({ key: "presentation.short.summary.targetSupport", vars: { gap: gapValue(context.gapBps) } });
@@ -300,8 +350,9 @@ const shortState: ScoringPresentationState = {
           : "presentation.short.reason.avoid.technical";
       return { key, vars: { ts: context.technicalScore ?? 0 } };
     }
-    const key = context.decision === "Act" ? "presentation.short.reason.act"
+    const baseKey = context.decision === "Act" ? "presentation.short.reason.act"
       : context.decision === "Watch" ? "presentation.short.reason.watch" : "presentation.short.reason.avoid";
+    const key = context.regimeScoringEnabled ? `${baseKey}.regime` : baseKey;
     return { key, vars: { cs: context.compositeScore } };
   },
   gap(gapBps) {

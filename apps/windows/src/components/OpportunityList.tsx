@@ -6,8 +6,10 @@ import { Sparkline } from "./Sparkline";
 import {
   getScoringPresentation,
   renderText,
+  scoringDimensionsTooltipKey,
   type ScoringModelId,
 } from "../scoringPresentation";
+import { createRegimePresentation, regimeRowInput } from "../regimePresentation";
 
 interface Props {
   rows: OpportunityRow[];
@@ -158,13 +160,18 @@ export function OpportunityList({
             <th className="sort-th">{t("col.trend")}</th>
             {th(t(presentation.targetColumnKey), "intrinsic_value_cents", t(presentation.analystTargetLabelKey))}
             {th(t(presentation.gapColumnKey), "gap_bps", t(presentation.gapLabelKey))}
-            {th("F·T·Fc",           "fundamentals_score",             t(presentation.trioTooltipKey))}
+            {th(
+              scoringModel === "aggressive_v3" || scoringModel === "short_v3" ? "F·T·Fc·R" : "F·T·Fc",
+              "fundamentals_score",
+              t(scoringDimensionsTooltipKey(scoringModel)),
+            )}
             {th(t("col.analysts"),  "analyst_opinion_count")}
             {th(t("col.sector"),    "sector_name")}
           </tr>
         </thead>
         <tbody>
           {sorted.map((row) => {
+            const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
             return (
               <tr
                 key={row.symbol}
@@ -219,6 +226,16 @@ export function OpportunityList({
                   <ScorePip v={row.technical_score} title={t(presentation.bucketLabelKeys[1])} />
                   <span className="score-sep">·</span>
                   <ScorePip v={row.forecast_score} title={t(presentation.bucketLabelKeys[2])} />
+                  {marketContext.visible && (
+                    <>
+                      <span className="score-sep">·</span>
+                      <ScorePip
+                        v={marketContext.score}
+                        title={`${t("analysis.marketContext.title")}: ${t(marketContext.statusKey)}`}
+                        muted={marketContext.muted}
+                      />
+                    </>
+                  )}
                 </td>
                 <td className="num-cell">{row.analyst_opinion_count ?? "—"}</td>
                 <td className="sector-cell">{row.sector_name ?? "—"}</td>
@@ -261,9 +278,9 @@ function SetupBadge({
 }
 
 
-function ScorePip({ v, title }: { v: number | null; title: string }) {
-  if (v == null) return <span className="pip pip-none" title={`${title}: no data`}>—</span>;
-  const color = v >= 30 ? "#22c55e" : v >= 0 ? "#f59e0b" : "#ef4444";
+function ScorePip({ v, title, muted = false }: { v: number | null; title: string; muted?: boolean }) {
+  if (v == null) return <span className="pip pip-none" title={title}>—</span>;
+  const color = muted ? "#64748b" : v >= 30 ? "#22c55e" : v >= 0 ? "#f59e0b" : "#ef4444";
   return (
     <span className="pip" title={`${title}: ${v}`} style={{ color }}>{v}</span>
   );
