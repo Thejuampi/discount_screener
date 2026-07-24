@@ -598,19 +598,65 @@ pub fn composite_score_v3(
     forecast: Option<i32>,
     beta_millis: Option<i32>,
 ) -> i32 {
-    let coverage = [fund, tech, forecast]
-        .iter()
-        .filter(|x| x.is_some())
-        .count();
+    composite_score_v3_ext(fund, tech, forecast, None, beta_millis, 1.0)
+}
+
+/// V3 composite with optional 4th bucket (regime fit) and beta haircut multiplier.
+///
+/// When `regime` is `None`, behavior matches classic three-bucket V3 (parity).
+/// Coverage bonus still scales with number of present buckets (max +15 with 4).
+pub fn composite_score_v3_ext(
+    fund: Option<i32>,
+    tech: Option<i32>,
+    forecast: Option<i32>,
+    regime: Option<i32>,
+    beta_millis: Option<i32>,
+    beta_haircut_mult: f64,
+) -> i32 {
+    let buckets = [fund, tech, forecast, regime];
+    let coverage = buckets.iter().filter(|x| x.is_some()).count();
     if coverage == 0 {
         return 0;
     }
-    let sum = fund.unwrap_or(0) + tech.unwrap_or(0) + forecast.unwrap_or(0);
+    let sum = fund.unwrap_or(0) + tech.unwrap_or(0) + forecast.unwrap_or(0) + regime.unwrap_or(0);
     let mean = sum as f64 / coverage as f64;
     let bonus = V3_COMPOSITE_COVERAGE_BONUS * (coverage as f64 - 1.0);
     let base = (mean + bonus).clamp(-V3_COMPOSITE_BOUND as f64, V3_COMPOSITE_BOUND as f64);
-    let haircut = beta_risk_haircut(beta_millis);
+    let haircut = beta_risk_haircut(beta_millis) * beta_haircut_mult.clamp(0.0, 2.5);
     ((base - haircut).round() as i32).clamp(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
+}
+
+/// Assemble a Short V3 composite from already short-oriented buckets.
+///
+/// The legacy three-dimensional path remains the exact inverse of Long V3.
+/// With context, all short-oriented buckets are converted back to Long space
+/// together, then the complete V3 result is inverted once. This preserves the
+/// inverse coverage-bonus and beta-haircut semantics without reversing context
+/// relative to the other short evidence.
+pub fn composite_score_v3_short_ext(
+    fund: Option<i32>,
+    tech: Option<i32>,
+    forecast: Option<i32>,
+    regime: Option<i32>,
+    beta_millis: Option<i32>,
+    beta_haircut_mult: f64,
+) -> i32 {
+    match regime {
+        Some(regime) => invert_composite(composite_score_v3_ext(
+            invert_bucket(fund),
+            invert_bucket(tech),
+            invert_bucket(forecast),
+            invert_bucket(Some(regime)),
+            beta_millis,
+            beta_haircut_mult,
+        )),
+        None => invert_composite(composite_score_v3(
+            invert_bucket(fund),
+            invert_bucket(tech),
+            invert_bucket(forecast),
+            beta_millis,
+        )),
+    }
 }
 
 fn beta_risk_haircut(beta_millis: Option<i32>) -> f64 {
@@ -673,6 +719,71 @@ mod tests {
     fn composite_coverage_bonus_three_buckets() {
         // mean of 40,40,40 = 40 + bonus 10 = 50
         assert_eq!(composite_score_v3(Some(40), Some(40), Some(40), None), 50);
+    }
+
+    #[test]
+    fn four_bucket_coverage_bonus_and_parity() {
+        // Classic 3-bucket path equals ext with regime=None
+        let a = composite_score_v3(Some(40), Some(40), Some(40), Some(1000));
+        let b = composite_score_v3_ext(Some(40), Some(40), Some(40), None, Some(1000), 1.0);
+        assert_eq!(a, b);
+        // 4 equal buckets: mean 40 + bonus 15 = 55
+        let c = composite_score_v3_ext(Some(40), Some(40), Some(40), Some(40), None, 1.0);
+        assert_eq!(c, 55);
+        // Positive regime fit lifts vs zero regime absent when others fixed
+        let with = composite_score_v3_ext(Some(40), Some(40), Some(40), Some(60), None, 1.0);
+        let without = composite_score_v3_ext(Some(40), Some(40), Some(40), None, None, 1.0);
+        assert!(with > without, "with={with} without={without}");
+    }
+
+    #[test]
+    fn short_extended_composite_preserves_inverse_v3_semantics() {
+        let supportive = composite_score_v3_short_ext(
+            Some(-40),
+            Some(-20),
+            Some(-10),
+            Some(60),
+            Some(1_200),
+            1.4,
+        );
+        let adverse = composite_score_v3_short_ext(
+            Some(-40),
+            Some(-20),
+            Some(-10),
+            Some(-60),
+            Some(1_200),
+            1.4,
+        );
+        assert!(
+            supportive > adverse,
+            "supportive={supportive} adverse={adverse}"
+        );
+        let expected = invert_composite(composite_score_v3_ext(
+            Some(40),
+            Some(20),
+            Some(10),
+            Some(-60),
+            Some(1_200),
+            1.4,
+        ));
+        assert_eq!(
+            supportive, expected,
+            "Short must preserve inverse-V3 coverage bonus and beta haircut semantics"
+        );
+    }
+
+    #[test]
+    fn short_extended_composite_has_exact_classic_parity_without_context() {
+        let classic = invert_composite(composite_score_v3(
+            Some(40),
+            Some(20),
+            Some(10),
+            Some(1_200),
+        ));
+        assert_eq!(
+            composite_score_v3_short_ext(Some(-40), Some(-20), Some(-10), None, Some(1_200), 1.0,),
+            classic
+        );
     }
 
     #[test]

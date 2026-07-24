@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { SCORING_PRESENTATION_MESSAGES } from "./scoringPresentationMessages";
 
 export type Lang = "es" | "en";
 
@@ -8,6 +9,7 @@ const STORAGE_KEY = "ds_lang";
 // Keys grouped by area. Add new strings here.
 
 const T: Record<string, { es: string; en: string }> = {
+  ...SCORING_PRESENTATION_MESSAGES,
   // ── App / Header ─────────────────────────────────────────────────────────
   "app.title":                  { es: "Vantage", en: "Vantage" },
   "search.placeholder":         { es: "Ticker o empresa…", en: "Ticker or company…" },
@@ -60,6 +62,71 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Modelo de scoring: Long V2 · Long V3 · Short",
     en: "Scoring model: Long V2 · Long V3 · Short",
   },
+  "scoring.regime":             { es: "Contexto de mercado", en: "Market context" },
+  "scoring.regime.hint":        {
+    es: "Incluye el contexto de mercado como cuarta dimensión para acciones V3. Apagado = score V3 de 3 dimensiones.",
+    en: "Includes market context as the fourth dimension for V3 stocks. Off = 3-dimensional V3 score.",
+  },
+  "scoring.regime.on":          { es: "Contexto de mercado ON", en: "Market context ON" },
+  "scoring.regime.off":         { es: "Contexto de mercado OFF", en: "Market context OFF" },
+  "analysis.regime":            { es: "Contexto de mercado", en: "Market context" },
+  "analysis.regime.base":       { es: "Base V3 (3 dimensiones)", en: "V3 base (3 dimensions)" },
+  "analysis.regime.subtitle":   {
+    es: "Encaje con el entorno actual; no es un pronóstico de dirección.",
+    en: "Fit with the current environment; not a directional forecast.",
+  },
+  "ia.regime.noData":           {
+    es: "Sin score de contexto: faltan datos confiables o la dimensión está desactivada.",
+    en: "No context score: reliable data is missing or the dimension is disabled.",
+  },
+  "ia.regime.scoreLine":        {
+    es: "Contexto {rs}/100: cuánto encaja este activo con el entorno actual.",
+    en: "Context {rs}/100: how well this asset fits the current environment.",
+  },
+  "ia.regime.signal.Quality":   {
+    es: "Calidad de balance / cash flow encaja con la policy (premia fortress en stress).",
+    en: "Balance-sheet / cash-flow quality fits the policy (rewards fortress names in stress).",
+  },
+  "ia.regime.signal.LowBeta":   {
+    es: "Perfil de beta alineado con el apetito de riesgo del régimen.",
+    en: "Beta profile aligned with the regime's risk appetite.",
+  },
+  "ia.regime.signal.Value":     {
+    es: "Valuación relativa apoya el fit de régimen.",
+    en: "Relative valuation supports regime fit.",
+  },
+  "ia.regime.signal.OversoldQual": {
+    es: "Oversold con calidad: timing contrarian permitido por la policy.",
+    en: "Oversold with quality: contrarian timing allowed by policy.",
+  },
+  "ia.regime.signal.Extension": {
+    es: "Extensión de precio (vs media / 52w / RSI) impacta el fit anti-chase o short.",
+    en: "Price extension (vs MA / 52w / RSI) drives anti-chase or short fit.",
+  },
+  "ia.regime.signal.Trend":     {
+    es: "Alineación de tendencia del nombre vs modo trend-follow del régimen.",
+    en: "Name trend alignment vs the regime's trend-follow mode.",
+  },
+  "ia.regime.signal.Defensive": {
+    es: "Sector defensivo: favorece risk-off / preserve capital.",
+    en: "Defensive sector: favors risk-off / capital preservation.",
+  },
+  "ia.regime.signal.Growth":    {
+    es: "Sector growth/cíclico: favorece risk-on o shorts frágiles según el lado.",
+    en: "Growth/cyclical sector: favors risk-on or fragile shorts depending on side.",
+  },
+  "ia.regime.signal.Liquidity": {
+    es: "Liquidez / tamaño de mercado en el fit de risk budget.",
+    en: "Liquidity / market size in the risk-budget fit.",
+  },
+  "ia.regime.signal.RegimeFit": {
+    es: "Fit de régimen material (agregado de style + timing + structure).",
+    en: "Material regime fit (aggregate of style + timing + structure).",
+  },
+  "ia.regime.signal.RegimeNeutral": {
+    es: "Fit de régimen cerca de neutro: el tape no premia ni castiga fuerte a este perfil.",
+    en: "Near-neutral regime fit: the tape neither strongly rewards nor punishes this profile.",
+  },
   "filter.all":                 { es: "Todas", en: "All" },
   "filter.high":                { es: "Confianza alta", en: "High confidence" },
   "filter.provisional":         { es: "Provisional", en: "Provisional" },
@@ -95,13 +162,25 @@ const T: Record<string, { es: string; en: string }> = {
     es: "{name} muestra una combinación sólida de fundamentals, momentum técnico y consenso de analistas que la posiciona como una oportunidad de compra atractiva (score {cs}/110).",
     en: "{name} shows a strong combination of fundamentals, technical momentum and analyst consensus, positioning it as an attractive buying opportunity (score {cs}/110).",
   },
+  "ia.summary.act.regime":      {
+    es: "{name} alcanza un score long accionable al considerar 4 dimensiones: fundamentales, técnico, pronóstico y contexto de mercado (score {cs}/110).",
+    en: "{name} reaches an actionable long score across 4 dimensions: fundamentals, technicals, forecast, and market context (score {cs}/110).",
+  },
   "ia.summary.act.gap":         {
     es: "El precio actual cotiza con un descuento de {gap}% respecto al precio objetivo de analistas.",
     en: "The current price trades at a {gap}% discount to the analyst target price.",
   },
+  "ia.summary.regime.fit":      {
+    es: "El contexto puntúa {rs}: mide si el perfil del activo —calidad, valoración, beta, sector y extensión— encaja con el entorno actual.",
+    en: "Market context scores {rs}: it measures whether the asset profile—quality, valuation, beta, sector, and extension—fits the current environment.",
+  },
   "ia.summary.watch":           {
     es: "{name} presenta condiciones mixtas: algunos indicadores son positivos pero no suficientes para recomendar entrada hoy (score {cs}/110). Vale la pena monitorear.",
     en: "{name} shows mixed conditions: some indicators are positive but not enough to recommend entering today (score {cs}/110). Worth monitoring.",
+  },
+  "ia.summary.watch.regime":    {
+    es: "{name} presenta una lectura mixta en 4 dimensiones: fundamentales, técnico, pronóstico y contexto de mercado. Score {cs}/110.",
+    en: "{name} has a mixed reading across 4 dimensions: fundamentals, technicals, forecast, and market context. Score {cs}/110.",
   },
   "ia.summary.avoid":           {
     es: "{name} no cumple los criterios de entrada por: {why}. Se recomienda esperar una mejor oportunidad.",
@@ -545,18 +624,74 @@ const T: Record<string, { es: string; en: string }> = {
   "journal.outcomeNotes":       { es: "Notas del resultado", en: "Outcome notes" },
   "journal.saveReview":         { es: "Guardar", en: "Save" },
   "journal.return":             { es: "Retorno", en: "Return" },
-  // ── Market regime ──
+  // ── Market regime v2 ──
   "regime.title":               { es: "Régimen de mercado", en: "Market regime" },
   "regime.RiskOn":              { es: "Risk-On", en: "Risk-On" },
   "regime.Neutral":             { es: "Neutral", en: "Neutral" },
   "regime.RiskOff":             { es: "Risk-Off", en: "Risk-Off" },
   "regime.Unknown":             { es: "Sin datos", en: "Unknown" },
-  "regime.exposure":            { es: "Exposición sugerida", en: "Suggested exposure" },
+  "regime.exposure":            { es: "Techo exposición", en: "Exposure ceiling" },
+  "regime.stance":              { es: "Stance", en: "Stance" },
+  "regime.riskMult":            { es: "New risk", en: "New risk" },
+  "regime.conf":                { es: "Conf", en: "Conf" },
   "regime.vix":                 { es: "VIX", en: "VIX" },
-  "regime.breadth":             { es: "Amplitud (>MA200)", en: "Breadth (>200MA)" },
+  "regime.fng":                 { es: "Fear & Greed", en: "Fear & Greed" },
+  "regime.breadth":             { es: "Amplitud", en: "Breadth" },
   "regime.spy":                 { es: "S&P 500", en: "S&P 500" },
   "regime.spyUp":               { es: "alcista", en: "uptrend" },
   "regime.spyDown":             { es: "bajista", en: "downtrend" },
+  "regime.drawdown":            { es: "DD desde ATH", en: "DD from ATH" },
+  "regime.pillars":             { es: "Pilares", en: "Pillars" },
+  "regime.signals":             { es: "Señales", en: "Signals" },
+  "regime.cashBuffer":          { es: "Cash buffer", en: "Cash buffer" },
+  "regime.preferQuality":       { es: "preferir calidad", en: "prefer quality" },
+  "regime.showDetails":         { es: "Detalles ▾", en: "Details ▾" },
+  "regime.hideDetails":         { es: "Ocultar ▴", en: "Hide ▴" },
+  "regime.reading":             { es: "Lectura agregada", en: "Aggregate reading" },
+  "regime.actions":             { es: "Qué hacer", en: "What to do" },
+  "regime.pillarsExplain":      { es: "Pilares (interpretación)", en: "Pillars (interpretation)" },
+  "regime.radar.title":         { es: "Mapa de régimen", en: "Regime radar" },
+  "regime.radar.legend":        {
+    es: "Centro = peor · Borde = mejor · F&G = oportunidad contrarian · Vol = calma",
+    en: "Center = worse · Edge = better · F&G = contrarian opportunity · Vol = calm",
+  },
+  "regime.radar.axis.trend":        { es: "Tendencia", en: "Trend" },
+  "regime.radar.axis.breadth":      { es: "Amplitud", en: "Breadth" },
+  "regime.radar.axis.volatility":   { es: "Calma", en: "Calm" },
+  "regime.radar.axis.sentiment":    { es: "Oport. F&G", en: "F&G opp." },
+  "regime.radar.axis.cross_asset":  { es: "Cross-asset", en: "Cross-asset" },
+  "regime.radar.axis.quality":      { es: "Calidad", en: "Quality" },
+  "regime.disclaimer":          {
+    es: "Policy de riesgo/stance — no es consejo de inversión. F&G es contrarian (miedo→comprar, euforia→reducir).",
+    en: "Risk/stance policy — not investment advice. F&G is contrarian (fear→buy bias, greed→reduce).",
+  },
+  "regime.phase.StrongBull":    { es: "Bull fuerte", en: "Strong bull" },
+  "regime.phase.Bull":          { es: "Bull", en: "Bull" },
+  "regime.phase.LateBull":      { es: "Late bull", en: "Late bull" },
+  "regime.phase.Range":         { es: "Rango", en: "Range" },
+  "regime.phase.Correction":    { es: "Corrección", en: "Correction" },
+  "regime.phase.Bear":          { es: "Bear", en: "Bear" },
+  "regime.phase.Capitulation":  { es: "Capitulación", en: "Capitulation" },
+  "regime.phase.Snapback":      { es: "Snapback", en: "Snapback" },
+  "regime.phase.Unknown":       { es: "Sin datos", en: "Unknown" },
+  "regime.stance.BloodInStreets": { es: "Sangre en las calles", en: "Blood in the streets" },
+  "regime.stance.Washout":      { es: "Washout", en: "Washout" },
+  "regime.stance.Accumulate":   { es: "Acumular", en: "Accumulate" },
+  "regime.stance.SelectiveBuy": { es: "Compra selectiva", en: "Selective buy" },
+  "regime.stance.HealthyPullback": { es: "Pullback sano", en: "Healthy pullback" },
+  "regime.stance.Deploy":       { es: "Desplegar", en: "Deploy" },
+  "regime.stance.TrendDeploy":  { es: "Seguir tendencia", en: "Trend deploy" },
+  "regime.stance.Neutral":      { es: "Neutral", en: "Neutral" },
+  "regime.stance.Hold":         { es: "Mantener", en: "Hold" },
+  "regime.stance.HoldTrim":     { es: "Mantener / recortar", en: "Hold / trim" },
+  "regime.stance.Reduce":       { es: "Reducir", en: "Reduce" },
+  "regime.stance.Euphoria":     { es: "Euforia", en: "Euphoria" },
+  "regime.stance.Distribute":   { es: "Distribuir", en: "Distribute" },
+  "regime.stance.Denial":       { es: "Negación", en: "Denial" },
+  "regime.stance.Defend":       { es: "Defender", en: "Defend" },
+  "regime.stance.UnstableBlowoff": { es: "Blow-off inestable", en: "Unstable blow-off" },
+  "regime.stance.Mixed":        { es: "Mixto", en: "Mixed" },
+  "regime.stance.Unknown":      { es: "Desconocido", en: "Unknown" },
   "regime.help.RiskOn":         {
     es: "Entorno favorable: la corriente está a favor. Las señales de compra tienen viento de cola.",
     en: "Favorable environment: the current is with you. Buy signals have a tailwind.",
@@ -797,42 +932,6 @@ const T: Record<string, { es: string; en: string }> = {
   "setup.Hold.desc":            { es: "Sin sesgo claro",                                     en: "No clear bias" },
   "setup.Avoid.desc":           { es: "Algún factor negativo dominante",                     en: "Some dominant negative factor" },
   "setup.StrongAvoid.desc":     { es: "Múltiples alertas — evitar entrada",                  en: "Multiple red flags — avoid entry" },
-  // Short mode (inverse V3): same tokens, short-oriented copy
-  "setup.short.StrongBuy":      { es: "Strong Short", en: "Strong Short" },
-  "setup.short.Buy":            { es: "Short", en: "Short" },
-  "setup.short.Accumulate":     { es: "Mild Short", en: "Mild Short" },
-  "setup.short.Watch":          { es: "Watch", en: "Watch" },
-  "setup.short.Hold":           { es: "Hold", en: "Hold" },
-  "setup.short.Avoid":          { es: "Avoid Short", en: "Avoid Short" },
-  "setup.short.StrongAvoid":    { es: "Strong Avoid Short", en: "Strong Avoid Short" },
-  "setup.short.StrongBuy.desc": {
-    es: "Setup short fuerte — forecast débil, valoración cara y/o técnicos bajistas alineados",
-    en: "Strong short setup — weak forecast, rich valuation and/or bearish technicals aligned",
-  },
-  "setup.short.Buy.desc": {
-    es: "Buen candidato short — la mayoría de factores favorecen la baja",
-    en: "Solid short candidate — most factors favor the downside",
-  },
-  "setup.short.Accumulate.desc": {
-    es: "Short tentativo — falta alguna confirmación",
-    en: "Tentative short — still missing confirmation",
-  },
-  "setup.short.Watch.desc": {
-    es: "En radar short — no actuar todavía",
-    en: "On short radar — don't act yet",
-  },
-  "setup.short.Hold.desc": {
-    es: "Sin sesgo short claro",
-    en: "No clear short bias",
-  },
-  "setup.short.Avoid.desc": {
-    es: "Poco atractivo para short — factores mixtos o favorables al long",
-    en: "Poor short — mixed or long-friendly factors",
-  },
-  "setup.short.StrongAvoid.desc": {
-    es: "No short — setup largo fuerte o downside limitado",
-    en: "Do not short — strong long setup or limited downside",
-  },
   "col.decision.tooltip":       {
     es: "Recomendación final del screener. Combina el score con reglas de protección: si el precio ya superó el target de analistas (gap ≤ 0), o la confianza es baja, o el score es < 8 → Avoid aunque la empresa sea excelente.",
     en: "Screener's final recommendation. Combines score with safety rules: if price already exceeds analyst target (gap ≤ 0), or confidence is low, or score is < 8 → Avoid even if the company is excellent.",
@@ -859,6 +958,22 @@ const T: Record<string, { es: string; en: string }> = {
   "reason.watch":               {
     es: "Score moderado ({cs}). Hay algo de momentum pero no es suficientemente fuerte para comprar hoy.",
     en: "Moderate score ({cs}). There is some momentum but not strong enough to buy today.",
+  },
+  "reason.watch.regime":        {
+    es: "Score moderado ({cs}) después de considerar las cuatro dimensiones. Hay señales, pero todavía no justifican actuar.",
+    en: "Moderate score ({cs}) after considering all four dimensions. Signals exist, but they do not yet justify acting.",
+  },
+  "reason.act.regime":          {
+    es: "Score final {cs}/110 y descuento de {gap}% al target, después de incorporar el contexto de mercado.",
+    en: "Final score {cs}/110 and a {gap}% discount to target after incorporating market context.",
+  },
+  "reason.act.noTarget.regime": {
+    es: "Score final {cs}/110 después de incorporar el contexto de mercado, aunque sin un target de analistas usable.",
+    en: "Final score {cs}/110 after incorporating market context, though without a usable analyst target.",
+  },
+  "reason.avoid.score.regime":  {
+    es: "Score final bajo ({cs}/110) después de considerar fundamentales, técnico, pronóstico y contexto de mercado.",
+    en: "Low final score ({cs}/110) after considering fundamentals, technicals, forecast, and market context.",
   },
   "reason.avoid.gap":           {
     es: "El precio actual ya superó el target de analistas ({gap}%). El descuento ya se consumió — entrar ahora sería comprar premium.",
@@ -893,7 +1008,14 @@ const T: Record<string, { es: string; en: string }> = {
   "col.rec":                    { es: "Rec.", en: "Rec." },
   "col.sector":                 { es: "Sector", en: "Sector" },
   "col.score.tooltip":          { es: "Score compuesto", en: "Composite score" },
-  "col.trio.tooltip":           { es: "Fundamentals · Técnico · Pronóstico", en: "Fundamentals · Technical · Forecast" },
+  "col.trio.tooltip":           {
+    es: "F · T · Fc · R: fundamentales, técnico, pronóstico y contexto de mercado. R aplica sólo a acciones V3; ETF y cripto siguen con evaluación técnica.",
+    en: "F · T · Fc · R: fundamentals, technicals, forecast, and market context. R applies only to V3 stocks; ETFs and crypto remain technical-only.",
+  },
+  "col.trio3.tooltip":          {
+    es: "Fundamentales · Técnico · Pronóstico",
+    en: "Fundamentals · Technical · Forecast",
+  },
 
   // ── Empty / loading states ──────────────────────────────────────────────
   "empty.loading":              { es: "Cargando datos de mercado…", en: "Loading market data…" },
@@ -958,6 +1080,51 @@ const T: Record<string, { es: string; en: string }> = {
   "analysis.technical":         { es: "Técnico", en: "Technical" },
   "analysis.forecast":          { es: "Pronóstico", en: "Forecast" },
   "analysis.noData":            { es: "Sin datos", en: "No data" },
+  "analysis.marketContext.title": { es: "Contexto de mercado", en: "Market context" },
+  "analysis.marketContext.baseShort": { es: "Base V3 (3D)", en: "V3 base (3D)" },
+  "analysis.marketContext.contextShort": { es: "Contexto", en: "Context" },
+  "analysis.marketContext.finalShort": { es: "Final", en: "Final" },
+  "analysis.marketContext.explainer": {
+    es: "Mide si el perfil del activo —calidad, valoración, beta, sector y extensión— encaja con el entorno actual. No predice la dirección del mercado.",
+    en: "Measures whether the asset profile—quality, valuation, beta, sector, and extension—fits the current environment. It does not predict market direction.",
+  },
+  "analysis.marketContext.status.included": { es: "Incluido", en: "Included" },
+  "analysis.marketContext.status.disabled": {
+    es: "Desactivado — score calculado con 3 dimensiones",
+    en: "Disabled — score calculated with 3 dimensions",
+  },
+  "analysis.marketContext.status.unavailable": {
+    es: "No disponible — falta una lectura confiable del mercado o datos suficientes del activo",
+    en: "Unavailable — no reliable market reading or insufficient asset data",
+  },
+  "analysis.marketContext.status.notApplicable": { es: "No aplica", en: "Not applicable" },
+  "analysis.marketContext.bucket.favorable": { es: "Favorable", en: "Favorable" },
+  "analysis.marketContext.bucket.neutral": { es: "Neutral", en: "Neutral" },
+  "analysis.marketContext.bucket.adverse": { es: "En contra", en: "Adverse" },
+  "analysis.marketContext.impact.long.raised": {
+    es: "El contexto elevó el score final en {impact} puntos.",
+    en: "Market context raised the final score by {impact} points.",
+  },
+  "analysis.marketContext.impact.long.reduced": {
+    es: "El contexto redujo el score final en {impact} puntos.",
+    en: "Market context reduced the final score by {impact} points.",
+  },
+  "analysis.marketContext.impact.long.unchanged": {
+    es: "El contexto no modificó el score final.",
+    en: "Market context did not change the final score.",
+  },
+  "analysis.marketContext.impact.short.raised": {
+    es: "El contexto fortaleció el score de la tesis bajista en {impact} puntos.",
+    en: "Market context strengthened the bearish-thesis score by {impact} points.",
+  },
+  "analysis.marketContext.impact.short.reduced": {
+    es: "El contexto redujo el respaldo a la tesis bajista en {impact} puntos.",
+    en: "Market context reduced support for the bearish thesis by {impact} points.",
+  },
+  "analysis.marketContext.impact.short.unchanged": {
+    es: "El contexto no modificó el respaldo a la tesis bajista.",
+    en: "Market context did not change support for the bearish thesis.",
+  },
 
   // ── History chart ───────────────────────────────────────────────────────
   "history.title":              { es: "Historia del score", en: "Score history" },

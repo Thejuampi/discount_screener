@@ -17,8 +17,9 @@ use crate::fetcher::{
     asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready, YahooClient,
 };
 use crate::opportunity_v3::{
-    composite_score_v3, decision_state_v3, invert_bucket, invert_composite, score_forecast_v3,
-    score_fundamentals_v3, score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
+    composite_score_v3, composite_score_v3_ext, composite_score_v3_short_ext, decision_state_v3,
+    invert_bucket, invert_composite, score_forecast_v3, score_fundamentals_v3,
+    score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
 };
 use crate::profiles::{compose_universe, profile_definitions, profile_symbols};
 use crate::state::AppState;
@@ -32,6 +33,32 @@ const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
 
 // ── Response types ────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RegimeScoreStatus {
+    Included,
+    Disabled,
+    Unavailable,
+    NotApplicable,
+}
+
+fn resolve_regime_score_status(
+    model: ScoringModel,
+    is_equity: bool,
+    toggle_enabled: bool,
+    policy_available: bool,
+    regime_score: Option<i32>,
+) -> RegimeScoreStatus {
+    if model == ScoringModel::AggressiveV2 || !is_equity {
+        RegimeScoreStatus::NotApplicable
+    } else if !toggle_enabled {
+        RegimeScoreStatus::Disabled
+    } else if !policy_available || regime_score.is_none() {
+        RegimeScoreStatus::Unavailable
+    } else {
+        RegimeScoreStatus::Included
+    }
+}
+
 #[derive(Serialize)]
 pub struct OpportunityRow {
     #[serde(flatten)]
@@ -40,11 +67,17 @@ pub struct OpportunityRow {
     pub fundamentals_score: Option<i32>,
     pub technical_score: Option<i32>,
     pub forecast_score: Option<i32>,
+    /// 4th V3 bucket: fit with active market-regime policy (null if off/unavailable).
+    pub regime_score: Option<i32>,
     pub composite_score: i32,
+    /// Classic 3-bucket V3 composite (debug / tooltip parity).
+    pub composite_score_base: i32,
     pub decision: &'static str, // "Act" | "Watch" | "Avoid"
     pub fundamentals_signals: Vec<String>,
     pub technical_signals: Vec<String>,
     pub forecast_signals: Vec<String>,
+    pub regime_signals: Vec<String>,
+    pub regime_status: RegimeScoreStatus,
     // DCF from SEC EDGAR (cents/share, null = not yet computed)
     pub dcf_value_cents: Option<i64>,
     // Insider activity (Form 4, 90-day window)
@@ -91,6 +124,25 @@ pub struct UniverseProfileStatus {
 
 #[tauri::command]
 pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
+    use crate::regime::{score_regime_fit, RegimeScoringPolicy, ScoreSide};
+    use std::sync::atomic::Ordering;
+
+    let apply_regime = state.apply_regime_scoring.load(Ordering::Relaxed);
+    // Never compute regime inline here — that path hits Yahoo/CNN and would block the
+    // opportunity list (polled every few seconds). Use cache only; RegimeBanner / get_market_regime
+    // warm the cache in the background.
+    let regime_snapshot = if apply_regime {
+        state.regime_cache.get()
+    } else {
+        None
+    };
+    let policy_long = regime_snapshot
+        .as_ref()
+        .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Long));
+    let policy_short = regime_snapshot
+        .as_ref()
+        .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Short));
+
     let screener = state.screener.lock().unwrap();
     let rows = screener.candidate_rows();
     let benchmarks = compute_sector_benchmarks(&rows);
@@ -107,6 +159,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
             let model = ScoringModel::parse(&screener.scoring_model);
             let dcf_analysis = screener.dcf_analyses.get(&row.symbol);
+            let equity = !is_crypto(row.symbol.as_str()) && !is_etf(row.symbol.as_str());
             let (
                 fund_score,
                 fund_signals,
@@ -115,8 +168,12 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 tech_breakdown,
                 fore_score,
                 fore_signals,
+                regime_score,
+                regime_signals,
                 composite,
+                composite_base,
                 decision,
+                regime_status,
             ) = match model {
                 ScoringModel::AggressiveV2 => {
                     let (fs, fsig) = score_fundamentals_v2(&row, bench);
@@ -134,33 +191,91 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                         tech_only,
                         ts,
                     );
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        None,
+                        vec![],
+                        comp,
+                        comp,
+                        dec,
+                        RegimeScoreStatus::NotApplicable,
+                    )
                 }
                 ScoringModel::AggressiveV3 => {
-                    // Pure Android V3 — single daily chart summary only (no multi-TF blend).
                     let (fs, fsig) = score_fundamentals_v3(&row);
                     let (ts, tsig) = score_opportunity_technicals_v3(daily);
-                    // Multi-TF breakdown is still computed for the technical detail panel,
-                    // but does NOT enter the opportunity composite / ranking.
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
                     let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
-                    let comp = composite_score_v3(fs, ts, fr, row.beta_millis);
+                    let base = composite_score_v3(fs, ts, fr, row.beta_millis);
+                    let (rs, rsig, haircut_mult) = if apply_regime && equity {
+                        if let Some(ref pol) = policy_long {
+                            let (s, sig) = score_regime_fit(&row, daily, pol);
+                            (s, sig, pol.beta_haircut_mult)
+                        } else {
+                            (None, vec![], 1.0)
+                        }
+                    } else {
+                        (None, vec![], 1.0)
+                    };
+                    let status = resolve_regime_score_status(
+                        model,
+                        equity,
+                        apply_regime,
+                        policy_long.is_some(),
+                        rs,
+                    );
+                    let comp = if status == RegimeScoreStatus::Included {
+                        composite_score_v3_ext(fs, ts, fr, rs, row.beta_millis, haircut_mult)
+                    } else {
+                        base
+                    };
                     let dec = decision_state_v3(comp);
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs, fsig, ts, tsig, tb, fr, frsig, rs, rsig, comp, base, dec, status,
+                    )
                 }
                 ScoringModel::ShortV3 => {
-                    // Pure inverse of Aggressive V3: invert buckets + final composite.
-                    let (fs, fsig) = score_fundamentals_v3(&row);
-                    let (ts, tsig) = score_opportunity_technicals_v3(daily);
+                    let (fs0, fsig) = score_fundamentals_v3(&row);
+                    let (ts0, tsig) = score_opportunity_technicals_v3(daily);
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
-                    let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
-                    let long_comp = composite_score_v3(fs, ts, fr, row.beta_millis);
-                    let fs = invert_bucket(fs);
-                    let ts = invert_bucket(ts);
-                    let fr = invert_bucket(fr);
-                    let comp = invert_composite(long_comp);
+                    let (fr0, frsig) = score_forecast_v3(&row, dcf_analysis);
+                    let (rs, rsig, haircut_mult) = if apply_regime && equity {
+                        if let Some(ref pol) = policy_short {
+                            let (s, sig) = score_regime_fit(&row, daily, pol);
+                            (s, sig, pol.beta_haircut_mult)
+                        } else {
+                            (None, vec![], 1.0)
+                        }
+                    } else {
+                        (None, vec![], 1.0)
+                    };
+                    let long_base = composite_score_v3(fs0, ts0, fr0, row.beta_millis);
+                    let fs = invert_bucket(fs0);
+                    let ts = invert_bucket(ts0);
+                    let fr = invert_bucket(fr0);
+                    let base = invert_composite(long_base);
+                    let status = resolve_regime_score_status(
+                        model,
+                        equity,
+                        apply_regime,
+                        policy_short.is_some(),
+                        rs,
+                    );
+                    let comp = if status == RegimeScoreStatus::Included {
+                        composite_score_v3_short_ext(fs, ts, fr, rs, row.beta_millis, haircut_mult)
+                    } else {
+                        base
+                    };
                     let dec = decision_state_v3(comp);
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs, fsig, ts, tsig, tb, fr, frsig, rs, rsig, comp, base, dec, status,
+                    )
                 }
             };
             let sym_str = row.symbol.as_str();
@@ -247,11 +362,15 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 fundamentals_score: fund_score,
                 technical_score: tech_score,
                 forecast_score: fore_score,
+                regime_score,
                 composite_score: composite,
+                composite_score_base: composite_base,
                 decision,
                 fundamentals_signals: fund_signals,
                 technical_signals: tech_signals,
                 forecast_signals: fore_signals,
+                regime_signals,
+                regime_status,
                 dcf_value_cents: dcf,
                 insider_net_shares_90d: ins_net,
                 insider_buy_count: ins_buy,
@@ -265,6 +384,19 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             }
         })
         .collect()
+}
+
+#[tauri::command]
+pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
+    use std::sync::atomic::Ordering;
+    state.apply_regime_scoring.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool {
+    use std::sync::atomic::Ordering;
+    state.apply_regime_scoring.store(enabled, Ordering::Relaxed);
+    enabled
 }
 
 #[tauri::command]
@@ -768,11 +900,50 @@ fn needs_enrichment_retry(
 mod feed_coordinator_tests {
     use super::{
         batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
-        ingest_fetch_result, needs_enrichment_retry, symbol_state_enrichment_complete,
-        RefreshOutcome,
+        ingest_fetch_result, needs_enrichment_retry, resolve_regime_score_status,
+        symbol_state_enrichment_complete, RefreshOutcome, RegimeScoreStatus,
     };
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
+    use crate::opportunity_v3::ScoringModel;
+
+    #[test]
+    fn regime_row_status_distinguishes_all_four_states_and_keeps_zero_included() {
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, true, true, Some(0)),
+            RegimeScoreStatus::Included
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, false, false, None),
+            RegimeScoreStatus::Disabled
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::ShortV3, true, true, false, None),
+            RegimeScoreStatus::Unavailable
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, true, true, None),
+            RegimeScoreStatus::Unavailable
+        );
+        for model in [ScoringModel::AggressiveV2] {
+            assert_eq!(
+                resolve_regime_score_status(model, true, true, true, Some(25)),
+                RegimeScoreStatus::NotApplicable
+            );
+        }
+        for equity in [false] {
+            assert_eq!(
+                resolve_regime_score_status(
+                    ScoringModel::AggressiveV3,
+                    equity,
+                    true,
+                    true,
+                    Some(25)
+                ),
+                RegimeScoreStatus::NotApplicable
+            );
+        }
+    }
 
     #[test]
     fn shared_yahoo_cooldown_is_applied_once_to_the_retry_batch() {

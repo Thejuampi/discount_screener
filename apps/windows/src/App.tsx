@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { OpportunityList } from "./components/OpportunityList";
 import { DetailPanel } from "./components/DetailPanel";
 import { AlertsPanel } from "./components/AlertsPanel";
@@ -24,24 +24,18 @@ import { useT } from "./i18n";
 import { useTheme } from "./theme";
 import { useSignalAlerts } from "./useSignalAlerts";
 import { useEmailNotifications } from "./useEmailNotifications";
+import { getScoringPresentation, isScoringModelId, type ScoringModelId } from "./scoringPresentation";
+import { warmMarketContext } from "./marketContextWarmup";
 import "./App.css";
 
 const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
 const SCORING_STORAGE_KEY = "ds_scoring_model";
-const SCORING_MODELS = ["aggressive_v2", "aggressive_v3", "short_v3"] as const;
-type ScoringModelId = (typeof SCORING_MODELS)[number];
-
-function isScoringModelId(value: string | null): value is ScoringModelId {
-  return value === "aggressive_v2" || value === "aggressive_v3" || value === "short_v3";
-}
-
+const REGIME_SCORING_KEY = "ds_regime_scoring";
 export default function App() {
   const { t } = useT();
   const { theme, setTheme } = useTheme();
 
   const [rows, setRows] = useState<OpportunityRow[]>([]);
-  useSignalAlerts(rows);
-  useEmailNotifications(rows);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showBacktest, setShowBacktest] = useState(false);
@@ -76,10 +70,21 @@ export default function App() {
     const saved = localStorage.getItem("ds_view_mode");
     return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
   });
-  const [scoringModel, setScoringModel] = useState<string>(() => {
+  const [scoringModel, setScoringModel] = useState<ScoringModelId>(() => {
     const saved = localStorage.getItem(SCORING_STORAGE_KEY);
     return isScoringModelId(saved) ? saved : "aggressive_v3";
   });
+  const [regimeScoring, setRegimeScoring] = useState(() => {
+    const saved = localStorage.getItem(REGIME_SCORING_KEY);
+    return saved === null ? true : saved === "1";
+  });
+  const [modelReady, setModelReady] = useState(false);
+  const scoringModelRef = useRef(scoringModel);
+  const requestedModelRef = useRef(scoringModel);
+  const modelSwitchingRef = useRef(false);
+  const dataGenerationRef = useRef(0);
+  useSignalAlerts(rows, scoringModel);
+  useEmailNotifications(rows, scoringModel);
   const handleViewModeChange = (v: ViewMode) => {
     setViewMode(v);
     localStorage.setItem("ds_view_mode", v);
@@ -98,25 +103,10 @@ export default function App() {
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
     api.listUniverseProfiles().then(setUniverseProfiles).catch(console.error);
-    // Restore preferred scoring model: localStorage wins if set, else backend default.
-    const saved = localStorage.getItem(SCORING_STORAGE_KEY);
-    if (isScoringModelId(saved)) {
-      api
-        .setScoringModel(saved)
-        .then((m) => {
-          setScoringModel(m);
-          localStorage.setItem(SCORING_STORAGE_KEY, m);
-        })
-        .catch(console.error);
-    } else {
-      api.getScoringModel().then((m) => {
-        setScoringModel(m);
-        localStorage.setItem(SCORING_STORAGE_KEY, m);
-      }).catch(console.error);
-    }
+    void warmMarketContext(api.getMarketRegime);
   }, []);
 
-  const isShortMode = scoringModel === "short_v3";
+  const scoringPresentation = getScoringPresentation(scoringModel);
 
   const toggleAutostart = async () => {
     const next = !autostartOn;
@@ -124,11 +114,16 @@ export default function App() {
     catch (e) { console.error(e); }
   };
 
+  // The callback reads mutable coordination refs only when invoked, never during render.
+  // eslint-disable-next-line react-hooks/refs
   const refresh = useMemo(() => singleFlight(async () => {
+    if (modelSwitchingRef.current) return;
+    const generation = dataGenerationRef.current;
     const [opportunities, status] = await Promise.allSettled([
       api.getOpportunities(),
       api.getFeedStatus(),
     ]);
+    if (generation !== dataGenerationRef.current || modelSwitchingRef.current) return;
     if (opportunities.status === "fulfilled") {
       setRows(opportunities.value);
     } else {
@@ -146,15 +141,87 @@ export default function App() {
     }
   }), []);
 
-  const selectScoringModel = async (next: ScoringModelId) => {
-    if (next === scoringModel) return;
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      const saved = localStorage.getItem(SCORING_STORAGE_KEY);
+      try {
+        const raw = isScoringModelId(saved) ? await api.setScoringModel(saved) : await api.getScoringModel();
+        if (!isScoringModelId(raw)) throw new Error(`Invalid scoring model from backend: ${raw}`);
+        if (cancelled) return;
+        scoringModelRef.current = raw;
+        requestedModelRef.current = raw;
+        setScoringModel(raw);
+        localStorage.setItem(SCORING_STORAGE_KEY, raw);
+      } catch (error) {
+        console.error(error);
+      }
+      // Regime toggle is best-effort — must not block modelReady / feed restore.
+      try {
+        const wantRegime = localStorage.getItem(REGIME_SCORING_KEY);
+        const enabled = wantRegime === null ? true : wantRegime === "1";
+        const backendRegime = await api.setRegimeScoringEnabled(enabled);
+        if (!cancelled) {
+          setRegimeScoring(backendRegime);
+          localStorage.setItem(REGIME_SCORING_KEY, backendRegime ? "1" : "0");
+        }
+      } catch (error) {
+        console.error("regime scoring toggle unavailable", error);
+      } finally {
+        if (!cancelled) setModelReady(true);
+      }
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleRegimeScoring = async () => {
+    const next = !regimeScoring;
     try {
-      const m = await api.setScoringModel(next);
-      setScoringModel(m);
-      localStorage.setItem(SCORING_STORAGE_KEY, m);
-      refresh();
+      const enabled = await api.setRegimeScoringEnabled(next);
+      setRegimeScoring(enabled);
+      localStorage.setItem(REGIME_SCORING_KEY, enabled ? "1" : "0");
+      const nextRows = await api.getOpportunities();
+      setRows(nextRows);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const selectScoringModel = async (next: ScoringModelId) => {
+    requestedModelRef.current = next;
+    if (modelSwitchingRef.current || next === scoringModelRef.current) return;
+    modelSwitchingRef.current = true;
+    const generation = ++dataGenerationRef.current;
+    try {
+      let backendModel = scoringModelRef.current;
+      while (true) {
+        const target = requestedModelRef.current;
+        if (target !== backendModel) {
+          const response = await api.setScoringModel(target);
+          if (!isScoringModelId(response) || response !== target) {
+            throw new Error(`Backend rejected scoring model ${target}: ${response}`);
+          }
+          backendModel = target;
+        }
+        if (requestedModelRef.current !== target) continue;
+        if (target === scoringModelRef.current) break;
+        const [nextRows, status] = await Promise.all([api.getOpportunities(), api.getFeedStatus()]);
+        if (requestedModelRef.current !== target) continue;
+        scoringModelRef.current = target;
+        setRows(nextRows);
+        setScoringModel(target);
+        setSymbolsLoaded(status.symbols_loaded);
+        setSymbolsTotal(status.symbols_total);
+        localStorage.setItem(SCORING_STORAGE_KEY, target);
+        break;
+      }
+    } catch (e) {
+      console.error(e);
+      requestedModelRef.current = scoringModelRef.current;
+      try { await api.setScoringModel(scoringModelRef.current); } catch (rollbackError) { console.error(rollbackError); }
+    } finally {
+      if (generation === dataGenerationRef.current) modelSwitchingRef.current = false;
     }
   };
 
@@ -178,6 +245,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!modelReady) return;
     const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY) || "sp500";
     // Apply saved universe (starts feed workers). startFeed is a no-op if already running.
     api
@@ -195,7 +263,7 @@ export default function App() {
       .finally(() => {
         void refresh();
       });
-  }, [refresh]);
+  }, [refresh, modelReady]);
 
   // Fast poll while the feed is still filling rows; slower once full.
   useEffect(() => {
@@ -270,7 +338,7 @@ export default function App() {
             onQueryChange={setFilter}
           />
           <div
-            className={`scoring-segment${isShortMode ? " scoring-segment--short" : ""}`}
+            className={`scoring-segment${scoringPresentation.isShort ? " scoring-segment--short" : ""}`}
             role="radiogroup"
             aria-label={t("scoring.group")}
           >
@@ -297,6 +365,17 @@ export default function App() {
               );
             })}
           </div>
+          {(scoringModel === "aggressive_v3" || scoringModel === "short_v3") && (
+            <button
+              type="button"
+              className={`scoring-segment__btn${regimeScoring ? " is-active" : ""}`}
+              title={t("scoring.regime.hint")}
+              onClick={() => void toggleRegimeScoring()}
+              style={{ marginLeft: 4 }}
+            >
+              {regimeScoring ? t("scoring.regime.on") : t("scoring.regime.off")}
+            </button>
+          )}
           <select
             className="filter-select"
             value={confidenceFilter}
@@ -380,6 +459,7 @@ export default function App() {
               symbolsTotal={symbolsTotal}
               onNavigate={handleViewModeChange}
               onOpenSymbol={openSymbol}
+              scoringModel={scoringModel}
             />
           </div>
         ) : viewMode === "settings" ? (
@@ -393,10 +473,10 @@ export default function App() {
           <>
             <div className={`list-pane ${selectedSymbol ? "narrow" : ""}`}>
               {!selectedSymbol && <RegimeBanner />}
-              {isShortMode && (
+              {scoringPresentation.banner && (
                 <div className="scoring-mode-banner scoring-mode-banner--short" role="status">
-                  <span className="scoring-mode-banner__tag">{t("scoring.banner.short.tag")}</span>
-                  <span className="scoring-mode-banner__text">{t("scoring.banner.short")}</span>
+                  <span className="scoring-mode-banner__tag">{t(scoringPresentation.banner.tagKey)}</span>
+                  <span className="scoring-mode-banner__text">{t(scoringPresentation.banner.textKey)}</span>
                 </div>
               )}
               <OpportunityList
@@ -414,6 +494,7 @@ export default function App() {
                 <DetailPanel
                   symbol={selectedSymbol}
                   row={rows.find((r) => r.symbol === selectedSymbol) ?? null}
+                  scoringModel={scoringModel}
                   profile={profile}
                   onProfileChange={handleProfileChange}
                   onClose={() => setSelectedSymbol(null)}
@@ -438,6 +519,7 @@ export default function App() {
             <AdvisorPanel
               rows={rows}
               onOpenSymbol={openSymbol}
+              scoringModel={scoringModel}
             />
           </div>
         )}

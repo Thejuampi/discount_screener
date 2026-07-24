@@ -4,6 +4,11 @@ import type {
   ChartSummary, TechnicalBreakdown, TrendState, TfAlignment, Divergence,
 } from "../api";
 import { useT } from "../i18n";
+import {
+  getScoringPresentation,
+  type ScoringModelId,
+  type ScoringPresentationState,
+} from "../scoringPresentation";
 
 // ── Glossary ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +83,7 @@ function buildTechnicalSummary(
   _hourly: ChartSummary | null,
   breakdown: TechnicalBreakdown | null,
   t: TFn,
+  presentation: ScoringPresentationState,
 ): TechnicalSummary {
   const signals: KeySignal[] = [];
 
@@ -302,19 +308,18 @@ function buildTechnicalSummary(
   }
 
   // ── Narrative + action hint (i18n) ─────────────────────────────────────────
-  const narrativeKeyMap: Record<TechnicalSummary["verdict"], { n: string; a: string }> = {
-    "Strong Bullish":     { n: "ts.narrative.strongBull",   a: "ts.action.strongBull" },
-    "Mildly Bullish":     { n: "ts.narrative.mildBull",     a: "ts.action.mildBull" },
-    "Neutral":            { n: "ts.narrative.neutral",      a: "ts.action.neutral" },
-    "Mildly Bearish":     { n: "ts.narrative.mildBear",     a: "ts.action.mildBear" },
-    "Strong Bearish":     { n: "ts.narrative.strongBear",   a: "ts.action.strongBear" },
-    "Insufficient data":  { n: "ts.narrative.insufficient", a: "ts.action.insufficient" },
+  const narrativeKeyMap: Record<TechnicalSummary["verdict"], string> = {
+    "Strong Bullish":     "ts.narrative.strongBull",
+    "Mildly Bullish":     "ts.narrative.mildBull",
+    "Neutral":            "ts.narrative.neutral",
+    "Mildly Bearish":     "ts.narrative.mildBear",
+    "Strong Bearish":     "ts.narrative.strongBear",
+    "Insufficient data":  "ts.narrative.insufficient",
   };
-  const nk = narrativeKeyMap[verdict];
   return {
     verdict, score, confidence,
-    narrative: t(nk.n),
-    action_hint: t(nk.a),
+    narrative: t(narrativeKeyMap[verdict]),
+    action_hint: t(presentation.technicalActionKey(verdict)),
     positives, negatives, contradictions,
   };
 }
@@ -357,6 +362,7 @@ interface Props {
   breakdown: TechnicalBreakdown | null;
   profile: Profile;
   onProfileChange: (p: Profile) => void;
+  scoringModel: ScoringModelId;
 }
 
 /** Picks the 3 chart summaries that correspond to the active profile. */
@@ -410,9 +416,10 @@ const ALIGN_LABEL: Record<TfAlignment, { label: string; color: string; emoji: st
 };
 
 export function TechnicalAnalysisPanel({
-  weekly, daily, hourly, monthly, breakdown, profile, onProfileChange,
+  weekly, daily, hourly, monthly, breakdown, profile, onProfileChange, scoringModel,
 }: Props) {
   const { t } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const [showGlossary, setShowGlossary] = useState(false);
   if (!daily && !weekly && !hourly && !monthly) return null;
 
@@ -435,7 +442,7 @@ export function TechnicalAnalysisPanel({
     hourly_trend: bottomTrend,
   } : null;
 
-  const summary = buildTechnicalSummary(top, mid, bottom, profileBreakdown, t);
+  const summary = buildTechnicalSummary(top, mid, bottom, profileBreakdown, t, presentation);
 
   return (
     <div className="info-section technical-panel">
@@ -450,7 +457,7 @@ export function TechnicalAnalysisPanel({
       <ProfileSelector profile={profile} onChange={onProfileChange} />
 
       {/* ── Weighted summary (TOP) ── */}
-      <TechnicalSummaryBox summary={summary} />
+      <TechnicalSummaryBox summary={summary} presentation={presentation} />
 
       {profileBreakdown && (
         <div className="alignment-banner" style={{ borderColor: ALIGN_LABEL[profileBreakdown.alignment].color }}>
@@ -786,9 +793,18 @@ const VERDICT_STYLE: Record<TechnicalSummary["verdict"], { color: string; bg: st
   "Insufficient data":  { color: "#64748b", bg: "rgba(100,116,139,0.08)", emoji: "⏳" },
 };
 
-function TechnicalSummaryBox({ summary }: { summary: TechnicalSummary }) {
+function TechnicalSummaryBox({
+  summary,
+  presentation,
+}: {
+  summary: TechnicalSummary;
+  presentation: ScoringPresentationState;
+}) {
   const { t } = useT();
   const st = VERDICT_STYLE[summary.verdict];
+  const signals = presentation.technicalSignals(summary.positives, summary.negatives);
+  const supportingArrow = presentation.isShort ? "▼" : "▲";
+  const risksArrow = presentation.isShort ? "▲" : "▼";
   return (
     <div className="tech-summary" style={{ borderLeftColor: st.color, background: st.bg }}>
       {/* Headline */}
@@ -817,26 +833,26 @@ function TechnicalSummaryBox({ summary }: { summary: TechnicalSummary }) {
       )}
 
       {/* Top signals breakdown */}
-      {(summary.positives.length > 0 || summary.negatives.length > 0) && (
+      {(signals.supporting.length > 0 || signals.risks.length > 0) && (
         <div className="tech-signals-grid">
           <div className="tech-signals-col">
             <div className="signals-col-header" style={{ color: "var(--success)" }}>
-              ▲ {t("tech.proLabel")} ({summary.positives.length})
+              {supportingArrow} {t(signals.supportingLabelKey)} ({signals.supporting.length})
             </div>
-            {summary.positives.length === 0 ? (
-              <div className="signal-empty">{t("tech.noProSignals")}</div>
+            {signals.supporting.length === 0 ? (
+              <div className="signal-empty">{t(signals.noSupportingKey)}</div>
             ) : (
-              summary.positives.map((s, i) => <SignalRow key={i} sig={s} />)
+              signals.supporting.map((s, i) => <SignalRow key={i} sig={s} />)
             )}
           </div>
           <div className="tech-signals-col">
             <div className="signals-col-header" style={{ color: "var(--danger)" }}>
-              ▼ {t("tech.conLabel")} ({summary.negatives.length})
+              {risksArrow} {t(signals.risksLabelKey)} ({signals.risks.length})
             </div>
-            {summary.negatives.length === 0 ? (
-              <div className="signal-empty">{t("tech.noConSignals")}</div>
+            {signals.risks.length === 0 ? (
+              <div className="signal-empty">{t(signals.noRisksKey)}</div>
             ) : (
-              summary.negatives.map((s, i) => <SignalRow key={i} sig={s} />)
+              signals.risks.map((s, i) => <SignalRow key={i} sig={s} />)
             )}
           </div>
         </div>
