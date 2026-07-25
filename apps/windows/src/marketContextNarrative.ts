@@ -260,21 +260,15 @@ function buildEvidenceLine(
       });
     }
     case "Trend": {
-      const above50 = m.price != null && m.ema50 != null ? m.price > m.ema50 : null;
-      const above200 = m.price != null && m.ema200 != null ? m.price > m.ema200 : null;
-      if (above50 != null || above200 != null) {
-        // For long, support ≈ bullish trend; for short, support ≈ weak/bearish.
+      // Frame as environment fit — never restate EMA/MACD structure (Technical owns that).
+      if (side === "short") {
         return t(support
-          ? (side === "short"
-            ? "analysis.marketContext.evidence.Trend.bearish"
-            : "analysis.marketContext.evidence.Trend.bullish")
-          : (side === "short"
-            ? "analysis.marketContext.evidence.Trend.bullish"
-            : "analysis.marketContext.evidence.Trend.bearish"));
+          ? "analysis.marketContext.evidence.Trend.short.support"
+          : "analysis.marketContext.evidence.Trend.short.risk");
       }
       return t(support
-        ? "analysis.marketContext.evidence.Trend.support.fallback"
-        : "analysis.marketContext.evidence.Trend.risk.fallback");
+        ? "analysis.marketContext.evidence.Trend.long.support"
+        : "analysis.marketContext.evidence.Trend.long.risk");
     }
     case "Defensive": {
       const sector = m.sector ?? t("analysis.marketContext.metric.sectorUnknown");

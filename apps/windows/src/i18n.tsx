@@ -1087,8 +1087,8 @@ const T: Record<string, { es: string; en: string }> = {
   "analysis.marketContext.contextShort": { es: "Contexto", en: "Context" },
   "analysis.marketContext.finalShort": { es: "Final", en: "Final" },
   "analysis.marketContext.explainer": {
-    es: "Evalúa cuánto encajan la calidad, valuación, beta, sector y comportamiento del precio del activo con el entorno actual. El valor va de −100 a +100 y no predice la dirección del mercado. Su efecto sobre el score final se muestra en el resumen superior.",
-    en: "Evaluates how well the asset's quality, valuation, beta, sector, and price behavior fit the current environment. The value ranges from −100 to +100 and does not predict market direction. Its effect on the final score appears in the summary above.",
+    es: "Mide el encaje del activo con el entorno de mercado (calidad, valuación, beta, sector y riesgo de persecución). No es un análisis técnico: las EMAs, el MACD y el RSI detallados viven en Técnico.",
+    en: "Measures how well the asset fits the market environment (quality, valuation, beta, sector, and chase risk). It is not a technical readout: EMAs, MACD, and detailed RSI live under Technicals.",
   },
   "analysis.marketContext.impact.long.raised": {
     es: "El contexto elevó el score final en {impact} puntos.",

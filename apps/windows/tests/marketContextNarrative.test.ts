@@ -179,5 +179,23 @@ test("english long adverse uses Unfavorable pill", () => {
   });
   const narrative = buildMarketContextNarrative(view, baseDetail(), t);
   assert.equal(narrative.classificationLabel, "Unfavorable");
-  assert.match(narrative.evidence[0], /looks extended|Price looks extended/i);
+  assert.match(narrative.evidence[0], /chase risk|environment/i);
+});
+
+test("trend cause uses environment-fit copy and never restates EMAs", () => {
+  const t = tFor("es");
+  const view = createRegimePresentation({
+    scoring_model: "aggressive_v3",
+    asset_type: "stock",
+    regime_status: "Included",
+    regime_score: -18,
+    regime_causes: [{ factor: "Trend", effect: "Risk", contribution_bps: -3500 }],
+    composite_score_base: 40,
+    composite_score: 36,
+  });
+  const narrative = buildMarketContextNarrative(view, baseDetail(), t);
+  assert.equal(narrative.chips[0].label, "Alineación");
+  assert.match(narrative.evidence[0], /entorno actual recompensa|alinea/i);
+  assert.doesNotMatch(narrative.evidence[0], /EMA|MACD|RSI|death cross|bull market/i);
+  assert.doesNotMatch(narrative.evidence[0], /Tendencia débil|Tendencia alcista/i);
 });

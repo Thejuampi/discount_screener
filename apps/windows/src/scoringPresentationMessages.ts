@@ -27,7 +27,7 @@ export const SCORING_PRESENTATION_MESSAGES: Record<string, Record<ScoringLang, s
   "presentation.context.cause.Value": { es: "valoración relativa", en: "relative valuation" },
   "presentation.context.cause.OversoldQual": { es: "calidad con sobreventa", en: "oversold quality" },
   "presentation.context.cause.Extension": { es: "extensión del precio", en: "price extension" },
-  "presentation.context.cause.Trend": { es: "tendencia del precio", en: "price trend" },
+  "presentation.context.cause.Trend": { es: "alineación con el entorno", en: "environment alignment" },
   "presentation.context.cause.Defensive": { es: "sector defensivo", en: "defensive sector" },
   "presentation.context.cause.Growth": { es: "sector cíclico o de crecimiento", en: "growth or cyclical sector" },
   "presentation.context.cause.Liquidity": { es: "liquidez", en: "liquidity" },

@@ -4,8 +4,8 @@ export type MarketContextLang = "es" | "en";
 export const MARKET_CONTEXT_MESSAGES: Record<string, Record<MarketContextLang, string>> = {
   "analysis.marketContext.title": { es: "Contexto de mercado", en: "Market context" },
   "analysis.marketContext.tooltip": {
-    es: "Evalúa cuánto encajan la calidad, valuación, beta, sector y comportamiento del precio del activo con el entorno actual. El valor va de −100 a +100 y no predice la dirección del mercado. Su efecto sobre el score final se muestra en el resumen superior.",
-    en: "Evaluates how well the asset’s quality, valuation, beta, sector, and price behavior fit the current environment. The value ranges from −100 to +100 and does not predict market direction. Its effect on the final score appears in the summary above.",
+    es: "Mide el encaje del activo con el entorno de mercado (calidad, valuación, beta, sector y riesgo de persecución). No es un análisis técnico: las EMAs, el MACD y el RSI detallados viven en Técnico. El valor va de −100 a +100 y no predice la dirección del mercado. Su efecto sobre el score final se muestra arriba.",
+    en: "Measures how well the asset fits the market environment (quality, valuation, beta, sector, and chase risk). It is not a technical readout: EMAs, MACD, and detailed RSI live under Technicals. The value ranges from −100 to +100 and does not predict market direction. Its effect on the final score appears above.",
   },
   "analysis.marketContext.infoAria": {
     es: "Qué significa el contexto de mercado",
@@ -68,7 +68,7 @@ export const MARKET_CONTEXT_MESSAGES: Record<string, Record<MarketContextLang, s
   "analysis.marketContext.chip.Value": { es: "Valor", en: "Value" },
   "analysis.marketContext.chip.OversoldQual": { es: "Calidad + sobreventa", en: "Oversold quality" },
   "analysis.marketContext.chip.Extension": { es: "Extensión", en: "Extension" },
-  "analysis.marketContext.chip.Trend": { es: "Tendencia", en: "Trend" },
+  "analysis.marketContext.chip.Trend": { es: "Alineación", en: "Alignment" },
   "analysis.marketContext.chip.Defensive": { es: "Sector defensivo", en: "Defensive sector" },
   "analysis.marketContext.chip.Growth": { es: "Sector de crecimiento", en: "Growth sector" },
   "analysis.marketContext.chip.Liquidity": { es: "Liquidez", en: "Liquidity" },
@@ -155,52 +155,54 @@ export const MARKET_CONTEXT_MESSAGES: Record<string, Record<MarketContextLang, s
     en: "The price decline is not backed by enough financial quality.",
   },
   "analysis.marketContext.evidence.Extension.long.support": {
-    es: "El precio no luce extendido: {facts}.",
-    en: "Price does not look extended: {facts}.",
+    es: "Poco riesgo de persecución en este entorno ({facts}).",
+    en: "Low chase risk in this environment ({facts}).",
   },
   "analysis.marketContext.evidence.Extension.long.risk": {
-    es: "El precio luce extendido: {facts}.",
-    en: "Price looks extended: {facts}.",
+    es: "Mayor riesgo de persecución en este entorno ({facts}).",
+    en: "Higher chase risk in this environment ({facts}).",
   },
   "analysis.marketContext.evidence.Extension.long.support.fallback": {
-    es: "El precio no luce extendido frente al entorno actual.",
-    en: "Price does not look extended versus the current environment.",
+    es: "Poco riesgo de persecución respecto del entorno actual.",
+    en: "Low chase risk relative to the current environment.",
   },
   "analysis.marketContext.evidence.Extension.long.risk.fallback": {
-    es: "El precio luce extendido frente al entorno actual.",
-    en: "Price looks extended versus the current environment.",
+    es: "Mayor riesgo de persecución respecto del entorno actual.",
+    en: "Higher chase risk relative to the current environment.",
   },
   "analysis.marketContext.evidence.Extension.short.support": {
-    es: "La extensión del precio aumenta su vulnerabilidad: {facts}.",
-    en: "Price extension increases vulnerability: {facts}.",
+    es: "La extensión del activo favorece el short en este entorno ({facts}).",
+    en: "Asset extension favors the short in this environment ({facts}).",
   },
   "analysis.marketContext.evidence.Extension.short.risk": {
-    es: "El precio no muestra suficiente extensión para fortalecer el short: {facts}.",
-    en: "Price does not show enough extension to strengthen the short: {facts}.",
+    es: "La extensión del activo no alcanza para reforzar el short en este entorno ({facts}).",
+    en: "Asset extension is not enough to reinforce the short in this environment ({facts}).",
   },
   "analysis.marketContext.evidence.Extension.short.support.fallback": {
-    es: "La extensión del precio aumenta su vulnerabilidad.",
-    en: "Price extension increases vulnerability.",
+    es: "La extensión del activo favorece el short en este entorno.",
+    en: "Asset extension favors the short in this environment.",
   },
   "analysis.marketContext.evidence.Extension.short.risk.fallback": {
-    es: "El precio no muestra suficiente extensión para fortalecer el short.",
-    en: "Price does not show enough extension to strengthen the short.",
+    es: "La extensión del activo no alcanza para reforzar el short en este entorno.",
+    en: "Asset extension is not enough to reinforce the short in this environment.",
   },
-  "analysis.marketContext.evidence.Trend.bullish": {
-    es: "Tendencia alcista: precio por encima de EMA50 y EMA200.",
-    en: "Uptrend: price above the 50- and 200-day EMAs.",
+  // Trend factor = alignment of the name with what the *environment* rewards.
+  // Do not restate EMA/MACD structure — that belongs to the Technical card.
+  "analysis.marketContext.evidence.Trend.long.support": {
+    es: "La trayectoria del activo se alinea con lo que el entorno actual recompensa.",
+    en: "The asset’s trajectory aligns with what the current environment rewards.",
   },
-  "analysis.marketContext.evidence.Trend.bearish": {
-    es: "Tendencia débil: precio por debajo de EMA50 y EMA200.",
-    en: "Weak trend: price below the 50- and 200-day EMAs.",
+  "analysis.marketContext.evidence.Trend.long.risk": {
+    es: "La trayectoria del activo no se alinea con lo que el entorno actual recompensa.",
+    en: "The asset’s trajectory does not align with what the current environment rewards.",
   },
-  "analysis.marketContext.evidence.Trend.support.fallback": {
-    es: "La tendencia del precio acompaña el entorno actual.",
-    en: "Price trend aligns with the current environment.",
+  "analysis.marketContext.evidence.Trend.short.support": {
+    es: "La trayectoria del activo refuerza su encaje con la tesis bajista en este entorno.",
+    en: "The asset’s trajectory strengthens its fit with the bearish thesis in this environment.",
   },
-  "analysis.marketContext.evidence.Trend.risk.fallback": {
-    es: "La tendencia del precio no acompaña el entorno actual.",
-    en: "Price trend does not align with the current environment.",
+  "analysis.marketContext.evidence.Trend.short.risk": {
+    es: "La trayectoria del activo no aporta ventaja a la tesis bajista en este entorno.",
+    en: "The asset’s trajectory does not help the bearish thesis in this environment.",
   },
   "analysis.marketContext.evidence.Defensive": {
     es: "Sector defensivo: {sector} aporta estabilidad en este entorno.",
