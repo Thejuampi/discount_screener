@@ -64,9 +64,11 @@ context:
 
 ## Spec Change Log
 
+- 2026-07-24: Evidence-first market-context card wording. Backend emits typed `regime_causes` (top 3 by |contribution|) plus legacy `regime_signals`; presentation builds one summary sentence, ≤3 metric-backed evidence bullets, score+classification pill, and human chips. Explainer moved to ⓘ tooltip. Long uses Favorable/Neutral/Desfavorable; Short uses explicit short-oriented labels. Status distinguishes market-reading vs insufficient-asset data. Score math/weights/thresholds unchanged.
+
 ## Design Notes
 
-Primary visible terminology is **Market context / Contexto de mercado**; **Regime / Régimen** remains a secondary technical term. The score header uses the factual composition `Base V3 (3D) 46 · Context +5 · Final 51`. The card explains that fit compares company quality, valuation, beta, sector, and extension with the active environment; it does not predict market direction.
+Primary visible terminology is **Market context / Contexto de mercado**; **Regime / Régimen** remains a secondary technical term. The score header uses the factual composition `Base V3 (3D) 46 · Context +5 · Final 51`. The card body interprets the asset (summary + concrete metrics), not the internal model; the ⓘ tooltip explains the −100..+100 fit scale and that it is not a market-direction forecast. Implementation: `regime_fit.rs` (typed causes), `marketContextNarrative.ts` + `marketContextMessages.ts` (copy), `DetailPanel.tsx` (passive render).
 
 ## Verification
 

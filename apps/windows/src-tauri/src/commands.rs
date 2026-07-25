@@ -77,6 +77,10 @@ pub struct OpportunityRow {
     pub technical_signals: Vec<String>,
     pub forecast_signals: Vec<String>,
     pub regime_signals: Vec<String>,
+    /// Typed regime causes (preferred by the presentation layer).
+    pub regime_causes: Vec<crate::regime::RegimeCause>,
+    /// Why market context is unavailable when status is Unavailable.
+    pub regime_unavailable_reason: Option<crate::regime::MarketContextUnavailableReason>,
     pub regime_status: RegimeScoreStatus,
     // DCF from SEC EDGAR (cents/share, null = not yet computed)
     pub dcf_value_cents: Option<i64>,
@@ -129,10 +133,14 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
 
     let apply_regime = state.apply_regime_scoring.load(Ordering::Relaxed);
     // Never compute regime inline here — that path hits Yahoo/CNN and would block the
-    // opportunity list (polled every few seconds). Use cache only; RegimeBanner / get_market_regime
-    // warm the cache in the background.
+    // opportunity list (polled every few seconds). Use cache only (stale-while-revalidate);
+    // background worker + get_market_regime / toggle keep the cache warm.
     let regime_snapshot = if apply_regime {
-        state.regime_cache.get()
+        let snap = state.regime_cache.get();
+        if snap.is_none() || state.regime_cache.needs_refresh() {
+            crate::regime::request_regime_refresh(&state);
+        }
+        snap
     } else {
         None
     };
@@ -170,6 +178,8 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 fore_signals,
                 regime_score,
                 regime_signals,
+                regime_causes,
+                regime_unavailable_reason,
                 composite,
                 composite_base,
                 decision,
@@ -201,6 +211,8 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                         frsig,
                         None,
                         vec![],
+                        vec![],
+                        None,
                         comp,
                         comp,
                         dec,
@@ -213,15 +225,27 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
                     let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
                     let base = composite_score_v3(fs, ts, fr, row.beta_millis);
-                    let (rs, rsig, haircut_mult) = if apply_regime && equity {
+                    let (rs, rsig, rcauses, runavail, haircut_mult) = if apply_regime && equity {
                         if let Some(ref pol) = policy_long {
-                            let (s, sig) = score_regime_fit(&row, daily, pol);
-                            (s, sig, pol.beta_haircut_mult)
+                            let fit = score_regime_fit(&row, daily, pol);
+                            (
+                                fit.score,
+                                fit.signals,
+                                fit.causes,
+                                fit.unavailable_reason,
+                                pol.beta_haircut_mult,
+                            )
                         } else {
-                            (None, vec![], 1.0)
+                            (
+                                None,
+                                vec![],
+                                vec![],
+                                Some(crate::regime::MarketContextUnavailableReason::MarketReadingUnavailable),
+                                1.0,
+                            )
                         }
                     } else {
-                        (None, vec![], 1.0)
+                        (None, vec![], vec![], None, 1.0)
                     };
                     let status = resolve_regime_score_status(
                         model,
@@ -237,7 +261,21 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                     };
                     let dec = decision_state_v3(comp);
                     (
-                        fs, fsig, ts, tsig, tb, fr, frsig, rs, rsig, comp, base, dec, status,
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        rs,
+                        rsig,
+                        rcauses,
+                        runavail,
+                        comp,
+                        base,
+                        dec,
+                        status,
                     )
                 }
                 ScoringModel::ShortV3 => {
@@ -245,15 +283,27 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                     let (ts0, tsig) = score_opportunity_technicals_v3(daily);
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
                     let (fr0, frsig) = score_forecast_v3(&row, dcf_analysis);
-                    let (rs, rsig, haircut_mult) = if apply_regime && equity {
+                    let (rs, rsig, rcauses, runavail, haircut_mult) = if apply_regime && equity {
                         if let Some(ref pol) = policy_short {
-                            let (s, sig) = score_regime_fit(&row, daily, pol);
-                            (s, sig, pol.beta_haircut_mult)
+                            let fit = score_regime_fit(&row, daily, pol);
+                            (
+                                fit.score,
+                                fit.signals,
+                                fit.causes,
+                                fit.unavailable_reason,
+                                pol.beta_haircut_mult,
+                            )
                         } else {
-                            (None, vec![], 1.0)
+                            (
+                                None,
+                                vec![],
+                                vec![],
+                                Some(crate::regime::MarketContextUnavailableReason::MarketReadingUnavailable),
+                                1.0,
+                            )
                         }
                     } else {
-                        (None, vec![], 1.0)
+                        (None, vec![], vec![], None, 1.0)
                     };
                     let long_base = composite_score_v3(fs0, ts0, fr0, row.beta_millis);
                     let fs = invert_bucket(fs0);
@@ -274,7 +324,21 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                     };
                     let dec = decision_state_v3(comp);
                     (
-                        fs, fsig, ts, tsig, tb, fr, frsig, rs, rsig, comp, base, dec, status,
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        rs,
+                        rsig,
+                        rcauses,
+                        runavail,
+                        comp,
+                        base,
+                        dec,
+                        status,
                     )
                 }
             };
@@ -370,6 +434,8 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 technical_signals: tech_signals,
                 forecast_signals: fore_signals,
                 regime_signals,
+                regime_causes,
+                regime_unavailable_reason,
                 regime_status,
                 dcf_value_cents: dcf,
                 insider_net_shares_90d: ins_net,
@@ -396,6 +462,10 @@ pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
 pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool {
     use std::sync::atomic::Ordering;
     state.apply_regime_scoring.store(enabled, Ordering::Relaxed);
+    // Turning context on must not wait for the banner: warm/refresh regime data now.
+    if enabled {
+        crate::regime::request_regime_refresh(&state);
+    }
     enabled
 }
 

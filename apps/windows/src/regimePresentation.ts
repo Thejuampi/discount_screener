@@ -1,6 +1,10 @@
 import type {
   OpportunityRow,
+  RegimeCause,
+  RegimeCauseEffect,
+  RegimeCauseFactor,
   RegimeScoreStatus,
+  RegimeUnavailableReason,
 } from "./api";
 import type {
   DirectionalTone,
@@ -15,6 +19,8 @@ type RegimeRowLike = Pick<
   | "regime_scoring_enabled"
   | "regime_score"
   | "regime_signals"
+  | "regime_causes"
+  | "regime_unavailable_reason"
   | "composite_score_base"
   | "composite_score"
 > & {
@@ -34,7 +40,11 @@ export interface RegimePresentation {
   bucketKey: string;
   statusKey: string;
   impactKey: string;
+  /** Typed causes preferred by the narrative layer. */
+  typedCauses: RegimeCause[];
+  /** Legacy string causes (compat / tests). */
   causes: string[];
+  unavailableReason: RegimeUnavailableReason | null;
   composition: {
     base: string;
     context: string;
@@ -47,6 +57,22 @@ const VALID_STATUSES = new Set<RegimeScoreStatus>([
   "Disabled",
   "Unavailable",
   "NotApplicable",
+]);
+
+const KNOWN_FACTORS = new Set<string>([
+  "Quality",
+  "LowBeta",
+  "Value",
+  "OversoldQual",
+  "Extension",
+  "Trend",
+  "Defensive",
+  "Growth",
+  "Liquidity",
+  "GeneralFit",
+  "Neutral",
+  "RegimeFit",
+  "RegimeNeutral",
 ]);
 
 export function normalizeRegimeStatus(
@@ -76,6 +102,49 @@ export function normalizeRegimeStatus(
   return "Unavailable";
 }
 
+function parseLegacyFactor(tag: string): RegimeCauseFactor {
+  if (tag === "RegimeFit") return "GeneralFit";
+  if (tag === "RegimeNeutral") return "Neutral";
+  if (KNOWN_FACTORS.has(tag) && tag !== "RegimeFit" && tag !== "RegimeNeutral") {
+    return tag as RegimeCauseFactor;
+  }
+  return "Other";
+}
+
+/** Normalize a legacy `+Quality` / `−Extension` / `RegimeNeutral` string. */
+export function parseLegacySignal(signal: string): RegimeCause {
+  const cleaned = signal.replace(/^[+−–—-]\s*/, "").trim();
+  const negative = /^[-−–—]/.test(signal);
+  const neutral = cleaned === "RegimeNeutral" || cleaned === "Neutral";
+  const factor = parseLegacyFactor(cleaned);
+  const effect: RegimeCauseEffect = neutral
+    ? "Neutral"
+    : negative
+      ? "Risk"
+      : "Support";
+  return { factor, effect, contribution_bps: 0 };
+}
+
+export function normalizeRegimeCauses(row: RegimeRowLike): RegimeCause[] {
+  if (row.regime_causes && row.regime_causes.length > 0) {
+    return row.regime_causes.slice(0, 3).map((c) => {
+      const raw = String(c.factor);
+      let factor: RegimeCauseFactor;
+      if (raw === "RegimeFit" || raw === "GeneralFit") factor = "GeneralFit";
+      else if (raw === "RegimeNeutral" || raw === "Neutral") factor = "Neutral";
+      else if (KNOWN_FACTORS.has(raw) || raw === "Other") factor = raw as RegimeCauseFactor;
+      else factor = "Other";
+      return {
+        factor,
+        effect: c.effect,
+        contribution_bps: c.contribution_bps ?? 0,
+      };
+    });
+  }
+  return (row.regime_signals ?? []).slice(0, 3).map(parseLegacySignal);
+}
+
+/** @deprecated Prefer marketContextNarrative evidence; kept for legacy tests/callers. */
 export function renderRegimeCause(
   signal: string,
   side: ScoringSide,
@@ -105,6 +174,25 @@ function signed(value: number): string {
   return value > 0 ? `+${value}` : `${value}`;
 }
 
+function statusKeyFor(
+  status: RegimeScoreStatus,
+  reason: RegimeUnavailableReason | null,
+): string {
+  if (status === "Unavailable") {
+    if (reason === "MarketReadingUnavailable") {
+      return "analysis.marketContext.status.unavailable.marketReading";
+    }
+    if (reason === "InsufficientAssetData") {
+      return "analysis.marketContext.status.unavailable.insufficientData";
+    }
+    if (reason === "Unknown") {
+      return "analysis.marketContext.status.unavailable.unknown";
+    }
+    return "analysis.marketContext.status.unavailable";
+  }
+  return `analysis.marketContext.status.${status[0].toLowerCase()}${status.slice(1)}`;
+}
+
 export function createRegimePresentation(row: RegimeRowLike): RegimePresentation {
   const status = normalizeRegimeStatus(row);
   const side: ScoringSide = row.scoring_model === "short_v3" ? "short" : "long";
@@ -114,6 +202,11 @@ export function createRegimePresentation(row: RegimeRowLike): RegimePresentation
   const impact = row.composite_score - base;
   const score = status === "Included" && row.regime_score != null ? row.regime_score : null;
   const direction = impact > 0 ? "raised" : impact < 0 ? "reduced" : "unchanged";
+  const typedCauses = status === "Included" ? normalizeRegimeCauses(row) : [];
+  const unavailableReason =
+    status === "Unavailable"
+      ? (row.regime_unavailable_reason ?? null)
+      : null;
 
   return {
     status,
@@ -126,15 +219,28 @@ export function createRegimePresentation(row: RegimeRowLike): RegimePresentation
     bucketKey: side === "short"
       ? "presentation.short.bucket.regime"
       : "analysis.marketContext.title",
-    statusKey: `analysis.marketContext.status.${status[0].toLowerCase()}${status.slice(1)}`,
+    statusKey: statusKeyFor(status, unavailableReason),
     impactKey: `analysis.marketContext.impact.${side}.${direction}`,
-    causes: (row.regime_signals ?? []).slice(0, 3),
+    typedCauses,
+    causes: typedCauses.map((c) => {
+      if (c.effect === "Support") return `+${legacyTag(c.factor)}`;
+      if (c.effect === "Risk") return `−${legacyTag(c.factor)}`;
+      return legacyTag(c.factor);
+    }),
+    unavailableReason,
     composition: {
       base: `${base}`,
       context: signed(impact),
       final: `${row.composite_score}`,
     },
   };
+}
+
+function legacyTag(factor: RegimeCauseFactor): string {
+  if (factor === "GeneralFit") return "RegimeFit";
+  if (factor === "Neutral") return "RegimeNeutral";
+  if (factor === "Other") return "Other";
+  return factor;
 }
 
 export function regimeRowInput(

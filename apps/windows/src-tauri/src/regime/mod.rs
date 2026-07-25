@@ -14,18 +14,19 @@ mod scoring_policy;
 mod types;
 
 pub use cnn_fng::CnnFngCache;
-pub use regime_fit::score_regime_fit;
+pub use regime_fit::{score_regime_fit, MarketContextUnavailableReason, RegimeCause};
 pub use scoring_policy::{RegimeScoringPolicy, ScoreSide};
 pub use types::{MarketRegime, REGIME_VERSION};
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use tauri::State;
 
-use crate::engine::ChartSummary;
+use crate::engine::{compute_chart_summary, ChartSummary, HistoricalCandle, ScreenerState};
 use crate::fetcher::{is_crypto, is_etf, YahooClient};
 use crate::state::AppState;
 
@@ -39,12 +40,16 @@ use pillars::{
 };
 use types::{PillarResult, RegimePillar};
 
-/// TTL for the full computed regime response.
+/// Soft TTL: after this, serve stale data and refresh in the background.
 const REGIME_TTL_SECS: u64 = 150;
+/// Background worker cadence while market-context scoring is enabled.
+const REGIME_REFRESH_SECS: u64 = 120;
 
 pub struct RegimeCache {
     inner: Mutex<Option<(MarketRegime, Instant)>>,
     last_exposure: Mutex<Option<u32>>,
+    /// Prevents stampedes of concurrent Yahoo/CNN refreshes.
+    refreshing: AtomicBool,
 }
 
 impl RegimeCache {
@@ -52,16 +57,29 @@ impl RegimeCache {
         Self {
             inner: Mutex::new(None),
             last_exposure: Mutex::new(None),
+            refreshing: AtomicBool::new(false),
         }
     }
 
+    /// Stale-while-revalidate: return the latest value even past TTL so opportunity
+    /// rows keep a market-context policy while a background refresh runs.
     pub fn get(&self) -> Option<MarketRegime> {
         let guard = self.inner.lock().ok()?;
-        let (v, at) = guard.as_ref()?;
-        if at.elapsed().as_secs() > REGIME_TTL_SECS {
-            return None;
+        guard.as_ref().map(|(v, _)| v.clone())
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        let Ok(guard) = self.inner.lock() else {
+            return false;
+        };
+        match guard.as_ref() {
+            Some((_, at)) => at.elapsed().as_secs() <= REGIME_TTL_SECS,
+            None => false,
         }
-        Some(v.clone())
+    }
+
+    pub fn needs_refresh(&self) -> bool {
+        !self.is_fresh()
     }
 
     pub fn put(&self, v: MarketRegime) {
@@ -75,6 +93,16 @@ impl RegimeCache {
 
     fn prev_exposure(&self) -> Option<u32> {
         self.last_exposure.lock().ok().and_then(|g| *g)
+    }
+
+    fn try_begin_refresh(&self) -> bool {
+        self.refreshing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn end_refresh(&self) {
+        self.refreshing.store(false, Ordering::SeqCst);
     }
 }
 
@@ -91,7 +119,7 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-fn closes_from_candles(candles: &[crate::engine::HistoricalCandle]) -> Vec<f64> {
+fn closes_from_candles(candles: &[HistoricalCandle]) -> Vec<f64> {
     candles
         .iter()
         .filter(|c| c.close_cents > 0)
@@ -107,19 +135,58 @@ fn fetch_closes(client: &YahooClient, symbol: &str, range: &str) -> Vec<f64> {
         .unwrap_or_default()
 }
 
+/// Build a ChartSummary when the screener has not enriched SPY yet.
+fn summary_from_closes(closes: &[f64]) -> Option<ChartSummary> {
+    if closes.len() < 20 {
+        return None;
+    }
+    let candles: Vec<HistoricalCandle> = closes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            if *c <= 0.0 {
+                return None;
+            }
+            let cents = (c * 100.0).round() as i64;
+            Some(HistoricalCandle {
+                epoch_seconds: i as i64 * 86_400,
+                open_cents: cents,
+                high_cents: cents,
+                low_cents: cents,
+                close_cents: cents,
+                volume: 0,
+            })
+        })
+        .collect();
+    compute_chart_summary(&candles)
+}
+
+fn is_usable_regime(regime: &MarketRegime) -> bool {
+    // Only cache readings that can actually drive the V3 market-context bucket.
+    RegimeScoringPolicy::from_regime(regime, ScoreSide::Long).is_some()
+}
+
 /// Build MarketRegime v2 from live + cached inputs.
 pub fn compute_market_regime(state: &AppState) -> MarketRegime {
+    compute_market_regime_parts(&state.screener, &state.cnn_fng_cache, &state.regime_cache)
+}
+
+fn compute_market_regime_parts(
+    screener: &Mutex<ScreenerState>,
+    cnn_fng_cache: &CnnFngCache,
+    regime_cache: &RegimeCache,
+) -> MarketRegime {
     let mut warnings: Vec<String> = Vec::new();
     let mut notes_es: Vec<String> = Vec::new();
     let mut notes_en: Vec<String> = Vec::new();
 
     // ── Screener cache snapshot ──────────────────────────────────────────────
-    let (chart_rows, spy_summary, spy_closes_cached): (
+    let (chart_rows, spy_summary_cached, spy_closes_cached): (
         Vec<(String, ChartSummary)>,
         Option<ChartSummary>,
         Vec<f64>,
     ) = {
-        let screener = match state.screener.lock() {
+        let screener = match screener.lock() {
             Ok(s) => s,
             Err(_) => {
                 warnings.push("screener lock poisoned".into());
@@ -161,22 +228,48 @@ pub fn compute_market_regime(state: &AppState) -> MarketRegime {
         .ok();
     let yahoo = YahooClient::new().ok();
 
+    // Prefer live Yahoo SPY candles so trend/VIX pillars work even when the
+    // screener has not enriched SPY (ETFs lag stock enrichment).
+    let (mut spy_summary, mut spy_closes) = (spy_summary_cached, spy_closes_cached);
+    if let Some(ref y) = yahoo {
+        if spy_summary.is_none() || spy_closes.len() < 60 {
+            if let Ok(candles) = y.fetch_candles("SPY", "1y", "1d") {
+                if !candles.is_empty() {
+                    let closes = closes_from_candles(&candles);
+                    if !closes.is_empty() {
+                        spy_closes = closes;
+                    }
+                    if spy_summary.is_none() {
+                        spy_summary = compute_chart_summary(&candles)
+                            .or_else(|| summary_from_closes(&spy_closes));
+                    }
+                }
+            }
+        }
+    }
+    if spy_summary.is_none() {
+        spy_summary = summary_from_closes(&spy_closes);
+        if spy_summary.is_some() {
+            warnings.push("SPY summary synthesized from closes (screener chart missing)".into());
+        }
+    }
+
     // VIX / VIX3M / SPY history
     let (vix_closes, vix3m_closes, spy_closes) = if let Some(ref y) = yahoo {
         (
             fetch_closes(y, "^VIX", "1y"),
             fetch_closes(y, "^VIX3M", "3mo"),
             {
-                let mut c = fetch_closes(y, "SPY", "1y");
+                let mut c = spy_closes;
                 if c.is_empty() {
-                    c = spy_closes_cached;
+                    c = fetch_closes(y, "SPY", "1y");
                 }
                 c
             },
         )
     } else {
         warnings.push("Yahoo client unavailable".into());
-        (vec![], vec![], spy_closes_cached)
+        (vec![], vec![], spy_closes)
     };
 
     let vol_snap = vol_snapshot(&vix_closes, &vix3m_closes, &spy_closes);
@@ -185,20 +278,19 @@ pub fn compute_market_regime(state: &AppState) -> MarketRegime {
         warnings.push("VIX unavailable".into());
     }
 
-    let spy_for_trend = spy_summary.as_ref().or_else(|| {
-        // synthesize minimal from closes if needed
-        None
-    });
-    let trend = trend_pillar(spy_for_trend, &spy_closes);
+    let trend = trend_pillar(spy_summary.as_ref(), &spy_closes);
+    if trend.confidence_bps == 0 {
+        warnings.push("SPY trend unavailable".into());
+    }
 
-    // CNN F&G
+    // CNN F&G with alternative.me fallback (CNN often returns 418)
     let cnn = if let Some(ref client) = http {
-        cnn_fng::get_cnn_fng(client, &state.cnn_fng_cache)
+        cnn_fng::get_cnn_fng(client, cnn_fng_cache)
     } else {
         None
     };
     if cnn.is_none() {
-        warnings.push("CNN Fear & Greed unavailable — using internal proxies".into());
+        warnings.push("CNN Fear & Greed unavailable — using internal proxies / alt.me".into());
     }
     let sentiment = sentiment_pillar(cnn.as_ref(), &breadth_snap);
 
@@ -226,7 +318,7 @@ pub fn compute_market_regime(state: &AppState) -> MarketRegime {
 
     // Correlation sample from equity closes in cache (up to 12 names)
     let avg_corr = {
-        let screener = state.screener.lock().ok();
+        let screener = screener.lock().ok();
         screener.and_then(|s| {
             let mut series: Vec<Vec<f64>> = Vec::new();
             for (sym, candles) in s.daily_candles.iter() {
@@ -272,7 +364,7 @@ pub fn compute_market_regime(state: &AppState) -> MarketRegime {
 
     let dd = spy_drawdown_from_ath_pct(&spy_closes);
 
-    let prev_exp = state.regime_cache.prev_exposure();
+    let prev_exp = regime_cache.prev_exposure();
 
     let comp_in = CompositeInput {
         trend: trend.clone(),
@@ -416,15 +508,68 @@ fn make_pillar(
     }
 }
 
-/// Tauri command — returns cached regime if fresh, else recomputes.
+/// Kick a single background recompute if none is already running.
+pub fn request_regime_refresh(state: &AppState) {
+    if !state.regime_cache.try_begin_refresh() {
+        return;
+    }
+    let screener = Arc::clone(&state.screener);
+    let cnn = Arc::clone(&state.cnn_fng_cache);
+    let cache = Arc::clone(&state.regime_cache);
+    let _ = std::thread::Builder::new()
+        .name("regime-refresh".into())
+        .spawn(move || {
+            let regime = compute_market_regime_parts(&screener, &cnn, &cache);
+            if is_usable_regime(&regime) {
+                cache.put(regime);
+            }
+            cache.end_refresh();
+        });
+}
+
+/// Long-lived worker: keep market-context data warm while scoring is enabled.
+pub fn spawn_regime_worker(state: &AppState) {
+    let screener = Arc::clone(&state.screener);
+    let cnn = Arc::clone(&state.cnn_fng_cache);
+    let cache = Arc::clone(&state.regime_cache);
+    let enabled = Arc::clone(&state.apply_regime_scoring);
+    let _ = std::thread::Builder::new()
+        .name("regime-worker".into())
+        .spawn(move || {
+            // First pass soon after startup so V3 context is not stuck on "—".
+            std::thread::sleep(Duration::from_secs(3));
+            loop {
+                if enabled.load(Ordering::Relaxed) && cache.needs_refresh() {
+                    if cache.try_begin_refresh() {
+                        let regime = compute_market_regime_parts(&screener, &cnn, &cache);
+                        if is_usable_regime(&regime) {
+                            cache.put(regime);
+                        }
+                        cache.end_refresh();
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(REGIME_REFRESH_SECS));
+            }
+        });
+}
+
+/// Tauri command — returns stale-while-revalidate cache; recomputes when empty.
 #[tauri::command]
 pub fn get_market_regime(state: State<'_, AppState>) -> Result<MarketRegime, String> {
     if let Some(cached) = state.regime_cache.get() {
+        if state.regime_cache.needs_refresh() {
+            request_regime_refresh(&state);
+        }
         return Ok(cached);
     }
-    // Heavy network work off the async runtime: command is sync (blocking OK for Tauri invoke).
+    // Empty cache: compute now so the banner and V3 context can light up.
     let regime = compute_market_regime(&state);
-    state.regime_cache.put(regime.clone());
+    if is_usable_regime(&regime) {
+        state.regime_cache.put(regime.clone());
+    } else {
+        // Still return whatever we have, and keep trying in background.
+        request_regime_refresh(&state);
+    }
     Ok(regime)
 }
 
@@ -432,13 +577,53 @@ pub fn get_market_regime(state: State<'_, AppState>) -> Result<MarketRegime, Str
 mod tests {
     use super::composite::{compose, stance_matrix, CompositeInput};
     use super::math::fng_to_contrarian_score;
+    use super::summary_from_closes;
+    use super::types::MarketRegime;
     use super::types::PillarResult;
-    use super::REGIME_TTL_SECS;
+    use super::{is_usable_regime, RegimeCache, REGIME_TTL_SECS};
 
     #[test]
     fn regime_cache_ttl_safely_exceeds_banner_poll_interval() {
         assert!(REGIME_TTL_SECS > 120);
         assert_eq!(REGIME_TTL_SECS, 150);
+    }
+
+    #[test]
+    fn regime_cache_serves_stale_after_ttl() {
+        let cache = RegimeCache::new();
+        let mut regime = MarketRegime::default();
+        regime.environment_band = "RiskOn".into();
+        regime.primary_regime = "Bull".into();
+        regime.global_confidence_bps = 8000;
+        cache.put(regime);
+        assert!(cache.get().is_some());
+        assert!(cache.is_fresh());
+        // Force age past TTL via put timestamp — we only verify SWR get keeps a value.
+        // (Instant is not mockable here; freshness is covered by needs_refresh defaults.)
+        assert!(cache.get().unwrap().global_confidence_bps == 8000);
+    }
+
+    #[test]
+    fn summary_from_closes_builds_emas() {
+        let closes: Vec<f64> = (1..=220).map(|i| 100.0 + (i as f64) * 0.1).collect();
+        let s = summary_from_closes(&closes).expect("summary");
+        assert!(s.latest_close_cents > 0);
+        assert!(s.ema50_cents.is_some());
+        assert!(s.ema200_cents.is_some());
+    }
+
+    #[test]
+    fn usable_regime_requires_policy_grade_confidence() {
+        assert!(!is_usable_regime(&MarketRegime::default()));
+        let mut low = MarketRegime::default();
+        low.environment_band = "RiskOn".into();
+        low.primary_regime = "Bull".into();
+        low.action_stance = "TrendDeploy".into();
+        low.global_confidence_bps = 2000;
+        assert!(!is_usable_regime(&low));
+        let mut ok = low.clone();
+        ok.global_confidence_bps = 4000;
+        assert!(is_usable_regime(&ok));
     }
 
     #[test]

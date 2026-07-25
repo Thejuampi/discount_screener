@@ -33,6 +33,10 @@ export interface OpportunityRow {
   technical_signals: string[];
   forecast_signals: string[];
   regime_signals?: string[];
+  /** Typed regime causes (preferred). Legacy clients may only send regime_signals. */
+  regime_causes?: RegimeCause[];
+  /** Present when regime_status is Unavailable. */
+  regime_unavailable_reason?: RegimeUnavailableReason | null;
   /** Authoritative state in current payloads. Optional for legacy compatibility. */
   regime_status?: RegimeScoreStatus;
   /** Legacy payload field; normalize at the presentation boundary. */
@@ -52,6 +56,33 @@ export interface OpportunityRow {
 
 export type AssetType = "stock" | "crypto" | "etf";
 export type RegimeScoreStatus = "Included" | "Disabled" | "Unavailable" | "NotApplicable";
+
+export type RegimeCauseFactor =
+  | "Quality"
+  | "LowBeta"
+  | "Value"
+  | "OversoldQual"
+  | "Extension"
+  | "Trend"
+  | "Defensive"
+  | "Growth"
+  | "Liquidity"
+  | "GeneralFit"
+  | "Neutral"
+  | "Other";
+
+export type RegimeCauseEffect = "Support" | "Risk" | "Neutral";
+
+export interface RegimeCause {
+  factor: RegimeCauseFactor;
+  effect: RegimeCauseEffect;
+  contribution_bps: number;
+}
+
+export type RegimeUnavailableReason =
+  | "MarketReadingUnavailable"
+  | "InsufficientAssetData"
+  | "Unknown";
 export type SetupLabel =
   | "StrongBuy" | "Buy" | "Accumulate" | "Watch" | "Hold" | "Avoid" | "StrongAvoid"
   // Crypto-specific labels (override the equity ones for crypto symbols)

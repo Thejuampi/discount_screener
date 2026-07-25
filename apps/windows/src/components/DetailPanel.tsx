@@ -24,9 +24,9 @@ import {
 import {
   createRegimePresentation,
   regimeRowInput,
-  renderRegimeCause,
   type RegimePresentation,
 } from "../regimePresentation";
+import { buildMarketContextNarrative } from "../marketContextNarrative";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -553,7 +553,7 @@ function AnalysisBuckets({
       {marketContext.visible && (
         <MarketContextBucket
           marketContext={marketContext}
-          points={reasons.regime}
+          detail={detail}
         />
       )}
     </div>
@@ -562,33 +562,81 @@ function AnalysisBuckets({
 
 function MarketContextBucket({
   marketContext,
-  points,
+  detail,
 }: {
   marketContext: RegimePresentation;
-  points: string[];
+  detail: SymbolDetail;
 }) {
   const { t } = useT();
-  const tone = marketContext.classification;
-  const color = tone === "favorable" ? "#22c55e"
-    : tone === "adverse" ? "#ef4444"
-      : "#f59e0b";
+  const [tipOpen, setTipOpen] = useState(false);
+  const narrative = buildMarketContextNarrative(marketContext, detail, t);
+  const color = narrative.tone === "favorable" ? "#22c55e"
+    : narrative.tone === "adverse" ? "#ef4444"
+      : narrative.tone === "neutral" ? "#f59e0b"
+        : "#64748b";
+  const tipId = "market-context-tooltip";
+
   return (
-    <div className={`analysis-bucket market-context-bucket${marketContext.muted ? " is-muted" : ""}`}>
-      <div className="bucket-header">
-        <span className="bucket-label">{t(marketContext.bucketKey)}</span>
-        <span className="bucket-score" style={{ color: marketContext.score == null ? "#64748b" : color }}>
-          {marketContext.score == null
-            ? t(marketContext.statusKey)
-            : `${marketContext.score > 0 ? "+" : ""}${marketContext.score} · ${t(`analysis.marketContext.bucket.${marketContext.classification}`)}`}
+    <div className={`analysis-bucket market-context-bucket${narrative.muted ? " is-muted" : ""}`}>
+      <div className="bucket-header market-context-header">
+        <span className="bucket-label market-context-title-row">
+          {t(marketContext.bucketKey)}
+          <button
+            type="button"
+            className="market-context-info"
+            aria-label={t("analysis.marketContext.infoAria")}
+            aria-describedby={tipOpen ? tipId : undefined}
+            aria-expanded={tipOpen}
+            onMouseEnter={() => setTipOpen(true)}
+            onMouseLeave={() => setTipOpen(false)}
+            onFocus={() => setTipOpen(true)}
+            onBlur={() => setTipOpen(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setTipOpen(false);
+            }}
+          >
+            ⓘ
+          </button>
+          {tipOpen && (
+            <span id={tipId} role="tooltip" className="market-context-tooltip">
+              {t(narrative.tooltipKey)}
+            </span>
+          )}
         </span>
+        {narrative.scoreDisplay != null ? (
+          <span className="market-context-result" style={{ color }}>
+            <span className="bucket-score market-context-score">{narrative.scoreDisplay}</span>
+            <span className={`market-context-pill market-context-pill--${narrative.tone}`}>
+              {narrative.classificationLabel}
+            </span>
+          </span>
+        ) : (
+          <span className="bucket-score" style={{ color: "#64748b" }}>—</span>
+        )}
       </div>
-      <div className="market-context-explainer">
-        {t("analysis.marketContext.explainer")}
-      </div>
-      {points.length > 0 && (
+      {narrative.summary && (
+        <div className="market-context-summary">{narrative.summary}</div>
+      )}
+      {narrative.statusMessage && (
+        <div className="market-context-status">{narrative.statusMessage}</div>
+      )}
+      {narrative.evidence.length > 0 && (
         <ul className="bucket-points">
-          {points.map((point, index) => <li key={index}>{point}</li>)}
+          {narrative.evidence.map((point, index) => <li key={index}>{point}</li>)}
         </ul>
+      )}
+      {narrative.chips.length > 0 && (
+        <div className="bucket-signals market-context-chips">
+          {narrative.chips.map((chip) => (
+            <span
+              key={`${chip.factor}-${chip.effect}`}
+              className={`signal-chip ${chip.className}`.trim()}
+              aria-label={chip.ariaLabel}
+            >
+              {chip.label} {chip.mark}
+            </span>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -770,14 +818,14 @@ function buildReasons(
     else if (is_ >= 5 && ib === 0)    forePoints.push(t(presentation.insiderSignalKey("heavySell"), { n: is_ }));
   }
 
-  // ── Regime (4th bucket) ──────────────────────────────────────────────────
+  // ── Regime (4th bucket) — evidence built by marketContextNarrative in the card
   const regimePoints: string[] = [];
   if (marketContext.visible) {
-    if (marketContext.status !== "Included") {
-      regimePoints.push(t(marketContext.statusKey));
-    }
-    for (const sig of marketContext.causes) {
-      regimePoints.push(renderRegimeCause(sig, marketContext.side, t));
+    const narrative = buildMarketContextNarrative(marketContext, detail, t);
+    if (narrative.statusMessage) regimePoints.push(narrative.statusMessage);
+    else if (narrative.summary) {
+      regimePoints.push(narrative.summary);
+      regimePoints.push(...narrative.evidence);
     }
   }
 

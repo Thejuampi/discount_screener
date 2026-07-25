@@ -1,39 +1,145 @@
 //! Fourth V3 scoring bucket: regime fit (−100..+100).
 
+use serde::Serialize;
+
 use crate::engine::{smooth_ramp, CandidateRow, ChartSummary};
 
 use super::scoring_policy::{RegimeScoringPolicy, ScoreSide};
+
+/// Typed cause factor — no user-facing copy lives here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RegimeCauseFactor {
+    Quality,
+    LowBeta,
+    Value,
+    OversoldQual,
+    Extension,
+    Trend,
+    Defensive,
+    Growth,
+    Liquidity,
+    GeneralFit,
+    Neutral,
+}
+
+impl RegimeCauseFactor {
+    /// Legacy signal tag (without leading sign).
+    pub fn legacy_tag(self) -> &'static str {
+        match self {
+            Self::Quality => "Quality",
+            Self::LowBeta => "LowBeta",
+            Self::Value => "Value",
+            Self::OversoldQual => "OversoldQual",
+            Self::Extension => "Extension",
+            Self::Trend => "Trend",
+            Self::Defensive => "Defensive",
+            Self::Growth => "Growth",
+            Self::Liquidity => "Liquidity",
+            Self::GeneralFit => "RegimeFit",
+            Self::Neutral => "RegimeNeutral",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RegimeCauseEffect {
+    Support,
+    Risk,
+    Neutral,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RegimeCause {
+    pub factor: RegimeCauseFactor,
+    pub effect: RegimeCauseEffect,
+    /// Internal magnitude for ranking only (not shown to users).
+    pub contribution_bps: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[allow(dead_code)] // Unknown reserved for presentation/API completeness
+pub enum MarketContextUnavailableReason {
+    MarketReadingUnavailable,
+    InsufficientAssetData,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegimeFitResult {
+    pub score: Option<i32>,
+    pub causes: Vec<RegimeCause>,
+    /// Legacy string signals (`+Quality`) for older clients.
+    pub signals: Vec<String>,
+    pub unavailable_reason: Option<MarketContextUnavailableReason>,
+}
+
+impl RegimeFitResult {
+    fn empty_insufficient() -> Self {
+        Self {
+            score: None,
+            causes: vec![],
+            signals: vec![],
+            unavailable_reason: Some(MarketContextUnavailableReason::InsufficientAssetData),
+        }
+    }
+}
+
+fn cause_from_signed(factor: RegimeCauseFactor, signed: f64, weight: f64) -> RegimeCause {
+    let contribution = signed * weight;
+    let contribution_bps = (contribution * 10_000.0).round() as i32;
+    let effect = if signed > 0.0 {
+        RegimeCauseEffect::Support
+    } else if signed < 0.0 {
+        RegimeCauseEffect::Risk
+    } else {
+        RegimeCauseEffect::Neutral
+    };
+    RegimeCause {
+        factor,
+        effect,
+        contribution_bps,
+    }
+}
+
+fn legacy_signal(cause: &RegimeCause) -> String {
+    match cause.effect {
+        RegimeCauseEffect::Support => format!("+{}", cause.factor.legacy_tag()),
+        RegimeCauseEffect::Risk => format!("−{}", cause.factor.legacy_tag()),
+        RegimeCauseEffect::Neutral => cause.factor.legacy_tag().to_string(),
+    }
+}
 
 /// Score how well this name fits the active regime policy.
 pub fn score_regime_fit(
     row: &CandidateRow,
     daily: Option<&ChartSummary>,
     policy: &RegimeScoringPolicy,
-) -> (Option<i32>, Vec<String>) {
+) -> RegimeFitResult {
     let features = SymbolFeatures::extract(row, daily);
     if features.coverage < 2 {
-        return (None, vec![]);
+        return RegimeFitResult::empty_insufficient();
     }
 
-    let mut parts: Vec<(f64, f64, &'static str)> = Vec::new(); // (signed contrib −1..1, weight, tag)
+    // (signed −1..1, weight, factor)
+    let mut parts: Vec<(f64, f64, RegimeCauseFactor)> = Vec::new();
 
     // Quality
     if let Some(q) = features.quality {
         // map 0..1 → −1..+1 around 0.45 neutral
         let s = ((q - 0.45) / 0.45).clamp(-1.0, 1.0);
-        parts.push((s, policy.w_quality, "Quality"));
+        parts.push((s, policy.w_quality, RegimeCauseFactor::Quality));
     }
 
     // Low beta (high beta → negative for long)
     if let Some(lb) = features.low_beta {
         let s = ((lb - 0.5) / 0.5).clamp(-1.0, 1.0);
-        parts.push((s, policy.w_low_beta, "LowBeta"));
+        parts.push((s, policy.w_low_beta, RegimeCauseFactor::LowBeta));
     }
 
     // Value
     if let Some(v) = features.value {
         let s = ((v - 0.45) / 0.45).clamp(-1.0, 1.0);
-        parts.push((s, policy.w_value, "Value"));
+        parts.push((s, policy.w_value, RegimeCauseFactor::Value));
     }
 
     // Oversold × quality gate
@@ -47,7 +153,11 @@ pub fn score_regime_fit(
         }; // junk oversold gets nothing
         let s = (os * 2.0 - 1.0).clamp(-1.0, 1.0) * gate;
         if gate > 0.0 {
-            parts.push((s, policy.w_oversold_quality, "OversoldQual"));
+            parts.push((
+                s,
+                policy.w_oversold_quality,
+                RegimeCauseFactor::OversoldQual,
+            ));
         }
     }
 
@@ -59,7 +169,7 @@ pub fn score_regime_fit(
         if policy.side == ScoreSide::Short {
             s = -s; // short wants extended
         }
-        parts.push((s, policy.w_anti_extension, "Extension"));
+        parts.push((s, policy.w_anti_extension, RegimeCauseFactor::Extension));
     }
 
     // Trend align
@@ -68,7 +178,7 @@ pub fn score_regime_fit(
         if policy.side == ScoreSide::Short {
             s = -s;
         }
-        parts.push((s, policy.w_trend, "Trend"));
+        parts.push((s, policy.w_trend, RegimeCauseFactor::Trend));
     }
 
     // Defensive / growth sector
@@ -78,7 +188,7 @@ pub fn score_regime_fit(
         } else {
             0.8
         };
-        parts.push((s, policy.w_defensive, "Defensive"));
+        parts.push((s, policy.w_defensive, RegimeCauseFactor::Defensive));
     }
     if features.growth_sector {
         let s = if policy.side == ScoreSide::Short {
@@ -86,31 +196,30 @@ pub fn score_regime_fit(
         } else {
             0.7
         };
-        parts.push((s, policy.w_growth, "Growth"));
+        parts.push((s, policy.w_growth, RegimeCauseFactor::Growth));
     }
 
     // Liquidity
     if let Some(liq) = features.liquidity {
         let s = ((liq - 0.4) / 0.5).clamp(-1.0, 1.0);
-        parts.push((s, policy.w_liquidity, "Liquidity"));
+        parts.push((s, policy.w_liquidity, RegimeCauseFactor::Liquidity));
     }
 
     let mut num = 0.0;
     let mut den = 0.0;
-    let mut signals = Vec::new();
-    for (s, w, tag) in &parts {
+    let mut candidates: Vec<RegimeCause> = Vec::new();
+    for (s, w, factor) in &parts {
         if *w <= 0.0 {
             continue;
         }
         num += s * w;
         den += w;
         if s.abs() >= 0.35 && *w >= 0.25 {
-            let sign = if *s >= 0.0 { "+" } else { "−" };
-            signals.push(format!("{sign}{tag}"));
+            candidates.push(cause_from_signed(*factor, *s, *w));
         }
     }
     if den <= 0.0 {
-        return (None, vec![]);
+        return RegimeFitResult::empty_insufficient();
     }
 
     let raw = (num / den) * policy.strength;
@@ -118,17 +227,48 @@ pub fn score_regime_fit(
     let score = (raw.tanh() * 100.0).round() as i32;
     let score = score.clamp(-100, 100);
 
-    if signals.is_empty() {
-        signals.push(if score >= 15 {
-            "+RegimeFit".into()
-        } else if score <= -15 {
-            "−RegimeFit".into()
-        } else {
-            "RegimeNeutral".into()
-        });
-    }
+    // Rank by absolute contribution; keep the three strongest causes.
+    candidates.sort_by(|a, b| {
+        b.contribution_bps
+            .abs()
+            .cmp(&a.contribution_bps.abs())
+            .then_with(|| a.factor.legacy_tag().cmp(b.factor.legacy_tag()))
+    });
+    candidates.truncate(3);
 
-    (Some(score), signals)
+    let causes = if candidates.is_empty() {
+        let (factor, effect, bps) = if score >= 15 {
+            (
+                RegimeCauseFactor::GeneralFit,
+                RegimeCauseEffect::Support,
+                score * 100,
+            )
+        } else if score <= -15 {
+            (
+                RegimeCauseFactor::GeneralFit,
+                RegimeCauseEffect::Risk,
+                score * 100,
+            )
+        } else {
+            (RegimeCauseFactor::Neutral, RegimeCauseEffect::Neutral, 0)
+        };
+        vec![RegimeCause {
+            factor,
+            effect,
+            contribution_bps: bps,
+        }]
+    } else {
+        candidates
+    };
+
+    let signals: Vec<String> = causes.iter().map(legacy_signal).collect();
+
+    RegimeFitResult {
+        score: Some(score),
+        causes,
+        signals,
+        unavailable_reason: None,
+    }
 }
 
 struct SymbolFeatures {
@@ -499,18 +639,28 @@ mod tests {
     #[test]
     fn quality_beats_junk_in_blood_in_streets() {
         let p = policy("BloodInStreets");
-        let (q, _) = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
-        let (j, _) = score_regime_fit(&row_quality(false), Some(&chart_oversold()), &p);
-        assert!(q.unwrap() > j.unwrap(), "q={q:?} j={j:?}");
+        let q = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
+        let j = score_regime_fit(&row_quality(false), Some(&chart_oversold()), &p);
+        assert!(
+            q.score.unwrap() > j.score.unwrap(),
+            "q={:?} j={:?}",
+            q.score,
+            j.score
+        );
     }
 
     #[test]
     fn junk_oversold_not_rewarded_like_quality() {
         let p = policy("Washout");
-        let (q, _) = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
-        let (j, _) = score_regime_fit(&row_quality(false), Some(&chart_oversold()), &p);
+        let q = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
+        let j = score_regime_fit(&row_quality(false), Some(&chart_oversold()), &p);
         // quality oversold should clearly beat junk oversold
-        assert!(q.unwrap() >= j.unwrap() + 10, "q={q:?} j={j:?}");
+        assert!(
+            q.score.unwrap() >= j.score.unwrap() + 10,
+            "q={:?} j={:?}",
+            q.score,
+            j.score
+        );
     }
 
     #[test]
@@ -524,11 +674,13 @@ mod tests {
             ..MarketRegime::default()
         };
         let p = RegimeScoringPolicy::from_regime(&r, ScoreSide::Long).unwrap();
-        let (ext, _) = score_regime_fit(&row_quality(true), Some(&chart_extended()), &p);
-        let (calm, _) = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
+        let ext = score_regime_fit(&row_quality(true), Some(&chart_extended()), &p);
+        let calm = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
         assert!(
-            ext.unwrap() < calm.unwrap(),
-            "extended should score worse in euphoria: ext={ext:?} calm={calm:?}"
+            ext.score.unwrap() < calm.score.unwrap(),
+            "extended should score worse in euphoria: ext={:?} calm={:?}",
+            ext.score,
+            calm.score
         );
     }
 
@@ -543,10 +695,90 @@ mod tests {
             ..MarketRegime::default()
         };
         let p = RegimeScoringPolicy::from_regime(&r, ScoreSide::Short).unwrap();
-        let (ext, _) = score_regime_fit(&row_quality(false), Some(&chart_extended()), &p);
+        let ext = score_regime_fit(&row_quality(false), Some(&chart_extended()), &p);
         assert!(
-            ext.unwrap() > 0,
-            "short fit for extended junk in euphoria: {ext:?}"
+            ext.score.unwrap() > 0,
+            "short fit for extended junk in euphoria: {:?}",
+            ext.score
+        );
+    }
+
+    #[test]
+    fn causes_sorted_by_abs_contribution_and_capped_at_three() {
+        let p = policy("BloodInStreets");
+        let result = score_regime_fit(&row_quality(true), Some(&chart_oversold()), &p);
+        assert!(result.score.is_some());
+        assert!(result.causes.len() <= 3, "causes={:?}", result.causes);
+        assert_eq!(result.causes.len(), result.signals.len());
+        for window in result.causes.windows(2) {
+            assert!(
+                window[0].contribution_bps.abs() >= window[1].contribution_bps.abs(),
+                "not sorted by |contrib|: {:?}",
+                result.causes
+            );
+        }
+        // No raw internal tokens in legacy signals beyond known tags.
+        for sig in &result.signals {
+            assert!(
+                !sig.contains("policy") && !sig.contains("bucket"),
+                "signal={sig}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_extension_risk_short_extension_support_in_euphoria() {
+        let r = MarketRegime {
+            action_stance: "Euphoria".into(),
+            environment_band: "RiskOn".into(),
+            primary_regime: "LateBull".into(),
+            global_confidence_bps: 9000,
+            cnn_fear_greed: Some(85),
+            ..MarketRegime::default()
+        };
+        let long = RegimeScoringPolicy::from_regime(&r, ScoreSide::Long).unwrap();
+        let short = RegimeScoringPolicy::from_regime(&r, ScoreSide::Short).unwrap();
+        let long_fit = score_regime_fit(&row_quality(true), Some(&chart_extended()), &long);
+        let short_fit = score_regime_fit(&row_quality(false), Some(&chart_extended()), &short);
+
+        let long_ext = long_fit
+            .causes
+            .iter()
+            .find(|c| c.factor == RegimeCauseFactor::Extension);
+        let short_ext = short_fit
+            .causes
+            .iter()
+            .find(|c| c.factor == RegimeCauseFactor::Extension);
+        if let Some(c) = long_ext {
+            assert_eq!(c.effect, RegimeCauseEffect::Risk);
+        }
+        if let Some(c) = short_ext {
+            assert_eq!(c.effect, RegimeCauseEffect::Support);
+        }
+    }
+
+    #[test]
+    fn insufficient_coverage_marks_unavailable_reason() {
+        let p = policy("BloodInStreets");
+        let sparse = CandidateRow {
+            free_cash_flow_dollars: None,
+            operating_cash_flow_dollars: None,
+            return_on_equity_bps: None,
+            debt_to_equity_hundredths: None,
+            total_cash_dollars: None,
+            total_debt_dollars: None,
+            forward_pe_hundredths: None,
+            beta_millis: None,
+            market_cap_dollars: None,
+            sector_name: None,
+            ..row_quality(true)
+        };
+        let result = score_regime_fit(&sparse, None, &p);
+        assert_eq!(result.score, None);
+        assert!(result.causes.is_empty());
+        assert_eq!(
+            result.unavailable_reason,
+            Some(MarketContextUnavailableReason::InsufficientAssetData)
         );
     }
 }

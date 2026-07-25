@@ -84,7 +84,7 @@ test("limits causes to three and exposes state-specific copy keys", () => {
     composite_score_base: 40,
     composite_score: 44,
   });
-  assert.deepEqual(included.causes, ["+Quality", "+Value", "-Extension"]);
+  assert.deepEqual(included.causes, ["+Quality", "+Value", "−Extension"]);
   assert.equal(included.statusKey, "analysis.marketContext.status.included");
 
   for (const [status, key] of [

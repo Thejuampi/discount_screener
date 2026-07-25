@@ -60,6 +60,9 @@ pub fn run() {
             let app_state = AppState::new(db_path);
             app.manage(app_state);
 
+            // Keep market-context (V3 4th bucket) warm independent of UI banner mount.
+            regime::spawn_regime_worker(&*app.state::<AppState>());
+
             // ── Real-time scalping WebSocket (background thread) ───────────────
             let scalp_rx = app.state::<AppState>().scalp_ws_tx.subscribe();
             scalp_ws::spawn(app.handle().clone(), scalp_rx);

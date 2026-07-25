@@ -236,7 +236,75 @@ pub fn fetch_cnn_fear_greed(client: &Client) -> Result<CnnFearGreed, String> {
     parse_cnn_fng_json(&body)
 }
 
-/// Get cached or fetch.
+/// alternative.me free F&G (crypto index) — used only when CNN is blocked.
+const ALT_ME_FNG_URL: &str = "https://api.alternative.me/fng/?limit=1&format=json";
+
+#[derive(Debug, Deserialize)]
+struct AltMeRoot {
+    data: Vec<AltMeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AltMeEntry {
+    value: String,
+    value_classification: String,
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+fn fetch_alt_me_fear_greed(client: &Client) -> Result<CnnFearGreed, String> {
+    let resp = client
+        .get(ALT_ME_FNG_URL)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .map_err(|e| format!("alt.me F&G fetch: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("alt.me F&G HTTP {}", resp.status()));
+    }
+    let body = resp.text().map_err(|e| format!("alt.me F&G body: {e}"))?;
+    parse_alt_me_fng_json(&body)
+}
+
+fn parse_alt_me_fng_json(body: &str) -> Result<CnnFearGreed, String> {
+    let root: AltMeRoot =
+        serde_json::from_str(body).map_err(|e| format!("alt.me F&G parse: {e}"))?;
+    let first = root
+        .data
+        .into_iter()
+        .next()
+        .ok_or_else(|| "alt.me F&G empty".to_string())?;
+    let score: f64 = first
+        .value
+        .parse()
+        .map_err(|_| format!("alt.me F&G value not a number: {}", first.value))?;
+    if !(0.0..=100.0).contains(&score) {
+        return Err(format!("alt.me F&G score out of range: {score}"));
+    }
+    let rating = if first.value_classification.is_empty() {
+        rating_from_score(score).to_string()
+    } else {
+        title_case_rating(&first.value_classification)
+    };
+    Ok(CnnFearGreed {
+        score,
+        rating,
+        previous_close: None,
+        previous_1_week: None,
+        historical: vec![],
+        fetched_at_epoch: first
+            .timestamp
+            .as_deref()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or_else(now_secs),
+    })
+}
+
+/// Get cached or fetch (CNN first, alternative.me fallback when CNN is blocked).
 pub fn get_cnn_fng(client: &Client, cache: &CnnFngCache) -> Option<CnnFearGreed> {
     if let Some(v) = cache.get_cached() {
         return Some(v);
@@ -246,7 +314,13 @@ pub fn get_cnn_fng(client: &Client, cache: &CnnFngCache) -> Option<CnnFearGreed>
             cache.put(v.clone());
             Some(v)
         }
-        Err(_) => None,
+        Err(_) => match fetch_alt_me_fear_greed(client) {
+            Ok(v) => {
+                cache.put(v.clone());
+                Some(v)
+            }
+            Err(_) => None,
+        },
     }
 }
 
@@ -304,5 +378,17 @@ mod tests {
     fn reject_garbage() {
         assert!(parse_cnn_fng_json("not json").is_err());
         assert!(parse_cnn_fng_json("{}").is_err());
+    }
+
+    #[test]
+    fn parse_alt_me_sample() {
+        let body = r#"{
+          "name":"Fear and Greed Index",
+          "data":[{"value":"27","value_classification":"Fear","timestamp":"1784937600"}],
+          "metadata":{"error":null}
+        }"#;
+        let fg = parse_alt_me_fng_json(body).expect("alt.me parse");
+        assert!((fg.score - 27.0).abs() < f64::EPSILON);
+        assert_eq!(fg.rating, "Fear");
     }
 }

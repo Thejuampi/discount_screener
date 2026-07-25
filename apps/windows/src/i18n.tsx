@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 import { SCORING_PRESENTATION_MESSAGES } from "./scoringPresentationMessages";
+import { MARKET_CONTEXT_MESSAGES } from "./marketContextMessages";
 
 export type Lang = "es" | "en";
 
@@ -10,6 +11,7 @@ const STORAGE_KEY = "ds_lang";
 
 const T: Record<string, { es: string; en: string }> = {
   ...SCORING_PRESENTATION_MESSAGES,
+  ...MARKET_CONTEXT_MESSAGES,
   // ── App / Header ─────────────────────────────────────────────────────────
   "app.title":                  { es: "Vantage", en: "Vantage" },
   "search.placeholder":         { es: "Ticker o empresa…", en: "Ticker or company…" },
@@ -1080,27 +1082,14 @@ const T: Record<string, { es: string; en: string }> = {
   "analysis.technical":         { es: "Técnico", en: "Technical" },
   "analysis.forecast":          { es: "Pronóstico", en: "Forecast" },
   "analysis.noData":            { es: "Sin datos", en: "No data" },
-  "analysis.marketContext.title": { es: "Contexto de mercado", en: "Market context" },
+  // Market-context card copy lives in marketContextMessages.ts (spread above).
   "analysis.marketContext.baseShort": { es: "Base V3 (3D)", en: "V3 base (3D)" },
   "analysis.marketContext.contextShort": { es: "Contexto", en: "Context" },
   "analysis.marketContext.finalShort": { es: "Final", en: "Final" },
   "analysis.marketContext.explainer": {
-    es: "Mide si el perfil del activo —calidad, valoración, beta, sector y extensión— encaja con el entorno actual. No predice la dirección del mercado.",
-    en: "Measures whether the asset profile—quality, valuation, beta, sector, and extension—fits the current environment. It does not predict market direction.",
+    es: "Evalúa cuánto encajan la calidad, valuación, beta, sector y comportamiento del precio del activo con el entorno actual. El valor va de −100 a +100 y no predice la dirección del mercado. Su efecto sobre el score final se muestra en el resumen superior.",
+    en: "Evaluates how well the asset's quality, valuation, beta, sector, and price behavior fit the current environment. The value ranges from −100 to +100 and does not predict market direction. Its effect on the final score appears in the summary above.",
   },
-  "analysis.marketContext.status.included": { es: "Incluido", en: "Included" },
-  "analysis.marketContext.status.disabled": {
-    es: "Desactivado — score calculado con 3 dimensiones",
-    en: "Disabled — score calculated with 3 dimensions",
-  },
-  "analysis.marketContext.status.unavailable": {
-    es: "No disponible — falta una lectura confiable del mercado o datos suficientes del activo",
-    en: "Unavailable — no reliable market reading or insufficient asset data",
-  },
-  "analysis.marketContext.status.notApplicable": { es: "No aplica", en: "Not applicable" },
-  "analysis.marketContext.bucket.favorable": { es: "Favorable", en: "Favorable" },
-  "analysis.marketContext.bucket.neutral": { es: "Neutral", en: "Neutral" },
-  "analysis.marketContext.bucket.adverse": { es: "En contra", en: "Adverse" },
   "analysis.marketContext.impact.long.raised": {
     es: "El contexto elevó el score final en {impact} puntos.",
     en: "Market context raised the final score by {impact} points.",
@@ -1125,9 +1114,6 @@ const T: Record<string, { es: string; en: string }> = {
     es: "El contexto no modificó el respaldo a la tesis bajista.",
     en: "Market context did not change support for the bearish thesis.",
   },
-
-  // ── History chart ───────────────────────────────────────────────────────
-  "history.title":              { es: "Historia del score", en: "Score history" },
   "history.loading":            { es: "Cargando historial…", en: "Loading history…" },
   "history.empty":              {
     es: "Sin suficientes snapshots todavía para este símbolo.",
