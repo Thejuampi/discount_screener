@@ -4,6 +4,7 @@ import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, Import
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
 import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   rows: OpportunityRow[];
@@ -585,7 +586,18 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   const scoreRows = accuracy.filter(a => a.bucket_type === "score");
 
   return (
-    <div className="congress-page">
+    <UiInspectable
+      as="div"
+      className="congress-page"
+      source={UI.advisorRoot}
+      snapshot={{
+        scoringModel,
+        positionCount: positions.length,
+        loading,
+        riskPct,
+        stopMult,
+      }}
+    >
       <header className="congress-header">
         <div>
           <h2 className="congress-title">{t("advisor.title")}</h2>
@@ -966,7 +978,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
 
       {/* ── Investment journal ── */}
       <JournalPanel rows={rows} />
-    </div>
+    </UiInspectable>
   );
 }
 

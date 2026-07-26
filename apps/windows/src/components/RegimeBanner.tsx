@@ -3,6 +3,15 @@ import { api } from "../api";
 import type { MarketRegime, RegimePillar } from "../api";
 import { useT } from "../i18n";
 import { RegimeRadar } from "./RegimeRadar";
+import { UI, UiInspectable } from "../uiInspect";
+import type { ScoringModelId } from "../scoringPresentation";
+import {
+  regimeExposureLabelKey,
+  regimeImplicationKey,
+  regimeLensFromModel,
+  regimeStanceLabelKey,
+  shortRegimeTone,
+} from "../regimeSideLens";
 
 const PHASE_STYLE: Record<string, { color: string; bg: string; border: string }> = {
   StrongBull:    { color: "#22c55e", bg: "rgba(34,197,94,0.12)",  border: "rgba(34,197,94,0.45)" },
@@ -120,8 +129,13 @@ function PillarCard({ pillar, lang }: { pillar: RegimePillar; lang: string }) {
   );
 }
 
-export function RegimeBanner() {
+export function RegimeBanner({
+  scoringModel = "aggressive_v3",
+}: {
+  scoringModel?: ScoringModelId;
+}) {
   const { t, lang } = useT();
+  const lens = regimeLensFromModel(scoringModel);
   const [regime, setRegime] = useState<MarketRegime | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -138,13 +152,19 @@ export function RegimeBanner() {
   // Soft loading state — never blank the whole dashboard if regime is slow.
   if (!regime) {
     return (
-      <div className="regime-banner" style={{
-        borderRadius: 8, marginBottom: 10, padding: "8px 14px",
-        background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)",
-        fontSize: 11, color: "var(--text-4)",
-      }}>
+      <UiInspectable
+        as="div"
+        className="regime-banner"
+        source={UI.regimeBanner}
+        snapshot={{ loading: true }}
+        style={{
+          borderRadius: 8, marginBottom: 10, padding: "8px 14px",
+          background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)",
+          fontSize: 11, color: "var(--text-4)",
+        }}
+      >
         {t("regime.title")}… {t("empty.loading")}
-      </div>
+      </UiInspectable>
     );
   }
 
@@ -156,10 +176,26 @@ export function RegimeBanner() {
   const notes = lang === "es" ? regime.notes_es : regime.notes_en;
   const mult = (regime.new_risk_multiplier_bps ?? 10000) / 10000;
   const conf = ((regime.global_confidence_bps ?? 0) / 100).toFixed(0);
-  const stanceKey = `regime.stance.${regime.action_stance}`;
+  const stanceKey = regimeStanceLabelKey(String(regime.action_stance), lens);
+  const longStanceKey = `regime.stance.${regime.action_stance}`;
   const phaseKey = `regime.phase.${regime.primary_regime}`;
-  const stanceLabel = t(stanceKey) !== stanceKey ? t(stanceKey) : regime.action_stance;
-  const phaseLabel = t(phaseKey) !== phaseKey ? t(phaseKey) : regime.primary_regime;
+  const rawStance = t(stanceKey);
+  const stanceLabel =
+    rawStance !== stanceKey
+      ? rawStance
+      : t(longStanceKey) !== longStanceKey
+        ? t(longStanceKey)
+        : String(regime.action_stance);
+  const phaseLabel = t(phaseKey) !== phaseKey ? t(phaseKey) : String(regime.primary_regime);
+  const implicationKey = regimeImplicationKey(
+    String(regime.action_stance),
+    String(regime.primary_regime),
+    lens,
+  );
+  const exposureKey = regimeExposureLabelKey(lens);
+  const shortTone = lens === "short"
+    ? shortRegimeTone(String(regime.action_stance), String(regime.primary_regime))
+    : null;
 
   const fngColor = (() => {
     const v = regime.cnn_fear_greed;
@@ -172,11 +208,28 @@ export function RegimeBanner() {
   })();
 
   return (
-    <div className="regime-banner" style={{
-      borderRadius: 8, marginBottom: 10,
-      background: st.bg, border: `1px solid ${st.border}`,
-      padding: "8px 14px",
-    }}>
+    <UiInspectable
+      as="div"
+      className="regime-banner"
+      source={UI.regimeBanner}
+      snapshot={{
+        primaryRegime: regime.primary_regime,
+        actionStance: regime.action_stance,
+        suggestedExposurePct: regime.suggested_exposure_pct,
+        globalConfidenceBps: regime.global_confidence_bps,
+        newRiskMultiplierBps: regime.new_risk_multiplier_bps,
+        cnnFearGreed: regime.cnn_fear_greed,
+        open,
+        scoringModel,
+        lens,
+        shortTone,
+      }}
+      style={{
+        borderRadius: 8, marginBottom: 10,
+        background: st.bg, border: `1px solid ${st.border}`,
+        padding: "8px 14px",
+      }}
+    >
       {/* ── Compact header ── */}
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -192,11 +245,11 @@ export function RegimeBanner() {
           </span>
           <strong style={{ fontSize: 15, color: st.color }}>{phaseLabel}</strong>
           <span style={{ fontSize: 11, color: "var(--text-3)" }}>
-            · {t("regime.exposure")}:{" "}
+            · {t(exposureKey)}:{" "}
             <strong style={{ color: st.color }}>{regime.suggested_exposure_pct}%</strong>
           </span>
           <span style={{ fontSize: 11, color: "var(--text-3)" }}>
-            · {t("regime.stance")}:{" "}
+            · {t(lens === "short" ? "regime.short.stanceLabel" : "regime.stance")}:{" "}
             <strong style={{ color: "var(--text-1)" }}>{stanceLabel}</strong>
           </span>
           <span style={{ fontSize: 11, color: "var(--text-4)" }}>
@@ -263,9 +316,25 @@ export function RegimeBanner() {
         </div>
       </div>
 
-      {/* Thesis */}
+      {/* Thesis + short-side implication when on short desk */}
       <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)", lineHeight: 1.5 }}>
         {thesis || t(`regime.help.${regime.regime}`)}
+        {implicationKey && (
+          <div
+            style={{
+              marginTop: 4,
+              color:
+                shortTone === "hostile"
+                  ? "#fb923c"
+                  : shortTone === "friendly"
+                    ? "#4ade80"
+                    : "var(--text-4)",
+              fontWeight: 600,
+            }}
+          >
+            {t(implicationKey)}
+          </div>
+        )}
         {!open && notes.length > 0 && (
           <span style={{ color: "var(--text-5)" }}> — {notes.slice(0, 3).join(" · ")}</span>
         )}
@@ -363,7 +432,7 @@ export function RegimeBanner() {
           </div>
         </div>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 

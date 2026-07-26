@@ -15,6 +15,7 @@ mod fibonacci;
 mod index_estimates;
 mod news;
 mod opportunity_v3;
+mod price_path;
 mod profiles;
 mod quant_lens;
 mod quote_summary;

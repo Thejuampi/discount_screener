@@ -10,6 +10,8 @@ import {
   type ScoringModelId,
 } from "../scoringPresentation";
 import { createRegimePresentation, regimeRowInput } from "../regimePresentation";
+import { UI, UiInspectable } from "../uiInspect";
+import { verdictFromTechnicalScore } from "../technicalVerdict";
 
 interface Props {
   rows: OpportunityRow[];
@@ -148,7 +150,18 @@ export function OpportunityList({
   }
 
   return (
-    <div className="opportunity-list">
+    <UiInspectable
+      as="div"
+      className="opportunity-list"
+      source={UI.screenerList}
+      snapshot={{
+        scoringModel,
+        rowCount: sorted.length,
+        sortKey,
+        sortAsc,
+        selectedSymbol,
+      }}
+    >
       <table className="stock-table">
         <thead>
           <tr>
@@ -173,10 +186,33 @@ export function OpportunityList({
           {sorted.map((row) => {
             const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
             return (
-              <tr
+              <UiInspectable
                 key={row.symbol}
+                as="tr"
                 className={`stock-row ${selectedSymbol === row.symbol ? "selected" : ""} ${row.qualification}`}
                 onClick={() => onSelect(row.symbol)}
+                source={UI.screenerRow}
+                snapshot={{
+                  symbol: row.symbol,
+                  companyName: row.company_name,
+                  assetType: row.asset_type,
+                  decision: row.decision,
+                  setupLabel: row.setup_label,
+                  setupScore: row.setup_score,
+                  compositeScore: row.composite_score,
+                  fundamentalsScore: row.fundamentals_score,
+                  technicalScore: row.technical_score,
+                  technicalVerdict: verdictFromTechnicalScore(row.technical_score),
+                  forecastScore: row.forecast_score,
+                  regimeScore: marketContext.score,
+                  gapBps: row.gap_bps,
+                  qualification: row.qualification,
+                  confidence: row.confidence,
+                  marketPriceCents: row.market_price_cents,
+                  intrinsicValueCents: row.intrinsic_value_cents,
+                  sectorName: row.sector_name,
+                  scoringModel,
+                }}
               >
                 <td className="symbol-cell">
                   {row.asset_type === "crypto" ? (
@@ -239,12 +275,12 @@ export function OpportunityList({
                 </td>
                 <td className="num-cell">{row.analyst_opinion_count ?? "—"}</td>
                 <td className="sector-cell">{row.sector_name ?? "—"}</td>
-              </tr>
+              </UiInspectable>
             );
           })}
         </tbody>
       </table>
-    </div>
+    </UiInspectable>
   );
 }
 

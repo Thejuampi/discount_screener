@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { QuantLensReport } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   symbol: string;
@@ -32,7 +33,17 @@ export function QuantLensPanel({ symbol }: Props) {
   if (!report) return <div className="ql-panel muted">{t("quant.loading")}</div>;
 
   return (
-    <div className="ql-panel">
+    <UiInspectable
+      as="div"
+      className="ql-panel"
+      source={UI.detailQuantLens}
+      snapshot={{
+        symbol,
+        primaryStatus: report.primary_status,
+        sectionCount: report.sections.length,
+        sectionIds: report.sections.map((s) => s.id),
+      }}
+    >
       <div className="ql-header">
         <h3>{t("quant.title")}</h3>
         <span className={`est-chip status-${report.primary_status.toLowerCase()}`}>
@@ -60,6 +71,6 @@ export function QuantLensPanel({ symbol }: Props) {
           </div>
         ))}
       </div>
-    </div>
+    </UiInspectable>
   );
 }

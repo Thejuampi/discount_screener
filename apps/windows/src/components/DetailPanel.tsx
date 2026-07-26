@@ -27,6 +27,9 @@ import {
   type RegimePresentation,
 } from "../regimePresentation";
 import { buildMarketContextNarrative } from "../marketContextNarrative";
+import { buildConditionalPlan, type PlanStance } from "../conditionalPlan";
+import { verdictFromTechnicalScore } from "../technicalVerdict";
+import { UI, UiInspectable } from "../uiInspect";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -151,7 +154,23 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   }
 
   return (
-    <div className="detail-panel">
+    <UiInspectable
+      as="div"
+      className="detail-panel"
+      source={UI.detailRoot}
+      snapshot={{
+        symbol,
+        scoringModel,
+        profile,
+        hasRow: !!row,
+        decision: row?.decision ?? null,
+        setupLabel: row?.setup_label ?? null,
+        compositeScore: row?.composite_score ?? null,
+        technicalScore: row?.technical_score ?? null,
+        technicalVerdict: verdictFromTechnicalScore(row?.technical_score ?? null),
+        assetType: row?.asset_type ?? null,
+      }}
+    >
       <div className="detail-header">
         <div>
           <span className="detail-symbol">{symbol}</span>
@@ -331,6 +350,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           hourly={detail.hourly_summary}
           monthly={detail.monthly_summary}
           breakdown={detail.technical_breakdown}
+          technicalScore={row?.technical_score}
           profile={profile}
           onProfileChange={onProfileChange}
           scoringModel={scoringModel}
@@ -379,8 +399,42 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
 
       {/* ── Full analysis breakdown (bottom) ── */}
       {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
-    </div>
+    </UiInspectable>
   );
+}
+
+function planStanceColor(stance: PlanStance): string {
+  if (stance === "ActNow") return "#22c55e";
+  if (stance === "ScaleIn") return "#38bdf8";
+  if (stance === "WaitZone") return "#f59e0b";
+  return "#ef4444";
+}
+
+function planStanceEmoji(stance: PlanStance): string {
+  if (stance === "ActNow") return "✅";
+  if (stance === "ScaleIn") return "📶";
+  if (stance === "WaitZone") return "⏳";
+  return "🚫";
+}
+
+function planStanceTitleKey(stance: PlanStance, side: "long" | "short"): string {
+  if (side === "short") {
+    if (stance === "ActNow") return "detail.plan.short.act";
+    if (stance === "ScaleIn") return "detail.plan.short.scale";
+    if (stance === "WaitZone") return "detail.plan.short.wait";
+    return "detail.plan.short.avoid";
+  }
+  if (stance === "ActNow") return "detail.plan.long.act";
+  if (stance === "ScaleIn") return "detail.plan.long.scale";
+  if (stance === "WaitZone") return "detail.plan.long.wait";
+  return "detail.plan.long.avoid";
+}
+
+function planStanceChipKey(stance: PlanStance): string {
+  if (stance === "ActNow") return "dash.v2.stance.ActNow";
+  if (stance === "ScaleIn") return "dash.v2.stance.ScaleIn";
+  if (stance === "WaitZone") return "dash.v2.stance.WaitZone";
+  return "dash.v2.stance.Avoid";
 }
 
 // ── Price provenance badge ────────────────────────────────────────────────────
@@ -454,6 +508,8 @@ function AnalysisSummary({
 }) {
   const { t } = useT();
   const dh = presentation.decisionHeader(row.decision);
+  const plan = buildConditionalPlan(row, scoringModel);
+  const techVerdict = verdictFromTechnicalScore(row.technical_score);
   const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
   const { summary } = buildReasons(row, detail, t, presentation, scoringModel);
   const reason = renderText(
@@ -462,12 +518,43 @@ function AnalysisSummary({
   );
   const gap = presentation.gap(row.gap_bps);
   const technicalOnly = row.asset_type === "crypto" || row.asset_type === "etf";
+  const planColor = planStanceColor(plan.stance);
 
   return (
-    <div className="analysis-box" style={{ borderColor: dh.color }}>
-      <div className="analysis-header" style={{ color: dh.color }}>
-        <span className="analysis-emoji">{dh.emoji}</span>
-        <span className="analysis-title">{t(dh.titleKey)}</span>
+    <UiInspectable
+      as="div"
+      className="analysis-box"
+      style={{ borderColor: planColor }}
+      source={UI.detailAnalysisSummary}
+      snapshot={{
+        symbol: row.symbol,
+        scoringModel,
+        side: plan.side,
+        stance: plan.stance,
+        decision: row.decision,
+        setupLabel: row.setup_label,
+        compositeScore: row.composite_score,
+        fundamentalsScore: row.fundamentals_score,
+        technicalScore: row.technical_score,
+        technicalVerdict: techVerdict,
+        forecastScore: row.forecast_score,
+        gapBps: row.gap_bps,
+        confidence: detail.confidence,
+        assetType: row.asset_type,
+        headlineKey: plan.headlineKey,
+        cautionCodes: plan.caution.map((c) => c.code),
+        supportCodes: plan.support.map((s) => s.code),
+        regimeScore: marketContext.score,
+        regimeVisible: marketContext.visible,
+      }}
+    >
+      <div className="analysis-header" style={{ color: planColor }}>
+        <div className="analysis-header-main">
+          <span className="analysis-emoji" aria-hidden="true">
+            {planStanceEmoji(plan.stance)}
+          </span>
+          <span className="analysis-title">{t(planStanceTitleKey(plan.stance, plan.side))}</span>
+        </div>
         <span className="analysis-score">
           {marketContext.visible ? (
             <>
@@ -480,7 +567,21 @@ function AnalysisSummary({
           ) : `${t("analysis.score")}: ${row.composite_score}`}
         </span>
       </div>
-      <p className="analysis-summary">{summary}</p>
+      <div className="analysis-body">
+        <div className="analysis-plan-meta">
+          <span className="analysis-plan-chip" style={{ borderColor: planColor, color: planColor }}>
+            {t(planStanceChipKey(plan.stance))}
+          </span>
+          <span className="analysis-plan-chip analysis-plan-chip--muted">
+            {t("analysis.decision.raw")}: {t(dh.titleKey)}
+          </span>
+          <span className="analysis-plan-chip analysis-plan-chip--muted">
+            {t("analysis.technical")}: {techVerdict}
+            {row.technical_score != null ? ` (${row.technical_score > 0 ? "+" : ""}${row.technical_score})` : ""}
+          </span>
+        </div>
+        <p className="analysis-summary">{summary}</p>
+      </div>
       <div className="decision-reason" style={{ borderTopColor: dh.color }}>
         <div className="decision-reason-label">{t("reason.title")}</div>
         <p className="decision-reason-text">
@@ -518,7 +619,7 @@ function AnalysisSummary({
       {presentation.riskNotice.key && (
         <div className="short-risk-notice">⚠ {renderText(presentation.riskNotice, t)}</div>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 
@@ -540,13 +641,42 @@ function AnalysisBuckets({
   const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
   if (technicalOnly) {
     return (
-      <div className="analysis-buckets-wrap analysis-buckets-wrap--single">
+      <UiInspectable
+        as="div"
+        className="analysis-buckets-wrap analysis-buckets-wrap--single"
+        source={UI.detailAnalysisBuckets}
+        snapshot={{
+          symbol: row.symbol,
+          technicalOnly: true,
+          technicalScore: row.technical_score,
+          technicalVerdict: verdictFromTechnicalScore(row.technical_score),
+          technicalSignals: row.technical_signals,
+          scoringModel,
+        }}
+      >
         <AnalysisBucket label={t(presentation.bucketLabelKeys[1])} score={row.technical_score} points={reasons.technical} signals={row.technical_signals} invertSignals={presentation.isShort} />
-      </div>
+      </UiInspectable>
     );
   }
   return (
-    <div className={`analysis-buckets-wrap${marketContext.visible ? " analysis-buckets-wrap--four" : ""}`}>
+    <UiInspectable
+      as="div"
+      className={`analysis-buckets-wrap${marketContext.visible ? " analysis-buckets-wrap--four" : ""}`}
+      source={UI.detailAnalysisBuckets}
+      snapshot={{
+        symbol: row.symbol,
+        technicalOnly: false,
+        fundamentalsScore: row.fundamentals_score,
+        technicalScore: row.technical_score,
+        technicalVerdict: verdictFromTechnicalScore(row.technical_score),
+        forecastScore: row.forecast_score,
+        fundamentalsSignals: row.fundamentals_signals,
+        technicalSignals: row.technical_signals,
+        forecastSignals: row.forecast_signals,
+        regimeScore: marketContext.score,
+        scoringModel,
+      }}
+    >
       <AnalysisBucket label={t(presentation.bucketLabelKeys[0])} score={row.fundamentals_score} points={reasons.fundamentals} signals={row.fundamentals_signals} invertSignals={presentation.isShort} />
       <AnalysisBucket label={t(presentation.bucketLabelKeys[1])} score={row.technical_score} points={reasons.technical} signals={row.technical_signals} invertSignals={presentation.isShort} />
       <AnalysisBucket label={t(presentation.bucketLabelKeys[2])} score={row.forecast_score} points={reasons.forecast} signals={row.forecast_signals} invertSignals={presentation.isShort} />
@@ -556,7 +686,7 @@ function AnalysisBuckets({
           detail={detail}
         />
       )}
-    </div>
+    </UiInspectable>
   );
 }
 
@@ -577,7 +707,18 @@ function MarketContextBucket({
   const tipId = "market-context-tooltip";
 
   return (
-    <div className={`analysis-bucket market-context-bucket${narrative.muted ? " is-muted" : ""}`}>
+    <UiInspectable
+      as="div"
+      className={`analysis-bucket market-context-bucket${narrative.muted ? " is-muted" : ""}`}
+      source={UI.detailMarketContextBucket}
+      snapshot={{
+        score: marketContext.score,
+        tone: narrative.tone,
+        muted: narrative.muted,
+        classification: narrative.classificationLabel,
+        chips: narrative.chips.map((c) => ({ factor: c.factor, effect: c.effect })),
+      }}
+    >
       <div className="bucket-header market-context-header">
         <span className="bucket-label market-context-title-row">
           {t(marketContext.bucketKey)}
@@ -638,7 +779,7 @@ function MarketContextBucket({
           ))}
         </div>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 

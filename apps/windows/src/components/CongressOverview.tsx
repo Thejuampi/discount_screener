@@ -10,6 +10,7 @@ import type {
 } from "../api";
 import { useT } from "../i18n";
 import { PoliticianDetailModal } from "./PoliticianDetailModal";
+import { UI, UiInspectable } from "../uiInspect";
 
 type Tab = "tickers" | "politicians";
 
@@ -228,7 +229,19 @@ export function CongressOverviewPanel() {
   };
 
   return (
-    <div className="congress-page">
+    <UiInspectable
+      as="div"
+      className="congress-page"
+      source={UI.congressRoot}
+      snapshot={{
+        days,
+        tab,
+        loading,
+        tradeCount: overview?.trade_count ?? null,
+        politicianCount: polMetrics.length,
+        chamberFilter,
+      }}
+    >
       <header className="congress-header">
         <div>
           <h2 className="congress-title">🏛 {t("congress.title")}</h2>
@@ -452,7 +465,7 @@ export function CongressOverviewPanel() {
           }}
         />
       )}
-    </div>
+    </UiInspectable>
   );
 }
 

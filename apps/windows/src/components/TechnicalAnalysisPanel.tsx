@@ -8,7 +8,15 @@ import {
   getScoringPresentation,
   type ScoringModelId,
   type ScoringPresentationState,
+  type TechnicalVerdict,
 } from "../scoringPresentation";
+import {
+  confidenceFromBreakdown,
+  narrativeKeyForVerdict,
+  resolveCanonicalTechnicalScore,
+  verdictFromTechnicalScore,
+} from "../technicalVerdict";
+import { UI, UiInspectable } from "../uiInspect";
 
 // ── Glossary ──────────────────────────────────────────────────────────────────
 
@@ -65,18 +73,26 @@ interface KeySignal {
 }
 
 interface TechnicalSummary {
-  verdict: "Strong Bullish" | "Mildly Bullish" | "Neutral" | "Mildly Bearish" | "Strong Bearish" | "Insufficient data";
-  score: number;        // -100..+100, weighted aggregate
-  confidence: "Alta" | "Media" | "Baja";  // based on total weight of evidence
-  narrative: string;    // 1-2 sentence summary in Spanish
-  action_hint: string;  // what this means for the trader
-  positives: KeySignal[];  // bullish signals, ranked
-  negatives: KeySignal[];  // bearish signals, ranked
+  verdict: TechnicalVerdict;
+  /** Canonical engine score — same as OpportunityRow.technical_score / buckets. */
+  score: number;
+  confidence: "Alta" | "Media" | "Baja";
+  narrative: string;
+  action_hint: string;
+  positives: KeySignal[];
+  negatives: KeySignal[];
   contradictions: string[];
+  /** True when score came from the shared engine (not a UI-only recompute). */
+  canonical: boolean;
 }
 
 type TFn = (key: string, vars?: Record<string, string | number>) => string;
 
+/**
+ * Evidence list for display only. Verdict + score always come from the
+ * centralized technical engine (resolveCanonicalTechnicalScore), never from
+ * re-weighting these signals — that dual engine caused Act-long vs Strong Bearish.
+ */
 function buildTechnicalSummary(
   _weekly: ChartSummary | null,
   daily: ChartSummary | null,
@@ -84,6 +100,7 @@ function buildTechnicalSummary(
   breakdown: TechnicalBreakdown | null,
   t: TFn,
   presentation: ScoringPresentationState,
+  opportunityTechnicalScore: number | null | undefined,
 ): TechnicalSummary {
   const signals: KeySignal[] = [];
 
@@ -266,28 +283,15 @@ function buildTechnicalSummary(
     }
   }
 
-  // ── Aggregate ──────────────────────────────────────────────────────────────
-  let bullWeight = 0, bearWeight = 0, totalWeight = 0;
-  for (const s of signals) {
-    const eff = s.weight * s.strength;
-    totalWeight += s.weight;
-    if (s.bias === "bull") bullWeight += eff;
-    else if (s.bias === "bear") bearWeight += eff;
-  }
-  const score = totalWeight === 0 ? 0
-    : Math.round(((bullWeight - bearWeight) / totalWeight) * 100);
-
-  let verdict: TechnicalSummary["verdict"] = "Insufficient data";
-  if (totalWeight >= 25) {
-    if (score >= 45) verdict = "Strong Bullish";
-    else if (score >= 15) verdict = "Mildly Bullish";
-    else if (score <= -45) verdict = "Strong Bearish";
-    else if (score <= -15) verdict = "Mildly Bearish";
-    else verdict = "Neutral";
-  }
-
-  const confidence: TechnicalSummary["confidence"] =
-    totalWeight >= 70 ? "Alta" : totalWeight >= 40 ? "Media" : "Baja";
+  // ── Canonical score (single engine) — do NOT re-score from local weights ──
+  const canonicalScore = resolveCanonicalTechnicalScore(
+    opportunityTechnicalScore,
+    breakdown,
+  );
+  const score = canonicalScore ?? 0;
+  const verdict = verdictFromTechnicalScore(canonicalScore);
+  const confidence = confidenceFromBreakdown(breakdown);
+  const canonical = canonicalScore != null;
 
   const sortedSignals = [...signals].sort(
     (a, b) => (b.weight * b.strength) - (a.weight * a.strength)
@@ -306,21 +310,21 @@ function buildTechnicalSummary(
   if (breakdown?.alignment === "Mixed") {
     contradictions.push(t("ts.contradiction.mixedTf"));
   }
+  // Surface mixed buckets vs overall score when evidence fights the engine score
+  if (canonical && positives.length > 0 && negatives.length > 0 && Math.abs(score) < 30) {
+    contradictions.push(t("ts.contradiction.mixedBuckets"));
+  }
 
-  // ── Narrative + action hint (i18n) ─────────────────────────────────────────
-  const narrativeKeyMap: Record<TechnicalSummary["verdict"], string> = {
-    "Strong Bullish":     "ts.narrative.strongBull",
-    "Mildly Bullish":     "ts.narrative.mildBull",
-    "Neutral":            "ts.narrative.neutral",
-    "Mildly Bearish":     "ts.narrative.mildBear",
-    "Strong Bearish":     "ts.narrative.strongBear",
-    "Insufficient data":  "ts.narrative.insufficient",
-  };
   return {
-    verdict, score, confidence,
-    narrative: t(narrativeKeyMap[verdict]),
+    verdict,
+    score,
+    confidence,
+    narrative: t(narrativeKeyForVerdict(verdict)),
     action_hint: t(presentation.technicalActionKey(verdict)),
-    positives, negatives, contradictions,
+    positives,
+    negatives,
+    contradictions,
+    canonical,
   };
 }
 
@@ -360,6 +364,8 @@ interface Props {
   hourly:  ChartSummary | null;
   monthly: ChartSummary | null;
   breakdown: TechnicalBreakdown | null;
+  /** OpportunityRow.technical_score — same number as dashboard buckets. */
+  technicalScore?: number | null;
   profile: Profile;
   onProfileChange: (p: Profile) => void;
   scoringModel: ScoringModelId;
@@ -416,24 +422,23 @@ const ALIGN_LABEL: Record<TfAlignment, { label: string; color: string; emoji: st
 };
 
 export function TechnicalAnalysisPanel({
-  weekly, daily, hourly, monthly, breakdown, profile, onProfileChange, scoringModel,
+  weekly, daily, hourly, monthly, breakdown, technicalScore, profile, onProfileChange, scoringModel,
 }: Props) {
   const { t } = useT();
   const presentation = getScoringPresentation(scoringModel);
   const [showGlossary, setShowGlossary] = useState(false);
   if (!daily && !weekly && !hourly && !monthly) return null;
 
-  // Pick the 3 frames for the active profile
+  // Pick the 3 frames for the active profile (table display only)
   const { top, mid, bottom } = framesForProfile(profile, monthly, weekly, daily, hourly);
   const frameLabels = PROFILE_INFO[profile].frames;
 
-  // Compute per-profile trends & alignment (overrides backend's swing-default breakdown)
+  // Profile lens for TF table — does NOT rewrite the engine score
   const topTrend    = classifyTrendLocal(top);
   const midTrend    = classifyTrendLocal(mid);
   const bottomTrend = classifyTrendLocal(bottom);
   const profileAlignment = alignmentLocal(topTrend, midTrend, bottomTrend);
 
-  // Build a profile-aware breakdown for the summary
   const profileBreakdown: TechnicalBreakdown | null = breakdown ? {
     ...breakdown,
     alignment: profileAlignment,
@@ -442,10 +447,39 @@ export function TechnicalAnalysisPanel({
     hourly_trend: bottomTrend,
   } : null;
 
-  const summary = buildTechnicalSummary(top, mid, bottom, profileBreakdown, t, presentation);
+  // Verdict uses engine frames (weekly/daily/hourly) + OpportunityRow.technical_score
+  const summary = buildTechnicalSummary(
+    weekly,
+    daily,
+    hourly,
+    breakdown,
+    t,
+    presentation,
+    technicalScore,
+  );
 
   return (
-    <div className="info-section technical-panel">
+    <UiInspectable
+      as="div"
+      className="info-section technical-panel"
+      source={UI.detailTechnicalPanel}
+      snapshot={{
+        scoringModel,
+        profile,
+        technicalScore: summary.score,
+        technicalVerdict: summary.verdict,
+        confidence: summary.confidence,
+        canonical: summary.canonical,
+        alignment: profileBreakdown?.alignment ?? breakdown?.alignment ?? null,
+        trendScore: breakdown?.trend_score ?? null,
+        momentumScore: breakdown?.momentum_score ?? null,
+        volatilityScore: breakdown?.volatility_score ?? null,
+        volumeScore: breakdown?.volume_score ?? null,
+        patternScore: breakdown?.pattern_score ?? null,
+        positives: summary.positives.map((p) => p.label),
+        negatives: summary.negatives.map((n) => n.label),
+      }}
+    >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h3 style={{ margin: 0 }}>{t("tech.title")}</h3>
         <button className="glossary-btn" onClick={() => setShowGlossary(!showGlossary)} title={t("tech.guide")}>
@@ -456,7 +490,7 @@ export function TechnicalAnalysisPanel({
       {/* ── Profile selector ── */}
       <ProfileSelector profile={profile} onChange={onProfileChange} />
 
-      {/* ── Weighted summary (TOP) ── */}
+      {/* ── Canonical engine summary (same score as dashboard / buckets) ── */}
       <TechnicalSummaryBox summary={summary} presentation={presentation} />
 
       {profileBreakdown && (
@@ -653,7 +687,7 @@ export function TechnicalAnalysisPanel({
           </div>
         </div>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 
@@ -806,7 +840,22 @@ function TechnicalSummaryBox({
   const supportingArrow = presentation.isShort ? "▼" : "▲";
   const risksArrow = presentation.isShort ? "▲" : "▼";
   return (
-    <div className="tech-summary" style={{ borderLeftColor: st.color, background: st.bg }}>
+    <UiInspectable
+      as="div"
+      className="tech-summary"
+      style={{ borderLeftColor: st.color, background: st.bg }}
+      source={UI.detailTechnicalSummary}
+      snapshot={{
+        verdict: summary.verdict,
+        score: summary.score,
+        confidence: summary.confidence,
+        canonical: summary.canonical,
+        isShort: presentation.isShort,
+        positives: summary.positives.map((p) => p.label),
+        negatives: summary.negatives.map((n) => n.label),
+        contradictions: summary.contradictions,
+      }}
+    >
       {/* Headline */}
       <div className="tech-summary-head">
         <div>
@@ -818,6 +867,10 @@ function TechnicalSummaryBox({
         </div>
         <ScoreGauge value={summary.score} color={st.color} />
       </div>
+
+      {summary.canonical && (
+        <p className="tech-engine-source">{t("ts.engine.source")}</p>
+      )}
 
       {/* Narrative + action */}
       <p className="tech-narrative">{summary.narrative}</p>
@@ -857,7 +910,7 @@ function TechnicalSummaryBox({
           </div>
         </div>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 

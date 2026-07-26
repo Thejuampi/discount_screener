@@ -99,6 +99,9 @@ pub struct OpportunityRow {
     pub atr_cents: Option<i64>,
     /// Recent daily closes (cents, oldest→newest) for an inline sparkline.
     pub spark: Vec<i64>,
+    /// Compact multi-anchor price path (Dashboard 2.0). None when price missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_path: Option<crate::price_path::CompactPricePath>,
 }
 
 #[derive(Serialize)]
@@ -421,6 +424,40 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             let ins_net = row.insider_net_shares_90d;
             let ins_buy = row.insider_buy_count;
             let ins_sell = row.insider_sell_count;
+            let path_side = match model {
+                ScoringModel::ShortV3 => crate::price_path::PathSide::Short,
+                _ => crate::price_path::PathSide::Long,
+            };
+            // Legacy signal tags use "−" / "-" prefix for adverse regime causes.
+            let regime_risk = regime_signals.iter().any(|s| {
+                s.starts_with('−') || s.starts_with('-')
+            });
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let price_path = if row.market_price_cents > 0 {
+                let input = crate::price_path::PricePathInput {
+                    side: path_side,
+                    market_price_cents: row.market_price_cents,
+                    intrinsic_value_cents: row.intrinsic_value_cents,
+                    dcf_value_cents: dcf,
+                    low_fair_value_cents: row.low_fair_value_cents,
+                    high_fair_value_cents: row.high_fair_value_cents,
+                    gap_bps: row.gap_bps,
+                    daily,
+                    candles: daily_candles_ref,
+                    next_earnings_epoch: row.next_earnings_epoch,
+                    now_epoch,
+                    regime_risk,
+                    forecast_score: fore_score,
+                    technical_score: tech_score,
+                };
+                let est = crate::price_path::estimate_price_path(&input);
+                Some(crate::price_path::compact_price_path(&est))
+            } else {
+                None
+            };
             OpportunityRow {
                 row,
                 fundamentals_score: fund_score,
@@ -447,6 +484,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 daily_change_bps,
                 atr_cents: daily.and_then(|d| d.atr_cents),
                 spark,
+                price_path,
             }
         })
         .collect()

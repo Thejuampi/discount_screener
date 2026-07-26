@@ -3,6 +3,7 @@ import { api, fmt } from "../api";
 import type { CryptoMetrics } from "../api";
 import { useT } from "../i18n";
 import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   symbol: string;
@@ -52,11 +53,20 @@ export function CryptoCyclePanel({ symbol, isCrypto, scoringModel }: Props) {
   const cycleProgress = Math.max(0, Math.min(100, (cycleDay / 1460) * 100));
   const labelColor = LABEL_COLOR[m.crypto_label] ?? "var(--text-3)";
 
+  const cryptoSnap = {
+    symbol,
+    scoringModel,
+    cryptoScore: m.crypto_score,
+    cryptoLabel: m.crypto_label,
+    daysSinceLastHalving: m.days_since_last_halving,
+    isShort: presentation.isShort,
+  };
+
   if (presentation.isShort) {
     const tone = m.crypto_score > 10 ? "risk" : m.crypto_score < -10 ? "support" : "neutral";
     const toneColor = tone === "risk" ? "var(--danger)" : tone === "support" ? "var(--success)" : "var(--warning)";
     return (
-      <div className="info-section crypto-cycle-panel">
+      <UiInspectable as="div" className="info-section crypto-cycle-panel" source={UI.detailCryptoCycle} snapshot={{ ...cryptoSnap, tone }}>
         <h3>{t("presentation.short.crypto.title")}</h3>
         <div className="crypto-verdict" style={{ borderLeftColor: toneColor }}>
           <div className="crypto-verdict-head">
@@ -77,12 +87,12 @@ export function CryptoCyclePanel({ symbol, isCrypto, scoringModel }: Props) {
           <span>{t("presentation.short.crypto.fearGreed")}</span><span>{m.fear_greed ? `${m.fear_greed.value}/100 · ${m.fear_greed.classification}` : "—"}</span>
         </div>
         <div className="crypto-disclaimer">{t("presentation.short.crypto.disclaimer")}</div>
-      </div>
+      </UiInspectable>
     );
   }
 
   return (
-    <div className="info-section crypto-cycle-panel">
+    <UiInspectable as="div" className="info-section crypto-cycle-panel" source={UI.detailCryptoCycle} snapshot={cryptoSnap}>
       <h3>₿ Crypto Cycle Analysis</h3>
 
       {/* Verdict banner */}
@@ -224,7 +234,7 @@ export function CryptoCyclePanel({ symbol, isCrypto, scoringModel }: Props) {
         Los patrones del pasado no garantizan rendimientos futuros — especialmente en crypto donde la
         adopción institucional puede cambiar la naturaleza de los ciclos.
       </div>
-    </div>
+    </UiInspectable>
   );
 }
 

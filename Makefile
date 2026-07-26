@@ -13,7 +13,7 @@ NPX := npx
 .PHONY: all build test clean fmt check release run \
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
         android-build android-test android-clean android-release android-run android-signing-bootstrap apk \
-        windows-run windows-dev windows-build windows-test run-windows \
+        windows-run windows-dev windows-stop windows-build windows-test run-windows \
         contracts-test
 
 run: desktop-run
@@ -74,7 +74,11 @@ apk:
 
 run-windows: windows-run
 
-windows-run windows-dev:
+# Kill prior Vite (5173) + Vantage window so re-runs do not fail with "port already in use".
+windows-stop:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/stop-windows-dev.ps1"
+
+windows-run windows-dev: windows-stop
 	pushd "$(WINDOWS_DIR)" && $(NPX) tauri dev && popd
 
 windows-build:

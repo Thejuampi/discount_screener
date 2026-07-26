@@ -52,6 +52,44 @@ export interface OpportunityRow {
   atr_cents: number | null;  // 14-day ATR (volatility) for stop & sizing
   next_earnings_epoch: number | null;
   spark: number[];           // recent daily closes (cents) for inline sparkline
+  /** Compact multi-anchor price path (Dashboard 2.0). */
+  price_path?: CompactPricePath | null;
+}
+
+export type PathSide = "long" | "short";
+export type ZoneConfidence = "low" | "med" | "high";
+export type TimingMethod =
+  | "empirical_touches"
+  | "atr_distance"
+  | "hybrid"
+  | "unavailable";
+
+export type PathMotiveCode =
+  | "extension"
+  | "far_from_support"
+  | "far_from_resistance"
+  | "rsi_rich"
+  | "rsi_washed"
+  | "above_value"
+  | "below_value"
+  | "regime_risk"
+  | "earnings_soon"
+  | "trend_against"
+  | "weak_forecast"
+  | "near_zone"
+  | "in_zone";
+
+export interface CompactPricePath {
+  zone_low_cents: number | null;
+  zone_high_cents: number | null;
+  zone_confidence: ZoneConfidence | null;
+  p_touch_20d: number | null;
+  expected_sessions: number | null;
+  invalidation_cents: number | null;
+  risk_codes: PathMotiveCode[];
+  support_codes: PathMotiveCode[];
+  timing_method: TimingMethod;
+  side: PathSide;
 }
 
 export type AssetType = "stock" | "crypto" | "etf";

@@ -8,6 +8,7 @@ import { AdvisorPanel } from "./components/AdvisorPanel";
 import { RegimeBanner } from "./components/RegimeBanner";
 import { ScalpingPanel } from "./components/ScalpingPanel";
 import { DashboardPanel } from "./components/DashboardPanel";
+import { DashboardEditionToggle, DashboardV2Panel, type DashboardEdition } from "./components/DashboardV2Panel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { singleFlight } from "./singleFlight";
@@ -26,13 +27,21 @@ import { useSignalAlerts } from "./useSignalAlerts";
 import { useEmailNotifications } from "./useEmailNotifications";
 import { getScoringPresentation, isScoringModelId, type ScoringModelId } from "./scoringPresentation";
 import { warmMarketContext } from "./marketContextWarmup";
+import { UiInspectProvider, UiInspectRoot } from "./uiInspect";
 import "./App.css";
 
 const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
 const SCORING_STORAGE_KEY = "ds_scoring_model";
 const REGIME_SCORING_KEY = "ds_regime_scoring";
+const DASHBOARD_EDITION_KEY = "ds_dashboard_edition";
+
+function readDashboardEdition(): DashboardEdition {
+  const saved = localStorage.getItem(DASHBOARD_EDITION_KEY);
+  return saved === "v2" ? "v2" : "legacy";
+}
+
 export default function App() {
-  const { t } = useT();
+  const { t, lang } = useT();
   const { theme, setTheme } = useTheme();
 
   const [rows, setRows] = useState<OpportunityRow[]>([]);
@@ -78,6 +87,7 @@ export default function App() {
     const saved = localStorage.getItem(REGIME_SCORING_KEY);
     return saved === null ? true : saved === "1";
   });
+  const [dashboardEdition, setDashboardEdition] = useState<DashboardEdition>(readDashboardEdition);
   const [modelReady, setModelReady] = useState(false);
   const scoringModelRef = useRef(scoringModel);
   const requestedModelRef = useRef(scoringModel);
@@ -188,6 +198,15 @@ export default function App() {
     }
   };
 
+  const handleDashboardEdition = (edition: DashboardEdition) => {
+    setDashboardEdition(edition);
+    localStorage.setItem(DASHBOARD_EDITION_KEY, edition);
+    // Dashboard 2.0 only supports V3 long/short — migrate off V2 on enter.
+    if (edition === "v2" && scoringModelRef.current === "aggressive_v2") {
+      void selectScoringModel("aggressive_v3");
+    }
+  };
+
   const selectScoringModel = async (next: ScoringModelId) => {
     requestedModelRef.current = next;
     if (modelSwitchingRef.current || next === scoringModelRef.current) return;
@@ -286,7 +305,33 @@ export default function App() {
     return matchText && matchConf && matchAsset;
   });
 
+  const uiAppContext = useMemo(
+    () => ({
+      view: viewMode,
+      scoringModel,
+      regimeScoring,
+      dashboardEdition,
+      profile,
+      lang,
+      theme,
+      assetFilter,
+      universeProfile,
+    }),
+    [
+      viewMode,
+      scoringModel,
+      regimeScoring,
+      dashboardEdition,
+      profile,
+      lang,
+      theme,
+      assetFilter,
+      universeProfile,
+    ],
+  );
+
   return (
+    <UiInspectProvider appContext={uiAppContext}>
     <div className="app app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
@@ -453,14 +498,37 @@ export default function App() {
       <div className="main-layout">
         {viewMode === "dashboard" ? (
           <div className="congress-pane">
-            <DashboardPanel
-              rows={rows}
-              symbolsLoaded={symbolsLoaded}
-              symbolsTotal={symbolsTotal}
-              onNavigate={handleViewModeChange}
-              onOpenSymbol={openSymbol}
-              scoringModel={scoringModel}
-            />
+            {dashboardEdition === "v2" ? (
+              <DashboardV2Panel
+                rows={rows}
+                symbolsLoaded={symbolsLoaded}
+                symbolsTotal={symbolsTotal}
+                scoringModel={scoringModel === "aggressive_v2" ? "aggressive_v3" : scoringModel}
+                regimeScoring={regimeScoring}
+                edition={dashboardEdition}
+                onEditionChange={handleDashboardEdition}
+                onSelectModel={(m) => void selectScoringModel(m)}
+                onToggleRegime={() => void toggleRegimeScoring()}
+                onOpenSymbol={openSymbol}
+              />
+            ) : (
+              <>
+                <div className="dash-legacy-edition-bar">
+                  <DashboardEditionToggle
+                    edition={dashboardEdition}
+                    onEditionChange={handleDashboardEdition}
+                  />
+                </div>
+                <DashboardPanel
+                  rows={rows}
+                  symbolsLoaded={symbolsLoaded}
+                  symbolsTotal={symbolsTotal}
+                  onNavigate={handleViewModeChange}
+                  onOpenSymbol={openSymbol}
+                  scoringModel={scoringModel}
+                />
+              </>
+            )}
           </div>
         ) : viewMode === "settings" ? (
           <div className="congress-pane">
@@ -472,7 +540,7 @@ export default function App() {
         ) : viewMode === "screener" ? (
           <>
             <div className={`list-pane ${selectedSymbol ? "narrow" : ""}`}>
-              {!selectedSymbol && <RegimeBanner />}
+              {!selectedSymbol && <RegimeBanner scoringModel={scoringModel} />}
               {scoringPresentation.banner && (
                 <div className="scoring-mode-banner scoring-mode-banner--short" role="status">
                   <span className="scoring-mode-banner__tag">{t(scoringPresentation.banner.tagKey)}</span>
@@ -548,7 +616,9 @@ export default function App() {
         onOpenSettings={() => handleViewModeChange("settings")}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
+      <UiInspectRoot />
       <Toaster />
     </div>
+    </UiInspectProvider>
   );
 }

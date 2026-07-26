@@ -16,6 +16,7 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Desktop Screen Guide](../apps/desktop/docs/SCREENS.md) - terminal UI layout and behavior.
 - [Desktop User Manual](../apps/desktop/docs/USER_MANUAL.md) - keyboard controls and operational behavior.
 - [Desktop History and Time-Series Manual](../apps/desktop/docs/HISTORY_TIME_SERIES.md) - persistence, time-series queries, and exports.
+- [Windows Dashboard 2.0 — Manual Regression Spec](windows-dashboard-2.0-manual-regression.md) - Classic vs 2.0 screen-by-screen functional spec and manual regression cases.
 
 ## BMad Planning Artifacts
 

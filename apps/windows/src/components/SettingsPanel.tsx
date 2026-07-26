@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import type { Lang } from "../i18n";
 import { SchwabConnect } from "./SchwabConnect";
 import { EmailNotifications } from "./EmailNotifications";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   autostartOn: boolean;
@@ -18,7 +19,7 @@ export function SettingsPanel({ autostartOn, onToggleAutostart }: Props) {
   const saveName = (v: string) => { setName(v); localStorage.setItem("ds_display_name", v); };
 
   return (
-    <div className="congress-page">
+    <UiInspectable as="div" className="congress-page" source={UI.settingsRoot} snapshot={{ theme, lang }}>
       <header className="congress-header">
         <div>
           <h2 className="congress-title">{t("view.settings")}</h2>
@@ -53,6 +54,7 @@ export function SettingsPanel({ autostartOn, onToggleAutostart }: Props) {
           <span>{t("settings.autostart")}</span>
         </label>
         <div className="settings-hint">{t("settings.hint")}</div>
+        <div className="settings-hint" style={{ marginTop: 8 }}>{t("settings.uiInspect.hint")}</div>
       </div>
 
       {/* Data source */}
@@ -65,7 +67,7 @@ export function SettingsPanel({ autostartOn, onToggleAutostart }: Props) {
       {/* Notifications */}
       <h3 className="settings-group-title">{t("settings.group.notif")}</h3>
       <EmailNotifications />
-    </div>
+    </UiInspectable>
   );
 }
 
