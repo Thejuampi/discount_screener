@@ -352,7 +352,13 @@ export const UI = {
     "Advisor panel",
     "components/AdvisorPanel.tsx",
     "AdvisorPanel",
-    ["scoringPresentation.ts", "conditionalPlan.ts"],
+    [
+      "scoringPresentation.ts",
+      "conditionalPlan.ts",
+      "portfolioRegimeEval.ts",
+      "useMarketRegime.ts",
+      "regimeSideLens.ts",
+    ],
     [],
     [
       DS.portfolioList,
@@ -362,6 +368,9 @@ export const UI = {
       DS.quotePrices,
       DS.scoringPresentation,
       DS.conditionalPlan,
+      DS.marketRegime,
+      DS.regimeSideLens,
+      DS.portfolioRegimeEval,
     ],
   ),
   advisorPosition: src(
@@ -369,9 +378,16 @@ export const UI = {
     "Advisor position row",
     "components/AdvisorPanel.tsx",
     "position row",
-    ["scoringPresentation.ts"],
+    ["scoringPresentation.ts", "portfolioRegimeEval.ts"],
     [],
-    [DS.portfolioList, DS.opportunities, DS.quotePrices, DS.scoringPresentation],
+    [
+      DS.portfolioList,
+      DS.opportunities,
+      DS.quotePrices,
+      DS.scoringPresentation,
+      DS.marketRegime,
+      DS.portfolioRegimeEval,
+    ],
   ),
 
   // ── Scalping ───────────────────────────────────────────────────────────────

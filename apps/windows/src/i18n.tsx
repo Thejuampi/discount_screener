@@ -543,6 +543,7 @@ const T: Record<string, { es: string; en: string }> = {
   "advisor.col.pnl":            { es: "P&L", en: "P&L" },
   "advisor.col.weight":         { es: "Peso", en: "Weight" },
   "advisor.col.signal":         { es: "Se├▒al", en: "Signal" },
+  "advisor.col.fit":            { es: "Fit régimen", en: "Regime fit" },
   "advisor.col.action":         { es: "Recomendaci├│n", en: "Recommendation" },
   "advisor.health":             { es: "Salud del portfolio", en: "Portfolio health" },
   "advisor.totalValue":         { es: "Valor total", en: "Total value" },
@@ -566,6 +567,31 @@ const T: Record<string, { es: string; en: string }> = {
   "advisor.warn.negative":      {
     es: "≡ƒö┤ {symbol} tiene se├▒al {label} ΓÇö revisar si mantener",
     en: "≡ƒö┤ {symbol} has {label} signal ΓÇö review whether to hold",
+  },
+  "advisor.regime.strip":       {
+    es: "Régimen {phase} · Stance: {stance} · Techo exp: {exp}% · New risk: {mult}× · Conf {conf}%",
+    en: "Regime {phase} · Stance: {stance} · Exposure ceiling: {exp}% · New risk: {mult}× · Conf {conf}%",
+  },
+  "advisor.regime.effectiveRisk": {
+    es: "Riesgo por trade efectivo: {effective}% (base {base}% × {mult})",
+    en: "Effective risk per trade: {effective}% (base {base}% × {mult})",
+  },
+  "advisor.regime.loading":     { es: "Cargando régimen de mercado…", en: "Loading market regime…" },
+  "advisor.regime.warn.lowConf": {
+    es: "ℹ️ Confianza del régimen baja ({conf}%) — sizing y acciones sin ajuste de mercado",
+    en: "ℹ️ Low regime confidence ({conf}%) — sizing and actions without market adjustment",
+  },
+  "advisor.regime.warn.defensiveNoAdd": {
+    es: "⚠️ Stance defensivo: el régimen no favorece nuevas altas de riesgo",
+    en: "⚠️ Defensive stance: regime does not favor adding new risk",
+  },
+  "advisor.regime.warn.poorFit": {
+    es: "⚠️ {symbol} encaja mal con el régimen actual (fit {score})",
+    en: "⚠️ {symbol} fits poorly with the current regime (fit {score})",
+  },
+  "advisor.regime.oppCaution":  {
+    es: "Stance actual no favorece nuevas altas — tamaños ya escalados por el multiplicador de riesgo",
+    en: "Current stance does not favor new adds — sizes already scaled by the risk multiplier",
   },
   // ΓöÇΓöÇ Signal-change alerts (desktop notifications) ΓöÇΓöÇ
   "alert.signalChange.title":   { es: "{symbol}: cambi├│ la valoraci├│n", en: "{symbol}: rating changed" },
@@ -902,6 +928,10 @@ const T: Record<string, { es: string; en: string }> = {
   "advisor.risk.totalAtRiskHelp": {
     es: "Suma de la p├⌐rdida de cada posici├│n si llega a su stop. Si esto supera ~6% del portfolio, est├ís demasiado expuesto: reduc├¡ tama├▒o o cantidad de posiciones.",
     en: "Sum of each position's loss if it hits its stop. If this exceeds ~6% of the portfolio you're over-exposed: cut size or number of positions.",
+  },
+  "advisor.risk.ceilingNote":   {
+    es: "Umbral de riesgo total (régimen): {ceiling}%",
+    en: "Total risk ceiling (regime): {ceiling}%",
   },
   "advisor.risk.noAtr":         { es: "Sin datos de volatilidad", en: "No volatility data" },
   "advisor.risk.corrTitle":     { es: "Concentraci├│n oculta (correlaci├│n)", en: "Hidden concentration (correlation)" },
