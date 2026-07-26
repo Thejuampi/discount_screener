@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import { api } from "../api";
-import type { MarketRegime, RegimePillar } from "../api";
+import { useState } from "react";
+import type { RegimePillar } from "../api";
 import { useT } from "../i18n";
 import { RegimeRadar } from "./RegimeRadar";
 import { UI, UiInspectable } from "../uiInspect";
@@ -12,6 +11,7 @@ import {
   regimeStanceLabelKey,
   shortRegimeTone,
 } from "../regimeSideLens";
+import { useMarketRegime } from "../useMarketRegime";
 
 const PHASE_STYLE: Record<string, { color: string; bg: string; border: string }> = {
   StrongBull:    { color: "#22c55e", bg: "rgba(34,197,94,0.12)",  border: "rgba(34,197,94,0.45)" },
@@ -136,18 +136,8 @@ export function RegimeBanner({
 }) {
   const { t, lang } = useT();
   const lens = regimeLensFromModel(scoringModel);
-  const [regime, setRegime] = useState<MarketRegime | null>(null);
+  const regime = useMarketRegime();
   const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => api.getMarketRegime()
-      .then((r) => { if (!cancelled) setRegime(r); })
-      .catch(console.error);
-    load();
-    const id = setInterval(load, 120_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
 
   // Soft loading state — never blank the whole dashboard if regime is slow.
   if (!regime) {
