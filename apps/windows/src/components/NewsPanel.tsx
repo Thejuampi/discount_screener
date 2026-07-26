@@ -3,6 +3,7 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { api } from "../api";
 import type { NewsBundle, NewsItem } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   symbol: string;
@@ -25,7 +26,12 @@ export function NewsPanel({ symbol }: Props) {
   }, [symbol]);
 
   return (
-    <div className="info-section news-section">
+    <UiInspectable
+      as="div"
+      className="info-section news-section"
+      source={UI.detailNews}
+      snapshot={{ symbol, loading, itemCount: bundle?.items?.length ?? 0 }}
+    >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h3 style={{ margin: 0 }}>{t("news.title")}</h3>
         <button className="glossary-btn" onClick={() => load(symbol)} disabled={loading}>
@@ -54,7 +60,7 @@ export function NewsPanel({ symbol }: Props) {
           </div>
         </>
       )}
-    </div>
+    </UiInspectable>
   );
 }
 

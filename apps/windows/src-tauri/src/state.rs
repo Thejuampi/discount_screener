@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,7 @@ use crate::engine::ScreenerState;
 use crate::feed_log::FeedLog;
 use crate::news::NewsCache;
 use crate::profiles::compose_universe;
+use crate::regime::{CnnFngCache, RegimeCache};
 use crate::ticker_search::YahooSearchQuote;
 
 #[derive(Clone)]
@@ -97,6 +98,12 @@ pub struct AppState {
     pub news_cache: Arc<NewsCache>,
     pub congress_sync: Arc<Mutex<CongressSyncProgress>>,
     pub fng_cache: Arc<FngCache>,
+    /// CNN equity Fear & Greed cache (regime engine).
+    pub cnn_fng_cache: Arc<CnnFngCache>,
+    /// Full market-regime response cache + exposure hysteresis.
+    pub regime_cache: Arc<RegimeCache>,
+    /// When true, V3 composite includes the 4th regime_fit bucket.
+    pub apply_regime_scoring: Arc<AtomicBool>,
     /// Carries the active scalping product to the WebSocket background task.
     pub scalp_ws_tx: tokio::sync::watch::Sender<String>,
     pub remote_search_cache: Arc<Mutex<RemoteSearchCache>>,
@@ -128,6 +135,9 @@ impl AppState {
             news_cache: Arc::new(NewsCache::new()),
             congress_sync: Arc::new(Mutex::new(CongressSyncProgress::default())),
             fng_cache: Arc::new(FngCache::new()),
+            cnn_fng_cache: Arc::new(CnnFngCache::new()),
+            regime_cache: Arc::new(RegimeCache::new()),
+            apply_regime_scoring: Arc::new(AtomicBool::new(true)),
             scalp_ws_tx,
             remote_search_cache: Arc::new(Mutex::new(RemoteSearchCache::new())),
             active_profile: Mutex::new(profile),

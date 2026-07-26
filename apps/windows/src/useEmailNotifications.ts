@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { api } from "./api";
 import type { OpportunityRow, SetupLabel, EmailConfigView } from "./api";
 import { useT } from "./i18n";
+import type { ScoringModelId } from "./scoringPresentation";
 import {
   buildDigestEmail,
   type EmailChange, type EmailOpportunity, type EmailRiskAlert,
@@ -23,17 +24,17 @@ const loadMap = (k: string): Record<string, SetupLabel> => {
  * rating changes for held positions. Driven from the frontend (the webview stays
  * alive in the tray); the Rust side only does SMTP delivery.
  */
-export function useEmailNotifications(rows: OpportunityRow[]) {
+export function useEmailNotifications(rows: OpportunityRow[], scoringModel: ScoringModelId) {
   const { lang } = useT();
   const cfgRef = useRef<EmailConfigView | null>(null);
   const heldRef = useRef<Set<string>>(new Set());
   const langRef = useRef(lang);
-  langRef.current = lang;
   // Read rows via a ref so the digest interval doesn't restart on every rows
   // update (which caused bursts of concurrent ticks → duplicate digests).
   const rowsRef = useRef(rows);
-  rowsRef.current = rows;
   const digestSendingRef = useRef(false);
+  useEffect(() => { langRef.current = lang; }, [lang]);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
 
   // Refresh config + held symbols periodically.
   useEffect(() => {
@@ -63,6 +64,9 @@ export function useEmailNotifications(rows: OpportunityRow[]) {
     const tick = async () => {
       const cfg = cfgRef.current;
       const rows = rowsRef.current;
+      // Digest templates and portfolio actions are long-side only. Never send
+      // them with inverted Short rows, where the same backend tokens mean the opposite trade.
+      if (scoringModel === "short_v3") return;
       if (cancelled || digestSendingRef.current) return;
       if (!cfg?.enabled || !cfg.daily_digest || rows.length === 0) return;
       const now = new Date();
@@ -95,7 +99,7 @@ export function useEmailNotifications(rows: OpportunityRow[]) {
     const id = setInterval(tick, 60_000);
     tick();
     return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  }, [scoringModel]);
 }
 
 function toChange(r: OpportunityRow, from: SetupLabel): EmailChange {

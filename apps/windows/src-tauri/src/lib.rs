@@ -15,6 +15,7 @@ mod fibonacci;
 mod index_estimates;
 mod news;
 mod opportunity_v3;
+mod price_path;
 mod profiles;
 mod quant_lens;
 mod quote_summary;
@@ -59,6 +60,9 @@ pub fn run() {
             let db_path = app_data_dir.join("history.sqlite");
             let app_state = AppState::new(db_path);
             app.manage(app_state);
+
+            // Keep market-context (V3 4th bucket) warm independent of UI banner mount.
+            regime::spawn_regime_worker(&*app.state::<AppState>());
 
             // ── Real-time scalping WebSocket (background thread) ───────────────
             let scalp_rx = app.state::<AppState>().scalp_ws_tx.subscribe();
@@ -177,6 +181,8 @@ pub fn run() {
             commands::get_politician_detail,
             risk::get_portfolio_risk,
             regime::get_market_regime,
+            commands::get_regime_scoring_enabled,
+            commands::set_regime_scoring_enabled,
             commands::journal_list,
             commands::journal_add,
             commands::journal_close,

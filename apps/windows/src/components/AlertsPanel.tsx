@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "../api";
 import type { AlertEvent } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   onClose: () => void;
@@ -22,7 +23,12 @@ export function AlertsPanel({ onClose }: Props) {
   };
 
   return (
-    <div className="alerts-panel">
+    <UiInspectable
+      as="div"
+      className="alerts-panel"
+      source={UI.alertsRoot}
+      snapshot={{ alertCount: alerts.length, kinds: alerts.map((a) => a.kind).slice(0, 12) }}
+    >
       <div className="alerts-header">
         <span>{t("alerts.title")}</span>
         <button className="close-btn" onClick={onClose}>✕</button>
@@ -44,6 +50,6 @@ export function AlertsPanel({ onClose }: Props) {
           })}
         </ul>
       )}
-    </div>
+    </UiInspectable>
   );
 }

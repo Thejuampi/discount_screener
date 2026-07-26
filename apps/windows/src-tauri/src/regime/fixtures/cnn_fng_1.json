@@ -1,0 +1,28 @@
+{
+  "fear_and_greed_historical": {
+    "timestamp": 1784851189000.0,
+    "score": 12.3,
+    "data": [
+      {
+        "x": 1780272000000.0,
+        "y": 17.3,
+        "rating": "neutral"
+      },
+      {
+        "x": 1780358400000.0,
+        "y": 12.3,
+        "rating": "extreme fear"
+      }
+    ],
+    "rating": "extreme fear"
+  },
+  "fear_and_greed": {
+    "previous_close": 15.3,
+    "previous_1_month": 2.3000000000000007,
+    "rating": "extreme fear",
+    "timestamp": "2026-07-01T23:59:49+00:00",
+    "score": 12.3,
+    "previous_1_year": 55.0,
+    "previous_1_week": 10.3
+  }
+}

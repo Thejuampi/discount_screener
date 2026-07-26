@@ -250,6 +250,26 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
         earnings_growth_bps: financial_data
             .and_then(|f| raw_double(f, "earningsGrowth"))
             .map(|v| (v * 10_000.0) as i32),
+        book_value_per_share_cents: statistics
+            .and_then(|s| {
+                raw_double(s, "bookValue")
+                    .or_else(|| raw_double(s, "bookValuePerShare"))
+            })
+            .filter(|v| *v > 0.0)
+            .map(|v| (v * 100.0).round() as i64)
+            .or_else(|| {
+                // Derive BVPS = price / P/B when Yahoo omits bookValue.
+                let price = financial_data
+                    .and_then(|f| raw_double(f, "currentPrice"))
+                    .or_else(|| price.and_then(|p| raw_double(p, "regularMarketPrice")))
+                    .or_else(|| market_price_cents.map(|c| c as f64 / 100.0))?;
+                let pb = statistics.and_then(|s| raw_double(s, "priceToBook"))?;
+                if price > 0.0 && pb > 0.0 {
+                    Some(((price / pb) * 100.0).round() as i64)
+                } else {
+                    None
+                }
+            }),
     });
 
     FetchResult {

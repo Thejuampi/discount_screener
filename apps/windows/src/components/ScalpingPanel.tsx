@@ -7,6 +7,7 @@ import { ScalpChart } from "./ScalpChart";
 import type { ChartOverlays } from "./ScalpChart";
 import { ChartPatterns } from "./ChartPatterns";
 import { FibLevels } from "./FibLevels";
+import { UI, UiInspectable } from "../uiInspect";
 
 const DEFAULT_OVERLAYS: ChartOverlays = { signal: true, smc: true, patterns: true, fib: true, ema: true, volume: true };
 
@@ -84,7 +85,22 @@ export function ScalpingPanel() {
   const sideColor = sig?.side === "LONG" ? "var(--success)" : sig?.side === "SHORT" ? "var(--danger)" : "var(--text-4)";
 
   return (
-    <div className="congress-page">
+    <UiInspectable
+      as="div"
+      className="congress-page"
+      source={UI.scalpingRoot}
+      snapshot={{
+        product,
+        chartTf,
+        rr,
+        fee,
+        loading,
+        hasAnalysis: !!a,
+        side: a?.signal?.side ?? null,
+        label: a?.signal?.label ?? null,
+        livePrice: live?.price ?? null,
+      }}
+    >
       <header className="congress-header">
         <div>
           <h2 className="congress-title">
@@ -300,7 +316,7 @@ export function ScalpingPanel() {
       )}
 
       {loading && !a && <div className="info-section" style={{ color: "var(--text-4)" }}>…</div>}
-    </div>
+    </UiInspectable>
   );
 }
 

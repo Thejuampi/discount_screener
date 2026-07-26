@@ -17,8 +17,9 @@ use crate::fetcher::{
     asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready, YahooClient,
 };
 use crate::opportunity_v3::{
-    composite_score_v3, decision_state_v3, invert_bucket, invert_composite, score_forecast_v3,
-    score_fundamentals_v3, score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
+    composite_score_v3, composite_score_v3_ext, composite_score_v3_short_ext, decision_state_v3,
+    invert_bucket, invert_composite, score_forecast_v3, score_fundamentals_v3,
+    score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
 };
 use crate::profiles::{compose_universe, profile_definitions, profile_symbols};
 use crate::state::AppState;
@@ -32,6 +33,32 @@ const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
 
 // ── Response types ────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RegimeScoreStatus {
+    Included,
+    Disabled,
+    Unavailable,
+    NotApplicable,
+}
+
+fn resolve_regime_score_status(
+    model: ScoringModel,
+    is_equity: bool,
+    toggle_enabled: bool,
+    policy_available: bool,
+    regime_score: Option<i32>,
+) -> RegimeScoreStatus {
+    if model == ScoringModel::AggressiveV2 || !is_equity {
+        RegimeScoreStatus::NotApplicable
+    } else if !toggle_enabled {
+        RegimeScoreStatus::Disabled
+    } else if !policy_available || regime_score.is_none() {
+        RegimeScoreStatus::Unavailable
+    } else {
+        RegimeScoreStatus::Included
+    }
+}
+
 #[derive(Serialize)]
 pub struct OpportunityRow {
     #[serde(flatten)]
@@ -40,11 +67,21 @@ pub struct OpportunityRow {
     pub fundamentals_score: Option<i32>,
     pub technical_score: Option<i32>,
     pub forecast_score: Option<i32>,
+    /// 4th V3 bucket: fit with active market-regime policy (null if off/unavailable).
+    pub regime_score: Option<i32>,
     pub composite_score: i32,
+    /// Classic 3-bucket V3 composite (debug / tooltip parity).
+    pub composite_score_base: i32,
     pub decision: &'static str, // "Act" | "Watch" | "Avoid"
     pub fundamentals_signals: Vec<String>,
     pub technical_signals: Vec<String>,
     pub forecast_signals: Vec<String>,
+    pub regime_signals: Vec<String>,
+    /// Typed regime causes (preferred by the presentation layer).
+    pub regime_causes: Vec<crate::regime::RegimeCause>,
+    /// Why market context is unavailable when status is Unavailable.
+    pub regime_unavailable_reason: Option<crate::regime::MarketContextUnavailableReason>,
+    pub regime_status: RegimeScoreStatus,
     // DCF from SEC EDGAR (cents/share, null = not yet computed)
     pub dcf_value_cents: Option<i64>,
     // Insider activity (Form 4, 90-day window)
@@ -62,6 +99,9 @@ pub struct OpportunityRow {
     pub atr_cents: Option<i64>,
     /// Recent daily closes (cents, oldest→newest) for an inline sparkline.
     pub spark: Vec<i64>,
+    /// Compact multi-anchor price path (Dashboard 2.0). None when price missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_path: Option<crate::price_path::CompactPricePath>,
 }
 
 #[derive(Serialize)]
@@ -91,7 +131,35 @@ pub struct UniverseProfileStatus {
 
 #[tauri::command]
 pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
-    let screener = state.screener.lock().unwrap();
+    use crate::regime::{score_regime_fit, RegimeScoringPolicy, ScoreSide};
+    use std::sync::atomic::Ordering;
+
+    let apply_regime = state.apply_regime_scoring.load(Ordering::Relaxed);
+    // Never compute regime inline here — that path hits Yahoo/CNN and would block the
+    // opportunity list (polled every few seconds). Use cache only (stale-while-revalidate);
+    // background worker + get_market_regime / toggle keep the cache warm.
+    let regime_snapshot = if apply_regime {
+        let snap = state.regime_cache.get();
+        if snap.is_none() || state.regime_cache.needs_refresh() {
+            crate::regime::request_regime_refresh(&state);
+        }
+        snap
+    } else {
+        None
+    };
+    let policy_long = regime_snapshot
+        .as_ref()
+        .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Long));
+    let policy_short = regime_snapshot
+        .as_ref()
+        .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Short));
+
+    let mut screener = state.screener.lock().unwrap();
+    // Purge/replace stale FCFF caches for financials before scoring/list DCF values.
+    let recon_syms: Vec<String> = screener.fundamentals.keys().cloned().collect();
+    for sym in recon_syms {
+        screener.ensure_model_routed_valuation(&sym);
+    }
     let rows = screener.candidate_rows();
     let benchmarks = compute_sector_benchmarks(&rows);
     rows.into_iter()
@@ -107,6 +175,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
             let model = ScoringModel::parse(&screener.scoring_model);
             let dcf_analysis = screener.dcf_analyses.get(&row.symbol);
+            let equity = !is_crypto(row.symbol.as_str()) && !is_etf(row.symbol.as_str());
             let (
                 fund_score,
                 fund_signals,
@@ -115,8 +184,14 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 tech_breakdown,
                 fore_score,
                 fore_signals,
+                regime_score,
+                regime_signals,
+                regime_causes,
+                regime_unavailable_reason,
                 composite,
+                composite_base,
                 decision,
+                regime_status,
             ) = match model {
                 ScoringModel::AggressiveV2 => {
                     let (fs, fsig) = score_fundamentals_v2(&row, bench);
@@ -134,33 +209,145 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                         tech_only,
                         ts,
                     );
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        None,
+                        vec![],
+                        vec![],
+                        None,
+                        comp,
+                        comp,
+                        dec,
+                        RegimeScoreStatus::NotApplicable,
+                    )
                 }
                 ScoringModel::AggressiveV3 => {
-                    // Pure Android V3 — single daily chart summary only (no multi-TF blend).
                     let (fs, fsig) = score_fundamentals_v3(&row);
                     let (ts, tsig) = score_opportunity_technicals_v3(daily);
-                    // Multi-TF breakdown is still computed for the technical detail panel,
-                    // but does NOT enter the opportunity composite / ranking.
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
                     let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
-                    let comp = composite_score_v3(fs, ts, fr, row.beta_millis);
+                    let base = composite_score_v3(fs, ts, fr, row.beta_millis);
+                    let (rs, rsig, rcauses, runavail, haircut_mult) = if apply_regime && equity {
+                        if let Some(ref pol) = policy_long {
+                            let fit = score_regime_fit(&row, daily, pol);
+                            (
+                                fit.score,
+                                fit.signals,
+                                fit.causes,
+                                fit.unavailable_reason,
+                                pol.beta_haircut_mult,
+                            )
+                        } else {
+                            (
+                                None,
+                                vec![],
+                                vec![],
+                                Some(crate::regime::MarketContextUnavailableReason::MarketReadingUnavailable),
+                                1.0,
+                            )
+                        }
+                    } else {
+                        (None, vec![], vec![], None, 1.0)
+                    };
+                    let status = resolve_regime_score_status(
+                        model,
+                        equity,
+                        apply_regime,
+                        policy_long.is_some(),
+                        rs,
+                    );
+                    let comp = if status == RegimeScoreStatus::Included {
+                        composite_score_v3_ext(fs, ts, fr, rs, row.beta_millis, haircut_mult)
+                    } else {
+                        base
+                    };
                     let dec = decision_state_v3(comp);
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        rs,
+                        rsig,
+                        rcauses,
+                        runavail,
+                        comp,
+                        base,
+                        dec,
+                        status,
+                    )
                 }
                 ScoringModel::ShortV3 => {
-                    // Pure inverse of Aggressive V3: invert buckets + final composite.
-                    let (fs, fsig) = score_fundamentals_v3(&row);
-                    let (ts, tsig) = score_opportunity_technicals_v3(daily);
+                    let (fs0, fsig) = score_fundamentals_v3(&row);
+                    let (ts0, tsig) = score_opportunity_technicals_v3(daily);
                     let (_, _, tb) = score_technicals_v3(weekly, daily, hourly, daily_candles_ref);
-                    let (fr, frsig) = score_forecast_v3(&row, dcf_analysis);
-                    let long_comp = composite_score_v3(fs, ts, fr, row.beta_millis);
-                    let fs = invert_bucket(fs);
-                    let ts = invert_bucket(ts);
-                    let fr = invert_bucket(fr);
-                    let comp = invert_composite(long_comp);
+                    let (fr0, frsig) = score_forecast_v3(&row, dcf_analysis);
+                    let (rs, rsig, rcauses, runavail, haircut_mult) = if apply_regime && equity {
+                        if let Some(ref pol) = policy_short {
+                            let fit = score_regime_fit(&row, daily, pol);
+                            (
+                                fit.score,
+                                fit.signals,
+                                fit.causes,
+                                fit.unavailable_reason,
+                                pol.beta_haircut_mult,
+                            )
+                        } else {
+                            (
+                                None,
+                                vec![],
+                                vec![],
+                                Some(crate::regime::MarketContextUnavailableReason::MarketReadingUnavailable),
+                                1.0,
+                            )
+                        }
+                    } else {
+                        (None, vec![], vec![], None, 1.0)
+                    };
+                    let long_base = composite_score_v3(fs0, ts0, fr0, row.beta_millis);
+                    let fs = invert_bucket(fs0);
+                    let ts = invert_bucket(ts0);
+                    let fr = invert_bucket(fr0);
+                    let base = invert_composite(long_base);
+                    let status = resolve_regime_score_status(
+                        model,
+                        equity,
+                        apply_regime,
+                        policy_short.is_some(),
+                        rs,
+                    );
+                    let comp = if status == RegimeScoreStatus::Included {
+                        composite_score_v3_short_ext(fs, ts, fr, rs, row.beta_millis, haircut_mult)
+                    } else {
+                        base
+                    };
                     let dec = decision_state_v3(comp);
-                    (fs, fsig, ts, tsig, tb, fr, frsig, comp, dec)
+                    (
+                        fs,
+                        fsig,
+                        ts,
+                        tsig,
+                        tb,
+                        fr,
+                        frsig,
+                        rs,
+                        rsig,
+                        rcauses,
+                        runavail,
+                        comp,
+                        base,
+                        dec,
+                        status,
+                    )
                 }
             };
             let sym_str = row.symbol.as_str();
@@ -242,16 +429,56 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
             let ins_net = row.insider_net_shares_90d;
             let ins_buy = row.insider_buy_count;
             let ins_sell = row.insider_sell_count;
+            let path_side = match model {
+                ScoringModel::ShortV3 => crate::price_path::PathSide::Short,
+                _ => crate::price_path::PathSide::Long,
+            };
+            // Legacy signal tags use "−" / "-" prefix for adverse regime causes.
+            let regime_risk = regime_signals.iter().any(|s| {
+                s.starts_with('−') || s.starts_with('-')
+            });
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let price_path = if row.market_price_cents > 0 {
+                let input = crate::price_path::PricePathInput {
+                    side: path_side,
+                    market_price_cents: row.market_price_cents,
+                    intrinsic_value_cents: row.intrinsic_value_cents,
+                    dcf_value_cents: dcf,
+                    low_fair_value_cents: row.low_fair_value_cents,
+                    high_fair_value_cents: row.high_fair_value_cents,
+                    gap_bps: row.gap_bps,
+                    daily,
+                    candles: daily_candles_ref,
+                    next_earnings_epoch: row.next_earnings_epoch,
+                    now_epoch,
+                    regime_risk,
+                    forecast_score: fore_score,
+                    technical_score: tech_score,
+                };
+                let est = crate::price_path::estimate_price_path(&input);
+                Some(crate::price_path::compact_price_path(&est))
+            } else {
+                None
+            };
             OpportunityRow {
                 row,
                 fundamentals_score: fund_score,
                 technical_score: tech_score,
                 forecast_score: fore_score,
+                regime_score,
                 composite_score: composite,
+                composite_score_base: composite_base,
                 decision,
                 fundamentals_signals: fund_signals,
                 technical_signals: tech_signals,
                 forecast_signals: fore_signals,
+                regime_signals,
+                regime_causes,
+                regime_unavailable_reason,
+                regime_status,
                 dcf_value_cents: dcf,
                 insider_net_shares_90d: ins_net,
                 insider_buy_count: ins_buy,
@@ -262,14 +489,34 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
                 daily_change_bps,
                 atr_cents: daily.and_then(|d| d.atr_cents),
                 spark,
+                price_path,
             }
         })
         .collect()
 }
 
 #[tauri::command]
+pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
+    use std::sync::atomic::Ordering;
+    state.apply_regime_scoring.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool {
+    use std::sync::atomic::Ordering;
+    state.apply_regime_scoring.store(enabled, Ordering::Relaxed);
+    // Turning context on must not wait for the banner: warm/refresh regime data now.
+    if enabled {
+        crate::regime::request_regime_refresh(&state);
+    }
+    enabled
+}
+
+#[tauri::command]
 pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
-    let screener = state.screener.lock().unwrap();
+    let mut screener = state.screener.lock().unwrap();
+    // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
+    screener.ensure_model_routed_valuation(&symbol);
     screener.detail(&symbol)
 }
 
@@ -439,7 +686,9 @@ pub fn get_quant_lens(
     symbol: String,
     state: State<AppState>,
 ) -> Result<crate::quant_lens::QuantLensReport, String> {
-    let screener = state.screener.lock().unwrap();
+    let mut screener = state.screener.lock().unwrap();
+    screener.ensure_model_routed_valuation(&symbol);
+
     let detail = screener
         .detail(&symbol)
         .ok_or_else(|| format!("no detail for {symbol}"))?;
@@ -768,11 +1017,50 @@ fn needs_enrichment_retry(
 mod feed_coordinator_tests {
     use super::{
         batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
-        ingest_fetch_result, needs_enrichment_retry, symbol_state_enrichment_complete,
-        RefreshOutcome,
+        ingest_fetch_result, needs_enrichment_retry, resolve_regime_score_status,
+        symbol_state_enrichment_complete, RefreshOutcome, RegimeScoreStatus,
     };
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
+    use crate::opportunity_v3::ScoringModel;
+
+    #[test]
+    fn regime_row_status_distinguishes_all_four_states_and_keeps_zero_included() {
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, true, true, Some(0)),
+            RegimeScoreStatus::Included
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, false, false, None),
+            RegimeScoreStatus::Disabled
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::ShortV3, true, true, false, None),
+            RegimeScoreStatus::Unavailable
+        );
+        assert_eq!(
+            resolve_regime_score_status(ScoringModel::AggressiveV3, true, true, true, None),
+            RegimeScoreStatus::Unavailable
+        );
+        for model in [ScoringModel::AggressiveV2] {
+            assert_eq!(
+                resolve_regime_score_status(model, true, true, true, Some(25)),
+                RegimeScoreStatus::NotApplicable
+            );
+        }
+        for equity in [false] {
+            assert_eq!(
+                resolve_regime_score_status(
+                    ScoringModel::AggressiveV3,
+                    equity,
+                    true,
+                    true,
+                    Some(25)
+                ),
+                RegimeScoreStatus::NotApplicable
+            );
+        }
+    }
 
     #[test]
     fn shared_yahoo_cooldown_is_applied_once_to_the_retry_batch() {
@@ -1463,30 +1751,64 @@ fn spawn_feed_workers(
                             continue;
                         }
 
-                        match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
-                            Ok(Some(fcf)) => {
-                                if !generation_is_current(&feed_gen, generation) {
-                                    return;
-                                }
-                                let mut s = screener.lock().unwrap();
-                                let fund = s.fundamentals.get(sym).cloned();
-                                let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
-                                if let Some(fund) = fund {
-                                    if let Ok(analysis) =
-                                        crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar")
-                                    {
-                                        s.ingest_dcf_analysis(sym.to_string(), analysis);
-                                    }
-                                } else if let Ok(Some(legacy)) =
-                                    edgar::fetch_dcf(&edgar_client, sym, cik, shares)
-                                {
-                                    s.ingest_dcf(sym.to_string(), legacy.value_per_share_cents);
+                        // Valuation model family: financials → residual income (no FCFF on
+                        // float OCF). Operating → FCFF from EDGAR FCF history.
+                        let is_financial = {
+                            let s = screener.lock().unwrap();
+                            s.fundamentals.get(sym).map(|fund| {
+                                crate::dcf_model::classify_business(
+                                    fund.sector_name.as_deref(),
+                                    fund.industry_name.as_deref(),
+                                    fund.sector_key.as_deref(),
+                                    fund.industry_key.as_deref(),
+                                    false,
+                                ) == crate::dcf_model::BusinessClass::FinancialServices
+                            })
+                            .unwrap_or(false)
+                        };
+
+                        if is_financial {
+                            let mut s = screener.lock().unwrap();
+                            let fund = s.fundamentals.get(sym).cloned();
+                            let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                            if let Some(fund) = fund {
+                                if let Ok(analysis) = crate::dcf_model::compute_from_fundamentals(
+                                    &fund,
+                                    price,
+                                    "fundamentals",
+                                ) {
+                                    s.ingest_dcf_analysis(sym.to_string(), analysis);
                                 }
                             }
-                            Ok(None) => {}
-                            Err(_) => {}
+                        } else {
+                            match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
+                                Ok(Some(fcf)) => {
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        return;
+                                    }
+                                    let mut s = screener.lock().unwrap();
+                                    let fund = s.fundamentals.get(sym).cloned();
+                                    let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                                    if let Some(fund) = fund {
+                                        if let Ok(analysis) = crate::dcf_model::compute(
+                                            &fund, &fcf, price, "sec_edgar",
+                                        ) {
+                                            s.ingest_dcf_analysis(sym.to_string(), analysis);
+                                        }
+                                    } else if let Ok(Some(legacy)) =
+                                        edgar::fetch_dcf(&edgar_client, sym, cik, shares)
+                                    {
+                                        s.ingest_dcf(
+                                            sym.to_string(),
+                                            legacy.value_per_share_cents,
+                                        );
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(_) => {}
+                            }
+                            thread::sleep(std::time::Duration::from_millis(125));
                         }
-                        thread::sleep(std::time::Duration::from_millis(125));
 
                         if let Ok(Some(ins)) = edgar::fetch_insider_activity(&edgar_client, cik) {
                             if !generation_is_current(&feed_gen, generation) {

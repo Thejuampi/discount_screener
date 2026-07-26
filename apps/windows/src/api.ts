@@ -23,11 +23,24 @@ export interface OpportunityRow {
   fundamentals_score: number | null;
   technical_score: number | null;
   forecast_score: number | null;
+  /** 4th bucket: fit with market-regime policy (null if off / unavailable). */
+  regime_score?: number | null;
   composite_score: number;
+  /** Classic 3-bucket V3 composite (tooltip / parity). */
+  composite_score_base?: number;
   decision: Decision;
   fundamentals_signals: string[];
   technical_signals: string[];
   forecast_signals: string[];
+  regime_signals?: string[];
+  /** Typed regime causes (preferred). Legacy clients may only send regime_signals. */
+  regime_causes?: RegimeCause[];
+  /** Present when regime_status is Unavailable. */
+  regime_unavailable_reason?: RegimeUnavailableReason | null;
+  /** Authoritative state in current payloads. Optional for legacy compatibility. */
+  regime_status?: RegimeScoreStatus;
+  /** Legacy payload field; normalize at the presentation boundary. */
+  regime_scoring_enabled?: boolean;
   dcf_value_cents: number | null;
   insider_net_shares_90d: number | null;
   insider_buy_count: number | null;
@@ -39,9 +52,75 @@ export interface OpportunityRow {
   atr_cents: number | null;  // 14-day ATR (volatility) for stop & sizing
   next_earnings_epoch: number | null;
   spark: number[];           // recent daily closes (cents) for inline sparkline
+  /** Compact multi-anchor price path (Dashboard 2.0). */
+  price_path?: CompactPricePath | null;
+}
+
+export type PathSide = "long" | "short";
+export type ZoneConfidence = "low" | "med" | "high";
+export type TimingMethod =
+  | "empirical_touches"
+  | "atr_distance"
+  | "hybrid"
+  | "unavailable";
+
+export type PathMotiveCode =
+  | "extension"
+  | "far_from_support"
+  | "far_from_resistance"
+  | "rsi_rich"
+  | "rsi_washed"
+  | "above_value"
+  | "below_value"
+  | "regime_risk"
+  | "earnings_soon"
+  | "trend_against"
+  | "weak_forecast"
+  | "near_zone"
+  | "in_zone";
+
+export interface CompactPricePath {
+  zone_low_cents: number | null;
+  zone_high_cents: number | null;
+  zone_confidence: ZoneConfidence | null;
+  p_touch_20d: number | null;
+  expected_sessions: number | null;
+  invalidation_cents: number | null;
+  risk_codes: PathMotiveCode[];
+  support_codes: PathMotiveCode[];
+  timing_method: TimingMethod;
+  side: PathSide;
 }
 
 export type AssetType = "stock" | "crypto" | "etf";
+export type RegimeScoreStatus = "Included" | "Disabled" | "Unavailable" | "NotApplicable";
+
+export type RegimeCauseFactor =
+  | "Quality"
+  | "LowBeta"
+  | "Value"
+  | "OversoldQual"
+  | "Extension"
+  | "Trend"
+  | "Defensive"
+  | "Growth"
+  | "Liquidity"
+  | "GeneralFit"
+  | "Neutral"
+  | "Other";
+
+export type RegimeCauseEffect = "Support" | "Risk" | "Neutral";
+
+export interface RegimeCause {
+  factor: RegimeCauseFactor;
+  effect: RegimeCauseEffect;
+  contribution_bps: number;
+}
+
+export type RegimeUnavailableReason =
+  | "MarketReadingUnavailable"
+  | "InsufficientAssetData"
+  | "Unknown";
 export type SetupLabel =
   | "StrongBuy" | "Buy" | "Accumulate" | "Watch" | "Hold" | "Avoid" | "StrongAvoid"
   // Crypto-specific labels (override the equity ones for crypto symbols)
@@ -258,10 +337,23 @@ export interface HistoryStatus {
   snapshot_count: number;
 }
 
+export type ValuationModel =
+  | "fcff_wacc"
+  | "residual_income_equity"
+  | "none";
+
+export type BusinessClass =
+  | "operating_non_financial"
+  | "financial_services"
+  | "not_eligible";
+
+export type DiscountRateKind = "wacc" | "cost_of_equity";
+
 export interface DcfAnalysis {
   bear_intrinsic_value_cents: number;
   base_intrinsic_value_cents: number;
   bull_intrinsic_value_cents: number;
+  /** Discount rate in bps (WACC or cost of equity — see discount_rate_kind). */
   wacc_bps: number;
   base_growth_bps: number;
   net_debt_dollars: number;
@@ -275,6 +367,15 @@ export interface DcfAnalysis {
     wacc_clamped: boolean;
   };
   source: string;
+  engine_version?: string;
+  model_policy_version?: string;
+  business_class?: BusinessClass;
+  model?: ValuationModel;
+  discount_rate_kind?: DiscountRateKind;
+  stable_growth_bps?: number;
+  book_value_per_share_cents?: number | null;
+  roe0_bps?: number | null;
+  reason_codes?: string[];
 }
 
 export interface ScenarioEstimate {
@@ -330,6 +431,9 @@ export type SearchSubmitOutcome =
 
 export const api = {
   getOpportunities: () => invoke<OpportunityRow[]>("get_opportunities"),
+  getRegimeScoringEnabled: () => invoke<boolean>("get_regime_scoring_enabled"),
+  setRegimeScoringEnabled: (enabled: boolean) =>
+    invoke<boolean>("set_regime_scoring_enabled", { enabled }),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
@@ -623,23 +727,93 @@ export interface PriceProvenance {
   sources_ok: number;
 }
 
-// ── Market regime types ─────────────────────────────────────────────────────
+// ── Market regime types (v2 multi-pillar engine) ────────────────────────────
 
 export type RegimeKind = "RiskOn" | "Neutral" | "RiskOff" | "Unknown";
 
+export type PrimaryRegime =
+  | "StrongBull" | "Bull" | "LateBull" | "Range" | "Correction"
+  | "Bear" | "Capitulation" | "Snapback" | "Unknown";
+
+export type EnvironmentBand =
+  | "StrongRiskOn" | "RiskOn" | "Neutral" | "RiskOff" | "Crisis" | "Unknown";
+
+export type ActionStance =
+  | "BloodInStreets" | "Washout" | "Accumulate" | "SelectiveBuy"
+  | "HealthyPullback" | "Deploy" | "TrendDeploy" | "Neutral" | "Hold"
+  | "HoldTrim" | "Reduce" | "Euphoria" | "Distribute" | "Denial"
+  | "Defend" | "UnstableBlowoff" | "Mixed" | "Unknown";
+
+export interface RegimeSignal {
+  id: string;
+  label_es: string;
+  label_en: string;
+  contribution: number;
+  detail: string | null;
+  hint_es?: string | null;
+  hint_en?: string | null;
+}
+
+export interface RegimePillar {
+  id: string;
+  name_es: string;
+  name_en: string;
+  score: number;
+  confidence_bps: number;
+  weight_used_bps: number;
+  signals: RegimeSignal[];
+  stale: boolean;
+  interpretation_es?: string;
+  interpretation_en?: string;
+  tone?: string;
+  /** 0..100, edge = better (vol inverted on backend). */
+  radar_radius?: number;
+}
+
 export interface MarketRegime {
+  /** Compat alias of environment band → RiskOn|Neutral|RiskOff|Unknown */
   regime: RegimeKind;
+  primary_regime: PrimaryRegime | string;
+  environment_band: EnvironmentBand | string;
+  action_stance: ActionStance | string;
   suggested_exposure_pct: number;
+  cash_buffer_pct: number;
+  new_risk_multiplier_bps: number;
+  add_bias: number;
+  prefer_quality: boolean;
+  global_confidence_bps: number;
+  environment_score: number;
+  sentiment_score: number;
+  quality_score: number;
+  pillars: RegimePillar[];
   vix: number | null;
-  vix_state: "Calm" | "Normal" | "Elevated" | "Fear" | "Unknown";
+  vix_percentile_1y: number | null;
+  vix_term_ratio: number | null;
+  vix_state: string;
+  cnn_fear_greed: number | null;
+  cnn_fear_greed_label: string | null;
+  cnn_fear_greed_prev_close: number | null;
   breadth_above_ma200_pct: number | null;
   breadth_above_ma50_pct: number | null;
   breadth_sample: number;
   spy_above_ma200: boolean | null;
   spy_price_cents: number | null;
   spy_ma200_cents: number | null;
+  spy_drawdown_from_ath_pct: number | null;
+  credit_score: number | null;
+  leadership_score: number | null;
+  avg_corr_milli: number | null;
+  thesis_es: string;
+  thesis_en: string;
+  reading_es?: string;
+  reading_en?: string;
+  action_bullets_es?: string[];
+  action_bullets_en?: string[];
   notes_es: string[];
   notes_en: string[];
+  warnings: string[];
+  as_of_epoch: number;
+  version: number;
 }
 
 // ── Risk engine types ───────────────────────────────────────────────────────

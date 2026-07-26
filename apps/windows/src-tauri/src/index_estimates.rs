@@ -262,6 +262,15 @@ mod tests {
                 wacc_clamped: false,
             },
             source: "sec_edgar".into(),
+            engine_version: crate::dcf_model::ENGINE_VERSION.into(),
+            model_policy_version: crate::dcf_model::MODEL_POLICY_VERSION.into(),
+            business_class: crate::dcf_model::BusinessClass::OperatingNonFinancial,
+            model: crate::dcf_model::ValuationModel::FcffWacc,
+            discount_rate_kind: crate::dcf_model::DiscountRateKind::Wacc,
+            stable_growth_bps: 250,
+            book_value_per_share_cents: None,
+            roe0_bps: None,
+            reason_codes: vec![],
         }
     }
 

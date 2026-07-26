@@ -4,6 +4,9 @@ import type { OpportunityRow, AlertEvent, SetupLabel } from "../api";
 import { useT } from "../i18n";
 import { RegimeBanner } from "./RegimeBanner";
 import { Sparkline } from "./Sparkline";
+import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
+import { UI, UiInspectable } from "../uiInspect";
+import { verdictFromTechnicalScore } from "../technicalVerdict";
 
 type ViewMode = "screener" | "congress" | "advisor" | "scalping" | "dashboard";
 
@@ -15,6 +18,7 @@ interface Props {
   symbolsTotal: number;
   onOpenSymbol: (s: string) => void;
   onNavigate: (v: ViewMode) => void;
+  scoringModel: ScoringModelId;
 }
 
 const day = (bps: number | null) => {
@@ -23,8 +27,9 @@ const day = (bps: number | null) => {
   return { v, col: v > 0 ? "var(--success)" : v < 0 ? "var(--danger)" : "var(--text-4)", arrow: v > 0 ? "▲" : v < 0 ? "▼" : "" };
 };
 
-export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol, onNavigate }: Props) {
+export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol, onNavigate, scoringModel }: Props) {
   const { t } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const isLoading = symbolsTotal === 0 || symbolsLoaded < symbolsTotal;
   const marketPlaceholder = isLoading
@@ -54,7 +59,12 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
   };
 
   return (
-    <div className="congress-page">
+    <UiInspectable
+      as="div"
+      className="congress-page"
+      source={UI.dashboardLegacyRoot}
+      snapshot={{ scoringModel, rowCount: rows.length, opportunityCount: opportunities.length }}
+    >
       <header className="congress-header">
         <div>
           <h2 className="congress-title">
@@ -64,27 +74,44 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
         </div>
       </header>
 
-      <RegimeBanner />
+      <RegimeBanner scoringModel={scoringModel} />
 
       {/* Top opportunities */}
       <div className="info-section">
         <div className="dash-sec-head">
-          <h3>{t("dash.opportunities")}</h3>
+          <h3>{t(presentation.dashboardOpportunityKey)}</h3>
           <button className="btn-ghost" onClick={() => onNavigate("screener")}>{t("dash.viewAll")} →</button>
         </div>
         {opportunities.length === 0 ? (
           <div style={{ color: "var(--text-4)", fontSize: 13 }}>
-            {rows.length === 0 ? marketPlaceholder : t("dash.noOpportunities")}
+            {rows.length === 0 ? marketPlaceholder : t(presentation.dashboardEmptyKey)}
           </div>
         ) : (
           <div className="dash-opps">
             {opportunities.map((r) => {
               const d = day(r.daily_change_bps);
               return (
-                <div key={r.symbol} className="dash-opp" onClick={() => onOpenSymbol(r.symbol)}>
+                <UiInspectable
+                  key={r.symbol}
+                  as="div"
+                  className="dash-opp"
+                  onClick={() => onOpenSymbol(r.symbol)}
+                  source={UI.dashboardLegacyCard}
+                  snapshot={{
+                    symbol: r.symbol,
+                    decision: r.decision,
+                    setupLabel: r.setup_label,
+                    setupScore: r.setup_score,
+                    compositeScore: r.composite_score,
+                    technicalScore: r.technical_score,
+                    technicalVerdict: verdictFromTechnicalScore(r.technical_score),
+                    marketPriceCents: r.market_price_cents,
+                    scoringModel,
+                  }}
+                >
                   <div className="dash-opp-top">
                     <strong>{r.symbol}</strong>
-                    <span className="dash-opp-score">{t(`setup.${r.setup_label}`)} +{r.setup_score}</span>
+                    <span className="dash-opp-score">{t(presentation.setupLabelKey(r.setup_label))} +{r.setup_score}</span>
                   </div>
                   <div className="dash-opp-meta">
                     <span>{r.company_name ?? "—"}</span>
@@ -94,7 +121,7 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
                     <span>{fmt.dollars(r.market_price_cents)}</span>
                     {d && <span style={{ color: d.col, fontWeight: 600 }}>{d.arrow} {d.v >= 0 ? "+" : ""}{d.v.toFixed(2)}%</span>}
                   </div>
-                </div>
+                </UiInspectable>
               );
             })}
           </div>
@@ -135,6 +162,6 @@ export function DashboardPanel({ rows, symbolsLoaded, symbolsTotal, onOpenSymbol
           )}
         </div>
       </div>
-    </div>
+    </UiInspectable>
   );
 }

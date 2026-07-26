@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api, fmt } from "../api";
 import type { BacktestResult, Decision, HistoryStatus } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   onClose: () => void;
@@ -37,7 +38,18 @@ export function BacktestPanel({ onClose }: Props) {
     bps > 200 ? "#22c55e" : bps > 0 ? "#4ade80" : bps > -200 ? "#f59e0b" : "#ef4444";
 
   return (
-    <div className="backtest-panel">
+    <UiInspectable
+      as="div"
+      className="backtest-panel"
+      source={UI.backtestRoot}
+      snapshot={{
+        decision,
+        daysAgo,
+        loading,
+        sampleSize: result?.sample_size ?? null,
+        meanReturnBps: result?.mean_return_bps ?? null,
+      }}
+    >
       <div className="backtest-header">
         <span style={{ fontSize: 16, fontWeight: 700 }}>📊 {t("backtest.title")}</span>
         <button className="close-btn" onClick={onClose}>✕</button>
@@ -147,6 +159,6 @@ export function BacktestPanel({ onClose }: Props) {
           {t("backtest.snapshotsTotal", { n: status.snapshot_count.toLocaleString() })}
         </div>
       )}
-    </div>
+    </UiInspectable>
   );
 }

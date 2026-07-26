@@ -70,6 +70,7 @@ pub fn fundamental_snapshot(symbol: &str) -> FundamentalSnapshot {
         beta_millis: Some(1_100),
         trailing_eps_cents: Some(800),
         earnings_growth_bps: Some(1_500),
+        book_value_per_share_cents: Some(5_000),
     }
 }
 

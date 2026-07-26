@@ -7,6 +7,7 @@ import {
 import { api } from "./api";
 import type { OpportunityRow, SetupLabel } from "./api";
 import { useT } from "./i18n";
+import { getScoringPresentation, type ScoringModelId } from "./scoringPresentation";
 
 // Bucket a label into polarity. Alerts fire only when the bucket flips, so we
 // don't spam on every minor score wiggle — only when the *stance* changes.
@@ -19,10 +20,10 @@ function bucketOf(label: SetupLabel): Bucket {
   return "neu";
 }
 
-const STORE_KEY = "ds_alert_labels"; // symbol → last label seen (persisted)
+function storeKey(model: ScoringModelId): string { return `ds_alert_labels_${model}`; }
 
-function loadStore(): Record<string, SetupLabel> {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}"); }
+function loadStore(model: ScoringModelId): Record<string, SetupLabel> {
+  try { return JSON.parse(localStorage.getItem(storeKey(model)) ?? "{}"); }
   catch { return {}; }
 }
 
@@ -31,10 +32,12 @@ function loadStore(): Record<string, SetupLabel> {
  * (e.g. Buy → Avoid), fire a native notification. Runs while the app is alive,
  * including minimized to tray. No external messaging channel involved.
  */
-export function useSignalAlerts(rows: OpportunityRow[]) {
+export function useSignalAlerts(rows: OpportunityRow[], scoringModel: ScoringModelId) {
   const { t } = useT();
+  const presentation = getScoringPresentation(scoringModel);
   const heldRef = useRef<Set<string>>(new Set());
-  const lastRef = useRef<Record<string, SetupLabel>>(loadStore());
+  const lastRef = useRef<Record<string, SetupLabel>>(loadStore(scoringModel));
+  useEffect(() => { lastRef.current = loadStore(scoringModel); }, [scoringModel]);
 
   // Keep the held-symbols set fresh (portfolio can change between sessions).
   useEffect(() => {
@@ -67,7 +70,7 @@ export function useSignalAlerts(rows: OpportunityRow[]) {
         store[r.symbol] = r.setup_label; // always update last-seen
       }
 
-      localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      localStorage.setItem(storeKey(scoringModel), JSON.stringify(store));
       if (cancelled || !granted) return;
 
       for (const c of changes) {
@@ -75,13 +78,13 @@ export function useSignalAlerts(rows: OpportunityRow[]) {
           title: t("alert.signalChange.title", { symbol: c.symbol }),
           body: t("alert.signalChange.body", {
             symbol: c.symbol,
-            from: t(`setup.${c.from}`),
-            to: t(`setup.${c.to}`),
+            from: t(presentation.setupLabelKey(c.from)),
+            to: t(presentation.setupLabelKey(c.to)),
           }),
         });
       }
     })();
 
     return () => { cancelled = true; };
-  }, [rows, t]);
+  }, [rows, scoringModel, presentation, t]);
 }

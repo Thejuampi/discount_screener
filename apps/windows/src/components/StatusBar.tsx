@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "../api";
 import type { FeedStatus } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
   rowCount: number;
@@ -30,7 +31,18 @@ export function StatusBar({ rowCount }: Props) {
     : `${t("status.loading")} ${profile} ${loaded}/${total} (${pct}%)`;
 
   return (
-    <footer className="status-bar">
+    <UiInspectable
+      as="footer"
+      className="status-bar"
+      source={UI.statusBar}
+      snapshot={{
+        rowCount,
+        symbolsLoaded: loaded,
+        symbolsTotal: total,
+        feedRunning: status?.running ?? false,
+        profileName: status?.profile_name ?? null,
+      }}
+    >
       <span className={`feed-dot ${isFullyLoaded ? "live" : "loading"}`} />
       <span>{feedLabel}</span>
       {status?.last_error && (
@@ -42,6 +54,6 @@ export function StatusBar({ rowCount }: Props) {
       <span style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
         {rowCount} {t("status.visible")}
       </span>
-    </footer>
+    </UiInspectable>
   );
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, fmt } from "../api";
 import type { IndexEstimatesReport, ScenarioEstimate } from "../api";
 import { useT } from "../i18n";
+import { UI, UiInspectable } from "../uiInspect";
 
 function upsideLabel(bps: number): string {
   const pct = (bps / 100).toFixed(1);
@@ -87,7 +88,20 @@ export function EstimatesPanel() {
   const cov = report.dcf_coverage;
 
   return (
-    <div className="est-panel">
+    <UiInspectable
+      as="div"
+      className="est-panel"
+      source={UI.estimatesRoot}
+      snapshot={{
+        profileName: report.profile_name,
+        totalSymbols: report.total_symbols,
+        baseUpsideBps: base?.implied_upside_bps ?? null,
+        dcfCoverageStatus: cov.status,
+        dcfCovered: cov.covered_symbols,
+        dcfEligible: cov.total_eligible_symbols,
+        scenarioCount: report.scenarios.length,
+      }}
+    >
       <header className="est-hero">
         <div>
           <div className="est-kicker">
@@ -117,6 +131,6 @@ export function EstimatesPanel() {
         <ScenarioCard title={t("estimates.internalDcf")} items={dcfScenarios} />
         <ScenarioCard title={t("estimates.wallStreet")} items={analyst} />
       </div>
-    </div>
+    </UiInspectable>
   );
 }

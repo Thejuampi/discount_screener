@@ -1,0 +1,531 @@
+import { DS } from "./dataSources.ts";
+import type { UiDataSource, UiSourceDef } from "./types.ts";
+
+const W = "apps/windows/src";
+
+function src(
+  id: string,
+  label: string,
+  component: string,
+  region: string,
+  related: string[] = [],
+  agentHints: string[] = [],
+  dataSources: UiDataSource[] = [],
+  approxLines?: string,
+): UiSourceDef {
+  return {
+    id,
+    label,
+    component: `${W}/${component}`,
+    region,
+    related: related.map((r) => (r.startsWith("apps/") ? r : `${W}/${r}`)),
+    agentHints:
+      agentHints.length > 0
+        ? agentHints
+        : [
+            `Start at region ${region} in ${component}`,
+            related[0] ? `Then open ${related[0]}` : "Trace props/snapshot fields to pure modules",
+          ],
+    dataSources: dataSources.length > 0 ? dataSources : undefined,
+    approxLines,
+  };
+}
+
+/** Full catalog of inspectable UI pieces. Keep ids stable. */
+export const UI = {
+  // ── Dashboard 2.0 ──────────────────────────────────────────────────────────
+  dashboardV2Root: src(
+    "dashboard.v2.root",
+    "Dashboard 2.0 panel",
+    "components/DashboardV2Panel.tsx",
+    "DashboardV2Panel",
+    ["dashboardV2Ranking.ts#rankDashboardV2Sections", "conditionalPlan.ts#buildConditionalPlan"],
+    [],
+    [DS.opportunities, DS.dashboardV2Ranking, DS.conditionalPlan, DS.marketRegime],
+  ),
+  dashboardV2Section: src(
+    "dashboard.v2.section",
+    "Dashboard 2.0 section",
+    "components/DashboardV2Panel.tsx",
+    "PlanSection",
+    ["dashboardV2Ranking.ts#rankDashboardV2Sections", "conditionalPlan.ts#isActionablePriority"],
+    [],
+    [DS.opportunities, DS.dashboardV2Ranking, DS.conditionalPlan],
+  ),
+  dashboardV2PlanCard: src(
+    "dashboard.v2.planCard",
+    "Dashboard 2.0 plan card",
+    "components/DashboardV2Panel.tsx",
+    "PlanCard",
+    [
+      "conditionalPlan.ts#buildConditionalPlan",
+      "conditionalPlan.ts#applyTechnicalConsistency",
+      "dashboardV2Ranking.ts#rankDashboardV2Sections",
+      "technicalVerdict.ts#isTechnicalAdverseForSide",
+      "technicalVerdict.ts#verdictFromTechnicalScore",
+    ],
+    [
+      "Open PlanCard in DashboardV2Panel.tsx",
+      "Primary data: get_opportunities → match Runtime.symbol",
+      "Stance/headline from buildConditionalPlan(row, model)",
+      "Technical gate: applyTechnicalConsistency / isTechnicalAdverseForSide",
+      "Section membership: rankDashboardV2Sections",
+    ],
+    [
+      DS.opportunities,
+      DS.conditionalPlan,
+      DS.dashboardV2Ranking,
+      DS.technicalVerdict,
+      DS.marketRegime,
+    ],
+  ),
+  dashboardV2EditionToggle: src(
+    "dashboard.v2.editionToggle",
+    "Dashboard edition toggle",
+    "components/DashboardV2Panel.tsx",
+    "DashboardEditionToggle",
+    ["App.tsx"],
+    ["UI chrome only — no backend data"],
+    [],
+  ),
+
+  // ── Dashboard legacy ───────────────────────────────────────────────────────
+  dashboardLegacyRoot: src(
+    "dashboard.legacy.root",
+    "Dashboard legacy panel",
+    "components/DashboardPanel.tsx",
+    "DashboardPanel",
+    ["scoringPresentation.ts", "regimePresentation.ts"],
+    [],
+    [DS.opportunities, DS.alerts, DS.scoringPresentation, DS.regimePresentation],
+  ),
+  dashboardLegacyCard: src(
+    "dashboard.legacy.card",
+    "Dashboard legacy opportunity card",
+    "components/DashboardPanel.tsx",
+    "opportunity card",
+    ["scoringPresentation.ts#getScoringPresentation"],
+    [],
+    [DS.opportunities, DS.scoringPresentation],
+  ),
+
+  // ── Screener list ──────────────────────────────────────────────────────────
+  screenerList: src(
+    "screener.list",
+    "Opportunity list",
+    "components/OpportunityList.tsx",
+    "OpportunityList",
+    ["scoringPresentation.ts", "regimePresentation.ts"],
+    [],
+    [DS.opportunities, DS.scoringPresentation, DS.regimePresentation],
+  ),
+  screenerRow: src(
+    "screener.row",
+    "Opportunity list row",
+    "components/OpportunityList.tsx",
+    "row render",
+    [
+      "scoringPresentation.ts#getScoringPresentation",
+      "regimePresentation.ts#createRegimePresentation",
+      "api.ts#OpportunityRow",
+      "src-tauri/src/opportunity_v3.rs#decision_state_v3",
+      "src-tauri/src/opportunity_v3.rs#setup_from_v3_composite",
+    ],
+    [
+      "Row data from get_opportunities — match Runtime.symbol",
+      "decision/setupLabel come from opportunity_v3 (composite cutoffs), not client invent",
+      "Presentation only: getScoringPresentation / createRegimePresentation",
+      "For deeper fields use get_symbol_detail(symbol)",
+    ],
+    [
+      DS.opportunities,
+      DS.symbolDetail,
+      DS.scoringPresentation,
+      DS.regimePresentation,
+    ],
+  ),
+
+  // ── Detail ─────────────────────────────────────────────────────────────────
+  detailRoot: src(
+    "detail.root",
+    "Symbol detail panel",
+    "components/DetailPanel.tsx",
+    "DetailPanel",
+    ["api.ts#getSymbolDetail", "scoringPresentation.ts"],
+    [],
+    [DS.symbolDetail, DS.opportunities, DS.priceProvenance],
+  ),
+  detailAnalysisSummary: src(
+    "detail.analysisSummary",
+    "Detail analysis summary",
+    "components/DetailPanel.tsx",
+    "AnalysisSummary",
+    [
+      "conditionalPlan.ts#buildConditionalPlan",
+      "scoringPresentation.ts#getScoringPresentation",
+      "regimePresentation.ts#createRegimePresentation",
+      "marketContextNarrative.ts#buildMarketContextNarrative",
+      "technicalVerdict.ts#verdictFromTechnicalScore",
+    ],
+    [
+      "Open AnalysisSummary in DetailPanel.tsx",
+      "Row scores: get_opportunities; detail: get_symbol_detail",
+      "Plan stance uses same buildConditionalPlan as Dashboard 2.0",
+      "Compare plan.stance vs technicalVerdict from technical_score",
+    ],
+    [
+      DS.opportunities,
+      DS.symbolDetail,
+      DS.conditionalPlan,
+      DS.scoringPresentation,
+      DS.regimePresentation,
+      DS.marketContextNarrative,
+      DS.technicalVerdict,
+      DS.marketRegime,
+    ],
+  ),
+  detailAnalysisBuckets: src(
+    "detail.analysisBuckets",
+    "Detail score buckets",
+    "components/DetailPanel.tsx",
+    "AnalysisBuckets",
+    ["scoringPresentation.ts", "regimePresentation.ts", "marketContextNarrative.ts"],
+    [],
+    [
+      DS.opportunities,
+      DS.symbolDetail,
+      DS.scoringPresentation,
+      DS.regimePresentation,
+      DS.marketContextNarrative,
+    ],
+  ),
+  detailMarketContextBucket: src(
+    "detail.marketContextBucket",
+    "Market context bucket",
+    "components/DetailPanel.tsx",
+    "MarketContextBucket",
+    ["regimePresentation.ts", "marketContextNarrative.ts#buildMarketContextNarrative"],
+    [],
+    [DS.marketRegime, DS.opportunities, DS.regimePresentation, DS.marketContextNarrative],
+  ),
+  detailTechnicalPanel: src(
+    "detail.technicalPanel",
+    "Technical analysis panel",
+    "components/TechnicalAnalysisPanel.tsx",
+    "TechnicalAnalysisPanel",
+    [
+      "technicalVerdict.ts#resolveCanonicalTechnicalScore",
+      "technicalVerdict.ts#verdictFromTechnicalScore",
+      "scoringPresentation.ts#technicalActionKey",
+      "src-tauri/src/engine.rs#score_technicals_v3",
+    ],
+    [
+      "Verdict score is canonical engine technical_score — not a local recompute",
+      "Primary: get_opportunities / get_symbol_detail → technical_score",
+      "Open technicalVerdict.ts then engine.rs score_technicals_v3",
+    ],
+    [DS.opportunities, DS.symbolDetail, DS.technicalVerdict, DS.scoringPresentation],
+  ),
+  detailTechnicalSummary: src(
+    "detail.technicalSummary",
+    "Technical summary box",
+    "components/TechnicalAnalysisPanel.tsx",
+    "TechnicalSummaryBox",
+    ["technicalVerdict.ts", "scoringPresentation.ts"],
+    [],
+    [DS.opportunities, DS.symbolDetail, DS.technicalVerdict, DS.scoringPresentation],
+  ),
+  detailChart: src(
+    "detail.chart",
+    "Detail candle chart section",
+    "components/DetailPanel.tsx",
+    "chart-section",
+    ["components/CandleChart.tsx"],
+    [],
+    [DS.candles],
+  ),
+  detailNews: src(
+    "detail.news",
+    "News panel",
+    "components/NewsPanel.tsx",
+    "NewsPanel",
+    ["api.ts"],
+    [],
+    [DS.news],
+  ),
+  detailQuantLens: src(
+    "detail.quantLens",
+    "Quant lens panel",
+    "components/QuantLensPanel.tsx",
+    "QuantLensPanel",
+    ["api.ts"],
+    [],
+    [DS.quantLens],
+  ),
+  detailCryptoCycle: src(
+    "detail.cryptoCycle",
+    "Crypto cycle panel",
+    "components/CryptoCyclePanel.tsx",
+    "CryptoCyclePanel",
+    ["src-tauri/src/crypto_cycle.rs"],
+    [],
+    [DS.cryptoMetrics],
+  ),
+  detailSchwab: src(
+    "detail.schwab",
+    "Schwab ratings panel",
+    "components/SchwabPanel.tsx",
+    "SchwabPanel",
+    ["api.ts"],
+    [],
+    [DS.schwabReport],
+  ),
+  detailCongressStock: src(
+    "detail.congressStock",
+    "Congress stock panel",
+    "components/CongressStockPanel.tsx",
+    "CongressStockPanel",
+    ["api.ts"],
+    [],
+    [DS.congressTradesForSymbol],
+  ),
+  detailChartPatterns: src(
+    "detail.chartPatterns",
+    "Chart patterns",
+    "components/ChartPatterns.tsx",
+    "ChartPatterns",
+    ["api.ts"],
+    [],
+    [DS.candles, DS.symbolDetail],
+  ),
+  detailFib: src(
+    "detail.fib",
+    "Fibonacci levels",
+    "components/FibLevels.tsx",
+    "FibLevels",
+    ["api.ts"],
+    [],
+    [DS.candles, DS.symbolDetail],
+  ),
+  detailHistory: src(
+    "detail.history",
+    "Score history chart",
+    "components/HistoryChart.tsx",
+    "HistoryChart",
+    ["api.ts"],
+    [],
+    [DS.symbolHistory],
+  ),
+
+  // ── Regime ─────────────────────────────────────────────────────────────────
+  regimeBanner: src(
+    "regime.banner",
+    "Regime banner",
+    "components/RegimeBanner.tsx",
+    "RegimeBanner",
+    ["regimeRadar.ts", "regimePresentation.ts", "api.ts#getMarketRegime"],
+    [],
+    [DS.marketRegime, DS.regimeRadar, DS.regimePresentation, DS.regimeSideLens, DS.scoringModel],
+  ),
+  regimePillar: src(
+    "regime.pillar",
+    "Regime pillar card",
+    "components/RegimeBanner.tsx",
+    "PillarCard",
+    ["regimeRadar.ts"],
+    [],
+    [DS.marketRegime, DS.regimeRadar],
+  ),
+  regimeRadar: src(
+    "regime.radar",
+    "Regime radar",
+    "components/RegimeRadar.tsx",
+    "RegimeRadar",
+    ["regimeRadar.ts"],
+    [],
+    [DS.marketRegime, DS.regimeRadar],
+  ),
+
+  // ── Advisor / portfolio ────────────────────────────────────────────────────
+  advisorRoot: src(
+    "advisor.root",
+    "Advisor panel",
+    "components/AdvisorPanel.tsx",
+    "AdvisorPanel",
+    ["scoringPresentation.ts", "conditionalPlan.ts"],
+    [],
+    [
+      DS.portfolioList,
+      DS.opportunities,
+      DS.modelAccuracy,
+      DS.portfolioRisk,
+      DS.quotePrices,
+      DS.scoringPresentation,
+      DS.conditionalPlan,
+    ],
+  ),
+  advisorPosition: src(
+    "advisor.position",
+    "Advisor position row",
+    "components/AdvisorPanel.tsx",
+    "position row",
+    ["scoringPresentation.ts"],
+    [],
+    [DS.portfolioList, DS.opportunities, DS.quotePrices, DS.scoringPresentation],
+  ),
+
+  // ── Scalping ───────────────────────────────────────────────────────────────
+  scalpingRoot: src(
+    "scalping.root",
+    "Scalping panel",
+    "components/ScalpingPanel.tsx",
+    "ScalpingPanel",
+    ["api.ts", "components/ScalpChart.tsx"],
+    [],
+    [DS.scalpAnalysis, DS.scalpCandles],
+  ),
+  scalpingAnalysis: src(
+    "scalping.analysis",
+    "Scalp analysis card",
+    "components/ScalpingPanel.tsx",
+    "analysis card",
+    ["api.ts"],
+    [],
+    [DS.scalpAnalysis],
+  ),
+  scalpingSmc: src(
+    "scalping.smc",
+    "SMC section",
+    "components/ScalpingPanel.tsx",
+    "SmcSection",
+    ["api.ts"],
+    [],
+    [DS.scalpAnalysis],
+  ),
+
+  // ── Estimates ──────────────────────────────────────────────────────────────
+  estimatesRoot: src(
+    "estimates.root",
+    "Estimates panel",
+    "components/EstimatesPanel.tsx",
+    "EstimatesPanel",
+    ["api.ts"],
+    [],
+    [DS.indexEstimates],
+  ),
+  estimatesScenario: src(
+    "estimates.scenario",
+    "Estimate scenario card",
+    "components/EstimatesPanel.tsx",
+    "ScenarioCard",
+    ["api.ts"],
+    [],
+    [DS.indexEstimates],
+  ),
+
+  // ── Congress ───────────────────────────────────────────────────────────────
+  congressRoot: src(
+    "congress.root",
+    "Congress overview",
+    "components/CongressOverview.tsx",
+    "CongressOverviewPanel",
+    ["api.ts"],
+    [],
+    [DS.congressOverview, DS.topPoliticians],
+  ),
+  congressRow: src(
+    "congress.row",
+    "Congress trade row",
+    "components/CongressOverview.tsx",
+    "trade row",
+    ["api.ts"],
+    [],
+    [DS.congressOverview],
+  ),
+
+  // ── Alerts / Backtest / Settings ───────────────────────────────────────────
+  alertsRoot: src(
+    "alerts.root",
+    "Alerts panel",
+    "components/AlertsPanel.tsx",
+    "AlertsPanel",
+    ["api.ts", "useSignalAlerts.ts"],
+    [],
+    [DS.alerts],
+  ),
+  backtestRoot: src(
+    "backtest.root",
+    "Backtest panel",
+    "components/BacktestPanel.tsx",
+    "BacktestPanel",
+    ["api.ts"],
+    [],
+    [DS.backtest, DS.historyStatus],
+  ),
+  settingsRoot: src(
+    "settings.root",
+    "Settings panel",
+    "components/SettingsPanel.tsx",
+    "SettingsPanel",
+    ["theme.tsx", "i18n.tsx"],
+    ["Mostly local UI prefs; Schwab/email have their own sources"],
+    [DS.scoringModel, DS.universeProfile],
+  ),
+  settingsSchwab: src(
+    "settings.schwab",
+    "Schwab connect",
+    "components/SchwabConnect.tsx",
+    "SchwabConnect",
+    ["api.ts"],
+    [],
+    [DS.schwabStatus],
+  ),
+  settingsEmail: src(
+    "settings.email",
+    "Email notifications",
+    "components/EmailNotifications.tsx",
+    "EmailNotifications",
+    ["useEmailNotifications.ts", "emailTemplates.ts"],
+    [],
+    [DS.emailConfig],
+  ),
+
+  // ── Shell ──────────────────────────────────────────────────────────────────
+  statusBar: src(
+    "shell.statusBar",
+    "Status bar",
+    "components/StatusBar.tsx",
+    "StatusBar",
+    ["api.ts#getFeedStatus"],
+    [],
+    [DS.feedStatus, DS.universeProfile],
+  ),
+  commandPalette: src(
+    "shell.commandPalette",
+    "Command palette",
+    "components/CommandPalette.tsx",
+    "CommandPalette",
+    ["App.tsx"],
+    [],
+    [DS.searchTickers, DS.opportunities],
+  ),
+  tickerSearch: src(
+    "shell.tickerSearch",
+    "Ticker search",
+    "components/TickerSearch.tsx",
+    "TickerSearch",
+    ["api.ts#searchTickers"],
+    [],
+    [DS.searchTickers],
+  ),
+} as const satisfies Record<string, UiSourceDef>;
+
+export type UiSourceId = (typeof UI)[keyof typeof UI]["id"];
+
+export function allUiSources(): UiSourceDef[] {
+  return Object.values(UI);
+}
+
+export function getUiSource(id: string): UiSourceDef | undefined {
+  return allUiSources().find((s) => s.id === id);
+}
