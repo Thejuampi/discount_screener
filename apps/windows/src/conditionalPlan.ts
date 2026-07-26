@@ -92,19 +92,44 @@ export function buildConditionalPlan(
   const path = row.price_path ?? null;
   const rawStance = deriveStance(row, path);
   // Same technical_score the detail panel / buckets show — never Act long into Strong Bearish.
-  const stance = applyTechnicalConsistency(rawStance, row.technical_score, side);
+  let stance = applyTechnicalConsistency(rawStance, row.technical_score, side);
   const zoneShown = shouldShowZone(path);
   const rawCaution = motivesToEvidence(path?.risk_codes ?? []);
   const rawSupport = motivesToEvidence(path?.support_codes ?? []);
   const techCaution = technicalCautionEvidence(row.technical_score, side);
   const mergedCaution =
     techCaution != null ? [techCaution, ...rawCaution] : rawCaution;
-  const { caution, support } = pickEvidence(
+  let { caution, support } = pickEvidence(
     stance,
     mergedCaution,
     rawSupport,
     row.composite_score,
   );
+
+  // Never label Act/Scale if primary board gates would hide the card
+  // (counts, empty-state copy, and detail stance stay honest).
+  const gateProbe: ActionableGateInput = {
+    stance,
+    side,
+    technicalScore: row.technical_score ?? null,
+    technicalSignals: row.technical_signals ?? [],
+    compositeScore: row.composite_score,
+    zoneShown,
+    zoneConfidence: path?.zone_confidence ?? null,
+    cautionCount: caution.length,
+  };
+  if (
+    (stance === "ActNow" || stance === "ScaleIn") &&
+    !passesActionableGates(gateProbe)
+  ) {
+    stance = "WaitZone";
+    ({ caution, support } = pickEvidence(
+      stance,
+      mergedCaution,
+      rawSupport,
+      row.composite_score,
+    ));
+  }
 
   const { headlineKey, headlineVars } = buildHeadline(row, path, stance, side, zoneShown);
   const signalClarity = computeSignalClarity(row, path, stance, zoneShown);
@@ -176,7 +201,10 @@ function technicalCautionEvidence(
  * Structural multi-TF conflict chips from engine (death/golden cross style).
  * Mild short-term tape alone should not promote Act when structure fights the side.
  */
-export function hasStructuralConflict(plan: ConditionalPlan): boolean {
+export function hasStructuralConflict(plan: {
+  technicalSignals: string[];
+  side: PlanSide;
+}): boolean {
   const sigs = plan.technicalSignals;
   if (plan.side === "long") {
     return sigs.includes("50/200-") || sigs.includes("20/50-");
@@ -184,8 +212,23 @@ export function hasStructuralConflict(plan: ConditionalPlan): boolean {
   return sigs.includes("50/200+") || sigs.includes("20/50+");
 }
 
-/** Primary board: long/short entries you can act on (or scale into). Never Wait. */
-export function isActionablePriority(plan: ConditionalPlan): boolean {
+/** Fields needed to decide if Act/Scale should surface on the primary board. */
+export interface ActionableGateInput {
+  stance: PlanStance;
+  side: PlanSide;
+  technicalScore: number | null;
+  technicalSignals: string[];
+  compositeScore: number;
+  zoneShown: boolean;
+  zoneConfidence: ZoneConfidence | null;
+  cautionCount: number;
+}
+
+/**
+ * Primary board gates for Act/Scale.
+ * buildConditionalPlan demotes stance when this fails so counts never disagree with cards.
+ */
+export function passesActionableGates(plan: ActionableGateInput): boolean {
   if (plan.stance === "ActNow") {
     if (!hasActionableTechnicalFloor(plan)) return false;
     if (hasStructuralConflict(plan) && !hasStrongTechnicalForSide(plan)) return false;
@@ -195,7 +238,7 @@ export function isActionablePriority(plan: ConditionalPlan): boolean {
     if (plan.compositeScore < 28) return false;
     if (!plan.zoneShown) return false;
     if (plan.zoneConfidence === "low") return false;
-    if (plan.caution.length >= 2) return false;
+    if (plan.cautionCount >= 2) return false;
     if (!hasActionableTechnicalFloor(plan)) return false;
     if (hasStructuralConflict(plan) && !hasStrongTechnicalForSide(plan)) return false;
     return true;
@@ -203,8 +246,25 @@ export function isActionablePriority(plan: ConditionalPlan): boolean {
   return false;
 }
 
+/** Primary board: long/short entries you can act on (or scale into). Never Wait. */
+export function isActionablePriority(plan: ConditionalPlan): boolean {
+  return passesActionableGates({
+    stance: plan.stance,
+    side: plan.side,
+    technicalScore: plan.technicalScore,
+    technicalSignals: plan.technicalSignals,
+    compositeScore: plan.compositeScore,
+    zoneShown: plan.zoneShown,
+    zoneConfidence: plan.zoneConfidence,
+    cautionCount: plan.caution.length,
+  });
+}
+
 /** Mild floor: long needs non-negative tech; short needs non-positive tech. */
-function hasActionableTechnicalFloor(plan: ConditionalPlan): boolean {
+function hasActionableTechnicalFloor(plan: {
+  technicalScore: number | null;
+  side: PlanSide;
+}): boolean {
   const tech = plan.technicalScore;
   if (tech == null) return true; // incomplete feed — don't block solely on missing tech
   if (plan.side === "long") return tech >= 10;
@@ -212,7 +272,10 @@ function hasActionableTechnicalFloor(plan: ConditionalPlan): boolean {
 }
 
 /** Strong enough tape to override structural multi-TF conflict. */
-function hasStrongTechnicalForSide(plan: ConditionalPlan): boolean {
+function hasStrongTechnicalForSide(plan: {
+  technicalScore: number | null;
+  side: PlanSide;
+}): boolean {
   const tech = plan.technicalScore;
   if (tech == null) return false;
   if (plan.side === "long") return tech >= 30;
