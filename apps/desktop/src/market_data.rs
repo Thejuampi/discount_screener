@@ -975,6 +975,25 @@ fn build_fundamental_snapshot(
             .as_ref()
             .and_then(|value| value.raw)
             .and_then(scale_ratio_to_millis),
+        book_value_per_share_cents: statistics
+            .book_value
+            .as_ref()
+            .and_then(|value| value.raw)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| (v * 100.0).round() as i64)
+            .or_else(|| {
+                let price = financial_data
+                    .current_price
+                    .as_ref()
+                    .and_then(|v| v.raw)
+                    .filter(|v| v.is_finite() && *v > 0.0)?;
+                let pb = statistics
+                    .price_to_book
+                    .as_ref()
+                    .and_then(|v| v.raw)
+                    .filter(|v| v.is_finite() && *v > 0.0)?;
+                Some(((price / pb) * 100.0).round() as i64)
+            }),
         trailing_eps_cents: statistics
             .trailing_eps
             .as_ref()
@@ -1420,6 +1439,8 @@ struct YahooDefaultKeyStatistics {
     beta: Option<YahooRawValue<f64>>,
     #[serde(rename = "trailingEps")]
     trailing_eps: Option<YahooRawValue<f64>>,
+    #[serde(rename = "bookValue")]
+    book_value: Option<YahooRawValue<f64>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1910,6 +1931,7 @@ mod tests {
                     beta_millis: None,
                     trailing_eps_cents: Some(642),
                     earnings_growth_bps: None,
+                    book_value_per_share_cents: None,
                 }),
             })
         );
@@ -1953,6 +1975,7 @@ mod tests {
                 beta_millis: Some(1_240),
                 trailing_eps_cents: Some(1_234),
                 earnings_growth_bps: Some(1_530),
+                book_value_per_share_cents: Some((((912.34_f64 / 42.65_f64) * 100.0).round()) as i64),
             }
         );
     }

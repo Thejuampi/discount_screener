@@ -1120,6 +1120,7 @@ fn raw_captures_from_journal(
                         beta_millis: None,
                         trailing_eps_cents: None,
                         earnings_growth_bps: None,
+                        book_value_per_share_cents: None,
                     }),
                 }
             }

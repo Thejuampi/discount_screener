@@ -27,6 +27,8 @@ import {
   type RegimePresentation,
 } from "../regimePresentation";
 import { buildMarketContextNarrative } from "../marketContextNarrative";
+import { buildConditionalPlan, type PlanStance } from "../conditionalPlan";
+import { verdictFromTechnicalScore } from "../technicalVerdict";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -45,11 +47,12 @@ function waccLabels(a: DcfAnalysis): string[] {
   const i = a.wacc_inputs;
   if (i.market_cap === "derived_price_times_shares") labels.push("market cap=price×shares");
   if (i.beta === "default") labels.push("beta=default");
+  // industry_shrink is intentional estimation — not provisional noise
   if (i.total_debt === "assumed_zero") labels.push("debt=assumed 0");
   if (i.total_cash === "assumed_zero") labels.push("cash=assumed 0");
   if (i.cost_of_debt === "default") labels.push("cost of debt=default");
   if (i.tax_rate === "default") labels.push("tax=default");
-  if (i.wacc_clamped) labels.push("wacc=clamped");
+  if (i.wacc_clamped) labels.push("params=provisional");
   return labels;
 }
 
@@ -126,8 +129,13 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const targetPrice = row?.intrinsic_value_cents ?? detail?.intrinsic_value_cents ?? 0;
   const gap = row ? row.gap_bps : detail?.gap_bps ?? null;
   const confidence = row?.confidence ?? detail?.confidence ?? "Low";
-  const dcfValue = row?.dcf_value_cents ?? detail?.dcf_value_cents ?? null;
+  // Prefer live detail analysis over list-row cache (row can hold stale FCFF for financials).
   const dcfAnalysis = detail?.dcf_analysis ?? null;
+  const dcfValue =
+    dcfAnalysis?.base_intrinsic_value_cents
+    ?? detail?.dcf_value_cents
+    ?? row?.dcf_value_cents
+    ?? null;
 
   const f = detail?.fundamentals;
   // Unknown row type stays neutral until the scored row arrives; never guess
@@ -193,11 +201,19 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
               <span className="price-value" style={{ color: toneColor(hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral") }}>
                 {fmt.dollars(dcfValue)}
               </span>
-              <span className="price-label">{t("detail.dcfValue")}</span>
+              <span className="price-label">
+                {dcfAnalysis?.model === "residual_income_equity"
+                  ? t("detail.residualIncomeValue")
+                  : t("detail.dcfValue")}
+              </span>
               {dcfAnalysis && (
                 <div className="wacc-block">
                   <div>
-                    WACC {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
+                    {dcfAnalysis.discount_rate_kind === "cost_of_equity" ||
+                    dcfAnalysis.model === "residual_income_equity"
+                      ? "rₑ"
+                      : "WACC"}{" "}
+                    {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
                     {waccLabels(dcfAnalysis).length > 0 && (
                       <span className="wacc-provisional"> · {t("detail.provisional")}</span>
                     )}
@@ -207,6 +223,15 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
                     {fmt.dollars(dcfAnalysis.base_intrinsic_value_cents)} · Bull{" "}
                     {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
                   </div>
+                  {dcfAnalysis.model === "residual_income_equity" &&
+                    dcfAnalysis.book_value_per_share_cents != null &&
+                    dcfAnalysis.book_value_per_share_cents > 0 && (
+                      <div className="muted small">
+                        BVPS {fmt.dollars(dcfAnalysis.book_value_per_share_cents)}
+                        {dcfAnalysis.roe0_bps != null &&
+                          ` · ROE ${(dcfAnalysis.roe0_bps / 100).toFixed(1)}%`}
+                      </div>
+                    )}
                   {waccLabels(dcfAnalysis).length > 0 && (
                     <div className="muted small">
                       {t("detail.waccInputs")}: {waccLabels(dcfAnalysis).join("; ")}
@@ -331,6 +356,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           hourly={detail.hourly_summary}
           monthly={detail.monthly_summary}
           breakdown={detail.technical_breakdown}
+          technicalScore={row?.technical_score}
           profile={profile}
           onProfileChange={onProfileChange}
           scoringModel={scoringModel}
@@ -381,6 +407,40 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
     </div>
   );
+}
+
+function planStanceColor(stance: PlanStance): string {
+  if (stance === "ActNow") return "#22c55e";
+  if (stance === "ScaleIn") return "#38bdf8";
+  if (stance === "WaitZone") return "#f59e0b";
+  return "#ef4444";
+}
+
+function planStanceEmoji(stance: PlanStance): string {
+  if (stance === "ActNow") return "✅";
+  if (stance === "ScaleIn") return "📶";
+  if (stance === "WaitZone") return "⏳";
+  return "🚫";
+}
+
+function planStanceTitleKey(stance: PlanStance, side: "long" | "short"): string {
+  if (side === "short") {
+    if (stance === "ActNow") return "detail.plan.short.act";
+    if (stance === "ScaleIn") return "detail.plan.short.scale";
+    if (stance === "WaitZone") return "detail.plan.short.wait";
+    return "detail.plan.short.avoid";
+  }
+  if (stance === "ActNow") return "detail.plan.long.act";
+  if (stance === "ScaleIn") return "detail.plan.long.scale";
+  if (stance === "WaitZone") return "detail.plan.long.wait";
+  return "detail.plan.long.avoid";
+}
+
+function planStanceChipKey(stance: PlanStance): string {
+  if (stance === "ActNow") return "dash.v2.stance.ActNow";
+  if (stance === "ScaleIn") return "dash.v2.stance.ScaleIn";
+  if (stance === "WaitZone") return "dash.v2.stance.WaitZone";
+  return "dash.v2.stance.Avoid";
 }
 
 // ── Price provenance badge ────────────────────────────────────────────────────
@@ -454,6 +514,8 @@ function AnalysisSummary({
 }) {
   const { t } = useT();
   const dh = presentation.decisionHeader(row.decision);
+  const plan = buildConditionalPlan(row, scoringModel);
+  const techVerdict = verdictFromTechnicalScore(row.technical_score);
   const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
   const { summary } = buildReasons(row, detail, t, presentation, scoringModel);
   const reason = renderText(
@@ -462,12 +524,17 @@ function AnalysisSummary({
   );
   const gap = presentation.gap(row.gap_bps);
   const technicalOnly = row.asset_type === "crypto" || row.asset_type === "etf";
+  const planColor = planStanceColor(plan.stance);
 
   return (
-    <div className="analysis-box" style={{ borderColor: dh.color }}>
-      <div className="analysis-header" style={{ color: dh.color }}>
-        <span className="analysis-emoji">{dh.emoji}</span>
-        <span className="analysis-title">{t(dh.titleKey)}</span>
+    <div className="analysis-box" style={{ borderColor: planColor }}>
+      <div className="analysis-header" style={{ color: planColor }}>
+        <div className="analysis-header-main">
+          <span className="analysis-emoji" aria-hidden="true">
+            {planStanceEmoji(plan.stance)}
+          </span>
+          <span className="analysis-title">{t(planStanceTitleKey(plan.stance, plan.side))}</span>
+        </div>
         <span className="analysis-score">
           {marketContext.visible ? (
             <>
@@ -480,7 +547,21 @@ function AnalysisSummary({
           ) : `${t("analysis.score")}: ${row.composite_score}`}
         </span>
       </div>
-      <p className="analysis-summary">{summary}</p>
+      <div className="analysis-body">
+        <div className="analysis-plan-meta">
+          <span className="analysis-plan-chip" style={{ borderColor: planColor, color: planColor }}>
+            {t(planStanceChipKey(plan.stance))}
+          </span>
+          <span className="analysis-plan-chip analysis-plan-chip--muted">
+            {t("analysis.decision.raw")}: {t(dh.titleKey)}
+          </span>
+          <span className="analysis-plan-chip analysis-plan-chip--muted">
+            {t("analysis.technical")}: {techVerdict}
+            {row.technical_score != null ? ` (${row.technical_score > 0 ? "+" : ""}${row.technical_score})` : ""}
+          </span>
+        </div>
+        <p className="analysis-summary">{summary}</p>
+      </div>
       <div className="decision-reason" style={{ borderTopColor: dh.color }}>
         <div className="decision-reason-label">{t("reason.title")}</div>
         <p className="decision-reason-text">

@@ -8,6 +8,7 @@ import { AdvisorPanel } from "./components/AdvisorPanel";
 import { RegimeBanner } from "./components/RegimeBanner";
 import { ScalpingPanel } from "./components/ScalpingPanel";
 import { DashboardPanel } from "./components/DashboardPanel";
+import { DashboardEditionToggle, DashboardV2Panel, type DashboardEdition } from "./components/DashboardV2Panel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { singleFlight } from "./singleFlight";
@@ -31,6 +32,13 @@ import "./App.css";
 const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
 const SCORING_STORAGE_KEY = "ds_scoring_model";
 const REGIME_SCORING_KEY = "ds_regime_scoring";
+const DASHBOARD_EDITION_KEY = "ds_dashboard_edition";
+
+function readDashboardEdition(): DashboardEdition {
+  const saved = localStorage.getItem(DASHBOARD_EDITION_KEY);
+  return saved === "v2" ? "v2" : "legacy";
+}
+
 export default function App() {
   const { t } = useT();
   const { theme, setTheme } = useTheme();
@@ -78,6 +86,7 @@ export default function App() {
     const saved = localStorage.getItem(REGIME_SCORING_KEY);
     return saved === null ? true : saved === "1";
   });
+  const [dashboardEdition, setDashboardEdition] = useState<DashboardEdition>(readDashboardEdition);
   const [modelReady, setModelReady] = useState(false);
   const scoringModelRef = useRef(scoringModel);
   const requestedModelRef = useRef(scoringModel);
@@ -185,6 +194,15 @@ export default function App() {
       setRows(nextRows);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleDashboardEdition = (edition: DashboardEdition) => {
+    setDashboardEdition(edition);
+    localStorage.setItem(DASHBOARD_EDITION_KEY, edition);
+    // Dashboard 2.0 only supports V3 long/short — migrate off V2 on enter.
+    if (edition === "v2" && scoringModelRef.current === "aggressive_v2") {
+      void selectScoringModel("aggressive_v3");
     }
   };
 
@@ -453,14 +471,37 @@ export default function App() {
       <div className="main-layout">
         {viewMode === "dashboard" ? (
           <div className="congress-pane">
-            <DashboardPanel
-              rows={rows}
-              symbolsLoaded={symbolsLoaded}
-              symbolsTotal={symbolsTotal}
-              onNavigate={handleViewModeChange}
-              onOpenSymbol={openSymbol}
-              scoringModel={scoringModel}
-            />
+            {dashboardEdition === "v2" ? (
+              <DashboardV2Panel
+                rows={rows}
+                symbolsLoaded={symbolsLoaded}
+                symbolsTotal={symbolsTotal}
+                scoringModel={scoringModel === "aggressive_v2" ? "aggressive_v3" : scoringModel}
+                regimeScoring={regimeScoring}
+                edition={dashboardEdition}
+                onEditionChange={handleDashboardEdition}
+                onSelectModel={(m) => void selectScoringModel(m)}
+                onToggleRegime={() => void toggleRegimeScoring()}
+                onOpenSymbol={openSymbol}
+              />
+            ) : (
+              <>
+                <div className="dash-legacy-edition-bar">
+                  <DashboardEditionToggle
+                    edition={dashboardEdition}
+                    onEditionChange={handleDashboardEdition}
+                  />
+                </div>
+                <DashboardPanel
+                  rows={rows}
+                  symbolsLoaded={symbolsLoaded}
+                  symbolsTotal={symbolsTotal}
+                  onNavigate={handleViewModeChange}
+                  onOpenSymbol={openSymbol}
+                  scoringModel={scoringModel}
+                />
+              </>
+            )}
           </div>
         ) : viewMode === "settings" ? (
           <div className="congress-pane">

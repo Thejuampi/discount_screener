@@ -102,6 +102,7 @@ pub struct FundamentalSnapshot {
     pub beta_millis: Option<i32>,
     pub trailing_eps_cents: Option<i64>,
     pub earnings_growth_bps: Option<i32>,
+    pub book_value_per_share_cents: Option<i64>,
 }
 
 impl FundamentalSnapshot {
@@ -127,6 +128,7 @@ impl FundamentalSnapshot {
             || self.beta_millis.is_some()
             || self.trailing_eps_cents.is_some()
             || self.earnings_growth_bps.is_some()
+            || self.book_value_per_share_cents.is_some()
     }
 }
 
@@ -1135,7 +1137,7 @@ fn encode_journal_entry(entry: &JournalEntry) -> String {
             )
         }
         JournalPayload::Fundamentals(fundamentals) => format!(
-            "F|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "F|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             entry.sequence,
             fundamentals.symbol,
             optional_string_field(fundamentals.sector_key.as_deref()),
@@ -1158,7 +1160,8 @@ fn encode_journal_entry(entry: &JournalEntry) -> String {
             optional_number_field(fundamentals.operating_cash_flow_dollars),
             optional_number_field(fundamentals.beta_millis),
             optional_number_field(fundamentals.trailing_eps_cents),
-            optional_number_field(fundamentals.earnings_growth_bps)
+            optional_number_field(fundamentals.earnings_growth_bps),
+            optional_number_field(fundamentals.book_value_per_share_cents)
         ),
         JournalPayload::FundamentalsCleared(symbol) => {
             format!("FC|{}|{}", entry.sequence, symbol)
@@ -1320,6 +1323,10 @@ fn decode_fundamentals_entry(parts: &[&str]) -> Result<JournalEntry, String> {
             earnings_growth_bps: parse_optional_number(
                 parts.get(23),
                 "fundamentals earnings_growth",
+            )?,
+            book_value_per_share_cents: parse_optional_number(
+                parts.get(24),
+                "fundamentals book_value_per_share",
             )?,
         }),
     })

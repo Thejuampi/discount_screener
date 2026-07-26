@@ -52,6 +52,44 @@ export interface OpportunityRow {
   atr_cents: number | null;  // 14-day ATR (volatility) for stop & sizing
   next_earnings_epoch: number | null;
   spark: number[];           // recent daily closes (cents) for inline sparkline
+  /** Compact multi-anchor price path (Dashboard 2.0). */
+  price_path?: CompactPricePath | null;
+}
+
+export type PathSide = "long" | "short";
+export type ZoneConfidence = "low" | "med" | "high";
+export type TimingMethod =
+  | "empirical_touches"
+  | "atr_distance"
+  | "hybrid"
+  | "unavailable";
+
+export type PathMotiveCode =
+  | "extension"
+  | "far_from_support"
+  | "far_from_resistance"
+  | "rsi_rich"
+  | "rsi_washed"
+  | "above_value"
+  | "below_value"
+  | "regime_risk"
+  | "earnings_soon"
+  | "trend_against"
+  | "weak_forecast"
+  | "near_zone"
+  | "in_zone";
+
+export interface CompactPricePath {
+  zone_low_cents: number | null;
+  zone_high_cents: number | null;
+  zone_confidence: ZoneConfidence | null;
+  p_touch_20d: number | null;
+  expected_sessions: number | null;
+  invalidation_cents: number | null;
+  risk_codes: PathMotiveCode[];
+  support_codes: PathMotiveCode[];
+  timing_method: TimingMethod;
+  side: PathSide;
 }
 
 export type AssetType = "stock" | "crypto" | "etf";
@@ -299,10 +337,23 @@ export interface HistoryStatus {
   snapshot_count: number;
 }
 
+export type ValuationModel =
+  | "fcff_wacc"
+  | "residual_income_equity"
+  | "none";
+
+export type BusinessClass =
+  | "operating_non_financial"
+  | "financial_services"
+  | "not_eligible";
+
+export type DiscountRateKind = "wacc" | "cost_of_equity";
+
 export interface DcfAnalysis {
   bear_intrinsic_value_cents: number;
   base_intrinsic_value_cents: number;
   bull_intrinsic_value_cents: number;
+  /** Discount rate in bps (WACC or cost of equity — see discount_rate_kind). */
   wacc_bps: number;
   base_growth_bps: number;
   net_debt_dollars: number;
@@ -316,6 +367,15 @@ export interface DcfAnalysis {
     wacc_clamped: boolean;
   };
   source: string;
+  engine_version?: string;
+  model_policy_version?: string;
+  business_class?: BusinessClass;
+  model?: ValuationModel;
+  discount_rate_kind?: DiscountRateKind;
+  stable_growth_bps?: number;
+  book_value_per_share_cents?: number | null;
+  roe0_bps?: number | null;
+  reason_codes?: string[];
 }
 
 export interface ScenarioEstimate {

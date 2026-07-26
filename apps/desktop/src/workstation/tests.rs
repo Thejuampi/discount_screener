@@ -225,6 +225,7 @@ mod tests {
             beta_millis: None,
             trailing_eps_cents: None,
             earnings_growth_bps,
+            book_value_per_share_cents: None,
         }
     }
 
@@ -638,6 +639,7 @@ mod tests {
             beta_millis: Some(1_100),
             trailing_eps_cents: Some(425),
             earnings_growth_bps: Some(1_500),
+            book_value_per_share_cents: Some(4_000),
         }
     }
 
@@ -2564,6 +2566,7 @@ mod tests {
             beta_millis: Some(1200),
             trailing_eps_cents: Some(630),
             earnings_growth_bps: Some(900),
+            book_value_per_share_cents: None,
         };
         persistence_handle
             .persist_batch(
@@ -7599,6 +7602,7 @@ mod tests {
                 beta_millis: None,
                 trailing_eps_cents: None,
                 earnings_growth_bps: fundamentals.earnings_growth_bps,
+                book_value_per_share_cents: None,
             };
             let analysis_input = analysis_input_key(&fundamentals);
             let symbol = fundamentals.symbol.clone();

@@ -1,13 +1,15 @@
 # Discount Screener
 
-Discount Screener is a multi-app monorepo that ranks public-market opportunities using Yahoo Finance data. Each company is evaluated through DCF analysis, analyst consensus, and confidence-weighted scoring. Stocks are triaged into Act / Watch / Avoid buckets so you can focus on the most actionable candidates first.
+Discount Screener is a multi-app monorepo that ranks public-market opportunities using Yahoo Finance data. Each company is evaluated through a **valuation model family** (FCFF DCF for operating firms, residual income for financial services), analyst consensus, and confidence-weighted scoring. Stocks are triaged into Act / Watch / Avoid buckets so you can focus on the most actionable candidates first.
+
+Valuation parameters and growth paths are **market/policy-driven** (not eternal hard floors/caps). Quant Lens prefers independent evidence and marks **Disputed** when model and analyst anchors diverge. Design notes: [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md); agent rules: [`Agents.md`](Agents.md).
 
 ## What's here
 
-- `apps/desktop` — Rust terminal workstation with candlestick charts, MACD, EMA overlays, volume profile, and DCF analysis
-- `apps/windows` — Tauri/React Windows workstation with model-aware opportunity scoring and live market detail
-- `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose
-- `shared/contracts` — shared fixtures and golden cases used by both apps
+- `apps/desktop` — Rust terminal workstation with candlestick charts, MACD, EMA overlays, volume profile, and model-family valuation
+- `apps/windows` — Tauri/React Windows workstation with opportunity scoring, Quant Lens, and residual-income / FCFF valuation
+- `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose (`core` owns valuation engines)
+- `shared/contracts` — shared fixtures and golden cases (ranking, DCF source selection, valuation model family)
 
 ## Android screenshots
 
