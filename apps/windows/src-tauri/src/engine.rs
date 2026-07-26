@@ -133,6 +133,8 @@ pub struct FundamentalSnapshot {
     pub beta_millis: Option<i32>,
     pub trailing_eps_cents: Option<i64>,
     pub earnings_growth_bps: Option<i32>,
+    /// Common book value per share in cents (when reported or derived).
+    pub book_value_per_share_cents: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2196,9 +2198,13 @@ impl ScreenerState {
                 beta_millis,
                 trailing_eps_cents,
                 earnings_growth_bps,
+                book_value_per_share_cents,
             );
         }
-        self.fundamentals.insert(fund.symbol.clone(), fund);
+        let symbol = fund.symbol.clone();
+        self.fundamentals.insert(symbol.clone(), fund);
+        // Financial-services residual income can run from fundamentals alone (no FCF).
+        try_ingest_fundamentals_valuation(self, &symbol);
     }
 
     pub fn ingest_chart_summary(&mut self, symbol: String, summary: ChartSummary) {
@@ -2234,9 +2240,74 @@ impl ScreenerState {
     }
 
     pub fn ingest_dcf_analysis(&mut self, symbol: String, analysis: crate::dcf_model::DcfAnalysis) {
+        // Never persist FCFF for financials — stale float-OCF DCFs (e.g. ACGL $875) must die here.
+        if analysis.model == crate::dcf_model::ValuationModel::FcffWacc {
+            if let Some(fund) = self.fundamentals.get(&symbol) {
+                let class = crate::dcf_model::classify_business(
+                    fund.sector_name.as_deref(),
+                    fund.industry_name.as_deref(),
+                    fund.sector_key.as_deref(),
+                    fund.industry_key.as_deref(),
+                    false,
+                );
+                if class == crate::dcf_model::BusinessClass::FinancialServices {
+                    return;
+                }
+            }
+        }
         self.dcf_values
             .insert(symbol.clone(), analysis.base_intrinsic_value_cents);
         self.dcf_analyses.insert(symbol, analysis);
+    }
+
+    pub fn clear_dcf(&mut self, symbol: &str) {
+        self.dcf_values.remove(symbol);
+        self.dcf_analyses.remove(symbol);
+    }
+
+    /// Reconcile cached valuation with business class. Overwrites wrong FCFF for
+    /// financials (even when a large positive DCF is already cached).
+    pub fn ensure_model_routed_valuation(&mut self, symbol: &str) {
+        let Some(fund) = self.fundamentals.get(symbol).cloned() else {
+            return;
+        };
+        let class = crate::dcf_model::classify_business(
+            fund.sector_name.as_deref(),
+            fund.industry_name.as_deref(),
+            fund.sector_key.as_deref(),
+            fund.industry_key.as_deref(),
+            false,
+        );
+        if class != crate::dcf_model::BusinessClass::FinancialServices {
+            return;
+        }
+
+        let needs_replace = match self.dcf_analyses.get(symbol) {
+            None => true,
+            Some(a) => {
+                a.model != crate::dcf_model::ValuationModel::ResidualIncomeEquity
+                    || a.business_class
+                        != crate::dcf_model::BusinessClass::FinancialServices
+                    || a.engine_version == "legacy"
+                    || a.base_intrinsic_value_cents <= 0
+            }
+        };
+        if !needs_replace {
+            return;
+        }
+
+        let price = self.snapshots.get(symbol).map(|s| s.market_price_cents);
+        match crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals") {
+            Ok(analysis) => {
+                self.dcf_values
+                    .insert(symbol.to_string(), analysis.base_intrinsic_value_cents);
+                self.dcf_analyses.insert(symbol.to_string(), analysis);
+            }
+            Err(_) => {
+                // Drop stale FCFF so detail cannot keep showing $875 float-OCF nonsense.
+                self.clear_dcf(symbol);
+            }
+        }
     }
 
     pub fn ingest_insider(&mut self, symbol: String, data: InsiderData) {
@@ -2472,6 +2543,109 @@ pub fn confidence(
             }
         }
         ExternalSignalStatus::Stale | ExternalSignalStatus::Divergent => ConfidenceBand::Low,
+    }
+}
+
+/// Residual income for financials can run from fundamentals alone (no FCF series).
+/// Always reconciles wrong FCFF caches when the name is financial.
+fn try_ingest_fundamentals_valuation(state: &mut ScreenerState, symbol: &str) {
+    state.ensure_model_routed_valuation(symbol);
+}
+
+#[cfg(test)]
+mod valuation_routing_tests {
+    use super::*;
+    use crate::dcf_model::{
+        BusinessClass, DcfAnalysis, DiscountRateKind, ValuationModel, WaccFieldSource,
+        WaccInputProvenance, ENGINE_VERSION, MODEL_POLICY_VERSION,
+    };
+
+    fn stale_fcff_acgl() -> DcfAnalysis {
+        DcfAnalysis {
+            bear_intrinsic_value_cents: 63_907,
+            base_intrinsic_value_cents: 87_503,
+            bull_intrinsic_value_cents: 122_962,
+            wacc_bps: 546,
+            base_growth_bps: 1_050,
+            net_debt_dollars: 0,
+            wacc_inputs: WaccInputProvenance {
+                market_cap: WaccFieldSource::Reported,
+                beta: WaccFieldSource::IndustryShrink,
+                total_debt: WaccFieldSource::Default,
+                total_cash: WaccFieldSource::Default,
+                cost_of_debt: WaccFieldSource::Default,
+                tax_rate: WaccFieldSource::Default,
+                wacc_clamped: true,
+            },
+            source: "sec_edgar".into(),
+            engine_version: "legacy".into(),
+            model_policy_version: "legacy".into(),
+            business_class: BusinessClass::OperatingNonFinancial,
+            model: ValuationModel::FcffWacc,
+            discount_rate_kind: DiscountRateKind::Wacc,
+            stable_growth_bps: 250,
+            book_value_per_share_cents: None,
+            roe0_bps: None,
+            reason_codes: vec![],
+        }
+    }
+
+    #[test]
+    fn ensure_model_routed_replaces_stale_fcff_for_acgl() {
+        let mut state = ScreenerState::new();
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "ACGL".into(),
+            company_name: Some("Arch Capital Group Ltd.".into()),
+            profitable: true,
+            market_price_cents: 10_336,
+            intrinsic_value_cents: 11_061,
+            previous_close_cents: 10_000,
+            next_earnings_epoch: None,
+        });
+        // Plant the bad $875 FCFF cache first.
+        state.dcf_values.insert("ACGL".into(), 87_503);
+        state.dcf_analyses.insert("ACGL".into(), stale_fcff_acgl());
+
+        state.ingest_fundamentals(FundamentalSnapshot {
+            symbol: "ACGL".into(),
+            sector_name: Some("Financial Services".into()),
+            industry_name: Some("Insurance - Property & Casualty".into()),
+            market_cap_dollars: Some(36_000_000_000),
+            shares_outstanding: Some(349_390_000),
+            beta_millis: Some(292),
+            return_on_equity_bps: Some(2_000),
+            book_value_per_share_cents: Some(6_511),
+            price_to_book_hundredths: Some(159),
+            ..Default::default()
+        });
+
+        let a = state.dcf_analyses.get("ACGL").expect("analysis");
+        assert_eq!(a.model, ValuationModel::ResidualIncomeEquity);
+        assert_eq!(a.business_class, BusinessClass::FinancialServices);
+        assert_eq!(a.engine_version, ENGINE_VERSION);
+        assert_eq!(a.model_policy_version, MODEL_POLICY_VERSION);
+        let base = a.base_intrinsic_value_cents as f64 / 100.0;
+        assert!(
+            base < 400.0,
+            "expected residual income base, still got ${base}"
+        );
+        assert_ne!(state.dcf_values.get("ACGL"), Some(&87_503));
+    }
+
+    #[test]
+    fn ingest_rejects_new_fcff_for_financials() {
+        let mut state = ScreenerState::new();
+        state.fundamentals.insert(
+            "ACGL".into(),
+            FundamentalSnapshot {
+                symbol: "ACGL".into(),
+                sector_name: Some("Financial Services".into()),
+                industry_name: Some("Insurance - Property & Casualty".into()),
+                ..Default::default()
+            },
+        );
+        state.ingest_dcf_analysis("ACGL".into(), stale_fcff_acgl());
+        assert!(state.dcf_analyses.get("ACGL").is_none());
     }
 }
 

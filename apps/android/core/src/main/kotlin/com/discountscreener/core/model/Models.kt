@@ -272,6 +272,7 @@ data class FundamentalSnapshot(
     val betaMillis: Int? = null,
     val trailingEpsCents: Long? = null,
     val earningsGrowthBps: Int? = null,
+    val bookValuePerShareCents: Long? = null,
 ) {
     fun hasAnyValues(): Boolean = listOf(
         sectorKey,
@@ -295,6 +296,7 @@ data class FundamentalSnapshot(
         betaMillis,
         trailingEpsCents,
         earningsGrowthBps,
+        bookValuePerShareCents,
     ).any { it != null }
 }
 
@@ -580,6 +582,28 @@ enum class WaccFieldSource {
     DerivedPriceTimesShares,
     AssumedZero,
     InterestOverDebt,
+    IndustryShrink,
+    MarketParams,
+}
+
+@Serializable
+enum class BusinessClass {
+    OperatingNonFinancial,
+    FinancialServices,
+    NotEligible,
+}
+
+@Serializable
+enum class ValuationModel {
+    FcffWacc,
+    ResidualIncomeEquity,
+    None,
+}
+
+@Serializable
+enum class DiscountRateKind {
+    Wacc,
+    CostOfEquity,
 }
 
 @Serializable
@@ -590,16 +614,18 @@ data class WaccInputProvenance(
     val totalCash: WaccFieldSource = WaccFieldSource.Reported,
     val costOfDebt: WaccFieldSource = WaccFieldSource.Reported,
     val taxRate: WaccFieldSource = WaccFieldSource.Reported,
+    /** True when beta was shrunk or market params are provisional (not a hard WACC clamp). */
     val waccClamped: Boolean = false,
 ) {
     fun summaryLabels(): List<String> = buildList {
         if (marketCap == WaccFieldSource.DerivedPriceTimesShares) add("market cap=price×shares")
         if (beta == WaccFieldSource.Default) add("beta=default")
+        if (beta == WaccFieldSource.IndustryShrink) add("beta=industry shrink")
         if (totalDebt == WaccFieldSource.AssumedZero) add("debt=assumed 0")
         if (totalCash == WaccFieldSource.AssumedZero) add("cash=assumed 0")
         if (costOfDebt == WaccFieldSource.Default) add("cost of debt=default")
         if (taxRate == WaccFieldSource.Default) add("tax=default")
-        if (waccClamped) add("wacc=clamped")
+        if (waccClamped) add("params=provisional")
     }
 
     fun isProvisional(): Boolean = summaryLabels().isNotEmpty()
@@ -637,6 +663,15 @@ data class DcfAnalysis(
         emptyList()
     },
     val waccInputs: WaccInputProvenance = WaccInputProvenance(),
+    val engineVersion: String = "legacy",
+    val modelPolicyVersion: String = "legacy",
+    val businessClass: BusinessClass = BusinessClass.OperatingNonFinancial,
+    val model: ValuationModel = ValuationModel.FcffWacc,
+    val discountRateKind: DiscountRateKind = DiscountRateKind.Wacc,
+    val stableGrowthBps: Int = 0,
+    val bookValuePerShareCents: Long? = null,
+    val roe0Bps: Int? = null,
+    val reasonCodes: List<String> = emptyList(),
 )
 
 @Serializable

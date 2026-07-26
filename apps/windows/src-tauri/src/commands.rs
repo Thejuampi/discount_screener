@@ -154,7 +154,12 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
         .as_ref()
         .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Short));
 
-    let screener = state.screener.lock().unwrap();
+    let mut screener = state.screener.lock().unwrap();
+    // Purge/replace stale FCFF caches for financials before scoring/list DCF values.
+    let recon_syms: Vec<String> = screener.fundamentals.keys().cloned().collect();
+    for sym in recon_syms {
+        screener.ensure_model_routed_valuation(&sym);
+    }
     let rows = screener.candidate_rows();
     let benchmarks = compute_sector_benchmarks(&rows);
     rows.into_iter()
@@ -509,7 +514,9 @@ pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool
 
 #[tauri::command]
 pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
-    let screener = state.screener.lock().unwrap();
+    let mut screener = state.screener.lock().unwrap();
+    // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
+    screener.ensure_model_routed_valuation(&symbol);
     screener.detail(&symbol)
 }
 
@@ -679,7 +686,9 @@ pub fn get_quant_lens(
     symbol: String,
     state: State<AppState>,
 ) -> Result<crate::quant_lens::QuantLensReport, String> {
-    let screener = state.screener.lock().unwrap();
+    let mut screener = state.screener.lock().unwrap();
+    screener.ensure_model_routed_valuation(&symbol);
+
     let detail = screener
         .detail(&symbol)
         .ok_or_else(|| format!("no detail for {symbol}"))?;
@@ -1742,30 +1751,64 @@ fn spawn_feed_workers(
                             continue;
                         }
 
-                        match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
-                            Ok(Some(fcf)) => {
-                                if !generation_is_current(&feed_gen, generation) {
-                                    return;
-                                }
-                                let mut s = screener.lock().unwrap();
-                                let fund = s.fundamentals.get(sym).cloned();
-                                let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
-                                if let Some(fund) = fund {
-                                    if let Ok(analysis) =
-                                        crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar")
-                                    {
-                                        s.ingest_dcf_analysis(sym.to_string(), analysis);
-                                    }
-                                } else if let Ok(Some(legacy)) =
-                                    edgar::fetch_dcf(&edgar_client, sym, cik, shares)
-                                {
-                                    s.ingest_dcf(sym.to_string(), legacy.value_per_share_cents);
+                        // Valuation model family: financials → residual income (no FCFF on
+                        // float OCF). Operating → FCFF from EDGAR FCF history.
+                        let is_financial = {
+                            let s = screener.lock().unwrap();
+                            s.fundamentals.get(sym).map(|fund| {
+                                crate::dcf_model::classify_business(
+                                    fund.sector_name.as_deref(),
+                                    fund.industry_name.as_deref(),
+                                    fund.sector_key.as_deref(),
+                                    fund.industry_key.as_deref(),
+                                    false,
+                                ) == crate::dcf_model::BusinessClass::FinancialServices
+                            })
+                            .unwrap_or(false)
+                        };
+
+                        if is_financial {
+                            let mut s = screener.lock().unwrap();
+                            let fund = s.fundamentals.get(sym).cloned();
+                            let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                            if let Some(fund) = fund {
+                                if let Ok(analysis) = crate::dcf_model::compute_from_fundamentals(
+                                    &fund,
+                                    price,
+                                    "fundamentals",
+                                ) {
+                                    s.ingest_dcf_analysis(sym.to_string(), analysis);
                                 }
                             }
-                            Ok(None) => {}
-                            Err(_) => {}
+                        } else {
+                            match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
+                                Ok(Some(fcf)) => {
+                                    if !generation_is_current(&feed_gen, generation) {
+                                        return;
+                                    }
+                                    let mut s = screener.lock().unwrap();
+                                    let fund = s.fundamentals.get(sym).cloned();
+                                    let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                                    if let Some(fund) = fund {
+                                        if let Ok(analysis) = crate::dcf_model::compute(
+                                            &fund, &fcf, price, "sec_edgar",
+                                        ) {
+                                            s.ingest_dcf_analysis(sym.to_string(), analysis);
+                                        }
+                                    } else if let Ok(Some(legacy)) =
+                                        edgar::fetch_dcf(&edgar_client, sym, cik, shares)
+                                    {
+                                        s.ingest_dcf(
+                                            sym.to_string(),
+                                            legacy.value_per_share_cents,
+                                        );
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(_) => {}
+                            }
+                            thread::sleep(std::time::Duration::from_millis(125));
                         }
-                        thread::sleep(std::time::Duration::from_millis(125));
 
                         if let Ok(Some(ins)) = edgar::fetch_insider_activity(&edgar_client, cik) {
                             if !generation_is_current(&feed_gen, generation) {

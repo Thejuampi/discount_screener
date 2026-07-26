@@ -5,6 +5,7 @@ This folder contains planning and implementation artifacts generated through BMa
 ## Required Agent Context
 
 - [Project Context](project-context.md) - critical implementation rules and technology versions. Agents should read this before implementation work.
+- [Agents.md](../Agents.md) - monorepo layout, **valuation model family** (dynamic params, no hard output caps), and Quant Lens SNR conventions.
 
 ## Current-State Documentation
 
@@ -14,6 +15,7 @@ This folder contains planning and implementation artifacts generated through BMa
 ## Feature Planning Artifacts
 
 - [Planning Artifacts Index](planning-artifacts/index.md)
+- [Valuation Model Family Architecture](planning-artifacts/valuation-model-family-architecture.md) - FCFF vs residual income; dynamic \(r_f\)/ERP/growth; forbidden hard caps
 - [Product Brief: Valuation Change Visibility](planning-artifacts/product-brief-valuation-change-visibility.md)
 - [Product Brief Distillate](planning-artifacts/product-brief-valuation-change-visibility-distillate.md)
 - [PRD: Valuation Change Visibility](planning-artifacts/prd.md)

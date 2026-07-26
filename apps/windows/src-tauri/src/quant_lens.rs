@@ -1,8 +1,13 @@
 //! Quant Lens multi-section read-only report (Android QuantLensEngine port, condensed).
+//!
+//! Signal/noise goals:
+//! - Do not crown a single FCFF/residual number as truth when it fights analyst anchors.
+//! - Count independent evidence *families*, not every positive flag.
+//! - Surface disagreement explicitly (Disputed / Mixed) instead of Strong + absurd upside.
 
 use serde::Serialize;
 
-use crate::dcf_model::DcfAnalysis;
+use crate::dcf_model::{BusinessClass, DcfAnalysis, ValuationModel};
 use crate::engine::{CandidateRow, ChartSummary, HistoricalCandle, SymbolDetail};
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,6 +27,22 @@ pub struct QuantLensReport {
     pub model_version: i32,
 }
 
+/// Relative gap beyond which model vs analyst is treated as a conflict (not a hard price cap).
+const MODEL_ANALYST_AGREE_BPS: i32 = 2_500; // 25%
+const MODEL_ANALYST_SOFT_BPS: i32 = 5_000; // 50%
+/// Scenario span (bull−bear)/base above this marks model quality as weak.
+const WIDE_SCENARIO_BPS: i32 = 12_000; // 120%
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelQuality {
+    /// Ordered scenarios, not provisional, moderate width.
+    Solid,
+    /// Usable but provisional inputs or wide scenarios.
+    Soft,
+    /// Structurally broken / incomplete — do not drive EV.
+    Unusable,
+}
+
 pub fn analyze(
     detail: &SymbolDetail,
     daily_candles: Option<&[HistoricalCandle]>,
@@ -31,7 +52,7 @@ pub fn analyze(
 ) -> QuantLensReport {
     let mut sections = Vec::new();
 
-    sections.push(evidence_strength(detail, daily_candles, dcf, opportunity));
+    sections.push(evidence_strength(detail, daily_candles, dcf));
     sections.push(expected_value_range(detail, dcf));
     sections.push(correlation_risk(daily_candles, peers));
     sections.push(trend_reliability(
@@ -46,7 +67,85 @@ pub fn analyze(
         symbol: detail.symbol.clone(),
         primary_status: primary.into(),
         sections,
-        model_version: 2,
+        model_version: 4, // high-SNR evidence families + disputed EV
+    }
+}
+
+fn scenarios_ordered(a: &DcfAnalysis) -> bool {
+    a.bear_intrinsic_value_cents > 0
+        && a.base_intrinsic_value_cents > 0
+        && a.bull_intrinsic_value_cents > 0
+        && a.bear_intrinsic_value_cents <= a.base_intrinsic_value_cents
+        && a.base_intrinsic_value_cents <= a.bull_intrinsic_value_cents
+}
+
+fn scenario_width_bps(a: &DcfAnalysis) -> Option<i32> {
+    let base = a.base_intrinsic_value_cents;
+    if base <= 0 {
+        return None;
+    }
+    let span = a.bull_intrinsic_value_cents - a.bear_intrinsic_value_cents;
+    Some(((span as i128 * 10_000) / base as i128) as i32)
+}
+
+fn model_quality(dcf: Option<&DcfAnalysis>) -> ModelQuality {
+    let Some(a) = dcf else {
+        return ModelQuality::Unusable;
+    };
+    if a.model == ValuationModel::None || !scenarios_ordered(a) {
+        return ModelQuality::Unusable;
+    }
+    let wide = scenario_width_bps(a).is_some_and(|w| w > WIDE_SCENARIO_BPS);
+    let provisional = a.wacc_inputs.is_provisional();
+    if provisional || wide {
+        ModelQuality::Soft
+    } else {
+        ModelQuality::Solid
+    }
+}
+
+fn usable_model(dcf: Option<&DcfAnalysis>) -> bool {
+    !matches!(model_quality(dcf), ModelQuality::Unusable)
+}
+
+fn complete_analyst(detail: &SymbolDetail) -> bool {
+    detail.intrinsic_value_cents > 0
+        && detail.low_fair_value_cents.is_some_and(|v| v > 0)
+        && detail.high_fair_value_cents.is_some_and(|v| v > 0)
+}
+
+fn relative_disagreement_bps(a_cents: i64, b_cents: i64) -> Option<i32> {
+    if a_cents <= 0 || b_cents <= 0 {
+        return None;
+    }
+    let mid = (a_cents + b_cents) as f64 / 2.0;
+    if mid <= 0.0 {
+        return None;
+    }
+    Some((((a_cents - b_cents).abs() as f64 / mid) * 10_000.0).round() as i32)
+}
+
+fn valuation_source_label(a: &DcfAnalysis) -> &'static str {
+    match a.model {
+        ValuationModel::ResidualIncomeEquity => "Residual income",
+        ValuationModel::FcffWacc => "FCFF DCF",
+        ValuationModel::None => "Unavailable",
+    }
+}
+
+fn weighted_three(low: i64, base: i64, high: i64) -> i64 {
+    if low > 0 && high > 0 {
+        (low + 2 * base + high) / 4
+    } else {
+        base
+    }
+}
+
+fn upside_bps(price: i64, fair: i64) -> i32 {
+    if price > 0 && fair > 0 {
+        (((fair - price) as f64 / price as f64) * 10_000.0).round() as i32
+    } else {
+        0
     }
 }
 
@@ -54,93 +153,305 @@ fn evidence_strength(
     detail: &SymbolDetail,
     candles: Option<&[HistoricalCandle]>,
     dcf: Option<&DcfAnalysis>,
-    opp: Option<&CandidateRow>,
 ) -> QuantLensSection {
-    let mut support = 0;
+    // Independent families — never double-count gap + analyst as two supports.
+    let mut families_ok = 0;
     let mut conflict = 0;
-    match detail.gap_bps {
-        Some(g) if g >= 1000 => support += 1,
-        Some(g) if g < 0 => conflict += 1,
-        _ => {}
+    let mut notes: Vec<&str> = Vec::new();
+
+    let analyst_ok = complete_analyst(detail);
+    if analyst_ok {
+        families_ok += 1;
+        notes.push("analyst_range");
     }
-    if detail.low_fair_value_cents.is_some() && detail.high_fair_value_cents.is_some() {
-        support += 1;
+
+    let mq = model_quality(dcf);
+    match mq {
+        ModelQuality::Solid => {
+            families_ok += 1;
+            notes.push("model_solid");
+        }
+        ModelQuality::Soft => {
+            // Soft model is evidence of *something*, but weaker — still one family.
+            families_ok += 1;
+            notes.push("model_soft");
+        }
+        ModelQuality::Unusable => {}
     }
-    if dcf.is_some_and(|d| d.base_intrinsic_value_cents > 0) {
-        support += 1;
-    }
+
     if candles.is_some_and(|c| c.len() >= 20) {
-        support += 1;
+        families_ok += 1;
+        notes.push("price_history");
     }
-    if opp.is_some_and(|o| o.dcf_value_cents.is_some()) {
-        support += 1;
+
+    // Cross-source agreement is a separate family (bonus) or conflict.
+    if usable_model(dcf) && analyst_ok {
+        if let Some(a) = dcf {
+            if let Some(rel) = relative_disagreement_bps(
+                a.base_intrinsic_value_cents,
+                detail.intrinsic_value_cents,
+            ) {
+                if rel <= MODEL_ANALYST_AGREE_BPS {
+                    families_ok += 1;
+                    notes.push("model_analyst_agree");
+                } else if rel > MODEL_ANALYST_SOFT_BPS {
+                    conflict += 1;
+                    notes.push("model_analyst_diverge");
+                } else {
+                    // Soft disagreement: no bonus, no hard conflict, but blocks Strong.
+                    conflict += 1;
+                    notes.push("model_analyst_tension");
+                }
+            }
+        }
     }
-    let status = match (support, conflict) {
-        (s, _) if s >= 4 => "Strong",
-        (s, c) if s >= 2 && c == 0 => "Provisional",
-        (s, c) if s >= 1 && c > 0 => "Mixed",
-        (0, _) => "Unavailable",
+
+    // Soft model alone never upgrades to Strong.
+    let status = match (families_ok, conflict, mq) {
+        (f, 0, ModelQuality::Solid) if f >= 3 => "Strong",
+        (f, 0, _) if f >= 3 => "Provisional",
+        (f, 0, _) if f >= 2 => "Provisional",
+        (f, c, _) if f >= 1 && c > 0 => "Mixed",
+        (0, _, _) => "Unavailable",
         _ => "Sparse",
     };
+
+    let mut metrics = vec![
+        ("families".into(), families_ok.to_string()),
+        ("conflict".into(), conflict.to_string()),
+        ("notes".into(), notes.join(",")),
+        (
+            "gap_bps".into(),
+            detail
+                .gap_bps
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "null".into()),
+        ),
+        (
+            "model_quality".into(),
+            match mq {
+                ModelQuality::Solid => "solid",
+                ModelQuality::Soft => "soft",
+                ModelQuality::Unusable => "unusable",
+            }
+            .into(),
+        ),
+    ];
+    if let Some(a) = dcf {
+        metrics.push((
+            "valuation_model".into(),
+            model_metric_label(a.model).into(),
+        ));
+        metrics.push((
+            "business_class".into(),
+            business_class_metric_label(a.business_class).into(),
+        ));
+        if let Some(w) = scenario_width_bps(a) {
+            metrics.push(("scenario_width_bps".into(), w.to_string()));
+        }
+    }
+
     QuantLensSection {
         id: "evidence".into(),
         title: "Evidence strength".into(),
         status: status.into(),
-        summary: format!("{support} supporting · {conflict} conflicting signals"),
-        metrics: vec![
-            ("support".into(), support.to_string()),
-            ("conflict".into(), conflict.to_string()),
-            (
-                "gap_bps".into(),
-                detail
-                    .gap_bps
-                    .map(|g| g.to_string())
-                    .unwrap_or_else(|| "null".into()),
-            ),
-        ],
+        summary: format!(
+            "{families_ok} independent families · {conflict} conflicts · {}",
+            notes.join(", ")
+        ),
+        metrics,
     }
 }
 
 fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> QuantLensSection {
-    let (low, base, high, source) = if let Some(a) = dcf {
+    let price = detail.market_price_cents;
+    let mq = model_quality(dcf);
+    let model = dcf.filter(|_| usable_model(dcf));
+    let analyst_ok = complete_analyst(detail);
+
+    let analyst_low = detail.low_fair_value_cents.unwrap_or(0);
+    let analyst_base = detail.intrinsic_value_cents;
+    let analyst_high = detail.high_fair_value_cents.unwrap_or(0);
+
+    // ── Select primary anchor without silencing disagreement ─────────────────
+    enum Primary {
+        Model,
+        Analyst,
+        Disputed,
+        None,
+    }
+
+    let disagreement = match (model, analyst_ok) {
+        (Some(a), true) => {
+            relative_disagreement_bps(a.base_intrinsic_value_cents, analyst_base)
+        }
+        _ => None,
+    };
+
+    let primary = match (model, analyst_ok, mq, disagreement) {
+        (None, false, _, _) => Primary::None,
+        (None, true, _, _) => Primary::Analyst,
+        (Some(_), false, ModelQuality::Unusable, _) => Primary::None,
+        (Some(_), false, _, _) => Primary::Model,
+        (Some(_), true, ModelQuality::Solid, Some(d)) if d <= MODEL_ANALYST_AGREE_BPS => {
+            Primary::Model
+        }
+        (Some(_), true, ModelQuality::Soft, Some(d)) if d <= MODEL_ANALYST_AGREE_BPS => {
+            // Agree but soft model → prefer analyst as primary fair value for SNR.
+            Primary::Analyst
+        }
+        (Some(_), true, _, Some(d)) if d > MODEL_ANALYST_AGREE_BPS => Primary::Disputed,
+        (Some(_), true, ModelQuality::Solid, None) => Primary::Model,
+        (Some(_), true, _, None) => Primary::Analyst,
+        _ => Primary::Analyst,
+    };
+
+    let (status, summary, low, base, high, source) = match primary {
+        Primary::None => (
+            "Unavailable",
+            "No usable model or analyst scenario set".to_string(),
+            0,
+            0,
+            0,
+            "none",
+        ),
+        Primary::Model => {
+            let a = model.expect("model primary");
+            let low = a.bear_intrinsic_value_cents;
+            let base = a.base_intrinsic_value_cents;
+            let high = a.bull_intrinsic_value_cents;
+            let w = weighted_three(low, base, high);
+            let up = upside_bps(price, w);
+            let label = valuation_source_label(a);
+            let soft = if mq == ModelQuality::Soft {
+                " · provisional inputs"
+            } else {
+                ""
+            };
+            (
+                if mq == ModelQuality::Soft {
+                    "Provisional"
+                } else {
+                    "Available"
+                },
+                format!("{label}{soft}: weighted vs price {up} bps"),
+                low,
+                base,
+                high,
+                label,
+            )
+        }
+        Primary::Analyst => {
+            let w = weighted_three(analyst_low, analyst_base, analyst_high);
+            let up = upside_bps(price, w);
+            let note = if model.is_some() && matches!(mq, ModelQuality::Soft) {
+                " (model soft — analyst primary)"
+            } else {
+                ""
+            };
+            (
+                "Available",
+                format!("Analyst range{note}: weighted vs price {up} bps"),
+                analyst_low,
+                analyst_base,
+                analyst_high,
+                "Analyst range",
+            )
+        }
+        Primary::Disputed => {
+            let a = model.expect("disputed model");
+            let m_up = upside_bps(price, a.base_intrinsic_value_cents);
+            let an_up = upside_bps(price, analyst_base);
+            let rel = disagreement.unwrap_or(0);
+            (
+                "Disputed",
+                format!(
+                    "{} base ${:.2} ({m_up} bps) vs analyst ${:.2} ({an_up} bps) · diverge {rel} bps — no single EV",
+                    valuation_source_label(a),
+                    a.base_intrinsic_value_cents as f64 / 100.0,
+                    analyst_base as f64 / 100.0,
+                ),
+                // Keep model as metric anchors but do not present as sole truth.
+                a.bear_intrinsic_value_cents,
+                a.base_intrinsic_value_cents,
+                a.bull_intrinsic_value_cents,
+                "disputed",
+            )
+        }
+    };
+
+    let mut metrics = vec![
+        ("low_cents".into(), low.to_string()),
+        ("base_cents".into(), base.to_string()),
+        ("high_cents".into(), high.to_string()),
         (
-            a.bear_intrinsic_value_cents,
-            a.base_intrinsic_value_cents,
-            a.bull_intrinsic_value_cents,
-            "DCF scenarios",
-        )
-    } else {
+            "upside_bps".into(),
+            if matches!(primary, Primary::Disputed) {
+                "n/a".into()
+            } else {
+                upside_bps(price, weighted_three(low, base, high)).to_string()
+            },
+        ),
+        ("source".into(), source.into()),
         (
-            detail.low_fair_value_cents.unwrap_or(0),
-            detail.intrinsic_value_cents,
-            detail.high_fair_value_cents.unwrap_or(0),
-            "Analyst range",
-        )
-    };
-    let status = if base > 0 { "Available" } else { "Unavailable" };
-    let weighted = if low > 0 && high > 0 {
-        (low + 2 * base + high) / 4
-    } else {
-        base
-    };
-    let upside = if detail.market_price_cents > 0 && weighted > 0 {
-        ((weighted - detail.market_price_cents) as f64 / detail.market_price_cents as f64
-            * 10_000.0)
-            .round() as i32
-    } else {
-        0
-    };
+            "primary".into(),
+            match primary {
+                Primary::Model => "model",
+                Primary::Analyst => "analyst",
+                Primary::Disputed => "disputed",
+                Primary::None => "none",
+            }
+            .into(),
+        ),
+    ];
+
+    if let Some(a) = model {
+        metrics.push((
+            "model_base_cents".into(),
+            a.base_intrinsic_value_cents.to_string(),
+        ));
+        metrics.push((
+            "model_upside_bps".into(),
+            upside_bps(price, a.base_intrinsic_value_cents).to_string(),
+        ));
+        metrics.push((
+            "discount_rate_bps".into(),
+            a.wacc_bps.to_string(),
+        ));
+        metrics.push((
+            "discount_rate_kind".into(),
+            match a.discount_rate_kind {
+                crate::dcf_model::DiscountRateKind::CostOfEquity => "cost_of_equity",
+                crate::dcf_model::DiscountRateKind::Wacc => "wacc",
+            }
+            .into(),
+        ));
+        if a.business_class == BusinessClass::FinancialServices {
+            if let Some(bvps) = a.book_value_per_share_cents {
+                metrics.push(("bvps_cents".into(), bvps.to_string()));
+            }
+            if let Some(roe) = a.roe0_bps {
+                metrics.push(("roe0_bps".into(), roe.to_string()));
+            }
+        }
+    }
+    if analyst_ok {
+        metrics.push(("analyst_base_cents".into(), analyst_base.to_string()));
+        metrics.push((
+            "analyst_upside_bps".into(),
+            upside_bps(price, analyst_base).to_string(),
+        ));
+    }
+    if let Some(d) = disagreement {
+        metrics.push(("model_analyst_diverge_bps".into(), d.to_string()));
+    }
+
     QuantLensSection {
         id: "ev_range".into(),
         title: "Expected value range".into(),
         status: status.into(),
-        summary: format!("{source}: weighted FV upside {upside} bps"),
-        metrics: vec![
-            ("low_cents".into(), low.to_string()),
-            ("base_cents".into(), base.to_string()),
-            ("high_cents".into(), high.to_string()),
-            ("upside_bps".into(), upside.to_string()),
-        ],
+        summary,
+        metrics,
     }
 }
 
@@ -203,12 +514,12 @@ fn trend_reliability(
     candles: Option<&[HistoricalCandle]>,
     summary: Option<&ChartSummary>,
 ) -> QuantLensSection {
-    let Some(c) = candles.filter(|x| x.len() >= 20) else {
+    let Some(c) = candles.filter(|x| x.len() >= 30) else {
         return QuantLensSection {
             id: "trend".into(),
             title: "Trend reliability".into(),
             status: "Insufficient".into(),
-            summary: "Need ≥20 bars".into(),
+            summary: "Need ≥30 daily closes".into(),
             metrics: vec![],
         };
     };
@@ -290,15 +601,12 @@ fn similar_setups(opp: Option<&CandidateRow>, peer_count: usize) -> QuantLensSec
     } else {
         "Partial"
     };
-    let score = opp.and_then(|o| o.gap_bps);
-    let gap_ctx = score
-        .map(|g| format!("{g} bps"))
-        .unwrap_or_else(|| "n/a".into());
+    let _ = opp;
     QuantLensSection {
         id: "similar".into(),
         title: "Similar setups".into(),
         status: status.into(),
-        summary: format!("Universe peers available: {peer_count} · gap context {gap_ctx}"),
+        summary: format!("Peer candle universe size: {peer_count}"),
         metrics: vec![("peers".into(), peer_count.to_string())],
     }
 }
@@ -375,10 +683,28 @@ fn ols_r2_slope(y: &[f64]) -> (f64, f64) {
     (r2, slope)
 }
 
+fn model_metric_label(model: ValuationModel) -> &'static str {
+    match model {
+        ValuationModel::ResidualIncomeEquity => "residual_income_equity",
+        ValuationModel::FcffWacc => "fcff_wacc",
+        ValuationModel::None => "none",
+    }
+}
+
+fn business_class_metric_label(class: BusinessClass) -> &'static str {
+    match class {
+        BusinessClass::FinancialServices => "financial_services",
+        BusinessClass::OperatingNonFinancial => "operating_non_financial",
+        BusinessClass::NotEligible => "not_eligible",
+    }
+}
+
 fn worst_status<'a>(statuses: impl Iterator<Item = &'a str>) -> &'a str {
+    // Lower index = more concerning for the overall chip.
     let order = [
         "Unavailable",
         "Insufficient",
+        "Disputed",
         "Sparse",
         "Mixed",
         "High",
@@ -402,4 +728,221 @@ fn worst_status<'a>(statuses: impl Iterator<Item = &'a str>) -> &'a str {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dcf_model::{
+        BusinessClass, DcfAnalysis, DiscountRateKind, ValuationModel, WaccFieldSource,
+        WaccInputProvenance,
+    };
+    use crate::engine::SymbolDetail;
+
+    fn detail_tsla_like() -> SymbolDetail {
+        SymbolDetail {
+            symbol: "TSLA".into(),
+            company_name: Some("Tesla".into()),
+            market_price_cents: 31_200, // ~$312
+            intrinsic_value_cents: 38_150, // analyst ~$381.5 → gap ~22%
+            gap_bps: Some(2_227),
+            qualification: crate::engine::QualificationStatus::Qualified,
+            confidence: crate::engine::ConfidenceBand::Provisional,
+            signal_status: crate::engine::ExternalSignalStatus::Supportive,
+            signal_age_seconds: None,
+            low_fair_value_cents: Some(25_000),
+            high_fair_value_cents: Some(50_000),
+            analyst_opinion_count: Some(40),
+            recommendation_mean_hundredths: None,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            fundamentals: crate::engine::FundamentalSnapshot {
+                symbol: "TSLA".into(),
+                sector_name: Some("Consumer Cyclical".into()),
+                ..Default::default()
+            },
+            chart_summary: None,
+            weekly_summary: None,
+            hourly_summary: None,
+            monthly_summary: None,
+            technical_breakdown: None,
+            dcf_value_cents: Some(3_499),
+            dcf_analysis: None,
+            insider_net_shares_90d: None,
+            insider_buy_count: None,
+            insider_sell_count: None,
+            next_earnings_epoch: None,
+            chart_patterns: vec![],
+            fib: None,
+        }
+    }
+
+    fn junk_fcff_tsla() -> DcfAnalysis {
+        DcfAnalysis {
+            bear_intrinsic_value_cents: 3_027,
+            base_intrinsic_value_cents: 3_499,
+            bull_intrinsic_value_cents: 4_067,
+            wacc_bps: 900,
+            base_growth_bps: 500,
+            net_debt_dollars: 0,
+            wacc_inputs: WaccInputProvenance {
+                market_cap: WaccFieldSource::Reported,
+                beta: WaccFieldSource::IndustryShrink,
+                total_debt: WaccFieldSource::Default,
+                total_cash: WaccFieldSource::Default,
+                cost_of_debt: WaccFieldSource::Default,
+                tax_rate: WaccFieldSource::Default,
+                wacc_clamped: true, // provisional
+            },
+            source: "sec_edgar".into(),
+            engine_version: "valuation-model-family/1".into(),
+            model_policy_version: "business-class-policy/1".into(),
+            business_class: BusinessClass::OperatingNonFinancial,
+            model: ValuationModel::FcffWacc,
+            discount_rate_kind: DiscountRateKind::Wacc,
+            stable_growth_bps: 300,
+            book_value_per_share_cents: None,
+            roe0_bps: None,
+            reason_codes: vec![],
+        }
+    }
+
+    fn solid_aligned_model() -> DcfAnalysis {
+        let mut a = junk_fcff_tsla();
+        a.bear_intrinsic_value_cents = 34_000;
+        a.base_intrinsic_value_cents = 37_000;
+        a.bull_intrinsic_value_cents = 40_000;
+        a.wacc_inputs = WaccInputProvenance {
+            market_cap: WaccFieldSource::Reported,
+            beta: WaccFieldSource::IndustryShrink,
+            total_debt: WaccFieldSource::Reported,
+            total_cash: WaccFieldSource::Reported,
+            cost_of_debt: WaccFieldSource::InterestOverDebt,
+            tax_rate: WaccFieldSource::Reported,
+            wacc_clamped: false,
+        };
+        a
+    }
+
+    #[test]
+    fn tsla_junk_fcff_is_disputed_not_strong_ev() {
+        let detail = detail_tsla_like();
+        let dcf = junk_fcff_tsla();
+        let ev = expected_value_range(&detail, Some(&dcf));
+        assert_eq!(ev.status, "Disputed");
+        assert!(
+            !ev.summary.contains("-8875"),
+            "must not headline absurd single upside: {}",
+            ev.summary
+        );
+        assert!(ev.summary.contains("diverge") || ev.summary.contains("vs analyst"));
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "upside_bps")
+                .map(|(_, v)| v.as_str()),
+            Some("n/a")
+        );
+
+        let ev_only = evidence_strength(&detail, None, Some(&dcf));
+        assert_ne!(ev_only.status, "Strong");
+        assert!(
+            ev_only.status == "Mixed" || ev_only.status == "Sparse" || ev_only.status == "Provisional",
+            "status={}",
+            ev_only.status
+        );
+        assert!(
+            ev_only.metrics.iter().any(|(k, v)| k == "conflict" && v != "0"),
+            "expected conflict when model and analyst diverge hard"
+        );
+    }
+
+    #[test]
+    fn aligned_solid_model_can_be_primary() {
+        let detail = detail_tsla_like();
+        let dcf = solid_aligned_model();
+        let ev = expected_value_range(&detail, Some(&dcf));
+        assert_eq!(ev.status, "Available");
+        assert!(ev.summary.contains("FCFF DCF"));
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "primary")
+                .map(|(_, v)| v.as_str()),
+            Some("model")
+        );
+    }
+
+    #[test]
+    fn analyst_only_when_no_model() {
+        let detail = detail_tsla_like();
+        let ev = expected_value_range(&detail, None);
+        assert_eq!(ev.status, "Available");
+        assert!(ev.summary.contains("Analyst range"));
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "base_cents")
+                .map(|(_, v)| v.as_str()),
+            Some("38150")
+        );
+    }
+
+    #[test]
+    fn gap_alone_does_not_double_count_as_two_families() {
+        let detail = detail_tsla_like();
+        let ev = evidence_strength(&detail, None, None);
+        // Only analyst_range family without history/model.
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "families")
+                .map(|(_, v)| v.as_str()),
+            Some("1")
+        );
+        assert_ne!(ev.status, "Strong");
+    }
+
+    #[test]
+    fn residual_income_label_when_aligned() {
+        let mut detail = detail_tsla_like();
+        detail.symbol = "ACGL".into();
+        detail.market_price_cents = 10_336;
+        detail.intrinsic_value_cents = 8_500;
+        detail.low_fair_value_cents = Some(7_500);
+        detail.high_fair_value_cents = Some(9_500);
+        let dcf = DcfAnalysis {
+            bear_intrinsic_value_cents: 7_000,
+            base_intrinsic_value_cents: 8_200,
+            bull_intrinsic_value_cents: 9_500,
+            wacc_bps: 750,
+            base_growth_bps: 1_400,
+            net_debt_dollars: 0,
+            wacc_inputs: WaccInputProvenance {
+                market_cap: WaccFieldSource::Reported,
+                beta: WaccFieldSource::IndustryShrink,
+                total_debt: WaccFieldSource::Reported,
+                total_cash: WaccFieldSource::Reported,
+                cost_of_debt: WaccFieldSource::Reported,
+                tax_rate: WaccFieldSource::Reported,
+                wacc_clamped: false,
+            },
+            source: "fundamentals".into(),
+            engine_version: "valuation-model-family/1".into(),
+            model_policy_version: "business-class-policy/1".into(),
+            business_class: BusinessClass::FinancialServices,
+            model: ValuationModel::ResidualIncomeEquity,
+            discount_rate_kind: DiscountRateKind::CostOfEquity,
+            stable_growth_bps: 300,
+            book_value_per_share_cents: Some(6_511),
+            roe0_bps: Some(2_000),
+            reason_codes: vec![],
+        };
+        let ev = expected_value_range(&detail, Some(&dcf));
+        assert_eq!(ev.status, "Available");
+        assert!(ev.summary.contains("Residual income"));
+    }
 }

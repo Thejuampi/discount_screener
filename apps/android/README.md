@@ -30,8 +30,11 @@ This directory contains the native Android client for Discount Screener.
 - opportunities can switch in-place among Legacy, Aggressive, Aggressive V2, and Aggressive V3 ranking models from the opportunities tab
 - Aggressive V3 keeps V2's continuous evidence math and adds blended valuation multiples (forward PE / EV/EBITDA / P/B), RSI regime + volume confirmation on chart summaries, analyst recommendation skew, DCF scenario-width uncertainty, and a beta risk haircut on the composite; Act/Avoid cutoffs are model-aware (±100 scale for V2/V3)
 - startup splash during warm restore plus a one-time disclaimer acceptance gate before entering the app
-- DCF WACC is resilient and transparent: missing market cap falls back to price × shares when possible; beta / debt / cash / cost of debt / tax defaults are recorded on each analysis; detail Valuation shows `WACC x.xx%`, marks `· provisional` when assumptions were used, and lists `WACC inputs: …` (for example `beta=default`, `market cap=price×shares`)
-- legacy warm-start DCF payloads without `waccInputs` still restore as non-provisional; live refresh may recompute and mark provisional from current fundamentals
+- Valuation is a **model family** (`DcfAnalysisEngine`): operating firms use FCFF+WACC; financial services use residual income (book + ROE fade, cost of equity). Do not treat OCF−CapEx as free cash flow for insurers/banks.
+- Discount rates and growth use dynamic market/policy inputs (risk-free, ERP, industry beta shrink, recent-window growth fade to \(g_{stable}\)). Hard `MIN_WACC` / price-multiple caps are not valuation truth; defaults are provisional when used.
+- WACC/CoE provenance remains transparent: missing market cap may fall back to price × shares; beta / debt / cash / cost of debt / tax sources are recorded; detail Valuation shows rate kind (`WACC` vs \(r_e\)), marks provisional inputs, and lists caveats (for example `tax=default`, `market cap=price×shares`). Industry beta shrink is intentional estimation, not provisional noise.
+- legacy warm-start DCF payloads without `waccInputs` still restore; live refresh recomputes with current fundamentals and model routing
+- Agent conventions: root `Agents.md`; design: `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`; contracts: `shared/contracts/valuation-model-family.json`
 
 ## Prerequisites
 

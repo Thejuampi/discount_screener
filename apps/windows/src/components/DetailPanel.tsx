@@ -48,11 +48,12 @@ function waccLabels(a: DcfAnalysis): string[] {
   const i = a.wacc_inputs;
   if (i.market_cap === "derived_price_times_shares") labels.push("market cap=price×shares");
   if (i.beta === "default") labels.push("beta=default");
+  // industry_shrink is intentional estimation — not provisional noise
   if (i.total_debt === "assumed_zero") labels.push("debt=assumed 0");
   if (i.total_cash === "assumed_zero") labels.push("cash=assumed 0");
   if (i.cost_of_debt === "default") labels.push("cost of debt=default");
   if (i.tax_rate === "default") labels.push("tax=default");
-  if (i.wacc_clamped) labels.push("wacc=clamped");
+  if (i.wacc_clamped) labels.push("params=provisional");
   return labels;
 }
 
@@ -129,8 +130,13 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const targetPrice = row?.intrinsic_value_cents ?? detail?.intrinsic_value_cents ?? 0;
   const gap = row ? row.gap_bps : detail?.gap_bps ?? null;
   const confidence = row?.confidence ?? detail?.confidence ?? "Low";
-  const dcfValue = row?.dcf_value_cents ?? detail?.dcf_value_cents ?? null;
+  // Prefer live detail analysis over list-row cache (row can hold stale FCFF for financials).
   const dcfAnalysis = detail?.dcf_analysis ?? null;
+  const dcfValue =
+    dcfAnalysis?.base_intrinsic_value_cents
+    ?? detail?.dcf_value_cents
+    ?? row?.dcf_value_cents
+    ?? null;
 
   const f = detail?.fundamentals;
   // Unknown row type stays neutral until the scored row arrives; never guess
@@ -212,11 +218,19 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
               <span className="price-value" style={{ color: toneColor(hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral") }}>
                 {fmt.dollars(dcfValue)}
               </span>
-              <span className="price-label">{t("detail.dcfValue")}</span>
+              <span className="price-label">
+                {dcfAnalysis?.model === "residual_income_equity"
+                  ? t("detail.residualIncomeValue")
+                  : t("detail.dcfValue")}
+              </span>
               {dcfAnalysis && (
                 <div className="wacc-block">
                   <div>
-                    WACC {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
+                    {dcfAnalysis.discount_rate_kind === "cost_of_equity" ||
+                    dcfAnalysis.model === "residual_income_equity"
+                      ? "rₑ"
+                      : "WACC"}{" "}
+                    {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
                     {waccLabels(dcfAnalysis).length > 0 && (
                       <span className="wacc-provisional"> · {t("detail.provisional")}</span>
                     )}
@@ -226,6 +240,15 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
                     {fmt.dollars(dcfAnalysis.base_intrinsic_value_cents)} · Bull{" "}
                     {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
                   </div>
+                  {dcfAnalysis.model === "residual_income_equity" &&
+                    dcfAnalysis.book_value_per_share_cents != null &&
+                    dcfAnalysis.book_value_per_share_cents > 0 && (
+                      <div className="muted small">
+                        BVPS {fmt.dollars(dcfAnalysis.book_value_per_share_cents)}
+                        {dcfAnalysis.roe0_bps != null &&
+                          ` · ROE ${(dcfAnalysis.roe0_bps / 100).toFixed(1)}%`}
+                      </div>
+                    )}
                   {waccLabels(dcfAnalysis).length > 0 && (
                     <div className="muted small">
                       {t("detail.waccInputs")}: {waccLabels(dcfAnalysis).join("; ")}

@@ -10,8 +10,10 @@ sections_completed:
   - quality_rules
   - workflow_rules
   - anti_patterns
+  - valuation_quant_lens_rules
 status: 'complete'
-rule_count: 47
+date_updated: '2026-07-26'
+rule_count: 54
 optimized_for_llm: true
 ---
 
@@ -23,7 +25,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 
 ## Technology Stack & Versions
 
-- **Monorepo:** `apps/desktop` Rust terminal workstation, `apps/android` native Android app, `shared/contracts` cross-platform fixtures/contracts.
+- **Monorepo:** `apps/desktop` Rust terminal workstation, `apps/windows` Tauri/React workstation, `apps/android` native Android app, `shared/contracts` cross-platform fixtures/contracts.
 - **Desktop Rust:** Rust edition 2024, `crossterm 0.29.0`, `ratatui 0.30.0`, `reqwest 0.12.12` with `rustls-tls`, `rusqlite 0.32.1` with bundled SQLite, `serde 1.0.217`, `serde_json 1.0.138`.
 - **Android build:** Android Gradle Plugin `8.7.3`, Kotlin `2.0.21`, Java/JVM target 17, compile/target SDK 35, min SDK 26.
 - **Android runtime libraries:** Compose BOM `2024.10.01`, Activity Compose `1.9.3`, Lifecycle `2.8.7`, Coroutines `1.9.0`, Kotlin Serialization JSON `1.7.3`, OkHttp `4.12.0`.
@@ -62,8 +64,19 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Android live QA is required when behavior reaches the installed app surface. Run `make android-run`, verify the app launches, inspect UI/logs when relevant, and report blockers.
 - For external Yahoo/provider behavior, gather at least 5 distinct real upstream samples. Do not invent provider payloads from assumptions.
 - Add persistence tests before changing SQLite schema, warm-start restore, pruning, dedupe, or migration semantics.
-- Add startup/performance regression tests when changing warm restore, chart history, DCF analysis startup, or profile hydration paths.
+- Add startup/performance regression tests when changing warm restore, chart history, DCF/valuation analysis startup, or profile hydration paths.
 - Run mutation testing around changed behavior when practical. Prefer `cargo-mutants` for Rust; otherwise perform manual mutation checks and state the gap.
+- Valuation and Quant Lens changes must cover classifier routing, residual-income financials, FCFF operating path, and disagreement/Disputed EV cases — not “value near market” caps.
+
+### Valuation & Quant Lens Rules
+
+- **Route by business class.** `OperatingNonFinancial` → FCFF+WACC; `FinancialServices` → residual income / excess ROE on book with cost of equity; `NotEligible` → no intrinsic. Never run OCF−PPE CapEx FCFF as primary for banks/insurers (ACGL class of bug).
+- **Parameters are dynamic.** Risk-free rate, ERP, beta (industry shrink), near-term growth (recent window), and \(g_{stable}=\min(\text{macro}, r_f-\text{buffer}, r-\varepsilon)\) come from market/policy inputs. Frozen `rf`/`ERP`/`MIN_WACC`/growth max constants are not valuation truth; defaults must be provisional when used.
+- **Structural constraints only.** Allowed: \(g < r\), model eligibility, clean-surplus identities, missing-driver unavailability. Forbidden: hard `intrinsic/price` caps, sector FCF haircuts, silent FCFF fallback for financials, acceptance tests that only require market proximity.
+- **Provenance is mandatory** for model id, business class, discount-rate kind, engine/policy version, and WACC/CoE input sources. UI labels must distinguish FCFF DCF vs residual income vs analyst.
+- **Quant Lens is high-SNR.** Count independent evidence families (analyst range, model quality, history, agreement) — do not double-count gap + analyst. Strong requires solid model quality and zero conflicts. When model and analyst diverge materially, EV status is **Disputed** (show both anchors; no single absurd weighted upside). Soft model + agreement → prefer analyst as primary fair value.
+- **Contracts:** `shared/contracts/valuation-model-family.json` and source-selection contracts; keep Windows/Android/desktop engines aligned.
+- Design authority: `_bmad-output/planning-artifacts/valuation-model-family-architecture.md` and root `AGENTS.md` / `Agents.md`.
 
 ### Code Quality & Style Rules
 
@@ -97,8 +110,9 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - **No network/storage in rendering.** Rendering should consume state already prepared by the app or core layers.
 - **Preserve decoupling between market data, persistence, and UI.** Mixing them caused regressions and makes live QA harder.
 - **Do not hide sparse data states.** Show empty, stale, unavailable, no-baseline, and no-analyst-target states explicitly rather than smoothing or omitting them.
-- **Prefer demand-driven expensive work.** History loading, DCF analysis, Yahoo fetches, and Android startup flows must be bounded, cancellable where practical, and observable enough to debug.
+- **Prefer demand-driven expensive work.** History loading, valuation/DCF analysis, Yahoo fetches, and Android startup flows must be bounded, cancellable where practical, and observable enough to debug. Financial residual income may run on fundamentals ingest or Quant Lens demand; operating FCFF still needs cash-flow history.
 - **Live QA findings override build confidence.** Passing unit tests and Gradle builds is insufficient when the installed app hangs, fails to launch, or renders the wrong surface.
+- **Do not “fix” valuation noise with output clamps.** Fix model routing, driver definitions, parameter dynamics, and Quant Lens agreement policy instead.
 
 ---
 
@@ -106,10 +120,10 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 
 **For AI Agents:**
 
-- Read this file before implementing code in this repository.
+- Read this file and root `Agents.md` / `AGENTS.md` before implementing code in this repository.
 - Follow all rules exactly as documented.
 - When rules conflict, prefer the stricter boundary or verification requirement.
-- Update this file when new durable project patterns emerge.
+- Update this file when new durable project patterns emerge (especially valuation and scoring).
 
 **For Humans:**
 
@@ -117,4 +131,4 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Update it when technology versions, architecture boundaries, or verification gates change.
 - Remove rules that become obsolete or too obvious to preserve LLM context efficiency.
 
-Last Updated: 2026-04-25
+Last Updated: 2026-07-26

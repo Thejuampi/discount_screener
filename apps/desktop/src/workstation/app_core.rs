@@ -1958,10 +1958,44 @@ struct DetailAnalysisSnapshot<'a> {
     color: Color,
 }
 
+fn is_financial_services_fundamentals(fundamentals: &FundamentalSnapshot) -> bool {
+    let blob = [
+        fundamentals.sector_name.as_deref().unwrap_or(""),
+        fundamentals.industry_name.as_deref().unwrap_or(""),
+        fundamentals.sector_key.as_deref().unwrap_or(""),
+        fundamentals.industry_key.as_deref().unwrap_or(""),
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+    [
+        "financial",
+        "insurance",
+        "bank",
+        "banks",
+        "capital markets",
+        "asset management",
+        "credit services",
+        "mortgage finance",
+        "reinsurance",
+        "life insurance",
+        "property & casualty",
+        "property and casualty",
+        "brokerage",
+        "investment banking",
+    ]
+    .iter()
+    .any(|k| blob.contains(k))
+}
+
 fn compute_dcf_analysis(
     fundamentals: &FundamentalSnapshot,
     timeseries: &FundamentalTimeseries,
 ) -> io::Result<DcfAnalysis> {
+    // Valuation model family: financials use residual income (never FCFF on float OCF).
+    if is_financial_services_fundamentals(fundamentals) {
+        return compute_residual_income_analysis(fundamentals, timeseries);
+    }
+
     if timeseries.free_cash_flow.len() < 3 {
         return Err(io::Error::other(
             "DCF unavailable: need at least 3 annual free cash flow points.",
@@ -1978,8 +2012,19 @@ fn compute_dcf_analysis(
         })?;
     let current_shares = latest_share_count(fundamentals, timeseries)
         .ok_or_else(|| io::Error::other("DCF unavailable: share count is missing."))?;
+    // Recent-window growth (last up to 4 positive FCF/share points), not full-history CAGR.
     let fcf_per_share = free_cash_flow_per_share_series(fundamentals, timeseries, current_shares);
-    let base_growth_bps = derive_base_growth_bps(&fcf_per_share).ok_or_else(|| {
+    let recent: Vec<(String, f64)> = fcf_per_share
+        .iter()
+        .filter(|(_, v)| *v > 0.0)
+        .cloned()
+        .collect();
+    let window = if recent.len() > 4 {
+        recent[recent.len() - 4..].to_vec()
+    } else {
+        recent
+    };
+    let base_growth_bps = derive_base_growth_bps(&window).ok_or_else(|| {
         io::Error::other("DCF unavailable: insufficient positive free cash flow per share history.")
     })?;
     let wacc_bps = derive_wacc_bps(fundamentals, timeseries)?;
@@ -1988,36 +2033,39 @@ fn compute_dcf_analysis(
         .unwrap_or(0)
         .saturating_sub(fundamentals.total_cash_dollars.unwrap_or(0));
 
-    let bear_growth_bps = (base_growth_bps - SCENARIO_GROWTH_SPREAD_BPS)
-        .clamp(BEAR_GROWTH_MIN_BPS, BEAR_GROWTH_MAX_BPS);
-    let base_growth_bps = base_growth_bps.clamp(BASE_GROWTH_MIN_BPS, BASE_GROWTH_MAX_BPS);
-    let bull_growth_bps = (base_growth_bps + SCENARIO_GROWTH_SPREAD_BPS)
-        .clamp(BULL_GROWTH_MIN_BPS, BULL_GROWTH_MAX_BPS);
+    // Fade growth toward stable: min(macro ceiling, rf − buffer, wacc − ε).
+    let g_stable = 300
+        .min(RISK_FREE_RATE_BPS - 100)
+        .min(wacc_bps - 50)
+        .max(50);
+    let bear_near = (base_growth_bps - SCENARIO_GROWTH_SPREAD_BPS).max(BEAR_GROWTH_MIN_BPS);
+    let bull_near = (base_growth_bps + SCENARIO_GROWTH_SPREAD_BPS).min(BULL_GROWTH_MAX_BPS);
+    let base_near = base_growth_bps.clamp(BASE_GROWTH_MIN_BPS, BASE_GROWTH_MAX_BPS);
 
-    let bear_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+    let bear_intrinsic_value_cents = discounted_fcff_fade_per_share_cents(
         latest_fcf,
         current_shares,
         net_debt_dollars,
-        bear_growth_bps,
-        clamp_terminal_growth_bps(BEAR_TERMINAL_GROWTH_BPS, wacc_bps),
+        bear_near,
+        g_stable,
         wacc_bps,
     )
     .ok_or_else(|| io::Error::other("DCF unavailable: bear scenario produced an invalid value."))?;
-    let base_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+    let base_intrinsic_value_cents = discounted_fcff_fade_per_share_cents(
         latest_fcf,
         current_shares,
         net_debt_dollars,
-        base_growth_bps,
-        clamp_terminal_growth_bps(BASE_TERMINAL_GROWTH_BPS, wacc_bps),
+        base_near,
+        g_stable,
         wacc_bps,
     )
     .ok_or_else(|| io::Error::other("DCF unavailable: base scenario produced an invalid value."))?;
-    let bull_intrinsic_value_cents = discounted_intrinsic_value_per_share_cents(
+    let bull_intrinsic_value_cents = discounted_fcff_fade_per_share_cents(
         latest_fcf,
         current_shares,
         net_debt_dollars,
-        bull_growth_bps,
-        clamp_terminal_growth_bps(BULL_TERMINAL_GROWTH_BPS, wacc_bps),
+        bull_near,
+        g_stable,
         wacc_bps,
     )
     .ok_or_else(|| io::Error::other("DCF unavailable: bull scenario produced an invalid value."))?;
@@ -2027,16 +2075,126 @@ fn compute_dcf_analysis(
         base_intrinsic_value_cents,
         bull_intrinsic_value_cents,
         wacc_bps,
-        base_growth_bps,
+        base_growth_bps: base_near,
         net_debt_dollars,
         selected_source: timeseries.source,
         source_policy_stage: timeseries.source_policy_stage.clone(),
         source_fingerprint: timeseries.source_fingerprint.clone(),
         decision_fingerprint: format!(
-            "{}|state=Selected|sec=DesktopSecDeferred",
+            "{}|state=Selected|model=fcff_wacc|sec=DesktopSecDeferred",
             timeseries.source_fingerprint
         ),
     })
+}
+
+fn compute_residual_income_analysis(
+    fundamentals: &FundamentalSnapshot,
+    timeseries: &FundamentalTimeseries,
+) -> io::Result<DcfAnalysis> {
+    let shares = latest_share_count(fundamentals, timeseries)
+        .ok_or_else(|| io::Error::other("DCF unavailable: share count is missing."))?;
+    let bvps_cents = fundamentals
+        .book_value_per_share_cents
+        .filter(|&v| v > 0)
+        .or_else(|| {
+            let pb = fundamentals.price_to_book_hundredths.filter(|&p| p > 0)? as f64 / 100.0;
+            let cap = fundamentals.market_cap_dollars.filter(|&c| c > 0)? as f64;
+            let sh = fundamentals.shares_outstanding.filter(|&s| s > 0)? as f64;
+            if pb <= 0.0 || sh <= 0.0 {
+                return None;
+            }
+            let price = cap / sh;
+            Some(((price / pb) * 100.0).round() as i64)
+        })
+        .ok_or_else(|| io::Error::other("DCF unavailable: book equity is missing."))?;
+    let book0 = (bvps_cents as f64 / 100.0) * shares;
+    if !book0.is_finite() || book0 <= 0.0 {
+        return Err(io::Error::other("DCF unavailable: book equity is not positive."));
+    }
+    let roe0 = fundamentals
+        .return_on_equity_bps
+        .filter(|&r| r > 0 && r < 10_000)
+        .ok_or_else(|| {
+            io::Error::other("DCF unavailable: return on equity is missing or invalid.")
+        })?;
+    let beta = fundamentals.beta_millis.unwrap_or(1_000) as f64 / 1_000.0;
+    let industry_beta = 0.9_f64;
+    let shrunk = 0.67 * beta + 0.33 * industry_beta;
+    let re_bps = RISK_FREE_RATE_BPS + (shrunk * EQUITY_RISK_PREMIUM_BPS as f64).round() as i32;
+    let retention = 0.70_f64;
+
+    let ri = |roe_bps: i32, re: i32, ret: f64| -> Option<i64> {
+        let re_f = re as f64 / 10_000.0;
+        let roe0_f = roe_bps as f64 / 10_000.0;
+        let mut book = book0;
+        let mut pv = 0.0;
+        for t in 1..=5 {
+            let w = t as f64 / 5.0;
+            let roe_t = roe0_f * (1.0 - w) + re_f * w;
+            pv += ((roe_t - re_f) * book) / (1.0 + re_f).powi(t);
+            book *= 1.0 + roe_t * ret;
+        }
+        let equity = book0 + pv;
+        if !equity.is_finite() || equity <= 0.0 {
+            return None;
+        }
+        Some(((equity / shares) * 100.0).round() as i64)
+    };
+
+    let bear = ri((roe0 - 300).max(100), re_bps + 75, retention * 0.9)
+        .ok_or_else(|| io::Error::other("DCF unavailable: bear residual income invalid."))?;
+    let base = ri(roe0, re_bps, retention)
+        .ok_or_else(|| io::Error::other("DCF unavailable: base residual income invalid."))?;
+    let bull = ri((roe0 + 200).min(9_000), (re_bps - 75).max(RISK_FREE_RATE_BPS + 50), retention)
+        .ok_or_else(|| io::Error::other("DCF unavailable: bull residual income invalid."))?;
+
+    Ok(DcfAnalysis {
+        bear_intrinsic_value_cents: bear,
+        base_intrinsic_value_cents: base,
+        bull_intrinsic_value_cents: bull,
+        wacc_bps: re_bps,
+        base_growth_bps: ((roe0 as f64 / 10_000.0) * retention * 10_000.0).round() as i32,
+        net_debt_dollars: 0,
+        selected_source: timeseries.source,
+        source_policy_stage: timeseries.source_policy_stage.clone(),
+        source_fingerprint: timeseries.source_fingerprint.clone(),
+        decision_fingerprint: format!(
+            "{}|state=Selected|model=residual_income_equity",
+            timeseries.source_fingerprint
+        ),
+    })
+}
+
+fn discounted_fcff_fade_per_share_cents(
+    latest_fcf_dollars: f64,
+    current_shares: f64,
+    net_debt_dollars: i64,
+    g_near_bps: i32,
+    g_stable_bps: i32,
+    wacc_bps: i32,
+) -> Option<i64> {
+    if latest_fcf_dollars <= 0.0 || current_shares <= 0.0 || g_stable_bps >= wacc_bps {
+        return None;
+    }
+    let wacc = wacc_bps as f64 / 10_000.0;
+    let g_near = g_near_bps as f64 / 10_000.0;
+    let g_stable = g_stable_bps as f64 / 10_000.0;
+    let mut projected = latest_fcf_dollars;
+    let mut pv = 0.0;
+    for year in 1..=(DCF_PROJECTION_YEARS as i32) {
+        let w = year as f64 / DCF_PROJECTION_YEARS as f64;
+        let g = g_near * (1.0 - w) + g_stable * w;
+        projected *= 1.0 + g;
+        pv += projected / (1.0 + wacc).powi(year);
+    }
+    let terminal_cf = projected * (1.0 + g_stable);
+    let terminal_value = terminal_cf / (wacc - g_stable);
+    let enterprise = pv + terminal_value / (1.0 + wacc).powi(DCF_PROJECTION_YEARS as i32);
+    let equity = enterprise - net_debt_dollars as f64;
+    if !equity.is_finite() || equity <= 0.0 {
+        return None;
+    }
+    Some(((equity / current_shares) * 100.0).round() as i64)
 }
 
 fn latest_share_count(

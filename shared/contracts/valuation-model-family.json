@@ -1,0 +1,89 @@
+{
+  "contract": "valuation-model-family",
+  "version": "1",
+  "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
+  "notes": [
+    "Golden cases for classifier + model selection. Numeric residual-income expected values are filled when engine Phase 1 lands; until then selection assertions are authoritative.",
+    "ACGL fundamentals sampled 2026-07-25 from public sources (Macrotrends/Yahoo/EDGAR/IR). Do not invent replacements without re-sampling."
+  ],
+  "forbiddenAcceptancePatterns": [
+    "assert_intrinsic_over_price_ratio_bounded",
+    "min_wacc_floor_as_valuation_truth",
+    "sector_fcf_haircut_constant"
+  ],
+  "classifierCases": [
+    {
+      "name": "acgl_pc_insurance_is_financial_services",
+      "symbol": "ACGL",
+      "sectorName": "Financial Services",
+      "industryName": "Insurance - Property & Casualty",
+      "expectedBusinessClass": "FinancialServices",
+      "expectedModel": "ResidualIncomeEquity",
+      "mustNotUseModel": "FcffWacc"
+    },
+    {
+      "name": "jpm_bank_is_financial_services",
+      "symbol": "JPM",
+      "sectorName": "Financial Services",
+      "industryName": "Banks - Diversified",
+      "expectedBusinessClass": "FinancialServices",
+      "expectedModel": "ResidualIncomeEquity",
+      "mustNotUseModel": "FcffWacc"
+    },
+    {
+      "name": "operating_industrial_uses_fcff",
+      "symbol": "EXAMPLE_OPERATING",
+      "sectorName": "Industrials",
+      "industryName": "Specialty Industrial Machinery",
+      "expectedBusinessClass": "OperatingNonFinancial",
+      "expectedModel": "FcffWacc"
+    },
+    {
+      "name": "etf_not_eligible",
+      "symbol": "SPY",
+      "sectorName": null,
+      "industryName": null,
+      "assetClassHint": "Etf",
+      "expectedBusinessClass": "NotEligible",
+      "expectedModel": "None"
+    }
+  ],
+  "regressionFixtures": [
+    {
+      "name": "acgl_must_not_emit_fcff_primary_from_ocf_minus_ppe",
+      "symbol": "ACGL",
+      "sampledInputs": {
+        "asOf": "2026-07-25",
+        "marketPriceDollars": 103.36,
+        "analystTargetDollars": 110.61,
+        "sharesOutstanding": 349390000,
+        "bookValuePerShareDollars": 65.11,
+        "returnOnEquityApprox": 0.20,
+        "sectorName": "Financial Services",
+        "industryName": "Insurance - Property & Casualty",
+        "edgarLatestAnnualOcfDollars": 6172000000,
+        "edgarPpeCapexNearZero": true,
+        "legacyFcffEngineProducedApproxDollars": 875.0,
+        "legacyFailureMode": "FcffWaccOnInsuranceFloatOcf"
+      },
+      "expected": {
+        "businessClass": "FinancialServices",
+        "model": "ResidualIncomeEquity",
+        "primaryCashFlowDefinition": "NotOcfMinusPpeCapex",
+        "discountRateKind": "CostOfEquity",
+        "acceptance": [
+          "model_is_residual_income_equity",
+          "does_not_use_fcff_wacc_primary",
+          "value_is_book_plus_finite_excess_roe_pv",
+          "no_price_multiple_hard_cap_required"
+        ]
+      }
+    }
+  ],
+  "structuralConstraintsAllowed": [
+    "stable_growth_strictly_less_than_discount_rate",
+    "financial_services_not_fcff_primary",
+    "terminal_roe_fades_to_competitive_long_run",
+    "missing_book_or_roe_is_unavailable_not_silent_fcff_fallback"
+  ]
+}
