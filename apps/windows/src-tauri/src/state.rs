@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::analyst_forecasts::AnalystForecastService;
 use crate::crypto_cycle::FngCache;
 use crate::db::Db;
 use crate::engine::ScreenerState;
@@ -93,6 +94,7 @@ pub struct AppState {
     pub screener: Arc<Mutex<ScreenerState>>,
     pub feed_status: Arc<Mutex<FeedStatus>>,
     pub db: Arc<Db>,
+    pub analyst_forecasts: Arc<AnalystForecastService>,
     /// Append-only diagnostics next to the DB (`feed.log`).
     pub feed_log: Arc<FeedLog>,
     pub news_cache: Arc<NewsCache>,
@@ -113,6 +115,9 @@ pub struct AppState {
     pub active_symbols: Mutex<Arc<Vec<String>>>,
     /// Bumped on each universe switch so stale feed workers exit.
     pub feed_generation: Arc<AtomicU64>,
+    /// Generation whose one-shot initial retry pass reached a terminal state.
+    /// `u64::MAX` means no current generation has completed yet.
+    pub initial_pass_completed_generation: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -122,6 +127,11 @@ impl AppState {
             .map(|p| p.join("feed.log"))
             .unwrap_or_else(|| PathBuf::from("feed.log"));
         let db = Db::open(db_path).expect("open history db");
+        let db = Arc::new(db);
+        let analyst_forecasts = Arc::new(
+            AnalystForecastService::new(Arc::clone(&db))
+                .expect("initialize FMP analyst forecast service"),
+        );
         let (scalp_ws_tx, _) = tokio::sync::watch::channel(String::new());
         let (profile, symbols) = compose_universe("sp500").expect("default sp500 universe");
         Self {
@@ -130,7 +140,8 @@ impl AppState {
                 profile_name: profile.clone(),
                 ..FeedStatus::default()
             })),
-            db: Arc::new(db),
+            db,
+            analyst_forecasts,
             feed_log: Arc::new(FeedLog::new(log_path)),
             news_cache: Arc::new(NewsCache::new()),
             congress_sync: Arc::new(Mutex::new(CongressSyncProgress::default())),
@@ -143,6 +154,7 @@ impl AppState {
             active_profile: Mutex::new(profile),
             active_symbols: Mutex::new(Arc::new(symbols)),
             feed_generation: Arc::new(AtomicU64::new(0)),
+            initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 

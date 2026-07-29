@@ -288,6 +288,82 @@ export interface FeedStatus {
   profile_name: string;
 }
 
+export type ForecastPanelState =
+  | "ready"
+  | "insufficient_coverage"
+  | "empty"
+  | "missing_key"
+  | "invalid_key"
+  | "quota_exhausted"
+  | "provider_unavailable"
+  | "not_eligible";
+
+export interface ForecastObservation {
+  symbol: string;
+  analyst: string | null;
+  firm: string | null;
+  issued_at_epoch: number;
+  horizon_epoch: number;
+  horizon_label: string;
+  rating: string | null;
+  target_cents: number;
+  previous_target_cents: number | null;
+  price_when_posted_cents: number | null;
+  source: string | null;
+  identity: string | null;
+}
+
+export interface ForecastHistogramBin {
+  low_cents: number;
+  high_cents: number;
+  count: number;
+}
+
+export interface ForecastStatistics {
+  minimum_cents: number;
+  maximum_cents: number;
+  simple_mean_cents: number;
+  weighted_mean_cents: number | null;
+  weighting_label: string;
+}
+
+export interface ForecastPricePoint {
+  epoch_seconds: number;
+  close_cents: number;
+}
+
+export interface FmpQuotaView {
+  provider_day: string;
+  attempts: number;
+  limit: number;
+  remaining: number;
+  warning: boolean;
+  exhausted: boolean;
+  resets_at_epoch: number;
+}
+
+export interface AnalystForecastPanel {
+  symbol: string;
+  state: ForecastPanelState;
+  state_message: string;
+  observations: ForecastObservation[];
+  histogram: ForecastHistogramBin[];
+  statistics: ForecastStatistics | null;
+  identity_count: number;
+  usable_weighted_consensus: boolean;
+  price_history: ForecastPricePoint[];
+  fetched_at_epoch: number | null;
+  from_cache: boolean;
+  horizon_disclosure: string;
+  provider_label: string;
+  quota: FmpQuotaView;
+}
+
+export interface FmpSettingsStatus {
+  configured: boolean;
+  quota: FmpQuotaView;
+}
+
 export interface UniverseProfileInfo {
   name: string;
   description: string;
@@ -435,6 +511,13 @@ export const api = {
   setRegimeScoringEnabled: (enabled: boolean) =>
     invoke<boolean>("set_regime_scoring_enabled", { enabled }),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
+  getAnalystForecasts: (symbol: string) =>
+    invoke<AnalystForecastPanel>("get_analyst_forecasts", { symbol }),
+  fmpSettingsStatus: () => invoke<FmpSettingsStatus>("fmp_settings_status"),
+  fmpSaveKey: (apiKey: string) =>
+    invoke<FmpSettingsStatus>("fmp_save_key", { apiKey }),
+  fmpDeleteKey: () => invoke<FmpSettingsStatus>("fmp_delete_key"),
+  fmpTestKey: () => invoke<AnalystForecastPanel>("fmp_test_key"),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),

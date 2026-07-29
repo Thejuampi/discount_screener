@@ -12,6 +12,7 @@ import { CryptoCyclePanel } from "./CryptoCyclePanel";
 import { ChartPatterns } from "./ChartPatterns";
 import { FibLevels } from "./FibLevels";
 import { QuantLensPanel } from "./QuantLensPanel";
+import { AnalystForecastsPanel } from "./AnalystForecastsPanel";
 import { useT } from "../i18n";
 import type { DcfAnalysis } from "../api";
 import {
@@ -336,6 +337,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         </div>
         <CandleChart symbol={symbol} range={range} patterns={showPat ? detail?.chart_patterns : undefined} fib={showFib ? detail?.fib : null} ema={showEma} volume={showVol} />
       </div>
+
+      <AnalystForecastsPanel symbol={symbol} />
 
       {/* Chart patterns (classic TA structures, from daily candles) */}
       {detail && detail.chart_patterns.length > 0 && (

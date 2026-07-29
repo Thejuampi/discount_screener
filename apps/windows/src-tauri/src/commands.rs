@@ -6,6 +6,7 @@ use std::thread;
 use serde::Serialize;
 use tauri::State;
 
+use crate::analyst_forecasts::{AnalystForecastPanel, FmpSettingsStatus, ForecastPricePoint};
 use crate::db::{BacktestResult, HistorySnapshot, SnapshotInsert};
 use crate::edgar;
 use crate::engine::{
@@ -131,7 +132,6 @@ pub struct UniverseProfileStatus {
 
 #[tauri::command]
 pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
-    use crate::regime::{score_regime_fit, RegimeScoringPolicy, ScoreSide};
     use std::sync::atomic::Ordering;
 
     let apply_regime = state.apply_regime_scoring.load(Ordering::Relaxed);
@@ -147,6 +147,16 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
     } else {
         None
     };
+    build_opportunity_rows(&state.screener, apply_regime, regime_snapshot)
+}
+
+fn build_opportunity_rows(
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    apply_regime: bool,
+    regime_snapshot: Option<crate::regime::MarketRegime>,
+) -> Vec<OpportunityRow> {
+    use crate::regime::{score_regime_fit, RegimeScoringPolicy, ScoreSide};
+
     let policy_long = regime_snapshot
         .as_ref()
         .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Long));
@@ -154,7 +164,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
         .as_ref()
         .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Short));
 
-    let mut screener = state.screener.lock().unwrap();
+    let mut screener = screener.lock().unwrap();
     // Purge/replace stale FCFF caches for financials before scoring/list DCF values.
     let recon_syms: Vec<String> = screener.fundamentals.keys().cloned().collect();
     for sym in recon_syms {
@@ -495,6 +505,52 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
         .collect()
 }
 
+fn schedule_fmp_top_ten_for_generation(
+    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    regime_cache: &Arc<crate::regime::RegimeCache>,
+    apply_regime_scoring: &Arc<std::sync::atomic::AtomicBool>,
+    analyst_forecasts: &Arc<crate::analyst_forecasts::AnalystForecastService>,
+    feed_generation: &Arc<std::sync::atomic::AtomicU64>,
+    generation: u64,
+) {
+    if !generation_is_current(feed_generation, generation) {
+        return;
+    }
+    let apply_regime = apply_regime_scoring.load(std::sync::atomic::Ordering::Relaxed);
+    let regime_snapshot = if apply_regime {
+        regime_cache.get()
+    } else {
+        None
+    };
+    let candidates = build_opportunity_rows(screener, apply_regime, regime_snapshot)
+        .into_iter()
+        .map(|row| crate::analyst_forecasts::WarmCandidate {
+            symbol: row.row.symbol.clone(),
+            composite_score: row.composite_score,
+            is_stock: row.asset_type == "stock",
+        })
+        .collect();
+    let top_symbols = crate::analyst_forecasts::rank_warm_candidates(candidates);
+    analyst_forecasts.spawn_generation_warm(top_symbols, Arc::clone(feed_generation), generation);
+}
+
+fn schedule_fmp_top_ten_if_initial_pass_complete(state: &AppState) {
+    let Some(generation) = warmable_completed_generation(
+        &state.feed_generation,
+        &state.initial_pass_completed_generation,
+    ) else {
+        return;
+    };
+    schedule_fmp_top_ten_for_generation(
+        &state.screener,
+        &state.regime_cache,
+        &state.apply_regime_scoring,
+        &state.analyst_forecasts,
+        &state.feed_generation,
+        generation,
+    );
+}
+
 #[tauri::command]
 pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
     use std::sync::atomic::Ordering;
@@ -518,6 +574,67 @@ pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<Symbo
     // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
     screener.ensure_model_routed_valuation(&symbol);
     screener.detail(&symbol)
+}
+
+#[tauri::command]
+pub async fn get_analyst_forecasts(
+    symbol: String,
+    state: State<'_, AppState>,
+) -> Result<AnalystForecastPanel, String> {
+    let symbol = symbol.trim().to_uppercase();
+    let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
+    let price_history = state
+        .screener
+        .lock()
+        .unwrap()
+        .daily_candles
+        .get(&symbol)
+        .map(|candles| {
+            candles
+                .iter()
+                .map(|candle| ForecastPricePoint {
+                    epoch_seconds: candle.epoch_seconds,
+                    close_cents: candle.close_cents,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let service = Arc::clone(&state.analyst_forecasts);
+    tauri::async_runtime::spawn_blocking(move || {
+        if eligible {
+            service.get(&symbol, price_history)
+        } else {
+            service.not_eligible(&symbol, price_history)
+        }
+    })
+    .await
+    .map_err(|error| format!("join FMP forecast request: {error}"))
+}
+
+#[tauri::command]
+pub fn fmp_settings_status(state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+    state.analyst_forecasts.settings_status()
+}
+
+#[tauri::command]
+pub fn fmp_save_key(api_key: String, state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+    state.analyst_forecasts.save_key(&api_key)?;
+    schedule_fmp_top_ten_if_initial_pass_complete(&state);
+    state.analyst_forecasts.settings_status()
+}
+
+#[tauri::command]
+pub fn fmp_delete_key(state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+    state.analyst_forecasts.delete_key()?;
+    state.analyst_forecasts.settings_status()
+}
+
+#[tauri::command]
+pub async fn fmp_test_key(state: State<'_, AppState>) -> Result<AnalystForecastPanel, String> {
+    let service = Arc::clone(&state.analyst_forecasts);
+    tauri::async_runtime::spawn_blocking(move || service.test_connection("AAPL"))
+        .await
+        .map_err(|error| format!("join FMP credential test: {error}"))
 }
 
 #[tauri::command]
@@ -599,6 +716,7 @@ fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String
         .feed_generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
+    reset_initial_pass_completion(&state.initial_pass_completed_generation);
 
     {
         let mut screener = state.screener.lock().unwrap();
@@ -941,6 +1059,31 @@ fn generation_is_current(state_gen: &std::sync::atomic::AtomicU64, gen: u64) -> 
     state_gen.load(std::sync::atomic::Ordering::SeqCst) == gen
 }
 
+fn reset_initial_pass_completion(completed_generation: &std::sync::atomic::AtomicU64) {
+    completed_generation.store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn mark_initial_pass_complete_if_current(
+    active_generation: &std::sync::atomic::AtomicU64,
+    completed_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+) -> bool {
+    if !generation_is_current(active_generation, generation) {
+        return false;
+    }
+    completed_generation.store(generation, std::sync::atomic::Ordering::SeqCst);
+    generation_is_current(active_generation, generation)
+}
+
+fn warmable_completed_generation(
+    active_generation: &std::sync::atomic::AtomicU64,
+    completed_generation: &std::sync::atomic::AtomicU64,
+) -> Option<u64> {
+    let active = active_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let completed = completed_generation.load(std::sync::atomic::Ordering::SeqCst);
+    (active == completed && completed != u64::MAX).then_some(active)
+}
+
 fn pending_as_refs(pending: &[String]) -> Vec<&str> {
     pending.iter().map(|s| s.as_str()).collect()
 }
@@ -1017,8 +1160,10 @@ fn needs_enrichment_retry(
 mod feed_coordinator_tests {
     use super::{
         batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
-        ingest_fetch_result, needs_enrichment_retry, resolve_regime_score_status,
-        symbol_state_enrichment_complete, RefreshOutcome, RegimeScoreStatus,
+        ingest_fetch_result, mark_initial_pass_complete_if_current, needs_enrichment_retry,
+        reset_initial_pass_completion, resolve_regime_score_status,
+        symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
+        RegimeScoreStatus,
     };
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
@@ -1101,6 +1246,28 @@ mod feed_coordinator_tests {
         let gen = std::sync::atomic::AtomicU64::new(3);
         assert!(super::generation_is_current(&gen, 3));
         assert!(!super::generation_is_current(&gen, 2));
+    }
+
+    #[test]
+    fn initial_pass_completion_is_generation_bound_and_resettable() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let active = AtomicU64::new(4);
+        let completed = AtomicU64::new(u64::MAX);
+        assert_eq!(warmable_completed_generation(&active, &completed), None);
+        assert!(!mark_initial_pass_complete_if_current(
+            &active, &completed, 3
+        ));
+        assert_eq!(completed.load(Ordering::SeqCst), u64::MAX);
+
+        assert!(mark_initial_pass_complete_if_current(
+            &active, &completed, 4
+        ));
+        assert_eq!(warmable_completed_generation(&active, &completed), Some(4));
+
+        active.store(5, Ordering::SeqCst);
+        reset_initial_pass_completion(&completed);
+        assert_eq!(warmable_completed_generation(&active, &completed), None);
     }
 
     #[test]
@@ -1403,6 +1570,11 @@ fn spawn_feed_workers(
         let loaded = Arc::clone(&loaded);
         let completed = Arc::clone(&completed);
         let feed_gen = Arc::clone(&feed_gen);
+        let analyst_forecasts = Arc::clone(&state.analyst_forecasts);
+        let regime_cache = Arc::clone(&state.regime_cache);
+        let apply_regime_scoring = Arc::clone(&state.apply_regime_scoring);
+        let initial_pass_completed_generation =
+            Arc::clone(&state.initial_pass_completed_generation);
 
         thread::Builder::new()
             .name("feed-refresh".into())
@@ -1524,6 +1696,21 @@ fn spawn_feed_workers(
                         Some(format_terminal_incomplete_status(&pending));
                 } else {
                     feed_log.info("feed initial enrichment complete: no pending symbols");
+                }
+
+                if mark_initial_pass_complete_if_current(
+                    &feed_gen,
+                    &initial_pass_completed_generation,
+                    generation,
+                ) {
+                    schedule_fmp_top_ten_for_generation(
+                        &screener,
+                        &regime_cache,
+                        &apply_regime_scoring,
+                        &analyst_forecasts,
+                        &feed_gen,
+                        generation,
+                    );
                 }
 
                 loop {
@@ -1755,16 +1942,18 @@ fn spawn_feed_workers(
                         // float OCF). Operating → FCFF from EDGAR FCF history.
                         let is_financial = {
                             let s = screener.lock().unwrap();
-                            s.fundamentals.get(sym).map(|fund| {
-                                crate::dcf_model::classify_business(
-                                    fund.sector_name.as_deref(),
-                                    fund.industry_name.as_deref(),
-                                    fund.sector_key.as_deref(),
-                                    fund.industry_key.as_deref(),
-                                    false,
-                                ) == crate::dcf_model::BusinessClass::FinancialServices
-                            })
-                            .unwrap_or(false)
+                            s.fundamentals
+                                .get(sym)
+                                .map(|fund| {
+                                    crate::dcf_model::classify_business(
+                                        fund.sector_name.as_deref(),
+                                        fund.industry_name.as_deref(),
+                                        fund.sector_key.as_deref(),
+                                        fund.industry_key.as_deref(),
+                                        false,
+                                    ) == crate::dcf_model::BusinessClass::FinancialServices
+                                })
+                                .unwrap_or(false)
                         };
 
                         if is_financial {
@@ -1791,17 +1980,17 @@ fn spawn_feed_workers(
                                     let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
                                     if let Some(fund) = fund {
                                         if let Ok(analysis) = crate::dcf_model::compute(
-                                            &fund, &fcf, price, "sec_edgar",
+                                            &fund,
+                                            &fcf,
+                                            price,
+                                            "sec_edgar",
                                         ) {
                                             s.ingest_dcf_analysis(sym.to_string(), analysis);
                                         }
                                     } else if let Ok(Some(legacy)) =
                                         edgar::fetch_dcf(&edgar_client, sym, cik, shares)
                                     {
-                                        s.ingest_dcf(
-                                            sym.to_string(),
-                                            legacy.value_per_share_cents,
-                                        );
+                                        s.ingest_dcf(sym.to_string(), legacy.value_per_share_cents);
                                     }
                                 }
                                 Ok(None) => {}

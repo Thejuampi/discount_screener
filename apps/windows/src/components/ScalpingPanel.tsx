@@ -97,7 +97,7 @@ export function ScalpingPanel() {
         loading,
         hasAnalysis: !!a,
         side: a?.signal?.side ?? null,
-        label: a?.signal?.label ?? null,
+        label: a?.score?.label ?? null,
         livePrice: live?.price ?? null,
       }}
     >

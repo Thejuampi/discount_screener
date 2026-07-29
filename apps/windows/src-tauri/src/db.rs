@@ -171,6 +171,23 @@ CREATE TABLE IF NOT EXISTS email_config (
     updated_at       INTEGER
 );
 
+-- Replaceable licensed forecast cache. Rows from older FMP quota days are
+-- deleted whenever a current-day result is saved.
+CREATE TABLE IF NOT EXISTS fmp_forecast_cache (
+    provider_day       TEXT NOT NULL,
+    symbol             TEXT NOT NULL,
+    fetched_at_epoch   INTEGER NOT NULL,
+    payload_json       TEXT NOT NULL,
+    PRIMARY KEY (provider_day, symbol)
+);
+
+-- Local estimate of outbound FMP attempts. The provider does not expose a
+-- free usage endpoint, so reservations are performed transactionally.
+CREATE TABLE IF NOT EXISTS fmp_request_budget (
+    provider_day       TEXT PRIMARY KEY,
+    attempts           INTEGER NOT NULL CHECK (attempts >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS schwab_reports (
     symbol               TEXT    PRIMARY KEY,
     company_name         TEXT,
@@ -236,6 +253,12 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FmpCacheRecord {
+    pub fetched_at_epoch: i64,
+    pub payload_json: String,
+}
+
 impl Db {
     /// Open (or create) the database at `path`. Runs the schema migration.
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -245,6 +268,25 @@ impl Db {
         }
         let conn =
             Connection::open(&path).map_err(|e| format!("open {}: {}", path.display(), e))?;
+        Self::from_connection(conn)
+    }
+
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self, String> {
+        let conn = Connection::open_in_memory().map_err(|e| format!("open memory db: {e}"))?;
+        Self::from_connection(conn)
+    }
+
+    #[cfg(test)]
+    pub fn drop_fmp_budget_table_for_test(&self) {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE fmp_request_budget", [])
+            .unwrap();
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, String> {
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("schema: {}", e))?;
         // WAL mode: better concurrent reads while writer is active
@@ -253,6 +295,128 @@ impl Db {
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    pub fn load_fmp_forecast_cache(
+        &self,
+        provider_day: &str,
+        symbol: &str,
+    ) -> Result<Option<FmpCacheRecord>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        conn.execute(
+            "DELETE FROM fmp_forecast_cache WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP cache on read: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT fetched_at_epoch, payload_json
+                 FROM fmp_forecast_cache
+                 WHERE provider_day = ?1 AND symbol = ?2",
+            )
+            .map_err(|e| format!("prepare FMP cache load: {e}"))?;
+        let mut rows = stmt
+            .query(params![provider_day, symbol])
+            .map_err(|e| format!("query FMP cache: {e}"))?;
+        match rows
+            .next()
+            .map_err(|e| format!("read FMP cache row: {e}"))?
+        {
+            Some(row) => Ok(Some(FmpCacheRecord {
+                fetched_at_epoch: row.get(0).map_err(|e| format!("FMP cache epoch: {e}"))?,
+                payload_json: row.get(1).map_err(|e| format!("FMP cache payload: {e}"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_fmp_forecast_cache(
+        &self,
+        provider_day: &str,
+        symbol: &str,
+        fetched_at_epoch: i64,
+        payload_json: &str,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin FMP cache save: {e}"))?;
+        tx.execute(
+            "DELETE FROM fmp_forecast_cache WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP cache: {e}"))?;
+        tx.execute(
+            "INSERT INTO fmp_forecast_cache
+                (provider_day, symbol, fetched_at_epoch, payload_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider_day, symbol) DO UPDATE SET
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                payload_json = excluded.payload_json",
+            params![provider_day, symbol, fetched_at_epoch, payload_json],
+        )
+        .map_err(|e| format!("save FMP cache: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit FMP cache save: {e}"))
+    }
+
+    /// Reserve one outbound attempt. `None` means the provider-day limit was
+    /// already reached and no network request is authorized.
+    pub fn reserve_fmp_attempt(
+        &self,
+        provider_day: &str,
+        limit: u16,
+    ) -> Result<Option<u16>, String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin FMP budget reservation: {e}"))?;
+        tx.execute(
+            "DELETE FROM fmp_request_budget WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP budget: {e}"))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO fmp_request_budget (provider_day, attempts) VALUES (?1, 0)",
+            params![provider_day],
+        )
+        .map_err(|e| format!("initialize FMP budget: {e}"))?;
+        let changed = tx
+            .execute(
+                "UPDATE fmp_request_budget
+                 SET attempts = attempts + 1
+                 WHERE provider_day = ?1 AND attempts < ?2",
+                params![provider_day, i64::from(limit)],
+            )
+            .map_err(|e| format!("reserve FMP budget: {e}"))?;
+        let attempts: i64 = tx
+            .query_row(
+                "SELECT attempts FROM fmp_request_budget WHERE provider_day = ?1",
+                params![provider_day],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("read FMP budget: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit FMP budget reservation: {e}"))?;
+        if changed == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(attempts.clamp(0, i64::from(u16::MAX)) as u16))
+        }
+    }
+
+    pub fn fmp_attempts(&self, provider_day: &str) -> Result<u16, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let attempts = conn
+            .query_row(
+                "SELECT attempts FROM fmp_request_budget WHERE provider_day = ?1",
+                params![provider_day],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| format!("read FMP budget: {e}"))?
+            .unwrap_or(0);
+        Ok(attempts.clamp(0, i64::from(u16::MAX)) as u16)
     }
 
     /// Insert a batch of snapshots in a single transaction (much faster than row-by-row).
@@ -1780,4 +1944,103 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod fmp_tests {
+    use super::*;
+
+    #[test]
+    fn fmp_cache_is_replaceable_and_scoped_to_the_provider_day() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, r#"{"old":true}"#)
+            .unwrap();
+        db.save_fmp_forecast_cache("2026-07-29", "MSFT", 200, r#"{"new":true}"#)
+            .unwrap();
+
+        let current = db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.fetched_at_epoch, 200);
+        assert_eq!(current.payload_json, r#"{"new":true}"#);
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-28", "AAPL")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reading_a_new_provider_day_prunes_licensed_rows_without_a_fetch() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, "{}")
+            .unwrap();
+
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-28", "AAPL")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn fmp_budget_reservation_never_exceeds_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), Some(1));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), Some(2));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), None);
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 2);
+    }
+
+    #[test]
+    fn fmp_budget_discards_previous_provider_days() {
+        let db = Db::open_in_memory().unwrap();
+        db.reserve_fmp_attempt("2026-07-28", 250).unwrap();
+        db.reserve_fmp_attempt("2026-07-29", 250).unwrap();
+
+        assert_eq!(db.fmp_attempts("2026-07-28").unwrap(), 0);
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 1);
+    }
+
+    #[test]
+    fn late_previous_day_cache_write_cannot_prune_the_new_day() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-29", "MSFT", 200, r#"{"new":true}"#)
+            .unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, r#"{"old":true}"#)
+            .unwrap();
+
+        let current = db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.payload_json, r#"{"new":true}"#);
+    }
+
+    #[test]
+    fn late_previous_day_budget_write_cannot_prune_the_new_day() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 250).unwrap(), Some(1));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-28", 250).unwrap(), Some(1));
+
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 1);
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 250).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn fmp_attempts_propagates_sqlite_failures_but_missing_rows_are_zero() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE fmp_request_budget", [])
+            .unwrap();
+
+        assert!(db.fmp_attempts("2026-07-29").is_err());
+    }
 }

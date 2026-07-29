@@ -1,3 +1,4 @@
+mod analyst_forecasts;
 mod chart_patterns;
 mod commands;
 mod congress;
@@ -138,6 +139,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_opportunities,
             commands::get_symbol_detail,
+            commands::get_analyst_forecasts,
+            commands::fmp_settings_status,
+            commands::fmp_save_key,
+            commands::fmp_delete_key,
+            commands::fmp_test_key,
             commands::get_candles,
             commands::get_alerts,
             commands::refresh_symbol,
