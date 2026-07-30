@@ -99,7 +99,7 @@ test("in-zone Act becomes ActNow", () => {
   assert.equal(isActionablePriority(plan), true);
 });
 
-test("TEL-style structural conflict blocks primary Act despite mild tech", () => {
+test("TEL-style structural conflict demotes Act so counts match primary board", () => {
   const plan = buildConditionalPlan(
     baseRow({
       technical_score: 19,
@@ -121,8 +121,32 @@ test("TEL-style structural conflict blocks primary Act despite mild tech", () =>
     }),
     "aggressive_v3",
   );
-  assert.equal(plan.stance, "ActNow");
+  // Ghost ActNow used to inflate "1 Actuar" while primary stayed empty — demote.
+  assert.equal(plan.stance, "WaitZone");
   assert.equal(isActionablePriority(plan), false);
+  const summary = rankDashboardV2([
+    baseRow({
+      symbol: "TEL",
+      technical_score: 19,
+      technical_signals: ["Px/20+", "20/50-", "50/200-", "Hist++", "MACD++", "RSI++", "Vol-"],
+      forecast_score: 38,
+      composite_score: 40,
+      price_path: {
+        zone_low_cents: 4900,
+        zone_high_cents: 5100,
+        zone_confidence: "high",
+        p_touch_20d: 84,
+        expected_sessions: 0,
+        invalidation_cents: 5400,
+        risk_codes: [],
+        support_codes: ["in_zone", "below_value"],
+        timing_method: "hybrid",
+        side: "long",
+      },
+    }),
+  ], "aggressive_v3", 6, 4);
+  assert.equal(summary.act, 0);
+  assert.equal(summary.actionable.length, 0);
 });
 
 test("Avoid decision maps to Avoid stance", () => {
@@ -268,6 +292,50 @@ test("primary board never fills with Wait-only noise", () => {
     summary.plans.map((p) => p.symbol),
     summary.actionable.map((p) => p.symbol),
   );
+});
+
+test("act/scale counts never exceed actionable board cards", () => {
+  const ghostAct = baseRow({
+    symbol: "GHOST",
+    technical_score: 19,
+    technical_signals: ["20/50-", "50/200-"],
+    composite_score: 40,
+    price_path: {
+      zone_low_cents: 4900,
+      zone_high_cents: 5100,
+      zone_confidence: "high",
+      p_touch_20d: 84,
+      expected_sessions: 0,
+      invalidation_cents: 5400,
+      risk_codes: [],
+      support_codes: ["in_zone", "below_value"],
+      timing_method: "hybrid",
+      side: "long",
+    },
+  });
+  const realAct = baseRow({
+    symbol: "REAL",
+    technical_score: 25,
+    technical_signals: ["Px/20+", "MACD++"],
+    composite_score: 40,
+    price_path: {
+      zone_low_cents: 4900,
+      zone_high_cents: 5100,
+      zone_confidence: "high",
+      p_touch_20d: 90,
+      expected_sessions: 0,
+      invalidation_cents: 5400,
+      risk_codes: [],
+      support_codes: ["in_zone"],
+      timing_method: "hybrid",
+      side: "long",
+    },
+  });
+  const summary = rankDashboardV2([ghostAct, realAct], "aggressive_v3", 6, 4);
+  assert.equal(summary.act, 1);
+  assert.equal(summary.actionable.length, 1);
+  assert.equal(summary.actionable[0]?.symbol, "REAL");
+  assert.equal(summary.act + summary.scale, summary.actionable.length);
 });
 
 test("actionable Act ranks in primary before waits", () => {
