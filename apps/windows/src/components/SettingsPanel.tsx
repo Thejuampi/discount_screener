@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import type { Lang } from "../i18n";
 import { SchwabConnect } from "./SchwabConnect";
 import { EmailNotifications } from "./EmailNotifications";
+import { TipRanksConnect } from "./TipRanksConnect";
 import { UI, UiInspectable } from "../uiInspect";
 
 interface Props {
@@ -59,6 +60,7 @@ export function SettingsPanel({ autostartOn, onToggleAutostart }: Props) {
 
       {/* Data source */}
       <h3 className="settings-group-title">{t("settings.group.data")}</h3>
+      <TipRanksConnect />
       <SchwabConnect />
       <div className="info-section">
         <SchwabImportButton />

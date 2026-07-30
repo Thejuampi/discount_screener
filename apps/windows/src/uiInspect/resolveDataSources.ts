@@ -1,7 +1,6 @@
 import type {
   ResolvedDataSource,
   UiAppContext,
-  UiDataSource,
   UiSnapshot,
   UiSourceDef,
 } from "./types.ts";
@@ -85,7 +84,7 @@ function aliases(key: string): string[] {
   }
 }
 
-function coerceArg(v: unknown): ArgValue | undefined {
+function coerceArg(v: unknown): ArgBag | undefined {
   if (v === undefined) return undefined;
   if (v === null) return null;
   if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
@@ -95,7 +94,7 @@ function coerceArg(v: unknown): ArgValue | undefined {
 
 function fillProbe(
   template: string | undefined,
-  args: Record<string, ArgValue>,
+  args: Record<string, ArgBag>,
 ): string | null {
   if (!template) return null;
   let out = template;
@@ -115,7 +114,7 @@ function fillProbe(
 /** Append client-side list filter so agents re-fetch the exact row. */
 function enrichProbe(
   probe: string | null,
-  match: Record<string, ArgValue>,
+  match: Record<string, ArgBag>,
 ): string | null {
   if (!probe || Object.keys(match).length === 0) return probe;
   const parts = Object.entries(match).map(([k, v]) => {

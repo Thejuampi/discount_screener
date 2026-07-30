@@ -238,10 +238,7 @@ fn evidence_strength(
         ),
     ];
     if let Some(a) = dcf {
-        metrics.push((
-            "valuation_model".into(),
-            model_metric_label(a.model).into(),
-        ));
+        metrics.push(("valuation_model".into(), model_metric_label(a.model).into()));
         metrics.push((
             "business_class".into(),
             business_class_metric_label(a.business_class).into(),
@@ -282,9 +279,7 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
     }
 
     let disagreement = match (model, analyst_ok) {
-        (Some(a), true) => {
-            relative_disagreement_bps(a.base_intrinsic_value_cents, analyst_base)
-        }
+        (Some(a), true) => relative_disagreement_bps(a.base_intrinsic_value_cents, analyst_base),
         _ => None,
     };
 
@@ -407,17 +402,22 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
 
     if let Some(a) = model {
         metrics.push((
+            "model_bear_cents".into(),
+            a.bear_intrinsic_value_cents.to_string(),
+        ));
+        metrics.push((
             "model_base_cents".into(),
             a.base_intrinsic_value_cents.to_string(),
+        ));
+        metrics.push((
+            "model_bull_cents".into(),
+            a.bull_intrinsic_value_cents.to_string(),
         ));
         metrics.push((
             "model_upside_bps".into(),
             upside_bps(price, a.base_intrinsic_value_cents).to_string(),
         ));
-        metrics.push((
-            "discount_rate_bps".into(),
-            a.wacc_bps.to_string(),
-        ));
+        metrics.push(("discount_rate_bps".into(), a.wacc_bps.to_string()));
         metrics.push((
             "discount_rate_kind".into(),
             match a.discount_rate_kind {
@@ -426,6 +426,76 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
             }
             .into(),
         ));
+        // Diagnostics (detail header stays overview-only; Quant Lens owns depth).
+        let d = &a.diagnostics;
+        if d.point_estimate_unreliable || a.wacc_inputs.is_provisional() {
+            metrics.push(("rate_quality".into(), "provisional".into()));
+        }
+        let labels = a.wacc_inputs.summary_labels();
+        if !labels.is_empty() {
+            metrics.push(("wacc_provenance".into(), labels.join("; ")));
+        }
+        if let Some(fcf) = d.latest_fcf_dollars {
+            metrics.push(("latest_fcf_dollars".into(), fcf.to_string()));
+        }
+        if let Some(fcf) = d.fcf_run_rate_dollars {
+            metrics.push(("fcf_run_rate_dollars".into(), fcf.to_string()));
+        }
+        if !d.fcf_annual_dollars.is_empty() {
+            let series: Vec<String> = d
+                .fcf_years
+                .iter()
+                .zip(d.fcf_annual_dollars.iter())
+                .map(|(y, v)| format!("{y}:{:.1}B", *v as f64 / 1e9))
+                .collect();
+            // Cap width for UI — last 6 years of the series.
+            let tail = if series.len() > 6 {
+                &series[series.len() - 6..]
+            } else {
+                &series[..]
+            };
+            metrics.push(("fcf_series".into(), tail.join(" · ")));
+        }
+        if !d.capex_imputed_years.is_empty() {
+            metrics.push((
+                "capex_imputed_years".into(),
+                d.capex_imputed_years
+                    .iter()
+                    .map(|y| y.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        metrics.push(("net_debt_dollars".into(), a.net_debt_dollars.to_string()));
+        if let Some(sh) = d.shares_outstanding {
+            metrics.push(("shares_outstanding".into(), sh.to_string()));
+        }
+        metrics.push(("g_near_bps".into(), a.base_growth_bps.to_string()));
+        metrics.push(("g_stable_bps".into(), a.stable_growth_bps.to_string()));
+        if let Some(re) = d.cost_of_equity_bps {
+            metrics.push(("cost_of_equity_bps".into(), re.to_string()));
+        }
+        if let Some(rd) = d.cost_of_debt_bps {
+            metrics.push(("cost_of_debt_bps".into(), rd.to_string()));
+        }
+        if let Some(at) = d.after_tax_cost_of_debt_bps {
+            metrics.push(("after_tax_cod_bps".into(), at.to_string()));
+        }
+        if let Some(ew) = d.equity_weight_bps {
+            metrics.push(("equity_weight_bps".into(), ew.to_string()));
+        }
+        if let Some(dw) = d.debt_weight_bps {
+            metrics.push(("debt_weight_bps".into(), dw.to_string()));
+        }
+        if let Some(wb) = d.wacc_bear_bps {
+            metrics.push(("wacc_bear_bps".into(), wb.to_string()));
+        }
+        if let Some(wu) = d.wacc_bull_bps {
+            metrics.push(("wacc_bull_bps".into(), wu.to_string()));
+        }
+        if !d.scenario_stress.is_empty() && d.scenario_stress != "none" {
+            metrics.push(("scenario_stress".into(), d.scenario_stress.clone()));
+        }
         if a.business_class == BusinessClass::FinancialServices {
             if let Some(bvps) = a.book_value_per_share_cents {
                 metrics.push(("bvps_cents".into(), bvps.to_string()));
@@ -696,6 +766,7 @@ fn business_class_metric_label(class: BusinessClass) -> &'static str {
         BusinessClass::FinancialServices => "financial_services",
         BusinessClass::OperatingNonFinancial => "operating_non_financial",
         BusinessClass::NotEligible => "not_eligible",
+        BusinessClass::Unclassified => "unclassified",
     }
 }
 
@@ -743,7 +814,7 @@ mod tests {
         SymbolDetail {
             symbol: "TSLA".into(),
             company_name: Some("Tesla".into()),
-            market_price_cents: 31_200, // ~$312
+            market_price_cents: 31_200,    // ~$312
             intrinsic_value_cents: 38_150, // analyst ~$381.5 → gap ~22%
             gap_bps: Some(2_227),
             qualification: crate::engine::QualificationStatus::Qualified,
@@ -771,6 +842,7 @@ mod tests {
             technical_breakdown: None,
             dcf_value_cents: Some(3_499),
             dcf_analysis: None,
+            valuation_unavailable_reason: None,
             insider_net_shares_90d: None,
             insider_buy_count: None,
             insider_sell_count: None,
@@ -807,6 +879,7 @@ mod tests {
             book_value_per_share_cents: None,
             roe0_bps: None,
             reason_codes: vec![],
+            diagnostics: Default::default(),
         }
     }
 
@@ -850,12 +923,17 @@ mod tests {
         let ev_only = evidence_strength(&detail, None, Some(&dcf));
         assert_ne!(ev_only.status, "Strong");
         assert!(
-            ev_only.status == "Mixed" || ev_only.status == "Sparse" || ev_only.status == "Provisional",
+            ev_only.status == "Mixed"
+                || ev_only.status == "Sparse"
+                || ev_only.status == "Provisional",
             "status={}",
             ev_only.status
         );
         assert!(
-            ev_only.metrics.iter().any(|(k, v)| k == "conflict" && v != "0"),
+            ev_only
+                .metrics
+                .iter()
+                .any(|(k, v)| k == "conflict" && v != "0"),
             "expected conflict when model and analyst diverge hard"
         );
     }
@@ -940,6 +1018,7 @@ mod tests {
             book_value_per_share_cents: Some(6_511),
             roe0_bps: Some(2_000),
             reason_codes: vec![],
+            diagnostics: Default::default(),
         };
         let ev = expected_value_range(&detail, Some(&dcf));
         assert_eq!(ev.status, "Available");

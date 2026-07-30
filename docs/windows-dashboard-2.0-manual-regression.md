@@ -890,4 +890,44 @@ Marcar listo para merge/release de esta feature cuando:
 
 ---
 
+---
+
+## 13. TipRanks analyst forecasts (detail PoC)
+
+Operator reference: [`docs/tipranks-analyst-forecasts.md`](tipranks-analyst-forecasts.md).
+
+| ID | Precondiciones | Pasos | Esperado | Fallo si… |
+| --- | --- | --- | --- | --- |
+| TR-001 | Sin clave TipRanks | Abrir detalle de un stock | Estado `missing_key` / unloaded; **0** llamadas MCP | Fetch al abrir |
+| TR-002 | Clave en Credential Manager; sin caché | Abrir detalle → **no** llama → click Load | 1 `get_recent_analyst_ratings`; panel con filas/estrellas/histograma; atribución TipRanks | Auto-fetch; clave en UI/logs |
+| TR-003 | Caché fresh/aging del mes UTC | Reabrir detalle | 0 llamadas; se muestran edad de fetch y de última opinión | Segunda llamada |
+| TR-004 | Caché stale (>7d) del mes | Abrir detalle | Datos visibles + banner stale + refresh “uses 1 call” + remaining | Datos ocultos; refresh silencioso |
+| TR-005 | Refresh falla (red/auth) | Click refresh | Caché previa intacta + error banner | Panel vacío |
+| TR-006 | Universo completa ranking | Completar load inicial | **0** TipRanks; no warm top-10 | Precache automático |
+| TR-007 | ≥25/50 o uso externo | Settings + panel | Warning/remaining/reset backend-owned; UI solo presenta | Umbrales en React |
+| TR-008 | Live key (opt-in) | AAPL/MSFT/ACGL/TSLA/JPM load | Observaciones reales; Yahoo ranking sin cambio | Drift a FCFF/Yahoo average |
+
+Opt-in live: `TIPRANKS_API_KEY=… cargo test --lib opt_in_live_contract_covers_five_distinct_symbols -- --ignored`.
+
+---
+
 *Fin del documento. Mantener alineado con el código si cambian stances, templates o el contrato `CompactPricePath`.*
+
+---
+
+## 13. TipRanks analyst forecasts (detail PoC)
+
+Operator reference: [`docs/tipranks-analyst-forecasts.md`](tipranks-analyst-forecasts.md).
+
+| ID | Precondiciones | Pasos | Esperado | Fallo si |
+| --- | --- | --- | --- | --- |
+| TR-001 | Sin clave TipRanks | Abrir detalle de un stock | Estado missing_key / unloaded; 0 llamadas MCP | Fetch al abrir |
+| TR-002 | Clave en Credential Manager; sin cache | Abrir detalle -> no llama -> click Load | 1 get_recent_analyst_ratings; panel con filas/estrellas/histograma; atribucion TipRanks | Auto-fetch; clave en UI/logs |
+| TR-003 | Cache fresh/aging del mes UTC | Reabrir detalle | 0 llamadas; se muestran edad de fetch y de ultima opinion | Segunda llamada |
+| TR-004 | Cache stale (>7d) del mes | Abrir detalle | Datos visibles + banner stale + refresh uses 1 call + remaining | Datos ocultos; refresh silencioso |
+| TR-005 | Refresh falla (red/auth) | Click refresh | Cache previa intacta + error banner | Panel vacio |
+| TR-006 | Universo completa ranking | Completar load inicial | 0 TipRanks; no warm top-10 | Precache automatico |
+| TR-007 | >=25/50 o uso externo | Settings + panel | Warning/remaining/reset backend-owned; UI solo presenta | Umbrales en React |
+| TR-008 | Live key (opt-in) | AAPL/MSFT/ACGL/TSLA/JPM load | Observaciones reales; Yahoo ranking sin cambio | Drift a Yahoo average |
+
+Opt-in live: TIPRANKS_API_KEY=... cargo test --lib opt_in_live_contract_covers_five_distinct_symbols -- --ignored.

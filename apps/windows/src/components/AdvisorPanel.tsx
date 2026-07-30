@@ -3,8 +3,17 @@ import { api, fmt } from "../api";
 import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, ImportPosition, PortfolioRiskResponse } from "../api";
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
+import {
+  evaluatePortfolioAgainstRegime,
+  type PortfolioActionKey,
+} from "../portfolioRegimeEval";
+import {
+  regimeLensFromModel,
+  regimeStanceLabelKey,
+} from "../regimeSideLens";
 import { getScoringPresentation, type ScoringModelId } from "../scoringPresentation";
 import { UI, UiInspectable } from "../uiInspect";
+import { useMarketRegime } from "../useMarketRegime";
 
 interface Props {
   rows: OpportunityRow[];
@@ -12,9 +21,9 @@ interface Props {
   scoringModel: ScoringModelId;
 }
 
-// ── Recommendation engine (rule-based, explainable) ──────────────────────────
+// ── Recommendation styles (logic lives in portfolioRegimeEval) ───────────────
 
-type ActionKey = "addStrong" | "add" | "hold" | "trim" | "exit" | "concentration" | "noData" | "shortRisk";
+type ActionKey = PortfolioActionKey;
 
 const ACTION_STYLE: Record<ActionKey, { color: string; bg: string }> = {
   addStrong:     { color: "#fff",    bg: "linear-gradient(135deg, #16a34a, #15803d)" },
@@ -31,16 +40,6 @@ const POSITIVE_LABELS: SetupLabel[] = ["StrongBuy", "StrongAccumulate"];
 const MILD_POSITIVE: SetupLabel[] = ["Buy", "Accumulate"];
 const NEGATIVE_LABELS: SetupLabel[] = ["Avoid", "Distribute", "Caution"];
 const STRONG_NEGATIVE: SetupLabel[] = ["StrongAvoid"];
-
-function recommend(label: SetupLabel | null, weightPct: number): ActionKey {
-  if (weightPct > 25) return "concentration";
-  if (label == null) return "noData";
-  if (STRONG_NEGATIVE.includes(label)) return "exit";
-  if (NEGATIVE_LABELS.includes(label)) return "trim";
-  if (POSITIVE_LABELS.includes(label)) return "addStrong";
-  if (MILD_POSITIVE.includes(label)) return "add";
-  return "hold";
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -323,6 +322,8 @@ function aggregateToPositions(txs: CsvTx[]): ImportPosition[] {
 export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   const { t } = useT();
   const presentation = getScoringPresentation(scoringModel);
+  const regime = useMarketRegime();
+  const lens = regimeLensFromModel(scoringModel);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
   const [accuracy, setAccuracy] = useState<AccuracyRow[]>([]);
   const [horizon, setHorizon] = useState(30);
@@ -460,23 +461,43 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   );
   const totalRiskPct = totals.value > 0 ? (totalRiskCents / totals.value) * 100 : 0;
 
-  // Position sizing for a new buy: shares that risk `riskPct`% of capital,
-  // stopping out at `stopMult` × ATR, capped at 25% of capital (concentration).
+  // ── Regime-aware portfolio policy (same intel as RegimeBanner) ────────────
+  const regimeEval = useMemo(
+    () =>
+      evaluatePortfolioAgainstRegime({
+        regime,
+        lens,
+        baseRiskPct: riskPct,
+        isShort: presentation.isShort,
+        holdings: holdings.map((h) => ({
+          symbol: h.pos.symbol,
+          weightPct: h.weightPct,
+          setupLabel: h.row?.setup_label ?? null,
+          regimeScore: h.row?.regime_score ?? null,
+        })),
+      }),
+    [regime, lens, riskPct, presentation.isShort, holdings],
+  );
+
+  // Position sizing: effective risk % (base × regime mult), stop at stopMult × ATR.
   const suggestSize = useCallback((atrCents: number | null, priceCents: number) => {
     const capital = totals.value;
     if (!atrCents || atrCents <= 0 || priceCents <= 0 || capital <= 0) return null;
     const stopDist = stopMult * atrCents;
-    const budget = capital * (riskPct / 100);
+    const budget = capital * (regimeEval.effectiveRiskPct / 100);
     let shares = budget / stopDist;
     let alloc = shares * priceCents;
     const maxAlloc = capital * 0.25;
     if (alloc > maxAlloc) { alloc = maxAlloc; shares = alloc / priceCents; }
     return { shares, allocCents: Math.round(alloc), stopCents: Math.round(priceCents - stopDist) };
-  }, [totals.value, stopMult, riskPct]);
+  }, [totals.value, stopMult, regimeEval.effectiveRiskPct]);
 
   // ── Risk warnings ─────────────────────────────────────────────────────────
   const warnings = useMemo(() => {
     const out: string[] = [];
+    for (const w of regimeEval.warnings) {
+      out.push(t(w.key, w.params));
+    }
     for (const h of holdings) {
       if (h.weightPct > 25) {
         out.push(t("advisor.warn.position", { symbol: h.pos.symbol, pct: h.weightPct.toFixed(0) }));
@@ -505,7 +526,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
       }
     }
     return out;
-  }, [holdings, presentation, t]);
+  }, [holdings, presentation, regimeEval.warnings, t]);
 
   // ── Opportunities not owned ───────────────────────────────────────────────
   const ownedSymbols = useMemo(() => new Set(positions.map(p => p.symbol)), [positions]);
@@ -513,7 +534,11 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     rows
       .filter(r => !ownedSymbols.has(r.symbol))
       .filter(r => POSITIVE_LABELS.includes(r.setup_label) || MILD_POSITIVE.includes(r.setup_label))
-      .sort((a, b) => b.composite_score - a.composite_score || b.setup_score - a.setup_score)
+      .sort((a, b) =>
+        b.composite_score - a.composite_score ||
+        b.setup_score - a.setup_score ||
+        (b.regime_score ?? 0) - (a.regime_score ?? 0)
+      )
       .slice(0, 6),
     [rows, ownedSymbols]
   );
@@ -596,6 +621,13 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
         loading,
         riskPct,
         stopMult,
+        primaryRegime: regimeEval.primaryRegime,
+        actionStance: regimeEval.stance,
+        riskMult: regimeEval.riskMult,
+        effectiveRiskPct: regimeEval.effectiveRiskPct,
+        posture: regimeEval.posture,
+        suggestedExposurePct: regimeEval.suggestedExposurePct,
+        totalRiskCeilingPct: regimeEval.totalRiskCeilingPct,
       }}
     >
       <header className="congress-header">
@@ -626,8 +658,69 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
         </div>
       </div>
 
+      {/* ── Market regime strip (same source as RegimeBanner) ── */}
+      <div
+        style={{
+          marginBottom: 12,
+          padding: "10px 14px",
+          borderRadius: 8,
+          fontSize: 12,
+          lineHeight: 1.45,
+          background:
+            regimeEval.posture === "Defensive"
+              ? "rgba(244,63,94,0.08)"
+              : regimeEval.posture === "Deploy"
+                ? "rgba(34,197,94,0.08)"
+                : "rgba(148,163,184,0.08)",
+          border: `1px solid ${
+            regimeEval.posture === "Defensive"
+              ? "rgba(244,63,94,0.35)"
+              : regimeEval.posture === "Deploy"
+                ? "rgba(34,197,94,0.3)"
+                : "rgba(148,163,184,0.3)"
+          }`,
+        }}
+      >
+        {!regimeEval.available ? (
+          <span style={{ color: "var(--text-4)" }}>{t("advisor.regime.loading")}</span>
+        ) : (
+          <>
+            <div style={{ fontWeight: 600, color: "var(--text-1)" }}>
+              {t("advisor.regime.strip", {
+                phase: (() => {
+                  const k = `regime.phase.${regimeEval.primaryRegime}`;
+                  const lab = t(k);
+                  return lab !== k ? lab : String(regimeEval.primaryRegime ?? "—");
+                })(),
+                stance: (() => {
+                  const sk = regimeStanceLabelKey(regimeEval.stance, lens);
+                  const lab = t(sk);
+                  if (lab !== sk) return lab;
+                  const longK = `regime.stance.${regimeEval.stance}`;
+                  const longLab = t(longK);
+                  return longLab !== longK ? longLab : String(regimeEval.stance ?? "—");
+                })(),
+                exp: regimeEval.suggestedExposurePct ?? "—",
+                mult: regimeEval.riskMult.toFixed(2),
+                conf:
+                  regimeEval.globalConfidenceBps != null
+                    ? (regimeEval.globalConfidenceBps / 100).toFixed(0)
+                    : "—",
+              })}
+            </div>
+            <div style={{ marginTop: 4, color: "var(--text-3)", fontSize: 11 }}>
+              {t("advisor.regime.effectiveRisk", {
+                effective: regimeEval.effectiveRiskPct.toFixed(2),
+                base: riskPct,
+                mult: regimeEval.riskMult.toFixed(2),
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
       {/* ── Risk warnings ── */}
-      {positions.length > 0 && (
+      {(positions.length > 0 || regimeEval.warnings.length > 0) && (
         <div className="info-section">
           <h3>{t("advisor.warnings")}</h3>
           {warnings.length === 0 ? (
@@ -734,14 +827,26 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                 <th style={{ textAlign: "right" }}>{t("advisor.col.weight")}</th>
                 <th style={{ textAlign: "right" }}>{t("advisor.col.days")}</th>
                 <th>{t("advisor.col.signal")}</th>
+                <th style={{ textAlign: "right" }}>{t("advisor.col.fit")}</th>
                 <th>{t("advisor.col.action")}</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {holdings.map((h) => {
-                const action = presentation.isShort && h.row ? "shortRisk" : recommend(h.row?.setup_label ?? null, h.weightPct);
+                const action =
+                  regimeEval.actionsBySymbol[h.pos.symbol] ??
+                  (presentation.isShort && h.row ? "shortRisk" : "noData");
                 const st = ACTION_STYLE[action];
+                const fit = h.row?.regime_score;
+                const fitColor =
+                  fit == null
+                    ? "var(--text-5)"
+                    : fit >= 20
+                      ? "var(--success)"
+                      : fit <= -20
+                        ? "var(--danger)"
+                        : "var(--text-3)";
                 return (
                   <tr key={h.pos.id}>
                     <td>
@@ -780,6 +885,9 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                           {t(presentation.setupLabelKey(h.row.setup_label))} ({h.row.setup_score > 0 ? "+" : ""}{h.row.setup_score})
                         </span>
                       ) : "—"}
+                    </td>
+                    <td className="num-cell" style={{ textAlign: "right", color: fitColor, fontWeight: 700, fontSize: 12 }}>
+                      {fit != null ? `${fit > 0 ? "+" : ""}${fit}` : "—"}
                     </td>
                     <td>
                       <span className="advisor-action-chip" style={{ background: st.bg, color: st.color }}>
@@ -824,21 +932,25 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
             {t("advisor.risk.help")}
           </p>
 
-          {/* Total portfolio risk budget */}
+          {/* Total portfolio risk budget (ceiling scales with regime mult) */}
           <div className="advisor-risk-total" style={{
             display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
             padding: "10px 14px", borderRadius: 8, marginBottom: 12,
-            background: totalRiskPct > 6 ? "rgba(244,63,94,0.12)" : "rgba(34,197,94,0.10)",
-            border: `1px solid ${totalRiskPct > 6 ? "rgba(244,63,94,0.4)" : "rgba(34,197,94,0.3)"}`,
+            background: totalRiskPct > regimeEval.totalRiskCeilingPct ? "rgba(244,63,94,0.12)" : "rgba(34,197,94,0.10)",
+            border: `1px solid ${totalRiskPct > regimeEval.totalRiskCeilingPct ? "rgba(244,63,94,0.4)" : "rgba(34,197,94,0.3)"}`,
           }}>
             <div>
               <div style={{ fontSize: 11, color: "var(--text-3)" }}>{t("advisor.risk.totalAtRisk")}</div>
               <div style={{ fontSize: 10, color: "var(--text-5)", maxWidth: 520, lineHeight: 1.4 }}>
                 {t("advisor.risk.totalAtRiskHelp")}
+                {" · "}
+                {t("advisor.risk.ceilingNote", {
+                  ceiling: regimeEval.totalRiskCeilingPct.toFixed(1),
+                })}
               </div>
             </div>
             <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-              <span style={{ fontSize: 20, fontWeight: 800, color: totalRiskPct > 6 ? "var(--danger)" : "var(--success)" }}>
+              <span style={{ fontSize: 20, fontWeight: 800, color: totalRiskPct > regimeEval.totalRiskCeilingPct ? "var(--danger)" : "var(--success)" }}>
                 {money(totalRiskCents)}
               </span>
               <span style={{ fontSize: 13, marginLeft: 6, color: "var(--text-3)" }}>
@@ -911,18 +1023,33 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
       {/* ── Opportunities not owned ── */}
       <div className="info-section">
         <h3>{t(presentation.advisorOpportunityKey)}</h3>
+        {!presentation.isShort &&
+          regimeEval.available &&
+          !regimeEval.lowConfidence &&
+          regimeEval.posture === "Defensive" &&
+          regimeEval.addBias < 0 && (
+            <p style={{ fontSize: 11, color: "var(--warning, #fbbf24)", lineHeight: 1.45, margin: "0 0 10px" }}>
+              {t("advisor.regime.oppCaution")}
+            </p>
+          )}
         {opportunities.length === 0 ? (
           <div style={{ color: "var(--text-4)", fontSize: 13 }}>{t(presentation.advisorEmptyKey)}</div>
         ) : (
           <div className="advisor-opps">
             {opportunities.map((r) => {
               const size = suggestSize(r.atr_cents, r.market_price_cents);
+              const fit = r.regime_score;
               return (
                 <div key={r.symbol} className="advisor-opp-card" onClick={() => onOpenSymbol(r.symbol)}>
                   <div className="advisor-opp-head">
                     <strong>{r.symbol}</strong>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "var(--success)" }}>
                       {t(presentation.setupLabelKey(r.setup_label))} +{r.setup_score}
+                      {fit != null && (
+                        <span style={{ marginLeft: 6, color: "var(--text-3)", fontWeight: 600 }}>
+                          · fit {fit > 0 ? "+" : ""}{fit}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="advisor-opp-meta">

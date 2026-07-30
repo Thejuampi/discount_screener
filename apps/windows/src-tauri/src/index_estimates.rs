@@ -271,6 +271,7 @@ mod tests {
             book_value_per_share_cents: None,
             roe0_bps: None,
             reason_codes: vec![],
+            diagnostics: Default::default(),
         }
     }
 

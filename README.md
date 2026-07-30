@@ -84,7 +84,8 @@ From `apps/windows`, run `npm install`, then:
 |---|---|
 | `npm test` | Run Windows frontend tests |
 | `npm run build` | Type-check and build the frontend |
-| `npm exec tauri dev` | Launch the live Tauri workstation |
+| `npm run tauri:dev` | Launch the live Tauri workstation (normal use; often full universe) |
+| `npm run tauri:dev:qa` | **Required for agent/manual live QA** — always profile `qa` (≤20 symbols) unless user explicitly asks otherwise |
 
 ### Cross-platform
 

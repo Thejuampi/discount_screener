@@ -1958,16 +1958,35 @@ struct DetailAnalysisSnapshot<'a> {
     color: Color,
 }
 
-fn is_financial_services_fundamentals(fundamentals: &FundamentalSnapshot) -> bool {
-    let blob = [
+/// Desktop policy lag vs Windows `business-class-policy/3`.
+/// Closed-world: refuse unknown class (no silent FCFF). Full WACC uplift / FCF
+/// run-rate parity with Windows remains deferred — see project-context.
+fn desktop_business_class(fundamentals: &FundamentalSnapshot) -> &'static str {
+    let sector = [
         fundamentals.sector_name.as_deref().unwrap_or(""),
-        fundamentals.industry_name.as_deref().unwrap_or(""),
         fundamentals.sector_key.as_deref().unwrap_or(""),
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+    let industry = [
+        fundamentals.industry_name.as_deref().unwrap_or(""),
         fundamentals.industry_key.as_deref().unwrap_or(""),
     ]
     .join(" ")
     .to_ascii_lowercase();
-    [
+    let blob = format!("{sector} {industry}");
+    let contains = |keys: &[&str]| keys.iter().any(|k| blob.contains(k));
+    if contains(&[
+        "etf",
+        "exchange traded",
+        "mutual fund",
+        "cryptocurrency",
+        "reit",
+        "real estate investment trust",
+    ]) {
+        return "not_eligible";
+    }
+    if contains(&[
         "financial",
         "insurance",
         "bank",
@@ -1977,23 +1996,73 @@ fn is_financial_services_fundamentals(fundamentals: &FundamentalSnapshot) -> boo
         "credit services",
         "mortgage finance",
         "reinsurance",
-        "life insurance",
-        "property & casualty",
-        "property and casualty",
         "brokerage",
         "investment banking",
-    ]
-    .iter()
-    .any(|k| blob.contains(k))
+        "healthcare plans",
+        "health care plans",
+        "managed care",
+        "health insurance",
+    ]) {
+        return "financial";
+    }
+    if contains(&[
+        "technology",
+        "industrials",
+        "industrial",
+        "consumer cyclical",
+        "consumer defensive",
+        "consumer staples",
+        "energy",
+        "utilities",
+        "basic materials",
+        "materials",
+        "communication",
+        "telecom",
+        "software",
+        "semiconductor",
+        "pharma",
+        "biotech",
+        "drug",
+        "retail",
+        "oil",
+        "chemicals",
+    ]) {
+        return "operating";
+    }
+    // Healthcare sector without plans keywords and with operating industry tokens.
+    if (sector.contains("healthcare") || sector.contains("health care"))
+        && (industry.contains("drug")
+            || industry.contains("pharma")
+            || industry.contains("biotech")
+            || industry.contains("device")
+            || industry.contains("diagnostic"))
+    {
+        return "operating";
+    }
+    "unclassified"
 }
 
 fn compute_dcf_analysis(
     fundamentals: &FundamentalSnapshot,
     timeseries: &FundamentalTimeseries,
 ) -> io::Result<DcfAnalysis> {
-    // Valuation model family: financials use residual income (never FCFF on float OCF).
-    if is_financial_services_fundamentals(fundamentals) {
-        return compute_residual_income_analysis(fundamentals, timeseries);
+    // Closed-world routing (fail-closed). Desktop engine still behind Windows policy/3
+    // on discount-rate uplift / FCF normalization — label via engine notes elsewhere.
+    match desktop_business_class(fundamentals) {
+        "not_eligible" => {
+            return Err(io::Error::other(
+                "valuation not eligible for this asset class (ETF/fund/crypto/REIT shell)",
+            ));
+        }
+        "unclassified" => {
+            return Err(io::Error::other(
+                "business class unclassified: sector/industry missing or not in policy tables — valuation refused (no FCFF fallback)",
+            ));
+        }
+        "financial" => {
+            return compute_residual_income_analysis(fundamentals, timeseries);
+        }
+        _ => {}
     }
 
     if timeseries.free_cash_flow.len() < 3 {

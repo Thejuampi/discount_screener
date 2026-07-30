@@ -12,6 +12,7 @@ import { CryptoCyclePanel } from "./CryptoCyclePanel";
 import { ChartPatterns } from "./ChartPatterns";
 import { FibLevels } from "./FibLevels";
 import { QuantLensPanel } from "./QuantLensPanel";
+import { AnalystForecastsPanel } from "./AnalystForecastsPanel";
 import { useT } from "../i18n";
 import type { DcfAnalysis } from "../api";
 import {
@@ -43,18 +44,30 @@ function gapToneClass(tone: DirectionalTone): string {
   return "gap-grey";
 }
 
-function waccLabels(a: DcfAnalysis): string[] {
-  const labels: string[] = [];
+/** Policy defaults / provisional rates → never treat base as a trusted point. */
+function dcfPointUnreliable(a: DcfAnalysis): boolean {
+  if (a.diagnostics?.point_estimate_unreliable) return true;
   const i = a.wacc_inputs;
-  if (i.market_cap === "derived_price_times_shares") labels.push("market cap=price×shares");
-  if (i.beta === "default") labels.push("beta=default");
-  // industry_shrink is intentional estimation — not provisional noise
-  if (i.total_debt === "assumed_zero") labels.push("debt=assumed 0");
-  if (i.total_cash === "assumed_zero") labels.push("cash=assumed 0");
-  if (i.cost_of_debt === "default") labels.push("cost of debt=default");
-  if (i.tax_rate === "default") labels.push("tax=default");
-  if (i.wacc_clamped) labels.push("params=provisional");
-  return labels;
+  return (
+    i.cost_of_debt === "default"
+    || i.tax_rate === "default"
+    || i.beta === "default"
+    || i.wacc_clamped
+  );
+}
+
+/** Map backend valuation refusal strings to i18n keys (fail-closed messaging). */
+function valuationUnavailableI18nKey(reason: string | null | undefined): string {
+  if (!reason) return "detail.dcfUnavailableHint";
+  const r = reason.toLowerCase();
+  if (r.includes("unclassified")) return "detail.dcfUnavailableUnclassified";
+  if (r.includes("not eligible") || r.includes("etf") || r.includes("reit")) {
+    return "detail.dcfUnavailableNotEligible";
+  }
+  if (r.includes("book")) return "detail.dcfUnavailableMissingBook";
+  if (r.includes("fcf") || r.includes("free cash")) return "detail.dcfUnavailableMissingFcf";
+  if (r.includes("share")) return "detail.dcfUnavailableMissingShares";
+  return "detail.dcfUnavailableHint";
 }
 
 interface Props {
@@ -74,6 +87,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const [detail, setDetail] = useState<SymbolDetail | null>(null);
   const [range, setRange] = useState("3mo");
   const [loading, setLoading] = useState(true);
+  /** EDGAR/valuation worker is async — keep a reserved DCF slot until timeout. */
+  const [dcfWaitTimedOut, setDcfWaitTimedOut] = useState(false);
   const [showPat, setShowPat] = useState(() => localStorage.getItem("ds_detail_pat") !== "0");
   const [showFib, setShowFib] = useState(() => localStorage.getItem("ds_detail_fib") !== "0");
   const [showEma, setShowEma] = useState(() => localStorage.getItem("ds_detail_ema") !== "0");
@@ -85,6 +100,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   useEffect(() => {
     setLoading(true);
     setDetail(null);   // ← clear stale data
+    setDcfWaitTimedOut(false);
     let cancelled = false;
 
     api.getSymbolDetail(symbol)
@@ -93,8 +109,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       })
       .catch(console.error);
 
-    // Fast path (quote + daily) returns ASAP; multi-TF continues in background.
-    // Poll a few times so weekly/hourly/monthly sections fill in without blocking.
+    // Fast path (quote + daily) returns ASAP; multi-TF + DCF continue in background.
+    // Poll longer than before so EDGAR valuation can land without the slot vanishing.
     const refreshDetail = () =>
       api.getSymbolDetail(symbol).then((d) => {
         if (!cancelled) {
@@ -113,11 +129,20 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
 
     const t1 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 1200);
     const t2 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 3500);
+    const t3 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 8000);
+    const t4 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 15000);
+    // After this, stop implying "still computing" — show unavailable if no DCF.
+    const tOut = window.setTimeout(() => {
+      if (!cancelled) setDcfWaitTimedOut(true);
+    }, 20000);
 
     return () => {
       cancelled = true;
       window.clearTimeout(t1);
       window.clearTimeout(t2);
+      window.clearTimeout(t3);
+      window.clearTimeout(t4);
+      window.clearTimeout(tOut);
     };
   }, [symbol]);
 
@@ -137,6 +162,9 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
     ?? detail?.dcf_value_cents
     ?? row?.dcf_value_cents
     ?? null;
+  const hasDcf = dcfValue != null && dcfValue > 0;
+  const valuationReason = detail?.valuation_unavailable_reason ?? null;
+  const valuationReasonKey = valuationUnavailableI18nKey(valuationReason);
 
   const f = detail?.fundamentals;
   // Unknown row type stays neutral until the scored row arrives; never guess
@@ -145,6 +173,15 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const isCrypto = row?.asset_type === "crypto" || symbol.endsWith("-USD");
   const gapPresentation = presentation.gap(gap);
   const hasValidData = marketPrice > 0;
+  // Prefer a reserved loading slot over appear/disappear when EDGAR is slow.
+  // Classification refuse is immediate unavailable (no timeout theater).
+  const dcfSlotState: "hidden" | "loading" | "ready" | "unavailable" = technicalOnly
+    ? "hidden"
+    : hasDcf
+      ? "ready"
+      : valuationReason || dcfWaitTimedOut
+        ? "unavailable"
+        : "loading";
 
   // If we have absolutely nothing yet (no row, no detail) show a loader
   if (!hasValidData && !detail && loading) {
@@ -175,6 +212,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         technicalScore: row?.technical_score ?? null,
         technicalVerdict: verdictFromTechnicalScore(row?.technical_score ?? null),
         assetType: row?.asset_type ?? null,
+        dcfSlotState,
+        hasDcf,
       }}
     >
       <div className="detail-header">
@@ -212,52 +251,78 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             <span className="price-label">{t(presentation.analystTargetLabelKey)}</span>
           </div>
         </>}
-        {!technicalOnly && dcfValue && dcfValue > 0 && (
-          <>
-            <div className="price-main">
-              <span className="price-value" style={{ color: toneColor(hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral") }}>
-                {fmt.dollars(dcfValue)}
-              </span>
-              <span className="price-label">
-                {dcfAnalysis?.model === "residual_income_equity"
+        {dcfSlotState === "loading" && (
+          <div className="price-main dcf-slot dcf-slot--loading" aria-busy="true" aria-live="polite">
+            <span className="price-value price-value--skeleton">···</span>
+            <span className="price-label">{t("detail.dcfLoading")}</span>
+          </div>
+        )}
+        {dcfSlotState === "unavailable" && (
+          <div className="price-main dcf-slot dcf-slot--unavailable">
+            <span className="price-value price-value--muted">—</span>
+            <span className="price-label">{t("detail.dcfUnavailable")}</span>
+            <div className="muted small dcf-slot-hint">
+              {t(valuationReasonKey)}
+              {valuationReason
+                && valuationReasonKey === "detail.dcfUnavailableHint"
+                && (
+                  <span className="dcf-slot-reason-raw" title={valuationReason}>
+                    {" "}
+                    ({valuationReason.length > 80
+                      ? `${valuationReason.slice(0, 80)}…`
+                      : valuationReason})
+                  </span>
+                )}
+            </div>
+          </div>
+        )}
+        {/* Overview: base is the hero (sell-side style PT); range secondary.
+            Full WACC/FCF diagnostics stay in Quant Lens. */}
+        {dcfSlotState === "ready" && dcfValue != null && dcfValue > 0 && (
+          <div className="price-main dcf-slot dcf-slot--ready">
+            {(() => {
+              const unreliable = dcfAnalysis ? dcfPointUnreliable(dcfAnalysis) : false;
+              const label =
+                dcfAnalysis?.model === "residual_income_equity"
                   ? t("detail.residualIncomeValue")
-                  : t("detail.dcfValue")}
-              </span>
-              {dcfAnalysis && (
-                <div className="wacc-block">
-                  <div>
-                    {dcfAnalysis.discount_rate_kind === "cost_of_equity" ||
-                    dcfAnalysis.model === "residual_income_equity"
-                      ? "rₑ"
-                      : "WACC"}{" "}
-                    {(dcfAnalysis.wacc_bps / 100).toFixed(2)}%
-                    {waccLabels(dcfAnalysis).length > 0 && (
-                      <span className="wacc-provisional"> · {t("detail.provisional")}</span>
-                    )}
-                  </div>
-                  <div className="muted small">
-                    Bear {fmt.dollars(dcfAnalysis.bear_intrinsic_value_cents)} · Base{" "}
-                    {fmt.dollars(dcfAnalysis.base_intrinsic_value_cents)} · Bull{" "}
-                    {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
-                  </div>
-                  {dcfAnalysis.model === "residual_income_equity" &&
-                    dcfAnalysis.book_value_per_share_cents != null &&
-                    dcfAnalysis.book_value_per_share_cents > 0 && (
-                      <div className="muted small">
-                        BVPS {fmt.dollars(dcfAnalysis.book_value_per_share_cents)}
-                        {dcfAnalysis.roe0_bps != null &&
-                          ` · ROE ${(dcfAnalysis.roe0_bps / 100).toFixed(1)}%`}
-                      </div>
-                    )}
-                  {waccLabels(dcfAnalysis).length > 0 && (
-                    <div className="muted small">
-                      {t("detail.waccInputs")}: {waccLabels(dcfAnalysis).join("; ")}
+                  : t("detail.dcfValue");
+              const hasRange =
+                dcfAnalysis != null
+                && dcfAnalysis.bear_intrinsic_value_cents > 0
+                && dcfAnalysis.bull_intrinsic_value_cents > 0
+                && (dcfAnalysis.bear_intrinsic_value_cents !== dcfAnalysis.bull_intrinsic_value_cents
+                  || dcfAnalysis.bear_intrinsic_value_cents !== dcfValue);
+              return (
+                <>
+                  <span
+                    className="price-value"
+                    style={{
+                      color: unreliable
+                        ? "var(--warning)"
+                        : toneColor(
+                          hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral",
+                        ),
+                    }}
+                  >
+                    {fmt.dollars(dcfValue)}
+                  </span>
+                  {hasRange && dcfAnalysis && (
+                    <div className="muted small dcf-overview-range">
+                      {fmt.dollars(dcfAnalysis.bear_intrinsic_value_cents)}
+                      {" – "}
+                      {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
                     </div>
                   )}
-                </div>
-              )}
-            </div>
-          </>
+                  <span className="price-label">
+                    {label}
+                    {unreliable && (
+                      <span className="wacc-unreliable"> · {t("detail.dcfUnreliable")}</span>
+                    )}
+                  </span>
+                </>
+              );
+            })()}
+          </div>
         )}
         {hasValidData && !technicalOnly && (
           <div
@@ -336,6 +401,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         </div>
         <CandleChart symbol={symbol} range={range} patterns={showPat ? detail?.chart_patterns : undefined} fib={showFib ? detail?.fib : null} ema={showEma} volume={showVol} />
       </div>
+
+      <AnalystForecastsPanel symbol={symbol} />
 
       {/* Chart patterns (classic TA structures, from daily candles) */}
       {detail && detail.chart_patterns.length > 0 && (

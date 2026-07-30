@@ -171,6 +171,45 @@ CREATE TABLE IF NOT EXISTS email_config (
     updated_at       INTEGER
 );
 
+-- Legacy FMP tables remain for schema compatibility but are inert.
+CREATE TABLE IF NOT EXISTS fmp_forecast_cache (
+    provider_day       TEXT NOT NULL,
+    symbol             TEXT NOT NULL,
+    fetched_at_epoch   INTEGER NOT NULL,
+    payload_json       TEXT NOT NULL,
+    PRIMARY KEY (provider_day, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS fmp_request_budget (
+    provider_day       TEXT PRIMARY KEY,
+    attempts           INTEGER NOT NULL CHECK (attempts >= 0)
+);
+
+-- TipRanks monthly licensed cache. Previous UTC quota months are pruned.
+CREATE TABLE IF NOT EXISTS tipranks_forecast_cache (
+    provider_month     TEXT NOT NULL,
+    symbol             TEXT NOT NULL,
+    fetched_at_epoch   INTEGER NOT NULL,
+    payload_json       TEXT NOT NULL,
+    PRIMARY KEY (provider_month, symbol)
+);
+
+-- Local TipRanks counted-call budget (UTC calendar month).
+CREATE TABLE IF NOT EXISTS tipranks_request_budget (
+    provider_month     TEXT PRIMARY KEY,
+    attempts           INTEGER NOT NULL CHECK (attempts >= 0)
+);
+
+-- Last free get_my_usage reconciliation snapshot (does not consume quota).
+CREATE TABLE IF NOT EXISTS tipranks_usage_snapshot (
+    provider_month     TEXT PRIMARY KEY,
+    used               INTEGER NOT NULL CHECK (used >= 0),
+    limit_calls        INTEGER NOT NULL CHECK (limit_calls >= 0),
+    remaining          INTEGER NOT NULL CHECK (remaining >= 0),
+    resets_at_epoch    INTEGER NOT NULL,
+    reconciled_at_epoch INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schwab_reports (
     symbol               TEXT    PRIMARY KEY,
     company_name         TEXT,
@@ -217,6 +256,22 @@ pub struct HistorySnapshot {
     pub confidence: String,
 }
 
+/// Latest snapshot row per symbol (after `captured_at DESC, rowid DESC` pick).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestSnapshotRow {
+    pub symbol: String,
+    pub captured_at: i64,
+    pub market_price_cents: i64,
+    pub intrinsic_value_cents: i64,
+    pub gap_bps: i32,
+    pub decision: String,
+    pub composite_score: i32,
+    pub fundamentals_score: Option<i32>,
+    pub technical_score: Option<i32>,
+    pub forecast_score: Option<i32>,
+    pub confidence: String,
+}
+
 /// One row to insert.
 pub struct SnapshotInsert<'a> {
     pub symbol: &'a str,
@@ -236,6 +291,27 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FmpCacheRecord {
+    pub fetched_at_epoch: i64,
+    pub payload_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TipRanksCacheRecord {
+    pub fetched_at_epoch: i64,
+    pub payload_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TipRanksUsageRecord {
+    pub used: u16,
+    pub limit_calls: u16,
+    pub remaining: u16,
+    pub resets_at_epoch: i64,
+    pub reconciled_at_epoch: i64,
+}
+
 impl Db {
     /// Open (or create) the database at `path`. Runs the schema migration.
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -245,6 +321,25 @@ impl Db {
         }
         let conn =
             Connection::open(&path).map_err(|e| format!("open {}: {}", path.display(), e))?;
+        Self::from_connection(conn)
+    }
+
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self, String> {
+        let conn = Connection::open_in_memory().map_err(|e| format!("open memory db: {e}"))?;
+        Self::from_connection(conn)
+    }
+
+    #[cfg(test)]
+    pub fn drop_tipranks_budget_table_for_test(&self) {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE tipranks_request_budget", [])
+            .unwrap();
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, String> {
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("schema: {}", e))?;
         // WAL mode: better concurrent reads while writer is active
@@ -253,6 +348,340 @@ impl Db {
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    pub fn load_fmp_forecast_cache(
+        &self,
+        provider_day: &str,
+        symbol: &str,
+    ) -> Result<Option<FmpCacheRecord>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        conn.execute(
+            "DELETE FROM fmp_forecast_cache WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP cache on read: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT fetched_at_epoch, payload_json
+                 FROM fmp_forecast_cache
+                 WHERE provider_day = ?1 AND symbol = ?2",
+            )
+            .map_err(|e| format!("prepare FMP cache load: {e}"))?;
+        let mut rows = stmt
+            .query(params![provider_day, symbol])
+            .map_err(|e| format!("query FMP cache: {e}"))?;
+        match rows
+            .next()
+            .map_err(|e| format!("read FMP cache row: {e}"))?
+        {
+            Some(row) => Ok(Some(FmpCacheRecord {
+                fetched_at_epoch: row.get(0).map_err(|e| format!("FMP cache epoch: {e}"))?,
+                payload_json: row.get(1).map_err(|e| format!("FMP cache payload: {e}"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_fmp_forecast_cache(
+        &self,
+        provider_day: &str,
+        symbol: &str,
+        fetched_at_epoch: i64,
+        payload_json: &str,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin FMP cache save: {e}"))?;
+        tx.execute(
+            "DELETE FROM fmp_forecast_cache WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP cache: {e}"))?;
+        tx.execute(
+            "INSERT INTO fmp_forecast_cache
+                (provider_day, symbol, fetched_at_epoch, payload_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider_day, symbol) DO UPDATE SET
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                payload_json = excluded.payload_json",
+            params![provider_day, symbol, fetched_at_epoch, payload_json],
+        )
+        .map_err(|e| format!("save FMP cache: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit FMP cache save: {e}"))
+    }
+
+    /// Reserve one outbound attempt. `None` means the provider-day limit was
+    /// already reached and no network request is authorized.
+    pub fn reserve_fmp_attempt(
+        &self,
+        provider_day: &str,
+        limit: u16,
+    ) -> Result<Option<u16>, String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin FMP budget reservation: {e}"))?;
+        tx.execute(
+            "DELETE FROM fmp_request_budget WHERE provider_day < ?1",
+            params![provider_day],
+        )
+        .map_err(|e| format!("prune FMP budget: {e}"))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO fmp_request_budget (provider_day, attempts) VALUES (?1, 0)",
+            params![provider_day],
+        )
+        .map_err(|e| format!("initialize FMP budget: {e}"))?;
+        let changed = tx
+            .execute(
+                "UPDATE fmp_request_budget
+                 SET attempts = attempts + 1
+                 WHERE provider_day = ?1 AND attempts < ?2",
+                params![provider_day, i64::from(limit)],
+            )
+            .map_err(|e| format!("reserve FMP budget: {e}"))?;
+        let attempts: i64 = tx
+            .query_row(
+                "SELECT attempts FROM fmp_request_budget WHERE provider_day = ?1",
+                params![provider_day],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("read FMP budget: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit FMP budget reservation: {e}"))?;
+        if changed == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(attempts.clamp(0, i64::from(u16::MAX)) as u16))
+        }
+    }
+
+    pub fn fmp_attempts(&self, provider_day: &str) -> Result<u16, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let attempts = conn
+            .query_row(
+                "SELECT attempts FROM fmp_request_budget WHERE provider_day = ?1",
+                params![provider_day],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| format!("read FMP budget: {e}"))?
+            .unwrap_or(0);
+        Ok(attempts.clamp(0, i64::from(u16::MAX)) as u16)
+    }
+
+    pub fn load_tipranks_forecast_cache(
+        &self,
+        provider_month: &str,
+        symbol: &str,
+    ) -> Result<Option<TipRanksCacheRecord>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        conn.execute(
+            "DELETE FROM tipranks_forecast_cache WHERE provider_month < ?1",
+            params![provider_month],
+        )
+        .map_err(|e| format!("prune TipRanks cache on read: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT fetched_at_epoch, payload_json
+                 FROM tipranks_forecast_cache
+                 WHERE provider_month = ?1 AND symbol = ?2",
+            )
+            .map_err(|e| format!("prepare TipRanks cache load: {e}"))?;
+        let mut rows = stmt
+            .query(params![provider_month, symbol])
+            .map_err(|e| format!("query TipRanks cache: {e}"))?;
+        match rows
+            .next()
+            .map_err(|e| format!("read TipRanks cache row: {e}"))?
+        {
+            Some(row) => Ok(Some(TipRanksCacheRecord {
+                fetched_at_epoch: row
+                    .get(0)
+                    .map_err(|e| format!("TipRanks cache epoch: {e}"))?,
+                payload_json: row
+                    .get(1)
+                    .map_err(|e| format!("TipRanks cache payload: {e}"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_tipranks_forecast_cache(
+        &self,
+        provider_month: &str,
+        symbol: &str,
+        fetched_at_epoch: i64,
+        payload_json: &str,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin TipRanks cache save: {e}"))?;
+        tx.execute(
+            "DELETE FROM tipranks_forecast_cache WHERE provider_month < ?1",
+            params![provider_month],
+        )
+        .map_err(|e| format!("prune TipRanks cache: {e}"))?;
+        tx.execute(
+            "INSERT INTO tipranks_forecast_cache
+                (provider_month, symbol, fetched_at_epoch, payload_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider_month, symbol) DO UPDATE SET
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                payload_json = excluded.payload_json",
+            params![provider_month, symbol, fetched_at_epoch, payload_json],
+        )
+        .map_err(|e| format!("save TipRanks cache: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit TipRanks cache save: {e}"))
+    }
+
+    pub fn reserve_tipranks_attempt(
+        &self,
+        provider_month: &str,
+        limit: u16,
+    ) -> Result<Option<u16>, String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin TipRanks budget reservation: {e}"))?;
+        tx.execute(
+            "DELETE FROM tipranks_request_budget WHERE provider_month < ?1",
+            params![provider_month],
+        )
+        .map_err(|e| format!("prune TipRanks budget: {e}"))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tipranks_request_budget (provider_month, attempts) VALUES (?1, 0)",
+            params![provider_month],
+        )
+        .map_err(|e| format!("initialize TipRanks budget: {e}"))?;
+        let changed = tx
+            .execute(
+                "UPDATE tipranks_request_budget
+                 SET attempts = attempts + 1
+                 WHERE provider_month = ?1 AND attempts < ?2",
+                params![provider_month, i64::from(limit)],
+            )
+            .map_err(|e| format!("reserve TipRanks budget: {e}"))?;
+        let attempts: i64 = tx
+            .query_row(
+                "SELECT attempts FROM tipranks_request_budget WHERE provider_month = ?1",
+                params![provider_month],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("read TipRanks budget: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit TipRanks budget reservation: {e}"))?;
+        if changed == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(attempts.clamp(0, i64::from(u16::MAX)) as u16))
+        }
+    }
+
+    pub fn tipranks_attempts(&self, provider_month: &str) -> Result<u16, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let attempts = conn
+            .query_row(
+                "SELECT attempts FROM tipranks_request_budget WHERE provider_month = ?1",
+                params![provider_month],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| format!("read TipRanks budget: {e}"))?
+            .unwrap_or(0);
+        Ok(attempts.clamp(0, i64::from(u16::MAX)) as u16)
+    }
+
+    pub fn save_tipranks_usage_snapshot(
+        &self,
+        provider_month: &str,
+        used: u16,
+        limit_calls: u16,
+        remaining: u16,
+        resets_at_epoch: i64,
+        reconciled_at_epoch: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        conn.execute(
+            "DELETE FROM tipranks_usage_snapshot WHERE provider_month < ?1",
+            params![provider_month],
+        )
+        .map_err(|e| format!("prune TipRanks usage: {e}"))?;
+        conn.execute(
+            "INSERT INTO tipranks_usage_snapshot
+                (provider_month, used, limit_calls, remaining, resets_at_epoch, reconciled_at_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(provider_month) DO UPDATE SET
+                used = excluded.used,
+                limit_calls = excluded.limit_calls,
+                remaining = excluded.remaining,
+                resets_at_epoch = excluded.resets_at_epoch,
+                reconciled_at_epoch = excluded.reconciled_at_epoch",
+            params![
+                provider_month,
+                i64::from(used),
+                i64::from(limit_calls),
+                i64::from(remaining),
+                resets_at_epoch,
+                reconciled_at_epoch
+            ],
+        )
+        .map_err(|e| format!("save TipRanks usage: {e}"))?;
+        Ok(())
+    }
+
+    pub fn load_tipranks_usage_snapshot(
+        &self,
+        provider_month: &str,
+    ) -> Result<Option<TipRanksUsageRecord>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        conn.execute(
+            "DELETE FROM tipranks_usage_snapshot WHERE provider_month < ?1",
+            params![provider_month],
+        )
+        .map_err(|e| format!("prune TipRanks usage on read: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT used, limit_calls, remaining, resets_at_epoch, reconciled_at_epoch
+                 FROM tipranks_usage_snapshot
+                 WHERE provider_month = ?1",
+            )
+            .map_err(|e| format!("prepare TipRanks usage load: {e}"))?;
+        let mut rows = stmt
+            .query(params![provider_month])
+            .map_err(|e| format!("query TipRanks usage: {e}"))?;
+        match rows
+            .next()
+            .map_err(|e| format!("read TipRanks usage row: {e}"))?
+        {
+            Some(row) => {
+                let used: i64 = row
+                    .get(0)
+                    .map_err(|e| format!("TipRanks usage used: {e}"))?;
+                let limit_calls: i64 = row
+                    .get(1)
+                    .map_err(|e| format!("TipRanks usage limit: {e}"))?;
+                let remaining: i64 = row
+                    .get(2)
+                    .map_err(|e| format!("TipRanks usage remaining: {e}"))?;
+                Ok(Some(TipRanksUsageRecord {
+                    used: used.clamp(0, i64::from(u16::MAX)) as u16,
+                    limit_calls: limit_calls.clamp(0, i64::from(u16::MAX)) as u16,
+                    remaining: remaining.clamp(0, i64::from(u16::MAX)) as u16,
+                    resets_at_epoch: row
+                        .get(3)
+                        .map_err(|e| format!("TipRanks usage reset: {e}"))?,
+                    reconciled_at_epoch: row
+                        .get(4)
+                        .map_err(|e| format!("TipRanks usage reconciled: {e}"))?,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Insert a batch of snapshots in a single transaction (much faster than row-by-row).
@@ -292,6 +721,54 @@ impl Db {
         }
         tx.commit().map_err(|e| format!("commit: {}", e))?;
         Ok(rows.len())
+    }
+
+    /// Latest snapshot row per symbol (deterministic: `captured_at DESC, rowid DESC`).
+    ///
+    /// Callers apply business filters (gap, SP500 membership, ranking) after this —
+    /// never filter gap on historical non-latest rows.
+    pub fn latest_snapshot_per_symbol(&self) -> Result<Vec<LatestSnapshotRow>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT symbol, captured_at, market_price_cents, intrinsic_value_cents, gap_bps, \
+                        decision, composite_score, fundamentals_score, technical_score, \
+                        forecast_score, confidence \
+                 FROM ( \
+                     SELECT symbol, captured_at, market_price_cents, intrinsic_value_cents, gap_bps, \
+                            decision, composite_score, fundamentals_score, technical_score, \
+                            forecast_score, confidence, \
+                            ROW_NUMBER() OVER ( \
+                                PARTITION BY symbol \
+                                ORDER BY captured_at DESC, rowid DESC \
+                            ) AS rn \
+                     FROM snapshots \
+                 ) \
+                 WHERE rn = 1",
+            )
+            .map_err(|e| format!("prepare latest snapshots: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(LatestSnapshotRow {
+                    symbol: r.get(0)?,
+                    captured_at: r.get(1)?,
+                    market_price_cents: r.get(2)?,
+                    intrinsic_value_cents: r.get(3)?,
+                    gap_bps: r.get(4)?,
+                    decision: r.get(5)?,
+                    composite_score: r.get(6)?,
+                    fundamentals_score: r.get(7)?,
+                    technical_score: r.get(8)?,
+                    forecast_score: r.get(9)?,
+                    confidence: r.get(10)?,
+                })
+            })
+            .map_err(|e| format!("query latest snapshots: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("latest snapshot row: {e}"))?);
+        }
+        Ok(out)
     }
 
     /// Return all snapshots for a symbol over the trailing `days` days, oldest first.
@@ -1780,4 +2257,206 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod fmp_tests {
+    use super::*;
+
+    #[test]
+    fn fmp_cache_is_replaceable_and_scoped_to_the_provider_day() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, r#"{"old":true}"#)
+            .unwrap();
+        db.save_fmp_forecast_cache("2026-07-29", "MSFT", 200, r#"{"new":true}"#)
+            .unwrap();
+
+        let current = db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.fetched_at_epoch, 200);
+        assert_eq!(current.payload_json, r#"{"new":true}"#);
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-28", "AAPL")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reading_a_new_provider_day_prunes_licensed_rows_without_a_fetch() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, "{}")
+            .unwrap();
+
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .load_fmp_forecast_cache("2026-07-28", "AAPL")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn fmp_budget_reservation_never_exceeds_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), Some(1));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), Some(2));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 2).unwrap(), None);
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 2);
+    }
+
+    #[test]
+    fn fmp_budget_discards_previous_provider_days() {
+        let db = Db::open_in_memory().unwrap();
+        db.reserve_fmp_attempt("2026-07-28", 250).unwrap();
+        db.reserve_fmp_attempt("2026-07-29", 250).unwrap();
+
+        assert_eq!(db.fmp_attempts("2026-07-28").unwrap(), 0);
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 1);
+    }
+
+    #[test]
+    fn late_previous_day_cache_write_cannot_prune_the_new_day() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_fmp_forecast_cache("2026-07-29", "MSFT", 200, r#"{"new":true}"#)
+            .unwrap();
+        db.save_fmp_forecast_cache("2026-07-28", "AAPL", 100, r#"{"old":true}"#)
+            .unwrap();
+
+        let current = db
+            .load_fmp_forecast_cache("2026-07-29", "MSFT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.payload_json, r#"{"new":true}"#);
+    }
+
+    #[test]
+    fn late_previous_day_budget_write_cannot_prune_the_new_day() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 250).unwrap(), Some(1));
+        assert_eq!(db.reserve_fmp_attempt("2026-07-28", 250).unwrap(), Some(1));
+
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 1);
+        assert_eq!(db.reserve_fmp_attempt("2026-07-29", 250).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn fmp_attempts_propagates_sqlite_failures_but_missing_rows_are_zero() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.fmp_attempts("2026-07-29").unwrap(), 0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE fmp_request_budget", [])
+            .unwrap();
+
+        assert!(db.fmp_attempts("2026-07-29").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tipranks_tests {
+    use super::*;
+
+    #[test]
+    fn tipranks_cache_is_replaceable_and_scoped_to_the_provider_month() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_tipranks_forecast_cache("2026-06", "AAPL", 100, r#"{"old":true}"#)
+            .unwrap();
+        db.save_tipranks_forecast_cache("2026-07", "MSFT", 200, r#"{"new":true}"#)
+            .unwrap();
+
+        let current = db
+            .load_tipranks_forecast_cache("2026-07", "MSFT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.fetched_at_epoch, 200);
+        assert!(db
+            .load_tipranks_forecast_cache("2026-06", "AAPL")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn tipranks_budget_reservation_never_exceeds_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.reserve_tipranks_attempt("2026-07", 2).unwrap(), Some(1));
+        assert_eq!(db.reserve_tipranks_attempt("2026-07", 2).unwrap(), Some(2));
+        assert_eq!(db.reserve_tipranks_attempt("2026-07", 2).unwrap(), None);
+        assert_eq!(db.tipranks_attempts("2026-07").unwrap(), 2);
+    }
+
+    #[test]
+    fn tipranks_budget_discards_previous_provider_months() {
+        let db = Db::open_in_memory().unwrap();
+        db.reserve_tipranks_attempt("2026-06", 50).unwrap();
+        db.reserve_tipranks_attempt("2026-07", 50).unwrap();
+        assert_eq!(db.tipranks_attempts("2026-06").unwrap(), 0);
+        assert_eq!(db.tipranks_attempts("2026-07").unwrap(), 1);
+    }
+
+    #[test]
+    fn tipranks_usage_snapshot_is_replaceable_per_month() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_tipranks_usage_snapshot("2026-07", 10, 50, 40, 1_775_001_600, 100)
+            .unwrap();
+        db.save_tipranks_usage_snapshot("2026-07", 25, 50, 25, 1_775_001_600, 200)
+            .unwrap();
+        let snap = db.load_tipranks_usage_snapshot("2026-07").unwrap().unwrap();
+        assert_eq!(snap.used, 25);
+        assert_eq!(snap.remaining, 25);
+        assert_eq!(snap.reconciled_at_epoch, 200);
+    }
+}
+
+#[cfg(test)]
+mod qa_latest_snapshot_tests {
+    use super::*;
+
+    fn insert(db: &Db, symbol: &str, captured_at: i64, gap_bps: i32, composite_score: i32) {
+        db.insert_snapshots(&[SnapshotInsert {
+            symbol,
+            captured_at,
+            market_price_cents: 10_000,
+            intrinsic_value_cents: 12_000,
+            gap_bps,
+            decision: "Act",
+            composite_score,
+            fundamentals_score: Some(50),
+            technical_score: Some(50),
+            forecast_score: Some(50),
+            confidence: "High",
+        }])
+        .unwrap();
+    }
+
+    #[test]
+    fn latest_per_symbol_ignores_older_qualifying_rows() {
+        let db = Db::open_in_memory().unwrap();
+        // Older row qualifies; latest does not.
+        insert(&db, "CI", 100, 5000, 90);
+        insert(&db, "CI", 200, 100, 10);
+        insert(&db, "AAPL", 200, 3000, 80);
+
+        let latest = db.latest_snapshot_per_symbol().unwrap();
+        let ci = latest.iter().find(|r| r.symbol == "CI").unwrap();
+        assert_eq!(ci.captured_at, 200);
+        assert_eq!(ci.gap_bps, 100);
+        assert_eq!(ci.composite_score, 10);
+    }
+
+    #[test]
+    fn latest_picks_higher_captured_at() {
+        let db = Db::open_in_memory().unwrap();
+        insert(&db, "X", 50, 1000, 1);
+        insert(&db, "X", 51, 9999, 99);
+        let latest = db.latest_snapshot_per_symbol().unwrap();
+        let x = latest.iter().find(|r| r.symbol == "X").unwrap();
+        assert_eq!(x.captured_at, 51);
+        assert_eq!(x.gap_bps, 9999);
+    }
 }

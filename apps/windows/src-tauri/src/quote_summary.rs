@@ -251,10 +251,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             .and_then(|f| raw_double(f, "earningsGrowth"))
             .map(|v| (v * 10_000.0) as i32),
         book_value_per_share_cents: statistics
-            .and_then(|s| {
-                raw_double(s, "bookValue")
-                    .or_else(|| raw_double(s, "bookValuePerShare"))
-            })
+            .and_then(|s| raw_double(s, "bookValue").or_else(|| raw_double(s, "bookValuePerShare")))
             .filter(|v| *v > 0.0)
             .map(|v| (v * 100.0).round() as i64)
             .or_else(|| {

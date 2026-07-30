@@ -29,6 +29,8 @@ This index is the starting point for humans and AI agents trying to understand t
 
 - [Valuation Model Family Architecture](../_bmad-output/planning-artifacts/valuation-model-family-architecture.md) - FCFF vs residual income by business class; dynamic market params; no hard output caps.
 - [Valuation Model Family Contract](../shared/contracts/valuation-model-family.json) - classifier / model-selection goldens.
+- [Valuation live QA checklist](valuation-live-qa-checklist.md) - **Windows live QA = profile `qa` only** (`npm run tauri:dev:qa`); checklist T/AMZN/CI/bank/industrial + merge-bar tests.
+- [Multi-name valuation baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar; quarantine ≠ success.
 - [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules.
 - [Valuation Change Visibility PRD](../_bmad-output/planning-artifacts/prd.md) - feature PRD for valuation-change visibility.
 - [Planning Artifacts Index](../_bmad-output/planning-artifacts/index.md) - local navigation for BMad planning files.

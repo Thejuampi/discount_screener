@@ -305,6 +305,14 @@ export const DS = {
   regimeSideLens: client("regimeSideLens", "regimeSideLens.ts", {
     note: "Short/long lens for regime banner copy under scoring model",
   }),
+
+  portfolioRegimeEval: client(
+    "portfolioRegimeEval",
+    "portfolioRegimeEval.ts#evaluatePortfolioAgainstRegime",
+    {
+      note: "Portfolio actions/sizing/warnings from MarketRegime + holdings",
+    },
+  ),
 } as const satisfies Record<string, UiDataSource>;
 
 /** All known Tauri command strings in this catalog (for tests). */

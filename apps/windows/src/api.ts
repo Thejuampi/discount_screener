@@ -188,6 +188,8 @@ export interface SymbolDetail {
   technical_breakdown: TechnicalBreakdown | null;
   dcf_value_cents: number | null;
   dcf_analysis: DcfAnalysis | null;
+  /** Why model valuation is missing (classification refuse, missing FCF, …). */
+  valuation_unavailable_reason?: string | null;
   insider_net_shares_90d: number | null;
   insider_buy_count: number | null;
   insider_sell_count: number | null;
@@ -286,6 +288,111 @@ export interface FeedStatus {
   symbols_total: number;
   last_error: string | null;
   profile_name: string;
+  /** When true, launch forced the universe; UI must not switch away. */
+  profile_locked: boolean;
+  /** QA reporting only: latest snapshots older than threshold. */
+  stale_snapshots: boolean;
+}
+
+export type ForecastPanelState =
+  | "ready"
+  | "insufficient_coverage"
+  | "empty"
+  | "unloaded"
+  | "missing_key"
+  | "invalid_key"
+  | "quota_exhausted"
+  | "rate_limited"
+  | "provider_unavailable"
+  | "not_eligible";
+
+export type CacheFreshness = "fresh" | "aging" | "stale";
+export type ObservationFreshness = "current" | "aging" | "stale" | "empty";
+export type ForecastActionKind = "none" | "load" | "refresh";
+
+export interface ForecastObservation {
+  symbol: string;
+  analyst: string | null;
+  firm: string | null;
+  issued_at_epoch: number;
+  horizon_epoch: number;
+  horizon_label: string;
+  rating: string | null;
+  target_cents: number;
+  previous_target_cents: number | null;
+  price_when_posted_cents: number | null;
+  source: string | null;
+  identity: string | null;
+  stars_hundredths: number | null;
+  rank: number | null;
+  weight_hundredths: number | null;
+}
+
+export interface ForecastHistogramBin {
+  low_cents: number;
+  high_cents: number;
+  count: number;
+}
+
+export interface ForecastStatistics {
+  minimum_cents: number;
+  maximum_cents: number;
+  simple_mean_cents: number;
+  weighted_mean_cents: number | null;
+  weighting_label: string;
+}
+
+export interface ForecastPricePoint {
+  epoch_seconds: number;
+  close_cents: number;
+}
+
+export interface TipRanksQuotaView {
+  provider_month: string;
+  attempts: number;
+  limit: number;
+  remaining: number;
+  warning: boolean;
+  exhausted: boolean;
+  estimated: boolean;
+  resets_at_epoch: number;
+  retry_after_epoch: number | null;
+}
+
+export interface ForecastAction {
+  kind: ForecastActionKind;
+  enabled: boolean;
+  call_cost: number;
+  remaining_after: number;
+  label: string;
+  confirmation_message: string | null;
+}
+
+export interface AnalystForecastPanel {
+  symbol: string;
+  state: ForecastPanelState;
+  state_message: string;
+  observations: ForecastObservation[];
+  histogram: ForecastHistogramBin[];
+  statistics: ForecastStatistics | null;
+  identity_count: number;
+  usable_weighted_consensus: boolean;
+  price_history: ForecastPricePoint[];
+  fetched_at_epoch: number | null;
+  latest_observation_epoch: number | null;
+  cache_freshness: CacheFreshness | null;
+  observation_freshness: ObservationFreshness;
+  from_cache: boolean;
+  horizon_disclosure: string;
+  provider_label: string;
+  quota: TipRanksQuotaView;
+  action: ForecastAction;
+  error_banner: string | null;
+}
+
+export interface TipRanksSettingsStatus {
+  configured: boolean;
+  quota: TipRanksQuotaView;
 }
 
 export interface UniverseProfileInfo {
@@ -298,6 +405,8 @@ export interface UniverseProfileStatus {
   name: string;
   symbols_total: number;
   symbols_loaded: number;
+  profile_locked: boolean;
+  stale_snapshots: boolean;
 }
 
 export interface HistorySnapshot {
@@ -349,6 +458,26 @@ export type BusinessClass =
 
 export type DiscountRateKind = "wacc" | "cost_of_equity";
 
+export interface DcfDiagnostics {
+  latest_fcf_dollars?: number | null;
+  fcf_run_rate_dollars?: number | null;
+  shares_outstanding?: number | null;
+  cost_of_equity_bps?: number | null;
+  cost_of_debt_bps?: number | null;
+  after_tax_cost_of_debt_bps?: number | null;
+  equity_weight_bps?: number | null;
+  debt_weight_bps?: number | null;
+  fcf_years?: number[];
+  fcf_annual_dollars?: number[];
+  point_estimate_unreliable?: boolean;
+  scenario_stress?: string;
+  capex_imputed_years?: number[];
+  wacc_bear_bps?: number | null;
+  wacc_bull_bps?: number | null;
+  provisional_wacc_uplift_bps?: number | null;
+  fcf_run_rate_normalized?: boolean;
+}
+
 export interface DcfAnalysis {
   bear_intrinsic_value_cents: number;
   base_intrinsic_value_cents: number;
@@ -376,6 +505,7 @@ export interface DcfAnalysis {
   book_value_per_share_cents?: number | null;
   roe0_bps?: number | null;
   reason_codes?: string[];
+  diagnostics?: DcfDiagnostics;
 }
 
 export interface ScenarioEstimate {
@@ -435,6 +565,16 @@ export const api = {
   setRegimeScoringEnabled: (enabled: boolean) =>
     invoke<boolean>("set_regime_scoring_enabled", { enabled }),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
+  getAnalystForecasts: (symbol: string) =>
+    invoke<AnalystForecastPanel>("get_analyst_forecasts", { symbol }),
+  loadAnalystForecasts: (symbol: string) =>
+    invoke<AnalystForecastPanel>("load_analyst_forecasts", { symbol }),
+  tipranksSettingsStatus: () =>
+    invoke<TipRanksSettingsStatus>("tipranks_settings_status"),
+  tipranksSaveKey: (apiKey: string) =>
+    invoke<TipRanksSettingsStatus>("tipranks_save_key", { apiKey }),
+  tipranksDeleteKey: () => invoke<TipRanksSettingsStatus>("tipranks_delete_key"),
+  tipranksTestKey: () => invoke<AnalystForecastPanel>("tipranks_test_key"),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),

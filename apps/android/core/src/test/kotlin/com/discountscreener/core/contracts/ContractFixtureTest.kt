@@ -4,6 +4,7 @@ import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.DcfSourceSelectionPolicy
+import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
@@ -26,6 +27,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 private val contractJson = Json { ignoreUnknownKeys = true }
 
@@ -67,6 +69,55 @@ class ContractFixtureTest {
             )
         }
         assertEquals(expected, actual)
+    }
+
+    @Test
+    fun valuation_model_family_policy2_fixtures_execute_against_core() {
+        val fixture = loadValuationModelFamilyFixture()
+        assertTrue("android" in fixture.policy2Adoption.executableSurfaces)
+        assertTrue("desktop" in fixture.policy2Adoption.deferredSurfaces)
+
+        fixture.regressionFixtures
+            .filter { it.name in executablePolicy2FixtureNames }
+            .forEach { case ->
+                val input = case.sampledInputs
+                val expected = case.expected
+                val analysis = DcfAnalysisEngine.compute(
+                    fundamentals = FundamentalSnapshot(
+                        symbol = case.symbol,
+                        sectorName = input.sectorName,
+                        industryName = input.industryName,
+                        marketCapDollars = input.marketCapDollars,
+                        sharesOutstanding = input.sharesOutstanding,
+                        betaMillis = input.betaMillis,
+                        totalDebtDollars = input.totalDebtDollars,
+                        totalCashDollars = input.totalCashDollars,
+                    ),
+                    timeseries = FundamentalTimeseries(
+                        freeCashFlow = input.fcfAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                    ),
+                    marketPriceCents = (input.marketPriceDollars * 100.0).toLong(),
+                ).getOrThrow()
+
+                assertEquals(expected.businessClass, analysis.businessClass.name, case.name)
+                assertEquals(expected.model, analysis.model.name, case.name)
+                assertEquals(expected.discountRateKind, analysis.discountRateKind.name, case.name)
+                assertEquals(expected.modelPolicyVersion, analysis.modelPolicyVersion, case.name)
+                assertEquals(expected.latestFcfDollars, analysis.latestFcfDollars, case.name)
+                assertEquals(expected.fcfRunRateDollars, analysis.fcfRunRateDollars, case.name)
+                assertTrue(
+                    analysis.bearIntrinsicValueCents <= analysis.baseIntrinsicValueCents &&
+                        analysis.baseIntrinsicValueCents <= analysis.bullIntrinsicValueCents,
+                    "${case.name} scenarios must be ordered",
+                )
+                expected.baseIntrinsicRangeDollars?.let { range ->
+                    val base = analysis.baseIntrinsicValueCents / 100.0
+                    assertTrue(base in range[0]..range[1], "${case.name} base $base outside $range")
+                }
+                assertTrue(analysis.reasonCodes.none { it.startsWith("calibration_target=") })
+            }
     }
 
     @Test
@@ -146,6 +197,11 @@ class ContractFixtureTest {
         return contractJson.decodeFromString(Files.readString(path))
     }
 
+    private fun loadValuationModelFamilyFixture(): ValuationModelFamilyFixture {
+        val path = findFixturePath("valuation-model-family.json")
+        return contractJson.decodeFromString(Files.readString(path))
+    }
+
     private fun candidate(source: DcfSource, fixtureState: String): DcfSourceCandidate? = when (fixtureState) {
         "absent" -> null
         "unavailable" -> DcfSourceCandidate(source = source)
@@ -208,6 +264,61 @@ class ContractFixtureTest {
         com.discountscreener.core.model.ChartRange.TenYears -> "10Y"
     }
 }
+
+private val executablePolicy2FixtureNames = setOf(
+    "t_class_provisional_fcff_calibrates_toward_weighted_analyst_not_clamp",
+    "amzn_capex_trough_does_not_invert_fcff_scenarios",
+)
+
+@Serializable
+private data class ValuationModelFamilyFixture(
+    val policy2Adoption: Policy2Adoption,
+    val regressionFixtures: List<ValuationRegressionFixture>,
+)
+
+@Serializable
+private data class Policy2Adoption(
+    val executableSurfaces: List<String>,
+    val deferredSurfaces: List<String>,
+)
+
+@Serializable
+private data class ValuationRegressionFixture(
+    val name: String,
+    val symbol: String,
+    val sampledInputs: ValuationSampledInputs,
+    val expected: ValuationExpected,
+)
+
+@Serializable
+private data class ValuationSampledInputs(
+    val marketPriceDollars: Double = 0.0,
+    val sharesOutstanding: Long? = null,
+    val marketCapDollars: Long? = null,
+    val betaMillis: Int? = null,
+    val totalDebtDollars: Long? = null,
+    val totalCashDollars: Long? = null,
+    val sectorName: String? = null,
+    val industryName: String? = null,
+    val fcfAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+)
+
+@Serializable
+private data class ValuationFcfPoint(
+    val year: Int,
+    val valueDollars: Double,
+)
+
+@Serializable
+private data class ValuationExpected(
+    val businessClass: String,
+    val model: String,
+    val discountRateKind: String,
+    val modelPolicyVersion: String = "legacy",
+    val baseIntrinsicRangeDollars: List<Double>? = null,
+    val latestFcfDollars: Long? = null,
+    val fcfRunRateDollars: Long? = null,
+)
 
 @Serializable
 private data class ContractFixture(
