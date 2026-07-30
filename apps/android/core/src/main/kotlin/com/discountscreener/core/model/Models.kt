@@ -589,6 +589,8 @@ enum class WaccFieldSource {
 @Serializable
 enum class BusinessClass {
     OperatingNonFinancial,
+    /** Sector/industry missing or not in closed policy tables — refuse valuation. */
+    Unclassified,
     FinancialServices,
     NotEligible,
 }
@@ -672,6 +674,13 @@ data class DcfAnalysis(
     val bookValuePerShareCents: Long? = null,
     val roe0Bps: Int? = null,
     val reasonCodes: List<String> = emptyList(),
+    /** Most recent fiscal FCF observation; never replaced by normalization. */
+    val latestFcfDollars: Long? = null,
+    /** FCFF run-rate actually used by the valuation model. */
+    val fcfRunRateDollars: Long? = null,
+    val fcfRunRateNormalized: Boolean = false,
+    val provisionalWaccUpliftBps: Int = 0,
+    val debtWeightBps: Int = 0,
 )
 
 @Serializable

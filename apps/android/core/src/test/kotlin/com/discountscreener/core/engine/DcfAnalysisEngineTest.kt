@@ -118,6 +118,105 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun policy2_exposes_latest_and_normalized_run_rate_without_runtime_street_reason() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                freeCashFlow = listOf(
+                    AnnualReportedValue("2021-12-31", 10_000_000.0),
+                    AnnualReportedValue("2022-12-31", 20_000_000.0),
+                    AnnualReportedValue("2023-12-31", 30_000_000.0),
+                    AnnualReportedValue("2024-12-31", 40_000_000.0),
+                ),
+                interestExpense = emptyList(),
+            ),
+        ).getOrThrow()
+
+        assertEquals(40_000_000L, analysis.latestFcfDollars)
+        assertEquals(25_000_000L, analysis.fcfRunRateDollars)
+        assertTrue(analysis.fcfRunRateNormalized)
+        assertTrue(analysis.provisionalWaccUpliftBps > 0)
+        assertTrue(analysis.reasonCodes.none { it.startsWith("calibration_target=") })
+    }
+
+    @Test
+    fun policy2_run_rate_uses_latest_contiguous_positive_suffix() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                freeCashFlow = listOf(
+                    AnnualReportedValue("2021-12-31", 10_000_000.0),
+                    AnnualReportedValue("2023-12-31", 30_000_000.0),
+                    AnnualReportedValue("2024-12-31", 40_000_000.0),
+                    AnnualReportedValue("2025-12-31", 50_000_000.0),
+                ),
+            ),
+        ).getOrThrow()
+
+        assertEquals(50_000_000L, analysis.latestFcfDollars)
+        assertEquals(40_000_000L, analysis.fcfRunRateDollars)
+    }
+
+    @Test
+    fun interest_derived_cost_of_debt_still_guards_extreme_market_weights() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                marketCapDollars = 10_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+                totalDebtDollars = 90_000_000_000L,
+                totalCashDollars = 0L,
+            ),
+            timeseries = completeTimeseries().copy(
+                freeCashFlow = listOf(
+                    AnnualReportedValue("2021-12-31", 14_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 15_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 16_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 17_000_000_000.0),
+                ),
+                interestExpense = listOf(AnnualReportedValue("2024-12-31", 4_500_000_000.0)),
+            ),
+        ).getOrThrow()
+
+        assertEquals(WaccFieldSource.InterestOverDebt, analysis.waccInputs.costOfDebt)
+        assertTrue(analysis.debtWeightBps <= 4_000)
+        assertEquals(0, analysis.provisionalWaccUpliftBps)
+        assertTrue(analysis.waccInputs.waccClamped)
+    }
+
+    @Test
+    fun amzn_capex_trough_keeps_normalized_scenarios_ordered() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = FundamentalSnapshot(
+                symbol = "AMZN",
+                sectorName = "Consumer Cyclical",
+                industryName = "Internet Retail",
+                marketCapDollars = 2_574_493_679_616L,
+                sharesOutstanding = 10_757_109_436L,
+                betaMillis = 1_461,
+                totalDebtDollars = 235_540_004_864L,
+                totalCashDollars = 143_088_992_256L,
+            ),
+            timeseries = FundamentalTimeseries(
+                freeCashFlow = listOf(
+                    AnnualReportedValue("2020-12-31", 25_924_000_000.0),
+                    AnnualReportedValue("2021-12-31", -14_726_000_000.0),
+                    AnnualReportedValue("2022-12-31", -16_893_000_000.0),
+                    AnnualReportedValue("2023-12-31", 32_217_000_000.0),
+                    AnnualReportedValue("2024-12-31", 32_878_000_000.0),
+                    AnnualReportedValue("2025-12-31", 7_695_000_000.0),
+                ),
+            ),
+            marketPriceCents = 23_933,
+        ).getOrThrow()
+
+        assertEquals(7_695_000_000L, analysis.latestFcfDollars)
+        assertEquals(24_263_333_333L, analysis.fcfRunRateDollars)
+        assertTrue(analysis.bearIntrinsicValueCents <= analysis.baseIntrinsicValueCents)
+        assertTrue(analysis.baseIntrinsicValueCents <= analysis.bullIntrinsicValueCents)
+        assertTrue(analysis.reasonCodes.any { it.startsWith("growth=recent_window_robustified:") })
+    }
+
+    @Test
     fun compute_without_market_cap_or_price_fails_clearly() {
         val fundamentals = completeFundamentals().copy(marketCapDollars = null)
         val result = DcfAnalysisEngine.compute(

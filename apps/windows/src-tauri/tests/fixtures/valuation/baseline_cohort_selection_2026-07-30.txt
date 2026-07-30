@@ -1,0 +1,24 @@
+as_of=2026-07-30
+source=history.sqlite High+gap>=2000 + SEC companyfacts pin; quarantined slots replaced with next qualifying High+20% names with usable FCF
+count=20 quarantine=0
+symbol	gap_bps	score	quarantine	reason	fcf_source
+VRRM	5821	20	False	None	sec_ocf_minus_ppe_or_productive
+PSIX	5483	-7	False	None	sec_ocf_minus_ppe_or_productive
+ADMA	4947	8	False	None	sec_ocf_minus_ppe_or_productive
+INOD	4816	4	False	None	sec_ocf_minus_ppe_or_productive
+MH	4799	25	False	None	sec_ocf_minus_ppe_or_productive
+VICR	4715	4	False	None	sec_ocf_minus_ppe_or_productive
+AMSC	4711	4	False	None	sec_ocf_minus_ppe_or_productive
+HNRG	4523	-4	False	None	sec_ocf_minus_ppe_or_productive
+BWMN	4461	5	False	None	sec_ocf_minus_ppe_or_productive
+MU	4289	50	False	None	sec_ocf_minus_da_maintenance_capex_proxy
+IDCC	4285	11	False	None	sec_ocf_minus_ppe_or_productive
+FIGS	4174	2	False	None	sec_ocf_minus_ppe_or_productive
+CALX	4099	7	False	None	sec_ocf_minus_ppe_or_productive
+CDE	4083	27	False	None	sec_ocf_minus_min_capex_da
+MIR	4062	-1	False	None	sec_ocf_minus_ppe_or_productive
+ROCK	3987	15	False	None	sec_ocf_minus_ppe_or_productive
+HURN	3983	31	False	None	sec_ocf_minus_ppe_or_productive
+VRT	3979	31	False	None	sec_ocf_minus_ppe_or_productive
+INVA	3921	18	False	None	sec_ocf_minus_ppe_or_productive
+APP	3898	18	False	None	sec_ocf_minus_ppe_or_productive

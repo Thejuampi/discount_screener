@@ -27,6 +27,7 @@ import { useSignalAlerts } from "./useSignalAlerts";
 import { useEmailNotifications } from "./useEmailNotifications";
 import { getScoringPresentation, isScoringModelId, type ScoringModelId } from "./scoringPresentation";
 import { warmMarketContext } from "./marketContextWarmup";
+import { canonicalUniverseName, planUniverseBoot } from "./universeBoot";
 import { UiInspectProvider, UiInspectRoot } from "./uiInspect";
 import "./App.css";
 
@@ -56,6 +57,8 @@ export default function App() {
     const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY);
     return saved && saved.length > 0 ? saved : "sp500";
   });
+  /** Launch --profile / DS_UNIVERSE_PROFILE lock: backend wins over localStorage. */
+  const [profileLocked, setProfileLocked] = useState(false);
   const [assetFilter, setAssetFilter] = useState<"all" | "stock" | "etf" | "crypto">(() => {
     const saved = localStorage.getItem("ds_asset_filter");
     if (saved === "stock" || saved === "etf" || saved === "crypto" || saved === "all") return saved;
@@ -145,6 +148,9 @@ export default function App() {
       setSymbolsTotal(status.value.symbols_total);
       if (status.value.profile_name) {
         setUniverseProfile(status.value.profile_name);
+      }
+      if (typeof status.value.profile_locked === "boolean") {
+        setProfileLocked(status.value.profile_locked);
       }
     } else {
       console.error("feed status refresh failed", status.reason);
@@ -245,7 +251,7 @@ export default function App() {
   };
 
   const handleUniverseChange = async (name: string) => {
-    if (!name || name === universeProfile) return;
+    if (!name || name === universeProfile || profileLocked) return;
     setUniverseProfile(name);
     localStorage.setItem(UNIVERSE_STORAGE_KEY, name);
     setSelectedSymbol(null);
@@ -256,32 +262,67 @@ export default function App() {
       setSymbolsTotal(status.symbols_total);
       setSymbolsLoaded(status.symbols_loaded);
       setUniverseProfile(status.name);
+      setProfileLocked(!!status.profile_locked);
+      // Persist canonical id only (never alias `test`).
       localStorage.setItem(UNIVERSE_STORAGE_KEY, status.name);
       void refresh();
     } catch (e) {
       console.error("universe switch failed", e);
+      // Restore UI from backend if switch was rejected (e.g. locked).
+      try {
+        const status = await api.getUniverseProfile();
+        setUniverseProfile(status.name);
+        setSymbolsTotal(status.symbols_total);
+        setSymbolsLoaded(status.symbols_loaded);
+        setProfileLocked(!!status.profile_locked);
+      } catch (restoreErr) {
+        console.error(restoreErr);
+      }
     }
   };
 
   useEffect(() => {
     if (!modelReady) return;
-    const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY) || "sp500";
-    // Apply saved universe (starts feed workers). startFeed is a no-op if already running.
-    api
-      .setUniverseProfile(saved)
-      .then((status) => {
+    const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY);
+    // If launch locked the profile, backend wins — never re-apply localStorage sp500.
+    void (async () => {
+      try {
+        const current = await api.getUniverseProfile();
+        setProfileLocked(!!current.profile_locked);
+        const plan = planUniverseBoot(
+          {
+            name: current.name,
+            symbols_total: current.symbols_total,
+            symbols_loaded: current.symbols_loaded,
+            profile_locked: !!current.profile_locked,
+          },
+          saved,
+        );
+        if (plan.kind === "use_locked") {
+          setUniverseProfile(plan.name);
+          setSymbolsTotal(current.symbols_total);
+          setSymbolsLoaded(current.symbols_loaded);
+          localStorage.setItem(UNIVERSE_STORAGE_KEY, canonicalUniverseName(plan.name));
+          await api.startFeed();
+          return;
+        }
+        const status = await api.setUniverseProfile(plan.name);
         setUniverseProfile(status.name);
         setSymbolsTotal(status.symbols_total);
         setSymbolsLoaded(status.symbols_loaded);
-        localStorage.setItem(UNIVERSE_STORAGE_KEY, status.name);
-      })
-      .catch((e) => {
+        setProfileLocked(!!status.profile_locked);
+        localStorage.setItem(UNIVERSE_STORAGE_KEY, canonicalUniverseName(status.name));
+      } catch (e) {
         console.error("universe restore failed", e);
-        api.startFeed().catch(console.error);
-      })
-      .finally(() => {
+        try {
+          await api.startFeed();
+        } catch (feedErr) {
+          console.error(feedErr);
+        }
+      } finally {
         void refresh();
-      });
+      }
+    })();
   }, [refresh, modelReady]);
 
   // Fast poll while the feed is still filling rows; slower once full.
@@ -435,9 +476,10 @@ export default function App() {
           <select
             className="filter-select universe-select"
             value={universeProfile}
-            title={t("universe.hint")}
+            title={profileLocked ? t("universe.lockedHint") : t("universe.hint")}
             onChange={(e) => void handleUniverseChange(e.target.value)}
             aria-label={t("universe.label")}
+            disabled={profileLocked}
           >
             {(universeProfiles.length > 0
               ? universeProfiles

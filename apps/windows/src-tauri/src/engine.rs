@@ -302,6 +302,10 @@ pub struct SymbolDetail {
     pub technical_breakdown: Option<TechnicalBreakdown>,
     pub dcf_value_cents: Option<i64>,
     pub dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
+    /// Why model valuation is missing (classification refuse, missing FCF, etc.).
+    /// Machine-readable English; UI maps known prefixes to i18n.
+    #[serde(default)]
+    pub valuation_unavailable_reason: Option<String>,
     pub insider_net_shares_90d: Option<i64>,
     pub insider_buy_count: Option<u32>,
     pub insider_sell_count: Option<u32>,
@@ -2038,6 +2042,8 @@ pub struct ScreenerState {
     pub crypto_metrics: HashMap<String, crate::crypto_cycle::CryptoMetrics>,
     pub dcf_values: HashMap<String, i64>, // symbol → base dcf value in cents/share
     pub dcf_analyses: HashMap<String, crate::dcf_model::DcfAnalysis>,
+    /// Last valuation failure reason per symbol (cleared on successful ingest).
+    pub valuation_errors: HashMap<String, String>,
     pub insider_data: HashMap<String, InsiderData>, // symbol → insider activity
     pub alerts: Vec<AlertEvent>,
     pub min_gap_bps: i32,
@@ -2240,6 +2246,12 @@ impl ScreenerState {
     }
 
     pub fn ingest_dcf_analysis(&mut self, symbol: String, analysis: crate::dcf_model::DcfAnalysis) {
+        if analysis.engine_version != crate::dcf_model::ENGINE_VERSION
+            || analysis.model_policy_version != crate::dcf_model::MODEL_POLICY_VERSION
+        {
+            self.clear_dcf(&symbol);
+            return;
+        }
         // Never persist FCFF for financials — stale float-OCF DCFs (e.g. ACGL $875) must die here.
         if analysis.model == crate::dcf_model::ValuationModel::FcffWacc {
             if let Some(fund) = self.fundamentals.get(&symbol) {
@@ -2255,6 +2267,7 @@ impl ScreenerState {
                 }
             }
         }
+        self.valuation_errors.remove(&symbol);
         self.dcf_values
             .insert(symbol.clone(), analysis.base_intrinsic_value_cents);
         self.dcf_analyses.insert(symbol, analysis);
@@ -2265,12 +2278,43 @@ impl ScreenerState {
         self.dcf_analyses.remove(symbol);
     }
 
+    pub fn set_valuation_error(&mut self, symbol: String, reason: String) {
+        self.valuation_errors.insert(symbol, reason);
+    }
+
+    /// Prefer classification refusal over last compute error over nothing.
+    pub fn valuation_unavailable_reason(&self, symbol: &str) -> Option<String> {
+        if self.dcf_analyses.contains_key(symbol) {
+            return None;
+        }
+        if let Some(fund) = self.fundamentals.get(symbol) {
+            let class = crate::dcf_model::classify_business(
+                fund.sector_name.as_deref(),
+                fund.industry_name.as_deref(),
+                fund.sector_key.as_deref(),
+                fund.industry_key.as_deref(),
+                false,
+            );
+            if let Some(r) = crate::dcf_model::classification_unavailable_reason(class) {
+                return Some(r.to_string());
+            }
+        }
+        self.valuation_errors.get(symbol).cloned()
+    }
+
     /// Reconcile cached valuation with business class. Overwrites wrong FCFF for
     /// financials (even when a large positive DCF is already cached).
     pub fn ensure_model_routed_valuation(&mut self, symbol: &str) {
         let Some(fund) = self.fundamentals.get(symbol).cloned() else {
             return;
         };
+        let stale_policy = self.dcf_analyses.get(symbol).is_some_and(|analysis| {
+            analysis.engine_version != crate::dcf_model::ENGINE_VERSION
+                || analysis.model_policy_version != crate::dcf_model::MODEL_POLICY_VERSION
+        });
+        if stale_policy {
+            self.clear_dcf(symbol);
+        }
         let class = crate::dcf_model::classify_business(
             fund.sector_name.as_deref(),
             fund.industry_name.as_deref(),
@@ -2278,6 +2322,15 @@ impl ScreenerState {
             fund.industry_key.as_deref(),
             false,
         );
+        // Refuse to keep any cached intrinsic when class is closed-world fail.
+        if matches!(
+            class,
+            crate::dcf_model::BusinessClass::Unclassified
+                | crate::dcf_model::BusinessClass::NotEligible
+        ) {
+            self.clear_dcf(symbol);
+            return;
+        }
         if class != crate::dcf_model::BusinessClass::FinancialServices {
             return;
         }
@@ -2286,8 +2339,7 @@ impl ScreenerState {
             None => true,
             Some(a) => {
                 a.model != crate::dcf_model::ValuationModel::ResidualIncomeEquity
-                    || a.business_class
-                        != crate::dcf_model::BusinessClass::FinancialServices
+                    || a.business_class != crate::dcf_model::BusinessClass::FinancialServices
                     || a.engine_version == "legacy"
                     || a.base_intrinsic_value_cents <= 0
             }
@@ -2460,6 +2512,7 @@ impl ScreenerState {
             },
             dcf_value_cents: self.dcf_values.get(symbol).copied(),
             dcf_analysis: self.dcf_analyses.get(symbol).cloned(),
+            valuation_unavailable_reason: self.valuation_unavailable_reason(symbol),
             insider_net_shares_90d: self.insider_data.get(symbol).map(|i| i.net_shares_90d),
             insider_buy_count: self.insider_data.get(symbol).map(|i| i.buy_count),
             insider_sell_count: self.insider_data.get(symbol).map(|i| i.sell_count),
@@ -2556,8 +2609,15 @@ fn try_ingest_fundamentals_valuation(state: &mut ScreenerState, symbol: &str) {
 mod valuation_routing_tests {
     use super::*;
     use crate::dcf_model::{
-        BusinessClass, DcfAnalysis, DiscountRateKind, ValuationModel, WaccFieldSource,
-        WaccInputProvenance, ENGINE_VERSION, MODEL_POLICY_VERSION,
+        BusinessClass,
+        DcfAnalysis,
+        DiscountRateKind,
+        ValuationModel,
+        WaccFieldSource,
+        // classification_unavailable_reason used via ScreenerState helper
+        WaccInputProvenance,
+        ENGINE_VERSION,
+        MODEL_POLICY_VERSION,
     };
 
     fn stale_fcff_acgl() -> DcfAnalysis {
@@ -2587,6 +2647,7 @@ mod valuation_routing_tests {
             book_value_per_share_cents: None,
             roe0_bps: None,
             reason_codes: vec![],
+            diagnostics: Default::default(),
         }
     }
 
@@ -2646,6 +2707,59 @@ mod valuation_routing_tests {
         );
         state.ingest_dcf_analysis("ACGL".into(), stale_fcff_acgl());
         assert!(state.dcf_analyses.get("ACGL").is_none());
+    }
+
+    #[test]
+    fn valuation_unavailable_reason_surfaces_unclassified() {
+        let mut state = ScreenerState::new();
+        state.fundamentals.insert(
+            "ZZZ".into(),
+            FundamentalSnapshot {
+                symbol: "ZZZ".into(),
+                sector_name: Some("Mystery Sector".into()),
+                industry_name: Some("Unknown Widgets".into()),
+                shares_outstanding: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        let reason = state.valuation_unavailable_reason("ZZZ").expect("reason");
+        assert!(
+            reason.contains("unclassified"),
+            "expected unclassified refuse, got {reason}"
+        );
+        // ensure_model_routed clears any planted DCF for unclassified.
+        state.dcf_values.insert("ZZZ".into(), 99_999);
+        state.ensure_model_routed_valuation("ZZZ");
+        assert!(state.dcf_values.get("ZZZ").is_none());
+    }
+
+    #[test]
+    fn reconciliation_drops_operating_analysis_from_stale_policy() {
+        let mut state = ScreenerState::new();
+        state.fundamentals.insert(
+            "OLD".into(),
+            FundamentalSnapshot {
+                symbol: "OLD".into(),
+                sector_name: Some("Industrials".into()),
+                industry_name: Some("Conglomerates".into()),
+                shares_outstanding: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        let mut stale = stale_fcff_acgl();
+        stale.business_class = BusinessClass::OperatingNonFinancial;
+        stale.model = ValuationModel::FcffWacc;
+        stale.engine_version = ENGINE_VERSION.into();
+        stale.model_policy_version = "business-class-policy/1".into();
+        state
+            .dcf_values
+            .insert("OLD".into(), stale.base_intrinsic_value_cents);
+        state.dcf_analyses.insert("OLD".into(), stale);
+
+        state.ensure_model_routed_valuation("OLD");
+
+        assert!(!state.dcf_analyses.contains_key("OLD"));
+        assert!(!state.dcf_values.contains_key("OLD"));
     }
 }
 

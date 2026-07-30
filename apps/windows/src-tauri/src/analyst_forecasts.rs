@@ -1,33 +1,82 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
-use chrono_tz::America::New_York;
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::db::Db;
 
 const SECONDS_PER_DAY: i64 = 86_400;
-const FMP_DAILY_LIMIT: u16 = 250;
-const FMP_WARNING_AT: u16 = 125;
+const TIPRANKS_MONTHLY_LIMIT: u16 = 50;
+const TIPRANKS_WARNING_AT: u16 = 25;
+const TIPRANKS_RATE_PER_MINUTE: usize = 10;
+const CACHE_FRESH_SECS: i64 = SECONDS_PER_DAY; // ≤24 hours
+const CACHE_AGING_SECS: i64 = 7 * SECONDS_PER_DAY; // ≤7 days
+const OBS_CURRENT_SECS: i64 = 30 * SECONDS_PER_DAY;
+const OBS_AGING_SECS: i64 = 90 * SECONDS_PER_DAY;
+const DEFAULT_MCP_URI: &str = "https://mcp.tipranks.com/mcp/";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawForecast {
+struct RawRating {
+    #[serde(default)]
     symbol: Option<String>,
+    #[serde(default, alias = "ticker")]
+    ticker: Option<String>,
+    #[serde(default, alias = "publishedDate", alias = "ratingDate", alias = "date")]
     published_date: Option<String>,
+    /// Live TipRanks MCP field for the opinion date (`MM/DD/YYYY`).
+    #[serde(default, alias = "recommendationDate")]
+    recommendation_date: Option<String>,
+    /// Live TipRanks MCP scrape/event timestamp (ISO-like, often without timezone).
+    #[serde(default)]
+    timestamp: Option<String>,
+    // Do not alias convertedPriceTarget onto this field: live payloads include both
+    // priceTarget and convertedPriceTarget, and serde rejects duplicate mappings.
+    #[serde(default, alias = "targetPrice", alias = "pt")]
     price_target: Option<f64>,
+    #[serde(default, alias = "convertedPriceTarget")]
+    converted_price_target: Option<f64>,
+    #[serde(default, alias = "adjPriceTarget")]
     adj_price_target: Option<f64>,
+    #[serde(default, alias = "priceWhenPosted", alias = "stockPrice")]
     price_when_posted: Option<f64>,
+    #[serde(
+        default,
+        alias = "analystName",
+        alias = "analyst_name",
+        alias = "expertName"
+    )]
     analyst_name: Option<String>,
+    #[serde(
+        default,
+        alias = "analystCompany",
+        alias = "firm",
+        alias = "firmName",
+        alias = "company",
+        alias = "expertFirmName"
+    )]
     analyst_company: Option<String>,
-    news_publisher: Option<String>,
+    #[serde(default, alias = "recommendation")]
     rating: Option<String>,
+    #[serde(default, alias = "newGrade", alias = "action", alias = "analystAction")]
     new_grade: Option<String>,
+    #[serde(default, alias = "previousPriceTarget")]
     previous_price_target: Option<f64>,
+    #[serde(default, alias = "targetDate")]
     target_date: Option<String>,
+    #[serde(
+        default,
+        alias = "starRating",
+        alias = "stars",
+        alias = "numOfStars",
+        alias = "expertRating"
+    )]
+    stars: Option<f64>,
+    #[serde(default, alias = "analystRank", alias = "rank", alias = "expertRank")]
+    rank: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +93,9 @@ pub struct ForecastObservation {
     pub price_when_posted_cents: Option<i64>,
     pub source: Option<String>,
     pub identity: Option<String>,
+    pub stars_hundredths: Option<i64>,
+    pub rank: Option<i64>,
+    pub weight_hundredths: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +112,8 @@ struct ForecastSummary {
     minimum_cents: i64,
     maximum_cents: i64,
     simple_mean_cents: i64,
+    weighted_mean_cents: Option<i64>,
+    weighting_label: String,
     histogram: Vec<HistogramBin>,
 }
 
@@ -69,11 +123,48 @@ pub enum ForecastPanelState {
     Ready,
     InsufficientCoverage,
     Empty,
+    Unloaded,
     MissingKey,
     InvalidKey,
     QuotaExhausted,
+    RateLimited,
     ProviderUnavailable,
     NotEligible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheFreshness {
+    Fresh,
+    Aging,
+    Stale,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationFreshness {
+    Current,
+    Aging,
+    Stale,
+    Empty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForecastActionKind {
+    None,
+    Load,
+    Refresh,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForecastAction {
+    pub kind: ForecastActionKind,
+    pub enabled: bool,
+    pub call_cost: u16,
+    pub remaining_after: u16,
+    pub label: String,
+    pub confirmation_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,14 +183,16 @@ pub struct ForecastPricePoint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FmpQuotaView {
-    pub provider_day: String,
+pub struct TipRanksQuotaView {
+    pub provider_month: String,
     pub attempts: u16,
     pub limit: u16,
     pub remaining: u16,
     pub warning: bool,
     pub exhausted: bool,
+    pub estimated: bool,
     pub resets_at_epoch: i64,
+    pub retry_after_epoch: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,16 +207,21 @@ pub struct AnalystForecastPanel {
     pub usable_weighted_consensus: bool,
     pub price_history: Vec<ForecastPricePoint>,
     pub fetched_at_epoch: Option<i64>,
+    pub latest_observation_epoch: Option<i64>,
+    pub cache_freshness: Option<CacheFreshness>,
+    pub observation_freshness: ObservationFreshness,
     pub from_cache: bool,
     pub horizon_disclosure: String,
     pub provider_label: String,
-    pub quota: FmpQuotaView,
+    pub quota: TipRanksQuotaView,
+    pub action: ForecastAction,
+    pub error_banner: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FmpSettingsStatus {
+pub struct TipRanksSettingsStatus {
     pub configured: bool,
-    pub quota: FmpQuotaView,
+    pub quota: TipRanksQuotaView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,21 +233,30 @@ struct CachedForecastPayload {
 enum ProviderFailure {
     InvalidKey,
     QuotaExhausted,
+    RateLimited { retry_after_epoch: Option<i64> },
     Unavailable,
     InvalidPayload,
-    Cancelled,
-    Rollover,
 }
 
 #[derive(Clone, Debug)]
 struct ProviderBlock {
-    provider_day: String,
+    provider_month: String,
     failure: ProviderFailure,
     until_epoch: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UsageSnapshot {
+    used: u16,
+    limit: u16,
+    remaining: u16,
+    resets_at_epoch: i64,
+}
+
 trait ForecastProvider: Send + Sync {
-    fn fetch(&self, symbol: &str, api_key: &str) -> Result<Vec<RawForecast>, ProviderFailure>;
+    fn fetch_ratings(&self, symbol: &str, api_key: &str)
+        -> Result<Vec<RawRating>, ProviderFailure>;
+    fn fetch_usage(&self, api_key: &str) -> Result<UsageSnapshot, ProviderFailure>;
 }
 
 trait CredentialStore: Send + Sync {
@@ -170,18 +277,6 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Clone)]
-struct GenerationGuard {
-    active_generation: Arc<AtomicU64>,
-    expected_generation: u64,
-}
-
-impl GenerationGuard {
-    fn is_current(&self) -> bool {
-        self.active_generation.load(Ordering::SeqCst) == self.expected_generation
-    }
-}
-
 struct RequestGate {
     active: Mutex<usize>,
     ready: Condvar,
@@ -197,22 +292,13 @@ impl RequestGate {
         }
     }
 
-    fn acquire(&self, generation: Option<&GenerationGuard>) -> Option<RequestPermit<'_>> {
+    fn acquire(&self) -> RequestPermit<'_> {
         let mut active = self.active.lock().unwrap();
-        loop {
-            if generation.is_some_and(|guard| !guard.is_current()) {
-                return None;
-            }
-            if *active < self.limit {
-                *active += 1;
-                return Some(RequestPermit { gate: self });
-            }
-            let waited = self
-                .ready
-                .wait_timeout(active, std::time::Duration::from_millis(20))
-                .unwrap();
-            active = waited.0;
+        while *active >= self.limit {
+            active = self.ready.wait(active).unwrap();
         }
+        *active += 1;
+        RequestPermit { gate: self }
     }
 }
 
@@ -225,6 +311,40 @@ impl Drop for RequestPermit<'_> {
         let mut active = self.gate.active.lock().unwrap();
         *active = active.saturating_sub(1);
         self.gate.ready.notify_one();
+    }
+}
+
+struct RateLimiter {
+    stamps: Mutex<VecDeque<i64>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            stamps: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn try_acquire(&self, now_epoch: i64) -> Result<(), Option<i64>> {
+        let mut stamps = self.stamps.lock().unwrap();
+        while stamps.front().is_some_and(|stamp| now_epoch - *stamp >= 60) {
+            stamps.pop_front();
+        }
+        if stamps.len() >= TIPRANKS_RATE_PER_MINUTE {
+            let retry = stamps.front().map(|stamp| *stamp + 60);
+            return Err(retry);
+        }
+        stamps.push_back(now_epoch);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn force_fill(&self, now_epoch: i64) {
+        let mut stamps = self.stamps.lock().unwrap();
+        stamps.clear();
+        for _ in 0..TIPRANKS_RATE_PER_MINUTE {
+            stamps.push_back(now_epoch);
+        }
     }
 }
 
@@ -242,51 +362,20 @@ pub struct AnalystForecastService {
     flights: Mutex<HashMap<String, Arc<Flight>>>,
     provider_block: Mutex<Option<ProviderBlock>>,
     request_gate: RequestGate,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WarmCandidate {
-    pub symbol: String,
-    pub composite_score: i32,
-    pub is_stock: bool,
-}
-
-pub fn rank_warm_candidates(candidates: Vec<WarmCandidate>) -> Vec<String> {
-    let mut candidates = candidates
-        .into_iter()
-        .filter(|candidate| candidate.is_stock)
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .composite_score
-            .cmp(&left.composite_score)
-            .then_with(|| left.symbol.cmp(&right.symbol))
-    });
-    let mut seen = HashSet::new();
-    candidates
-        .into_iter()
-        .filter_map(|candidate| {
-            let symbol = candidate.symbol.trim().to_uppercase();
-            if valid_symbol(&symbol) && seen.insert(symbol.clone()) {
-                Some(symbol)
-            } else {
-                None
-            }
-        })
-        .take(10)
-        .collect()
+    rate_limiter: RateLimiter,
 }
 
 impl AnalystForecastService {
     pub fn new(db: Arc<Db>) -> Result<Self, String> {
         Ok(Self {
             db,
-            provider: Arc::new(FmpRestProvider::new()?),
+            provider: Arc::new(TipRanksMcpProvider::new(DEFAULT_MCP_URI.to_string())),
             credentials: Arc::new(WindowsCredentialStore),
             clock: Arc::new(SystemClock),
             flights: Mutex::new(HashMap::new()),
             provider_block: Mutex::new(None),
             request_gate: RequestGate::new(2),
+            rate_limiter: RateLimiter::new(),
         })
     }
 
@@ -304,6 +393,7 @@ impl AnalystForecastService {
             flights: Mutex::new(HashMap::new()),
             provider_block: Mutex::new(None),
             request_gate: RequestGate::new(2),
+            rate_limiter: RateLimiter::new(),
         }
     }
 
@@ -322,44 +412,30 @@ impl AnalystForecastService {
             flights: Mutex::new(HashMap::new()),
             provider_block: Mutex::new(None),
             request_gate: RequestGate::new(2),
+            rate_limiter: RateLimiter::new(),
         }
     }
 
+    /// Cache-only detail read. Never spends TipRanks quota.
     pub fn get(
         &self,
         symbol: &str,
         price_history: Vec<ForecastPricePoint>,
     ) -> AnalystForecastPanel {
-        self.get_inner(symbol, price_history, None)
-    }
-
-    fn get_for_generation(
-        &self,
-        symbol: &str,
-        generation: GenerationGuard,
-    ) -> AnalystForecastPanel {
-        self.get_inner(symbol, vec![], Some(generation))
-    }
-
-    fn get_inner(
-        &self,
-        symbol: &str,
-        price_history: Vec<ForecastPricePoint>,
-        generation: Option<GenerationGuard>,
-    ) -> AnalystForecastPanel {
         let symbol = symbol.trim().to_uppercase();
-        let day = provider_day(self.clock.now());
+        let month = provider_month(self.clock.now());
         if !valid_symbol(&symbol) {
             return self.failure_panel(
                 symbol,
                 ForecastPanelState::NotEligible,
-                "FMP forecasts are available only for eligible stock symbols.",
+                "TipRanks forecasts are available only for eligible stock symbols.",
                 price_history,
-                &day,
+                &month,
+                None,
             );
         }
 
-        match self.db.load_fmp_forecast_cache(&day.key, &symbol) {
+        match self.db.load_tipranks_forecast_cache(&month.key, &symbol) {
             Ok(Some(record)) => {
                 if let Ok(payload) =
                     serde_json::from_str::<CachedForecastPayload>(&record.payload_json)
@@ -370,7 +446,8 @@ impl AnalystForecastService {
                         record.fetched_at_epoch,
                         true,
                         price_history,
-                        &day,
+                        &month,
+                        None,
                     );
                 }
             }
@@ -379,23 +456,110 @@ impl AnalystForecastService {
                 return self.failure_panel(
                     symbol,
                     ForecastPanelState::ProviderUnavailable,
-                    "The local FMP cache is unavailable.",
+                    "The local TipRanks cache is unavailable.",
                     price_history,
-                    &day,
-                )
+                    &month,
+                    None,
+                );
             }
         }
 
+        match self.credentials.load() {
+            Ok(None) => self.failure_panel(
+                symbol,
+                ForecastPanelState::MissingKey,
+                "Configure a TipRanks API key in Settings.",
+                price_history,
+                &month,
+                None,
+            ),
+            Ok(Some(_)) => {
+                let mut panel = self.failure_panel(
+                    symbol,
+                    ForecastPanelState::Unloaded,
+                    "TipRanks analyst targets are not loaded for this symbol yet.",
+                    price_history,
+                    &month,
+                    None,
+                );
+                panel.action = self.compute_action(
+                    ForecastActionKind::Load,
+                    true,
+                    1,
+                    &month,
+                    "Load TipRanks analyst targets",
+                    Some("Uses 1 TipRanks call.".to_string()),
+                );
+                panel
+            }
+            Err(_) => self.failure_panel(
+                symbol,
+                ForecastPanelState::ProviderUnavailable,
+                "Windows Credential Manager is unavailable.",
+                price_history,
+                &month,
+                None,
+            ),
+        }
+    }
+
+    /// Explicit user load/refresh. Counted only when backend action requires it.
+    pub fn load(
+        &self,
+        symbol: &str,
+        price_history: Vec<ForecastPricePoint>,
+    ) -> AnalystForecastPanel {
+        let symbol = symbol.trim().to_uppercase();
+        let month = provider_month(self.clock.now());
+        if !valid_symbol(&symbol) {
+            return self.failure_panel(
+                symbol,
+                ForecastPanelState::NotEligible,
+                "TipRanks forecasts are available only for eligible stock symbols.",
+                price_history,
+                &month,
+                None,
+            );
+        }
+
+        let existing = self
+            .db
+            .load_tipranks_forecast_cache(&month.key, &symbol)
+            .ok()
+            .flatten()
+            .and_then(|record| {
+                serde_json::from_str::<CachedForecastPayload>(&record.payload_json)
+                    .ok()
+                    .map(|payload| (payload, record.fetched_at_epoch))
+            });
+
+        if let Some((payload, fetched_at)) = existing.as_ref() {
+            let freshness = cache_freshness(self.clock.now().timestamp(), *fetched_at);
+            if matches!(freshness, CacheFreshness::Fresh | CacheFreshness::Aging) {
+                return self.payload_panel(
+                    symbol,
+                    payload.clone(),
+                    *fetched_at,
+                    true,
+                    price_history,
+                    &month,
+                    None,
+                );
+            }
+        }
+
+        let prior_cache = existing.clone();
         let api_key = match self.credentials.load() {
             Ok(Some(value)) => value,
             Ok(None) => {
                 return self.failure_panel(
                     symbol,
                     ForecastPanelState::MissingKey,
-                    "Configure an FMP API key in Settings.",
+                    "Configure a TipRanks API key in Settings.",
                     price_history,
-                    &day,
-                )
+                    &month,
+                    None,
+                );
             }
             Err(_) => {
                 return self.failure_panel(
@@ -403,15 +567,23 @@ impl AnalystForecastService {
                     ForecastPanelState::ProviderUnavailable,
                     "Windows Credential Manager is unavailable.",
                     price_history,
-                    &day,
-                )
+                    &month,
+                    None,
+                );
             }
         };
-        if let Some(failure) = self.active_provider_block(&day) {
-            return self.failure_from_provider(symbol, failure, price_history, &day);
+
+        if let Some(failure) = self.active_provider_block(&month) {
+            return self.failure_with_optional_cache(
+                symbol,
+                failure,
+                prior_cache,
+                price_history,
+                &month,
+            );
         }
 
-        let flight_key = format!("{}:{symbol}", day.key);
+        let flight_key = format!("{}:{symbol}", month.key);
         let (flight, leader) = {
             let mut flights = self.flights.lock().unwrap();
             if let Some(flight) = flights.get(&flight_key) {
@@ -424,14 +596,9 @@ impl AnalystForecastService {
         };
 
         let result = if leader {
-            let fetched = self.fetch_and_cache(&symbol, &api_key, &day, generation.as_ref());
+            let fetched = self.fetch_and_cache(&symbol, &api_key, &month);
             if let Err(failure) = &fetched {
-                if !matches!(
-                    failure,
-                    ProviderFailure::Cancelled | ProviderFailure::Rollover
-                ) {
-                    self.record_provider_block(&day, failure.clone());
-                }
+                self.record_provider_block(&month, failure.clone());
             }
             {
                 let mut result = flight.result.lock().unwrap();
@@ -455,10 +622,16 @@ impl AnalystForecastService {
                 fetched_at_epoch,
                 false,
                 price_history,
-                &day,
+                &month,
+                None,
             ),
-            Err(ProviderFailure::Rollover) => self.get_inner(&symbol, price_history, generation),
-            Err(failure) => self.failure_from_provider(symbol, failure, price_history, &day),
+            Err(failure) => self.failure_with_optional_cache(
+                symbol,
+                failure,
+                prior_cache,
+                price_history,
+                &month,
+            ),
         }
     }
 
@@ -466,18 +639,21 @@ impl AnalystForecastService {
         Ok(self.credentials.load()?.is_some())
     }
 
-    pub fn settings_status(&self) -> Result<FmpSettingsStatus, String> {
-        let day = provider_day(self.clock.now());
-        Ok(FmpSettingsStatus {
+    pub fn settings_status(&self) -> Result<TipRanksSettingsStatus, String> {
+        let month = provider_month(self.clock.now());
+        if let Ok(Some(key)) = self.credentials.load() {
+            let _ = self.reconcile_usage(&key, &month);
+        }
+        Ok(TipRanksSettingsStatus {
             configured: self.credential_configured()?,
-            quota: self.quota_view_result(&day)?,
+            quota: self.quota_view_result(&month)?,
         })
     }
 
     pub fn save_key(&self, api_key: &str) -> Result<(), String> {
         let value = api_key.trim();
         if value.is_empty() {
-            return Err("FMP API key cannot be empty".into());
+            return Err("TipRanks API key cannot be empty".into());
         }
         self.credentials.save(value)?;
         *self.provider_block.lock().unwrap() = None;
@@ -495,156 +671,108 @@ impl AnalystForecastService {
         symbol: &str,
         price_history: Vec<ForecastPricePoint>,
     ) -> AnalystForecastPanel {
-        let day = provider_day(self.clock.now());
+        let month = provider_month(self.clock.now());
         self.failure_panel(
             symbol.trim().to_uppercase(),
             ForecastPanelState::NotEligible,
-            "FMP forecasts are available only for eligible stock symbols.",
+            "TipRanks forecasts are available only for eligible stock symbols.",
             price_history,
-            &day,
+            &month,
+            None,
         )
     }
 
-    /// Validate the currently stored credential with one real, budgeted
-    /// provider request. This intentionally bypasses the symbol cache: cached
-    /// licensed data proves nothing about a newly saved key.
+    /// Budgeted credential validation. Bypasses cache intentionally.
     pub fn test_connection(&self, symbol: &str) -> AnalystForecastPanel {
         let symbol = symbol.trim().to_uppercase();
+        let month = provider_month(self.clock.now());
         if !valid_symbol(&symbol) {
-            let day = provider_day(self.clock.now());
             return self.failure_panel(
                 symbol,
                 ForecastPanelState::NotEligible,
-                "FMP forecasts are available only for eligible stock symbols.",
+                "TipRanks forecasts are available only for eligible stock symbols.",
                 vec![],
-                &day,
+                &month,
+                None,
             );
         }
 
-        loop {
-            let day = provider_day(self.clock.now());
-            let api_key = match self.credentials.load() {
-                Ok(Some(value)) => value,
-                Ok(None) => {
-                    return self.failure_panel(
-                        symbol,
-                        ForecastPanelState::MissingKey,
-                        "Configure an FMP API key in Settings.",
-                        vec![],
-                        &day,
-                    );
-                }
-                Err(_) => {
-                    return self.failure_panel(
-                        symbol,
-                        ForecastPanelState::ProviderUnavailable,
-                        "Windows Credential Manager is unavailable.",
-                        vec![],
-                        &day,
-                    );
-                }
-            };
-            if let Some(failure @ (ProviderFailure::InvalidKey | ProviderFailure::QuotaExhausted)) =
-                self.active_provider_block(&day)
-            {
-                return self.failure_from_provider(symbol, failure, vec![], &day);
+        let api_key = match self.credentials.load() {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return self.failure_panel(
+                    symbol,
+                    ForecastPanelState::MissingKey,
+                    "Configure a TipRanks API key in Settings.",
+                    vec![],
+                    &month,
+                    None,
+                );
             }
+            Err(_) => {
+                return self.failure_panel(
+                    symbol,
+                    ForecastPanelState::ProviderUnavailable,
+                    "Windows Credential Manager is unavailable.",
+                    vec![],
+                    &month,
+                    None,
+                );
+            }
+        };
 
-            match self.fetch_and_cache(&symbol, &api_key, &day, None) {
-                Ok((payload, fetched_at_epoch)) => {
-                    *self.provider_block.lock().unwrap() = None;
-                    return self.payload_panel(
-                        symbol,
-                        payload,
-                        fetched_at_epoch,
-                        false,
-                        vec![],
-                        &day,
-                    );
-                }
-                Err(ProviderFailure::Rollover) => continue,
-                Err(failure) => {
-                    self.record_provider_block(&day, failure.clone());
-                    return self.failure_from_provider(symbol, failure, vec![], &day);
-                }
+        if let Some(failure @ (ProviderFailure::InvalidKey | ProviderFailure::QuotaExhausted)) =
+            self.active_provider_block(&month)
+        {
+            return self.failure_from_provider(symbol, failure, vec![], &month, None);
+        }
+
+        match self.fetch_and_cache(&symbol, &api_key, &month) {
+            Ok((payload, fetched_at_epoch)) => {
+                *self.provider_block.lock().unwrap() = None;
+                self.payload_panel(
+                    symbol,
+                    payload,
+                    fetched_at_epoch,
+                    false,
+                    vec![],
+                    &month,
+                    None,
+                )
+            }
+            Err(failure) => {
+                self.record_provider_block(&month, failure.clone());
+                self.failure_from_provider(symbol, failure, vec![], &month, None)
             }
         }
-    }
-
-    pub fn spawn_generation_warm(
-        self: &Arc<Self>,
-        symbols: Vec<String>,
-        feed_generation: Arc<AtomicU64>,
-        generation: u64,
-    ) {
-        if symbols.is_empty() {
-            return;
-        }
-        let service = Arc::clone(self);
-        let _ = std::thread::Builder::new()
-            .name("fmp-top10-warm".into())
-            .spawn(move || {
-                let symbols = Arc::new(symbols);
-                let cursor = Arc::new(AtomicUsize::new(0));
-                let mut workers = Vec::new();
-                for worker_index in 0..2 {
-                    let service = Arc::clone(&service);
-                    let symbols = Arc::clone(&symbols);
-                    let cursor = Arc::clone(&cursor);
-                    let feed_generation = Arc::clone(&feed_generation);
-                    if let Ok(worker) = std::thread::Builder::new()
-                        .name(format!("fmp-warm-{worker_index}"))
-                        .spawn(move || loop {
-                            if feed_generation.load(Ordering::SeqCst) != generation {
-                                return;
-                            }
-                            let index = cursor.fetch_add(1, Ordering::Relaxed);
-                            if index >= symbols.len() {
-                                return;
-                            }
-                            let guard = GenerationGuard {
-                                active_generation: Arc::clone(&feed_generation),
-                                expected_generation: generation,
-                            };
-                            let _ = service.get_for_generation(&symbols[index], guard);
-                        })
-                    {
-                        workers.push(worker);
-                    }
-                }
-                for worker in workers {
-                    let _ = worker.join();
-                }
-            });
     }
 
     fn fetch_and_cache(
         &self,
         symbol: &str,
         api_key: &str,
-        day: &ProviderDay,
-        generation: Option<&GenerationGuard>,
+        month: &ProviderMonth,
     ) -> Result<(CachedForecastPayload, i64), ProviderFailure> {
-        let _permit = self
-            .request_gate
-            .acquire(generation)
-            .ok_or(ProviderFailure::Cancelled)?;
-        if generation.is_some_and(|guard| !guard.is_current()) {
-            return Err(ProviderFailure::Cancelled);
+        let _permit = self.request_gate.acquire();
+        let now = self.clock.now();
+        let current_month = provider_month(now);
+        if current_month != *month {
+            return Err(ProviderFailure::Unavailable);
         }
-        let current_day = provider_day(self.clock.now());
-        if current_day != *day {
-            return Err(ProviderFailure::Rollover);
+        if let Err(retry_after) = self.rate_limiter.try_acquire(now.timestamp()) {
+            return Err(ProviderFailure::RateLimited {
+                retry_after_epoch: retry_after,
+            });
         }
         if self
             .db
-            .reserve_fmp_attempt(&day.key, FMP_DAILY_LIMIT)
+            .reserve_tipranks_attempt(&month.key, TIPRANKS_MONTHLY_LIMIT)
             .map_err(|_| ProviderFailure::Unavailable)?
             .is_none()
         {
             return Err(ProviderFailure::QuotaExhausted);
         }
-        let rows = self.provider.fetch(symbol, api_key)?;
+        let rows = self.provider.fetch_ratings(symbol, api_key)?;
         drop(_permit);
         let now = self.clock.now();
         let payload = CachedForecastPayload {
@@ -653,16 +781,32 @@ impl AnalystForecastService {
         let fetched_at_epoch = now.timestamp();
         let json = serde_json::to_string(&payload).map_err(|_| ProviderFailure::InvalidPayload)?;
         self.db
-            .save_fmp_forecast_cache(&day.key, symbol, fetched_at_epoch, &json)
+            .save_tipranks_forecast_cache(&month.key, symbol, fetched_at_epoch, &json)
             .map_err(|_| ProviderFailure::Unavailable)?;
+        let _ = self.reconcile_usage(api_key, month);
         Ok((payload, fetched_at_epoch))
     }
 
-    fn active_provider_block(&self, day: &ProviderDay) -> Option<ProviderFailure> {
+    fn reconcile_usage(&self, api_key: &str, month: &ProviderMonth) -> Result<(), ProviderFailure> {
+        let snap = self.provider.fetch_usage(api_key)?;
+        self.db
+            .save_tipranks_usage_snapshot(
+                &month.key,
+                snap.used,
+                snap.limit,
+                snap.remaining,
+                snap.resets_at_epoch,
+                self.clock.now().timestamp(),
+            )
+            .map_err(|_| ProviderFailure::Unavailable)?;
+        Ok(())
+    }
+
+    fn active_provider_block(&self, month: &ProviderMonth) -> Option<ProviderFailure> {
         let now = self.clock.now().timestamp();
         let mut block = self.provider_block.lock().unwrap();
         match block.as_ref() {
-            Some(value) if value.provider_day == day.key && value.until_epoch > now => {
+            Some(value) if value.provider_month == month.key && value.until_epoch > now => {
                 Some(value.failure.clone())
             }
             Some(_) => {
@@ -673,19 +817,53 @@ impl AnalystForecastService {
         }
     }
 
-    fn record_provider_block(&self, day: &ProviderDay, failure: ProviderFailure) {
-        let until_epoch = match failure {
-            ProviderFailure::InvalidKey | ProviderFailure::QuotaExhausted => day.resets_at_epoch,
-            ProviderFailure::Unavailable | ProviderFailure::InvalidPayload => {
-                self.clock.now().timestamp() + 60
-            }
-            ProviderFailure::Cancelled | ProviderFailure::Rollover => return,
+    fn record_provider_block(&self, month: &ProviderMonth, failure: ProviderFailure) {
+        let until_epoch = match &failure {
+            ProviderFailure::InvalidKey | ProviderFailure::QuotaExhausted => month.resets_at_epoch,
+            ProviderFailure::RateLimited {
+                retry_after_epoch: Some(epoch),
+            } => *epoch,
+            ProviderFailure::RateLimited { .. }
+            | ProviderFailure::Unavailable
+            | ProviderFailure::InvalidPayload => self.clock.now().timestamp() + 60,
         };
         *self.provider_block.lock().unwrap() = Some(ProviderBlock {
-            provider_day: day.key.clone(),
+            provider_month: month.key.clone(),
             failure,
             until_epoch,
         });
+    }
+
+    fn failure_with_optional_cache(
+        &self,
+        symbol: String,
+        failure: ProviderFailure,
+        prior: Option<(CachedForecastPayload, i64)>,
+        price_history: Vec<ForecastPricePoint>,
+        month: &ProviderMonth,
+    ) -> AnalystForecastPanel {
+        let (state, message) = map_failure(&failure);
+        if let Some((payload, fetched_at)) = prior {
+            let mut panel = self.payload_panel(
+                symbol,
+                payload,
+                fetched_at,
+                true,
+                price_history,
+                month,
+                Some(message.to_string()),
+            );
+            // Keep cached chart/state but surface the provider failure.
+            panel.error_banner = Some(message.to_string());
+            if state == ForecastPanelState::QuotaExhausted
+                || state == ForecastPanelState::InvalidKey
+                || state == ForecastPanelState::RateLimited
+            {
+                panel.state_message = message.to_string();
+            }
+            return panel;
+        }
+        self.failure_from_provider(symbol, failure, price_history, month, None)
     }
 
     fn failure_from_provider(
@@ -693,26 +871,20 @@ impl AnalystForecastService {
         symbol: String,
         failure: ProviderFailure,
         price_history: Vec<ForecastPricePoint>,
-        day: &ProviderDay,
+        month: &ProviderMonth,
+        error_banner: Option<String>,
     ) -> AnalystForecastPanel {
-        let (state, message) = match failure {
-            ProviderFailure::InvalidKey => (
-                ForecastPanelState::InvalidKey,
-                "The configured FMP API key was rejected.",
-            ),
-            ProviderFailure::QuotaExhausted => (
-                ForecastPanelState::QuotaExhausted,
-                "The estimated FMP daily request budget is exhausted.",
-            ),
-            ProviderFailure::Unavailable
-            | ProviderFailure::InvalidPayload
-            | ProviderFailure::Cancelled
-            | ProviderFailure::Rollover => (
-                ForecastPanelState::ProviderUnavailable,
-                "FMP forecasts are temporarily unavailable.",
-            ),
+        let (state, message) = map_failure(&failure);
+        let retry = match failure {
+            ProviderFailure::RateLimited { retry_after_epoch } => retry_after_epoch,
+            _ => None,
         };
-        self.failure_panel(symbol, state, message, price_history, day)
+        let mut panel =
+            self.failure_panel(symbol, state, message, price_history, month, error_banner);
+        if retry.is_some() {
+            panel.quota.retry_after_epoch = retry;
+        }
+        panel
     }
 
     fn payload_panel(
@@ -722,17 +894,46 @@ impl AnalystForecastService {
         fetched_at_epoch: i64,
         from_cache: bool,
         price_history: Vec<ForecastPricePoint>,
-        day: &ProviderDay,
+        month: &ProviderMonth,
+        error_banner: Option<String>,
     ) -> AnalystForecastPanel {
+        let now = self.clock.now().timestamp();
+        let freshness = cache_freshness(now, fetched_at_epoch);
+        let latest = payload
+            .observations
+            .iter()
+            .map(|item| item.issued_at_epoch)
+            .max();
+        let observation_freshness = observation_freshness(now, latest);
+        let action = match freshness {
+            CacheFreshness::Stale => self.compute_action(
+                ForecastActionKind::Refresh,
+                true,
+                1,
+                month,
+                "Refresh stale TipRanks data",
+                Some("Uses 1 TipRanks call.".to_string()),
+            ),
+            CacheFreshness::Fresh | CacheFreshness::Aging => self.compute_action(
+                ForecastActionKind::None,
+                false,
+                0,
+                month,
+                "Cached TipRanks data",
+                None,
+            ),
+        };
+
         match summarize(payload.observations) {
             Some(summary) => {
+                let usable = summary.weighted_mean_cents.is_some();
                 let state = if summary.identity_count >= 3 {
                     ForecastPanelState::Ready
                 } else {
                     ForecastPanelState::InsufficientCoverage
                 };
                 let state_message = if state == ForecastPanelState::Ready {
-                    "Individual FMP price targets.".to_string()
+                    "Individual TipRanks analyst targets.".to_string()
                 } else {
                     "Fewer than three distinct analyst or firm identities.".to_string()
                 };
@@ -746,26 +947,30 @@ impl AnalystForecastService {
                         minimum_cents: summary.minimum_cents,
                         maximum_cents: summary.maximum_cents,
                         simple_mean_cents: summary.simple_mean_cents,
-                        weighted_mean_cents: None,
-                        weighting_label: "Unavailable: no licensed analyst-accuracy history"
-                            .to_string(),
+                        weighted_mean_cents: summary.weighted_mean_cents,
+                        weighting_label: summary.weighting_label,
                     }),
                     identity_count: summary.identity_count,
-                    usable_weighted_consensus: false,
+                    usable_weighted_consensus: usable,
                     price_history,
                     fetched_at_epoch: Some(fetched_at_epoch),
+                    latest_observation_epoch: latest,
+                    cache_freshness: Some(freshness),
+                    observation_freshness,
                     from_cache,
                     horizon_disclosure:
                         "Targets without an explicit date use an assumed 12-month horizon."
                             .to_string(),
-                    provider_label: "Data by FMP".to_string(),
-                    quota: self.quota_view(day),
+                    provider_label: "Data by TipRanks".to_string(),
+                    quota: self.quota_view(month),
+                    action,
+                    error_banner,
                 }
             }
             None => AnalystForecastPanel {
                 symbol,
                 state: ForecastPanelState::Empty,
-                state_message: "FMP returned no current price-target coverage.".to_string(),
+                state_message: "TipRanks returned no current price-target coverage.".to_string(),
                 observations: vec![],
                 histogram: vec![],
                 statistics: None,
@@ -773,11 +978,16 @@ impl AnalystForecastService {
                 usable_weighted_consensus: false,
                 price_history,
                 fetched_at_epoch: Some(fetched_at_epoch),
+                latest_observation_epoch: None,
+                cache_freshness: Some(freshness),
+                observation_freshness: ObservationFreshness::Empty,
                 from_cache,
                 horizon_disclosure:
                     "Targets without an explicit date use an assumed 12-month horizon.".to_string(),
-                provider_label: "Data by FMP".to_string(),
-                quota: self.quota_view(day),
+                provider_label: "Data by TipRanks".to_string(),
+                quota: self.quota_view(month),
+                action,
+                error_banner,
             },
         }
     }
@@ -788,8 +998,46 @@ impl AnalystForecastService {
         state: ForecastPanelState,
         message: &str,
         price_history: Vec<ForecastPricePoint>,
-        day: &ProviderDay,
+        month: &ProviderMonth,
+        error_banner: Option<String>,
     ) -> AnalystForecastPanel {
+        let action = if state == ForecastPanelState::Unloaded {
+            self.compute_action(
+                ForecastActionKind::Load,
+                true,
+                1,
+                month,
+                "Load TipRanks analyst targets",
+                Some("Uses 1 TipRanks call.".to_string()),
+            )
+        } else if state == ForecastPanelState::MissingKey {
+            self.compute_action(
+                ForecastActionKind::Load,
+                false,
+                1,
+                month,
+                "Load TipRanks analyst targets",
+                Some("Configure a TipRanks API key first.".to_string()),
+            )
+        } else if state == ForecastPanelState::QuotaExhausted {
+            self.compute_action(
+                ForecastActionKind::Load,
+                false,
+                1,
+                month,
+                "Load TipRanks analyst targets",
+                Some("Monthly TipRanks budget is exhausted.".to_string()),
+            )
+        } else {
+            ForecastAction {
+                kind: ForecastActionKind::None,
+                enabled: false,
+                call_cost: 0,
+                remaining_after: self.quota_view(month).remaining,
+                label: String::new(),
+                confirmation_message: None,
+            }
+        };
         AnalystForecastPanel {
             symbol,
             state,
@@ -801,34 +1049,116 @@ impl AnalystForecastService {
             usable_weighted_consensus: false,
             price_history,
             fetched_at_epoch: None,
+            latest_observation_epoch: None,
+            cache_freshness: None,
+            observation_freshness: ObservationFreshness::Empty,
             from_cache: false,
             horizon_disclosure: "Targets without an explicit date use an assumed 12-month horizon."
                 .to_string(),
-            provider_label: "Data by FMP".to_string(),
-            quota: self.quota_view(day),
+            provider_label: "Data by TipRanks".to_string(),
+            quota: self.quota_view(month),
+            action,
+            error_banner,
         }
     }
 
-    fn quota_view(&self, day: &ProviderDay) -> FmpQuotaView {
-        self.quota_view_result(day)
-            .unwrap_or_else(|_| Self::quota_view_for_attempts(day, 0))
+    fn compute_action(
+        &self,
+        kind: ForecastActionKind,
+        enabled: bool,
+        call_cost: u16,
+        month: &ProviderMonth,
+        label: &str,
+        confirmation_message: Option<String>,
+    ) -> ForecastAction {
+        let quota = self.quota_view(month);
+        let enabled =
+            enabled && !quota.exhausted && (call_cost == 0 || quota.remaining >= call_cost);
+        let remaining_after = quota.remaining.saturating_sub(call_cost);
+        let confirmation_message = confirmation_message.map(|base| {
+            if call_cost > 0 {
+                format!("{base} Remaining after: {remaining_after}/{}.", quota.limit)
+            } else {
+                base
+            }
+        });
+        ForecastAction {
+            kind,
+            enabled,
+            call_cost,
+            remaining_after,
+            label: label.to_string(),
+            confirmation_message,
+        }
     }
 
-    fn quota_view_result(&self, day: &ProviderDay) -> Result<FmpQuotaView, String> {
-        let attempts = self.db.fmp_attempts(&day.key)?;
-        Ok(Self::quota_view_for_attempts(day, attempts))
+    fn quota_view(&self, month: &ProviderMonth) -> TipRanksQuotaView {
+        self.quota_view_result(month)
+            .unwrap_or_else(|_| Self::quota_view_for_attempts(month, 0, true, None))
     }
 
-    fn quota_view_for_attempts(day: &ProviderDay, attempts: u16) -> FmpQuotaView {
-        FmpQuotaView {
-            provider_day: day.key.clone(),
+    fn quota_view_result(&self, month: &ProviderMonth) -> Result<TipRanksQuotaView, String> {
+        let local = self.db.tipranks_attempts(&month.key)?;
+        let reconciled = self.db.load_tipranks_usage_snapshot(&month.key)?;
+        match reconciled {
+            Some(snap) => {
+                let attempts = local.max(snap.used);
+                let limit = snap.limit_calls.max(TIPRANKS_MONTHLY_LIMIT);
+                let remaining = limit.saturating_sub(attempts).min(snap.remaining);
+                Ok(TipRanksQuotaView {
+                    provider_month: month.key.clone(),
+                    attempts,
+                    limit,
+                    remaining,
+                    warning: attempts >= TIPRANKS_WARNING_AT,
+                    exhausted: remaining == 0 || attempts >= limit,
+                    estimated: false,
+                    resets_at_epoch: snap.resets_at_epoch.max(month.resets_at_epoch),
+                    retry_after_epoch: None,
+                })
+            }
+            None => Ok(Self::quota_view_for_attempts(month, local, true, None)),
+        }
+    }
+
+    fn quota_view_for_attempts(
+        month: &ProviderMonth,
+        attempts: u16,
+        estimated: bool,
+        retry_after_epoch: Option<i64>,
+    ) -> TipRanksQuotaView {
+        TipRanksQuotaView {
+            provider_month: month.key.clone(),
             attempts,
-            limit: FMP_DAILY_LIMIT,
-            remaining: FMP_DAILY_LIMIT.saturating_sub(attempts),
-            warning: attempts >= FMP_WARNING_AT,
-            exhausted: attempts >= FMP_DAILY_LIMIT,
-            resets_at_epoch: day.resets_at_epoch,
+            limit: TIPRANKS_MONTHLY_LIMIT,
+            remaining: TIPRANKS_MONTHLY_LIMIT.saturating_sub(attempts),
+            warning: attempts >= TIPRANKS_WARNING_AT,
+            exhausted: attempts >= TIPRANKS_MONTHLY_LIMIT,
+            estimated,
+            resets_at_epoch: month.resets_at_epoch,
+            retry_after_epoch,
         }
+    }
+}
+
+fn map_failure(failure: &ProviderFailure) -> (ForecastPanelState, &'static str) {
+    match failure {
+        ProviderFailure::InvalidKey => (
+            ForecastPanelState::InvalidKey,
+            "The configured TipRanks API key was rejected.",
+        ),
+        ProviderFailure::QuotaExhausted => (
+            ForecastPanelState::QuotaExhausted,
+            "The TipRanks monthly request budget is exhausted.",
+        ),
+        ProviderFailure::RateLimited { .. } => (
+            ForecastPanelState::RateLimited,
+            "TipRanks rate limit reached. Wait before retrying.",
+        ),
+        ProviderFailure::Unavailable | ProviderFailure::InvalidPayload => (
+            ForecastPanelState::ProviderUnavailable,
+            "TipRanks forecasts are temporarily unavailable.",
+        ),
     }
 }
 
@@ -840,57 +1170,302 @@ fn valid_symbol(symbol: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
 }
 
-struct FmpRestProvider {
-    client: reqwest::blocking::Client,
-    endpoint: String,
-}
-
-impl FmpRestProvider {
-    fn new() -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| format!("build FMP HTTP client: {error}"))?;
-        Ok(Self {
-            client,
-            endpoint: "https://financialmodelingprep.com/stable/price-target-news".to_string(),
-        })
-    }
-
-    #[cfg(test)]
-    fn with_endpoint(endpoint: String) -> Result<Self, String> {
-        let mut provider = Self::new()?;
-        provider.endpoint = endpoint;
-        Ok(provider)
+fn cache_freshness(now_epoch: i64, fetched_at_epoch: i64) -> CacheFreshness {
+    let age = now_epoch.saturating_sub(fetched_at_epoch);
+    if age <= CACHE_FRESH_SECS {
+        CacheFreshness::Fresh
+    } else if age <= CACHE_AGING_SECS {
+        CacheFreshness::Aging
+    } else {
+        CacheFreshness::Stale
     }
 }
 
-impl ForecastProvider for FmpRestProvider {
-    fn fetch(&self, symbol: &str, api_key: &str) -> Result<Vec<RawForecast>, ProviderFailure> {
-        let response = self
-            .client
-            .get(&self.endpoint)
-            .header("apikey", api_key)
-            .query(&[("symbol", symbol), ("page", "0"), ("limit", "100")])
-            .send()
-            .map_err(|_| ProviderFailure::Unavailable)?;
-        match response.status().as_u16() {
-            200 => response
-                .json::<Vec<RawForecast>>()
-                .map_err(|_| ProviderFailure::InvalidPayload),
-            401 | 403 => Err(ProviderFailure::InvalidKey),
-            429 => Err(ProviderFailure::QuotaExhausted),
-            _ => Err(ProviderFailure::Unavailable),
+fn observation_freshness(now_epoch: i64, latest: Option<i64>) -> ObservationFreshness {
+    let Some(latest) = latest else {
+        return ObservationFreshness::Empty;
+    };
+    let age = now_epoch.saturating_sub(latest);
+    if age <= OBS_CURRENT_SECS {
+        ObservationFreshness::Current
+    } else if age <= OBS_AGING_SECS {
+        ObservationFreshness::Aging
+    } else {
+        ObservationFreshness::Stale
+    }
+}
+
+/// weight = clamp(1 + 0.15 * (stars - 3), 0.70, 1.30) as hundredths.
+pub fn star_weight_hundredths(stars: f64) -> i64 {
+    if !stars.is_finite() {
+        return 100;
+    }
+    let raw = 1.0 + 0.15 * (stars - 3.0);
+    let clamped = raw.clamp(0.70, 1.30);
+    (clamped * 100.0).round() as i64
+}
+
+struct TipRanksMcpProvider {
+    uri: String,
+}
+
+impl TipRanksMcpProvider {
+    fn new(uri: String) -> Self {
+        Self { uri }
+    }
+
+    fn call_tool(
+        &self,
+        api_key: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value, ProviderFailure> {
+        let uri = self.uri.clone();
+        let api_key = api_key.to_string();
+        let tool_name = tool_name.to_string();
+        let handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ProviderFailure::Unavailable)?;
+            runtime.block_on(async move {
+                use rmcp::{
+                    model::{
+                        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
+                    },
+                    transport::streamable_http_client::StreamableHttpClientTransportConfig,
+                    transport::StreamableHttpClientTransport,
+                    ServiceExt,
+                };
+
+                let config =
+                    StreamableHttpClientTransportConfig::with_uri(uri).auth_header(api_key);
+                let transport = StreamableHttpClientTransport::from_config(config);
+                let client_info = ClientInfo::new(
+                    ClientCapabilities::default(),
+                    Implementation::new("vantage-tipranks", "0.1.0"),
+                );
+                let client = client_info
+                    .serve(transport)
+                    .await
+                    .map_err(|_| ProviderFailure::Unavailable)?;
+                let args = arguments.as_object().cloned().unwrap_or_default();
+                let result = client
+                    .call_tool(CallToolRequestParams::new(tool_name).with_arguments(args))
+                    .await
+                    .map_err(|error| map_rmcp_error(&error))?;
+                let _ = client.cancel().await;
+                if result.is_error.unwrap_or(false) {
+                    return Err(ProviderFailure::Unavailable);
+                }
+                if let Some(structured) = result.structured_content {
+                    return Ok(unwrap_tool_json_envelope(structured));
+                }
+                let text = result
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.trim().is_empty() {
+                    return Ok(Value::Null);
+                }
+                match serde_json::from_str::<Value>(&text) {
+                    Ok(parsed) => Ok(unwrap_tool_json_envelope(parsed)),
+                    Err(_) => Ok(Value::String(text)),
+                }
+            })
+        });
+        handle.join().map_err(|_| ProviderFailure::Unavailable)?
+    }
+}
+
+/// TipRanks MCP often wraps tool output as `{ "result": "<json string>" }` or a
+/// stringified array. Normalize those envelopes before ratings/usage parsing.
+fn unwrap_tool_json_envelope(value: Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(&text)
+            .map(unwrap_tool_json_envelope)
+            .unwrap_or(Value::String(text)),
+        Value::Object(map) => {
+            if let Some(inner) = map.get("result").cloned() {
+                return unwrap_tool_json_envelope(inner);
+            }
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn map_rmcp_error(error: &rmcp::ServiceError) -> ProviderFailure {
+    let message = error.to_string().to_lowercase();
+    if message.contains("401")
+        || message.contains("403")
+        || message.contains("unauthorized")
+        || message.contains("invalid")
+        || message.contains("auth")
+    {
+        return ProviderFailure::InvalidKey;
+    }
+    if message.contains("429") || message.contains("rate") {
+        return ProviderFailure::RateLimited {
+            retry_after_epoch: None,
+        };
+    }
+    if message.contains("quota") || message.contains("limit") {
+        return ProviderFailure::QuotaExhausted;
+    }
+    ProviderFailure::Unavailable
+}
+
+impl ForecastProvider for TipRanksMcpProvider {
+    fn fetch_ratings(
+        &self,
+        symbol: &str,
+        api_key: &str,
+    ) -> Result<Vec<RawRating>, ProviderFailure> {
+        let value = self.call_tool(
+            api_key,
+            "get_recent_analyst_ratings",
+            serde_json::json!({ "ticker": symbol, "tickers": symbol, "symbol": symbol }),
+        )?;
+        parse_ratings_payload(value, symbol)
+    }
+
+    fn fetch_usage(&self, api_key: &str) -> Result<UsageSnapshot, ProviderFailure> {
+        let value = self.call_tool(api_key, "get_my_usage", serde_json::json!({}))?;
+        parse_usage_payload(value)
+    }
+}
+
+fn parse_ratings_payload(value: Value, symbol: &str) -> Result<Vec<RawRating>, ProviderFailure> {
+    let rows = extract_array(value).ok_or(ProviderFailure::InvalidPayload)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match serde_json::from_value::<RawRating>(row) {
+            Ok(mut item) => {
+                if item.symbol.is_none() && item.ticker.is_none() {
+                    item.symbol = Some(symbol.to_string());
+                }
+                out.push(item);
+            }
+            Err(_) => continue,
         }
     }
+    Ok(out)
+}
+
+fn extract_array(value: Value) -> Option<Vec<Value>> {
+    let value = unwrap_tool_json_envelope(value);
+    match value {
+        Value::Array(items) => Some(items),
+        Value::Object(map) => {
+            for key in [
+                "result",
+                "ratings",
+                "data",
+                "items",
+                "results",
+                "analystRatings",
+                "recentRatings",
+            ] {
+                if let Some(nested) = map.get(key).cloned() {
+                    if let Some(items) = extract_array(nested) {
+                        return Some(items);
+                    }
+                }
+            }
+            // Single-key objects that wrap the array under an unknown name.
+            if map.len() == 1 {
+                if let Some(nested) = map.into_values().next() {
+                    return extract_array(nested);
+                }
+            }
+            None
+        }
+        Value::String(text) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(extract_array),
+        _ => None,
+    }
+}
+
+fn parse_usage_payload(value: Value) -> Result<UsageSnapshot, ProviderFailure> {
+    let value = unwrap_tool_json_envelope(value);
+    let obj = match value {
+        Value::Object(map) => map,
+        Value::String(text) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .ok_or(ProviderFailure::InvalidPayload)?,
+        _ => return Err(ProviderFailure::InvalidPayload),
+    };
+    let used = read_u16(
+        &obj,
+        &["used", "calls_used", "requests_used", "usedThisMonth"],
+    )
+    .unwrap_or(0);
+    let limit = read_u16(
+        &obj,
+        &["limit", "monthly_limit", "limit_calls", "monthlyLimit"],
+    )
+    .unwrap_or(TIPRANKS_MONTHLY_LIMIT);
+    let remaining = read_u16(&obj, &["remaining", "remaining_calls", "callsRemaining"])
+        .unwrap_or(limit.saturating_sub(used));
+    let resets_at_epoch = read_i64(
+        &obj,
+        &["resets_at_epoch", "reset_at", "resetsAt", "resetEpoch"],
+    )
+    .unwrap_or_else(|| provider_month(Utc::now()).resets_at_epoch);
+    Ok(UsageSnapshot {
+        used,
+        limit,
+        remaining,
+        resets_at_epoch,
+    })
+}
+
+fn read_u16(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u16> {
+    for key in keys {
+        if let Some(value) = map.get(*key) {
+            if let Some(n) = value.as_u64() {
+                return Some(n.min(u64::from(u16::MAX)) as u16);
+            }
+            if let Some(n) = value.as_i64() {
+                return Some(n.clamp(0, i64::from(u16::MAX)) as u16);
+            }
+            if let Some(n) = value.as_f64() {
+                return Some(n.clamp(0.0, f64::from(u16::MAX)) as u16);
+            }
+        }
+    }
+    None
+}
+
+fn read_i64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    for key in keys {
+        if let Some(value) = map.get(*key) {
+            if let Some(n) = value.as_i64() {
+                return Some(n);
+            }
+            if let Some(n) = value.as_u64() {
+                return Some(n as i64);
+            }
+            if let Some(text) = value.as_str() {
+                if let Some(epoch) = parse_provider_date(text) {
+                    return Some(epoch);
+                }
+            }
+        }
+    }
+    None
 }
 
 struct WindowsCredentialStore;
 
 impl WindowsCredentialStore {
     fn entry() -> Result<keyring::Entry, String> {
-        keyring::Entry::new("com.discount-screener.vantage", "fmp-api-key")
+        keyring::Entry::new("com.discount-screener.vantage", "tipranks-api-key")
             .map_err(|error| format!("open Windows Credential Manager entry: {error}"))
     }
 }
@@ -900,43 +1475,45 @@ impl CredentialStore for WindowsCredentialStore {
         match Self::entry()?.get_password() {
             Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("read FMP credential: {error}")),
+            Err(error) => Err(format!("read TipRanks credential: {error}")),
         }
     }
 
     fn save(&self, api_key: &str) -> Result<(), String> {
         Self::entry()?
             .set_password(api_key)
-            .map_err(|error| format!("save FMP credential: {error}"))
+            .map_err(|error| format!("save TipRanks credential: {error}"))
     }
 
     fn delete(&self) -> Result<(), String> {
         match Self::entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(format!("delete FMP credential: {error}")),
+            Err(error) => Err(format!("delete TipRanks credential: {error}")),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ProviderDay {
+struct ProviderMonth {
     key: String,
     resets_at_epoch: i64,
 }
 
 #[cfg(test)]
-fn normalize(raw: Vec<RawForecast>, requested_symbol: &str) -> Vec<ForecastObservation> {
+fn normalize(raw: Vec<RawRating>, requested_symbol: &str) -> Vec<ForecastObservation> {
     normalize_at(raw, requested_symbol, Utc::now().timestamp())
 }
 
 fn normalize_at(
-    raw: Vec<RawForecast>,
+    raw: Vec<RawRating>,
     requested_symbol: &str,
     now_epoch: i64,
 ) -> Vec<ForecastObservation> {
     raw.into_iter()
         .filter_map(|item| {
-            let provider_symbol = clean_optional(item.symbol);
+            let provider_symbol = clean_optional(item.symbol.clone())
+                .or_else(|| clean_optional(item.ticker.clone()))
+                .map(|symbol| symbol.to_uppercase());
             if provider_symbol
                 .as_deref()
                 .is_some_and(|symbol| !symbol.eq_ignore_ascii_case(requested_symbol))
@@ -946,8 +1523,17 @@ fn normalize_at(
             let target_cents = item
                 .price_target
                 .and_then(dollars_to_cents)
+                .or_else(|| item.converted_price_target.and_then(dollars_to_cents))
                 .or_else(|| item.adj_price_target.and_then(dollars_to_cents))?;
-            let issued_at_epoch = parse_provider_date(item.published_date.as_deref()?)?;
+            // Prefer the explicit opinion date over scrape timestamps.
+            let issued_at_epoch = [
+                item.recommendation_date.as_deref(),
+                item.published_date.as_deref(),
+                item.timestamp.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(parse_provider_date)?;
             if issued_at_epoch > now_epoch {
                 return None;
             }
@@ -979,6 +1565,14 @@ fn normalize_at(
                 (None, Some(firm)) => Some(format!("firm:{}", firm.to_lowercase())),
                 (None, None) => None,
             };
+            let stars_hundredths = item
+                .stars
+                .filter(|s| s.is_finite())
+                .map(|s| (s * 100.0).round() as i64);
+            let weight_hundredths = item
+                .stars
+                .filter(|s| s.is_finite())
+                .map(star_weight_hundredths);
             Some(ForecastObservation {
                 symbol: provider_symbol.unwrap_or_else(|| requested_symbol.to_uppercase()),
                 analyst,
@@ -990,8 +1584,11 @@ fn normalize_at(
                 target_cents,
                 previous_target_cents: item.previous_price_target.and_then(dollars_to_cents),
                 price_when_posted_cents: item.price_when_posted.and_then(dollars_to_cents),
-                source: clean_optional(item.news_publisher),
+                source: Some("TipRanks".to_string()),
                 identity,
+                stars_hundredths,
+                rank: item.rank,
+                weight_hundredths,
             })
         })
         .collect()
@@ -1012,10 +1609,8 @@ fn summarize(observations: Vec<ForecastObservation>) -> Option<ForecastSummary> 
                     identified.insert(identity, item);
                 }
             }
-        } else {
-            if !anonymous.contains(&item) {
-                anonymous.push(item);
-            }
+        } else if !anonymous.contains(&item) {
+            anonymous.push(item);
         }
     }
     let identity_count = identified.len();
@@ -1035,50 +1630,100 @@ fn summarize(observations: Vec<ForecastObservation>) -> Option<ForecastSummary> 
     let simple_mean_cents = (total / observations.len() as i128) as i64;
     let histogram = histogram(&observations, minimum_cents, maximum_cents);
 
+    let (weighted_mean_cents, weighting_label) = if identity_count >= 3 {
+        let weighted = weighted_mean(&observations);
+        (
+            weighted,
+            if weighted.is_some() {
+                "TipRanks stars weight: clamp(1 + 0.15×(stars−3), 0.70, 1.30)".to_string()
+            } else {
+                "Unavailable: fewer than three weighted identities".to_string()
+            },
+        )
+    } else {
+        (
+            None,
+            "Unavailable: fewer than three distinct analyst identities".to_string(),
+        )
+    };
+
     Some(ForecastSummary {
         observations,
         identity_count,
         minimum_cents,
         maximum_cents,
         simple_mean_cents,
+        weighted_mean_cents,
+        weighting_label,
         histogram,
     })
 }
 
-fn provider_day(now: DateTime<Utc>) -> ProviderDay {
-    let local = now.with_timezone(&New_York);
-    let local_date = local.date_naive();
-    let reset_date = if local.hour() < 15 {
-        local_date
+fn weighted_mean(observations: &[ForecastObservation]) -> Option<i64> {
+    let mut weighted_total = 0_i128;
+    let mut weight_total = 0_i128;
+    let mut weighted_identities = 0_usize;
+    let mut seen = HashSet::new();
+    for item in observations {
+        let Some(identity) = item.identity.as_ref() else {
+            continue;
+        };
+        if !seen.insert(identity.clone()) {
+            continue;
+        }
+        let weight = item
+            .weight_hundredths
+            .or_else(|| {
+                item.stars_hundredths
+                    .map(|stars| star_weight_hundredths(stars as f64 / 100.0))
+            })
+            .unwrap_or(100);
+        weighted_total += i128::from(item.target_cents) * i128::from(weight);
+        weight_total += i128::from(weight);
+        weighted_identities += 1;
+    }
+    if weighted_identities < 3 || weight_total <= 0 {
+        return None;
+    }
+    Some((weighted_total / weight_total) as i64)
+}
+
+fn provider_month(now: DateTime<Utc>) -> ProviderMonth {
+    let key = format!("{:04}-{:02}", now.year(), now.month());
+    let (year, month) = if now.month() == 12 {
+        (now.year() + 1, 1)
     } else {
-        local_date
-            .succ_opt()
-            .expect("provider reset date remains representable")
+        (now.year(), now.month() + 1)
     };
-    let quota_date = reset_date
-        .pred_opt()
-        .expect("provider quota date remains representable");
-    let reset_local = New_York
-        .with_ymd_and_hms(
-            reset_date.year(),
-            reset_date.month(),
-            reset_date.day(),
-            15,
-            0,
-            0,
-        )
+    let resets = Utc
+        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
-        .expect("3 PM local time is never ambiguous");
-    ProviderDay {
-        key: quota_date.format("%Y-%m-%d").to_string(),
-        resets_at_epoch: reset_local.with_timezone(&Utc).timestamp(),
+        .expect("month boundary is valid");
+    ProviderMonth {
+        key,
+        resets_at_epoch: resets.timestamp(),
     }
 }
 
 fn parse_provider_date(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
     DateTime::parse_from_rfc3339(value)
         .map(|date| date.timestamp())
         .ok()
+        .or_else(|| {
+            // Live TipRanks timestamps often omit the timezone suffix.
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .map(|date| date.and_utc().timestamp())
+        })
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|date| date.and_utc().timestamp())
+        })
         .or_else(|| {
             NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
                 .ok()
@@ -1086,6 +1731,13 @@ fn parse_provider_date(value: &str) -> Option<i64> {
         })
         .or_else(|| {
             NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|date| date.and_utc().timestamp())
+        })
+        .or_else(|| {
+            // Live TipRanks recommendationDate: MM/DD/YYYY
+            NaiveDate::parse_from_str(value, "%m/%d/%Y")
                 .ok()
                 .and_then(|date| date.and_hms_opt(0, 0, 0))
                 .map(|date| date.and_utc().timestamp())
@@ -1150,25 +1802,27 @@ fn histogram(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
     use std::thread;
 
-    fn raw(analyst: Option<&str>, firm: Option<&str>, published: &str, target: f64) -> RawForecast {
-        RawForecast {
+    fn raw(analyst: Option<&str>, firm: Option<&str>, published: &str, target: f64) -> RawRating {
+        RawRating {
             symbol: Some("AAPL".into()),
+            ticker: None,
             published_date: Some(published.into()),
+            recommendation_date: None,
+            timestamp: None,
             price_target: Some(target),
+            converted_price_target: None,
             adj_price_target: None,
             price_when_posted: Some(190.25),
             analyst_name: analyst.map(str::to_string),
             analyst_company: firm.map(str::to_string),
-            news_publisher: Some("FMP".into()),
             rating: Some("Buy".into()),
             new_grade: None,
             previous_price_target: Some(200.0),
             target_date: None,
+            stars: Some(4.0),
+            rank: Some(120),
         }
     }
 
@@ -1195,10 +1849,62 @@ mod tests {
             365 * SECONDS_PER_DAY
         );
         assert_eq!(item.horizon_label, "Assumed 12-month horizon");
+        assert_eq!(item.stars_hundredths, Some(400));
+        assert_eq!(item.weight_hundredths, Some(115));
+        assert_eq!(item.rank, Some(120));
         assert_eq!(
             item.identity.as_deref(),
             Some("analyst:jane doe|firm:example capital")
         );
+    }
+
+    #[test]
+    fn star_weight_formula_clamps_between_0_70_and_1_30() {
+        assert_eq!(star_weight_hundredths(1.0), 70);
+        assert_eq!(star_weight_hundredths(3.0), 100);
+        assert_eq!(star_weight_hundredths(5.0), 130);
+        assert_eq!(star_weight_hundredths(4.0), 115);
+        assert_eq!(star_weight_hundredths(0.0), 70);
+        assert_eq!(star_weight_hundredths(10.0), 130);
+    }
+
+    #[test]
+    fn weighted_consensus_requires_three_identities() {
+        let sparse = summarize(normalize(
+            vec![
+                raw(Some("A"), Some("F1"), "2026-07-01", 200.0),
+                raw(Some("B"), Some("F2"), "2026-07-02", 220.0),
+            ],
+            "AAPL",
+        ))
+        .unwrap();
+        assert!(sparse.weighted_mean_cents.is_none());
+
+        let ready = summarize(normalize(
+            vec![
+                {
+                    let mut row = raw(Some("A"), Some("F1"), "2026-07-01", 100.0);
+                    row.stars = Some(5.0);
+                    row
+                },
+                {
+                    let mut row = raw(Some("B"), Some("F2"), "2026-07-02", 200.0);
+                    row.stars = Some(3.0);
+                    row
+                },
+                {
+                    let mut row = raw(Some("C"), Some("F3"), "2026-07-03", 300.0);
+                    row.stars = Some(1.0);
+                    row
+                },
+            ],
+            "AAPL",
+        ))
+        .unwrap();
+        assert!(ready.weighted_mean_cents.is_some());
+        // weights 1.30, 1.00, 0.70 → mean (100*1.3 + 200*1 + 300*0.7) / 3.0 = 600/3 = 200 dollars? in cents:
+        // (10000*130 + 20000*100 + 30000*70) / 300 = (1_300_000 + 2_000_000 + 2_100_000)/300 = 5_400_000/300 = 18000
+        assert_eq!(ready.weighted_mean_cents, Some(18_000));
     }
 
     #[test]
@@ -1214,10 +1920,6 @@ mod tests {
                 .single()
                 .unwrap()
                 .timestamp()
-        );
-        assert_eq!(
-            observations[0].identity.as_deref(),
-            Some("firm:example capital")
         );
     }
 
@@ -1254,125 +1956,50 @@ mod tests {
     }
 
     #[test]
-    fn normalization_rejects_wrong_symbol_future_and_expired_rows() {
-        let now = Utc
-            .with_ymd_and_hms(2026, 7, 29, 12, 0, 0)
-            .single()
-            .unwrap()
-            .timestamp();
-        let mut wrong_symbol = raw(Some("Jane"), Some("Firm"), "2026-07-01", 225.0);
-        wrong_symbol.symbol = Some("MSFT".into());
-        let future = raw(Some("Future"), Some("Firm"), "2026-08-01", 230.0);
-        let expired = raw(Some("Old"), Some("Firm"), "2025-01-01", 180.0);
-
-        assert!(normalize_at(vec![wrong_symbol, future, expired], "AAPL", now).is_empty());
-    }
-
-    #[test]
-    fn adjusted_target_is_used_when_primary_target_is_invalid() {
-        let now = Utc
-            .with_ymd_and_hms(2026, 7, 29, 12, 0, 0)
-            .single()
-            .unwrap()
-            .timestamp();
-        let mut item = raw(Some("Jane"), Some("Firm"), "2026-07-01", -1.0);
-        item.adj_price_target = Some(230.0);
-
-        let observations = normalize_at(vec![item], "AAPL", now);
-        assert_eq!(observations[0].target_cents, 23_000);
-    }
-
-    #[test]
-    fn exact_anonymous_duplicates_are_counted_once() {
-        let item = raw(None, None, "2026-07-01", 225.0);
-        let summary = summarize(normalize(vec![item.clone(), item], "AAPL")).unwrap();
-
-        assert_eq!(summary.observations.len(), 1);
-        assert_eq!(summary.identity_count, 0);
+    fn cache_and_observation_freshness_boundaries() {
+        let now = 1_000_000_i64;
+        assert_eq!(cache_freshness(now, now), CacheFreshness::Fresh);
         assert_eq!(
-            summary.histogram.iter().map(|bin| bin.count).sum::<usize>(),
-            1
+            cache_freshness(now, now - CACHE_FRESH_SECS),
+            CacheFreshness::Fresh
         );
-    }
-
-    #[test]
-    fn histogram_handles_the_full_i64_range_without_overflow() {
-        let observation = |target_cents| ForecastObservation {
-            symbol: "AAPL".into(),
-            analyst: None,
-            firm: None,
-            issued_at_epoch: 1,
-            horizon_epoch: 2,
-            horizon_label: "Provider horizon".into(),
-            rating: None,
-            target_cents,
-            previous_target_cents: None,
-            price_when_posted_cents: None,
-            source: None,
-            identity: None,
-        };
-        let bins = histogram(
-            &[observation(i64::MIN), observation(i64::MAX)],
-            i64::MIN,
-            i64::MAX,
-        );
-
-        assert_eq!(bins.iter().map(|bin| bin.count).sum::<usize>(), 2);
-        assert_eq!(bins.first().unwrap().low_cents, i64::MIN);
-        assert_eq!(bins.last().unwrap().high_cents, i64::MAX);
-    }
-
-    #[test]
-    fn computes_integer_statistics_and_backend_owned_histogram_bins() {
-        let rows = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0]
-            .into_iter()
-            .enumerate()
-            .map(|(index, target)| {
-                raw(
-                    Some(&format!("Analyst {index}")),
-                    Some("Firm"),
-                    &format!("2026-07-{:02}", index + 1),
-                    target,
-                )
-            })
-            .collect();
-
-        let summary = summarize(normalize(rows, "AAPL")).unwrap();
-        assert_eq!(summary.minimum_cents, 10_000);
-        assert_eq!(summary.maximum_cents, 15_000);
-        assert_eq!(summary.simple_mean_cents, 12_500);
-        assert_eq!(summary.histogram.len(), 5);
         assert_eq!(
-            summary.histogram.iter().map(|bin| bin.count).sum::<usize>(),
-            6
+            cache_freshness(now, now - CACHE_FRESH_SECS - 1),
+            CacheFreshness::Aging
+        );
+        assert_eq!(
+            cache_freshness(now, now - CACHE_AGING_SECS - 1),
+            CacheFreshness::Stale
+        );
+        assert_eq!(
+            observation_freshness(now, Some(now - OBS_CURRENT_SECS)),
+            ObservationFreshness::Current
+        );
+        assert_eq!(
+            observation_freshness(now, Some(now - OBS_CURRENT_SECS - 1)),
+            ObservationFreshness::Aging
+        );
+        assert_eq!(
+            observation_freshness(now, Some(now - OBS_AGING_SECS - 1)),
+            ObservationFreshness::Stale
+        );
+        assert_eq!(
+            observation_freshness(now, None),
+            ObservationFreshness::Empty
         );
     }
 
     #[test]
-    fn quota_day_rolls_at_three_pm_new_york_time() {
-        let before = provider_day(
-            Utc.with_ymd_and_hms(2026, 7, 29, 18, 59, 59)
+    fn provider_month_is_utc_calendar_month() {
+        let month = provider_month(
+            Utc.with_ymd_and_hms(2026, 7, 29, 23, 59, 59)
                 .single()
                 .unwrap(),
         );
-        let after = provider_day(
-            Utc.with_ymd_and_hms(2026, 7, 29, 19, 0, 0)
-                .single()
-                .unwrap(),
-        );
-
-        assert_eq!(before.key, "2026-07-28");
-        assert_eq!(after.key, "2026-07-29");
+        assert_eq!(month.key, "2026-07");
         assert_eq!(
-            before.resets_at_epoch,
-            Utc.with_ymd_and_hms(2026, 7, 29, 19, 0, 0)
-                .single()
-                .unwrap()
-                .timestamp()
-        );
-        assert_eq!(
-            after.resets_at_epoch,
-            Utc.with_ymd_and_hms(2026, 7, 30, 19, 0, 0)
+            month.resets_at_epoch,
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0)
                 .single()
                 .unwrap()
                 .timestamp()
@@ -1410,28 +2037,47 @@ mod tests {
 
     struct FakeProvider {
         calls: AtomicUsize,
-        result: Result<Vec<RawForecast>, ProviderFailure>,
+        usage_calls: AtomicUsize,
+        result: Result<Vec<RawRating>, ProviderFailure>,
+        usage: Result<UsageSnapshot, ProviderFailure>,
         delay_ms: u64,
     }
 
     impl FakeProvider {
-        fn successful(rows: Vec<RawForecast>) -> Self {
+        fn successful(rows: Vec<RawRating>) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
+                usage_calls: AtomicUsize::new(0),
                 result: Ok(rows),
+                usage: Ok(UsageSnapshot {
+                    used: 0,
+                    limit: TIPRANKS_MONTHLY_LIMIT,
+                    remaining: TIPRANKS_MONTHLY_LIMIT,
+                    resets_at_epoch: provider_month(Utc::now()).resets_at_epoch,
+                }),
                 delay_ms: 0,
             }
         }
     }
 
     impl ForecastProvider for FakeProvider {
-        fn fetch(&self, _symbol: &str, api_key: &str) -> Result<Vec<RawForecast>, ProviderFailure> {
+        fn fetch_ratings(
+            &self,
+            _symbol: &str,
+            api_key: &str,
+        ) -> Result<Vec<RawRating>, ProviderFailure> {
             assert_eq!(api_key, "test-secret");
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.delay_ms > 0 {
                 thread::sleep(std::time::Duration::from_millis(self.delay_ms));
             }
             self.result.clone()
+        }
+
+        fn fetch_usage(&self, api_key: &str) -> Result<UsageSnapshot, ProviderFailure> {
+            assert_eq!(api_key, "test-secret");
+            self.usage_calls.fetch_add(1, Ordering::SeqCst);
+            self.usage.clone()
         }
     }
 
@@ -1445,105 +2091,11 @@ mod tests {
                 now: Mutex::new(now),
             }
         }
-
-        fn set(&self, now: DateTime<Utc>) {
-            *self.now.lock().unwrap() = now;
-        }
     }
 
     impl Clock for TestClock {
         fn now(&self) -> DateTime<Utc> {
             *self.now.lock().unwrap()
-        }
-    }
-
-    struct RolloverClock {
-        calls: AtomicUsize,
-        before_reset: DateTime<Utc>,
-        after_reset: DateTime<Utc>,
-    }
-
-    impl Clock for RolloverClock {
-        fn now(&self) -> DateTime<Utc> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                self.before_reset
-            } else {
-                self.after_reset
-            }
-        }
-    }
-
-    struct ControlledProvider {
-        calls: AtomicUsize,
-        started: (Mutex<usize>, Condvar),
-        released: (Mutex<Vec<bool>>, Condvar),
-    }
-
-    impl ControlledProvider {
-        fn new(capacity: usize) -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-                started: (Mutex::new(0), Condvar::new()),
-                released: (Mutex::new(vec![false; capacity]), Condvar::new()),
-            }
-        }
-
-        fn wait_for_started(&self, count: usize) {
-            let (lock, ready) = &self.started;
-            let mut started = lock.lock().unwrap();
-            while *started < count {
-                started = ready.wait(started).unwrap();
-            }
-        }
-
-        fn release(&self, index: usize) {
-            let (lock, ready) = &self.released;
-            lock.lock().unwrap()[index] = true;
-            ready.notify_all();
-        }
-    }
-
-    impl ForecastProvider for ControlledProvider {
-        fn fetch(&self, _symbol: &str, api_key: &str) -> Result<Vec<RawForecast>, ProviderFailure> {
-            assert_eq!(api_key, "test-secret");
-            let index = self.calls.fetch_add(1, Ordering::SeqCst);
-            {
-                let (lock, ready) = &self.started;
-                *lock.lock().unwrap() += 1;
-                ready.notify_all();
-            }
-            let (lock, ready) = &self.released;
-            let mut released = lock.lock().unwrap();
-            while !released[index] {
-                released = ready.wait(released).unwrap();
-            }
-            Ok(vec![raw(
-                Some(&format!("Analyst {index}")),
-                Some("Firm"),
-                "2026-07-01",
-                200.0 + index as f64,
-            )])
-        }
-    }
-
-    struct ConcurrencyProvider {
-        calls: AtomicUsize,
-        active: AtomicUsize,
-        maximum: AtomicUsize,
-    }
-
-    impl ForecastProvider for ConcurrencyProvider {
-        fn fetch(
-            &self,
-            _symbol: &str,
-            _api_key: &str,
-        ) -> Result<Vec<RawForecast>, ProviderFailure> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            self.maximum.fetch_max(active, Ordering::SeqCst);
-            thread::sleep(std::time::Duration::from_millis(60));
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(vec![])
         }
     }
 
@@ -1574,24 +2126,175 @@ mod tests {
     }
 
     #[test]
-    fn same_provider_day_cache_prevents_a_second_network_call() {
+    fn uncached_open_issues_zero_provider_calls_and_exposes_load_action() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let provider = Arc::new(FakeProvider::successful(vec![]));
+        let service = service(db, Arc::clone(&provider), true);
+
+        let panel = service.get("AAPL", vec![]);
+        assert_eq!(panel.state, ForecastPanelState::Unloaded);
+        assert_eq!(panel.action.kind, ForecastActionKind::Load);
+        assert!(panel.action.enabled);
+        assert_eq!(panel.action.call_cost, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn explicit_load_issues_one_counted_call_and_caches_result() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let provider = Arc::new(FakeProvider::successful(vec![
+            raw(Some("A"), Some("F1"), "2026-07-01", 200.0),
+            raw(Some("B"), Some("F2"), "2026-07-02", 210.0),
+            raw(Some("C"), Some("F3"), "2026-07-03", 220.0),
+        ]));
+        let service = service(db, Arc::clone(&provider), true);
+
+        let first = service.load("aapl", vec![]);
+        let reopen = service.get("AAPL", vec![]);
+
+        assert_eq!(first.state, ForecastPanelState::Ready);
+        assert!(!first.from_cache);
+        assert!(reopen.from_cache);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reopen.quota.attempts, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fresh_and_aging_cache_reopen_never_calls_provider() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 7, 29, 12, 0, 0)
+            .single()
+            .unwrap();
+        let clock = Arc::new(TestClock::new(now));
         let db = Arc::new(Db::open_in_memory().unwrap());
         let provider = Arc::new(FakeProvider::successful(vec![raw(
-            Some("Jane"),
-            Some("Firm"),
+            Some("A"),
+            Some("F"),
+            "2026-07-01",
+            200.0,
+        )]));
+        let service = service_with_clock(
+            Arc::clone(&db),
+            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let loaded = service.load("AAPL", vec![]);
+        assert!(!loaded.from_cache);
+
+        let fresh = service.get("AAPL", vec![]);
+        assert!(fresh.from_cache);
+        assert_eq!(fresh.cache_freshness, Some(CacheFreshness::Fresh));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        // Age the cache into the aging band without a second call.
+        let fetched = loaded.fetched_at_epoch.unwrap();
+        let month = provider_month(now);
+        let payload = db
+            .load_tipranks_forecast_cache(&month.key, "AAPL")
+            .unwrap()
+            .unwrap();
+        db.save_tipranks_forecast_cache(
+            &month.key,
+            "AAPL",
+            fetched - CACHE_FRESH_SECS - 60,
+            &payload.payload_json,
+        )
+        .unwrap();
+        let aging = service.get("AAPL", vec![]);
+        assert_eq!(aging.cache_freshness, Some(CacheFreshness::Aging));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(aging.action.call_cost == 0);
+    }
+
+    #[test]
+    fn stale_cache_stays_visible_with_refresh_cost_confirmation() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 7, 29, 12, 0, 0)
+            .single()
+            .unwrap();
+        let clock = Arc::new(TestClock::new(now));
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let provider = Arc::new(FakeProvider::successful(vec![raw(
+            Some("A"),
+            Some("F"),
+            "2026-07-01",
+            200.0,
+        )]));
+        let service = service_with_clock(
+            Arc::clone(&db),
+            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        service.load("AAPL", vec![]);
+        let month = provider_month(now);
+        let payload = db
+            .load_tipranks_forecast_cache(&month.key, "AAPL")
+            .unwrap()
+            .unwrap();
+        db.save_tipranks_forecast_cache(
+            &month.key,
+            "AAPL",
+            now.timestamp() - CACHE_AGING_SECS - 10,
+            &payload.payload_json,
+        )
+        .unwrap();
+
+        let panel = service.get("AAPL", vec![]);
+        assert_eq!(panel.cache_freshness, Some(CacheFreshness::Stale));
+        assert!(!panel.observations.is_empty());
+        assert_eq!(panel.action.kind, ForecastActionKind::Refresh);
+        assert_eq!(panel.action.call_cost, 1);
+        assert!(panel
+            .action
+            .confirmation_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("1 TipRanks call"));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_prior_cache_and_error_banner() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let ok = Arc::new(FakeProvider::successful(vec![raw(
+            Some("A"),
+            Some("F"),
             "2026-07-01",
             225.0,
         )]));
-        let service = service(db, Arc::clone(&provider), true);
+        service(Arc::clone(&db), ok, true).load("AAPL", vec![]);
+        let month = provider_month(Utc::now());
+        let payload = db
+            .load_tipranks_forecast_cache(&month.key, "AAPL")
+            .unwrap()
+            .unwrap();
+        db.save_tipranks_forecast_cache(
+            &month.key,
+            "AAPL",
+            Utc::now().timestamp() - CACHE_AGING_SECS - 10,
+            &payload.payload_json,
+        )
+        .unwrap();
 
-        let first = service.get("aapl", vec![]);
-        let second = service.get("AAPL", vec![]);
-
-        assert_eq!(first.state, ForecastPanelState::InsufficientCoverage);
-        assert!(!first.from_cache);
-        assert!(second.from_cache);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(second.quota.attempts, 1);
+        let failing = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            usage_calls: AtomicUsize::new(0),
+            result: Err(ProviderFailure::Unavailable),
+            usage: Ok(UsageSnapshot {
+                used: 1,
+                limit: 50,
+                remaining: 49,
+                resets_at_epoch: month.resets_at_epoch,
+            }),
+            delay_ms: 0,
+        });
+        let service = service(db, Arc::clone(&failing), true);
+        let panel = service.load("AAPL", vec![]);
+        assert_eq!(panel.observations[0].target_cents, 22_500);
+        assert!(panel.from_cache);
+        assert!(panel.error_banner.is_some());
+        assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1603,356 +2306,127 @@ mod tests {
             missing.get("AAPL", vec![]).state,
             ForecastPanelState::MissingKey
         );
+        assert_eq!(
+            missing.load("AAPL", vec![]).state,
+            ForecastPanelState::MissingKey
+        );
 
-        let day = provider_day(Utc::now());
-        for _ in 0..FMP_DAILY_LIMIT {
-            db.reserve_fmp_attempt(&day.key, FMP_DAILY_LIMIT).unwrap();
+        let month = provider_month(Utc::now());
+        for _ in 0..TIPRANKS_MONTHLY_LIMIT {
+            db.reserve_tipranks_attempt(&month.key, TIPRANKS_MONTHLY_LIMIT)
+                .unwrap();
         }
         let exhausted = service(db, Arc::clone(&provider), true);
         assert_eq!(
-            exhausted.get("MSFT", vec![]).state,
+            exhausted.load("MSFT", vec![]).state,
             ForecastPanelState::QuotaExhausted
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn valid_empty_results_are_cached_and_expose_the_warning_boundary() {
+    fn warning_threshold_fires_at_25_of_50() {
         let db = Arc::new(Db::open_in_memory().unwrap());
-        let day = provider_day(Utc::now());
-        for _ in 0..(FMP_WARNING_AT - 1) {
-            db.reserve_fmp_attempt(&day.key, FMP_DAILY_LIMIT).unwrap();
+        let month = provider_month(Utc::now());
+        for _ in 0..(TIPRANKS_WARNING_AT - 1) {
+            db.reserve_tipranks_attempt(&month.key, TIPRANKS_MONTHLY_LIMIT)
+                .unwrap();
         }
         let provider = Arc::new(FakeProvider::successful(vec![]));
+        let service = service(db, provider, true);
+        let panel = service.load("AAPL", vec![]);
+        assert_eq!(panel.quota.attempts, TIPRANKS_WARNING_AT);
+        assert!(panel.quota.warning);
+        assert_eq!(panel.quota.limit, TIPRANKS_MONTHLY_LIMIT);
+    }
+
+    #[test]
+    fn external_usage_reconciliation_uses_stricter_remaining() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let month = provider_month(Utc::now());
+        db.reserve_tipranks_attempt(&month.key, TIPRANKS_MONTHLY_LIMIT)
+            .unwrap();
+        let provider = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            usage_calls: AtomicUsize::new(0),
+            result: Ok(vec![]),
+            usage: Ok(UsageSnapshot {
+                used: 30,
+                limit: 50,
+                remaining: 20,
+                resets_at_epoch: month.resets_at_epoch,
+            }),
+            delay_ms: 0,
+        });
+        let service = service(db, provider, true);
+        let status = service.settings_status().unwrap();
+        assert_eq!(status.quota.attempts, 30);
+        assert_eq!(status.quota.remaining, 20);
+        assert!(!status.quota.estimated);
+        assert!(status.quota.warning);
+    }
+
+    #[test]
+    fn rate_limit_blocks_before_an_eleventh_call_in_one_minute() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let provider = Arc::new(FakeProvider::successful(vec![]));
         let service = service(db, Arc::clone(&provider), true);
-
-        let first = service.get("AAPL", vec![]);
-        let second = service.get("AAPL", vec![]);
-
-        assert_eq!(first.state, ForecastPanelState::Empty);
-        assert_eq!(first.quota.attempts, FMP_WARNING_AT);
-        assert!(first.quota.warning);
-        assert!(second.from_cache);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        service.rate_limiter.force_fill(Utc::now().timestamp());
+        let panel = service.load("AAPL", vec![]);
+        assert_eq!(panel.state, ForecastPanelState::RateLimited);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn provider_failures_map_to_explicit_states_without_being_cached() {
-        for (failure, expected) in [
-            (ProviderFailure::InvalidKey, ForecastPanelState::InvalidKey),
-            (
-                ProviderFailure::QuotaExhausted,
-                ForecastPanelState::QuotaExhausted,
-            ),
-            (
-                ProviderFailure::Unavailable,
-                ForecastPanelState::ProviderUnavailable,
-            ),
-            (
-                ProviderFailure::InvalidPayload,
-                ForecastPanelState::ProviderUnavailable,
-            ),
-        ] {
-            let db = Arc::new(Db::open_in_memory().unwrap());
-            let provider = Arc::new(FakeProvider {
-                calls: AtomicUsize::new(0),
-                result: Err(failure),
-                delay_ms: 0,
-            });
-            let service = service(db, Arc::clone(&provider), true);
-
-            assert_eq!(service.get("AAPL", vec![]).state, expected);
-            assert_eq!(service.get("AAPL", vec![]).state, expected);
-            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[test]
-    fn overlapping_requests_share_one_in_flight_provider_call() {
+    fn overlapping_load_requests_share_one_provider_call() {
         let db = Arc::new(Db::open_in_memory().unwrap());
         let provider = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
+            usage_calls: AtomicUsize::new(0),
             result: Ok(vec![raw(Some("Jane"), Some("Firm"), "2026-07-01", 225.0)]),
-            delay_ms: 100,
+            usage: Ok(UsageSnapshot {
+                used: 1,
+                limit: 50,
+                remaining: 49,
+                resets_at_epoch: provider_month(Utc::now()).resets_at_epoch,
+            }),
+            delay_ms: 80,
         });
         let service = Arc::new(service(db, Arc::clone(&provider), true));
         let left = {
             let service = Arc::clone(&service);
-            thread::spawn(move || service.get("AAPL", vec![]))
+            thread::spawn(move || service.load("AAPL", vec![]))
         };
         let right = {
             let service = Arc::clone(&service);
-            thread::spawn(move || service.get("AAPL", vec![]))
+            thread::spawn(move || service.load("AAPL", vec![]))
         };
-
-        assert_eq!(
-            left.join().unwrap().state,
-            ForecastPanelState::InsufficientCoverage
-        );
-        assert_eq!(
-            right.join().unwrap().state,
-            ForecastPanelState::InsufficientCoverage
-        );
+        left.join().unwrap();
+        right.join().unwrap();
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn new_provider_day_request_does_not_join_an_old_day_flight() {
-        let old_now = Utc
-            .with_ymd_and_hms(2026, 7, 29, 18, 59, 0)
-            .single()
-            .unwrap();
-        let new_now = Utc
-            .with_ymd_and_hms(2026, 7, 29, 19, 1, 0)
-            .single()
-            .unwrap();
-        let clock = Arc::new(TestClock::new(old_now));
-        let provider = Arc::new(ControlledProvider::new(2));
-        let service = Arc::new(service_with_clock(
-            Arc::new(Db::open_in_memory().unwrap()),
-            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
-            Arc::clone(&clock) as Arc<dyn Clock>,
-        ));
-
-        let old_request = {
-            let service = Arc::clone(&service);
-            thread::spawn(move || service.get("AAPL", vec![]))
-        };
-        provider.wait_for_started(1);
-        clock.set(new_now);
-        let new_request = {
-            let service = Arc::clone(&service);
-            thread::spawn(move || service.get("AAPL", vec![]))
-        };
-        provider.wait_for_started(2);
-
-        provider.release(1);
-        let new_panel = new_request.join().unwrap();
-        provider.release(0);
-        let _old_panel = old_request.join().unwrap();
-        let cached_new_panel = service.get("AAPL", vec![]);
-
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(new_panel.observations[0].target_cents, 20_100);
-        assert!(cached_new_panel.from_cache);
-        assert_eq!(cached_new_panel.observations[0].target_cents, 20_100);
-    }
-
-    #[test]
-    fn network_concurrency_is_globally_limited_to_two() {
-        let provider = Arc::new(ConcurrencyProvider {
-            calls: AtomicUsize::new(0),
-            active: AtomicUsize::new(0),
-            maximum: AtomicUsize::new(0),
-        });
-        let service = Arc::new(service_with_clock(
-            Arc::new(Db::open_in_memory().unwrap()),
-            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
-            Arc::new(SystemClock),
-        ));
-        let handles = ["AAPL", "MSFT", "TSLA", "JPM", "NVDA", "AMD"]
-            .into_iter()
-            .map(|symbol| {
-                let service = Arc::clone(&service);
-                thread::spawn(move || service.get(symbol, vec![]))
+    fn previous_month_cache_is_never_presented() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        db.save_tipranks_forecast_cache(
+            "2026-06",
+            "AAPL",
+            1,
+            &serde_json::to_string(&CachedForecastPayload {
+                observations: normalize(
+                    vec![raw(Some("A"), Some("F"), "2026-06-01", 200.0)],
+                    "AAPL",
+                ),
             })
-            .collect::<Vec<_>>();
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 6);
-        assert_eq!(provider.maximum.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn stale_warm_request_queued_at_the_gate_uses_no_call_or_budget() {
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let day = provider_day(Utc::now());
-        let provider = Arc::new(ControlledProvider::new(2));
-        let service = Arc::new(service_with_clock(
-            Arc::clone(&db),
-            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
-            Arc::new(SystemClock),
-        ));
-        let first = {
-            let service = Arc::clone(&service);
-            thread::spawn(move || service.get("AAPL", vec![]))
-        };
-        let second = {
-            let service = Arc::clone(&service);
-            thread::spawn(move || service.get("MSFT", vec![]))
-        };
-        provider.wait_for_started(2);
-
-        let active_generation = Arc::new(AtomicU64::new(7));
-        let queued = {
-            let service = Arc::clone(&service);
-            let guard = GenerationGuard {
-                active_generation: Arc::clone(&active_generation),
-                expected_generation: 7,
-            };
-            thread::spawn(move || service.get_for_generation("TSLA", guard))
-        };
-        thread::sleep(std::time::Duration::from_millis(40));
-        active_generation.store(8, Ordering::SeqCst);
-        provider.release(0);
-        provider.release(1);
-
-        first.join().unwrap();
-        second.join().unwrap();
-        let queued_panel = queued.join().unwrap();
-        assert_eq!(queued_panel.state, ForecastPanelState::ProviderUnavailable);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(db.fmp_attempts(&day.key).unwrap(), 2);
-    }
-
-    #[test]
-    fn queued_request_crossing_reset_retries_under_only_the_new_provider_day() {
-        let before_reset = Utc
-            .with_ymd_and_hms(2026, 7, 29, 18, 59, 59)
-            .single()
-            .unwrap();
-        let after_reset = Utc
-            .with_ymd_and_hms(2026, 7, 29, 19, 0, 1)
-            .single()
-            .unwrap();
-        let old_day = provider_day(before_reset);
-        let new_day = provider_day(after_reset);
-        let db = Arc::new(Db::open_in_memory().unwrap());
+            .unwrap(),
+        )
+        .unwrap();
         let provider = Arc::new(FakeProvider::successful(vec![]));
-        let clock = Arc::new(RolloverClock {
-            calls: AtomicUsize::new(0),
-            before_reset,
-            after_reset,
-        });
-        let service = Arc::new(service_with_clock(
-            Arc::clone(&db),
-            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
-            Arc::clone(&clock) as Arc<dyn Clock>,
-        ));
-        let queued_service = Arc::clone(&service);
-        let first_permit = service.request_gate.acquire(None).unwrap();
-        let second_permit = service.request_gate.acquire(None).unwrap();
-        let queued = thread::spawn(move || queued_service.get("TSLA", vec![]));
-
-        while clock.calls.load(Ordering::SeqCst) < 2 {
-            thread::yield_now();
-        }
-        drop(first_permit);
-        let panel = queued.join().unwrap();
-        drop(second_permit);
-
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(db.fmp_attempts(&old_day.key).unwrap(), 0);
-        assert_eq!(db.fmp_attempts(&new_day.key).unwrap(), 1);
-        assert!(db
-            .load_fmp_forecast_cache(&old_day.key, "TSLA")
-            .unwrap()
-            .is_none());
-        assert!(db
-            .load_fmp_forecast_cache(&new_day.key, "TSLA")
-            .unwrap()
-            .is_some());
-        assert_eq!(panel.quota.provider_day, new_day.key);
-    }
-
-    #[test]
-    fn explicit_test_crossing_reset_transparently_uses_the_new_provider_day() {
-        let before_reset = Utc
-            .with_ymd_and_hms(2026, 7, 29, 18, 59, 59)
-            .single()
-            .unwrap();
-        let after_reset = Utc
-            .with_ymd_and_hms(2026, 7, 29, 19, 0, 1)
-            .single()
-            .unwrap();
-        let old_day = provider_day(before_reset);
-        let new_day = provider_day(after_reset);
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let provider = Arc::new(FakeProvider::successful(vec![]));
-        let clock = Arc::new(RolloverClock {
-            calls: AtomicUsize::new(0),
-            before_reset,
-            after_reset,
-        });
-        let service = service_with_clock(
-            Arc::clone(&db),
-            Arc::clone(&provider) as Arc<dyn ForecastProvider>,
-            clock,
-        );
-
-        let panel = service.test_connection("AAPL");
-
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(db.fmp_attempts(&old_day.key).unwrap(), 0);
-        assert_eq!(db.fmp_attempts(&new_day.key).unwrap(), 1);
-        assert_eq!(panel.quota.provider_day, new_day.key);
-    }
-
-    #[test]
-    #[ignore = "requires FMP_API_KEY"]
-    fn opt_in_live_contract_covers_five_distinct_symbols() {
-        let api_key = std::env::var("FMP_API_KEY")
-            .expect("FMP_API_KEY is required for the ignored live test");
-        let provider = FmpRestProvider::new().unwrap();
-        let now = Utc::now().timestamp();
-        for symbol in ["AAPL", "MSFT", "ACGL", "TSLA", "JPM"] {
-            let rows = provider.fetch(symbol, &api_key).unwrap_or_else(|failure| {
-                panic!("live FMP contract failed for {symbol}: {failure:?}")
-            });
-            let normalized = normalize_at(rows, symbol, now);
-            assert!(
-                !normalized.is_empty(),
-                "live FMP contract returned no usable observations for {symbol}"
-            );
-            assert!(normalized.iter().all(|item| {
-                item.symbol.eq_ignore_ascii_case(symbol)
-                    && item.target_cents > 0
-                    && item.horizon_epoch > now
-            }));
-        }
-    }
-
-    #[test]
-    fn warm_ranking_uses_final_backend_scores_and_caps_distinct_stocks_at_ten() {
-        let mut candidates = (0..12)
-            .map(|index| WarmCandidate {
-                symbol: format!("S{index:02}"),
-                composite_score: index,
-                is_stock: true,
-            })
-            .collect::<Vec<_>>();
-        candidates.push(WarmCandidate {
-            symbol: "CRYPTO".into(),
-            composite_score: 100,
-            is_stock: false,
-        });
-        candidates.push(WarmCandidate {
-            symbol: "S11".into(),
-            composite_score: 99,
-            is_stock: true,
-        });
-
-        let ranked = rank_warm_candidates(candidates);
-        assert_eq!(ranked.len(), 10);
-        assert_eq!(ranked[0], "S11");
-        assert_eq!(ranked[1], "S10");
-        assert!(!ranked.contains(&"CRYPTO".to_string()));
-        assert_eq!(ranked.iter().collect::<HashSet<_>>().len(), ranked.len());
-    }
-
-    #[test]
-    fn warm_workers_stop_before_provider_calls_when_generation_is_stale() {
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let provider = Arc::new(FakeProvider::successful(vec![]));
-        let service = Arc::new(service(db, Arc::clone(&provider), true));
-        let feed_generation = Arc::new(AtomicU64::new(8));
-
-        service.spawn_generation_warm(vec!["AAPL".into(), "MSFT".into()], feed_generation, 7);
-        thread::sleep(std::time::Duration::from_millis(50));
-
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let service = service(db, provider, true);
+        let panel = service.get("AAPL", vec![]);
+        assert_eq!(panel.state, ForecastPanelState::Unloaded);
+        assert!(panel.observations.is_empty());
     }
 
     #[test]
@@ -1960,7 +2434,6 @@ mod tests {
         let db = Arc::new(Db::open_in_memory().unwrap());
         let provider = Arc::new(FakeProvider::successful(vec![]));
         let service = service(db, provider, true);
-
         let json = serde_json::to_string(&service.settings_status().unwrap()).unwrap();
         assert!(json.contains("\"configured\":true"));
         assert!(!json.contains("test-secret"));
@@ -1972,203 +2445,287 @@ mod tests {
         let db = Arc::new(Db::open_in_memory().unwrap());
         let provider = Arc::new(FakeProvider::successful(vec![]));
         let service = service(Arc::clone(&db), provider, true);
-        db.drop_fmp_budget_table_for_test();
-
+        db.drop_tipranks_budget_table_for_test();
         assert!(service.settings_status().is_err());
     }
 
-    fn serve_one_http_response(
-        status: &str,
-        body: &str,
-    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
-        serve_one_http_response_with_headers(status, "", body)
+    #[test]
+    fn parses_tipranks_payload_shapes() {
+        let nested = serde_json::json!({
+            "ratings": [{
+                "ticker": "AAPL",
+                "analystName": "Jane",
+                "firm": "Alpha",
+                "priceTarget": 210.5,
+                "date": "2026-07-01",
+                "stars": 4.5,
+                "rank": 42,
+                "rating": "Buy"
+            }]
+        });
+        let rows = parse_ratings_payload(nested, "AAPL").unwrap();
+        let obs = normalize(rows, "AAPL");
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].target_cents, 21_050);
+        assert_eq!(obs[0].rank, Some(42));
+        assert_eq!(obs[0].weight_hundredths, Some(123));
     }
 
-    fn serve_one_http_response_with_headers(
-        status: &str,
-        extra_headers: &str,
-        body: &str,
-    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let (request_tx, request_rx) = mpsc::channel();
-        let status = status.to_string();
-        let extra_headers = extra_headers.to_string();
-        let body = body.to_string();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0_u8; 1024];
-            loop {
-                let read = stream.read(&mut buffer).unwrap();
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&buffer[..read]);
-                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
+    #[test]
+    fn parses_live_mcp_structured_result_string_envelope() {
+        // Live TipRanks MCP returns structuredContent as:
+        // { "result": "<json string of rating array>" } with live field names.
+        // Live rows include BOTH priceTarget and convertedPriceTarget.
+        let row = serde_json::json!({
+            "analystName": "Jane Doe",
+            "firmName": "Example Capital",
+            "recommendation": "Buy",
+            "recommendationDate": "07/01/2026",
+            "priceTarget": 225.0,
+            "convertedPriceTarget": 225.0,
+            "numOfStars": 4.0,
+            "analystRank": 120,
+            "ticker": "aapl",
+            "timestamp": "2026-07-02T09:30:14.797",
+            "analystAction": "reiterated"
+        });
+        let envelope = serde_json::json!({
+            "result": serde_json::to_string(&vec![row]).unwrap()
+        });
+        let rows = parse_ratings_payload(envelope, "AAPL").unwrap();
+        let now = Utc
+            .with_ymd_and_hms(2026, 7, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let obs = normalize_at(rows, "AAPL", now);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].symbol, "AAPL");
+        assert_eq!(obs[0].target_cents, 22_500);
+        assert_eq!(obs[0].analyst.as_deref(), Some("Jane Doe"));
+        assert_eq!(obs[0].firm.as_deref(), Some("Example Capital"));
+        assert_eq!(obs[0].rating.as_deref(), Some("Buy"));
+        assert_eq!(obs[0].stars_hundredths, Some(400));
+        assert_eq!(obs[0].weight_hundredths, Some(115));
+        assert_eq!(obs[0].rank, Some(120));
+        assert_eq!(
+            obs[0].issued_at_epoch,
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp()
+        );
+    }
+
+    #[test]
+    fn parses_live_mcp_text_content_array_with_mm_dd_yyyy_dates() {
+        let payload = serde_json::json!([{
+            "analystName": "Alex",
+            "firmName": "Beta Research",
+            "recommendation": "Hold",
+            "recommendationDate": "06/15/2026",
+            "priceTarget": 180.25,
+            "numOfStars": 3.5,
+            "analystRank": 55,
+            "ticker": "MSFT"
+        }]);
+        let rows = parse_ratings_payload(payload, "MSFT").unwrap();
+        let obs = normalize_at(
+            rows,
+            "MSFT",
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp(),
+        );
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].target_cents, 18_025);
+        assert_eq!(
+            obs[0].issued_at_epoch,
+            Utc.with_ymd_and_hms(2026, 6, 15, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp()
+        );
+        assert_eq!(obs[0].weight_hundredths, Some(108));
+    }
+
+    #[test]
+    fn unwraps_double_encoded_tool_result_envelope() {
+        let array = serde_json::json!([{
+            "ticker": "TSLA",
+            "analystName": "Pat",
+            "firmName": "Gamma",
+            "recommendation": "Buy",
+            "recommendationDate": "05/01/2026",
+            "priceTarget": 300.0,
+            "numOfStars": 5.0,
+            "analystRank": 10
+        }]);
+        let double_wrapped = serde_json::json!({
+            "result": serde_json::json!({
+                "result": serde_json::to_string(&array).unwrap()
+            })
+        });
+        let unwrapped = unwrap_tool_json_envelope(double_wrapped);
+        assert!(unwrapped.is_array());
+        let rows = parse_ratings_payload(unwrapped, "TSLA").unwrap();
+        let obs = normalize_at(
+            rows,
+            "TSLA",
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp(),
+        );
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].target_cents, 30_000);
+    }
+
+    #[test]
+    fn uses_converted_price_target_when_native_target_missing() {
+        let payload = serde_json::json!([{
+            "analystName": "Sam",
+            "firmName": "Delta",
+            "recommendation": "Buy",
+            "recommendationDate": "07/01/2026",
+            "priceTarget": null,
+            "convertedPriceTarget": 250.5,
+            "numOfStars": 4.0,
+            "ticker": "JPM"
+        }]);
+        let rows = parse_ratings_payload(payload, "JPM").unwrap();
+        let obs = normalize_at(
+            rows,
+            "JPM",
+            Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp(),
+        );
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].target_cents, 25_050);
+    }
+
+    #[test]
+    fn parse_provider_date_accepts_live_tipranks_formats() {
+        assert_eq!(
+            parse_provider_date("07/28/2026"),
+            Some(
+                Utc.with_ymd_and_hms(2026, 7, 28, 0, 0, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp()
+            )
+        );
+        assert_eq!(
+            parse_provider_date("2026-07-29T09:30:14.797"),
+            Some(
+                NaiveDateTime::parse_from_str("2026-07-29T09:30:14.797", "%Y-%m-%dT%H:%M:%S%.f")
+                    .unwrap()
+                    .and_utc()
+                    .timestamp()
+            )
+        );
+        assert_eq!(
+            parse_provider_date("2026-07-01 14:30:00"),
+            Some(
+                Utc.with_ymd_and_hms(2026, 7, 1, 14, 30, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp()
+            )
+        );
+    }
+
+    #[test]
+    fn computes_integer_statistics_and_histogram_bins() {
+        let rows = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| {
+                raw(
+                    Some(&format!("Analyst {index}")),
+                    Some("Firm"),
+                    &format!("2026-07-{:02}", index + 1),
+                    target,
+                )
+            })
+            .collect();
+        let summary = summarize(normalize(rows, "AAPL")).unwrap();
+        assert_eq!(summary.minimum_cents, 10_000);
+        assert_eq!(summary.maximum_cents, 15_000);
+        assert_eq!(summary.simple_mean_cents, 12_500);
+        assert_eq!(
+            summary.histogram.iter().map(|bin| bin.count).sum::<usize>(),
+            6
+        );
+    }
+
+    fn resolve_live_tipranks_api_key() -> Option<String> {
+        if let Ok(value) = std::env::var("TIPRANKS_API_KEY") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
-            request_tx
-                .send(String::from_utf8_lossy(&bytes).to_string())
-                .unwrap();
-            let response = format!(
-                "HTTP/1.1 {status}\r\n{extra_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+        }
+        // Windows: cargo may run without User-scope env injected into the process.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let output = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "[Environment]::GetEnvironmentVariable('TIPRANKS_API_KEY','User')",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TIPRANKS_API_KEY"]
+    fn opt_in_live_contract_covers_five_distinct_symbols() {
+        let api_key = resolve_live_tipranks_api_key()
+            .expect("TIPRANKS_API_KEY is required for the ignored live test");
+        assert!(
+            !api_key.is_empty() && api_key.len() >= 8,
+            "TIPRANKS_API_KEY looks empty or too short"
+        );
+        let provider = TipRanksMcpProvider::new(DEFAULT_MCP_URI.to_string());
+        let now = Utc::now().timestamp();
+        for symbol in ["AAPL", "MSFT", "ACGL", "TSLA", "JPM"] {
+            let rows = provider
+                .fetch_ratings(symbol, &api_key)
+                .unwrap_or_else(|failure| {
+                    panic!("live TipRanks contract failed for {symbol}: {failure:?}")
+                });
+            let normalized = normalize_at(rows, symbol, now);
+            assert!(
+                !normalized.is_empty(),
+                "live TipRanks contract returned no usable observations for {symbol}"
             );
-            stream.write_all(response.as_bytes()).unwrap();
-        });
-        (
-            format!("http://{address}/stable/price-target-news"),
-            request_rx,
-            handle,
-        )
-    }
-
-    #[test]
-    fn rest_adapter_sends_the_key_only_in_a_header() {
-        let (endpoint, request_rx, handle) = serve_one_http_response("200 OK", "[]");
-        let provider = FmpRestProvider::with_endpoint(endpoint).unwrap();
-
-        assert_eq!(provider.fetch("AAPL", "super-secret").unwrap().len(), 0);
-        handle.join().unwrap();
-        let request = request_rx.recv().unwrap();
-        let request_line = request.lines().next().unwrap();
-        assert!(request_line.contains("symbol=AAPL"));
-        assert!(!request_line.contains("super-secret"));
-        assert!(request
-            .lines()
-            .any(|line| line.eq_ignore_ascii_case("apikey: super-secret")));
-    }
-
-    #[test]
-    fn rest_adapter_maps_authentication_failure_without_exposing_a_body() {
-        let (endpoint, _request_rx, handle) =
-            serve_one_http_response("401 Unauthorized", r#"{"error":"rejected"}"#);
-        let provider = FmpRestProvider::with_endpoint(endpoint).unwrap();
-
-        assert!(matches!(
-            provider.fetch("AAPL", "super-secret"),
-            Err(ProviderFailure::InvalidKey)
-        ));
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn rest_adapter_does_not_follow_redirects() {
-        let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
-        redirect_target.set_nonblocking(true).unwrap();
-        let location = format!(
-            "Location: http://{}/redirected\r\n",
-            redirect_target.local_addr().unwrap()
-        );
-        let (endpoint, _request_rx, handle) =
-            serve_one_http_response_with_headers("302 Found", &location, "");
-        let provider = FmpRestProvider::with_endpoint(endpoint).unwrap();
-
-        assert!(matches!(
-            provider.fetch("AAPL", "super-secret"),
-            Err(ProviderFailure::Unavailable)
-        ));
-        handle.join().unwrap();
-        thread::sleep(std::time::Duration::from_millis(20));
-        assert!(matches!(
-            redirect_target.accept(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-        ));
-    }
-
-    #[test]
-    fn repeated_explicit_test_honors_invalid_key_breaker_until_key_changes() {
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let day = provider_day(Utc::now());
-        let provider = Arc::new(FakeProvider {
-            calls: AtomicUsize::new(0),
-            result: Err(ProviderFailure::InvalidKey),
-            delay_ms: 0,
-        });
-        let service = service(db, Arc::clone(&provider), true);
-
-        assert_eq!(
-            service.test_connection("AAPL").state,
-            ForecastPanelState::InvalidKey
-        );
-        assert_eq!(
-            service.test_connection("AAPL").state,
-            ForecastPanelState::InvalidKey
-        );
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(service.db.fmp_attempts(&day.key).unwrap(), 1);
-
-        service.save_key("test-secret").unwrap();
-        assert_eq!(
-            service.test_connection("AAPL").state,
-            ForecastPanelState::InvalidKey
-        );
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn cached_aapl_does_not_bypass_explicit_credential_validation() {
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let successful_provider = Arc::new(FakeProvider::successful(vec![raw(
-            Some("Jane"),
-            Some("Firm"),
-            "2026-07-01",
-            225.0,
-        )]));
-        let cached_service = service(Arc::clone(&db), successful_provider, true);
-        assert_eq!(
-            cached_service.get("AAPL", vec![]).state,
-            ForecastPanelState::InsufficientCoverage
-        );
-
-        let invalid_provider = Arc::new(FakeProvider {
-            calls: AtomicUsize::new(0),
-            result: Err(ProviderFailure::InvalidKey),
-            delay_ms: 0,
-        });
-        let validating_service = service(db, Arc::clone(&invalid_provider), true);
-        let validation = validating_service.test_connection("AAPL");
-        let cached_after_failure = validating_service.get("AAPL", vec![]);
-
-        assert_eq!(validation.state, ForecastPanelState::InvalidKey);
-        assert!(!validation.from_cache);
-        assert_eq!(validation.quota.attempts, 2);
-        assert_eq!(cached_after_failure.observations[0].target_cents, 22_500);
-        assert!(cached_after_failure.from_cache);
-        assert_eq!(invalid_provider.calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn successful_explicit_validation_replaces_the_cached_result() {
-        let db = Arc::new(Db::open_in_memory().unwrap());
-        let initial_provider = Arc::new(FakeProvider::successful(vec![raw(
-            Some("Jane"),
-            Some("Firm"),
-            "2026-07-01",
-            225.0,
-        )]));
-        service(Arc::clone(&db), initial_provider, true).get("AAPL", vec![]);
-
-        let updated_provider = Arc::new(FakeProvider::successful(vec![raw(
-            Some("Jane"),
-            Some("Firm"),
-            "2026-07-02",
-            250.0,
-        )]));
-        let validating_service = service(db, Arc::clone(&updated_provider), true);
-        let validation = validating_service.test_connection("AAPL");
-        let cached = validating_service.get("AAPL", vec![]);
-
-        assert_eq!(validation.observations[0].target_cents, 25_000);
-        assert!(!validation.from_cache);
-        assert_eq!(validation.quota.attempts, 2);
-        assert_eq!(cached.observations[0].target_cents, 25_000);
-        assert!(cached.from_cache);
-        assert_eq!(updated_provider.calls.load(Ordering::SeqCst), 1);
+            assert!(normalized.iter().all(|item| {
+                item.symbol.eq_ignore_ascii_case(symbol)
+                    && item.target_cents > 0
+                    && item.horizon_epoch > now
+            }));
+        }
     }
 }

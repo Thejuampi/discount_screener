@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fmt } from "../api";
 import type { OpportunityRow, Decision, SetupLabel } from "../api";
 import { useT } from "../i18n";
@@ -12,6 +12,17 @@ import {
 import { createRegimePresentation, regimeRowInput } from "../regimePresentation";
 import { UI, UiInspectable } from "../uiInspect";
 import { verdictFromTechnicalScore } from "../technicalVerdict";
+import {
+  applyListFilters,
+  countActiveFilters,
+  EMPTY_LIST_FILTERS,
+  hasActiveFilters,
+  LIST_FILTER_PRESETS,
+  loadListFiltersFromStorage,
+  parseFilterNumber,
+  saveListFiltersToStorage,
+  type ListFilterState,
+} from "../opportunityListFilters";
 
 interface Props {
   rows: OpportunityRow[];
@@ -28,6 +39,8 @@ type SortKey =
   | "gap_bps" | "decision" | "setup_score" | "composite_score" | "fundamentals_score"
   | "technical_score" | "forecast_score" | "analyst_opinion_count"
   | "recommendation_mean_hundredths" | "sector_name";
+
+type FilterField = "minSetupScore" | "minGapPct" | "minCompositeScore";
 
 const SETUP_STYLE: Record<SetupLabel, { bg: string; color: string; shadow: string; icon: string }> = {
   StrongBuy:        { bg: "linear-gradient(135deg, #16a34a, #15803d)", color: "#fff",    shadow: "0 0 0 1px rgba(22,163,74,0.55), 0 3px 12px rgba(22,163,74,0.45)", icon: "▲▲▲" },
@@ -94,6 +107,11 @@ function sortRows(rows: OpportunityRow[], key: SortKey, asc: boolean): Opportuni
   });
 }
 
+function filterDraftValue(filters: ListFilterState, field: FilterField): string {
+  var v = filters[field];
+  return v == null ? "" : String(v);
+}
+
 export function OpportunityList({
   rows,
   selectedSymbol,
@@ -107,24 +125,104 @@ export function OpportunityList({
   // Default: Android V3 ranks by composite; setup_score mirrors composite under V3/Short.
   const [sortKey, setSortKey] = useState<SortKey>("composite_score");
   const [sortAsc, setSortAsc] = useState(false);
+  const [filters, setFilters] = useState<ListFilterState>(() => loadListFiltersFromStorage());
+  const [drafts, setDrafts] = useState(() => {
+    var initial = loadListFiltersFromStorage();
+    return {
+      minSetupScore: filterDraftValue(initial, "minSetupScore"),
+      minGapPct: filterDraftValue(initial, "minGapPct"),
+      minCompositeScore: filterDraftValue(initial, "minCompositeScore"),
+    };
+  });
+
+  useEffect(() => {
+    saveListFiltersToStorage(filters);
+  }, [filters]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortAsc((a) => !a);
     else { setSortKey(key); setSortAsc(key === "symbol" || key === "company_name" || key === "sector_name"); }
   };
 
-  const sorted = sortRows(rows, sortKey, sortAsc);
+  const setFilterField = (field: FilterField, raw: string) => {
+    setDrafts((d) => ({ ...d, [field]: raw }));
+    var parsed = parseFilterNumber(raw);
+    setFilters((prev) => {
+      if (prev[field] === parsed) return prev;
+      return { ...prev, [field]: parsed };
+    });
+  };
 
-  const th = (label: string, key: SortKey, title?: string) => {
+  const clearFilters = () => {
+    setFilters({ ...EMPTY_LIST_FILTERS });
+    setDrafts({ minSetupScore: "", minGapPct: "", minCompositeScore: "" });
+  };
+
+  const applyPreset = (preset: (typeof LIST_FILTER_PRESETS)[number]) => {
+    var next: ListFilterState = {
+      minSetupScore: preset.minSetupScore,
+      minGapPct: preset.minGapPct,
+      minCompositeScore: preset.minCompositeScore,
+    };
+    setFilters(next);
+    setDrafts({
+      minSetupScore: filterDraftValue(next, "minSetupScore"),
+      minGapPct: filterDraftValue(next, "minGapPct"),
+      minCompositeScore: filterDraftValue(next, "minCompositeScore"),
+    });
+  };
+
+  const filteredRows = useMemo(() => applyListFilters(rows, filters), [rows, filters]);
+  const sorted = useMemo(
+    () => sortRows(filteredRows, sortKey, sortAsc),
+    [filteredRows, sortKey, sortAsc],
+  );
+  const activeFilterCount = countActiveFilters(filters);
+  const filtersOn = hasActiveFilters(filters);
+
+  const th = (
+    label: string,
+    key: SortKey,
+    title?: string,
+    filter?: { field: FilterField; unit: string; placeholder: string; title: string },
+  ) => {
     const active = sortKey === key;
     const arrow = active ? (sortAsc ? " ▲" : " ▼") : "";
+    const filterActive = filter != null && filters[filter.field] != null;
     return (
       <th
-        className={`sortable-th ${active ? "sort-active" : ""}`}
+        className={`sortable-th ${active ? "sort-active" : ""}${filter ? " filterable-th" : ""}${filterActive ? " filter-active" : ""}`}
         title={title ?? label}
-        onClick={() => handleSort(key)}
       >
-        {label}{arrow}
+        <button
+          type="button"
+          className="th-sort-btn"
+          onClick={() => handleSort(key)}
+          title={title ?? label}
+        >
+          {label}{arrow}
+        </button>
+        {filter && (
+          <label className="th-filter" title={filter.title} onClick={(e) => e.stopPropagation()}>
+            <span className="th-filter-op" aria-hidden="true">≥</span>
+            <input
+              className="th-filter-input"
+              type="text"
+              inputMode="decimal"
+              placeholder={filter.placeholder}
+              value={drafts[filter.field]}
+              aria-label={filter.title}
+              onChange={(e) => setFilterField(filter.field, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setFilterField(filter.field, "");
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+            />
+            <span className="th-filter-unit">{filter.unit}</span>
+          </label>
+        )}
       </th>
     );
   };
@@ -157,129 +255,220 @@ export function OpportunityList({
       snapshot={{
         scoringModel,
         rowCount: sorted.length,
+        sourceRowCount: rows.length,
         sortKey,
         sortAsc,
         selectedSymbol,
+        filters,
+        activeFilterCount,
       }}
     >
-      <table className="stock-table">
-        <thead>
-          <tr>
-            {th(t("col.symbol"),    "symbol")}
-            {th(t("col.setup"),     "setup_score",                    t(presentation.setupTooltipKey))}
-            {th(t("col.company"),   "company_name")}
-            {th(t("col.price"),     "market_price_cents")}
-            {th(t("col.dailyChange"), "daily_change_bps", t("col.dailyChange.tooltip"))}
-            <th className="sort-th">{t("col.trend")}</th>
-            {th(t(presentation.targetColumnKey), "intrinsic_value_cents", t(presentation.analystTargetLabelKey))}
-            {th(t(presentation.gapColumnKey), "gap_bps", t(presentation.gapLabelKey))}
-            {th(
-              scoringModel === "aggressive_v3" || scoringModel === "short_v3" ? "F·T·Fc·R" : "F·T·Fc",
-              "fundamentals_score",
-              t(scoringDimensionsTooltipKey(scoringModel)),
-            )}
-            {th(t("col.analysts"),  "analyst_opinion_count")}
-            {th(t("col.sector"),    "sector_name")}
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((row) => {
-            const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
+      <div className="list-filter-bar" role="toolbar" aria-label={t("listFilter.toolbar")}>
+        <div className="list-filter-presets">
+          <span className="list-filter-label">{t("listFilter.presets")}</span>
+          {LIST_FILTER_PRESETS.map((preset) => {
+            const active =
+              filters.minSetupScore === preset.minSetupScore
+              && filters.minGapPct === preset.minGapPct
+              && filters.minCompositeScore === preset.minCompositeScore;
             return (
-              <UiInspectable
-                key={row.symbol}
-                as="tr"
-                className={`stock-row ${selectedSymbol === row.symbol ? "selected" : ""} ${row.qualification}`}
-                onClick={() => onSelect(row.symbol)}
-                source={UI.screenerRow}
-                snapshot={{
-                  symbol: row.symbol,
-                  companyName: row.company_name,
-                  assetType: row.asset_type,
-                  decision: row.decision,
-                  setupLabel: row.setup_label,
-                  setupScore: row.setup_score,
-                  compositeScore: row.composite_score,
-                  fundamentalsScore: row.fundamentals_score,
-                  technicalScore: row.technical_score,
-                  technicalVerdict: verdictFromTechnicalScore(row.technical_score),
-                  forecastScore: row.forecast_score,
-                  regimeScore: marketContext.score,
-                  gapBps: row.gap_bps,
-                  qualification: row.qualification,
-                  confidence: row.confidence,
-                  marketPriceCents: row.market_price_cents,
-                  intrinsicValueCents: row.intrinsic_value_cents,
-                  sectorName: row.sector_name,
-                  scoringModel,
-                }}
+              <button
+                key={preset.id}
+                type="button"
+                className={`list-filter-chip${active ? " active" : ""}`}
+                onClick={() => applyPreset(preset)}
+                title={t(`listFilter.preset.${preset.id}.title`)}
               >
-                <td className="symbol-cell">
-                  {row.asset_type === "crypto" ? (
-                    <span className="crypto-badge" title="Cryptocurrency — scoring técnico solamente">₿</span>
-                  ) : row.asset_type === "etf" ? (
-                    <span className="etf-badge" title="ETF — scoring técnico solamente">ETF</span>
-                  ) : (
-                    <span className="qual-badge">{QUAL_LABEL[row.qualification]}</span>
-                  )}
-                  <strong>{row.symbol}</strong>
-                </td>
-                <td>
-                  <SetupBadge label={row.setup_label} score={row.setup_score} t={t} scoringModel={scoringModel} />
-                </td>
-                <td className="company-cell">{row.company_name ?? "—"}</td>
-                <td className="num-cell">{fmt.dollars(row.market_price_cents)}</td>
-                <td className="num-cell">
-                  {row.daily_change_bps != null ? (
-                    <span style={{
-                      color: row.daily_change_bps > 0 ? "var(--success)"
-                        : row.daily_change_bps < 0 ? "var(--danger)" : "var(--text-4)",
-                      fontWeight: 600,
-                    }}>
-                      {row.daily_change_bps > 0 ? "+" : ""}{(row.daily_change_bps / 100).toFixed(2)}%
-                    </span>
-                  ) : <span style={{ color: "var(--text-5)" }}>—</span>}
-                </td>
-                <td><Sparkline data={row.spark} /></td>
-                <td className="num-cell">
-                  {row.intrinsic_value_cents > 0 ? fmt.dollars(row.intrinsic_value_cents) : "—"}
-                </td>
-                <td className="num-cell gap-cell">
-                  {(() => {
-                    const gap = presentation.gap(row.gap_bps);
-                    const className = gap.tone === "favorable" ? "gap-positive"
-                      : gap.tone === "adverse" ? "gap-adverse" : "gap-neutral";
-                    return (
-                      <span className={className} title={renderText(gap.text, t)}>
-                        {gap.marker} {renderText(gap.compactText, t)}
-                      </span>
-                    );
-                  })()}
-                </td>
-                <td className="num-cell score-trio">
-                  <ScorePip v={row.fundamentals_score} title={t(presentation.bucketLabelKeys[0])} />
-                  <span className="score-sep">·</span>
-                  <ScorePip v={row.technical_score} title={t(presentation.bucketLabelKeys[1])} />
-                  <span className="score-sep">·</span>
-                  <ScorePip v={row.forecast_score} title={t(presentation.bucketLabelKeys[2])} />
-                  {marketContext.visible && (
-                    <>
-                      <span className="score-sep">·</span>
-                      <ScorePip
-                        v={marketContext.score}
-                        title={`${t("analysis.marketContext.title")}: ${t(marketContext.statusKey)}`}
-                        muted={marketContext.muted}
-                      />
-                    </>
-                  )}
-                </td>
-                <td className="num-cell">{row.analyst_opinion_count ?? "—"}</td>
-                <td className="sector-cell">{row.sector_name ?? "—"}</td>
-              </UiInspectable>
+                {t(`listFilter.preset.${preset.id}`)}
+              </button>
             );
           })}
-        </tbody>
-      </table>
+          <label
+            className={`list-filter-inline${filters.minCompositeScore != null ? " filter-active" : ""}`}
+            title={t("listFilter.composite.title")}
+          >
+            <span className="list-filter-inline-label">{t("listFilter.composite.short")}</span>
+            <span className="th-filter-op" aria-hidden="true">≥</span>
+            <input
+              className="th-filter-input"
+              type="text"
+              inputMode="decimal"
+              placeholder="—"
+              value={drafts.minCompositeScore}
+              aria-label={t("listFilter.composite.title")}
+              onChange={(e) => setFilterField("minCompositeScore", e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setFilterField("minCompositeScore", "");
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+            />
+            <span className="th-filter-unit">{t("listFilter.unit.pts")}</span>
+          </label>
+        </div>
+        <div className="list-filter-meta">
+          <span className="list-filter-count">
+            {filtersOn
+              ? t("listFilter.showing", { shown: sorted.length, total: rows.length })
+              : t("listFilter.showingAll", { total: rows.length })}
+          </span>
+          {filtersOn && (
+            <button type="button" className="list-filter-clear" onClick={clearFilters}>
+              {t("listFilter.clear")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div className="empty-state empty-state--filtered">
+          <p>{t("listFilter.nomatch")}</p>
+          <p className="hint">{t("listFilter.nomatch.hint")}</p>
+          <button type="button" className="list-filter-clear list-filter-clear--block" onClick={clearFilters}>
+            {t("listFilter.clear")}
+          </button>
+        </div>
+      ) : (
+        <table className="stock-table">
+          <thead>
+            <tr>
+              {th(t("col.symbol"),    "symbol")}
+              {th(
+                t("col.setup"),
+                "setup_score",
+                t(presentation.setupTooltipKey),
+                {
+                  field: "minSetupScore",
+                  unit: t("listFilter.unit.pts"),
+                  placeholder: "—",
+                  title: t("listFilter.setup.title"),
+                },
+              )}
+              {th(t("col.company"),   "company_name")}
+              {th(t("col.price"),     "market_price_cents")}
+              {th(t("col.dailyChange"), "daily_change_bps", t("col.dailyChange.tooltip"))}
+              <th className="sort-th">{t("col.trend")}</th>
+              {th(t(presentation.targetColumnKey), "intrinsic_value_cents", t(presentation.analystTargetLabelKey))}
+              {th(
+                t(presentation.gapColumnKey),
+                "gap_bps",
+                t(presentation.gapLabelKey),
+                {
+                  field: "minGapPct",
+                  unit: "%",
+                  placeholder: "—",
+                  title: t("listFilter.gap.title"),
+                },
+              )}
+              {th(
+                scoringModel === "aggressive_v3" || scoringModel === "short_v3" ? "F·T·Fc·R" : "F·T·Fc",
+                "fundamentals_score",
+                t(scoringDimensionsTooltipKey(scoringModel)),
+              )}
+              {th(t("col.analysts"),  "analyst_opinion_count")}
+              {th(t("col.sector"),    "sector_name")}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((row) => {
+              const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
+              return (
+                <UiInspectable
+                  key={row.symbol}
+                  as="tr"
+                  className={`stock-row ${selectedSymbol === row.symbol ? "selected" : ""} ${row.qualification}`}
+                  onClick={() => onSelect(row.symbol)}
+                  source={UI.screenerRow}
+                  snapshot={{
+                    symbol: row.symbol,
+                    companyName: row.company_name,
+                    assetType: row.asset_type,
+                    decision: row.decision,
+                    setupLabel: row.setup_label,
+                    setupScore: row.setup_score,
+                    compositeScore: row.composite_score,
+                    fundamentalsScore: row.fundamentals_score,
+                    technicalScore: row.technical_score,
+                    technicalVerdict: verdictFromTechnicalScore(row.technical_score),
+                    forecastScore: row.forecast_score,
+                    regimeScore: marketContext.score,
+                    gapBps: row.gap_bps,
+                    qualification: row.qualification,
+                    confidence: row.confidence,
+                    marketPriceCents: row.market_price_cents,
+                    intrinsicValueCents: row.intrinsic_value_cents,
+                    sectorName: row.sector_name,
+                    scoringModel,
+                  }}
+                >
+                  <td className="symbol-cell">
+                    {row.asset_type === "crypto" ? (
+                      <span className="crypto-badge" title="Cryptocurrency — scoring técnico solamente">₿</span>
+                    ) : row.asset_type === "etf" ? (
+                      <span className="etf-badge" title="ETF — scoring técnico solamente">ETF</span>
+                    ) : (
+                      <span className="qual-badge">{QUAL_LABEL[row.qualification]}</span>
+                    )}
+                    <strong>{row.symbol}</strong>
+                  </td>
+                  <td>
+                    <SetupBadge label={row.setup_label} score={row.setup_score} t={t} scoringModel={scoringModel} />
+                  </td>
+                  <td className="company-cell">{row.company_name ?? "—"}</td>
+                  <td className="num-cell">{fmt.dollars(row.market_price_cents)}</td>
+                  <td className="num-cell">
+                    {row.daily_change_bps != null ? (
+                      <span style={{
+                        color: row.daily_change_bps > 0 ? "var(--success)"
+                          : row.daily_change_bps < 0 ? "var(--danger)" : "var(--text-4)",
+                        fontWeight: 600,
+                      }}>
+                        {row.daily_change_bps > 0 ? "+" : ""}{(row.daily_change_bps / 100).toFixed(2)}%
+                      </span>
+                    ) : <span style={{ color: "var(--text-5)" }}>—</span>}
+                  </td>
+                  <td><Sparkline data={row.spark} /></td>
+                  <td className="num-cell">
+                    {row.intrinsic_value_cents > 0 ? fmt.dollars(row.intrinsic_value_cents) : "—"}
+                  </td>
+                  <td className="num-cell gap-cell">
+                    {(() => {
+                      const gap = presentation.gap(row.gap_bps);
+                      const className = gap.tone === "favorable" ? "gap-positive"
+                        : gap.tone === "adverse" ? "gap-adverse" : "gap-neutral";
+                      return (
+                        <span className={className} title={renderText(gap.text, t)}>
+                          {gap.marker} {renderText(gap.compactText, t)}
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td className="num-cell score-trio">
+                    <ScorePip v={row.fundamentals_score} title={t(presentation.bucketLabelKeys[0])} />
+                    <span className="score-sep">·</span>
+                    <ScorePip v={row.technical_score} title={t(presentation.bucketLabelKeys[1])} />
+                    <span className="score-sep">·</span>
+                    <ScorePip v={row.forecast_score} title={t(presentation.bucketLabelKeys[2])} />
+                    {marketContext.visible && (
+                      <>
+                        <span className="score-sep">·</span>
+                        <ScorePip
+                          v={marketContext.score}
+                          title={`${t("analysis.marketContext.title")}: ${t(marketContext.statusKey)}`}
+                          muted={marketContext.muted}
+                        />
+                      </>
+                    )}
+                  </td>
+                  <td className="num-cell">{row.analyst_opinion_count ?? "—"}</td>
+                  <td className="sector-cell">{row.sector_name ?? "—"}</td>
+                </UiInspectable>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </UiInspectable>
   );
 }

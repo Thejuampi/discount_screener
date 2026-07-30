@@ -1,73 +1,71 @@
-# React + TypeScript + Vite
+# Vantage — Windows workstation (Tauri + React)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Windows desktop app for Discount Screener / Vantage.
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```text
+cd apps/windows
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Requires Node.js, Rust toolchain, [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), and WebView2.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Commands
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Command | Purpose |
+| --- | --- |
+| `npm test` | Frontend unit tests |
+| `npm run build` | Type-check + Vite production build |
+| `npm run tauri:dev` | Live Tauri app (default universe = last saved / `sp500`) |
+| **`npm run tauri:dev:qa`** | **Live Tauri with QA universe locked (≤20 symbols)** — use for agent/manual live QA |
+| `npm run test:e2e` | WebdriverIO e2e (when configured) |
+
+### Live QA (agents and humans) — ALWAYS profile `qa`
+
+**QA se hace con profile `qa`.** No exceptions unless the user explicitly orders another universe.
+
+| | |
+| --- | --- |
+| **Required command** | `npm run tauri:dev:qa` |
+| **Wrong** | `npm run tauri:dev` / bare `tauri dev` for QA (often full SP500) |
+| **Wrong** | `tauri dev -- -- --profile qa` (Cargo steals `--profile`) |
+
+```text
+npm run tauri:dev:qa
+```
+
+This sets `DS_UNIVERSE_PROFILE=qa` and starts Tauri. The app locks membership to ≤20 SP500 names (top score + ≥25% gap from `history.sqlite`, with priority fill if the DB is thin).
+
+**Do not** use:
+
+```text
+tauri dev -- -- --profile qa
+cargo tauri dev -- -- --profile qa
+```
+
+Cargo treats `--profile` as a **compile** profile (`error: profile qa is not defined`), so the flag often never reaches the app and agents fall back to a full-universe cold start.
+
+Equivalent env form:
+
+```text
+$env:DS_UNIVERSE_PROFILE = "qa"
+npm run tauri:dev
+```
+
+Binary (when the frontend/dev server is already up):
+
+```text
+.\src-tauri\target\debug\discount-screener-windows.exe --universe qa
+```
+
+See also: [`docs/valuation-live-qa-checklist.md`](../../docs/valuation-live-qa-checklist.md) and `AGENTS.md` § Windows live QA profile.
+
+## Rust tests (valuation / feed)
+
+```text
+cd src-tauri
+cargo test --lib
+cargo test --lib dcf_model::
+cargo test --lib valuation_baseline::
 ```

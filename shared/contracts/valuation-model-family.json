@@ -1,11 +1,15 @@
 {
   "contract": "valuation-model-family",
-  "version": "1",
+  "version": "2",
   "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
   "notes": [
-    "Golden cases for classifier + model selection. Numeric residual-income expected values are filled when engine Phase 1 lands; until then selection assertions are authoritative.",
-    "ACGL fundamentals sampled 2026-07-25 from public sources (Macrotrends/Yahoo/EDGAR/IR). Do not invent replacements without re-sampling."
+    "Golden cases for classifier, model selection, and executable policy/2 FCFF regressions.",
+    "ACGL fundamentals sampled 2026-07-25 from public sources (Macrotrends/Yahoo/EDGAR/IR). T and AMZN inputs were sampled 2026-07-30 from Yahoo plus SEC companyfacts. Do not invent replacements without re-sampling."
   ],
+  "policy2Adoption": {
+    "executableSurfaces": ["windows", "android"],
+    "deferredSurfaces": ["desktop"]
+  },
   "forbiddenAcceptancePatterns": [
     "assert_intrinsic_over_price_ratio_bounded",
     "min_wacc_floor_as_valuation_truth",
@@ -31,6 +35,26 @@
       "mustNotUseModel": "FcffWacc"
     },
     {
+      "name": "ci_healthcare_plans_is_financial_services",
+      "symbol": "CI",
+      "sectorName": "Healthcare",
+      "industryName": "Healthcare Plans",
+      "sectorKey": "healthcare",
+      "industryKey": "healthcare-plans",
+      "expectedBusinessClass": "FinancialServices",
+      "expectedModel": "ResidualIncomeEquity",
+      "mustNotUseModel": "FcffWacc",
+      "notes": "Managed care float must not run FCFF primary (same class of failure as ACGL)."
+    },
+    {
+      "name": "pharma_stays_operating_fcff",
+      "symbol": "PFE",
+      "sectorName": "Healthcare",
+      "industryName": "Drug Manufacturers - General",
+      "expectedBusinessClass": "OperatingNonFinancial",
+      "expectedModel": "FcffWacc"
+    },
+    {
       "name": "operating_industrial_uses_fcff",
       "symbol": "EXAMPLE_OPERATING",
       "sectorName": "Industrials",
@@ -46,6 +70,25 @@
       "assetClassHint": "Etf",
       "expectedBusinessClass": "NotEligible",
       "expectedModel": "None"
+    },
+    {
+      "name": "missing_sector_industry_unclassified_refuses_valuation",
+      "symbol": "ZZZ",
+      "sectorName": null,
+      "industryName": null,
+      "expectedBusinessClass": "Unclassified",
+      "expectedModel": "None",
+      "mustNotUseModel": "FcffWacc",
+      "notes": "Closed-world classifier: no silent FCFF default when class is unknown."
+    },
+    {
+      "name": "unknown_sector_text_unclassified",
+      "symbol": "WEIRD",
+      "sectorName": "Intergalactic Conglomerate",
+      "industryName": "Moon Cheese",
+      "expectedBusinessClass": "Unclassified",
+      "expectedModel": "None",
+      "mustNotUseModel": "FcffWacc"
     }
   ],
   "regressionFixtures": [
@@ -78,12 +121,105 @@
           "no_price_multiple_hard_cap_required"
         ]
       }
+    },
+    {
+      "name": "t_class_provisional_fcff_calibrates_toward_weighted_analyst_not_clamp",
+      "symbol": "T",
+      "sampledInputs": {
+        "asOf": "2026-07-30",
+        "marketPriceDollars": 21.12,
+        "weightedAnalystMeanDollars": 30.02,
+        "jpmReferenceTargetDollars": 33.0,
+        "sharesOutstanding": 6948338835,
+        "marketCapDollars": 146748915712,
+        "betaMillis": 422,
+        "totalDebtDollars": 159750995968,
+        "totalCashDollars": 11964000256,
+        "sectorName": "Communication Services",
+        "industryName": "Telecom Services",
+        "fcfAnnualDollars": [
+          { "year": 2021, "valueDollars": 26420000000 },
+          { "year": 2023, "valueDollars": 20460000000 },
+          { "year": 2024, "valueDollars": 18510000000 },
+          { "year": 2025, "valueDollars": 19440000000 }
+        ],
+        "preCalibrationSoftBaseBandDollars": [46.0, 55.0],
+        "legacyFailureModes": [
+          "CapexTaxonomyMissFcfEqualsOcf",
+          "ProvisionalWaccTooCheapOnLeveredIssuer"
+        ]
+      },
+      "expected": {
+        "businessClass": "OperatingNonFinancial",
+        "model": "FcffWacc",
+        "discountRateKind": "Wacc",
+        "modelPolicyVersion": "business-class-policy/3",
+        "baseIntrinsicRangeDollars": [25.0, 35.0],
+        "latestFcfDollars": 19440000000,
+        "fcfRunRateDollars": 19470000000,
+        "acceptance": [
+          "uses_provisional_wacc_base_uplift_when_cod_default_and_levered",
+          "fcf_run_rate_recent_window_average",
+          "base_materially_closer_to_weighted_analyst_than_pre_calibration_band",
+          "base_not_assigned_equal_to_street_or_price",
+          "no_intrinsic_price_hard_cap",
+          "point_estimate_unreliable_while_rates_provisional"
+        ]
+      },
+      "evidence": "_bmad-output/planning-artifacts/research-dcf-vs-street-gap-T-2026-07-30.md"
+    },
+    {
+      "name": "amzn_capex_trough_does_not_invert_fcff_scenarios",
+      "symbol": "AMZN",
+      "sampledInputs": {
+        "asOf": "2026-07-30",
+        "marketPriceDollars": 239.33,
+        "weightedAnalystMeanDollars": 313.07,
+        "sharesOutstanding": 10757109436,
+        "marketCapDollars": 2574493679616,
+        "betaMillis": 1461,
+        "totalDebtDollars": 235540004864,
+        "totalCashDollars": 143088992256,
+        "sectorName": "Consumer Cyclical",
+        "industryName": "Internet Retail",
+        "fcfAnnualDollars": [
+          { "year": 2020, "valueDollars": 25924000000 },
+          { "year": 2021, "valueDollars": -14726000000 },
+          { "year": 2022, "valueDollars": -16893000000 },
+          { "year": 2023, "valueDollars": 32217000000 },
+          { "year": 2024, "valueDollars": 32878000000 },
+          { "year": 2025, "valueDollars": 7695000000 }
+        ]
+      },
+      "expected": {
+        "businessClass": "OperatingNonFinancial",
+        "model": "FcffWacc",
+        "discountRateKind": "Wacc",
+        "modelPolicyVersion": "business-class-policy/3",
+        "latestFcfDollars": 7695000000,
+        "fcfRunRateDollars": 24263333333,
+        "acceptance": [
+          "bear_less_than_or_equal_to_base_less_than_or_equal_to_bull",
+          "volatile_endpoint_growth_is_robustified_before_scenario_projection",
+          "latest_fcf_and_normalized_run_rate_remain_distinct",
+          "material_model_analyst_disagreement_remains_visible_not_blended"
+        ]
+      },
+      "evidence": "user-reported Windows detail snapshot plus SEC companyfacts sampled 2026-07-30"
     }
   ],
   "structuralConstraintsAllowed": [
     "stable_growth_strictly_less_than_discount_rate",
     "financial_services_not_fcff_primary",
     "terminal_roe_fades_to_competitive_long_run",
-    "missing_book_or_roe_is_unavailable_not_silent_fcff_fallback"
-  ]
+    "missing_book_or_roe_is_unavailable_not_silent_fcff_fallback",
+    "provisional_wacc_base_uplift_debt_scaled_not_output_clamp"
+  ],
+  "multiNameBaseline": {
+    "requiredForPolicyChanges": true,
+    "fixture": "apps/windows/src-tauri/tests/fixtures/valuation/baseline_cohort_2026-07-30.json",
+    "testModule": "valuation_baseline",
+    "policyDoc": "_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md",
+    "rule": "Single-ticker green is insufficient; multi-name baseline suite must pass before merge-quality claims on valuation policy/engine changes."
+  }
 }

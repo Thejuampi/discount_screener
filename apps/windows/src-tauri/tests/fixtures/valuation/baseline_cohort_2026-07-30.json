@@ -1,0 +1,999 @@
+{
+  "as_of": "2026-07-30",
+  "source": "history.sqlite High+gap>=2000 + SEC companyfacts pin; quarantined slots replaced with next qualifying High+20% names with usable FCF",
+  "selection_rule": "latest snapshot High gap_bps>=2000; original top-20 by gap; slots without usable offline FCFF drivers replaced by next High+20% with SEC FCF",
+  "members": [
+    {
+      "symbol": "VRRM",
+      "cik": "0001682745",
+      "entity_name": "VERRA MOBILITY CORPORATION",
+      "selection": {
+        "gap_bps": 5821,
+        "confidence": "High",
+        "composite_score": 20,
+        "snapshot_market_price_cents": 412,
+        "snapshot_intrinsic_cents": 986,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 412,
+        "shares_outstanding": 153689000,
+        "market_cap_dollars": 633198680,
+        "total_debt_dollars": 1028045000,
+        "total_cash_dollars": 65272000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Software - Infrastructure",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 168173000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 170151000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 149116000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 152786000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 136708000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "PSIX",
+      "cik": "0001137091",
+      "entity_name": "POWER SOLUTIONS INTERNATIONAL, INC.",
+      "selection": {
+        "gap_bps": 5483,
+        "confidence": "High",
+        "composite_score": -7,
+        "snapshot_market_price_cents": 3178,
+        "snapshot_intrinsic_cents": 7037,
+        "captured_at": 1784688429
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 3178,
+        "shares_outstanding": 23063000,
+        "market_cap_dollars": 732942140,
+        "total_debt_dollars": 184000,
+        "total_cash_dollars": 41250000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Specialty Industrial Machinery",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": -61478000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -8845000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 70512000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 62390000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 24113000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "ADMA",
+      "cik": "0001368514",
+      "entity_name": "ADMA BIOLOGICS, INC.",
+      "selection": {
+        "gap_bps": 4947,
+        "confidence": "High",
+        "composite_score": 8,
+        "snapshot_market_price_cents": 859,
+        "snapshot_intrinsic_cents": 1700,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 859,
+        "shares_outstanding": 239955762,
+        "market_cap_dollars": 2061219995,
+        "total_debt_dollars": 72143000,
+        "total_cash_dollars": 87630000,
+        "beta_millis": 1000,
+        "sector_name": "Healthcare",
+        "industry_name": "Biotechnology",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": -125880000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -73419000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 4029000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 110446000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 27821000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "INOD",
+      "cik": "0000903651",
+      "entity_name": "INNODATA\u00a0INC.",
+      "selection": {
+        "gap_bps": 4816,
+        "confidence": "High",
+        "composite_score": 4,
+        "snapshot_market_price_cents": 6363,
+        "snapshot_intrinsic_cents": 12275,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 6363,
+        "shares_outstanding": 35572000,
+        "market_cap_dollars": 2263446360,
+        "total_debt_dollars": 5956000,
+        "total_cash_dollars": 82230000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Information Technology Services",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 783000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -7742000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 339000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 27123000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 35648000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "MH",
+      "cik": "0001951070",
+      "entity_name": "McGraw Hill, Inc.",
+      "selection": {
+        "gap_bps": 4799,
+        "confidence": "High",
+        "composite_score": 25,
+        "snapshot_market_price_cents": 932,
+        "snapshot_intrinsic_cents": 1792,
+        "captured_at": 1784688429
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 932,
+        "shares_outstanding": 183670022,
+        "market_cap_dollars": 1711804605,
+        "total_debt_dollars": 2560698000,
+        "total_cash_dollars": 253519000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Conglomerates",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2024,
+            "value_dollars": 154203000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 575222000.0
+          },
+          {
+            "year": 2026,
+            "value_dollars": 246311000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "VICR",
+      "cik": "0000751978",
+      "entity_name": "VICOR CORPORATION",
+      "selection": {
+        "gap_bps": 4715,
+        "confidence": "High",
+        "composite_score": 4,
+        "snapshot_market_price_cents": 21470,
+        "snapshot_intrinsic_cents": 40625,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 21470,
+        "shares_outstanding": 47254000,
+        "market_cap_dollars": 10145433800,
+        "total_debt_dollars": 0,
+        "total_cash_dollars": 402805000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Electronic Components",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 6683000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -41027000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 41076000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 27240000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 119230000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "AMSC",
+      "cik": "0000880807",
+      "entity_name": "American Superconductor Corporation",
+      "selection": {
+        "gap_bps": 4711,
+        "confidence": "High",
+        "composite_score": 4,
+        "snapshot_market_price_cents": 3455,
+        "snapshot_intrinsic_cents": 6533,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 3455,
+        "shares_outstanding": 43902000,
+        "market_cap_dollars": 1516814099,
+        "total_debt_dollars": 0,
+        "total_cash_dollars": 140693000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Electrical Equipment & Parts",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2022,
+            "value_dollars": -19915000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": -23721000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 1204000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 25870000.0
+          },
+          {
+            "year": 2026,
+            "value_dollars": 18260000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "HNRG",
+      "cik": "0000788965",
+      "entity_name": "HALLADOR ENERGY CO",
+      "selection": {
+        "gap_bps": 4523,
+        "confidence": "High",
+        "composite_score": -4,
+        "snapshot_market_price_cents": 1661,
+        "snapshot_intrinsic_cents": 3033,
+        "captured_at": 1784688429
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 1661,
+        "shares_outstanding": 46519000,
+        "market_cap_dollars": 772680590,
+        "total_debt_dollars": 29678000,
+        "total_cash_dollars": 10070000,
+        "beta_millis": 1000,
+        "sector_name": "Energy",
+        "industry_name": "Thermal Coal",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 19924000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 149000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": -15938000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 12567000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 11919000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "BWMN",
+      "cik": "0001847590",
+      "entity_name": "BOWMAN CONSULTING GROUP LTD.",
+      "selection": {
+        "gap_bps": 4461,
+        "confidence": "High",
+        "composite_score": 5,
+        "snapshot_market_price_cents": 2640,
+        "snapshot_intrinsic_cents": 4767,
+        "captured_at": 1784688429
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 2640,
+        "shares_outstanding": 16453401,
+        "market_cap_dollars": 434369786,
+        "total_debt_dollars": 57596000,
+        "total_cash_dollars": 11066000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Engineering & Construction",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 3812000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 8268000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 9629000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 23675000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 33434000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "MU",
+      "cik": "0000723125",
+      "entity_name": "Micron Technology, Inc.",
+      "selection": {
+        "gap_bps": 4289,
+        "confidence": "High",
+        "composite_score": 50,
+        "snapshot_market_price_cents": 86085,
+        "snapshot_intrinsic_cents": 150738,
+        "captured_at": 1785428658
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 86085,
+        "shares_outstanding": 1142000000,
+        "market_cap_dollars": 983090700000,
+        "total_debt_dollars": 11533000000,
+        "total_cash_dollars": 9642000000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Semiconductors",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 6260000000.000001
+          },
+          {
+            "year": 2022,
+            "value_dollars": 8059999999.999999
+          },
+          {
+            "year": 2023,
+            "value_dollars": -6199999999.999999
+          },
+          {
+            "year": 2024,
+            "value_dollars": 729999999.9999995
+          },
+          {
+            "year": 2025,
+            "value_dollars": 9170000000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_da_maintenance_capex_proxy"
+      }
+    },
+    {
+      "symbol": "IDCC",
+      "cik": "0001405495",
+      "entity_name": "INTERDIGITAL, INC.",
+      "selection": {
+        "gap_bps": 4285,
+        "confidence": "High",
+        "composite_score": 11,
+        "snapshot_market_price_cents": 26437,
+        "snapshot_intrinsic_cents": 46267,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 26437,
+        "shares_outstanding": 34770000,
+        "market_cap_dollars": 9192144900,
+        "total_debt_dollars": 217835000,
+        "total_cash_dollars": 738960000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Software - Application",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 127881000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 282883000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 209465000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 265679000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 528562000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "FIGS",
+      "cik": "0001846576",
+      "entity_name": "FIGS, Inc.",
+      "selection": {
+        "gap_bps": 4174,
+        "confidence": "High",
+        "composite_score": 2,
+        "snapshot_market_price_cents": 1027,
+        "snapshot_intrinsic_cents": 1763,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 1027,
+        "shares_outstanding": 196090295,
+        "market_cap_dollars": 2013847329,
+        "total_debt_dollars": 0,
+        "total_cash_dollars": 81985000,
+        "beta_millis": 1000,
+        "sector_name": "Consumer Cyclical",
+        "industry_name": "Apparel Manufacturing",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 63725000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -40677000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 84567000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 64141000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 53002000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "CALX",
+      "cik": "0001406666",
+      "entity_name": "Calix, Inc",
+      "selection": {
+        "gap_bps": 4099,
+        "confidence": "High",
+        "composite_score": 7,
+        "snapshot_market_price_cents": 3747,
+        "snapshot_intrinsic_cents": 6350,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 3747,
+        "shares_outstanding": 66956000,
+        "market_cap_dollars": 2508841320,
+        "total_debt_dollars": 0,
+        "total_cash_dollars": 143086000,
+        "beta_millis": 1000,
+        "sector_name": "Technology",
+        "industry_name": "Communication Equipment",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 46330000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 13116000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 38396000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 50346000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 115518000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "CDE",
+      "cik": "0000215466",
+      "entity_name": "COEUR MINING, INC.",
+      "selection": {
+        "gap_bps": 4083,
+        "confidence": "High",
+        "composite_score": 27,
+        "snapshot_market_price_cents": 1530,
+        "snapshot_intrinsic_cents": 2586,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 1530,
+        "shares_outstanding": 698689000,
+        "market_cap_dollars": 10689941700,
+        "total_debt_dollars": 266426000,
+        "total_cash_dollars": 553597000,
+        "beta_millis": 1000,
+        "sector_name": "Basic Materials",
+        "industry_name": "Gold",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": -17833000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -86010000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": -32534000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 49260000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 665717000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_min_capex_da"
+      }
+    },
+    {
+      "symbol": "MIR",
+      "cik": "0001809987",
+      "entity_name": "Mirion Technologies, Inc.",
+      "selection": {
+        "gap_bps": 4062,
+        "confidence": "High",
+        "composite_score": -1,
+        "snapshot_market_price_cents": 1627,
+        "snapshot_intrinsic_cents": 2740,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 1627,
+        "shares_outstanding": 275355000,
+        "market_cap_dollars": 4480025850,
+        "total_debt_dollars": 686400000,
+        "total_cash_dollars": 412300000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Specialty Industrial Machinery",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 30400000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 5200000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 58100000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 50300000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 106900000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "ROCK",
+      "cik": "0000912562",
+      "entity_name": "GIBRALTAR INDUSTRIES, INC.",
+      "selection": {
+        "gap_bps": 3987,
+        "confidence": "High",
+        "composite_score": 15,
+        "snapshot_market_price_cents": 4359,
+        "snapshot_intrinsic_cents": 7250,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 4359,
+        "shares_outstanding": 29796000,
+        "market_cap_dollars": 1298807640,
+        "total_debt_dollars": 0,
+        "total_cash_dollars": 115724000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Metal Fabrication",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 5365000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 82553000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 204592000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 156890000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 120588000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "HURN",
+      "cik": "0001289848",
+      "entity_name": "HURON CONSULTING GROUP INC.",
+      "selection": {
+        "gap_bps": 3983,
+        "confidence": "High",
+        "composite_score": 31,
+        "snapshot_market_price_cents": 11085,
+        "snapshot_intrinsic_cents": 18425,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 11085,
+        "shares_outstanding": 17406000,
+        "market_cap_dollars": 1929455100,
+        "total_debt_dollars": 290000000,
+        "total_cash_dollars": 24508000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Consulting Services",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 7116000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 72853000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 125818000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 192668000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 182957000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "VRT",
+      "cik": "0001674101",
+      "entity_name": "Vertiv Holdings Co",
+      "selection": {
+        "gap_bps": 3979,
+        "confidence": "High",
+        "composite_score": 31,
+        "snapshot_market_price_cents": 22646,
+        "snapshot_intrinsic_cents": 37615,
+        "captured_at": 1785429969
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 22646,
+        "shares_outstanding": 392511287,
+        "market_cap_dollars": 88888106054,
+        "total_debt_dollars": 2913000000,
+        "total_cash_dollars": 1728400000,
+        "beta_millis": 1000,
+        "sector_name": "Industrials",
+        "industry_name": "Electrical Equipment & Parts",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 137500000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": -252800000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 772600000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 1152300000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 1893800000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "INVA",
+      "cik": "0001080014",
+      "entity_name": "INNOVIVA, INC.",
+      "selection": {
+        "gap_bps": 3921,
+        "confidence": "High",
+        "composite_score": 18,
+        "snapshot_market_price_cents": 2158,
+        "snapshot_intrinsic_cents": 3550,
+        "captured_at": 1784690350
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 2158,
+        "shares_outstanding": 84849000,
+        "market_cap_dollars": 1831041419,
+        "total_debt_dollars": 748271000,
+        "total_cash_dollars": 550941000,
+        "beta_millis": 1000,
+        "sector_name": "Healthcare",
+        "industry_name": "Drug Manufacturers - Specialty & Generic",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 363813000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 201659000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 140653000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 188420000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 195799000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    },
+    {
+      "symbol": "APP",
+      "cik": "0001751008",
+      "entity_name": "AppLovin Corp",
+      "selection": {
+        "gap_bps": 3898,
+        "confidence": "High",
+        "composite_score": 18,
+        "snapshot_market_price_cents": 39939,
+        "snapshot_intrinsic_cents": 65460,
+        "captured_at": 1785429969
+      },
+      "status": "ok",
+      "quarantine": false,
+      "quarantine_reason": null,
+      "inputs": {
+        "market_price_cents": 39939,
+        "shares_outstanding": 338729000,
+        "market_cap_dollars": 135284975310,
+        "total_debt_dollars": 3512987000,
+        "total_cash_dollars": 2487096000,
+        "beta_millis": 1000,
+        "sector_name": "Communication Services",
+        "industry_name": "Internet Content & Information",
+        "analyst_target_mean_cents": null,
+        "fcf_annual": [
+          {
+            "year": 2021,
+            "value_dollars": 360461000.0
+          },
+          {
+            "year": 2022,
+            "value_dollars": 412111000.0
+          },
+          {
+            "year": 2023,
+            "value_dollars": 1057264000.0
+          },
+          {
+            "year": 2024,
+            "value_dollars": 2094235000.0
+          },
+          {
+            "year": 2025,
+            "value_dollars": 3971094000.0
+          }
+        ],
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
+      }
+    }
+  ]
+}

@@ -14,6 +14,7 @@ mod feed_log;
 mod fetcher;
 mod fibonacci;
 mod index_estimates;
+mod launch_profile;
 mod news;
 mod opportunity_v3;
 mod price_path;
@@ -30,6 +31,8 @@ mod smc;
 mod state;
 mod stooq;
 mod ticker_search;
+#[cfg(test)]
+mod valuation_baseline;
 mod yahoo_session;
 
 use state::AppState;
@@ -59,7 +62,28 @@ pub fn run() {
             // ── State / DB ────────────────────────────────────────────────────
             let app_data_dir = app.path().app_data_dir().expect("resolve app data dir");
             let db_path = app_data_dir.join("history.sqlite");
-            let app_state = AppState::new(db_path);
+
+            // Launch profile: --profile / --profile=NAME wins over DS_UNIVERSE_PROFILE.
+            // Invalid explicit values fail closed (never silent sp500).
+            let forced = match launch_profile::parse_forced_profile(
+                std::env::args().skip(1),
+                std::env::var(launch_profile::DS_UNIVERSE_PROFILE_ENV)
+                    .ok()
+                    .as_deref(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("discount_screener: {e}");
+                    return Err(e.to_string().into());
+                }
+            };
+            let app_state = AppState::new_with_forced_profile(db_path, forced)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if app_state.is_profile_locked() {
+                let name = app_state.active_profile.lock().unwrap().clone();
+                let n = app_state.active_symbols.lock().unwrap().len();
+                eprintln!("discount_screener: launch profile locked to {name} ({n} symbols)");
+            }
             app.manage(app_state);
 
             // Keep market-context (V3 4th bucket) warm independent of UI banner mount.
@@ -140,10 +164,11 @@ pub fn run() {
             commands::get_opportunities,
             commands::get_symbol_detail,
             commands::get_analyst_forecasts,
-            commands::fmp_settings_status,
-            commands::fmp_save_key,
-            commands::fmp_delete_key,
-            commands::fmp_test_key,
+            commands::load_analyst_forecasts,
+            commands::tipranks_settings_status,
+            commands::tipranks_save_key,
+            commands::tipranks_delete_key,
+            commands::tipranks_test_key,
             commands::get_candles,
             commands::get_alerts,
             commands::refresh_symbol,

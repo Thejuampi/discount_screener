@@ -1,6 +1,7 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.BusinessClass
+import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.FundamentalSnapshot
@@ -19,11 +20,13 @@ import kotlin.math.roundToLong
  * See `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`.
  */
 private const val ENGINE_VERSION = "valuation-model-family/1"
-private const val MODEL_POLICY_VERSION = "business-class-policy/1"
+/** Parity with Windows policy/3 (closed-world business class; no silent FCFF default). */
+private const val MODEL_POLICY_VERSION = "business-class-policy/3"
 private const val DEFAULT_RF_BPS = 430
 private const val DEFAULT_ERP_BPS = 450
 private const val DEFAULT_TAX_RATE_BPS = 2_100
 private const val DEFAULT_COST_OF_DEBT_BPS = 550
+private const val DEFAULT_COD_SPREAD_OVER_RF_BPS = 300
 private const val DEFAULT_RETENTION_BPS = 7_000
 private const val BETA_COMPANY_WEIGHT = 0.67
 private const val BETA_INDUSTRY_WEIGHT = 0.33
@@ -33,6 +36,8 @@ private const val COE_SCENARIO_BAND_BPS = 75
 private const val ROE_BEAR_HAIRCUT_BPS = 300
 private const val ROE_BULL_BOOST_BPS = 200
 private const val GROWTH_RECENT_WINDOW = 4
+/** Dynamic robustification band around stable growth; constrains inputs, not output. */
+private const val MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS = 1_200
 private const val STABLE_GROWTH_RF_BUFFER_BPS = 100
 /** Long-run nominal economy growth ceiling (bps); g_stable ≤ min(this, rf − buffer). */
 private const val MACRO_STABLE_GROWTH_BPS = 300
@@ -40,6 +45,10 @@ private const val MIN_STABLE_GROWTH_BPS = 50
 private const val GORDON_RATE_EPSILON_BPS = 50
 private const val MIN_COST_OF_DEBT_BPS = 200
 private const val MAX_COST_OF_DEBT_BPS = 1_200
+/** Soft-rate debt-weight cap (Windows parity). */
+private const val PROVISIONAL_MAX_DEBT_WEIGHT = 0.40
+/** Full uplift at debt-weight cap when CoD is policy default (T reverse-DCF ≈ +170 bps). */
+private const val PROVISIONAL_WACC_BASE_UPLIFT_BPS = 175
 
 data class MarketParams(
     val rfBps: Int = DEFAULT_RF_BPS,
@@ -53,6 +62,8 @@ data class MarketParams(
 
 private data class ResolvedWacc(
     val waccBps: Int,
+    val provisionalWaccUpliftBps: Int = 0,
+    val debtWeightBps: Int = 0,
     val inputs: WaccInputProvenance,
 )
 
@@ -65,14 +76,16 @@ object DcfAnalysisEngine {
         assetNotEquity: Boolean = false,
     ): BusinessClass {
         if (assetNotEquity) return BusinessClass.NotEligible
-        val blob = listOfNotNull(sectorName, industryName, sectorKey, industryKey)
-            .joinToString(" ")
-            .lowercase()
-        return if (isFinancialServicesText(blob)) {
-            BusinessClass.FinancialServices
-        } else {
-            BusinessClass.OperatingNonFinancial
+        val sector = listOfNotNull(sectorName, sectorKey).joinToString(" ").lowercase()
+        val industry = listOfNotNull(industryName, industryKey).joinToString(" ").lowercase()
+        val blob = "$sector $industry"
+        // Closed world: not-eligible → financial → operating → unclassified (fail).
+        if (isNotEligibleEquityText(blob)) return BusinessClass.NotEligible
+        if (isFinancialServicesText(blob)) return BusinessClass.FinancialServices
+        if (isOperatingNonFinancialText(sector, industry, blob)) {
+            return BusinessClass.OperatingNonFinancial
         }
+        return BusinessClass.Unclassified
     }
 
     fun compute(
@@ -83,7 +96,7 @@ object DcfAnalysisEngine {
         assetNotEquity: Boolean = false,
     ): Result<DcfAnalysis> = runCatching {
         when (
-            classifyBusiness(
+            val class_ = classifyBusiness(
                 fundamentals.sectorName,
                 fundamentals.industryName,
                 fundamentals.sectorKey,
@@ -92,7 +105,11 @@ object DcfAnalysisEngine {
             )
         ) {
             BusinessClass.NotEligible ->
-                error("valuation not eligible for this asset class")
+                error("valuation not eligible for this asset class (ETF/fund/crypto/REIT shell)")
+            BusinessClass.Unclassified ->
+                error(
+                    "business class unclassified: sector/industry missing or not in policy tables — valuation refused (no FCFF fallback)",
+                )
             BusinessClass.FinancialServices ->
                 residualIncome(fundamentals, marketPriceCents, marketParams)
             BusinessClass.OperatingNonFinancial ->
@@ -100,15 +117,71 @@ object DcfAnalysisEngine {
         }
     }
 
-    private fun isFinancialServicesText(blob: String): Boolean {
-        val keys = listOf(
-            "financial", "insurance", "bank", "banks", "capital markets",
-            "asset management", "credit services", "mortgage finance", "reinsurance",
-            "life insurance", "property & casualty", "property and casualty",
-            "diversified financial", "financial conglomerate", "brokerage",
-            "investment banking", "savings & loan", "thrift",
+    private fun containsAny(hay: String, keys: List<String>): Boolean =
+        keys.any { hay.contains(it) }
+
+    private fun isNotEligibleEquityText(blob: String): Boolean = containsAny(
+        blob,
+        listOf(
+            "exchange traded", "etf", "closed-end fund", "closed end fund", "mutual fund",
+            "money market", "cryptocurrency", "crypto ", "digital currency",
+            "reit", "real estate investment trust", "mortgage reit", "equity reit",
+        ),
+    )
+
+    private fun isFinancialServicesText(blob: String): Boolean = containsAny(
+        blob,
+        listOf(
+            "financial services", "financials", "financial", "insurance", "insur",
+            "bank", "banks", "capital markets", "asset management", "credit services",
+            "mortgage finance", "reinsurance", "life insurance",
+            "property & casualty", "property and casualty", "property casualty",
+            "diversified financial", "financial conglomerate", "savings & loan", "thrift",
+            "brokerage", "investment banking", "specialty insurance", "p&c",
+            "healthcare plans", "health care plans", "healthcare-plans", "health-care-plans",
+            "managed care", "managed-care", "health insurance", "medical insurance",
+            "insurance brokers", "insurance-brokers", "credit card", "consumer finance",
+            "shell companies",
+        ),
+    )
+
+    private fun isOperatingNonFinancialText(sector: String, industry: String, blob: String): Boolean {
+        val operatingSectors = listOf(
+            "technology", "information technology", "industrials", "industrial",
+            "consumer cyclical", "consumer defensive", "consumer staples", "consumer discretionary",
+            "energy", "utilities", "basic materials", "materials",
+            "communication services", "communication", "telecommunications",
         )
-        return keys.any { blob.contains(it) }
+        if (containsAny(sector, operatingSectors)) return true
+        if (sector.contains("healthcare") || sector.contains("health care")) {
+            if (isFinancialServicesText(industry) || isFinancialServicesText(blob)) return false
+            if (industry.trim().isEmpty()) return false
+            val healthOperating = listOf(
+                "drug", "pharma", "biotech", "biotechnology", "device", "devices", "diagnostics",
+                "medical instruments", "medical devices", "medical care", "medical distribution",
+                "health information", "health care equipment", "healthcare equipment",
+                "hospitals", "medical facilities", "tools & diagnostics", "tools and diagnostics",
+            )
+            return containsAny(industry, healthOperating) || containsAny(blob, healthOperating)
+        }
+        val operatingIndustry = listOf(
+            "software", "semiconductor", "semiconductors", "hardware", "computer",
+            "internet content", "internet retail", "it services", "information technology services",
+            "electronic", "aerospace", "defense", "airlines", "railroad", "trucking", "logistics",
+            "machinery", "construction", "building products", "engineering", "waste management",
+            "farming", "agriculture", "auto manufacturers", "auto parts", "automobiles",
+            "restaurants", "apparel", "footwear", "lodging", "leisure", "entertainment",
+            "packaging", "tobacco", "beverages", "food products", "confectioners",
+            "household products", "personal products", "discount stores", "department stores",
+            "specialty retail", "oil & gas", "oil and gas", "oil gas", "thermal coal", "uranium",
+            "renewable", "solar", "electric utilities", "gas utilities", "water utilities",
+            "independent power", "diversified utilities", "chemicals", "specialty chemicals",
+            "steel", "aluminum", "copper", "gold", "silver", "other industrial metals",
+            "other precious metals", "coking coal", "lumber", "paper", "building materials",
+            "telecom", "telecommunications", "media", "publishing", "broadcasting",
+            "advertising", "interactive media",
+        )
+        return containsAny(industry, operatingIndustry) || containsAny(blob, operatingIndustry)
     }
 
     private fun residualIncome(
@@ -223,33 +296,45 @@ object DcfAnalysisEngine {
         require(timeseries.freeCashFlow.size >= 3) {
             "DCF unavailable: need at least 3 annual free cash flow points."
         }
-        val latestFcf = timeseries.freeCashFlow.lastOrNull()?.value?.takeIf { it > 0.0 }
-            ?: error("DCF unavailable: latest annual free cash flow is not positive.")
+        val (runRate, fcfNormalized) = fcfRunRateDollars(timeseries)
+            ?: error("DCF unavailable: free cash flow run-rate is not positive.")
         val currentShares = latestShareCount(fundamentals, timeseries)
             ?: error("DCF unavailable: share count is missing.")
-        val gNear = recentFcfGrowthBps(timeseries)
+        val rawGNear = recentFcfGrowthBps(timeseries)
             ?: error("DCF unavailable: insufficient positive free cash flow history for growth.")
         val resolvedWacc = deriveWacc(fundamentals, timeseries, marketPriceCents, marketParams)
         val netDebtDollars = (fundamentals.totalDebtDollars ?: 0L) - (fundamentals.totalCashDollars ?: 0L)
         val gStable = marketParams.stableGrowthBps()
             .coerceAtMost(resolvedWacc.waccBps - GORDON_RATE_EPSILON_BPS)
             .coerceAtLeast(MIN_STABLE_GROWTH_BPS)
+        val gNear = rawGNear.coerceIn(
+            gStable - MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS,
+            gStable + MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS,
+        )
 
         val bearNear = (gNear - 400).coerceAtLeast(-1_200)
         val bullNear = (gNear + 400).coerceAtMost(2_400)
 
-        val bear = discountedFcffFade(latestFcf, currentShares, netDebtDollars, bearNear, gStable, resolvedWacc.waccBps)
+        val bear = discountedFcffFade(runRate, currentShares, netDebtDollars, bearNear, gStable, resolvedWacc.waccBps)
             ?: error("DCF unavailable: bear scenario produced an invalid value.")
-        val base = discountedFcffFade(latestFcf, currentShares, netDebtDollars, gNear, gStable, resolvedWacc.waccBps)
+        val base = discountedFcffFade(runRate, currentShares, netDebtDollars, gNear, gStable, resolvedWacc.waccBps)
             ?: error("DCF unavailable: base scenario produced an invalid value.")
-        val bull = discountedFcffFade(latestFcf, currentShares, netDebtDollars, bullNear, gStable, resolvedWacc.waccBps)
+        val bull = discountedFcffFade(runRate, currentShares, netDebtDollars, bullNear, gStable, resolvedWacc.waccBps)
             ?: error("DCF unavailable: bull scenario produced an invalid value.")
 
         val reasons = buildList {
             add("model=fcff_wacc")
             add("business_class=operating_non_financial")
             add("growth=recent_window_fade_to_stable")
+            if (fcfNormalized) add("fcf_run_rate=recent_window_average")
+            else add("fcf_run_rate=latest_positive")
+            if (gNear != rawGNear) {
+                add("growth=recent_window_robustified:raw=$rawGNear:used=$gNear")
+            }
             if (marketParams.provisional) add("market_params=provisional")
+            if (resolvedWacc.provisionalWaccUpliftBps > 0) {
+                add("wacc=provisional_base_uplift:${resolvedWacc.provisionalWaccUpliftBps}")
+            }
         }
 
         return DcfAnalysis(
@@ -269,17 +354,40 @@ object DcfAnalysisEngine {
             bookValuePerShareCents = fundamentals.bookValuePerShareCents,
             roe0Bps = fundamentals.returnOnEquityBps,
             reasonCodes = reasons,
+            latestFcfDollars = timeseries.freeCashFlow.lastOrNull()?.value?.roundToLong(),
+            fcfRunRateDollars = runRate.roundToLong(),
+            fcfRunRateNormalized = fcfNormalized,
+            provisionalWaccUpliftBps = resolvedWacc.provisionalWaccUpliftBps,
+            debtWeightBps = resolvedWacc.debtWeightBps,
         )
     }
 
-    private fun recentFcfGrowthBps(timeseries: FundamentalTimeseries): Int? {
-        val positive = timeseries.freeCashFlow.filter { it.value > 0.0 }
-        if (positive.size < 2) return null
-        val window = if (positive.size > GROWTH_RECENT_WINDOW) {
-            positive.takeLast(GROWTH_RECENT_WINDOW)
-        } else {
-            positive
+    private fun recentPositiveFcfWindow(timeseries: FundamentalTimeseries): List<AnnualReportedValue> {
+        val suffix = mutableListOf<AnnualReportedValue>()
+        var expectedYear: Int? = null
+        for (point in timeseries.freeCashFlow.asReversed()) {
+            val year = parseYmd(point.asOfDate)?.year ?: break
+            if (point.value <= 0.0 || (expectedYear != null && year != expectedYear)) break
+            suffix += point
+            if (suffix.size == GROWTH_RECENT_WINDOW) break
+            expectedYear = year - 1
         }
+        return suffix.asReversed()
+    }
+
+    /** Average of positive FCF in the recent window (Windows parity). */
+    private fun fcfRunRateDollars(timeseries: FundamentalTimeseries): Pair<Double, Boolean>? {
+        val window = recentPositiveFcfWindow(timeseries)
+        if (window.isEmpty()) return null
+        if (window.size == 1) return window.first().value to false
+        val avg = window.map { it.value }.average()
+        if (!avg.isFinite() || avg <= 0.0) return null
+        return avg to true
+    }
+
+    private fun recentFcfGrowthBps(timeseries: FundamentalTimeseries): Int? {
+        val window = recentPositiveFcfWindow(timeseries)
+        if (window.size < 2) return null
         val first = window.first()
         val last = window.last()
         val years = elapsedYearsBetween(first.asOfDate, last.asOfDate)
@@ -408,8 +516,8 @@ object DcfAnalysisEngine {
         val totalCash = (fundamentals.totalCashDollars ?: 0L).coerceAtLeast(0).toDouble()
         val netDebt = (totalDebt - totalCash).coerceAtLeast(0.0)
         val debtWeightBase = marketCap + netDebt
-        val equityWeight = if (debtWeightBase > 0.0) marketCap / debtWeightBase else 1.0
-        val debtWeight = if (debtWeightBase > 0.0) netDebt / debtWeightBase else 0.0
+        var equityWeight = if (debtWeightBase > 0.0) marketCap / debtWeightBase else 1.0
+        var debtWeight = if (debtWeightBase > 0.0) netDebt / debtWeightBase else 0.0
 
         val latestInterestExpense = timeseries.interestExpense.lastOrNull()?.value?.absoluteValue
         val costOfDebtSource: WaccFieldSource
@@ -420,11 +528,18 @@ object DcfAnalysisEngine {
                     .coerceIn(MIN_COST_OF_DEBT_BPS, MAX_COST_OF_DEBT_BPS)
             } else {
                 costOfDebtSource = WaccFieldSource.Default
-                DEFAULT_COST_OF_DEBT_BPS
+                maxOf(DEFAULT_COST_OF_DEBT_BPS, marketParams.rfBps + DEFAULT_COD_SPREAD_OVER_RF_BPS)
             }
         } else {
             costOfDebtSource = WaccFieldSource.Reported
             DEFAULT_COST_OF_DEBT_BPS
+        }
+
+        var structureGuard = false
+        if (debtWeight > PROVISIONAL_MAX_DEBT_WEIGHT) {
+            debtWeight = PROVISIONAL_MAX_DEBT_WEIGHT
+            equityWeight = 1.0 - debtWeight
+            structureGuard = true
         }
 
         val taxRateSource =
@@ -433,11 +548,21 @@ object DcfAnalysisEngine {
             ?: DEFAULT_TAX_RATE_BPS)
             .coerceIn(0, 3_500)
         val afterTaxCostOfDebtBps = (costOfDebtBps * (1.0 - taxRateBps / 10_000.0)).roundToInt()
-        val weighted = (equityWeight * costOfEquityBps) + (debtWeight * afterTaxCostOfDebtBps)
-        val waccBps = weighted.roundToInt()
+        val softWaccBps =
+            ((equityWeight * costOfEquityBps) + (debtWeight * afterTaxCostOfDebtBps)).roundToInt()
+        val provisionalUplift =
+            if (costOfDebtSource == WaccFieldSource.Default && debtWeight > 0.0) {
+                val scale = (debtWeight / PROVISIONAL_MAX_DEBT_WEIGHT).coerceIn(0.0, 1.0)
+                (PROVISIONAL_WACC_BASE_UPLIFT_BPS * scale).roundToInt()
+            } else {
+                0
+            }
+        val waccBps = softWaccBps + provisionalUplift
 
         return ResolvedWacc(
             waccBps = waccBps,
+            provisionalWaccUpliftBps = provisionalUplift,
+            debtWeightBps = (debtWeight * 10_000.0).roundToInt(),
             inputs = WaccInputProvenance(
                 marketCap = marketCapSource,
                 beta = betaSource,
@@ -445,7 +570,7 @@ object DcfAnalysisEngine {
                 totalCash = totalCashSource,
                 costOfDebt = costOfDebtSource,
                 taxRate = taxRateSource,
-                waccClamped = betaProv || marketParams.provisional,
+                waccClamped = betaProv || marketParams.provisional || structureGuard || provisionalUplift > 0,
             ),
         )
     }

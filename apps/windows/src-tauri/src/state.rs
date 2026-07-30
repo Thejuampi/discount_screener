@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
@@ -9,8 +9,9 @@ use crate::crypto_cycle::FngCache;
 use crate::db::Db;
 use crate::engine::ScreenerState;
 use crate::feed_log::FeedLog;
+use crate::launch_profile::ForcedProfile;
 use crate::news::NewsCache;
-use crate::profiles::compose_universe;
+use crate::profiles::{compose_universe, resolve_profile_membership};
 use crate::regime::{CnnFngCache, RegimeCache};
 use crate::ticker_search::YahooSearchQuote;
 
@@ -20,6 +21,8 @@ pub struct FeedStatus {
     pub symbols_loaded: usize,
     pub last_error: Option<String>,
     pub profile_name: String,
+    /// Informational: QA sample used snapshots older than reporting threshold.
+    pub stale_snapshots: bool,
 }
 
 impl Default for FeedStatus {
@@ -29,6 +32,7 @@ impl Default for FeedStatus {
             symbols_loaded: 0,
             last_error: None,
             profile_name: "sp500".into(),
+            stale_snapshots: false,
         }
     }
 }
@@ -109,35 +113,78 @@ pub struct AppState {
     /// Carries the active scalping product to the WebSocket background task.
     pub scalp_ws_tx: tokio::sync::watch::Sender<String>,
     pub remote_search_cache: Arc<Mutex<RemoteSearchCache>>,
-    /// Active index / universe profile id (`sp500`, `dow`, …).
+    /// Active index / universe profile id (`sp500`, `dow`, `qa`, …).
     pub active_profile: Mutex<String>,
     /// Symbols currently tracked by the feed for `active_profile`.
     pub active_symbols: Mutex<Arc<Vec<String>>>,
+    /// When true, launch forced the profile; UI must not switch away.
+    pub profile_locked: AtomicBool,
     /// Bumped on each universe switch so stale feed workers exit.
     pub feed_generation: Arc<AtomicU64>,
     /// Generation whose one-shot initial retry pass reached a terminal state.
     /// `u64::MAX` means no current generation has completed yet.
     pub initial_pass_completed_generation: Arc<AtomicU64>,
+    /// SEC ticker→CIK map (lazy; filled by EDGAR workers / demand valuation).
+    pub edgar_cik_map: Arc<Mutex<Option<HashMap<String, u64>>>>,
+    /// Symbols with an in-flight demand-driven valuation (avoid duplicate EDGAR hits).
+    pub valuation_inflight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppState {
+    #[allow(dead_code)] // convenience for tests / non-launch callers
     pub fn new(db_path: PathBuf) -> Self {
+        Self::new_with_forced_profile(db_path, None).expect("open app state")
+    }
+
+    /// Build state; optional launch-forced profile locks membership and skips localStorage restore.
+    pub fn new_with_forced_profile(
+        db_path: PathBuf,
+        forced: Option<ForcedProfile>,
+    ) -> Result<Self, String> {
         let log_path = db_path
             .parent()
             .map(|p| p.join("feed.log"))
             .unwrap_or_else(|| PathBuf::from("feed.log"));
-        let db = Db::open(db_path).expect("open history db");
+        let db = Db::open(db_path).map_err(|e| format!("open history db: {e}"))?;
         let db = Arc::new(db);
         let analyst_forecasts = Arc::new(
             AnalystForecastService::new(Arc::clone(&db))
-                .expect("initialize FMP analyst forecast service"),
+                .map_err(|e| format!("initialize FMP analyst forecast service: {e}"))?,
         );
         let (scalp_ws_tx, _) = tokio::sync::watch::channel(String::new());
-        let (profile, symbols) = compose_universe("sp500").expect("default sp500 universe");
-        Self {
+
+        let locked = forced.is_some();
+        let (profile, symbols, stale, db_err) = match forced {
+            Some(f) => {
+                let resolved = resolve_profile_membership(&f.name, &db)?;
+                (
+                    resolved.name,
+                    resolved.symbols,
+                    resolved.stale_snapshots,
+                    resolved.db_error,
+                )
+            }
+            None => {
+                let (p, s) = compose_universe("sp500").expect("default sp500 universe");
+                (p, s, false, None)
+            }
+        };
+
+        let mut last_error = db_err.map(|e| format!("qa db fallback: {e}"));
+        if stale {
+            let msg = "qa: stale_snapshots (reporting only; membership not excluded)";
+            last_error = Some(match last_error {
+                Some(e) => format!("{e}; {msg}"),
+                None => msg.into(),
+            });
+        }
+
+        Ok(Self {
             screener: Arc::new(Mutex::new(ScreenerState::new())),
             feed_status: Arc::new(Mutex::new(FeedStatus {
                 profile_name: profile.clone(),
+                last_error,
+                stale_snapshots: stale,
                 ..FeedStatus::default()
             })),
             db,
@@ -153,12 +200,20 @@ impl AppState {
             remote_search_cache: Arc::new(Mutex::new(RemoteSearchCache::new())),
             active_profile: Mutex::new(profile),
             active_symbols: Mutex::new(Arc::new(symbols)),
+            profile_locked: AtomicBool::new(locked),
             feed_generation: Arc::new(AtomicU64::new(0)),
             initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),
-        }
+            edgar_cik_map: Arc::new(Mutex::new(None)),
+            valuation_inflight: Arc::new(Mutex::new(HashSet::new())),
+        })
     }
 
     pub fn feed_generation_arc(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.feed_generation)
+    }
+
+    pub fn is_profile_locked(&self) -> bool {
+        self.profile_locked
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }

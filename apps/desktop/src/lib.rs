@@ -1268,8 +1268,8 @@ fn decode_external_entry(parts: &[&str]) -> Result<JournalEntry, String> {
 }
 
 fn decode_fundamentals_entry(parts: &[&str]) -> Result<JournalEntry, String> {
-    if parts.len() != 24 {
-        return Err("fundamentals entry should have 24 fields".to_string());
+    if parts.len() != 24 && parts.len() != 25 {
+        return Err("fundamentals entry should have 24 or 25 fields".to_string());
     }
 
     Ok(JournalEntry {

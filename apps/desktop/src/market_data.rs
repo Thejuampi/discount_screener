@@ -1975,7 +1975,9 @@ mod tests {
                 beta_millis: Some(1_240),
                 trailing_eps_cents: Some(1_234),
                 earnings_growth_bps: Some(1_530),
-                book_value_per_share_cents: Some((((912.34_f64 / 42.65_f64) * 100.0).round()) as i64),
+                book_value_per_share_cents: Some(
+                    (((912.34_f64 / 42.65_f64) * 100.0).round()) as i64
+                ),
             }
         );
     }

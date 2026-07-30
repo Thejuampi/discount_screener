@@ -6,7 +6,7 @@ use std::thread;
 use serde::Serialize;
 use tauri::State;
 
-use crate::analyst_forecasts::{AnalystForecastPanel, FmpSettingsStatus, ForecastPricePoint};
+use crate::analyst_forecasts::{AnalystForecastPanel, ForecastPricePoint, TipRanksSettingsStatus};
 use crate::db::{BacktestResult, HistorySnapshot, SnapshotInsert};
 use crate::edgar;
 use crate::engine::{
@@ -22,7 +22,10 @@ use crate::opportunity_v3::{
     invert_bucket, invert_composite, score_forecast_v3, score_fundamentals_v3,
     score_opportunity_technicals_v3, setup_from_v3_composite, ScoringModel,
 };
-use crate::profiles::{compose_universe, profile_definitions, profile_symbols};
+use crate::profiles::{
+    compose_universe, profile_definitions, profile_symbols, resolve_profile_membership,
+    resolve_profile_name, QA_MAX_SYMBOLS,
+};
 use crate::state::AppState;
 use crate::ticker_search::{
     local_universe_candidates, merge_and_rank, normalize_search_query_key, remote_candidates,
@@ -112,6 +115,8 @@ pub struct FeedStatusResponse {
     pub symbols_total: usize,
     pub last_error: Option<String>,
     pub profile_name: String,
+    pub profile_locked: bool,
+    pub stale_snapshots: bool,
 }
 
 #[derive(Serialize)]
@@ -126,6 +131,8 @@ pub struct UniverseProfileStatus {
     pub name: String,
     pub symbols_total: usize,
     pub symbols_loaded: usize,
+    pub profile_locked: bool,
+    pub stale_snapshots: bool,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -505,52 +512,6 @@ fn build_opportunity_rows(
         .collect()
 }
 
-fn schedule_fmp_top_ten_for_generation(
-    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
-    regime_cache: &Arc<crate::regime::RegimeCache>,
-    apply_regime_scoring: &Arc<std::sync::atomic::AtomicBool>,
-    analyst_forecasts: &Arc<crate::analyst_forecasts::AnalystForecastService>,
-    feed_generation: &Arc<std::sync::atomic::AtomicU64>,
-    generation: u64,
-) {
-    if !generation_is_current(feed_generation, generation) {
-        return;
-    }
-    let apply_regime = apply_regime_scoring.load(std::sync::atomic::Ordering::Relaxed);
-    let regime_snapshot = if apply_regime {
-        regime_cache.get()
-    } else {
-        None
-    };
-    let candidates = build_opportunity_rows(screener, apply_regime, regime_snapshot)
-        .into_iter()
-        .map(|row| crate::analyst_forecasts::WarmCandidate {
-            symbol: row.row.symbol.clone(),
-            composite_score: row.composite_score,
-            is_stock: row.asset_type == "stock",
-        })
-        .collect();
-    let top_symbols = crate::analyst_forecasts::rank_warm_candidates(candidates);
-    analyst_forecasts.spawn_generation_warm(top_symbols, Arc::clone(feed_generation), generation);
-}
-
-fn schedule_fmp_top_ten_if_initial_pass_complete(state: &AppState) {
-    let Some(generation) = warmable_completed_generation(
-        &state.feed_generation,
-        &state.initial_pass_completed_generation,
-    ) else {
-        return;
-    };
-    schedule_fmp_top_ten_for_generation(
-        &state.screener,
-        &state.regime_cache,
-        &state.apply_regime_scoring,
-        &state.analyst_forecasts,
-        &state.feed_generation,
-        generation,
-    );
-}
-
 #[tauri::command]
 pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
     use std::sync::atomic::Ordering;
@@ -570,25 +531,143 @@ pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool
 
 #[tauri::command]
 pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
+    let symbol = symbol.trim().to_uppercase();
+    {
+        let mut screener = state.screener.lock().unwrap();
+        // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
+        screener.ensure_model_routed_valuation(&symbol);
+    }
+    // Universe EDGAR worker can take minutes on SP500. Opening detail must not
+    // leave the valuation slot stuck on loading→timeout — demand-drive one symbol.
+    request_demand_valuation_if_needed(&symbol, &state);
     let mut screener = state.screener.lock().unwrap();
-    // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
     screener.ensure_model_routed_valuation(&symbol);
     screener.detail(&symbol)
 }
 
-#[tauri::command]
-pub async fn get_analyst_forecasts(
-    symbol: String,
-    state: State<'_, AppState>,
-) -> Result<AnalystForecastPanel, String> {
-    let symbol = symbol.trim().to_uppercase();
-    let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
-    let price_history = state
+/// Kick a background valuation for one equity when detail is open and no DCF yet.
+fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
+    if is_crypto(symbol) || is_etf(symbol) {
+        return;
+    }
+    {
+        let mut s = state.screener.lock().unwrap();
+        if s.dcf_analyses.contains_key(symbol) || s.dcf_values.contains_key(symbol) {
+            return;
+        }
+        // Need fundamentals (shares) before EDGAR compute is useful.
+        let Some(fund) = s.fundamentals.get(symbol).cloned() else {
+            return;
+        };
+        if fund.shares_outstanding.unwrap_or(0) == 0 {
+            return;
+        }
+        // Closed-world refuse: do not start EDGAR / FCFF for unclassifiable names.
+        let class = crate::dcf_model::classify_business(
+            fund.sector_name.as_deref(),
+            fund.industry_name.as_deref(),
+            fund.sector_key.as_deref(),
+            fund.industry_key.as_deref(),
+            false,
+        );
+        if matches!(
+            class,
+            crate::dcf_model::BusinessClass::Unclassified
+                | crate::dcf_model::BusinessClass::NotEligible
+        ) {
+            if let Some(reason) = crate::dcf_model::classification_unavailable_reason(class) {
+                s.set_valuation_error(symbol.to_string(), reason.to_string());
+            }
+            s.clear_dcf(symbol);
+            return;
+        }
+    }
+    {
+        let mut inflight = state.valuation_inflight.lock().unwrap();
+        if !inflight.insert(symbol.to_string()) {
+            return; // already computing
+        }
+    }
+
+    let symbol = symbol.to_string();
+    let screener = Arc::clone(&state.screener);
+    let cik_cache = Arc::clone(&state.edgar_cik_map);
+    let inflight = Arc::clone(&state.valuation_inflight);
+    let feed_log = Arc::clone(&state.feed_log);
+
+    let _ = thread::Builder::new()
+        .name(format!("edgar-dcf-{symbol}"))
+        .spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let client = edgar::edgar_client();
+                let cik = {
+                    let mut guard = cik_cache.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(edgar::fetch_cik_map(&client)?);
+                    }
+                    guard
+                        .as_ref()
+                        .and_then(|m| m.get(&symbol).copied())
+                        .ok_or_else(|| format!("no CIK for {symbol}"))?
+                };
+
+                let (fund, price, is_financial) = {
+                    let s = screener.lock().unwrap();
+                    let fund = s
+                        .fundamentals
+                        .get(&symbol)
+                        .cloned()
+                        .ok_or_else(|| "fundamentals missing".to_string())?;
+                    let price = s.snapshots.get(&symbol).map(|x| x.market_price_cents);
+                    let is_financial = crate::dcf_model::classify_business(
+                        fund.sector_name.as_deref(),
+                        fund.industry_name.as_deref(),
+                        fund.sector_key.as_deref(),
+                        fund.industry_key.as_deref(),
+                        false,
+                    ) == crate::dcf_model::BusinessClass::FinancialServices;
+                    (fund, price, is_financial)
+                };
+
+                if is_financial {
+                    let analysis =
+                        crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
+                    screener
+                        .lock()
+                        .unwrap()
+                        .ingest_dcf_analysis(symbol.clone(), analysis);
+                    return Ok(());
+                }
+
+                let fcf = edgar::fetch_fcf_history(&client, &symbol, cik)?
+                    .ok_or_else(|| "no FCF history".to_string())?;
+                let analysis =
+                    crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar").map_err(|e| e)?;
+                screener
+                    .lock()
+                    .unwrap()
+                    .ingest_dcf_analysis(symbol.clone(), analysis);
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                feed_log.warn(&format!("demand-valuation {symbol}: {e}"));
+                screener
+                    .lock()
+                    .unwrap()
+                    .set_valuation_error(symbol.clone(), e);
+            }
+            inflight.lock().unwrap().remove(&symbol);
+        });
+}
+
+fn analyst_price_history(state: &AppState, symbol: &str) -> Vec<ForecastPricePoint> {
+    state
         .screener
         .lock()
         .unwrap()
         .daily_candles
-        .get(&symbol)
+        .get(symbol)
         .map(|candles| {
             candles
                 .iter()
@@ -598,7 +677,18 @@ pub async fn get_analyst_forecasts(
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Cache-only detail read. Never spends TipRanks quota.
+#[tauri::command]
+pub async fn get_analyst_forecasts(
+    symbol: String,
+    state: State<'_, AppState>,
+) -> Result<AnalystForecastPanel, String> {
+    let symbol = symbol.trim().to_uppercase();
+    let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
+    let price_history = analyst_price_history(&state, &symbol);
     let service = Arc::clone(&state.analyst_forecasts);
     tauri::async_runtime::spawn_blocking(move || {
         if eligible {
@@ -608,33 +698,56 @@ pub async fn get_analyst_forecasts(
         }
     })
     .await
-    .map_err(|error| format!("join FMP forecast request: {error}"))
+    .map_err(|error| format!("join TipRanks forecast request: {error}"))
+}
+
+/// Explicit user load/refresh action. May spend one counted TipRanks call.
+#[tauri::command]
+pub async fn load_analyst_forecasts(
+    symbol: String,
+    state: State<'_, AppState>,
+) -> Result<AnalystForecastPanel, String> {
+    let symbol = symbol.trim().to_uppercase();
+    let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
+    let price_history = analyst_price_history(&state, &symbol);
+    let service = Arc::clone(&state.analyst_forecasts);
+    tauri::async_runtime::spawn_blocking(move || {
+        if eligible {
+            service.load(&symbol, price_history)
+        } else {
+            service.not_eligible(&symbol, price_history)
+        }
+    })
+    .await
+    .map_err(|error| format!("join TipRanks forecast load: {error}"))
 }
 
 #[tauri::command]
-pub fn fmp_settings_status(state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+pub fn tipranks_settings_status(state: State<AppState>) -> Result<TipRanksSettingsStatus, String> {
     state.analyst_forecasts.settings_status()
 }
 
 #[tauri::command]
-pub fn fmp_save_key(api_key: String, state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+pub fn tipranks_save_key(
+    api_key: String,
+    state: State<AppState>,
+) -> Result<TipRanksSettingsStatus, String> {
     state.analyst_forecasts.save_key(&api_key)?;
-    schedule_fmp_top_ten_if_initial_pass_complete(&state);
     state.analyst_forecasts.settings_status()
 }
 
 #[tauri::command]
-pub fn fmp_delete_key(state: State<AppState>) -> Result<FmpSettingsStatus, String> {
+pub fn tipranks_delete_key(state: State<AppState>) -> Result<TipRanksSettingsStatus, String> {
     state.analyst_forecasts.delete_key()?;
     state.analyst_forecasts.settings_status()
 }
 
 #[tauri::command]
-pub async fn fmp_test_key(state: State<'_, AppState>) -> Result<AnalystForecastPanel, String> {
+pub async fn tipranks_test_key(state: State<'_, AppState>) -> Result<AnalystForecastPanel, String> {
     let service = Arc::clone(&state.analyst_forecasts);
     tauri::async_runtime::spawn_blocking(move || service.test_connection("AAPL"))
         .await
-        .map_err(|error| format!("join FMP credential test: {error}"))
+        .map_err(|error| format!("join TipRanks credential test: {error}"))
 }
 
 #[tauri::command]
@@ -653,6 +766,8 @@ pub fn get_feed_status(state: State<AppState>) -> FeedStatusResponse {
         symbols_total,
         last_error: status.last_error.clone(),
         profile_name: status.profile_name.clone(),
+        profile_locked: state.is_profile_locked(),
+        stale_snapshots: status.stale_snapshots,
     }
 }
 
@@ -661,14 +776,13 @@ pub fn list_universe_profiles() -> Vec<UniverseProfileInfo> {
     profile_definitions()
         .iter()
         .map(|def| {
-            let symbol_count = profile_symbols(def.name).map(|s| s.len()).unwrap_or(0);
-            // sp500 live feed is larger (ETFs + crypto); report composed size for UI.
-            let symbol_count = if def.name == "sp500" {
-                compose_universe("sp500")
+            let symbol_count = match def.name {
+                "sp500" => compose_universe("sp500")
                     .map(|(_, u)| u.len())
-                    .unwrap_or(symbol_count)
-            } else {
-                symbol_count
+                    .unwrap_or_else(|_| profile_symbols(def.name).map(|s| s.len()).unwrap_or(0)),
+                // Dynamic sample — report hard cap for UI.
+                "qa" => QA_MAX_SYMBOLS,
+                _ => profile_symbols(def.name).map(|s| s.len()).unwrap_or(0),
             };
             UniverseProfileInfo {
                 name: def.name.to_string(),
@@ -681,14 +795,7 @@ pub fn list_universe_profiles() -> Vec<UniverseProfileInfo> {
 
 #[tauri::command]
 pub fn get_universe_profile(state: State<AppState>) -> UniverseProfileStatus {
-    let name = state.active_profile.lock().unwrap().clone();
-    let symbols_total = state.active_symbols.lock().unwrap().len();
-    let symbols_loaded = state.feed_status.lock().unwrap().symbols_loaded;
-    UniverseProfileStatus {
-        name,
-        symbols_total,
-        symbols_loaded,
-    }
+    universe_profile_status(&state)
 }
 
 #[tauri::command]
@@ -697,19 +804,71 @@ pub fn set_universe_profile(
     state: State<AppState>,
 ) -> Result<UniverseProfileStatus, String> {
     apply_universe_profile(&name, &state)?;
+    Ok(universe_profile_status(&state))
+}
+
+fn universe_profile_status(state: &AppState) -> UniverseProfileStatus {
+    let name = state.active_profile.lock().unwrap().clone();
     let symbols_total = state.active_symbols.lock().unwrap().len();
-    let profile_name = state.active_profile.lock().unwrap().clone();
-    Ok(UniverseProfileStatus {
-        name: profile_name,
+    let status = state.feed_status.lock().unwrap();
+    UniverseProfileStatus {
+        name,
         symbols_total,
-        symbols_loaded: 0,
-    })
+        symbols_loaded: status.symbols_loaded,
+        profile_locked: state.is_profile_locked(),
+        stale_snapshots: status.stale_snapshots,
+    }
 }
 
 /// Validate, clear screener, install new universe, bump generation, and start feed workers.
+///
+/// Idempotent by **canonical symbol set** when profile name matches: same membership
+/// set does not restart workers (order changes alone are ignored).
 fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String> {
-    let (canonical, symbols) = compose_universe(raw_name)?;
-    let symbols = Arc::new(symbols);
+    let requested = resolve_profile_name(raw_name)
+        .ok_or_else(|| format!("unknown universe profile: {raw_name}"))?
+        .to_string();
+
+    // Lock check before any worker/state mutation.
+    if state.is_profile_locked() {
+        let current = state.active_profile.lock().unwrap().clone();
+        if requested != current {
+            return Err(format!(
+                "universe profile locked to {current} (launch --profile / DS_UNIVERSE_PROFILE)"
+            ));
+        }
+    }
+
+    let resolved = resolve_profile_membership(&requested, &state.db)?;
+    if resolved.name == "qa" && resolved.symbols.len() > QA_MAX_SYMBOLS {
+        return Err(format!(
+            "qa membership exceeded hard cap: {} > {QA_MAX_SYMBOLS}",
+            resolved.symbols.len()
+        ));
+    }
+
+    let new_set: std::collections::HashSet<String> = resolved.symbol_set();
+    {
+        let current_name = state.active_profile.lock().unwrap().clone();
+        let current_symbols = state.active_symbols.lock().unwrap();
+        let current_set: std::collections::HashSet<String> =
+            current_symbols.iter().cloned().collect();
+        let feed_running = state.feed_status.lock().unwrap().running;
+        if feed_running && current_name == resolved.name && current_set == new_set {
+            // Same membership set — do not thrash workers.
+            return Ok(());
+        }
+    }
+
+    let profile_name = resolved.name.clone();
+    let symbols = Arc::new(resolved.symbols);
+    // Fail-closed gate immediately before spawning workers.
+    if profile_name == "qa" && symbols.len() > QA_MAX_SYMBOLS {
+        return Err(format!(
+            "qa refuse spawn: {} symbols > {QA_MAX_SYMBOLS}",
+            symbols.len()
+        ));
+    }
 
     // Invalidate any in-flight workers from the previous universe.
     let generation = state
@@ -722,16 +881,37 @@ fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String
         let mut screener = state.screener.lock().unwrap();
         screener.clear_universe();
     }
-    *state.active_profile.lock().unwrap() = canonical.clone();
+    *state.active_profile.lock().unwrap() = profile_name.clone();
     *state.active_symbols.lock().unwrap() = Arc::clone(&symbols);
 
     {
         let mut status = state.feed_status.lock().unwrap();
         status.running = true;
         status.symbols_loaded = 0;
-        status.last_error = None;
-        status.profile_name = canonical;
+        status.profile_name = profile_name.clone();
+        status.stale_snapshots = resolved.stale_snapshots;
+        let mut err_parts = Vec::new();
+        if let Some(e) = resolved.db_error {
+            err_parts.push(format!("qa db fallback: {e}"));
+        }
+        if resolved.stale_snapshots {
+            err_parts.push("qa: stale_snapshots (reporting only; membership not excluded)".into());
+        }
+        status.last_error = if err_parts.is_empty() {
+            None
+        } else {
+            Some(err_parts.join("; "))
+        };
     }
+
+    state.feed_log.info(&format!(
+        "universe apply profile={profile_name} symbols={} ranked={} fill={} source={:?} locked={}",
+        symbols.len(),
+        resolved.ranked_count,
+        resolved.fill_count,
+        resolved.source,
+        state.is_profile_locked()
+    ));
 
     spawn_feed_workers(state, symbols, generation)
 }
@@ -934,6 +1114,15 @@ pub fn resolve_ticker_search_submit(
 /// within ~1 request instead of waiting on 4 candle ranges.
 #[tauri::command]
 pub fn ensure_symbol_loaded(symbol: String, state: State<AppState>) -> Result<String, String> {
+    ensure_symbol_loaded_inner(symbol, &state)
+}
+
+/// One-shot load into screener cache. Must **not** grow `active_symbols` or spawn
+/// persistent feed workers (QA hard-cap contract).
+pub(crate) fn ensure_symbol_loaded_inner(
+    symbol: String,
+    state: &AppState,
+) -> Result<String, String> {
     let symbol = symbol.trim().to_uppercase();
     if symbol.is_empty() {
         return Err("empty symbol".into());
@@ -1570,9 +1759,6 @@ fn spawn_feed_workers(
         let loaded = Arc::clone(&loaded);
         let completed = Arc::clone(&completed);
         let feed_gen = Arc::clone(&feed_gen);
-        let analyst_forecasts = Arc::clone(&state.analyst_forecasts);
-        let regime_cache = Arc::clone(&state.regime_cache);
-        let apply_regime_scoring = Arc::clone(&state.apply_regime_scoring);
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
 
@@ -1698,20 +1884,11 @@ fn spawn_feed_workers(
                     feed_log.info("feed initial enrichment complete: no pending symbols");
                 }
 
-                if mark_initial_pass_complete_if_current(
+                let _ = mark_initial_pass_complete_if_current(
                     &feed_gen,
                     &initial_pass_completed_generation,
                     generation,
-                ) {
-                    schedule_fmp_top_ten_for_generation(
-                        &screener,
-                        &regime_cache,
-                        &apply_regime_scoring,
-                        &analyst_forecasts,
-                        &feed_gen,
-                        generation,
-                    );
-                }
+                );
 
                 loop {
                     thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
@@ -3058,4 +3235,88 @@ pub fn get_news(symbol: String, state: State<AppState>) -> Result<crate::news::N
     let bundle = crate::news::fetch_news(&client, &symbol)?;
     state.news_cache.put(symbol, bundle.clone());
     Ok(bundle)
+}
+
+#[cfg(test)]
+mod qa_universe_apply_tests {
+    use super::{apply_universe_profile, ensure_symbol_loaded_inner};
+    use crate::launch_profile::ForcedProfile;
+    use crate::profiles::QA_MAX_SYMBOLS;
+    use crate::state::AppState;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    fn temp_state(forced: Option<ForcedProfile>) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "ds_qa_state_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.sqlite");
+        AppState::new_with_forced_profile(path, forced).expect("state")
+    }
+
+    #[test]
+    fn qa_membership_never_exceeds_hard_cap() {
+        let state = temp_state(Some(ForcedProfile { name: "qa".into() }));
+        assert!(state.is_profile_locked());
+        let n = state.active_symbols.lock().unwrap().len();
+        assert!(n <= QA_MAX_SYMBOLS, "got {n}");
+        assert_eq!(state.active_profile.lock().unwrap().as_str(), "qa");
+    }
+
+    #[test]
+    fn locked_profile_rejects_switch_without_mutation() {
+        let state = temp_state(Some(ForcedProfile { name: "qa".into() }));
+        let before_gen = state.feed_generation.load(Ordering::SeqCst);
+        let before_set: std::collections::HashSet<_> = state
+            .active_symbols
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let err = apply_universe_profile("sp500", &state).unwrap_err();
+        assert!(err.contains("locked"), "{err}");
+        assert_eq!(state.feed_generation.load(Ordering::SeqCst), before_gen);
+        let after_set: std::collections::HashSet<_> = state
+            .active_symbols
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(before_set, after_set);
+    }
+
+    #[test]
+    fn reapply_same_symbol_set_is_idempotent() {
+        let state = temp_state(None);
+        apply_universe_profile("qa", &state).unwrap();
+        let gen1 = state.feed_generation.load(Ordering::SeqCst);
+        // Reorder active symbols without changing set — should still match via set compare
+        // after re-resolve (resolve order is stable; re-apply same qa is the main case).
+        apply_universe_profile("qa", &state).unwrap();
+        let gen2 = state.feed_generation.load(Ordering::SeqCst);
+        assert_eq!(gen1, gen2, "same membership must not bump generation");
+    }
+
+    #[test]
+    fn ensure_symbol_loaded_does_not_grow_active_symbols() {
+        let state = temp_state(Some(ForcedProfile { name: "qa".into() }));
+        let before = state.active_symbols.lock().unwrap().clone();
+        // Network may fail; contract is membership size unchanged either way.
+        let _ = ensure_symbol_loaded_inner("ZZZZNOPE".into(), &state);
+        let after = state.active_symbols.lock().unwrap().clone();
+        assert_eq!(before.len(), after.len());
+        let before_set: std::collections::HashSet<_> = before.iter().cloned().collect();
+        let after_set: std::collections::HashSet<_> = after.iter().cloned().collect();
+        assert_eq!(before_set, after_set);
+        // Ensure we did not replace Arc membership with a larger list.
+        assert!(Arc::ptr_eq(&before, &after) || before_set == after_set);
+    }
 }
