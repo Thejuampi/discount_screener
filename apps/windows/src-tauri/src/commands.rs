@@ -560,6 +560,44 @@ pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<Symbo
     screener.detail(&symbol)
 }
 
+/// Deterministic native-E2E setup. This is inert in release builds and unless
+/// the dedicated runner opts in; the assertion path itself still uses the real
+/// `get_symbol_detail` command and the normal DetailPanel renderer.
+#[tauri::command]
+pub fn debug_seed_cof_native_e2e(state: State<AppState>) -> Result<SymbolDetail, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+
+    seed_cof_native_e2e(&state)
+}
+
+pub(crate) fn seed_cof_native_e2e(state: &AppState) -> Result<SymbolDetail, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/yahoo/quoteSummary/COF-retention.json"
+    ))
+    .map_err(|error| format!("parse COF native E2E fixture: {error}"))?;
+    let fetched = crate::quote_summary::parse_quote_summary(&fixture, "COF");
+    let snapshot = fetched
+        .snapshot
+        .ok_or_else(|| "COF native E2E fixture has no market snapshot".to_string())?;
+    let fundamentals = fetched
+        .fundamentals
+        .ok_or_else(|| "COF native E2E fixture has no fundamentals".to_string())?;
+
+    let mut screener = state.screener.lock().unwrap();
+    screener.ingest_snapshot(snapshot);
+    screener.ingest_fundamentals(fundamentals);
+    screener.ensure_model_routed_valuation("COF");
+    screener
+        .detail("COF")
+        .ok_or_else(|| "COF detail missing after native E2E seed".to_string())
+}
+
 /// Kick a background valuation for one equity when detail is open and no DCF yet.
 fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     if is_crypto(symbol) || is_etf(symbol) {

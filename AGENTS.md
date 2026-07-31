@@ -352,6 +352,7 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
    - `cargo test --lib dcf_model::`
    - `cargo test --lib valuation_baseline::`
    - `cargo test --lib quant_lens::` if Quant Lens / EV agreement is in scope  
+   - `npm run test:e2e:native:cof` from `apps/windows` when Detail valuation routing or its backend contract changes
 
 2. **Live valuation QA (always after model changes that affect UI numbers)**  
    Full checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).  
@@ -391,6 +392,7 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
 | Backend DCF green, Detail still unavailable | COF returned valid residual income while the UI discarded it because operating `valuation_status` was null | Probe the active Tauri invoke over local CDP and assert the rendered Detail; typed residual income is independently publishable |
+| Whole-Detail text assertion | Mutation stayed green because Quant Lens echoed `$168.81` while the hero slot still said unavailable | Scope native regression assertions to `.price-summary .dcf-slot`, not the whole Detail panel |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
 | Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
 | Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |

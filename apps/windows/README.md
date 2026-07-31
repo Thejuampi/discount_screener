@@ -20,6 +20,7 @@ Requires Node.js, Rust toolchain, [Tauri prerequisites](https://v2.tauri.app/sta
 | `npm run tauri:dev` | Live Tauri app (default universe = last saved / `sp500`) |
 | **`npm run tauri:dev:qa`** | **Live Tauri with QA universe locked (≤20 symbols)** — use for agent/manual live QA |
 | `npm run test:e2e` | WebdriverIO e2e (when configured) |
+| `npm run test:e2e:native:cof` | Native hidden Tauri regression: real COF IPC → hero valuation slot |
 
 ### Live QA (agents and humans) — ALWAYS profile `qa`
 

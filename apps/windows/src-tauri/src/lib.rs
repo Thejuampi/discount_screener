@@ -194,6 +194,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_opportunities,
             commands::get_symbol_detail,
+            commands::debug_seed_cof_native_e2e,
             commands::get_analyst_forecasts,
             commands::load_analyst_forecasts,
             commands::tipranks_settings_status,
