@@ -102,8 +102,8 @@ private const val QUOTE_PAGE_ACCEPT =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 private const val QUOTE_PAGE_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
-private const val QUOTE_SUMMARY_MODULES =
-    "price,financialData,defaultKeyStatistics,assetProfile,recommendationTrend"
+internal const val QUOTE_SUMMARY_MODULES =
+    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend"
 
 private const val QUOTE_HTML_COMPONENT = "quoteHtml"
 internal const val QUOTE_SUMMARY_COMPONENT = "quoteSummary"
@@ -115,6 +115,7 @@ private const val MISSING_KIND = "missing"
 private const val ERROR_KIND = "error"
 
 internal const val FINANCIAL_DATA_MARKER = "\\\"financialData\\\":"
+internal const val SUMMARY_DETAIL_MARKER = "\\\"summaryDetail\\\":"
 internal const val DEFAULT_KEY_STATISTICS_MARKER = "\\\"defaultKeyStatistics\\\":"
 internal const val PRICE_MARKER = "\\\"price\\\":"
 internal const val ASSET_PROFILE_MARKER = "\\\"assetProfile\\\":"
@@ -535,6 +536,7 @@ internal fun parseQuotePage(
     diagnostics: MutableList<ProviderDiagnostic>,
 ): QuoteContext {
     val financialData = parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics) ?: JsonObject(emptyMap())
+    val summaryDetail = parseEmbeddedJsonObject(body, SUMMARY_DETAIL_MARKER, diagnostics) ?: JsonObject(emptyMap())
     val statistics = parseEmbeddedJsonObject(body, DEFAULT_KEY_STATISTICS_MARKER, diagnostics) ?: JsonObject(emptyMap())
     val recommendationTrend = parseEmbeddedJsonObject(body, RECOMMENDATION_TREND_MARKER, diagnostics)
     val price = parseQuoteSummaryPrice(body, diagnostics)
@@ -547,6 +549,7 @@ internal fun parseQuotePage(
     return buildQuoteContext(
         symbol = symbol,
         financialData = financialData,
+        summaryDetail = summaryDetail,
         statistics = statistics,
         recommendationTrend = recommendationTrend,
         price = price,
@@ -581,6 +584,7 @@ internal fun parseQuoteSummary(
     }
 
     val financialData = result.child("financialData")
+    val summaryDetail = result.child("summaryDetail")
     val statistics = result.child("defaultKeyStatistics")
     val recommendationTrend = result["recommendationTrend"]?.jsonObject
     val price = result.child("price")
@@ -598,6 +602,7 @@ internal fun parseQuoteSummary(
     return buildQuoteContext(
         symbol = symbol,
         financialData = financialData,
+        summaryDetail = summaryDetail,
         statistics = statistics,
         recommendationTrend = recommendationTrend,
         price = price,
@@ -612,6 +617,7 @@ internal fun parseQuoteSummary(
 private fun buildQuoteContext(
     symbol: String,
     financialData: JsonObject,
+    summaryDetail: JsonObject,
     statistics: JsonObject,
     recommendationTrend: JsonObject?,
     price: JsonObject,
@@ -670,7 +676,8 @@ private fun buildQuoteContext(
         betaMillis = statistics.rawDouble("beta")?.times(1_000.0)?.roundToLong()?.toInt(),
         trailingEpsCents = statistics.rawDouble("trailingEps")?.times(100.0)?.roundToLong()?.toLong(),
         earningsGrowthBps = financialData.rawDouble("earningsGrowth")?.times(10_000.0)?.roundToLong()?.toInt(),
-        retentionBps = financialData.rawDouble("payoutRatio")
+        retentionBps = (financialData.rawDouble("payoutRatio")
+            ?: summaryDetail.rawDouble("payoutRatio"))
             ?.takeIf { it.isFinite() && it in 0.0..1.0 }
             ?.let { ((1.0 - it) * 10_000.0).roundToLong().toInt() },
     ).takeIf(FundamentalSnapshot::hasAnyValues)

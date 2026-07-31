@@ -93,7 +93,7 @@ Binary (frontend already up), only if needed:
 | 2 | **AMZN** | Ordered bear≤base≤bull; not ~$1; not inverted scenarios | Penny intrinsic; bull &lt; bear |
 | 3 | **CI** | **Residual income** (not FCFF DCF copy); no $700+ float mirage | Model label/path is FCFF; value absurdly high vs book/analysts |
 | 4 | **UNH** or **ELV** | Same managed-care family as CI → residual income | FCFF primary |
-| 5 | **JPM** or **ACGL** | Residual income / financial | FCFF on OCF−PPE |
+| 5 | **JPM**, **ACGL**, or **COF** | Residual income / financial; COF resolves reported payout from Yahoo `summaryDetail` | FCFF on OCF−PPE or COF unavailable for missing retention |
 | 6 | **AAPL** or **MSFT** | FCFF operating; sensible vs market order of magnitude | Unclassified refuse; penny; inverted scenarios |
 | 7 | **Unknown / garbage sector** (if you can force) | Slot **unavailable** with classified refuse copy | Silent invented DCF |
 

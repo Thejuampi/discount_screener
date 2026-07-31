@@ -512,7 +512,7 @@ Source-consistency architecture remains the gate for **which FCF series** enters
 | --- | --- | --- |
 | Book equity ($) and/or BVPS | Residual income | From Yahoo key stats / balance sheet; SEC equity concepts as secondary |
 | ROE | Residual income | Already partially present (`return_on_equity_bps`) |
-| Payout / retention | Residual income book growth | Optional v1 with provisional default |
+| Payout / retention | Residual income book growth | Yahoo reported `payoutRatio` from `financialData` or canonical `summaryDetail`; derive retention as `1 − payout` with reported provenance |
 | Sector & industry keys | Classifier | Already on Windows fundamentals |
 | Industry/sector median beta | Shrinkage | Compute from universe or ship policy table |
 | Risk-free observation | All models | New small market-params provider |

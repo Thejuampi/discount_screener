@@ -155,7 +155,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Modules requested by the Android client (+ calendarEvents for Windows earnings field).
 pub const QUOTE_SUMMARY_MODULES: &str =
-    "price,financialData,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents";
+    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents";
 pub const FORWARD_FORECAST_MODULES: &str = "earningsTrend,price";
 
 /// Map share-class dots to Yahoo path form: `BRK.B` → `BRK-B`, keep exchange suffixes.
@@ -200,6 +200,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
     };
 
     let financial_data = result.get("financialData");
+    let summary_detail = result.get("summaryDetail");
     let statistics = result.get("defaultKeyStatistics");
     let recommendation_trend = result.get("recommendationTrend");
     let price = result.get("price");
@@ -417,6 +418,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             }),
         retention_bps: financial_data
             .and_then(|f| raw_double(f, "payoutRatio"))
+            .or_else(|| summary_detail.and_then(|detail| raw_double(detail, "payoutRatio")))
             .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
             .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32),
     });
@@ -652,6 +654,49 @@ mod tests {
                 .source_fingerprint
                 .starts_with("yahoo-earnings-trend/1|"));
         }
+    }
+
+    #[test]
+    fn cof_reads_reported_payout_from_summary_detail_for_residual_income() {
+        assert!(
+            QUOTE_SUMMARY_MODULES
+                .split(',')
+                .any(|module| module == "summaryDetail"),
+            "production fetch must request the Yahoo module that owns payoutRatio"
+        );
+        let result = parse_quote_summary(&fixture("COF-retention.json"), "COF");
+        let snapshot = result.snapshot.expect("COF snapshot");
+        let fundamentals = result.fundamentals.expect("COF fundamentals");
+        assert_eq!(fundamentals.retention_bps, Some(8_347));
+        let analysis = crate::dcf_model::compute_from_fundamentals(
+            &fundamentals,
+            Some(snapshot.market_price_cents),
+            "yahoo_fixture",
+        )
+        .expect("COF residual income");
+        assert_eq!(
+            analysis.model,
+            crate::dcf_model::ValuationModel::ResidualIncomeEquity
+        );
+        assert_eq!(analysis.base_intrinsic_value_cents, 16_881);
+        assert!(analysis
+            .reason_codes
+            .contains(&"retention_source=reported:8347bps".to_string()));
+
+        let mut state = crate::engine::ScreenerState::new();
+        state.ingest_snapshot(snapshot);
+        let mut missing_payout = fundamentals.clone();
+        missing_payout.retention_bps = None;
+        state.ingest_fundamentals(missing_payout);
+        assert!(state.dcf_analyses.get("COF").is_none());
+        state.ingest_fundamentals(fundamentals);
+        assert_eq!(
+            state
+                .dcf_analyses
+                .get("COF")
+                .map(|value| value.base_intrinsic_value_cents),
+            Some(16_881)
+        );
     }
 
     #[test]
