@@ -167,6 +167,31 @@ export function detailValuationPresentation(
     };
   }
 
+  // Financial-services valuations do not pass through the operating-model
+  // router, so valuation_status is intentionally null. A current, typed
+  // residual-income analysis is independently publishable and must not be
+  // suppressed as if it were an unverified legacy FCFF cache.
+  const analysis = detail.dcf_analysis;
+  if (
+    analysis?.model === "residual_income_equity"
+    && analysis.base_intrinsic_value_cents > 0
+  ) {
+    return {
+      kind: "selected",
+      valueCents: analysis.base_intrinsic_value_cents,
+      model: "residual_income_equity",
+      labelKey: "detail.residualIncomeValue",
+      quality: dcfQuality(analysis),
+      range: analysis.bear_intrinsic_value_cents > 0 && analysis.bull_intrinsic_value_cents > 0
+        ? {
+            lowCents: analysis.bear_intrinsic_value_cents,
+            highCents: analysis.bull_intrinsic_value_cents,
+          }
+        : null,
+      diagnostics,
+    };
+  }
+
   // Current backends always serialize this additive field. Null means routing
   // is pending: never promote the legacy FCFF compatibility cache meanwhile.
   if (Object.prototype.hasOwnProperty.call(detail, "valuation_status")) {
@@ -176,7 +201,6 @@ export function detailValuationPresentation(
     return { kind: "none", diagnostics };
   }
 
-  const analysis = detail.dcf_analysis;
   const legacyValue = analysis?.base_intrinsic_value_cents ?? detail.dcf_value_cents;
   if (legacyValue != null && legacyValue > 0) {
     const residual = analysis?.model === "residual_income_equity";

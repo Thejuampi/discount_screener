@@ -115,6 +115,22 @@ a provider/model failure, verify it names the owning boundary well enough to
 start debugging without reconstructing the pipeline from logs. Escape must
 close it; focus/hover/click must expose it.
 
+## Exact Tauri backend probe (debug builds only)
+
+Windows debug builds expose the active WebView2 DevTools Protocol endpoint at
+`http://127.0.0.1:9222/json/list`. It is loopback-only and absent from release
+builds. Evaluate the following in that page target to exercise the same IPC
+bridge as `apps/windows/src/api.ts#getSymbolDetail`:
+
+```js
+await window.__TAURI_INTERNALS__.invoke("get_symbol_detail", { symbol: "COF" })
+```
+
+For a Detail failure, capture both the returned backend fields
+(`dcf_analysis`, `valuation_status`, `valuation_unavailable_reason`, and required
+fundamentals) and the rendered `.detail-panel` text. A backend-only green result
+does not pass QA if the presentation boundary suppresses it.
+
 ## Notes
 
 - Header gap may be **analyst vs market**, not model vs market — do not confuse the two.

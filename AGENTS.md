@@ -390,6 +390,7 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Default “not financial ⇒ FCFF” | CI Healthcare Plans → absurd DCF; UI did not refuse | Closed-world `Unclassified` + reason in UI |
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
+| Backend DCF green, Detail still unavailable | COF returned valid residual income while the UI discarded it because operating `valuation_status` was null | Probe the active Tauri invoke over local CDP and assert the rendered Detail; typed residual income is independently publishable |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
 | Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
 | Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |

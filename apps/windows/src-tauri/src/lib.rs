@@ -56,8 +56,26 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+#[cfg(all(debug_assertions, target_os = "windows"))]
+fn enable_local_webview_debugging() {
+    const ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    let existing = std::env::var(ENV).unwrap_or_default();
+    if existing.contains("--remote-debugging-port") {
+        return;
+    }
+    let args = format!(
+        "{} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222",
+        existing.trim()
+    );
+    std::env::set_var(ENV, args.trim());
+    eprintln!("discount_screener: local WebView debug endpoint on 127.0.0.1:9222");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(all(debug_assertions, target_os = "windows"))]
+    enable_local_webview_debugging();
+
     tauri::Builder::default()
         // Single-instance MUST be the first plugin: if another instance is already
         // running, this callback fires in that instance and we focus its window

@@ -133,6 +133,47 @@ describe("detail valuation presentation", () => {
     assert.equal(p.kind, "none");
   });
 
+  it("presents COF residual income even though the operating router status is null", () => {
+    const p = detailValuationPresentation(detail({
+      valuation_status: null,
+      selected_valuation_value_cents: null,
+      selected_valuation_model: null,
+      operating_valuation: null,
+      dcf_value_cents: 16_881,
+      valuation_unavailable_reason: null,
+      dcf_analysis: {
+        bear_intrinsic_value_cents: 15_770,
+        base_intrinsic_value_cents: 16_881,
+        bull_intrinsic_value_cents: 17_742,
+        wacc_bps: 872,
+        base_growth_bps: 0,
+        net_debt_dollars: 0,
+        wacc_inputs: {
+          market_cap: "reported",
+          beta: "reported",
+          total_debt: "not_applicable",
+          total_cash: "not_applicable",
+          cost_of_debt: "not_applicable",
+          tax_rate: "not_applicable",
+          wacc_clamped: false,
+        },
+        source: "fundamentals",
+        model: "residual_income_equity",
+        business_class: "financial_services",
+        discount_rate_kind: "cost_of_equity",
+        reason_codes: ["retention_source=reported:8347bps"],
+        diagnostics: { point_estimate_unreliable: true },
+      },
+    }));
+
+    assert.equal(p.kind, "selected");
+    if (p.kind !== "selected") return;
+    assert.equal(p.model, "residual_income_equity");
+    assert.equal(p.valueCents, 16_881);
+    assert.equal(p.labelKey, "detail.residualIncomeValue");
+    assert.deepEqual(p.range, { lowCents: 15_770, highCents: 17_742 });
+  });
+
   it("executes focus, click and Escape tooltip state with linked ARIA content", () => {
     const tipId = "valuation-info-test";
     let state = nextValuationTooltipState(CLOSED_VALUATION_TOOLTIP, "pointer_enter");
