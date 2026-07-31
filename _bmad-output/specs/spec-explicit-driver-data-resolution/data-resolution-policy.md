@@ -27,11 +27,11 @@ The resolver runs only after classification returns `OperatingNonFinancial`.
 
 1. Use an observable yield/spread when the instrument is liquid, current, and representative of the issuer's debt.
 2. Use an issuer rating/spread when current and attributable to the issuer. If no rating exists, a synthetic spread may be derived from interest coverage using a versioned spread table and actual issuer facts.
-3. Use SEC annual interest expense divided by average aligned debt when the debt facts cover the same fiscal periods. A single valid pair is real evidence but `provisional`.
+3. Use SEC annual interest expense divided by average aligned debt when the debt facts cover the same fiscal periods. The annual denominator is the average of the current and prior fiscal closing debt; the resolved rate is the median of valid annual observations. A single valid pair is real evidence but `provisional`.
 4. Use Yahoo annual interest and debt only when both facts share the same fiscal period and compatible units.
 5. Return `unavailable` with all attempted-source reason codes if no valid path remains.
 
-`cost_of_debt_source` must distinguish `MarketYield`, `RatedSpread`, `SyntheticCoverageSpread`, `InterestOverAverageDebt`, `YahooAlignedInterestOverDebt`, `NotApplicable`, and `Unavailable`. A policy constant may not be emitted as one of these sources.
+`cost_of_debt_source` must distinguish `MarketYield`, `RatedOrSyntheticSpread` (with rating/synthetic concept retained in source provenance), `InterestOverAverageDebt`, `YahooAlignedInterestOverDebt`, `NotApplicable`, and `Unavailable`. A policy constant may not be emitted as one of these sources.
 
 ### Tax inputs
 

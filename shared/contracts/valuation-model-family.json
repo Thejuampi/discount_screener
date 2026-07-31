@@ -1,6 +1,6 @@
 {
   "contract": "valuation-model-family",
-  "version": "2",
+  "version": "3",
   "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
   "notes": [
     "Golden cases for classifier, model selection, and executable policy/2 FCFF regressions.",
@@ -9,6 +9,48 @@
   "policy2Adoption": {
     "executableSurfaces": ["windows", "android"],
     "deferredSurfaces": ["desktop"]
+  },
+  "driverResolutionContract": {
+    "scope": "OperatingNonFinancial only; FinancialServices bypasses FCFF rate resolution",
+    "costOfDebtOrder": [
+      "market_yield",
+      "rated_or_synthetic_spread",
+      "sec_interest_over_average_fiscal_close_debt",
+      "yahoo_aligned_interest_over_debt",
+      "unavailable"
+    ],
+    "marginalTaxOrder": [
+      "tax_reconciliation",
+      "jurisdiction_statutory",
+      "domicile_tax_proxy",
+      "unavailable"
+    ],
+    "effectiveTaxIsNotMarginalTax": true,
+    "missingDebtIsNotZero": true,
+    "explicitZeroDebt": "not_applicable",
+    "positiveInterestWithZeroDebt": "provider_inconsistent",
+    "qualityThresholds": {
+      "solidMinimumValidPeriods": 3,
+      "provisionalValidPeriods": [1, 2],
+      "unavailableValidPeriods": 0
+    }
+  },
+  "downstreamUnavailableContract": {
+    "emitsIntrinsic": false,
+    "emitsGap": false,
+    "contributesScoreAsZero": false,
+    "clearsStaleFcffCache": true,
+    "analystRangeMayRemainIndependent": true,
+    "reasonCodesAreVisible": true
+  },
+  "exactParityContract": {
+    "moneyUnit": "cents",
+    "rateUnit": "bps",
+    "floatCrossesPublicContract": false,
+    "comparison": "exact textual field equality",
+    "epsilon": null,
+    "oneCentMutationMustFail": true,
+    "oneBpMutationMustFail": true
   },
   "forbiddenAcceptancePatterns": [
     "assert_intrinsic_over_price_ratio_bounded",

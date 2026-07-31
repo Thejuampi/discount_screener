@@ -1,6 +1,6 @@
 ---
 id: SPEC-explicit-driver-data-resolution
-status: in-progress
+status: final
 baseline_commit: 8bcf758a96d15e7add1af19f3aca8648c8434d81
 companions:
   - data-resolution-policy.md
@@ -78,15 +78,17 @@ The same pinned annual evidence produces identical Windows and Android outputs, 
 
 ## Tasks & Acceptance
 
-- [ ] Add a typed, provenance-carrying resolver for aligned annual debt, interest, effective tax, and marginal tax inputs.
-- [ ] Remove FCFF CoD/tax silent defaults and return unavailable with reason codes after source exhaustion.
-- [ ] Preserve financial-services residual income routing and fail closed when book/ROE inputs are absent.
-- [ ] Propagate unavailable through cache, Detail, scoring, and Quant Lens without zero/synthetic gaps.
-- [ ] Extend Windows and Android parity exports and make exact comparison a required test gate, including a one-cent mutation test.
-- [ ] Add fixtures for the specified operating, financial, tax, debt-source, period-alignment, contradiction, and downstream-unavailable cases.
-- [ ] Pass the required Windows and Android gates; live QA, if performed, uses only the locked `qa` profile with at most 20 symbols.
+- [x] Add a typed, provenance-carrying resolver for aligned annual debt, interest, effective tax, and marginal tax inputs.
+- [x] Remove FCFF CoD/tax silent defaults and return unavailable with reason codes after source exhaustion.
+- [x] Preserve financial-services residual income routing and fail closed when book/ROE inputs are absent.
+- [x] Propagate unavailable through cache, Detail, scoring, and Quant Lens without zero/synthetic gaps.
+- [x] Extend Windows and Android parity exports and make exact comparison a required test gate, including a one-cent mutation test.
+- [x] Add fixtures for the specified operating, financial, tax, debt-source, period-alignment, contradiction, and downstream-unavailable cases.
+- [x] Pass the required Windows and Android automated gates; live UI QA remains restricted to the locked `qa` profile with at most 20 symbols and was intentionally not launched in this implementation run.
 
 Acceptance is met only when every resolved public monetary field is equal in cents, every rate in bps, and all provenance, periods, fingerprints, enums, and reason codes compare exactly; missing evidence never produces a fabricated FCFF value.
+
+Implementation evidence: Windows `dcf_model`, `driver_resolution`, `valuation_baseline`, `quant_lens`, and parity tests pass; Android `:core:test`, `:app:testDebugUnitTest`, and `scripts/validate-android.ps1` pass; the exact comparator passes 23/23 cases and the deliberate one-cent mutation is rejected.
 
 ## Assumptions
 

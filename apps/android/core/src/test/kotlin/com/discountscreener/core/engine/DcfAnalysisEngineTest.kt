@@ -26,7 +26,7 @@ class DcfAnalysisEngineTest {
         assertEquals(WaccFieldSource.Reported, analysis.waccInputs.totalDebt)
         assertEquals(WaccFieldSource.Reported, analysis.waccInputs.totalCash)
         assertEquals(WaccFieldSource.InterestOverAverageDebt, analysis.waccInputs.costOfDebt)
-        assertEquals(WaccFieldSource.ReportedMarginalTax, analysis.waccInputs.taxRate)
+        assertEquals(WaccFieldSource.JurisdictionStatutory, analysis.waccInputs.taxRate)
         assertEquals(ValuationModel.FcffWacc, analysis.model)
         assertTrue(analysis.baseIntrinsicValueCents > 0L)
         assertTrue(!analysis.pointEstimateUnreliable)
@@ -80,7 +80,7 @@ class DcfAnalysisEngineTest {
         ).getOrThrow()
 
         assertEquals(WaccFieldSource.IndustryShrink, analysis.waccInputs.beta)
-        assertEquals(WaccFieldSource.ReportedMarginalTax, analysis.waccInputs.taxRate)
+        assertEquals(WaccFieldSource.JurisdictionStatutory, analysis.waccInputs.taxRate)
         assertTrue(!analysis.waccInputs.isProvisional())
         assertTrue(analysis.waccInputs.summaryLabels().none { it.contains("beta=default") })
         assertTrue(analysis.waccInputs.summaryLabels().none { it.contains("tax=") })
@@ -111,7 +111,7 @@ class DcfAnalysisEngineTest {
         ).getOrThrow()
 
         assertEquals(WaccFieldSource.InterestOverAverageDebt, analysis.waccInputs.costOfDebt)
-        assertEquals(WaccFieldSource.ReportedMarginalTax, analysis.waccInputs.taxRate)
+        assertEquals(WaccFieldSource.JurisdictionStatutory, analysis.waccInputs.taxRate)
     }
 
     @Test
@@ -307,10 +307,10 @@ class DcfAnalysisEngineTest {
                     AnnualReportedValue("2025-12-31", 235_540_004_864.0),
                 ),
                 marginalTaxRate = listOf(
-                    AnnualReportedValue("2022-12-31", 0.21),
-                    AnnualReportedValue("2023-12-31", 0.21),
-                    AnnualReportedValue("2024-12-31", 0.21),
-                    AnnualReportedValue("2025-12-31", 0.21),
+                    AnnualReportedValue("2022-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2025-12-31", 0.21, concept = "JurisdictionStatutory"),
                 ),
             ),
             marketPriceCents = 23_977,
@@ -525,10 +525,10 @@ class DcfAnalysisEngineTest {
             AnnualReportedValue("2024-12-31", 8_000_000.0),
         ),
         taxRateForCalcs = listOf(
-            AnnualReportedValue("2021-12-31", 0.21),
-            AnnualReportedValue("2022-12-31", 0.21),
-            AnnualReportedValue("2023-12-31", 0.21),
-            AnnualReportedValue("2024-12-31", 0.21),
+            AnnualReportedValue("2021-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2022-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
         ),
         totalDebt = listOf(
             AnnualReportedValue("2021-12-31", 120_000_000.0),
@@ -537,10 +537,10 @@ class DcfAnalysisEngineTest {
             AnnualReportedValue("2024-12-31", 120_000_000.0),
         ),
         marginalTaxRate = listOf(
-            AnnualReportedValue("2021-12-31", 0.21),
-            AnnualReportedValue("2022-12-31", 0.21),
-            AnnualReportedValue("2023-12-31", 0.21),
-            AnnualReportedValue("2024-12-31", 0.21),
+            AnnualReportedValue("2021-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2022-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
         ),
     )
 }
