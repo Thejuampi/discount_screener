@@ -732,6 +732,33 @@ fn compute_demand_valuation_once(
     cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
     valuation_yahoo: &Option<Arc<YahooClient>>,
 ) -> Result<(), String> {
+    compute_demand_valuation_once_with_financial_refresh(
+        symbol,
+        screener,
+        cik_cache,
+        valuation_yahoo,
+        |symbol| {
+            let Some(yahoo) = valuation_yahoo.as_deref() else {
+                return Ok(None);
+            };
+            yahoo
+                .fetch_symbol(symbol)
+                .map(|result| result.fundamentals)
+                .map_err(|error| format!("financial fundamentals refresh failed: {error}"))
+        },
+    )
+}
+
+fn compute_demand_valuation_once_with_financial_refresh<F>(
+    symbol: &str,
+    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
+    valuation_yahoo: &Option<Arc<YahooClient>>,
+    refresh_financial_fundamentals: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<Option<crate::engine::FundamentalSnapshot>, String>,
+{
     let (mut fund, price, class, existing_fcff) = {
         let s = screener.lock().unwrap();
         let fund = s
@@ -775,19 +802,14 @@ fn compute_demand_valuation_once(
         // residual-income model. This avoids requiring an app restart for COF-like
         // missing payout/retention snapshots.
         if financial_required_drivers_missing(&fund) {
-            if let Some(yahoo) = valuation_yahoo.as_deref() {
-                if let Some(refreshed) = yahoo
-                    .fetch_symbol(symbol)
-                    .map_err(|error| format!("financial fundamentals refresh failed: {error}"))?
+            if let Some(refreshed) = refresh_financial_fundamentals(symbol)? {
+                let mut state = screener.lock().unwrap();
+                state.ingest_fundamentals(refreshed);
+                fund = state
                     .fundamentals
-                {
-                    let mut state = screener.lock().unwrap();
-                    state.ingest_fundamentals(refreshed);
-                    fund =
-                        state.fundamentals.get(symbol).cloned().ok_or_else(|| {
-                            "refreshed financial fundamentals missing".to_string()
-                        })?;
-                }
+                    .get(symbol)
+                    .cloned()
+                    .ok_or_else(|| "refreshed financial fundamentals missing".to_string())?;
             }
         }
 
@@ -1723,7 +1745,8 @@ fn needs_enrichment_retry(
 #[cfg(test)]
 mod feed_coordinator_tests {
     use super::{
-        batch_retry_delay_ms, financial_required_drivers_missing, format_incomplete_retry_status,
+        batch_retry_delay_ms, compute_demand_valuation_once_with_financial_refresh,
+        financial_required_drivers_missing, format_incomplete_retry_status,
         format_terminal_incomplete_status, ingest_fetch_result,
         mark_initial_pass_complete_if_current, needs_enrichment_retry,
         reset_initial_pass_completion, resolve_regime_score_status,
@@ -1748,6 +1771,59 @@ mod feed_coordinator_tests {
 
         cof.retention_bps = Some(8_347);
         assert!(!financial_required_drivers_missing(&cof));
+    }
+
+    #[test]
+    fn cof_stale_detail_demand_refresh_replaces_unavailable_with_residual_income() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/yahoo/quoteSummary/COF-retention.json"
+        ))
+        .expect("COF fixture JSON");
+        let fetched = crate::quote_summary::parse_quote_summary(&fixture, "COF");
+        let snapshot = fetched.snapshot.expect("COF snapshot");
+        let fresh_fundamentals = fetched.fundamentals.expect("COF fundamentals");
+
+        let mut stale_fundamentals = fresh_fundamentals.clone();
+        stale_fundamentals.retention_bps = None;
+        let mut state = ScreenerState::new();
+        state.ingest_snapshot(snapshot);
+        state.ingest_fundamentals(stale_fundamentals);
+        state.set_valuation_error(
+            "COF".into(),
+            "retention/payout is missing or invalid".into(),
+        );
+        let before = state.detail("COF").expect("stale COF detail");
+        assert!(before.dcf_analysis.is_none());
+        assert!(before
+            .valuation_unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("retention/payout")));
+
+        let screener = std::sync::Arc::new(std::sync::Mutex::new(state));
+        let cik_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut refresh_calls = 0;
+        compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            |requested_symbol| {
+                refresh_calls += 1;
+                assert_eq!(requested_symbol, "COF");
+                Ok(Some(fresh_fundamentals))
+            },
+        )
+        .expect("demand valuation should recover stale COF");
+
+        assert_eq!(refresh_calls, 1, "Detail must issue one bounded refresh");
+        let state = screener.lock().unwrap();
+        let after = state.detail("COF").expect("refreshed COF detail");
+        assert_eq!(after.dcf_value_cents, Some(16_881));
+        assert_eq!(
+            after.dcf_analysis.as_ref().map(|analysis| analysis.model),
+            Some(crate::dcf_model::ValuationModel::ResidualIncomeEquity)
+        );
+        assert_eq!(after.valuation_unavailable_reason, None);
     }
 
     #[test]
