@@ -714,6 +714,13 @@ fn current_epoch_day() -> i64 {
         .unwrap_or(0)
 }
 
+fn financial_required_drivers_missing(fund: &crate::engine::FundamentalSnapshot) -> bool {
+    fund.shares_outstanding.unwrap_or(0) == 0
+        || fund.book_value_per_share_cents.unwrap_or(0) <= 0
+        || !matches!(fund.return_on_equity_bps, Some(1..=9_999))
+        || !matches!(fund.retention_bps, Some(0..=10_000))
+}
+
 /// Compute one demand-driven valuation using the same route as Detail.
 ///
 /// The helper is intentionally synchronous so the bounded QA audit can process
@@ -762,6 +769,28 @@ fn compute_demand_valuation_once(
     }
 
     if class == crate::dcf_model::BusinessClass::FinancialServices {
+        // A symbol can remain in memory from a quoteSummary fetched before a newly
+        // required module/field was available. Detail is the bounded recovery
+        // boundary: refresh the full Yahoo fundamentals once before refusing the
+        // residual-income model. This avoids requiring an app restart for COF-like
+        // missing payout/retention snapshots.
+        if financial_required_drivers_missing(&fund) {
+            if let Some(yahoo) = valuation_yahoo.as_deref() {
+                if let Some(refreshed) = yahoo
+                    .fetch_symbol(symbol)
+                    .map_err(|error| format!("financial fundamentals refresh failed: {error}"))?
+                    .fundamentals
+                {
+                    let mut state = screener.lock().unwrap();
+                    state.ingest_fundamentals(refreshed);
+                    fund =
+                        state.fundamentals.get(symbol).cloned().ok_or_else(|| {
+                            "refreshed financial fundamentals missing".to_string()
+                        })?;
+                }
+            }
+        }
+
         let cik = if fund.shares_outstanding.unwrap_or(0) == 0 {
             let client = edgar::edgar_client();
             let mut guard = cik_cache.lock().unwrap();
@@ -782,6 +811,9 @@ fn compute_demand_valuation_once(
             fund.shares_outstanding = Some(shares);
             shares_resolved_from_sec = true;
             screener.lock().unwrap().ingest_fundamentals(fund.clone());
+        }
+        if !matches!(fund.retention_bps, Some(0..=10_000)) {
+            return Err("retention/payout is missing or invalid after Yahoo refresh".into());
         }
         let mut analysis =
             crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
@@ -1691,8 +1723,9 @@ fn needs_enrichment_retry(
 #[cfg(test)]
 mod feed_coordinator_tests {
     use super::{
-        batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
-        ingest_fetch_result, mark_initial_pass_complete_if_current, needs_enrichment_retry,
+        batch_retry_delay_ms, financial_required_drivers_missing, format_incomplete_retry_status,
+        format_terminal_incomplete_status, ingest_fetch_result,
+        mark_initial_pass_complete_if_current, needs_enrichment_retry,
         reset_initial_pass_completion, resolve_regime_score_status,
         symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
         RegimeScoreStatus,
@@ -1700,6 +1733,22 @@ mod feed_coordinator_tests {
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
     use crate::opportunity_v3::ScoringModel;
+
+    #[test]
+    fn financial_detail_refreshes_when_retention_is_missing() {
+        let mut cof = FundamentalSnapshot {
+            symbol: "COF".into(),
+            shares_outstanding: Some(480_000_000),
+            book_value_per_share_cents: Some(15_000),
+            return_on_equity_bps: Some(903),
+            retention_bps: None,
+            ..Default::default()
+        };
+        assert!(financial_required_drivers_missing(&cof));
+
+        cof.retention_bps = Some(8_347);
+        assert!(!financial_required_drivers_missing(&cof));
+    }
 
     #[test]
     fn regime_row_status_distinguishes_all_four_states_and_keeps_zero_included() {

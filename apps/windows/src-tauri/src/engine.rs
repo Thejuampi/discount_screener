@@ -2222,6 +2222,7 @@ impl ScreenerState {
                 trailing_eps_cents,
                 earnings_growth_bps,
                 book_value_per_share_cents,
+                retention_bps,
             );
         }
         let symbol = fund.symbol.clone();

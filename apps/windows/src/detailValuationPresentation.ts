@@ -19,6 +19,9 @@ export function valuationUnavailableI18nKey(reason: string | null | undefined): 
   if (r.includes("acquisition-contaminated")) {
     return "detail.dcfUnavailableAcquisitionGrowth";
   }
+  if (r.includes("retention") || r.includes("payout")) {
+    return "detail.dcfUnavailableMissingRetention";
+  }
   if (r.includes("book")) return "detail.dcfUnavailableMissingBook";
   if (r.includes("fcf") || r.includes("free cash")) return "detail.dcfUnavailableMissingFcf";
   if (r.includes("share")) return "detail.dcfUnavailableMissingShares";

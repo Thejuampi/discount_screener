@@ -68,6 +68,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Falta book equity / ROE para residual income (servicios financieros).",
     en: "Book equity / ROE missing for residual income (financial services).",
   },
+  "detail.dcfUnavailableMissingRetention": {
+    es: "Falta payout/retención reportado para residual income; se reintentó Yahoo sin obtener un valor válido.",
+    en: "Reported payout/retention is missing for residual income; Yahoo was retried without a valid value.",
+  },
   "detail.dcfUnavailableMissingFcf": {
     es: "Sin historial de free cash flow usable para FCFF.",
     en: "No usable free cash flow history for FCFF.",

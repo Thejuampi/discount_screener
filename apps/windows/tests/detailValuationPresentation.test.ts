@@ -63,6 +63,10 @@ describe("detail valuation presentation", () => {
       valuationUnavailableI18nKey("need at least 3 annual free cash flow points"),
       "detail.dcfUnavailableMissingFcf",
     );
+    assert.equal(
+      valuationUnavailableI18nKey("retention/payout is missing or invalid"),
+      "detail.dcfUnavailableMissingRetention",
+    );
   });
 
   it("labels an independently computed DCF discount to market", () => {

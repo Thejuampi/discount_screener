@@ -697,6 +697,19 @@ mod tests {
                 .map(|value| value.base_intrinsic_value_cents),
             Some(16_881)
         );
+
+        state.ingest_fundamentals(crate::engine::FundamentalSnapshot {
+            symbol: "COF".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            state
+                .fundamentals
+                .get("COF")
+                .and_then(|value| value.retention_bps),
+            Some(8_347),
+            "a thin refresh must not erase an already resolved payout/retention driver"
+        );
     }
 
     #[test]
