@@ -21,6 +21,7 @@ import com.discountscreener.core.model.PricingCandle
 import com.discountscreener.core.model.PriceHistoryPoint
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.IndexEstimatesReport
+import com.discountscreener.core.model.TipRanksForecast
 import com.discountscreener.android.domain.model.DatabaseTableInfo
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
@@ -161,6 +162,25 @@ data class PersistedRevisionRecord(
     val payload: EvaluatedSymbolState,
 )
 
+data class TipRanksUsageRecord(
+    val providerMonthUtc: String,
+    val providerUsed: Int,
+    val providerLimit: Int,
+    val capturedAtEpochSeconds: Long,
+)
+
+enum class TipRanksAttemptState { Reserved, Sent, Cancelled }
+
+data class TipRanksAttemptRecord(
+    val id: Long,
+    val providerMonthUtc: String,
+    val operation: String,
+    val symbol: String?,
+    val state: TipRanksAttemptState,
+    val reservedAtEpochSeconds: Long,
+    val sentAtEpochSeconds: Long? = null,
+)
+
 class SQLiteStateStore(
     private val appContext: Context,
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -207,6 +227,9 @@ class SQLiteStateStore(
         }
         if (oldVersion < 6 && newVersion >= 6) {
             createDiscoverySchema(db)
+        }
+        if (oldVersion < 7 && newVersion >= 7) {
+            createTipRanksSchema(db)
         }
     }
 
@@ -490,6 +513,93 @@ class SQLiteStateStore(
         }
     }
 
+    /** Public normalized data; credential deletion deliberately does not clear this cache. */
+    suspend fun loadTipRanksForecast(symbol: String): TipRanksForecast? = withContext(Dispatchers.IO) {
+        readableDatabase.rawQuery(
+            "SELECT payload_json FROM tipranks_forecast_cache WHERE symbol = ?",
+            arrayOf(symbol.uppercase()),
+        ).useRows { cursor ->
+            if (cursor.moveToFirst()) json.decodeFromString(cursor.getString(0)) else null
+        }
+    }
+
+    suspend fun saveTipRanksForecast(forecast: TipRanksForecast) = withContext(Dispatchers.IO) {
+        writableDatabase.insertWithOnConflict(
+            "tipranks_forecast_cache", null,
+            ContentValues().apply {
+                put("symbol", forecast.symbol.uppercase())
+                put("fetched_at", forecast.fetchedAtEpochSeconds)
+                put("payload_json", json.encodeToString(forecast))
+            }, SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    /** Records a reservation before dispatch; 50/month enforcement is atomic with the insert. */
+    suspend fun reserveTipRanksForecastAttempt(
+        providerMonthUtc: String,
+        symbol: String,
+        reservedAtEpochSeconds: Long,
+        monthlyLimit: Int = 50,
+    ): TipRanksAttemptRecord? = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val charged = db.compileStatement(
+                "SELECT COUNT(*) FROM tipranks_attempt WHERE provider_month_utc = ? AND state IN ('reserved', 'sent')",
+            ).use { statement ->
+                statement.bindString(1, providerMonthUtc)
+                statement.simpleQueryForLong().toInt()
+            }
+            if (charged >= monthlyLimit) return@withContext null
+            val id = db.insertOrThrow("tipranks_attempt", null, ContentValues().apply {
+                put("provider_month_utc", providerMonthUtc)
+                put("operation", "forecast")
+                put("symbol", symbol.uppercase())
+                put("state", "reserved")
+                put("reserved_at", reservedAtEpochSeconds)
+                putNull("sent_at")
+            })
+            db.setTransactionSuccessful()
+            TipRanksAttemptRecord(id, providerMonthUtc, "forecast", symbol.uppercase(), TipRanksAttemptState.Reserved, reservedAtEpochSeconds)
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** The sent mark is committed independently from forecast-cache writes. */
+    suspend fun markTipRanksAttemptSent(id: Long, sentAtEpochSeconds: Long): Boolean = withContext(Dispatchers.IO) {
+        writableDatabase.update(
+            "tipranks_attempt", ContentValues().apply { put("state", "sent"); put("sent_at", sentAtEpochSeconds) },
+            "id = ? AND state = 'reserved'", arrayOf(id.toString()),
+        ) == 1
+    }
+
+    /** Cancellation is legal only before dispatch. */
+    suspend fun cancelReservedTipRanksAttempt(id: Long): Boolean = withContext(Dispatchers.IO) {
+        writableDatabase.update(
+            "tipranks_attempt", ContentValues().apply { put("state", "cancelled") },
+            "id = ? AND state = 'reserved'", arrayOf(id.toString()),
+        ) == 1
+    }
+
+    suspend fun saveTipRanksUsageSnapshot(record: TipRanksUsageRecord) = withContext(Dispatchers.IO) {
+        writableDatabase.insertWithOnConflict("tipranks_usage_snapshot", null, ContentValues().apply {
+            put("provider_month_utc", record.providerMonthUtc)
+            put("provider_used", record.providerUsed)
+            put("provider_limit", record.providerLimit)
+            put("captured_at", record.capturedAtEpochSeconds)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    suspend fun loadLatestTipRanksUsageSnapshot(providerMonthUtc: String): TipRanksUsageRecord? = withContext(Dispatchers.IO) {
+        readableDatabase.rawQuery(
+            "SELECT provider_used, provider_limit, captured_at FROM tipranks_usage_snapshot WHERE provider_month_utc = ?",
+            arrayOf(providerMonthUtc),
+        ).useRows { cursor ->
+            if (!cursor.moveToFirst()) null else TipRanksUsageRecord(providerMonthUtc, cursor.getInt(0), cursor.getInt(1), cursor.getLong(2))
+        }
+    }
+
     private fun createSchema(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -598,6 +708,7 @@ class SQLiteStateStore(
             "CREATE INDEX estimates_snapshot_profile_idx ON estimates_snapshot(profile_name, computed_at_epoch, id)",
         )
         createDiscoverySchema(db)
+        createTipRanksSchema(db)
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -1414,10 +1525,32 @@ class SQLiteStateStore(
         )
     }
 
+    private fun createTipRanksSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE tipranks_forecast_cache (
+                symbol TEXT PRIMARY KEY, fetched_at INTEGER NOT NULL, payload_json TEXT NOT NULL
+            )""",
+        )
+        db.execSQL(
+            """CREATE TABLE tipranks_usage_snapshot (
+                provider_month_utc TEXT PRIMARY KEY, provider_used INTEGER NOT NULL,
+                provider_limit INTEGER NOT NULL, captured_at INTEGER NOT NULL
+            )""",
+        )
+        db.execSQL(
+            """CREATE TABLE tipranks_attempt (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider_month_utc TEXT NOT NULL,
+                operation TEXT NOT NULL, symbol TEXT, state TEXT NOT NULL,
+                reserved_at INTEGER NOT NULL, sent_at INTEGER
+            )""",
+        )
+        db.execSQL("CREATE INDEX tipranks_attempt_month_idx ON tipranks_attempt(provider_month_utc, state, reserved_at)")
+    }
+
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 6
+        private const val SQLITE_SCHEMA_VERSION = 7
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
@@ -1432,12 +1565,14 @@ class SQLiteStateStore(
             "raw_latest", "pricing_candle", "symbol_revision", "symbol_latest", "issue_state",
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
+            "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
             LogTableQuery("pricing_candle", "captured_at"),
             LogTableQuery("symbol_revision", "evaluated_at"),
             LogTableQuery("discovery_job", "started_at"),
+            LogTableQuery("tipranks_attempt", "reserved_at"),
         )
     }
 

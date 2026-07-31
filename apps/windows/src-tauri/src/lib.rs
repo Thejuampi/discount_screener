@@ -36,6 +36,8 @@ mod stooq;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
+#[cfg(test)]
+mod valuation_decision_contract;
 mod valuation_divergence;
 mod yahoo_session;
 

@@ -3,6 +3,7 @@ package com.discountscreener.core.contracts
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.ReportingEngine
+import com.discountscreener.core.engine.ValuationDecisionPolicy
 import com.discountscreener.core.engine.DcfSourceSelectionPolicy
 import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.model.AnnualReportedValue
@@ -149,6 +150,28 @@ class ContractFixtureTest {
     }
 
     @Test
+    fun valuation_decision_policy_goldens_execute_against_core() {
+        val fixture = loadValuationDecisionPolicyFixture()
+        assertEquals(1, fixture.schemaVersion)
+        assertEquals("valuation-decision-policy/1", fixture.policyVersion)
+
+        fixture.fixtures.forEach { case ->
+            when {
+                case.left != null && case.right != null -> assertEquals(
+                    case.expectedDifferenceBps,
+                    ValuationDecisionPolicy.differenceBps(case.left, case.right),
+                    case.name,
+                )
+                case.bear != null -> assertEquals(
+                    case.expectedScenarioWidthBps,
+                    ValuationDecisionPolicy.scenarioWidthBps(case.bear, requireNotNull(case.base), requireNotNull(case.bull)),
+                    case.name,
+                )
+            }
+        }
+    }
+
+    @Test
     fun portfolio_ranking_fixture_matches_core_behavior() {
         val fixture = loadFixture()
         val engine = ReportingEngine()
@@ -227,6 +250,11 @@ class ContractFixtureTest {
 
     private fun loadValuationModelFamilyFixture(): ValuationModelFamilyFixture {
         val path = findFixturePath("valuation-model-family.json")
+        return contractJson.decodeFromString(Files.readString(path))
+    }
+
+    private fun loadValuationDecisionPolicyFixture(): ValuationDecisionPolicyFixture {
+        val path = findFixturePath("valuation-decision-policy.json")
         return contractJson.decodeFromString(Files.readString(path))
     }
 
@@ -364,6 +392,25 @@ private data class ValuationExpected(
     val latestFcfDollars: Long? = null,
     val fcfRunRateDollars: Long? = null,
     val valuationDriver: String? = null,
+)
+
+@Serializable
+private data class ValuationDecisionPolicyFixture(
+    val schemaVersion: Int,
+    val policyVersion: String,
+    val fixtures: List<ValuationDecisionPolicyCase>,
+)
+
+@Serializable
+private data class ValuationDecisionPolicyCase(
+    val name: String,
+    val left: Long? = null,
+    val right: Long? = null,
+    val bear: Long? = null,
+    val base: Long? = null,
+    val bull: Long? = null,
+    val expectedDifferenceBps: Int? = null,
+    val expectedScenarioWidthBps: Int? = null,
 )
 
 @Serializable

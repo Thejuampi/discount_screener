@@ -10,7 +10,6 @@ import com.discountscreener.core.model.QuantLensReasonCode
 import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ValuationModel
-import kotlin.math.roundToInt
 
 /**
  * Chooses the expected-value anchor without hiding model/analyst disagreement.
@@ -20,8 +19,6 @@ import kotlin.math.roundToInt
  * explicitly disputed so the UI cannot headline an absurd single upside.
  */
 object QuantLensExpectedValuePolicy {
-    private const val MODEL_ANALYST_AGREE_BPS = 2_500
-    private const val WIDE_SCENARIO_BPS = 12_000
 
     fun select(
         detail: SymbolDetail,
@@ -38,17 +35,21 @@ object QuantLensExpectedValuePolicy {
         val analystAnchors = analystAnchors(detail)
         val modelQuality = modelQuality(dcf, modelAnchors)
         val disagreement = if (modelAnchors.size == 3 && analystAnchors.size == 3) {
-            relativeDisagreementBps(modelAnchors[1], analystAnchors[1])
+            ValuationDecisionPolicy.differenceBps(modelAnchors[1], analystAnchors[1])
         } else {
             null
         }
 
         if (modelAnchors.size == 3 && analystAnchors.size == 3 &&
-            disagreement != null && disagreement > MODEL_ANALYST_AGREE_BPS
+            disagreement != null && disagreement > ValuationDecisionPolicy.ALIGNED_MAX_BPS
         ) {
             return QuantLensExpectedValueRange(
                 primaryStatus = QuantLensPrimaryStatus.Disputed,
-                band = ExpectedValueRangeBand.Disputed,
+                band = if (disagreement > ValuationDecisionPolicy.TENSION_MAX_BPS) {
+                    ExpectedValueRangeBand.Disputed
+                } else {
+                    ExpectedValueRangeBand.Tension
+                },
                 modelLowFairValueCents = modelAnchors[0],
                 modelBaseFairValueCents = modelAnchors[1],
                 modelHighFairValueCents = modelAnchors[2],
@@ -182,12 +183,8 @@ object QuantLensExpectedValuePolicy {
             return ModelQuality.Unusable
         }
         val base = anchors[1]
-        val widthBps = if (base > 0L) {
-            (((anchors[2] - anchors[0]).toDouble() / base.toDouble()) * 10_000.0).roundToInt()
-        } else {
-            Int.MAX_VALUE
-        }
-        return if (dcf.waccInputs.isProvisional() || dcf.pointEstimateUnreliable || widthBps > WIDE_SCENARIO_BPS) {
+        val widthBps = ValuationDecisionPolicy.scenarioWidthBps(anchors[0], base, anchors[2]) ?: Int.MAX_VALUE
+        return if (dcf.waccInputs.isProvisional() || dcf.pointEstimateUnreliable || widthBps > ValuationDecisionPolicy.WIDE_SCENARIO_BPS) {
             ModelQuality.Soft
         } else {
             ModelQuality.Solid
@@ -196,15 +193,6 @@ object QuantLensExpectedValuePolicy {
 
     private fun weightedThree(low: Long, base: Long, high: Long): Long =
         (low + (base * 2L) + high) / 4L
-
-    private fun relativeDisagreementBps(aCents: Long, bCents: Long): Int? {
-        if (aCents <= 0L || bCents <= 0L) return null
-        val midpoint = (aCents + bCents).toDouble() / 2.0
-        if (!midpoint.isFinite() || midpoint <= 0.0) return null
-        return (((kotlin.math.abs(aCents - bCents).toDouble() / midpoint) * 10_000.0)
-            .roundToInt())
-            .coerceIn(0, 100_000)
-    }
 
     private enum class ModelQuality {
         Solid,

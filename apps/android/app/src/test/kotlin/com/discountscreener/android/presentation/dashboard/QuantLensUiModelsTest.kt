@@ -78,7 +78,7 @@ class QuantLensUiModelsTest {
         val state = mapQuantLensReport(report())
 
         assertEquals(
-            listOf("Signal quality", "Price estimate", "Market overlap", "Price trend", "Typical moves", "Similar patterns"),
+            listOf("Valuation decision", "Signal quality", "Market overlap", "Price trend", "Typical moves", "Similar patterns"),
             state?.sections?.map { it.title },
         )
     }

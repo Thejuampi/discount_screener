@@ -57,8 +57,8 @@ data class QuantLensUiState(
 internal fun mapQuantLensReport(report: QuantLensReport?, marketPriceCents: Long? = null): QuantLensUiState? {
     report ?: return null
     val sections = listOf(
-        evidenceSection(report),
         evSection(report, marketPriceCents),
+        evidenceSection(report),
 
         correlationSection(report),
         trendSection(report),
@@ -127,6 +127,7 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
             if (crossesZero) "Mixed up/down"
             else if (lowBps != null && highBps != null) "${compactPct(lowBps)}..${compactPct(highBps)}% upside"
             else "Upside estimate"
+        ExpectedValueRangeBand.Tension -> "Tension"
         ExpectedValueRangeBand.Disputed -> "Disputed"
         ExpectedValueRangeBand.ReferenceOnly,
         ExpectedValueRangeBand.Sparse,
@@ -141,7 +142,8 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
             else if (lowBps != null && weightedBps != null && highBps != null)
                 "Estimated upside ${signedPercent(lowBps)} to ${signedPercent(highBps)} · Best guess ${signedPercent(weightedBps)}"
             else weightedBps?.let { "Estimated upside ${signedPercent(it)}" } ?: "Price references only"
-        ExpectedValueRangeBand.Disputed -> disputedPrimaryLine(section, price)
+        ExpectedValueRangeBand.Tension -> disputedPrimaryLine(section, price, "sources are in tension")
+        ExpectedValueRangeBand.Disputed -> disputedPrimaryLine(section, price, "sources disagree")
         ExpectedValueRangeBand.ReferenceOnly ->
             "$anchorCount price reference${if (anchorCount == 1) "" else "s"} · Indicative only"
         ExpectedValueRangeBand.Sparse ->
@@ -154,7 +156,9 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
             weightedBps?.let { "Expected" to signedPercent(it) },
             highBps?.let { "Optimistic" to signedPercent(it) },
         )
-        ExpectedValueRangeBand.Disputed -> disputedRows(section, price)
+        ExpectedValueRangeBand.Tension,
+        ExpectedValueRangeBand.Disputed,
+        -> disputedRows(section, price)
         ExpectedValueRangeBand.ReferenceOnly -> listOfNotNull(
             section.lowFairValueCents?.let { "Low" to money(it) },
             section.highFairValueCents?.let { "High" to money(it) },
@@ -168,7 +172,9 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
     }
     val anchorChip = when (section.band) {
         ExpectedValueRangeBand.ScenarioWeighted -> "3 scenarios"
-        ExpectedValueRangeBand.Disputed -> "No single EV"
+        ExpectedValueRangeBand.Tension,
+        ExpectedValueRangeBand.Disputed,
+        -> "No single EV"
         ExpectedValueRangeBand.ReferenceOnly -> "$anchorCount price point${if (anchorCount == 1) "" else "s"}"
         else -> null
     }
@@ -178,6 +184,7 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
         QuantLensFreshnessQualifier.ProviderUncertain -> "Source uncertain"
         QuantLensFreshnessQualifier.Fresh, null -> when (section.band) {
             ExpectedValueRangeBand.ScenarioWeighted -> "Up to date"
+            ExpectedValueRangeBand.Tension -> "Sources in tension"
             ExpectedValueRangeBand.Disputed -> "Sources disagree"
             else -> null
         }
@@ -198,7 +205,7 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
     } else null
     return QuantLensSectionUi(
         lensId = QuantLensLensId.ExpectedValueRange,
-        title = "Price estimate",
+        title = "Valuation decision",
         chip = QuantLensChipUi(QuantLensLensId.ExpectedValueRange, label, severityFor(section.primaryStatus, mixed = mixed)),
         primaryLine = primaryLine,
         rows = rows,
@@ -312,6 +319,7 @@ private fun rowChip(state: QuantLensLensRowState): QuantLensChipUi =
             QuantLensRowLabel.EvidenceSparse -> "Few signals"
             QuantLensRowLabel.EvidenceUnavailable -> "No signals"
             QuantLensRowLabel.EvRange -> evRowRange(state)
+            QuantLensRowLabel.EvTension -> "Tension · model vs analyst"
             QuantLensRowLabel.EvDisputed -> "Disputed · model vs analyst"
             QuantLensRowLabel.EvSparse -> "Estimate limited"
             QuantLensRowLabel.EvUnavailable -> "No estimate"
@@ -343,13 +351,14 @@ private fun evRowRange(state: QuantLensLensRowState): String {
 private fun disputedPrimaryLine(
     section: com.discountscreener.core.model.QuantLensExpectedValueRange,
     marketPriceCents: Long?,
+    relationLabel: String,
 ): String {
     val modelBase = section.modelBaseFairValueCents
     val analystBase = section.analystBaseFairValueCents
-    if (modelBase == null || analystBase == null) return "Model and analyst sources disagree · no single estimate"
+    if (modelBase == null || analystBase == null) return "Model and analyst $relationLabel · no single estimate"
     val modelUpside = marketPriceCents?.let { upsideBps(modelBase, it) }
     val analystUpside = marketPriceCents?.let { upsideBps(analystBase, it) }
-    return "DCF ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) vs analyst ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}) · no single estimate"
+    return "DCF ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) vs analyst ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}) · $relationLabel · no single estimate"
 }
 
 private fun disputedRows(

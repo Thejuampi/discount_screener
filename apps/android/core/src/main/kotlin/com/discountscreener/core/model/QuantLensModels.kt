@@ -50,6 +50,7 @@ enum class QuantLensRowLabel {
     EvidenceSparse,
     EvidenceUnavailable,
     EvRange,
+    EvTension,
     EvDisputed,
     EvSparse,
     EvUnavailable,
@@ -81,6 +82,7 @@ enum class EvidenceStrengthBand {
 @Serializable
 enum class ExpectedValueRangeBand {
     ScenarioWeighted,
+    Tension,
     Disputed,
     ReferenceOnly,
     Sparse,

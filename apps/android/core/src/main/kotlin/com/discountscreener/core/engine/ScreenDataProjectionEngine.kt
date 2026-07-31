@@ -728,11 +728,11 @@ class ScreenDataProjectionEngine {
         }
 
         val selection = QuantLensExpectedValuePolicy.select(detail, dcfAnalysis)
-        if (selection.band == ExpectedValueRangeBand.Disputed) {
+        if (selection.band == ExpectedValueRangeBand.Disputed || selection.band == ExpectedValueRangeBand.Tension) {
             return QuantLensLensRowState(
                 lensId = QuantLensLensId.ExpectedValueRange,
                 primaryStatus = QuantLensPrimaryStatus.Disputed,
-                band = ExpectedValueRangeBand.Disputed.name,
+                band = selection.band.name,
                 label = QuantLensRowLabel.EvDisputed,
                 reasonCodes = selection.reasonCodes,
             )

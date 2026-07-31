@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "valuation-decision-policy/1",
+  "ordering": ["Model", "Yahoo", "TipRanks"],
+  "units": { "value": "minor units with explicit ISO currency and scale", "difference": "bps" },
+  "rounding": "integer half-up; exact comparisons and output use integers only",
+  "differenceBps": "positive anchors in the same ISO currency and minor-unit scale only: floor((abs(a-b)*20000 + floor((a+b)/2))/(a+b)); no saturation cap",
+  "scenarioWidthBps": "ordered scenarios allow equality and require 0<bear<=base<=bull: floor(((bull-bear)*10000 + floor(base/2))/base)",
+  "thresholds": { "alignedMaxBps": 2500, "tensionMaxBps": 5000, "wideScenarioBps": 12000 },
+  "fixtures": [
+    { "name": "aligned-boundary", "left": 700000, "right": 900000, "expectedDifferenceBps": 2500, "relation": "Aligned" },
+    { "name": "tension-boundary", "left": 17499, "right": 22501, "expectedDifferenceBps": 2501, "relation": "Tension" },
+    { "name": "tension-upper-boundary", "left": 15000, "right": 25000, "expectedDifferenceBps": 5000, "relation": "Tension" },
+    { "name": "disputed-boundary", "left": 14999, "right": 25001, "expectedDifferenceBps": 5001, "relation": "Disputed" },
+    { "name": "equal-scenarios", "bear": 100, "base": 100, "bull": 100, "expectedScenarioWidthBps": 0 },
+    { "name": "incompatible-currency", "leftCurrency": "USD", "rightCurrency": "EUR", "expectedComparable": false },
+    { "name": "tipranks-cache-fresh", "ageSeconds": 86400, "expected": "Fresh" },
+    { "name": "tipranks-cache-aging-start", "ageSeconds": 86401, "expected": "Aging" },
+    { "name": "tipranks-cache-aging-end", "ageSeconds": 604800, "expected": "Aging" },
+    { "name": "tipranks-cache-stale", "ageSeconds": 604801, "expected": "Stale" },
+    { "name": "tipranks-observation-fresh", "ageSeconds": 2592000, "expected": "Fresh" },
+    { "name": "tipranks-observation-aging-start", "ageSeconds": 2592001, "expected": "Aging" },
+    { "name": "tipranks-observation-aging-end", "ageSeconds": 7776000, "expected": "Aging" },
+    { "name": "tipranks-observation-stale", "ageSeconds": 7776001, "expected": "Stale" }
+  ]
+}

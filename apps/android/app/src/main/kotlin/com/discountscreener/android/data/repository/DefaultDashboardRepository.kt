@@ -2008,11 +2008,11 @@ class DefaultDashboardRepository(
                 freshnessQualifier = com.discountscreener.core.model.QuantLensFreshnessQualifier.ProviderUncertain,
                 reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
             )
-            selection?.band == ExpectedValueRangeBand.Disputed -> QuantLensLensRowState(
+            selection?.band == ExpectedValueRangeBand.Disputed || selection?.band == ExpectedValueRangeBand.Tension -> QuantLensLensRowState(
                 lensId = QuantLensLensId.ExpectedValueRange,
                 primaryStatus = QuantLensPrimaryStatus.Disputed,
-                band = ExpectedValueRangeBand.Disputed.name,
-                label = QuantLensRowLabel.EvDisputed,
+                band = selection.band.name,
+                label = if (selection.band == ExpectedValueRangeBand.Tension) QuantLensRowLabel.EvTension else QuantLensRowLabel.EvDisputed,
                 reasonCodes = selection.reasonCodes,
             )
             selection?.band == ExpectedValueRangeBand.ScenarioWeighted -> QuantLensLensRowState(
