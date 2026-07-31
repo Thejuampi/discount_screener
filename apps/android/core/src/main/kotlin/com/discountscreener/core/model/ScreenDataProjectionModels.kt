@@ -148,6 +148,24 @@ data class ProjectedDetailData(
     val waccBps: Int? = null,
     val waccProvisional: Boolean = false,
     val waccAssumptionLabels: List<String> = emptyList(),
+    /** User-visible refuse copy when valuation is unavailable (Windows Detail parity). */
+    val valuationUnavailableReason: String? = null,
+    /** Honest model label: FCFF DCF vs Residual income. */
+    val valuationModelLabel: String? = null,
+    val latestFcfDollars: Long? = null,
+    val fcfRunRateDollars: Long? = null,
+    val fcfRunRateNormalized: Boolean = false,
+    val provisionalWaccUpliftBps: Int = 0,
+    val valuationDriver: String? = null,
+    val latestRevenueDollars: Long? = null,
+    val normalizedFcffDollars: Long? = null,
+    val normalizedOcfMarginBps: Int? = null,
+    val normalizedCapexIntensityBps: Int? = null,
+    val normalizedAfterTaxInterestMarginBps: Int? = null,
+    val capexSpikeYears: List<Int> = emptyList(),
+    val driverRegime: String? = null,
+    val growthDispersionBps: Int? = null,
+    val growthDriver: String? = null,
 ) {
     init {
         require(symbol.isNotBlank()) { "Projected detail symbol is required." }

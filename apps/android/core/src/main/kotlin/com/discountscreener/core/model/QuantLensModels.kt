@@ -11,6 +11,7 @@ enum class QuantLensPrimaryStatus {
     Available,
     Partial,
     Provisional,
+    Disputed,
     Sparse,
     Insufficient,
     Unavailable,
@@ -49,6 +50,7 @@ enum class QuantLensRowLabel {
     EvidenceSparse,
     EvidenceUnavailable,
     EvRange,
+    EvDisputed,
     EvSparse,
     EvUnavailable,
     CorrLow,
@@ -79,6 +81,7 @@ enum class EvidenceStrengthBand {
 @Serializable
 enum class ExpectedValueRangeBand {
     ScenarioWeighted,
+    Disputed,
     ReferenceOnly,
     Sparse,
     Unavailable,
@@ -126,6 +129,7 @@ enum class QuantLensReasonCode {
     InsufficientTrendSamples,
     InsufficientComparables,
     CompleteScenarioAnchors,
+    ModelAnalystDisagreement,
     HistoricalBaselineAvailable,
     MissingHorizonCandles,
     InsufficientHorizonSamples,
@@ -274,6 +278,13 @@ data class QuantLensExpectedValueRange(
     val lowFairValueCents: Long? = null,
     val highFairValueCents: Long? = null,
     val spreadBps: Int? = null,
+    val modelLowFairValueCents: Long? = null,
+    val modelBaseFairValueCents: Long? = null,
+    val modelHighFairValueCents: Long? = null,
+    val analystLowFairValueCents: Long? = null,
+    val analystBaseFairValueCents: Long? = null,
+    val analystHighFairValueCents: Long? = null,
+    val disagreementBps: Int? = null,
     val reasonCodes: List<QuantLensReasonCode>,
 ) {
     init {
@@ -288,6 +299,13 @@ data class QuantLensExpectedValueRange(
             }
         }
         requireBps("spreadBps", spreadBps, max = 100_000)
+        requireNonNegativeCents("modelLowFairValueCents", modelLowFairValueCents)
+        requireNonNegativeCents("modelBaseFairValueCents", modelBaseFairValueCents)
+        requireNonNegativeCents("modelHighFairValueCents", modelHighFairValueCents)
+        requireNonNegativeCents("analystLowFairValueCents", analystLowFairValueCents)
+        requireNonNegativeCents("analystBaseFairValueCents", analystBaseFairValueCents)
+        requireNonNegativeCents("analystHighFairValueCents", analystHighFairValueCents)
+        requireBps("disagreementBps", disagreementBps, max = 100_000)
     }
 }
 

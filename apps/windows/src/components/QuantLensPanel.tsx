@@ -94,6 +94,8 @@ function metricLabel(key: string): string {
     gap_bps: "analyst gap",
     model_quality: "model quality",
     valuation_model: "model",
+    valuation_driver: "valuation driver",
+    growth_driver: "growth driver",
     business_class: "class",
     scenario_width_bps: "scenario width",
     low_cents: "low",
@@ -113,6 +115,11 @@ function metricLabel(key: string): string {
     wacc_provenance: "WACC inputs",
     latest_fcf_dollars: "FCF latest fiscal",
     fcf_run_rate_dollars: "FCF run-rate",
+    latest_revenue_dollars: "latest revenue",
+    normalized_fcff_dollars: "normalized FCFF",
+    normalized_ocf_margin_bps: "normalized OCF margin",
+    normalized_capex_intensity_bps: "normalized CapEx intensity",
+    capex_spike_years: "CapEx spikes",
     fcf_series: "FCF series",
     capex_imputed_years: "CapEx imputed",
     net_debt_dollars: "net debt",
@@ -148,6 +155,8 @@ function formatMetric(key: string, value: string): string {
   if (
     key === "latest_fcf_dollars"
     || key === "fcf_run_rate_dollars"
+    || key === "latest_revenue_dollars"
+    || key === "normalized_fcff_dollars"
     || key === "net_debt_dollars"
   ) {
     const n = Number(value);

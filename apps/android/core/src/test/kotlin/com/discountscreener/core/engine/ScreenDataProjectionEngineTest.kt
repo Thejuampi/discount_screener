@@ -30,6 +30,8 @@ import com.discountscreener.core.model.ProjectionRoute
 import com.discountscreener.core.model.ProjectionSymbolState
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensLensId
+import com.discountscreener.core.model.QuantLensPrimaryStatus
+import com.discountscreener.core.model.QuantLensRowLabel
 import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
@@ -176,6 +178,37 @@ class ScreenDataProjectionEngineTest {
         )
 
         assertEquals(fxLiveAnalystExpectation(), projectionExpectation(result))
+    }
+
+    @Test
+    fun quant_lens_row_marks_material_model_analyst_gap_disputed_without_dcf_upside_range() {
+        val result = projectSingleSymbol(
+            symbol = "AMZN",
+            detail = detail(
+                symbol = "AMZN",
+                marketPriceCents = 23_977L,
+                intrinsicValueCents = 31_307L,
+                confidence = ConfidenceBand.High,
+                externalSignalFairValueCents = 31_500L,
+                externalSignalLowFairValueCents = 20_700L,
+                externalSignalHighFairValueCents = 37_000L,
+            ),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 1_152L,
+                baseIntrinsicValueCents = 1_708L,
+                bullIntrinsicValueCents = 1_913L,
+            ),
+        )
+
+        val state = result.trackedRows.single().quantLensSummary
+            ?.lensStates
+            ?.single { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertEquals(QuantLensPrimaryStatus.Disputed, state?.primaryStatus)
+        assertEquals(QuantLensRowLabel.EvDisputed, state?.label)
+        assertEquals(null, state?.evLowUpsideBps)
+        assertEquals(null, state?.evHighUpsideBps)
     }
 
     @Test
@@ -624,8 +657,8 @@ class ScreenDataProjectionEngineTest {
         fairValueCents = 13_000L,
         upsideBps = 3_000,
         displayLabel = ProjectedFairValueLabels.MODEL_FAIR_VALUE,
-        compactLabel = "DCF model",
-        sourceLabel = "DCF base - Yahoo Finance",
+        compactLabel = "FCFF DCF",
+        sourceLabel = "FCFF DCF base - Yahoo Finance",
         role = ProjectedFairValueRole.DcfBaseModel,
         provenanceState = ProjectedProvenanceState.Live,
         confidence = ProjectedConfidence.Provisional,
@@ -634,7 +667,7 @@ class ScreenDataProjectionEngineTest {
         decision = ProjectedRowDecision.Watch,
         canPopulateAnalystHistory = false,
         detailFairValueCents = 13_000L,
-        detailSourceLabel = "DCF base - Yahoo Finance",
+        detailSourceLabel = "FCFF DCF base - Yahoo Finance",
         evLowUpsideBps = 1_500,
         evHighUpsideBps = 5_000,
         providerCategory = ProjectedProviderCategory.Live,
@@ -652,8 +685,8 @@ class ScreenDataProjectionEngineTest {
         fairValueCents = 13_000L,
         upsideBps = 3_000,
         displayLabel = ProjectedFairValueLabels.MODEL_FAIR_VALUE,
-        compactLabel = "DCF model",
-        sourceLabel = "DCF base - source uncertain",
+        compactLabel = "FCFF DCF",
+        sourceLabel = "FCFF DCF base - source uncertain",
         role = ProjectedFairValueRole.UncertainDcfModel,
         provenanceState = ProjectedProvenanceState.ProviderUncertain,
         confidence = ProjectedConfidence.Provisional,
@@ -662,7 +695,7 @@ class ScreenDataProjectionEngineTest {
         decision = ProjectedRowDecision.Watch,
         canPopulateAnalystHistory = false,
         detailFairValueCents = 13_000L,
-        detailSourceLabel = "DCF base - source uncertain",
+        detailSourceLabel = "FCFF DCF base - source uncertain",
         evLowUpsideBps = null,
         evHighUpsideBps = null,
         providerCategory = ProjectedProviderCategory.ProviderUncertain,

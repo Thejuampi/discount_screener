@@ -54,51 +54,35 @@
       }
     },
     {
-      "symbol": "PSIX",
-      "cik": "0001137091",
-      "entity_name": "POWER SOLUTIONS INTERNATIONAL, INC.",
+      "symbol": "T",
+      "cik": "0000732712",
+      "entity_name": "AT&T INC.",
       "selection": {
         "gap_bps": 5483,
         "confidence": "High",
         "composite_score": -7,
-        "snapshot_market_price_cents": 3178,
-        "snapshot_intrinsic_cents": 7037,
+        "snapshot_market_price_cents": 2112,
+        "snapshot_intrinsic_cents": 30000,
         "captured_at": 1784688429
       },
       "status": "ok",
       "quarantine": false,
       "quarantine_reason": null,
       "inputs": {
-        "market_price_cents": 3178,
-        "shares_outstanding": 23063000,
-        "market_cap_dollars": 732942140,
-        "total_debt_dollars": 184000,
-        "total_cash_dollars": 41250000,
-        "beta_millis": 1000,
-        "sector_name": "Industrials",
-        "industry_name": "Specialty Industrial Machinery",
+        "market_price_cents": 2112,
+        "shares_outstanding": 6948338835,
+        "market_cap_dollars": 146748915712,
+        "total_debt_dollars": 159750995968,
+        "total_cash_dollars": 11964000256,
+        "beta_millis": 422,
+        "sector_name": "Communication Services",
+        "industry_name": "Telecom Services",
         "analyst_target_mean_cents": null,
         "fcf_annual": [
-          {
-            "year": 2021,
-            "value_dollars": -61478000.0
-          },
-          {
-            "year": 2022,
-            "value_dollars": -8845000.0
-          },
-          {
-            "year": 2023,
-            "value_dollars": 70512000.0
-          },
-          {
-            "year": 2024,
-            "value_dollars": 62390000.0
-          },
-          {
-            "year": 2025,
-            "value_dollars": 24113000.0
-          }
+          {"year": 2022, "value_dollars": 12397000000.0},
+          {"year": 2023, "value_dollars": 20460000000.0},
+          {"year": 2024, "value_dollars": 18510000000.0},
+          {"year": 2025, "value_dollars": 19440000000.0}
         ],
         "fcf_source": "sec_ocf_minus_ppe_or_productive"
       }
@@ -346,51 +330,35 @@
       }
     },
     {
-      "symbol": "HNRG",
-      "cik": "0000788965",
-      "entity_name": "HALLADOR ENERGY CO",
+      "symbol": "AMZN",
+      "cik": "0001018724",
+      "entity_name": "AMAZON.COM, INC.",
       "selection": {
         "gap_bps": 4523,
         "confidence": "High",
         "composite_score": -4,
-        "snapshot_market_price_cents": 1661,
-        "snapshot_intrinsic_cents": 3033,
+        "snapshot_market_price_cents": 23933,
+        "snapshot_intrinsic_cents": 60000,
         "captured_at": 1784688429
       },
       "status": "ok",
       "quarantine": false,
       "quarantine_reason": null,
       "inputs": {
-        "market_price_cents": 1661,
-        "shares_outstanding": 46519000,
-        "market_cap_dollars": 772680590,
-        "total_debt_dollars": 29678000,
-        "total_cash_dollars": 10070000,
-        "beta_millis": 1000,
-        "sector_name": "Energy",
-        "industry_name": "Thermal Coal",
+        "market_price_cents": 23933,
+        "shares_outstanding": 10757109436,
+        "market_cap_dollars": 2574493679616,
+        "total_debt_dollars": 235540004864,
+        "total_cash_dollars": 143088992256,
+        "beta_millis": 1461,
+        "sector_name": "Consumer Cyclical",
+        "industry_name": "Internet Retail",
         "analyst_target_mean_cents": null,
         "fcf_annual": [
-          {
-            "year": 2021,
-            "value_dollars": 19924000.0
-          },
-          {
-            "year": 2022,
-            "value_dollars": 149000.0
-          },
-          {
-            "year": 2023,
-            "value_dollars": -15938000.0
-          },
-          {
-            "year": 2024,
-            "value_dollars": 12567000.0
-          },
-          {
-            "year": 2025,
-            "value_dollars": 11919000.0
-          }
+          {"year": 2022, "value_dollars": -16893000000.0},
+          {"year": 2023, "value_dollars": 32217000000.0},
+          {"year": 2024, "value_dollars": 32878000000.0},
+          {"year": 2025, "value_dollars": 7695000000.0}
         ],
         "fcf_source": "sec_ocf_minus_ppe_or_productive"
       }
@@ -446,53 +414,36 @@
       }
     },
     {
-      "symbol": "MU",
-      "cik": "0000723125",
-      "entity_name": "Micron Technology, Inc.",
+      "symbol": "AAPL",
+      "cik": "0000320193",
+      "entity_name": "APPLE INC.",
       "selection": {
         "gap_bps": 4289,
         "confidence": "High",
         "composite_score": 50,
-        "snapshot_market_price_cents": 86085,
-        "snapshot_intrinsic_cents": 150738,
+        "snapshot_market_price_cents": 31339,
+        "snapshot_intrinsic_cents": 50000,
         "captured_at": 1785428658
       },
       "status": "ok",
       "quarantine": false,
       "quarantine_reason": null,
       "inputs": {
-        "market_price_cents": 86085,
-        "shares_outstanding": 1142000000,
-        "market_cap_dollars": 983090700000,
-        "total_debt_dollars": 11533000000,
-        "total_cash_dollars": 9642000000,
-        "beta_millis": 1000,
+        "market_price_cents": 31339,
+        "shares_outstanding": 14687356000,
+        "market_cap_dollars": 4602870628352,
+        "total_debt_dollars": 84710998016,
+        "total_cash_dollars": 68507000832,
+        "beta_millis": 1097,
         "sector_name": "Technology",
-        "industry_name": "Semiconductors",
+        "industry_name": "Consumer Electronics",
         "analyst_target_mean_cents": null,
         "fcf_annual": [
-          {
-            "year": 2021,
-            "value_dollars": 6260000000.000001
-          },
-          {
-            "year": 2022,
-            "value_dollars": 8059999999.999999
-          },
-          {
-            "year": 2023,
-            "value_dollars": -6199999999.999999
-          },
-          {
-            "year": 2024,
-            "value_dollars": 729999999.9999995
-          },
-          {
-            "year": 2025,
-            "value_dollars": 9170000000.0
-          }
+          {"year": 2021, "value_dollars": 92953000000.0},
+          {"year": 2022, "value_dollars": 111443000000.0},
+          {"year": 2023, "value_dollars": 99584000000.0}
         ],
-        "fcf_source": "sec_ocf_minus_da_maintenance_capex_proxy"
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
       }
     },
     {
@@ -646,53 +597,36 @@
       }
     },
     {
-      "symbol": "CDE",
-      "cik": "0000215466",
-      "entity_name": "COEUR MINING, INC.",
+      "symbol": "MSFT",
+      "cik": "0000789019",
+      "entity_name": "MICROSOFT CORPORATION",
       "selection": {
         "gap_bps": 4083,
         "confidence": "High",
         "composite_score": 27,
-        "snapshot_market_price_cents": 1530,
-        "snapshot_intrinsic_cents": 2586,
+        "snapshot_market_price_cents": 50000,
+        "snapshot_intrinsic_cents": 80000,
         "captured_at": 1784690350
       },
       "status": "ok",
       "quarantine": false,
       "quarantine_reason": null,
       "inputs": {
-        "market_price_cents": 1530,
-        "shares_outstanding": 698689000,
-        "market_cap_dollars": 10689941700,
-        "total_debt_dollars": 266426000,
-        "total_cash_dollars": 553597000,
+        "market_price_cents": 50000,
+        "shares_outstanding": 7430000000,
+        "market_cap_dollars": 3715000000000,
+        "total_debt_dollars": 86302000000,
+        "total_cash_dollars": 78000000000,
         "beta_millis": 1000,
-        "sector_name": "Basic Materials",
-        "industry_name": "Gold",
+        "sector_name": "Technology",
+        "industry_name": "Software - Infrastructure",
         "analyst_target_mean_cents": null,
         "fcf_annual": [
-          {
-            "year": 2021,
-            "value_dollars": -17833000.0
-          },
-          {
-            "year": 2022,
-            "value_dollars": -86010000.0
-          },
-          {
-            "year": 2023,
-            "value_dollars": -32534000.0
-          },
-          {
-            "year": 2024,
-            "value_dollars": 49260000.0
-          },
-          {
-            "year": 2025,
-            "value_dollars": 665717000.0
-          }
+          {"year": 2022, "value_dollars": 65149000000.0},
+          {"year": 2023, "value_dollars": 59475000000.0},
+          {"year": 2024, "value_dollars": 74071000000.0}
         ],
-        "fcf_source": "sec_ocf_minus_min_capex_da"
+        "fcf_source": "sec_ocf_minus_ppe_or_productive"
       }
     },
     {

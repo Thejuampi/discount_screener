@@ -135,6 +135,8 @@ pub struct FundamentalSnapshot {
     pub earnings_growth_bps: Option<i32>,
     /// Common book value per share in cents (when reported or derived).
     pub book_value_per_share_cents: Option<i64>,
+    /// Retained earnings fraction in basis points; required by residual income.
+    pub retention_bps: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2677,6 +2679,7 @@ mod valuation_routing_tests {
             return_on_equity_bps: Some(2_000),
             book_value_per_share_cents: Some(6_511),
             price_to_book_hundredths: Some(159),
+            retention_bps: Some(7_000),
             ..Default::default()
         });
 

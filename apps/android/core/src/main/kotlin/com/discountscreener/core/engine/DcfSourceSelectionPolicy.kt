@@ -50,7 +50,8 @@ object DcfSourceSelectionPolicy {
         }
 
         var selected = usable.minWithOrNull(
-            compareBy<Pair<DcfSourceCandidate, DcfProviderQuality>> { priorityIndex(config, it.first.source) }
+            compareByDescending<Pair<DcfSourceCandidate, DcfProviderQuality>> { it.second.driverAnnualPoints }
+                .thenBy { priorityIndex(config, it.first.source) }
                 .thenByDescending { it.second.latestFiscalPeriod ?: "" }
                 .thenByDescending { it.second.acceptedAnnualFcfPoints }
                 .thenBy { it.first.source.name },
@@ -94,19 +95,14 @@ object DcfSourceSelectionPolicy {
             }
             return DcfProviderQuality(candidate.source, ProviderState.Unavailable, reasons = reasons)
         }
-        if (candidate.analysis == null) {
-            return DcfProviderQuality(
-                source = candidate.source,
-                providerState = ProviderState.NotEligible,
-                reasons = listOf(reason(ProviderDecisionReasonCode.MissingMarketCap, candidate.source)),
-            )
-        }
         val annualFreeCashFlow = acceptedAnnualFreeCashFlow(timeseries)
+        val driverPoints = alignedDriverAnnualPoints(timeseries)
         if (annualFreeCashFlow.size < MIN_ANNUAL_FCF_POINTS) {
             return DcfProviderQuality(
                 source = candidate.source,
                 providerState = ProviderState.NotEligible,
                 acceptedAnnualFcfPoints = annualFreeCashFlow.size,
+                driverAnnualPoints = driverPoints,
                 latestFiscalPeriod = annualFreeCashFlow.lastOrNull()?.asOfDate,
                 reasons = listOf(reason(ProviderDecisionReasonCode.InsufficientAnnualPeriods, candidate.source)),
             )
@@ -116,14 +112,41 @@ object DcfSourceSelectionPolicy {
                 source = candidate.source,
                 providerState = ProviderState.NotEligible,
                 acceptedAnnualFcfPoints = annualFreeCashFlow.size,
+                driverAnnualPoints = driverPoints,
                 latestFiscalPeriod = annualFreeCashFlow.last().asOfDate,
                 reasons = listOf(reason(ProviderDecisionReasonCode.LatestFcfNonPositive, candidate.source)),
+            )
+        }
+        if (candidate.analysis == null) {
+            return DcfProviderQuality(
+                source = candidate.source,
+                providerState = ProviderState.Unavailable,
+                acceptedAnnualFcfPoints = annualFreeCashFlow.size,
+                driverAnnualPoints = driverPoints,
+                latestFiscalPeriod = annualFreeCashFlow.last().asOfDate,
+                reasons = candidate.reasons.ifEmpty {
+                    listOf(reason(ProviderDecisionReasonCode.MissingDriverEvidence, candidate.source))
+                },
+            )
+        }
+        if (driverPoints < MIN_ANNUAL_FCF_POINTS) {
+            return DcfProviderQuality(
+                source = candidate.source,
+                providerState = ProviderState.Unavailable,
+                acceptedAnnualFcfPoints = annualFreeCashFlow.size,
+                driverAnnualPoints = driverPoints,
+                latestFiscalPeriod = annualFreeCashFlow.last().asOfDate,
+                reasons = candidate.reasons + reason(
+                    ProviderDecisionReasonCode.MissingDriverEvidence,
+                    candidate.source,
+                ),
             )
         }
         return DcfProviderQuality(
             source = candidate.source,
             providerState = ProviderState.Live,
             acceptedAnnualFcfPoints = annualFreeCashFlow.size,
+            driverAnnualPoints = driverPoints,
             latestFiscalPeriod = annualFreeCashFlow.last().asOfDate,
             reasons = candidate.reasons,
         )
@@ -167,10 +190,37 @@ object DcfSourceSelectionPolicy {
             .distinctBy { point -> point.asOfDate }
             .sortedBy { point -> point.asOfDate }
 
+    private fun alignedDriverAnnualPoints(timeseries: FundamentalTimeseries): Int {
+        val ocfPeriods = timeseries.operatingCashFlow.map(::annualKey).toSet()
+        val capexPeriods = timeseries.capitalExpenditure.map(::annualKey).toSet()
+        val revenuePeriods = timeseries.revenue.map(::annualKey).toSet()
+        return ocfPeriods.intersect(capexPeriods).intersect(revenuePeriods).count()
+    }
+
     private fun fingerprint(source: DcfSource, timeseries: FundamentalTimeseries): String = buildString {
         append(source.name)
         append("|fcf=")
         append(seriesFingerprint(acceptedAnnualFreeCashFlow(timeseries)))
+        append("|ocf=")
+        append(seriesFingerprint(timeseries.operatingCashFlow))
+        append("|capex=")
+        append(seriesFingerprint(timeseries.capitalExpenditure))
+        append("|revenue=")
+        append(seriesFingerprint(timeseries.revenue))
+        append("|interest=")
+        append(seriesFingerprint(timeseries.interestExpense))
+        append("|pretax=")
+        append(seriesFingerprint(timeseries.pretaxIncome))
+        append("|tax=")
+        append(seriesFingerprint(timeseries.taxRateForCalcs))
+        append("|debt=")
+        append(seriesFingerprint(timeseries.totalDebt))
+        append("|marginal_tax=")
+        append(seriesFingerprint(timeseries.marginalTaxRate))
+        append("|market_yield=")
+        append(seriesFingerprint(timeseries.marketYieldBps))
+        append("|rated_spread=")
+        append(seriesFingerprint(timeseries.ratedOrSyntheticSpreadBps))
         append("|shares=")
         append(seriesFingerprint(timeseries.dilutedAverageShares))
     }
@@ -186,6 +236,7 @@ object DcfSourceSelectionPolicy {
                     quality.source.name,
                     quality.providerState.name,
                     quality.acceptedAnnualFcfPoints,
+                    quality.driverAnnualPoints,
                     quality.latestFiscalPeriod.orEmpty(),
                     quality.reasons.map { it.code.name }.sorted().joinToString(","),
                 ).joinToString(":")
@@ -253,7 +304,9 @@ object DcfSourceSelectionPolicy {
     private fun seriesFingerprint(values: List<AnnualReportedValue>): String = values
         .filter { point -> point.asOfDate.isNotBlank() && point.value.isFinite() }
         .sortedBy { point -> point.asOfDate }
-        .joinToString(";") { point -> "${point.asOfDate}:${point.value}" }
+        .joinToString(";") { point ->
+            "${annualKey(point)}:${point.asOfDate}:${point.value}:${point.periodStart.orEmpty()}:${point.durationDays ?: "-"}:${point.source.name}:${point.concept.orEmpty()}"
+        }
 
     private const val MIN_ANNUAL_FCF_POINTS = 3
 }

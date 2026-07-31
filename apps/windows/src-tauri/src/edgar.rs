@@ -73,8 +73,11 @@ pub struct AnnualValue {
     pub value_dollars: i64,
 }
 
-/// Extract annual values for a given XBRL concept from the companyfacts JSON.
-/// Filters to 10-K filings and de-dupes by fiscal year (takes the most-recently filed).
+/// Extract annual values for a given XBRL concept from companyfacts JSON.
+///
+/// Companyfacts also contains quarterly facts embedded in a 10-K and segment
+/// facts for the same end date. Taking the latest filed row blindly can select
+/// a segment (INTU) or a quarter (NVDA), which poisons downstream drivers.
 fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> {
     let units = facts.pointer(&format!("/facts/us-gaap/{}/units/USD", concept));
     let arr = match units.and_then(|v| v.as_array()) {
@@ -82,36 +85,223 @@ fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> 
         None => return vec![],
     };
 
-    // Keep only annual (10-K) filings; de-dup by end-date (latest filed wins)
-    let mut by_year: HashMap<String, (i64, String)> = HashMap::new();
+    #[derive(Clone)]
+    struct AnnualCandidate {
+        end: String,
+        fiscal_year: i32,
+        value_dollars: i64,
+        filed: String,
+        consolidated: bool,
+    }
+
+    // Keep one consolidated annual fact per end-date. Exact end dates can have
+    // a re-filed fact and a segment fact; consolidated wins over segment, then
+    // the most recently filed value wins.
+    let mut by_end: HashMap<String, AnnualCandidate> = HashMap::new();
     for entry in arr {
         let form = entry["form"].as_str().unwrap_or("");
         if form != "10-K" {
             continue;
         }
+        // A 10-K may carry CY2019Q4/CY2020Q1 facts. They are not annual
+        // observations and must not be mixed into a fiscal-year series.
+        if entry["frame"]
+            .as_str()
+            .is_some_and(|frame| frame.contains('Q'))
+        {
+            continue;
+        }
         let end = entry["end"].as_str().unwrap_or("").to_string();
+        if end.is_empty() {
+            continue;
+        }
         let val = match entry["val"].as_i64() {
             Some(v) => v,
             None => continue,
         };
         let filed = entry["filed"].as_str().unwrap_or("").to_string();
-        let existing = by_year.entry(end.clone()).or_insert((val, filed.clone()));
-        if filed > existing.1 {
-            *existing = (val, filed);
+        // The SEC `fy` field belongs to the filing, not necessarily to the
+        // fact's period.  A current 10-K commonly carries comparative annual
+        // facts for prior ends with the current filing's `fy` (e.g. NVDA's
+        // 2025 and 2026 revenue facts both carry fy=2026).  Keying by `fy`
+        // therefore discards valid comparative years and creates a broken
+        // driver history.  The fiscal end year is the stable annual key; use
+        // `fy` only as a malformed-end fallback.
+        let end_year = end.get(..4).and_then(|year| year.parse::<i32>().ok());
+        let fiscal_year = end_year.or_else(|| {
+            entry["fy"]
+                .as_i64()
+                .and_then(|year| i32::try_from(year).ok())
+        });
+        let Some(fiscal_year) = fiscal_year else {
+            continue;
+        };
+        let consolidated = entry
+            .get("segment")
+            .map_or(true, serde_json::Value::is_null);
+        let candidate = AnnualCandidate {
+            end: end.clone(),
+            fiscal_year,
+            value_dollars: val,
+            filed,
+            consolidated,
+        };
+        let replace = by_end.get(&end).is_none_or(|existing| {
+            (candidate.consolidated && !existing.consolidated)
+                || (candidate.consolidated == existing.consolidated
+                    && candidate.filed > existing.filed)
+        });
+        if replace {
+            by_end.insert(end, candidate);
         }
     }
 
-    let mut result: Vec<AnnualValue> = by_year
+    // A restated comparative fact can carry the same `fy` as the current fact
+    // on a later fiscal end. Keep the latest fiscal end for that year so the
+    // aligned series contains one observation per fiscal year.
+    let mut by_fiscal_year: HashMap<i32, AnnualCandidate> = HashMap::new();
+    for candidate in by_end.into_values() {
+        let replace = by_fiscal_year
+            .get(&candidate.fiscal_year)
+            .is_none_or(|existing| candidate.end > existing.end);
+        if replace {
+            by_fiscal_year.insert(candidate.fiscal_year, candidate);
+        }
+    }
+    let mut result: Vec<AnnualValue> = by_fiscal_year
         .into_iter()
-        .filter_map(|(end, (val, _))| {
-            let year = end.get(..4)?.parse::<i32>().ok()?;
-            Some(AnnualValue {
-                year,
-                value_dollars: val,
-            })
+        .map(|(year, candidate)| AnnualValue {
+            year,
+            value_dollars: candidate.value_dollars,
         })
         .collect();
     result.sort_by_key(|v| v.year);
+    result
+}
+
+/// Extract the first usable annual USD series from a list of issuer-specific
+/// XBRL concepts. SEC filers commonly rotate between equivalent revenue,
+/// interest, and tax tags, so the provider layer resolves that taxonomy before
+/// the valuation engine sees the aligned driver rows.
+fn extract_annual_any(facts: &serde_json::Value, concepts: &[&str]) -> Vec<AnnualValue> {
+    // Equivalent XBRL concepts are often rotated during taxonomy migrations:
+    // one tag may contain the older history while another contains recent
+    // filings.  Selecting the longest series silently drops the newer tag and
+    // can pair OCF with stale revenue.  Merge by fiscal year in declared
+    // precedence order instead; overlaps use the canonical first concept and
+    // gaps are filled from the alternatives.
+    let mut by_year = HashMap::<i32, i64>::new();
+    for concept in concepts {
+        for value in extract_annual(facts, concept) {
+            by_year.entry(value.year).or_insert(value.value_dollars);
+        }
+    }
+    let mut result: Vec<AnnualValue> = by_year
+        .into_iter()
+        .map(|(year, value_dollars)| AnnualValue {
+            year,
+            value_dollars,
+        })
+        .collect();
+    result.sort_by_key(|value| value.year);
+    result
+}
+
+fn extract_total_debt(facts: &serde_json::Value) -> Vec<AnnualValue> {
+    let current = extract_annual_any(
+        facts,
+        &[
+            "LongTermDebtAndFinanceLeaseObligationsCurrent",
+            "LongTermDebtCurrent",
+            "DebtCurrent",
+            "ShortTermBorrowings",
+        ],
+    );
+    let noncurrent = extract_annual_any(
+        facts,
+        &[
+            "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+            "LongTermDebtNoncurrent",
+        ],
+    );
+    let reported_total = extract_annual_any(
+        facts,
+        &[
+            "DebtAndCapitalLeaseObligations",
+            "LongTermDebtAndCapitalLeaseObligations",
+            "LongTermDebt",
+            "DebtInstrumentCarryingAmount",
+        ],
+    );
+    let mut by_year = HashMap::<i32, i64>::new();
+    for value in current.into_iter().chain(noncurrent) {
+        *by_year.entry(value.year).or_default() += value.value_dollars.abs();
+    }
+    for value in reported_total {
+        by_year.insert(value.year, value.value_dollars.abs());
+    }
+    let mut result = by_year
+        .into_iter()
+        .map(|(year, value_dollars)| AnnualValue {
+            year,
+            value_dollars,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by_key(|value| value.year);
+    result
+}
+
+/// Extract a filing's statutory federal rate from the tax reconciliation.  SEC
+/// facts commonly encode this as `pure` or `percent`, not USD.
+fn extract_annual_percent_any(facts: &serde_json::Value, concepts: &[&str]) -> Vec<AnnualValue> {
+    let mut by_year = HashMap::<i32, i64>::new();
+    for concept in concepts {
+        let Some(units) = facts.pointer(&format!("/facts/us-gaap/{concept}/units")) else {
+            continue;
+        };
+        let Some(obj) = units.as_object() else {
+            continue;
+        };
+        let Some(arr) = obj.values().find_map(|value| value.as_array()) else {
+            continue;
+        };
+        for entry in arr {
+            if entry["form"].as_str() != Some("10-K")
+                || entry["frame"]
+                    .as_str()
+                    .is_some_and(|frame| frame.contains('Q'))
+            {
+                continue;
+            }
+            let Some(end) = entry["end"].as_str() else {
+                continue;
+            };
+            let Some(year) = end.get(..4).and_then(|value| value.parse::<i32>().ok()) else {
+                continue;
+            };
+            let Some(value) = entry["val"].as_f64() else {
+                continue;
+            };
+            let bps = if value.abs() <= 1.0 {
+                value * 10_000.0
+            } else if value.abs() <= 100.0 {
+                value * 100.0
+            } else {
+                value
+            };
+            if (0.0..=5_000.0).contains(&bps) {
+                by_year.entry(year).or_insert(bps.round() as i64);
+            }
+        }
+    }
+    let mut result = by_year
+        .into_iter()
+        .map(|(year, value_dollars)| AnnualValue {
+            year,
+            value_dollars,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by_key(|value| value.year);
     result
 }
 
@@ -558,8 +748,69 @@ pub fn fetch_fcf_history(
         .json()
         .map_err(|e| format!("EDGAR parse {}: {}", symbol, e))?;
 
-    let ocf = extract_annual(&body, "NetCashProvidedByUsedInOperatingActivities");
+    let ocf = extract_annual_any(
+        &body,
+        &[
+            "NetCashProvidedByUsedInOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation",
+        ],
+    );
     let capex = extract_capex(&body);
+    let revenue = extract_annual_any(
+        &body,
+        &[
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "SalesRevenueNet",
+            "SalesRevenueGoodsNet",
+            "RevenueFromContractWithCustomerIncludingAssessedTax",
+            "RevenuesFromExternalCustomers",
+        ],
+    );
+    let interest = extract_annual_any(
+        &body,
+        &[
+            "InterestExpenseNonOperating",
+            "InterestExpenseNonoperating",
+            "InterestExpenseDebt",
+            "InterestAndDebtExpense",
+            "InterestExpense",
+            "InterestExpenseOtherLongTermDebt",
+            "InterestIncomeExpenseNet",
+            "InterestIncomeExpenseNonoperatingNet",
+            "FinanceLeaseInterestExpense",
+            "InterestPaidNet",
+        ],
+    );
+    let pretax = extract_annual_any(
+        &body,
+        &[
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
+        ],
+    );
+    let tax = extract_annual_any(
+        &body,
+        &[
+            "IncomeTaxExpenseBenefit",
+            "IncomeTaxExpenseBenefitContinuingOperations",
+        ],
+    );
+    let debt = extract_total_debt(&body);
+    let marginal_tax = extract_annual_percent_any(
+        &body,
+        &[
+            "IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate",
+            "IncomeTaxReconciliationFederalStatutoryIncomeTaxRate",
+            "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate",
+            "StatutoryFederalIncomeTaxRate",
+            "StatutoryIncomeTaxRate",
+        ],
+    );
 
     if ocf.is_empty() {
         return Ok(None);
@@ -569,15 +820,102 @@ pub fn fetch_fcf_history(
     if fcf.len() < 3 {
         return Ok(None);
     }
+    let by_year = |series: &[AnnualValue], year: i32| {
+        series
+            .iter()
+            .find(|value| value.year == year)
+            .map(|value| value.value_dollars as f64)
+    };
+
     Ok(Some(
         fcf.into_iter()
-            .map(|v| crate::dcf_model::FcfPoint {
-                year: v.year,
-                value_dollars: v.value_dollars as f64,
-                capex_imputed: v.capex_imputed,
+            .map(|v| {
+                let operating_cash_flow = by_year(&ocf, v.year).unwrap_or(v.value_dollars as f64);
+                let capital_expenditure = by_year(&capex, v.year);
+                let revenue_dollars = by_year(&revenue, v.year);
+                let interest_expense_dollars = by_year(&interest, v.year);
+                let total_debt_dollars = by_year(&debt, v.year);
+                let marginal_tax_bps = by_year(&marginal_tax, v.year).map(|value| value as i32);
+                let tax_rate_bps = match (by_year(&tax, v.year), by_year(&pretax, v.year)) {
+                    (Some(tax_expense), Some(pretax_income)) if pretax_income.abs() > 0.0 => Some(
+                        ((tax_expense.abs() / pretax_income.abs()) * 10_000.0)
+                            .round()
+                            .clamp(0.0, 3_500.0) as i32,
+                    ),
+                    _ => None,
+                };
+                let mut point = crate::dcf_model::FcfPoint::new(v.year, v.value_dollars as f64);
+                point.capex_imputed = v.capex_imputed;
+                if !capex.is_empty() {
+                    if let (Some(capital_expenditure), Some(revenue_dollars)) =
+                        (capital_expenditure, revenue_dollars)
+                    {
+                        point = point.with_operating_drivers(
+                            operating_cash_flow,
+                            capital_expenditure,
+                            revenue_dollars,
+                            interest_expense_dollars,
+                            tax_rate_bps,
+                        );
+                        point = point.with_rate_resolution_inputs(
+                            total_debt_dollars,
+                            marginal_tax_bps,
+                            None,
+                            None,
+                        );
+                        if marginal_tax_bps.is_some() {
+                            point = point.with_marginal_tax_source(
+                                crate::dcf_model::WaccFieldSource::TaxReconciliation,
+                            );
+                        }
+                    }
+                }
+                point
             })
             .collect(),
     ))
+}
+
+/// Resolve the latest issuer share count from SEC DEI facts when Yahoo omits
+/// `sharesOutstanding`. This is a provider fallback for a required unit
+/// conversion, not an analyst/market valuation input.
+pub fn fetch_shares_outstanding(
+    client: &Client,
+    symbol: &str,
+    cik: u64,
+) -> Result<Option<u64>, String> {
+    let cik_padded = format!("{:010}", cik);
+    let url = format!(
+        "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
+        cik_padded
+    );
+    let body: serde_json::Value = client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|e| format!("EDGAR shares {}: {}", symbol, e))?
+        .json()
+        .map_err(|e| format!("EDGAR shares parse {}: {}", symbol, e))?;
+    Ok(extract_current_shares(&body))
+}
+
+fn extract_current_shares(facts: &serde_json::Value) -> Option<u64> {
+    let units = facts.pointer("/facts/dei/EntityCommonStockSharesOutstanding/units/shares")?;
+    let values = units.as_array()?;
+    values
+        .iter()
+        .filter(|entry| matches!(entry["form"].as_str(), Some("10-K" | "10-Q" | "8-K")))
+        .filter_map(|entry| {
+            Some((
+                entry["end"].as_str()?.to_string(),
+                entry["filed"].as_str().unwrap_or("").to_string(),
+                u64::try_from(entry["val"].as_i64()?).ok()?,
+            ))
+        })
+        .max_by(|left, right| {
+            (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
+        })
+        .map(|(_, _, shares)| shares)
 }
 
 /// Fetch EDGAR data for a symbol and compute legacy fixed-10% DCF intrinsic value.
@@ -627,6 +965,95 @@ mod tests {
         assert_eq!(merged[0].value_dollars.abs(), 20_000_000_000);
         assert_eq!(merged[1].year, 2024);
         assert_eq!(merged[1].value_dollars.abs(), 20_260_000_000);
+    }
+
+    #[test]
+    fn annual_extraction_prefers_consolidated_annual_over_segment_and_quarter() {
+        let facts = serde_json::json!({
+            "facts": {"us-gaap": {"SyntheticRevenue": {"units": {"USD": [
+                {"form":"10-K", "end":"2024-12-31", "fy":2024, "fp":"FY", "val":100, "filed":"2025-02-01"},
+                {"form":"10-K", "end":"2024-12-31", "fy":2024, "fp":"FY", "val":20, "filed":"2026-02-01", "segment":{"dimension":"region"}},
+                {"form":"10-K", "end":"2024-12-31", "fy":2024, "fp":"FY", "val":30, "filed":"2026-02-01", "frame":"CY2024Q4"},
+                {"form":"10-K", "end":"2025-12-31", "fy":2025, "fp":"FY", "val":110, "filed":"2026-02-01"},
+                {"form":"10-Q", "end":"2025-03-31", "fy":2025, "fp":"Q1", "val":25, "filed":"2025-05-01"}
+            ]}}}}
+        });
+
+        let annual = extract_annual(&facts, "SyntheticRevenue");
+        assert_eq!(
+            annual
+                .iter()
+                .map(|value| (value.year, value.value_dollars))
+                .collect::<Vec<_>>(),
+            vec![(2024, 100), (2025, 110)]
+        );
+    }
+
+    #[test]
+    fn annual_extraction_keeps_comparatives_with_current_filing_fy() {
+        let facts = serde_json::json!(
+            {
+                "facts": {"us-gaap": {"SyntheticRevenue": {"units": {"USD": [
+                    // A current 10-K reports the prior year comparative with
+                    // the current filing fy. Both are valid annual facts.
+                    {"form":"10-K", "end":"2025-01-26", "fy":2026, "fp":"FY", "frame":"CY2024", "val":130497, "filed":"2026-02-25"},
+                    {"form":"10-K", "end":"2026-01-25", "fy":2026, "fp":"FY", "frame":"CY2025", "val":215938, "filed":"2026-02-25"}
+                ]}}}}
+            }
+        );
+
+        let annual = extract_annual(&facts, "SyntheticRevenue");
+        assert_eq!(
+            annual
+                .iter()
+                .map(|value| (value.year, value.value_dollars))
+                .collect::<Vec<_>>(),
+            vec![(2025, 130497), (2026, 215938)]
+        );
+    }
+
+    #[test]
+    fn equivalent_xbrl_concepts_merge_history_without_overwriting_precedence() {
+        let facts = serde_json::json!(
+            {
+                "facts": {"us-gaap": {
+                    "SyntheticRevenuePrimary": {"units": {"USD": [
+                        {"form":"10-K", "end":"2024-12-31", "fy":2024, "fp":"FY", "val":400, "filed":"2025-02-01"},
+                        {"form":"10-K", "end":"2025-12-31", "fy":2025, "fp":"FY", "val":500, "filed":"2026-02-01"}
+                    ]}},
+                    "SyntheticRevenueLegacy": {"units": {"USD": [
+                        {"form":"10-K", "end":"2023-12-31", "fy":2023, "fp":"FY", "val":300, "filed":"2024-02-01"},
+                        {"form":"10-K", "end":"2024-12-31", "fy":2024, "fp":"FY", "val":999, "filed":"2025-02-01"}
+                    ]}}
+                }}
+            }
+        );
+
+        let annual = extract_annual_any(
+            &facts,
+            &["SyntheticRevenuePrimary", "SyntheticRevenueLegacy"],
+        );
+        assert_eq!(
+            annual
+                .iter()
+                .map(|value| (value.year, value.value_dollars))
+                .collect::<Vec<_>>(),
+            vec![(2023, 300), (2024, 400), (2025, 500)]
+        );
+    }
+
+    #[test]
+    fn current_shares_prefers_latest_filed_dei_observation() {
+        let facts = serde_json::json!(
+            {
+                "facts": {"dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+                    {"form":"10-Q", "end":"2025-03-31", "val":1000, "filed":"2025-05-01"},
+                    {"form":"10-K", "end":"2025-12-31", "val":1200, "filed":"2026-02-01"},
+                    {"form":"8-K", "end":"2026-01-15", "val":1250, "filed":"2026-02-10"}
+                ]}}}}
+            }
+        );
+        assert_eq!(extract_current_shares(&facts), Some(1_250));
     }
 
     #[test]

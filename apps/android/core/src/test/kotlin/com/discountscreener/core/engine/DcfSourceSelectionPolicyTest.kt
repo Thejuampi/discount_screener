@@ -74,6 +74,25 @@ class DcfSourceSelectionPolicyTest {
         assertFalse(DcfSourceSelectionPolicy.isDcfUsable(candidate))
     }
 
+    @Test
+    fun source_with_aligned_driver_rows_wins_over_priority_only_source() {
+        val yahoo = usableTimeseries().copy(
+            operatingCashFlow = annual(100.0, 120.0, 140.0),
+            capitalExpenditure = annual(-20.0, -24.0, -28.0),
+            revenue = annual(500.0, 550.0, 600.0),
+        )
+        val selection = DcfSourceSelectionPolicy.select(
+            yahoo = candidate(DcfSource.YahooFinance, yahoo),
+            sec = candidate(DcfSource.SecEdgar, usableTimeseries().copy(
+                operatingCashFlow = emptyList(),
+                capitalExpenditure = emptyList(),
+                revenue = emptyList(),
+            )),
+        )
+
+        assertEquals(DcfSource.YahooFinance, selection.selectedSource)
+    }
+
     private fun candidate(
         source: DcfSource,
         timeseries: FundamentalTimeseries,
@@ -89,6 +108,9 @@ class DcfSourceSelectionPolicyTest {
             AnnualReportedValue("2022-12-31", 120.0),
             AnnualReportedValue("2023-12-31", 140.0),
         ),
+        operatingCashFlow = annual(150.0, 175.0, 200.0),
+        capitalExpenditure = annual(-50.0, -55.0, -60.0),
+        revenue = annual(500.0, 550.0, 600.0),
     )
 
     private fun unusableTimeseries() = FundamentalTimeseries(
@@ -105,7 +127,14 @@ class DcfSourceSelectionPolicyTest {
             AnnualReportedValue("2022-12-31", 120.0),
             AnnualReportedValue("2023-12-31", 180.0),
         ),
+        operatingCashFlow = annual(150.0, 175.0, 200.0),
+        capitalExpenditure = annual(-50.0, -55.0, -60.0),
+        revenue = annual(500.0, 550.0, 600.0),
     )
+
+    private fun annual(vararg values: Double) = values.mapIndexed { index, value ->
+        AnnualReportedValue("${2021 + index}-12-31", value)
+    }
 
     private fun analysis() = DcfAnalysis(
         bearIntrinsicValueCents = 8_000L,

@@ -100,6 +100,39 @@ class QuantLensEngineTest {
     }
 
     @Test
+    fun expected_value_marks_amzn_like_model_analyst_gap_disputed_without_single_upside() {
+        val report = QuantLensEngine.analyze(
+            minimalInput(
+                detail = detail(
+                    symbol = "AMZN",
+                    marketPriceCents = 23_977,
+                    intrinsicValueCents = 31_307,
+                    externalSignalLowFairValueCents = 20_700,
+                    externalSignalFairValueCents = 31_500,
+                    externalSignalHighFairValueCents = 37_000,
+                ),
+                dcfAnalysis = DcfAnalysis(
+                    bearIntrinsicValueCents = 1_152,
+                    baseIntrinsicValueCents = 1_708,
+                    bullIntrinsicValueCents = 1_913,
+                    waccBps = 1_019,
+                    baseGrowthBps = -900,
+                    netDebtDollars = 92_451_012_608L,
+                    source = DcfSource.YahooFinance,
+                ),
+            ),
+        ).requireSuccess()
+
+        assertEquals(QuantLensPrimaryStatus.Disputed, report.expectedValueRange.primaryStatus)
+        assertEquals(ExpectedValueRangeBand.Disputed, report.expectedValueRange.band)
+        assertEquals(null, report.expectedValueRange.weightedFairValueCents)
+        assertEquals(null, report.expectedValueRange.weightedUpsideBps)
+        assertEquals(1_152L, report.expectedValueRange.modelLowFairValueCents)
+        assertEquals(31_500L, report.expectedValueRange.analystBaseFairValueCents)
+        assertEquals(true, report.expectedValueRange.reasonCodes.contains(QuantLensReasonCode.ModelAnalystDisagreement))
+    }
+
+    @Test
     fun expected_value_keeps_one_or_two_anchors_sparse_reference_only() {
         val report = QuantLensEngine.analyze(
             minimalInput(
@@ -473,6 +506,7 @@ class QuantLensEngineTest {
     )
 
     private fun detail(
+        symbol: String = "ACME",
         marketPriceCents: Long = 10_000,
         intrinsicValueCents: Long = 12_000,
         gapBps: Int = 1_667,
@@ -481,7 +515,7 @@ class QuantLensEngineTest {
         externalSignalHighFairValueCents: Long? = null,
         weightedExternalSignalFairValueCents: Long? = null,
     ) = SymbolDetail(
-        symbol = "ACME",
+        symbol = symbol,
         profitable = true,
         marketPriceCents = marketPriceCents,
         intrinsicValueCents = intrinsicValueCents,

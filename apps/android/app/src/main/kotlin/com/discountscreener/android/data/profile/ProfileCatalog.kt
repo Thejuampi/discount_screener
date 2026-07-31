@@ -73,7 +73,15 @@ class ProfileCatalog(private val assets: AssetManager) {
 
     companion object {
         private val FALLBACK_PROFILES = mapOf(
-            "dow" to listOf("AAPL", "AMZN", "AXP", "BA", "CAT", "CRM", "CSCO", "DIS", "GS", "HD", "HON", "IBM", "JNJ", "JPM", "KO", "MCD", "MMM", "MRK", "MSFT", "NKE", "NVDA", "PG", "SHW", "TRV", "UNH", "V", "VZ", "WMT"),
+            "qa" to listOf(
+                "T", "AMZN", "AAPL", "CI", "JPM", "ACGL", "MSFT", "NVDA", "UNH", "JNJ",
+                "XOM", "BAC", "V", "WMT", "GOOGL", "META", "TSLA", "HD", "PG", "MRK",
+            ),
+            "dow" to listOf(
+                "AAPL", "AMZN", "AXP", "BA", "CAT", "CRM", "CSCO", "DIS", "GS", "HD", "HON",
+                "IBM", "JNJ", "JPM", "KO", "MCD", "MMM", "MRK", "MSFT", "NKE", "NVDA", "PG",
+                "SHW", "TRV", "UNH", "V", "VZ", "WMT",
+            ),
         )
     }
 }

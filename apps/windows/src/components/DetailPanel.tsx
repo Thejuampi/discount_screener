@@ -404,6 +404,10 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
 
       <AnalystForecastsPanel symbol={symbol} />
 
+      {dcfAnalysis?.diagnostics && (
+        <DcfDriverBridge diagnostics={dcfAnalysis.diagnostics} />
+      )}
+
       {/* Chart patterns (classic TA structures, from daily candles) */}
       {detail && detail.chart_patterns.length > 0 && (
         <div className="info-section">
@@ -490,6 +494,28 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       {/* ── Full analysis breakdown (bottom) ── */}
       {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
     </UiInspectable>
+  );
+}
+
+function DcfDriverBridge({ diagnostics }: { diagnostics: NonNullable<DcfAnalysis["diagnostics"]> }) {
+  const d = diagnostics;
+  const hasDriverBridge = d.valuation_driver === "driver_based_fcff"
+    || d.normalized_fcff_dollars != null
+    || d.latest_revenue_dollars != null;
+  if (!hasDriverBridge) return null;
+  return (
+    <div className="info-section">
+      <h3>FCFF driver bridge</h3>
+      <div className="kv-grid">
+        <span>Reported FCF</span><span>{fmt.billions(d.latest_fcf_dollars ?? null)}</span>
+        <span>Normalized FCFF</span><span>{fmt.billions(d.normalized_fcff_dollars ?? d.fcf_run_rate_dollars ?? null)}</span>
+        <span>Revenue driver</span><span>{fmt.billions(d.latest_revenue_dollars ?? null)}</span>
+        <span>Normalized OCF margin</span><span>{d.normalized_ocf_margin_bps != null ? `${(d.normalized_ocf_margin_bps / 100).toFixed(1)}%` : "—"}</span>
+        <span>Normalized CapEx intensity</span><span>{d.normalized_capex_intensity_bps != null ? `${(d.normalized_capex_intensity_bps / 100).toFixed(1)}%` : "—"}</span>
+        <span>Growth driver</span><span>{d.growth_driver ?? "—"}</span>
+        <span>CapEx spikes</span><span>{d.capex_spike_years?.length ? d.capex_spike_years.join(", ") : "none"}</span>
+      </div>
+    </div>
   );
 }
 

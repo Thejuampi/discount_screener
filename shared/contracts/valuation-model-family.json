@@ -123,7 +123,7 @@
       }
     },
     {
-      "name": "t_class_provisional_fcff_calibrates_toward_weighted_analyst_not_clamp",
+      "name": "t_class_explicit_driver_fcff_no_analyst_calibration",
       "symbol": "T",
       "sampledInputs": {
         "asOf": "2026-07-30",
@@ -139,11 +139,53 @@
         "industryName": "Telecom Services",
         "fcfAnnualDollars": [
           { "year": 2021, "valueDollars": 26420000000 },
+          { "year": 2022, "valueDollars": 12397000000 },
           { "year": 2023, "valueDollars": 20460000000 },
           { "year": 2024, "valueDollars": 18510000000 },
           { "year": 2025, "valueDollars": 19440000000 }
         ],
-        "preCalibrationSoftBaseBandDollars": [46.0, 55.0],
+        "operatingCashFlowAnnualDollars": [
+          { "year": 2022, "valueDollars": 32023000000 },
+          { "year": 2023, "valueDollars": 38314000000 },
+          { "year": 2024, "valueDollars": 38771000000 },
+          { "year": 2025, "valueDollars": 40284000000 }
+        ],
+        "capitalExpenditureAnnualDollars": [
+          { "year": 2022, "valueDollars": -19626000000 },
+          { "year": 2023, "valueDollars": -17853000000 },
+          { "year": 2024, "valueDollars": -20263000000 },
+          { "year": 2025, "valueDollars": -20842000000 }
+        ],
+        "revenueAnnualDollars": [
+          { "year": 2022, "valueDollars": 120741000000 },
+          { "year": 2023, "valueDollars": 122428000000 },
+          { "year": 2024, "valueDollars": 122336000000 },
+          { "year": 2025, "valueDollars": 125648000000 }
+        ],
+        "interestExpenseAnnualDollars": [
+          { "year": 2022, "valueDollars": 6108000000 },
+          { "year": 2023, "valueDollars": 6704000000 },
+          { "year": 2024, "valueDollars": 6759000000 },
+          { "year": 2025, "valueDollars": 6804000000 }
+        ],
+        "taxRateBpsAnnual": [
+          { "year": 2022, "valueDollars": 2100 },
+          { "year": 2023, "valueDollars": 2100 },
+          { "year": 2024, "valueDollars": 2100 },
+          { "year": 2025, "valueDollars": 2100 }
+        ],
+        "totalDebtAnnualDollars": [
+          { "year": 2022, "valueDollars": 154679000000 },
+          { "year": 2023, "valueDollars": 154899000000 },
+          { "year": 2024, "valueDollars": 140923000000 },
+          { "year": 2025, "valueDollars": 155043000000 }
+        ],
+        "marginalTaxBpsAnnual": [
+          { "year": 2022, "valueDollars": 2100 },
+          { "year": 2023, "valueDollars": 2100 },
+          { "year": 2024, "valueDollars": 2100 },
+          { "year": 2025, "valueDollars": 2100 }
+        ],
         "legacyFailureModes": [
           "CapexTaxonomyMissFcfEqualsOcf",
           "ProvisionalWaccTooCheapOnLeveredIssuer"
@@ -153,17 +195,14 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/3",
-        "baseIntrinsicRangeDollars": [25.0, 35.0],
+        "modelPolicyVersion": "business-class-policy/7-explicit-driver-resolution",
         "latestFcfDollars": 19440000000,
-        "fcfRunRateDollars": 19470000000,
+        "fcfRunRateDollars": 24363147200,
         "acceptance": [
-          "uses_provisional_wacc_base_uplift_when_cod_default_and_levered",
           "fcf_run_rate_recent_window_average",
-          "base_materially_closer_to_weighted_analyst_than_pre_calibration_band",
-          "base_not_assigned_equal_to_street_or_price",
-          "no_intrinsic_price_hard_cap",
-          "point_estimate_unreliable_while_rates_provisional"
+          "base_is_derived_only_from_operating_and_rate_drivers",
+          "no_intrinsic_price_or_analyst_hard_cap",
+          "rate_provenance_is_explicit"
         ]
       },
       "evidence": "_bmad-output/planning-artifacts/research-dcf-vs-street-gap-T-2026-07-30.md"
@@ -189,19 +228,63 @@
           { "year": 2023, "valueDollars": 32217000000 },
           { "year": 2024, "valueDollars": 32878000000 },
           { "year": 2025, "valueDollars": 7695000000 }
+        ],
+        "operatingCashFlowAnnualDollars": [
+          { "year": 2022, "valueDollars": 46752000000 },
+          { "year": 2023, "valueDollars": 84946000000 },
+          { "year": 2024, "valueDollars": 115877000000 },
+          { "year": 2025, "valueDollars": 139514000000 }
+        ],
+        "capitalExpenditureAnnualDollars": [
+          { "year": 2022, "valueDollars": -63645000000 },
+          { "year": 2023, "valueDollars": -52729000000 },
+          { "year": 2024, "valueDollars": -82999000000 },
+          { "year": 2025, "valueDollars": -131819000000 }
+        ],
+        "revenueAnnualDollars": [
+          { "year": 2022, "valueDollars": 513983000000 },
+          { "year": 2023, "valueDollars": 574785000000 },
+          { "year": 2024, "valueDollars": 637959000000 },
+          { "year": 2025, "valueDollars": 716924000000 }
+        ],
+        "interestExpenseAnnualDollars": [
+          { "year": 2022, "valueDollars": 2367000000 },
+          { "year": 2023, "valueDollars": 3182000000 },
+          { "year": 2024, "valueDollars": 2406000000 },
+          { "year": 2025, "valueDollars": 2274000000 }
+        ],
+        "taxRateBpsAnnual": [
+          { "year": 2022, "valueDollars": 2100 },
+          { "year": 2023, "valueDollars": 1896 },
+          { "year": 2024, "valueDollars": 1350 },
+          { "year": 2025, "valueDollars": 1961 }
+        ],
+        "totalDebtAnnualDollars": [
+          { "year": 2022, "valueDollars": 178500000000 },
+          { "year": 2023, "valueDollars": 177500000000 },
+          { "year": 2024, "valueDollars": 178000000000 },
+          { "year": 2025, "valueDollars": 235540000000 }
+        ],
+        "marginalTaxBpsAnnual": [
+          { "year": 2022, "valueDollars": 2100 },
+          { "year": 2023, "valueDollars": 2100 },
+          { "year": 2024, "valueDollars": 2100 },
+          { "year": 2025, "valueDollars": 2100 }
         ]
       },
       "expected": {
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/3",
+        "modelPolicyVersion": "business-class-policy/7-explicit-driver-resolution",
         "latestFcfDollars": 7695000000,
-        "fcfRunRateDollars": 24263333333,
+        "fcfRunRateDollars": 19787102400,
+        "valuationDriver": "driver_based_fcff",
         "acceptance": [
           "bear_less_than_or_equal_to_base_less_than_or_equal_to_bull",
-          "volatile_endpoint_growth_is_robustified_before_scenario_projection",
-          "latest_fcf_and_normalized_run_rate_remain_distinct",
+          "revenue_growth_and_normalized_fcff_margin_drive_projection",
+          "latest_reported_fcf_and_normalized_fcff_remain_distinct",
+          "capex_spike_is_visible_as_a_driver_diagnostic",
           "material_model_analyst_disagreement_remains_visible_not_blended"
         ]
       },
@@ -213,7 +296,7 @@
     "financial_services_not_fcff_primary",
     "terminal_roe_fades_to_competitive_long_run",
     "missing_book_or_roe_is_unavailable_not_silent_fcff_fallback",
-    "provisional_wacc_base_uplift_debt_scaled_not_output_clamp"
+    "no_hardcoded_cost_of_debt_or_terminal_tax_default"
   ],
   "multiNameBaseline": {
     "requiredForPolicyChanges": true,

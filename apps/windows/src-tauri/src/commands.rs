@@ -555,13 +555,12 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
         if s.dcf_analyses.contains_key(symbol) || s.dcf_values.contains_key(symbol) {
             return;
         }
-        // Need fundamentals (shares) before EDGAR compute is useful.
+        // Need fundamentals before EDGAR compute is useful. Missing shares may
+        // be recovered from SEC DEI in the demand path below; do not refuse
+        // before trying the provider fallback.
         let Some(fund) = s.fundamentals.get(symbol).cloned() else {
             return;
         };
-        if fund.shares_outstanding.unwrap_or(0) == 0 {
-            return;
-        }
         // Closed-world refuse: do not start EDGAR / FCFF for unclassifiable names.
         let class = crate::dcf_model::classify_business(
             fund.sector_name.as_deref(),
@@ -598,67 +597,117 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     let _ = thread::Builder::new()
         .name(format!("edgar-dcf-{symbol}"))
         .spawn(move || {
-            let result = (|| -> Result<(), String> {
-                let client = edgar::edgar_client();
-                let cik = {
-                    let mut guard = cik_cache.lock().unwrap();
-                    if guard.is_none() {
-                        *guard = Some(edgar::fetch_cik_map(&client)?);
-                    }
-                    guard
-                        .as_ref()
-                        .and_then(|m| m.get(&symbol).copied())
-                        .ok_or_else(|| format!("no CIK for {symbol}"))?
-                };
-
-                let (fund, price, is_financial) = {
-                    let s = screener.lock().unwrap();
-                    let fund = s
-                        .fundamentals
-                        .get(&symbol)
-                        .cloned()
-                        .ok_or_else(|| "fundamentals missing".to_string())?;
-                    let price = s.snapshots.get(&symbol).map(|x| x.market_price_cents);
-                    let is_financial = crate::dcf_model::classify_business(
-                        fund.sector_name.as_deref(),
-                        fund.industry_name.as_deref(),
-                        fund.sector_key.as_deref(),
-                        fund.industry_key.as_deref(),
-                        false,
-                    ) == crate::dcf_model::BusinessClass::FinancialServices;
-                    (fund, price, is_financial)
-                };
-
-                if is_financial {
-                    let analysis =
-                        crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
-                    screener
-                        .lock()
-                        .unwrap()
-                        .ingest_dcf_analysis(symbol.clone(), analysis);
-                    return Ok(());
-                }
-
-                let fcf = edgar::fetch_fcf_history(&client, &symbol, cik)?
-                    .ok_or_else(|| "no FCF history".to_string())?;
-                let analysis =
-                    crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar").map_err(|e| e)?;
-                screener
-                    .lock()
-                    .unwrap()
-                    .ingest_dcf_analysis(symbol.clone(), analysis);
-                Ok(())
-            })();
+            let result = compute_demand_valuation_once(&symbol, &screener, &cik_cache);
 
             if let Err(e) = result {
                 feed_log.warn(&format!("demand-valuation {symbol}: {e}"));
-                screener
-                    .lock()
-                    .unwrap()
-                    .set_valuation_error(symbol.clone(), e);
+                let mut state = screener.lock().unwrap();
+                // An exhausted driver path invalidates any older FCFF cache;
+                // never leave a stale intrinsic while showing a new error.
+                state.clear_dcf(&symbol);
+                state.set_valuation_error(symbol.clone(), e);
             }
             inflight.lock().unwrap().remove(&symbol);
         });
+}
+
+/// Compute one demand-driven valuation using the same route as Detail.
+///
+/// The helper is intentionally synchronous so the bounded QA audit can process
+/// at most 20 names sequentially. Financial services still avoid EDGAR FCF;
+/// they only use the CIK when SEC DEI is needed to recover missing shares.
+fn compute_demand_valuation_once(
+    symbol: &str,
+    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
+) -> Result<(), String> {
+    let (mut fund, price, class) = {
+        let s = screener.lock().unwrap();
+        let fund = s
+            .fundamentals
+            .get(symbol)
+            .cloned()
+            .ok_or_else(|| "fundamentals missing".to_string())?;
+        let price = s
+            .snapshots
+            .get(symbol)
+            .map(|snapshot| snapshot.market_price_cents);
+        let class = crate::dcf_model::classify_business(
+            fund.sector_name.as_deref(),
+            fund.industry_name.as_deref(),
+            fund.sector_key.as_deref(),
+            fund.industry_key.as_deref(),
+            false,
+        );
+        (fund, price, class)
+    };
+
+    if matches!(
+        class,
+        crate::dcf_model::BusinessClass::Unclassified
+            | crate::dcf_model::BusinessClass::NotEligible
+    ) {
+        return Err(crate::dcf_model::classification_unavailable_reason(class)
+            .unwrap_or("valuation unavailable")
+            .into());
+    }
+
+    let needs_cik = class == crate::dcf_model::BusinessClass::OperatingNonFinancial
+        || fund.shares_outstanding.unwrap_or(0) == 0;
+    let cik = if needs_cik {
+        let client = edgar::edgar_client();
+        let mut guard = cik_cache.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(edgar::fetch_cik_map(&client)?);
+        }
+        guard
+            .as_ref()
+            .and_then(|map| map.get(symbol).copied())
+            .ok_or_else(|| format!("no CIK for {symbol}"))?
+    } else {
+        0
+    };
+
+    let mut shares_resolved_from_sec = false;
+    if fund.shares_outstanding.unwrap_or(0) == 0 {
+        let shares = edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik)?
+            .ok_or_else(|| "share count is missing from Yahoo and SEC DEI".to_string())?;
+        fund.shares_outstanding = Some(shares);
+        shares_resolved_from_sec = true;
+        // Persist the provider-resolved unit conversion so Detail and future
+        // demand computations see the same auditable share count.
+        screener.lock().unwrap().ingest_fundamentals(fund.clone());
+    }
+
+    if class == crate::dcf_model::BusinessClass::FinancialServices {
+        let mut analysis =
+            crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
+        if shares_resolved_from_sec {
+            analysis.reason_codes.push("shares=sec_dei_fallback".into());
+        }
+        screener
+            .lock()
+            .unwrap()
+            .ingest_dcf_analysis(symbol.to_string(), analysis);
+        return Ok(());
+    }
+
+    let client = edgar::edgar_client();
+    let fcf = edgar::fetch_fcf_history(&client, symbol, cik)?
+        .ok_or_else(|| "no FCF history".to_string())?;
+    let mut analysis = crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar")?;
+    if shares_resolved_from_sec {
+        analysis.reason_codes.push("shares=sec_dei_fallback".into());
+        analysis
+            .diagnostics
+            .driver_provenance
+            .push("shares=sec_dei_fallback".into());
+    }
+    screener
+        .lock()
+        .unwrap()
+        .ingest_dcf_analysis(symbol.to_string(), analysis);
+    Ok(())
 }
 
 fn analyst_price_history(state: &AppState, symbol: &str) -> Vec<ForecastPricePoint> {
@@ -1004,6 +1053,94 @@ pub fn get_quant_lens(
     Ok(crate::quant_lens::analyze(
         &detail, candles, dcf, opp, &peers,
     ))
+}
+
+/// Run the bounded DCF-vs-analyst audit used to investigate model outliers.
+///
+/// This command is intentionally fail-closed: it only runs for a launch-locked
+/// `qa` profile and never changes universe membership.  Missing DCFs are
+/// computed sequentially through the same Detail route, so the audit cannot
+/// create a Yahoo burst or silently compare stale/partial models.
+#[tauri::command]
+pub async fn run_qa_valuation_divergence_audit(
+    state: State<'_, AppState>,
+) -> Result<crate::valuation_divergence::ValuationDivergenceAudit, String> {
+    let profile = state.active_profile.lock().unwrap().clone();
+    if profile != "qa" || !state.is_profile_locked() {
+        return Err("valuation divergence audit requires launch-locked profile qa".into());
+    }
+    let symbols = state.active_symbols.lock().unwrap().as_ref().clone();
+    if symbols.len() > crate::valuation_divergence::AUDIT_MAX_SYMBOLS {
+        return Err(format!(
+            "valuation divergence audit refused: {} active symbols > {}",
+            symbols.len(),
+            crate::valuation_divergence::AUDIT_MAX_SYMBOLS
+        ));
+    }
+
+    let screener = Arc::clone(&state.screener);
+    let cik_cache = Arc::clone(&state.edgar_cik_map);
+    let feed_log = Arc::clone(&state.feed_log);
+    tauri::async_runtime::spawn_blocking(move || {
+        for symbol in &symbols {
+            let needs_valuation = {
+                let mut s = screener.lock().unwrap();
+                s.ensure_model_routed_valuation(symbol);
+                !s.dcf_analyses.contains_key(symbol) && !s.dcf_values.contains_key(symbol)
+            };
+            if needs_valuation {
+                if let Err(error) = compute_demand_valuation_once(symbol, &screener, &cik_cache) {
+                    feed_log.warn(&format!("qa-divergence-audit {symbol}: {error}"));
+                    screener
+                        .lock()
+                        .unwrap()
+                        .set_valuation_error(symbol.clone(), error);
+                }
+            }
+        }
+
+        let candidates = {
+            let mut s = screener.lock().unwrap();
+            symbols
+                .iter()
+                .map(|symbol| {
+                    s.ensure_model_routed_valuation(symbol);
+                    let detail = s.detail(symbol);
+                    crate::valuation_divergence::AuditCandidate {
+                        symbol: symbol.clone(),
+                        analyst_value_cents: detail
+                            .as_ref()
+                            .map(|value| value.intrinsic_value_cents)
+                            .filter(|value| *value > 0),
+                        analyst_low_cents: detail
+                            .as_ref()
+                            .and_then(|value| value.low_fair_value_cents),
+                        analyst_high_cents: detail
+                            .as_ref()
+                            .and_then(|value| value.high_fair_value_cents),
+                        analyst_opinion_count: detail
+                            .as_ref()
+                            .and_then(|value| value.analyst_opinion_count),
+                        dcf: detail.as_ref().and_then(|value| value.dcf_analysis.clone()),
+                        unavailable_reason: detail
+                            .as_ref()
+                            .and_then(|value| value.valuation_unavailable_reason.clone()),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let computed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        Ok(crate::valuation_divergence::build_audit(
+            "qa",
+            candidates,
+            computed_at,
+        ))
+    })
+    .await
+    .map_err(|error| format!("join QA valuation divergence audit: {error}"))?
 }
 
 /// Local + optional remote Yahoo search (Android ticker/company search parity).

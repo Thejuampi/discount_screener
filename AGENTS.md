@@ -256,6 +256,7 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 - Desktop: `cargo test` from `apps/desktop`; `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke`.
 - Windows: `cargo test` in `apps/windows/src-tauri` (include `dcf_model`, `quant_lens` when touching valuation/lens).
 - Android: `scripts/validate-android.ps1` (always `:core:test`; app tasks when SDK configured).
+- **Android live / agent QA uses profile `qa` only (≤20 symbols).** Debug installs (`make android-run` / `installDebug`) cold-start on `qa`. Never QA on full `sp500` (~500 tickers). See **Android live QA = profile `qa` only** below.
 - Valuation / Quant Lens: prefer goldens in `shared/contracts` and fixture regressions (e.g. ACGL residual income, TSLA disputed EV) over inventing market-proximity asserts.
 - **Valuation merge bar (mandatory):** any change to classifier, FCFF/WACC, CapEx→FCF, residual income, or model policy version **must** pass:
   - `cargo test --lib valuation_baseline::` (from `apps/windows/src-tauri`)
@@ -264,6 +265,20 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 - External providers: ≥5 distinct real upstream samples; never invent Yahoo/SEC payloads when live behavior matters.
 - `cargo fmt` before finishing Rust changes.
 - Mutation testing around changed logic when practical; state the gap if not.
+
+### Android live QA = profile `qa` only (mandatory)
+
+**QA on the Android app is always done with universe profile `qa` (≤20 symbols).**
+
+| | |
+| --- | --- |
+| **Profile** | **`qa`** — pin in `apps/android/app/src/main/assets/profiles/qa.txt` (hard cap 20) |
+| **When** | Any live UI QA, agent “check the app,” post-change smoke on Android |
+| **Launch** | `make android-run` — debug builds bootstrap **`qa`** and clear app data on install |
+| **Unless** | User **explicitly** orders another profile (`sp500`, `dow`, …). Silence → **`qa`** |
+| **Forbidden** | Cold-start full `sp500` / 500+ Yahoo thrash “to be thorough” |
+
+Checklist names (T, AMZN, CI, JPM/ACGL, AAPL, …) live in the qa pin; one-shot load extras only if needed — never switch to full SP500 for agent QA.
 
 ### Windows live QA = profile `qa` only (mandatory)
 
@@ -366,7 +381,8 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
-| Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → `npm run tauri:dev:qa`; reuse one process; one-shot checklist loads |
+| Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
+| Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |
 | `tauri dev -- -- --profile qa` | Cargo steals `--profile` → compile error / full universe fallback | `npm run tauri:dev:qa` or `DS_UNIVERSE_PROFILE=qa`; binary `--universe qa` |
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
 

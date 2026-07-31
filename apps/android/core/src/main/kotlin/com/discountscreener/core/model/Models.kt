@@ -273,6 +273,8 @@ data class FundamentalSnapshot(
     val trailingEpsCents: Long? = null,
     val earningsGrowthBps: Int? = null,
     val bookValuePerShareCents: Long? = null,
+    /** Retained earnings fraction in basis points; no silent 70% fallback. */
+    val retentionBps: Int? = null,
 ) {
     fun hasAnyValues(): Boolean = listOf(
         sectorKey,
@@ -297,6 +299,7 @@ data class FundamentalSnapshot(
         trailingEpsCents,
         earningsGrowthBps,
         bookValuePerShareCents,
+        retentionBps,
     ).any { it != null }
 }
 
@@ -388,6 +391,16 @@ data class PricingCandle(
 data class AnnualReportedValue(
     val asOfDate: String,
     val value: Double,
+    /** Fiscal-period identity is part of the public driver contract. */
+    val periodStart: String? = null,
+    val periodEnd: String? = asOfDate,
+    val durationDays: Int? = null,
+    val fiscalYear: Int? = asOfDate.take(4).toIntOrNull(),
+    val source: DcfSource = DcfSource.Unknown,
+    val concept: String? = null,
+    val currency: String? = null,
+    val unit: String? = null,
+    val filedAt: String? = null,
 )
 
 @Serializable
@@ -395,10 +408,20 @@ data class FundamentalTimeseries(
     val freeCashFlow: List<AnnualReportedValue> = emptyList(),
     val operatingCashFlow: List<AnnualReportedValue> = emptyList(),
     val capitalExpenditure: List<AnnualReportedValue> = emptyList(),
+    /** Annual revenue aligned with the cash-flow driver rows. */
+    val revenue: List<AnnualReportedValue> = emptyList(),
     val dilutedAverageShares: List<AnnualReportedValue> = emptyList(),
     val interestExpense: List<AnnualReportedValue> = emptyList(),
     val pretaxIncome: List<AnnualReportedValue> = emptyList(),
     val taxRateForCalcs: List<AnnualReportedValue> = emptyList(),
+    /** Total debt at the same fiscal period end as annual interest. */
+    val totalDebt: List<AnnualReportedValue> = emptyList(),
+    /** Statutory/marginal tax evidence for WACC, not historical effective tax. */
+    val marginalTaxRate: List<AnnualReportedValue> = emptyList(),
+    /** Observable market yield on debt, aligned by fiscal period when available. */
+    val marketYieldBps: List<AnnualReportedValue> = emptyList(),
+    /** Rating-derived or interest-coverage synthetic spread over risk-free. */
+    val ratedOrSyntheticSpreadBps: List<AnnualReportedValue> = emptyList(),
     val netIncome: List<AnnualReportedValue> = emptyList(),
 )
 
@@ -463,6 +486,10 @@ enum class ProviderDecisionReasonCode {
     MissingMarketCap,
     MissingShares,
     MissingDebtOrCash,
+    MissingAlignedDebt,
+    MissingMarginalTax,
+    ProviderInconsistentDebtInterest,
+    MissingDriverEvidence,
     MissingBeta,
     StaleFiscalPeriod,
     FiscalPeriodMisaligned,
@@ -540,6 +567,8 @@ data class DcfProviderQuality(
     val source: DcfSource,
     val providerState: ProviderState,
     val acceptedAnnualFcfPoints: Int = 0,
+    /** Annual rows with OCF, CapEx, and revenue aligned for driver FCFF. */
+    val driverAnnualPoints: Int = 0,
     val latestFiscalPeriod: String? = null,
     val reasons: List<ProviderDecisionReason> = emptyList(),
 )
@@ -573,6 +602,7 @@ data class DcfSourceSelection(
     val inputFingerprint: String? = null,
     val decisionFingerprint: String? = null,
     val financialSnapshot: SourceResolvedFinancialSnapshot = SourceResolvedFinancialSnapshot(),
+    val valuationUnavailableReason: String? = null,
 )
 
 @Serializable
@@ -584,6 +614,17 @@ enum class WaccFieldSource {
     InterestOverDebt,
     IndustryShrink,
     MarketParams,
+    MarketYield,
+    RatedOrSyntheticSpread,
+    InterestOverAverageDebt,
+    YahooAlignedInterestOverDebt,
+    ReportedMarginalTax,
+    TaxReconciliation,
+    JurisdictionStatutory,
+    DomicileTaxProxy,
+    HistoricalEffectiveTax,
+    NotApplicable,
+    Unavailable,
 }
 
 @Serializable
@@ -622,15 +663,31 @@ data class WaccInputProvenance(
     fun summaryLabels(): List<String> = buildList {
         if (marketCap == WaccFieldSource.DerivedPriceTimesShares) add("market cap=price×shares")
         if (beta == WaccFieldSource.Default) add("beta=default")
-        if (beta == WaccFieldSource.IndustryShrink) add("beta=industry shrink")
         if (totalDebt == WaccFieldSource.AssumedZero) add("debt=assumed 0")
         if (totalCash == WaccFieldSource.AssumedZero) add("cash=assumed 0")
-        if (costOfDebt == WaccFieldSource.Default) add("cost of debt=default")
-        if (taxRate == WaccFieldSource.Default) add("tax=default")
+        if (costOfDebt == WaccFieldSource.Default || costOfDebt == WaccFieldSource.Unavailable) {
+            add("cost of debt=unavailable")
+        }
+        if (taxRate == WaccFieldSource.Default || taxRate == WaccFieldSource.Unavailable) {
+            add("tax=unavailable")
+        }
         if (waccClamped) add("params=provisional")
     }
 
     fun isProvisional(): Boolean = summaryLabels().isNotEmpty()
+
+    /**
+     * Point intrinsic must not be shown as a single "truth" number when CoD,
+     * tax, beta, or market params (rf/ERP) come from policy defaults.
+     * Parity with Windows `WaccInputProvenance::point_estimate_unreliable`.
+     */
+    fun pointEstimateUnreliable(): Boolean =
+        costOfDebt == WaccFieldSource.Default ||
+            costOfDebt == WaccFieldSource.Unavailable ||
+            waccClamped ||
+            beta == WaccFieldSource.Default ||
+            taxRate == WaccFieldSource.Default ||
+            taxRate == WaccFieldSource.Unavailable
 }
 
 @Serializable
@@ -681,6 +738,26 @@ data class DcfAnalysis(
     val fcfRunRateNormalized: Boolean = false,
     val provisionalWaccUpliftBps: Int = 0,
     val debtWeightBps: Int = 0,
+    val pointEstimateUnreliable: Boolean = false,
+    val scenarioStress: String = "growth_and_discount_rate",
+    val waccBearBps: Int? = null,
+    val waccBullBps: Int? = null,
+    /** `driver_based_fcff` or the explicit legacy fallback policy. */
+    val valuationDriver: String = "fcf_history_fade",
+    val latestRevenueDollars: Long? = null,
+    val normalizedFcffDollars: Long? = null,
+    val normalizedOcfMarginBps: Int? = null,
+    val normalizedCapexIntensityBps: Int? = null,
+    val normalizedAfterTaxInterestMarginBps: Int? = null,
+    val capexSpikeYears: List<Int> = emptyList(),
+    val driverRegime: String = "",
+    val growthDispersionBps: Int? = null,
+    val growthDriver: String = "fcf_endpoint_robustified",
+    /** Canonical aligned annual input fingerprint used to invalidate stale DCFs. */
+    val driverInputFingerprint: String? = null,
+    /** Human-readable provenance for the driver bridge and source layer. */
+    val driverProvenance: List<String> = emptyList(),
+    val valuationUnavailableReason: String? = null,
 )
 
 @Serializable

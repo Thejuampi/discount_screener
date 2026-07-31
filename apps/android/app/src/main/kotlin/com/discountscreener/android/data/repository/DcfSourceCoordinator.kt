@@ -8,6 +8,8 @@ import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceCandidate
 import com.discountscreener.core.model.DcfSourceSelection
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.ProviderDecisionReason
+import com.discountscreener.core.model.ProviderDecisionReasonCode
 import kotlinx.coroutines.CancellationException
 
 internal class DcfSourceCoordinator(
@@ -58,9 +60,25 @@ internal class DcfSourceCoordinator(
         source: DcfSource,
         timeseries: FundamentalTimeseries?,
         evaluate: (FundamentalTimeseries) -> DcfAnalysis?,
-    ): DcfSourceCandidate = DcfSourceCandidate(
-        source = source,
-        timeseries = timeseries,
-        analysis = timeseries?.let { value -> runCatching { evaluate(value) }.getOrNull() },
-    )
+    ): DcfSourceCandidate {
+        val evaluation = timeseries?.let { value -> runCatching { evaluate(value) } }
+        val analysis = evaluation?.getOrNull()
+        val reasons = if (evaluation?.isFailure == true) {
+            listOf(
+                ProviderDecisionReason(
+                    code = ProviderDecisionReasonCode.MissingDriverEvidence,
+                    provider = source,
+                    upstreamStatus = evaluation.exceptionOrNull()?.message,
+                ),
+            )
+        } else {
+            emptyList()
+        }
+        return DcfSourceCandidate(
+            source = source,
+            timeseries = timeseries,
+            analysis = analysis,
+            reasons = reasons,
+        )
+    }
 }

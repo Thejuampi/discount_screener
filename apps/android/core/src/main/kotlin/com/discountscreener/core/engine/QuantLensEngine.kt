@@ -6,7 +6,6 @@ import com.discountscreener.core.model.ComputationFailure
 import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.CorrelationRiskBand
 import com.discountscreener.core.model.EvidenceStrengthBand
-import com.discountscreener.core.model.ExpectedValueRangeSource
 import com.discountscreener.core.model.ExpectedValueRangeBand
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.QuantLensCorrelationRisk
@@ -34,8 +33,6 @@ import kotlin.math.sqrt
 
 object QuantLensEngine {
     private const val MIN_HORIZON_WINDOWS = 10
-    private const val MIN_QUANT_LENS_BPS = -100_000
-    private const val MAX_QUANT_LENS_BPS = 100_000
 
     fun analyze(input: QuantLensInput): ComputationResult<QuantLensReport> = captureComputationResult(
         area = ComputationArea.QuantLens,
@@ -244,66 +241,14 @@ object QuantLensEngine {
         .distinctBy { it.epochSeconds }
 
     private fun analyzeExpectedValueRange(input: QuantLensInput): QuantLensExpectedValueRange {
-        val detail = input.detail
-        val marketPriceCents = detail.marketPriceCents
-        if (marketPriceCents <= 0L) {
+        if (input.detail.marketPriceCents <= 0L) {
             return QuantLensExpectedValueRange(
                 primaryStatus = QuantLensPrimaryStatus.Unavailable,
                 band = ExpectedValueRangeBand.Unavailable,
                 reasonCodes = listOf(QuantLensReasonCode.MissingMarketPrice),
             )
         }
-
-        val dcfAnchors = normalizedScenarioAnchors(
-            anchors = input.dcfAnalysis?.let {
-                listOf(it.bearIntrinsicValueCents, it.baseIntrinsicValueCents, it.bullIntrinsicValueCents)
-            }.orEmpty(),
-            source = "DCF",
-            symbol = detail.symbol,
-        )
-        val analystAnchors = normalizedScenarioAnchors(
-            anchors = analystAnchors(detail),
-            source = "analyst",
-            symbol = detail.symbol,
-        )
-
-        val sourceAndAnchors = when {
-            dcfAnchors.size == 3 -> ExpectedValueRangeSource.Dcf to dcfAnchors
-            analystAnchors.size == 3 -> ExpectedValueRangeSource.Analyst to analystAnchors
-            else -> null
-        }
-
-        if (sourceAndAnchors == null) {
-            return QuantLensExpectedValueRange(
-                primaryStatus = QuantLensPrimaryStatus.Sparse,
-                band = if (dcfAnchors.isNotEmpty() || analystAnchors.isNotEmpty()) {
-                    ExpectedValueRangeBand.ReferenceOnly
-                } else {
-                    ExpectedValueRangeBand.Sparse
-                },
-                reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
-            )
-        }
-
-        val (source, anchors) = sourceAndAnchors
-        val low = anchors[0]
-        val base = anchors[1]
-        val high = anchors[2]
-        val weighted = ((low + (base * 2) + high) / 4L).coerceAtLeast(0L)
-        val weightedUpsideBps = boundedQuantLensBps(checkedUpsideBps(marketPriceCents, weighted)) ?: 0
-        val spreadBps = boundedQuantLensBps(checkedUpsideBps(low.coerceAtLeast(1L), high), min = 0) ?: 0
-
-        return QuantLensExpectedValueRange(
-            primaryStatus = QuantLensPrimaryStatus.Available,
-            band = ExpectedValueRangeBand.ScenarioWeighted,
-            source = source,
-            weightedFairValueCents = weighted,
-            weightedUpsideBps = weightedUpsideBps,
-            lowFairValueCents = low,
-            highFairValueCents = high,
-            spreadBps = spreadBps,
-            reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
-        )
+        return QuantLensExpectedValuePolicy.select(input.detail, input.dcfAnalysis)
     }
 
     private fun analyzeCorrelationRisk(input: QuantLensInput): QuantLensCorrelationRisk {
@@ -457,38 +402,6 @@ object QuantLensEngine {
             detail.externalSignalHighFairValueCents,
         ).filter { it > 0L }
 
-    private fun normalizedScenarioAnchors(
-        anchors: List<Long>,
-        source: String,
-        symbol: String,
-    ): List<Long> {
-        if (anchors.isEmpty()) {
-            return emptyList()
-        }
-        val positiveAnchors = anchors.filter { it > 0L }
-        if (positiveAnchors.size < anchors.size) {
-            return positiveAnchors
-        }
-        if (positiveAnchors.size < 3) {
-            return positiveAnchors
-        }
-        if (positiveAnchors.size != 3) {
-            throw invalidScenarioAnchors(source, symbol, positiveAnchors)
-        }
-        return positiveAnchors.sorted()
-    }
-
-    private fun invalidScenarioAnchors(
-        source: String,
-        symbol: String,
-        anchors: List<Long>,
-    ): IllegalStateException = IllegalStateException(
-        "$source scenario anchors could not be normalized for $symbol: ${anchors.joinToString()}",
-    )
-
-    private fun boundedQuantLensBps(value: Int?, min: Int = MIN_QUANT_LENS_BPS, max: Int = MAX_QUANT_LENS_BPS): Int? =
-        value?.coerceIn(min, max)
-
     private fun returnsByEpoch(candles: List<HistoricalCandle>): Map<Long, Double> =
         candles
             .filter { it.closeCents > 0L }
@@ -617,6 +530,7 @@ object QuantLensEngine {
 
     private fun combinedStatus(vararg statuses: QuantLensPrimaryStatus): QuantLensPrimaryStatus =
         when {
+            statuses.any { it == QuantLensPrimaryStatus.Disputed } -> QuantLensPrimaryStatus.Disputed
             statuses.any { it == QuantLensPrimaryStatus.Available } -> QuantLensPrimaryStatus.Available
             statuses.any { it == QuantLensPrimaryStatus.Provisional || it == QuantLensPrimaryStatus.Partial } ->
                 QuantLensPrimaryStatus.Provisional

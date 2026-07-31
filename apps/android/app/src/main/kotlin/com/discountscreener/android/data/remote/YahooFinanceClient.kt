@@ -3,6 +3,7 @@ package com.discountscreener.android.data.remote
 import com.discountscreener.core.engine.sanitizeExternalSignal
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
@@ -348,10 +349,13 @@ open class YahooFinanceClient(
             "annualFreeCashFlow",
             "annualOperatingCashFlow",
             "annualCapitalExpenditure",
+            "annualTotalRevenue",
             "annualDilutedAverageShares",
             "annualInterestExpense",
             "annualPretaxIncome",
             "annualTaxRateForCalcs",
+            "annualTotalDebt",
+            "annualMarginalTaxRate",
             "annualNetIncome",
         ).joinToString(",")
 
@@ -367,10 +371,13 @@ open class YahooFinanceClient(
             freeCashFlow = parseTimeseriesMetric(root, "annualFreeCashFlow"),
             operatingCashFlow = parseTimeseriesMetric(root, "annualOperatingCashFlow"),
             capitalExpenditure = parseTimeseriesMetric(root, "annualCapitalExpenditure"),
+            revenue = parseTimeseriesMetric(root, "annualTotalRevenue"),
             dilutedAverageShares = parseTimeseriesMetric(root, "annualDilutedAverageShares"),
             interestExpense = parseTimeseriesMetric(root, "annualInterestExpense"),
             pretaxIncome = parseTimeseriesMetric(root, "annualPretaxIncome"),
             taxRateForCalcs = parseTimeseriesMetric(root, "annualTaxRateForCalcs"),
+            totalDebt = parseTimeseriesMetric(root, "annualTotalDebt"),
+            marginalTaxRate = parseTimeseriesMetric(root, "annualMarginalTaxRate"),
             netIncome = parseTimeseriesMetric(root, "annualNetIncome"),
         )
     }
@@ -663,6 +670,9 @@ private fun buildQuoteContext(
         betaMillis = statistics.rawDouble("beta")?.times(1_000.0)?.roundToLong()?.toInt(),
         trailingEpsCents = statistics.rawDouble("trailingEps")?.times(100.0)?.roundToLong()?.toLong(),
         earningsGrowthBps = financialData.rawDouble("earningsGrowth")?.times(10_000.0)?.roundToLong()?.toInt(),
+        retentionBps = financialData.rawDouble("payoutRatio")
+            ?.takeIf { it.isFinite() && it in 0.0..1.0 }
+            ?.let { ((1.0 - it) * 10_000.0).roundToLong().toInt() },
     ).takeIf(FundamentalSnapshot::hasAnyValues)
 
     val snapshot = if (marketPriceCents != null && intrinsicValueCents != null && profitable != null) {
@@ -937,7 +947,12 @@ private fun parseTimeseriesMetric(root: JsonObject, name: String): List<AnnualRe
         val obj = element.jsonObject
         val date = obj["asOfDate"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
         val value = obj["reportedValue"]?.jsonObject?.get("raw")?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
-        AnnualReportedValue(date, value)
+        AnnualReportedValue(
+            asOfDate = date,
+            value = value,
+            source = DcfSource.YahooFinance,
+            concept = name,
+        )
     }.sortedBy { it.asOfDate }
 }
 

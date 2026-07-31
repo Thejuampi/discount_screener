@@ -159,7 +159,7 @@ data class DashboardUiState(
     val refreshing: Boolean = false,
     val currentTab: DashboardTab = DashboardTab.Opportunities,
     val availableProfiles: List<String> = emptyList(),
-    val currentProfile: String = "sp500",
+    val currentProfile: String = "qa",
     val query: String = "",
     val tickerSearchQuery: String = "",
     val tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),

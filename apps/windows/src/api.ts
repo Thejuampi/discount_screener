@@ -476,6 +476,15 @@ export interface DcfDiagnostics {
   wacc_bull_bps?: number | null;
   provisional_wacc_uplift_bps?: number | null;
   fcf_run_rate_normalized?: boolean;
+  valuation_driver?: string;
+  latest_revenue_dollars?: number | null;
+  normalized_fcff_dollars?: number | null;
+  normalized_ocf_margin_bps?: number | null;
+  normalized_capex_intensity_bps?: number | null;
+  capex_spike_years?: number[];
+  growth_driver?: string;
+  driver_input_fingerprint?: string | null;
+  driver_provenance?: string[];
 }
 
 export interface DcfAnalysis {
@@ -527,6 +536,45 @@ export interface IndexEstimatesReport {
     coverage_bps: number;
     status: string;
   };
+}
+
+export type ValuationDivergenceDirection = "dcf_above_analyst" | "dcf_below_analyst";
+export type ValuationAuditModelQuality = "solid" | "soft" | "unusable";
+
+export interface ValuationDivergenceRow {
+  rank: number;
+  symbol: string;
+  analyst_value_cents: number;
+  dcf_value_cents: number;
+  signed_difference_cents: number;
+  relative_disagreement_bps: number;
+  direction: ValuationDivergenceDirection;
+  model: ValuationModel;
+  business_class: string;
+  analyst_opinion_count: number | null;
+  analyst_range_complete: boolean;
+  model_quality: ValuationAuditModelQuality;
+  primary_cause: string;
+  causes: string[];
+  evidence: string[];
+}
+
+export interface ValuationAuditUnavailable {
+  symbol: string;
+  analyst_anchor_available: boolean;
+  dcf_available: boolean;
+  reason: string;
+}
+
+export interface ValuationDivergenceAudit {
+  profile_name: string;
+  model_policy_version: string;
+  computed_at_epoch_seconds: number;
+  candidate_count: number;
+  comparable_count: number;
+  unavailable_count: number;
+  rows: ValuationDivergenceRow[];
+  unavailable: ValuationAuditUnavailable[];
 }
 
 export interface QuantLensSection {
@@ -586,6 +634,8 @@ export const api = {
   getScoringModel: () => invoke<string>("get_scoring_model"),
   setScoringModel: (model: string) => invoke<string>("set_scoring_model", { model }),
   getIndexEstimates: () => invoke<IndexEstimatesReport>("get_index_estimates"),
+  runQaValuationDivergenceAudit: () =>
+    invoke<ValuationDivergenceAudit>("run_qa_valuation_divergence_audit"),
   getQuantLens: (symbol: string) => invoke<QuantLensReport>("get_quant_lens", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),

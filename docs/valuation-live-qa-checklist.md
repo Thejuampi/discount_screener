@@ -32,6 +32,15 @@ cargo test --lib quant_lens::
 
 Optional Android: `scripts/validate-android.ps1` when touching Kotlin engine.
 
+## Bounded DCF-vs-analyst divergence audit
+
+The Windows Estimates panel exposes **Auditoría DCF vs analistas**. Run it only
+from the launch-locked `qa` profile. It computes missing Detail valuations
+sequentially for the existing ≤20 symbols, ranks by symmetric relative
+disagreement, and shows driver/WACC/CapEx evidence. It never changes universe
+membership or uses analyst targets as model inputs. Zero-equity outcomes and
+unavailable drivers remain visible with their structural reason.
+
 ## Launch Windows for this checklist
 
 ```text

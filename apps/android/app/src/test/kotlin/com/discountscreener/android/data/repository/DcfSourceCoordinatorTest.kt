@@ -82,6 +82,21 @@ private fun usableTimeseries() = FundamentalTimeseries(
         AnnualReportedValue("2022-12-31", 120.0),
         AnnualReportedValue("2023-12-31", 140.0),
     ),
+    operatingCashFlow = listOf(
+        AnnualReportedValue("2021-12-31", 150.0),
+        AnnualReportedValue("2022-12-31", 175.0),
+        AnnualReportedValue("2023-12-31", 200.0),
+    ),
+    capitalExpenditure = listOf(
+        AnnualReportedValue("2021-12-31", -50.0),
+        AnnualReportedValue("2022-12-31", -55.0),
+        AnnualReportedValue("2023-12-31", -60.0),
+    ),
+    revenue = listOf(
+        AnnualReportedValue("2021-12-31", 500.0),
+        AnnualReportedValue("2022-12-31", 550.0),
+        AnnualReportedValue("2023-12-31", 600.0),
+    ),
 )
 
 private fun analysis() = DcfAnalysis(

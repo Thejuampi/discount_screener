@@ -725,6 +725,20 @@ private fun ValuationSection(
     var model = valuationRangeModel(detail, projectedDetail)
 
     Text("Valuation", fontWeight = FontWeight.Bold)
+    projectedDetail?.valuationUnavailableReason?.takeIf { it.isNotBlank() }?.let { reason ->
+        Text(
+            text = reason,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    projectedDetail?.valuationModelLabel?.let { label ->
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     ValuationHeadline(model = model)
     ValuationRangeChart(
         model = model,
@@ -745,19 +759,28 @@ private fun ValuationSection(
         }
     }
     WaccAssumptionsSection(projectedDetail = projectedDetail)
+    FcfDiagnosticsSection(projectedDetail = projectedDetail)
     AnalystConcentrationSection(detail = detail)
 }
 
 @Composable
 private fun WaccAssumptionsSection(projectedDetail: ProjectedDetailData?) {
     val waccBps = projectedDetail?.waccBps ?: return
+    if (waccBps <= 0) return
     val provisional = projectedDetail.waccProvisional
     val labels = projectedDetail.waccAssumptionLabels
     val waccPercent = waccBps / 100.0
+    val rateKind = when (projectedDetail.valuationModelLabel) {
+        "Residual income" -> "CoE"
+        else -> "WACC"
+    }
     Text(
         text = buildString {
-            append("WACC ${"%.2f".format(java.util.Locale.US, waccPercent)}%")
+            append("$rateKind ${"%.2f".format(java.util.Locale.US, waccPercent)}%")
             if (provisional) append(" · provisional")
+            if (projectedDetail.provisionalWaccUpliftBps > 0) {
+                append(" · uplift ${projectedDetail.provisionalWaccUpliftBps} bps")
+            }
         },
         style = MaterialTheme.typography.labelMedium,
         color = if (provisional) {
@@ -768,11 +791,46 @@ private fun WaccAssumptionsSection(projectedDetail: ProjectedDetailData?) {
     )
     if (labels.isNotEmpty()) {
         Text(
-            text = "WACC inputs: ${labels.joinToString("; ")}",
+            text = "Rate inputs: ${labels.joinToString("; ")}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+@Composable
+private fun FcfDiagnosticsSection(projectedDetail: ProjectedDetailData?) {
+    val detail = projectedDetail ?: return
+    val latest = detail.latestFcfDollars
+    val normalizedFcff = detail.normalizedFcffDollars
+    if (latest == null && normalizedFcff == null) return
+    Text(
+        text = buildString {
+            // Fields are total dollars; compactMoney expects cents.
+            latest?.let { append("Reported FCF ${compactMoney(it * 100)}") }
+            normalizedFcff?.let {
+                if (isNotEmpty()) append(" · ")
+                append("Normalized FCFF ${compactMoney(it * 100)}")
+            }
+            detail.latestRevenueDollars?.let {
+                append(" · Revenue ${compactMoney(it * 100)}")
+            }
+            detail.normalizedOcfMarginBps?.let {
+                append(" · OCF margin ${"%.1f".format(java.util.Locale.US, it / 100.0)}%")
+            }
+            detail.normalizedCapexIntensityBps?.let {
+                append(" · CapEx intensity ${"%.1f".format(java.util.Locale.US, it / 100.0)}%")
+            }
+            if (detail.capexSpikeYears.isNotEmpty()) {
+                append(" · CapEx spike ${detail.capexSpikeYears.joinToString(",")}")
+            }
+            detail.growthDriver?.let { driver ->
+                if (driver.startsWith("revenue_growth_median")) append(" · growth from revenue drivers")
+            }
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

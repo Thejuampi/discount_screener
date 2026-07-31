@@ -428,6 +428,8 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
         ));
         // Diagnostics (detail header stays overview-only; Quant Lens owns depth).
         let d = &a.diagnostics;
+        metrics.push(("valuation_driver".into(), d.valuation_driver.clone()));
+        metrics.push(("growth_driver".into(), d.growth_driver.clone()));
         if d.point_estimate_unreliable || a.wacc_inputs.is_provisional() {
             metrics.push(("rate_quality".into(), "provisional".into()));
         }
@@ -440,6 +442,31 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
         }
         if let Some(fcf) = d.fcf_run_rate_dollars {
             metrics.push(("fcf_run_rate_dollars".into(), fcf.to_string()));
+        }
+        if let Some(revenue) = d.latest_revenue_dollars {
+            metrics.push(("latest_revenue_dollars".into(), revenue.to_string()));
+        }
+        if let Some(fcff) = d.normalized_fcff_dollars {
+            metrics.push(("normalized_fcff_dollars".into(), fcff.to_string()));
+        }
+        if let Some(margin) = d.normalized_ocf_margin_bps {
+            metrics.push(("normalized_ocf_margin_bps".into(), margin.to_string()));
+        }
+        if let Some(intensity) = d.normalized_capex_intensity_bps {
+            metrics.push((
+                "normalized_capex_intensity_bps".into(),
+                intensity.to_string(),
+            ));
+        }
+        if !d.capex_spike_years.is_empty() {
+            metrics.push((
+                "capex_spike_years".into(),
+                d.capex_spike_years
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
         }
         if !d.fcf_annual_dollars.is_empty() {
             let series: Vec<String> = d

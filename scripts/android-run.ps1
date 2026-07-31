@@ -352,6 +352,7 @@ if ($selectedDevice.IsEmulator -and $unauthorizedPhysicalDevices) {
 
 $env:ANDROID_SERIAL = $selectedDevice.Serial
 Write-Host "Installing on Android device '$(Format-DeviceLabel $selectedDevice)'..."
+Write-Host "QA rule: debug install boots profile 'qa' (≤20 symbols). Do NOT switch to sp500 for agent QA."
 
 if (-not (Wait-ForBootCompletion -AdbPath $adb -Serial $selectedDevice.Serial -TimeoutSeconds 180)) {
     throw "Android device '$($selectedDevice.Serial)' did not finish booting in time."
@@ -367,10 +368,15 @@ try {
     Pop-Location
 }
 
+# Drop stale warm-start that may still be pinned to full sp500 from prior sessions.
+Write-Host "Clearing app data so cold-start uses profile qa (avoids 500+ symbol thrash)..."
+& $adb -s $selectedDevice.Serial shell pm clear com.discountscreener.android | Out-Null
+
 & $adb -s $selectedDevice.Serial shell am start -n com.discountscreener.android/.app.MainActivity
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20."
 } catch {
     $message = $_.Exception.Message
     if (-not $message) {

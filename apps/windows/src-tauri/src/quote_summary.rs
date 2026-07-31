@@ -84,6 +84,19 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
     let target_low_cents = financial_data.and_then(|f| raw_money(f, "targetLowPrice"));
     let target_high_cents = financial_data.and_then(|f| raw_money(f, "targetHighPrice"));
 
+    let price_dollars = financial_data
+        .and_then(|f| raw_double(f, "currentPrice"))
+        .or_else(|| price.and_then(|p| raw_double(p, "regularMarketPrice")))
+        .or_else(|| market_price_cents.map(|c| c as f64 / 100.0));
+    let reported_market_cap_dollars = price.and_then(|p| raw_double(p, "marketCap"));
+    let reported_shares_outstanding = statistics.and_then(|s| raw_double(s, "sharesOutstanding"));
+    // Yahoo can omit sharesOutstanding while still returning market cap and
+    // price. Deriving shares from those two reported quantities is a bounded
+    // unit conversion, not a valuation anchor, and prevents otherwise valid
+    // DCFs (MU/CRM-class) from being discarded for a transport omission.
+    let shares_outstanding = reported_shares_outstanding
+        .or_else(|| derive_shares_outstanding(reported_market_cap_dollars, price_dollars));
+
     let trailing_eps = statistics.and_then(|s| raw_double(s, "trailingEps"));
     // Crypto profitability is applied by the fetcher shell after parse.
     let profitable = trailing_eps.map(|e| e > 0.0).unwrap_or(false);
@@ -197,16 +210,11 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         market_cap_dollars: resolve_market_cap_dollars(
-            price.and_then(|p| raw_double(p, "marketCap")),
-            statistics.and_then(|s| raw_double(s, "sharesOutstanding")),
-            financial_data
-                .and_then(|f| raw_double(f, "currentPrice"))
-                .or_else(|| price.and_then(|p| raw_double(p, "regularMarketPrice")))
-                .or_else(|| market_price_cents.map(|c| c as f64 / 100.0)),
+            reported_market_cap_dollars,
+            shares_outstanding,
+            price_dollars,
         ),
-        shares_outstanding: statistics
-            .and_then(|s| raw_double(s, "sharesOutstanding"))
-            .map(|v| v as u64),
+        shares_outstanding: shares_outstanding.map(|v| v as u64),
         trailing_pe_hundredths: statistics
             .and_then(|s| raw_double(s, "trailingPE"))
             .map(|v| (v * 100.0) as u32),
@@ -267,6 +275,10 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
                     None
                 }
             }),
+        retention_bps: financial_data
+            .and_then(|f| raw_double(f, "payoutRatio"))
+            .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
+            .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32),
     });
 
     FetchResult {
@@ -384,6 +396,20 @@ fn resolve_market_cap_dollars(
     }
 }
 
+fn derive_shares_outstanding(
+    market_cap_dollars: Option<f64>,
+    price_dollars: Option<f64>,
+) -> Option<f64> {
+    match (market_cap_dollars, price_dollars) {
+        (Some(market_cap), Some(price))
+            if market_cap.is_finite() && market_cap > 0.0 && price.is_finite() && price > 0.0 =>
+        {
+            Some(market_cap / price)
+        }
+        _ => None,
+    }
+}
+
 fn is_usable_name(name: &str, symbol: &str) -> bool {
     let n = name.trim();
     !n.is_empty() && !n.eq_ignore_ascii_case("null") && !n.eq_ignore_ascii_case(symbol)
@@ -451,6 +477,16 @@ mod tests {
         assert_eq!(dollars_to_cents(12.345), Some(1_235));
         assert_eq!(dollars_to_cents(0.0), None);
         assert_eq!(dollars_to_cents(-1.0), None);
+    }
+
+    #[test]
+    fn derives_shares_when_yahoo_omits_share_count_but_reports_market_cap() {
+        assert_eq!(
+            derive_shares_outstanding(Some(120_000_000_000.0), Some(120.0)),
+            Some(1_000_000_000.0)
+        );
+        assert_eq!(derive_shares_outstanding(None, Some(120.0)), None);
+        assert_eq!(derive_shares_outstanding(Some(120.0), Some(0.0)), None);
     }
 
     #[test]

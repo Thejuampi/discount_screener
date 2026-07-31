@@ -97,6 +97,27 @@ class ContractFixtureTest {
                         freeCashFlow = input.fcfAnnualDollars.map { point ->
                             AnnualReportedValue("${point.year}-12-31", point.valueDollars)
                         },
+                        operatingCashFlow = input.operatingCashFlowAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                        capitalExpenditure = input.capitalExpenditureAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                        revenue = input.revenueAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                        interestExpense = input.interestExpenseAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                        taxRateForCalcs = input.taxRateBpsAnnual.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars / 10_000.0)
+                        },
+                        totalDebt = input.totalDebtAnnualDollars.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars)
+                        },
+                        marginalTaxRate = input.marginalTaxBpsAnnual.map { point ->
+                            AnnualReportedValue("${point.year}-12-31", point.valueDollars / 10_000.0)
+                        },
                     ),
                     marketPriceCents = (input.marketPriceDollars * 100.0).toLong(),
                 ).getOrThrow()
@@ -107,6 +128,9 @@ class ContractFixtureTest {
                 assertEquals(expected.modelPolicyVersion, analysis.modelPolicyVersion, case.name)
                 assertEquals(expected.latestFcfDollars, analysis.latestFcfDollars, case.name)
                 assertEquals(expected.fcfRunRateDollars, analysis.fcfRunRateDollars, case.name)
+                expected.valuationDriver?.let { driver ->
+                    assertEquals(driver, analysis.valuationDriver, case.name)
+                }
                 assertTrue(
                     analysis.bearIntrinsicValueCents <= analysis.baseIntrinsicValueCents &&
                         analysis.baseIntrinsicValueCents <= analysis.bullIntrinsicValueCents,
@@ -217,6 +241,9 @@ class ContractFixtureTest {
             AnnualReportedValue("2022-12-31", 120.0),
             AnnualReportedValue("2023-12-31", 140.0),
         ),
+        operatingCashFlow = annual(150.0, 175.0, 200.0),
+        capitalExpenditure = annual(-50.0, -55.0, -60.0),
+        revenue = annual(500.0, 550.0, 600.0),
     )
 
     private fun divergentTimeseries() = FundamentalTimeseries(
@@ -225,7 +252,14 @@ class ContractFixtureTest {
             AnnualReportedValue("2022-12-31", 120.0),
             AnnualReportedValue("2023-12-31", 180.0),
         ),
+        operatingCashFlow = annual(150.0, 175.0, 200.0),
+        capitalExpenditure = annual(-50.0, -55.0, -60.0),
+        revenue = annual(500.0, 550.0, 600.0),
     )
+
+    private fun annual(vararg values: Double) = values.mapIndexed { index, value ->
+        AnnualReportedValue("${2021 + index}-12-31", value)
+    }
 
     private fun unsupportedTimeseries() = FundamentalTimeseries(
         freeCashFlow = listOf(AnnualReportedValue("2023-12-31", 140.0)),
@@ -266,7 +300,7 @@ class ContractFixtureTest {
 }
 
 private val executablePolicy2FixtureNames = setOf(
-    "t_class_provisional_fcff_calibrates_toward_weighted_analyst_not_clamp",
+    "t_class_explicit_driver_fcff_no_analyst_calibration",
     "amzn_capex_trough_does_not_invert_fcff_scenarios",
 )
 
@@ -301,6 +335,13 @@ private data class ValuationSampledInputs(
     val sectorName: String? = null,
     val industryName: String? = null,
     val fcfAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val operatingCashFlowAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val capitalExpenditureAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val revenueAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val interestExpenseAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val taxRateBpsAnnual: List<ValuationFcfPoint> = emptyList(),
+    val totalDebtAnnualDollars: List<ValuationFcfPoint> = emptyList(),
+    val marginalTaxBpsAnnual: List<ValuationFcfPoint> = emptyList(),
 )
 
 @Serializable
@@ -318,6 +359,7 @@ private data class ValuationExpected(
     val baseIntrinsicRangeDollars: List<Double>? = null,
     val latestFcfDollars: Long? = null,
     val fcfRunRateDollars: Long? = null,
+    val valuationDriver: String? = null,
 )
 
 @Serializable

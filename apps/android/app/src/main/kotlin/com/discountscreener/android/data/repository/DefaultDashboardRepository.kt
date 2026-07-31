@@ -46,12 +46,15 @@ import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.EstimatesHistoryPolicy
 import com.discountscreener.core.engine.IndexEstimatesEngine
+import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.QuantLensEngine
+import com.discountscreener.core.engine.QuantLensExpectedValuePolicy
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.ScreenDataProjectionEngine
 import com.discountscreener.core.engine.TickerSearchCandidate
@@ -59,6 +62,7 @@ import com.discountscreener.core.engine.TickerSearchEngine
 import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
@@ -70,8 +74,10 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceSelection
 import com.discountscreener.core.model.DataProvenance
+import com.discountscreener.core.model.ExpectedValueRangeBand
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
@@ -201,6 +207,11 @@ class DefaultDashboardRepository(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val computeDispatcher: CoroutineDispatcher = ioDispatcher,
     private val logger: AppLogger = NoOpAppLogger,
+    /**
+     * Startup universe. Debug/agent QA must use [QA_PROFILE] (≤20 symbols).
+     * Release product default remains [PRODUCT_DEFAULT_PROFILE] (`sp500`).
+     */
+    private val defaultProfile: String = PRODUCT_DEFAULT_PROFILE,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
@@ -238,7 +249,7 @@ class DefaultDashboardRepository(
     private val companyNameBySymbol = linkedMapOf<String, String>()
     private val remoteSearchCache = linkedMapOf<String, RemoteSearchCacheEntry>()
 
-    private var currentProfile = DEFAULT_PROFILE
+    private var currentProfile = defaultProfile
     private var lastUpdatedAtEpochSeconds: Long? = null
     private var startupPhase = DashboardStartupPhase.Restoring
     private var refreshCompletedSymbols = 0
@@ -260,7 +271,7 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         if (!restored) {
-            loadUniverse(DEFAULT_PROFILE)
+            loadUniverse(defaultProfile)
             restored = true
         }
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
@@ -343,7 +354,9 @@ class DefaultDashboardRepository(
             selection.timeseries?.let { timeseries ->
                 stateMutex.withLock {
                     timeseriesCache[symbol] = timeseries
-                    resolvedAnalysis?.let { analysis -> dcfCache[symbol] = analysis }
+                    resolvedAnalysis?.let { analysis ->
+                        putDcfAnalysisLocked(symbol, analysis, fundamentals)
+                    }
                 }
                 captures += fundamentalTimeseriesCapture(
                     symbol = symbol,
@@ -354,7 +367,7 @@ class DefaultDashboardRepository(
             } ?: run {
                 // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
                 resolvedAnalysis?.let { analysis ->
-                    stateMutex.withLock { dcfCache[symbol] = analysis }
+                    stateMutex.withLock { putDcfAnalysisLocked(symbol, analysis, fundamentals) }
                 }
             }
         }
@@ -468,9 +481,7 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun beginProfileSwitch(profile: String): ProfileSwitchRequest {
-        val symbols = profileCatalog.loadProfile(profile).distinct().ifEmpty {
-            profileCatalog.loadProfile(DEFAULT_PROFILE).distinct()
-        }
+        val symbols = resolveProfileSymbols(profile)
         val generation = stateMutex.withLock {
             activeProfileGeneration += 1
             activeProfileGeneration
@@ -532,10 +543,23 @@ class DefaultDashboardRepository(
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
-    private suspend fun loadUniverse(profile: String) {
+    private fun resolveProfileSymbols(profile: String): List<String> {
         val symbols = profileCatalog.loadProfile(profile).distinct().ifEmpty {
-            profileCatalog.loadProfile(DEFAULT_PROFILE).distinct()
+            profileCatalog.loadProfile(defaultProfile).distinct()
         }
+        if (normalizeProfileName(profile) == QA_PROFILE && symbols.size > QA_MAX_SYMBOLS) {
+            error(
+                "qa profile must have ≤$QA_MAX_SYMBOLS symbols (got ${symbols.size}); refuse full-universe thrash",
+            )
+        }
+        return symbols
+    }
+
+    private fun normalizeProfileName(value: String): String =
+        value.lowercase().filter { it.isLetterOrDigit() }
+
+    private suspend fun loadUniverse(profile: String) {
+        val symbols = resolveProfileSymbols(profile)
         val bootstrap = runCatching { stateStore.loadWarmStart() }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
@@ -919,7 +943,7 @@ class DefaultDashboardRepository(
             timeseriesCache[result.symbol] = timeseries
         }
         result.fallbackDcfAnalysis?.let { analysis ->
-            dcfCache[result.symbol] = analysis
+            putDcfAnalysisLocked(result.symbol, analysis, effectiveFundamentals)
         }
 
         result.chartCandles?.takeIf(List<HistoricalCandle>::isNotEmpty)?.let { candles ->
@@ -1969,48 +1993,66 @@ class DefaultDashboardRepository(
             ),
         )
 
-        val analystAnchors = listOfNotNull(
-            detail.externalSignalLowFairValueCents,
-            detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents,
-            detail.externalSignalHighFairValueCents,
-        ).filter { it > 0L }
         val dcf = dcfCache[detail.symbol]
-        val dcfAnchors = listOfNotNull(
-            dcf?.bearIntrinsicValueCents,
-            dcf?.baseIntrinsicValueCents,
-            dcf?.bullIntrinsicValueCents,
-        ).filter { it > 0L }
-        if (detail.marketPriceCents > 0L && (dcfAnchors.size == 3 || analystAnchors.size == 3)) {
-            val anchors = if (dcfAnchors.size == 3) dcfAnchors else analystAnchors
-            states += QuantLensLensRowState(
-                lensId = QuantLensLensId.ExpectedValueRange,
-                primaryStatus = QuantLensPrimaryStatus.Available,
-                band = QuantLensRowLabel.EvRange.name,
-                label = QuantLensRowLabel.EvRange,
-                reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
-                evLowUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, anchors.first()),
-                evHighUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, anchors.last()),
-            )
+        val selection = if (detail.marketPriceCents > 0L) {
+            QuantLensExpectedValuePolicy.select(detail, dcf)
         } else {
-            val evLabel = if (detail.marketPriceCents > 0L) QuantLensRowLabel.EvSparse else QuantLensRowLabel.EvUnavailable
-            states += QuantLensLensRowState(
+            null
+        }
+        val evState = when {
+            dcf?.resolverState == ResolverState.ProviderUncertain -> QuantLensLensRowState(
                 lensId = QuantLensLensId.ExpectedValueRange,
-                primaryStatus = if (detail.marketPriceCents > 0L) {
-                    QuantLensPrimaryStatus.Sparse
-                } else {
-                    QuantLensPrimaryStatus.Unavailable
+                primaryStatus = QuantLensPrimaryStatus.Unavailable,
+                band = ExpectedValueRangeBand.Unavailable.name,
+                label = QuantLensRowLabel.EvUnavailable,
+                freshnessQualifier = com.discountscreener.core.model.QuantLensFreshnessQualifier.ProviderUncertain,
+                reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
+            )
+            selection?.band == ExpectedValueRangeBand.Disputed -> QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Disputed,
+                band = ExpectedValueRangeBand.Disputed.name,
+                label = QuantLensRowLabel.EvDisputed,
+                reasonCodes = selection.reasonCodes,
+            )
+            selection?.band == ExpectedValueRangeBand.ScenarioWeighted -> QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = selection.primaryStatus,
+                band = selection.band.name,
+                label = QuantLensRowLabel.EvRange,
+                reasonCodes = selection.reasonCodes,
+                evLowUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, selection.lowFairValueCents ?: 0L),
+                evHighUpsideBps = boundedQuantLensRowUpsideBps(detail.marketPriceCents, selection.highFairValueCents ?: 0L),
+            )
+            selection?.band == ExpectedValueRangeBand.ReferenceOnly -> QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Partial,
+                band = selection.band.name,
+                label = QuantLensRowLabel.EvRange,
+                reasonCodes = selection.reasonCodes,
+                evLowUpsideBps = selection.lowFairValueCents?.let {
+                    boundedQuantLensRowUpsideBps(detail.marketPriceCents, it)
                 },
-                band = evLabel.name,
-                label = evLabel,
-                reasonCodes = listOf(
-                    if (detail.marketPriceCents > 0L) {
-                        QuantLensReasonCode.MissingScenarioAnchors
-                    } else {
-                        QuantLensReasonCode.MissingMarketPrice
-                    },
-                ),
+                evHighUpsideBps = selection.highFairValueCents?.let {
+                    boundedQuantLensRowUpsideBps(detail.marketPriceCents, it)
+                },
+            )
+            detail.marketPriceCents > 0L -> QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Sparse,
+                band = QuantLensRowLabel.EvSparse.name,
+                label = QuantLensRowLabel.EvSparse,
+                reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
+            )
+            else -> QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Unavailable,
+                band = QuantLensRowLabel.EvUnavailable.name,
+                label = QuantLensRowLabel.EvUnavailable,
+                reasonCodes = listOf(QuantLensReasonCode.MissingMarketPrice),
             )
         }
+        states += evState
 
         states += QuantLensLensRowState(
             lensId = QuantLensLensId.CorrelationRisk,
@@ -2118,7 +2160,9 @@ class DefaultDashboardRepository(
         }
 
         hydratedStates.forEach { state ->
-            state.dcfAnalysis?.let { dcfCache[state.symbol] = it }
+            state.dcfAnalysis?.let { analysis ->
+                putDcfAnalysisLocked(state.symbol, analysis, state.fundamentals)
+            }
         }
 
         chartCache.clear()
@@ -2573,6 +2617,7 @@ class DefaultDashboardRepository(
         betaMillis = existing.betaMillis ?: derived.betaMillis,
         trailingEpsCents = existing.trailingEpsCents ?: derived.trailingEpsCents,
         earningsGrowthBps = existing.earningsGrowthBps ?: derived.earningsGrowthBps,
+        retentionBps = existing.retentionBps ?: derived.retentionBps,
     ) ?: derived
 
     private fun issueAppliesToUniverse(key: String, trackedSymbols: Set<String>): Boolean {
@@ -2772,7 +2817,11 @@ class DefaultDashboardRepository(
             )
         }
         result.dcfAnalysis?.let { analysis ->
-            dcfCache[result.symbol] = analysis
+            putDcfAnalysisLocked(
+                result.symbol,
+                analysis,
+                engine.detail(result.symbol)?.fundamentals,
+            )
         }
 
         // Clear prior enrichment issues when this pass recovered chart/DCF data.
@@ -2804,30 +2853,185 @@ class DefaultDashboardRepository(
         symbol: String,
         fundamentals: FundamentalSnapshot,
     ) {
+        ensureModelRoutedValuationLocked(symbol, fundamentals)
         val cachedAnalysis = dcfCache[symbol] ?: return
         // NotEligible stays until a live resolve reopens it (see needsDcfResolutionLocked).
         if (cachedAnalysis.resolverState == ResolverState.NotEligible) return
-        val selectedTimeseries = timeseriesCache[symbol] ?: return
+        if (!DcfAnalysisEngine.isCurrentPolicy(cachedAnalysis)) {
+            dcfCache.remove(symbol)
+            return
+        }
+        val selectedTimeseries = timeseriesCache[symbol]
+            ?: if (cachedAnalysis.model == ValuationModel.ResidualIncomeEquity) {
+                FundamentalTimeseries()
+            } else {
+                return
+            }
         val marketPriceCents = engine.detail(symbol)?.marketPriceCents?.takeIf { it > 0L }
         val recomputed = DcfAnalysisEngine.compute(
             fundamentals = fundamentals,
             timeseries = selectedTimeseries,
             marketPriceCents = marketPriceCents,
-        ).getOrNull() ?: return
+        ).getOrNull()
+        if (recomputed == null) {
+            dcfCache.remove(symbol)
+            return
+        }
         // Update numeric DCF only. Never promote RestoredOnly → Selected from cache-only recompute;
         // live Selected requires dcfSourceCoordinator.resolve (enrichment / ensureDetailLoaded).
-        dcfCache[symbol] = recomputed.copy(
-            source = cachedAnalysis.source,
-            sourceFingerprint = cachedAnalysis.sourceFingerprint,
-            resolverState = cachedAnalysis.resolverState,
-            decisionFingerprint = cachedAnalysis.decisionFingerprint,
-            provenance = cachedAnalysis.provenance,
-            providerReasons = cachedAnalysis.providerReasons,
+        putDcfAnalysisLocked(
+            symbol,
+            recomputed.copy(
+                source = cachedAnalysis.source,
+                sourceFingerprint = cachedAnalysis.sourceFingerprint,
+                resolverState = cachedAnalysis.resolverState,
+                decisionFingerprint = cachedAnalysis.decisionFingerprint,
+                provenance = cachedAnalysis.provenance,
+                providerReasons = cachedAnalysis.providerReasons,
+            ),
+            fundamentals,
         )
+    }
+
+    /**
+     * Windows `ensure_model_routed_valuation` / `ingest_dcf_analysis` parity:
+     * drop stale engine/policy, refuse Unclassified/NotEligible caches, and
+     * replace FCFF-on-financials with residual income when possible.
+     */
+    private fun putDcfAnalysisLocked(
+        symbol: String,
+        analysis: DcfAnalysis,
+        fundamentals: FundamentalSnapshot? = null,
+    ) {
+        if (!admitDcfAnalysisLocked(symbol, analysis, fundamentals)) return
+        dcfCache[symbol] = analysis
+    }
+
+    private fun admitDcfAnalysisLocked(
+        symbol: String,
+        analysis: DcfAnalysis,
+        fundamentals: FundamentalSnapshot? = null,
+    ): Boolean {
+        if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
+            dcfCache.remove(symbol)
+            return false
+        }
+        // Terminal NotEligible markers are intentional coverage states (missing FCF), not model-family refuse.
+        if (analysis.resolverState == ResolverState.NotEligible) {
+            return true
+        }
+        val fund = fundamentals ?: engine.detail(symbol)?.fundamentals
+        if (fund != null) {
+            val businessClass = DcfAnalysisEngine.classifyBusiness(
+                fund.sectorName,
+                fund.industryName,
+                fund.sectorKey,
+                fund.industryKey,
+            )
+            if (
+                businessClass == BusinessClass.Unclassified ||
+                businessClass == BusinessClass.NotEligible
+            ) {
+                dcfCache.remove(symbol)
+                return false
+            }
+            if (
+                analysis.model == ValuationModel.FcffWacc &&
+                businessClass == BusinessClass.FinancialServices
+            ) {
+                dcfCache.remove(symbol)
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun ensureModelRoutedValuationLocked(
+        symbol: String,
+        fundamentals: FundamentalSnapshot? = null,
+    ) {
+        val fund = fundamentals ?: engine.detail(symbol)?.fundamentals ?: return
+        val cached = dcfCache[symbol]
+        if (cached != null && !DcfAnalysisEngine.isCurrentPolicy(cached)) {
+            dcfCache.remove(symbol)
+        }
+        val businessClass = DcfAnalysisEngine.classifyBusiness(
+            fund.sectorName,
+            fund.industryName,
+            fund.sectorKey,
+            fund.industryKey,
+        )
+        if (
+            businessClass == BusinessClass.Unclassified ||
+            businessClass == BusinessClass.NotEligible
+        ) {
+            dcfCache.remove(symbol)
+            return
+        }
+        if (businessClass != BusinessClass.FinancialServices) return
+
+        val current = dcfCache[symbol]
+        val needsReplace = when (current?.model) {
+            null -> true
+            ValuationModel.FcffWacc, ValuationModel.None -> true
+            ValuationModel.ResidualIncomeEquity -> !DcfAnalysisEngine.isCurrentPolicy(current)
+        }
+        if (!needsReplace) return
+
+        val marketPriceCents = engine.detail(symbol)?.marketPriceCents?.takeIf { it > 0L }
+        val timeseries = timeseriesCache[symbol] ?: FundamentalTimeseries()
+        val recomputed = DcfAnalysisEngine.compute(
+            fundamentals = fund,
+            timeseries = timeseries,
+            marketPriceCents = marketPriceCents,
+        ).getOrNull()
+        if (recomputed == null) {
+            dcfCache.remove(symbol)
+            return
+        }
+        val admitted = if (current != null) {
+            recomputed.copy(
+                source = current.source,
+                sourceFingerprint = current.sourceFingerprint,
+                resolverState = current.resolverState,
+                decisionFingerprint = current.decisionFingerprint,
+                provenance = current.provenance,
+                providerReasons = current.providerReasons,
+            )
+        } else {
+            recomputed
+        }
+        putDcfAnalysisLocked(symbol, admitted, fund)
     }
 
     private fun needsDcfResolutionLocked(symbol: String): Boolean {
         val analysis = dcfCache[symbol] ?: return true
+        if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
+            dcfCache.remove(symbol)
+            return true
+        }
+        val fund = engine.detail(symbol)?.fundamentals
+        if (fund != null) {
+            val businessClass = DcfAnalysisEngine.classifyBusiness(
+                fund.sectorName,
+                fund.industryName,
+                fund.sectorKey,
+                fund.industryKey,
+            )
+            if (
+                businessClass == BusinessClass.Unclassified ||
+                businessClass == BusinessClass.NotEligible
+            ) {
+                dcfCache.remove(symbol)
+                return false
+            }
+            if (
+                businessClass == BusinessClass.FinancialServices &&
+                analysis.model == ValuationModel.FcffWacc
+            ) {
+                return true
+            }
+        }
         return when (analysis.resolverState) {
             ResolverState.Selected ->
                 analysis.bearIntrinsicValueCents <= 0L ||
@@ -2864,8 +3068,56 @@ class DefaultDashboardRepository(
         selection.analysis?.let { return it }
         return when (selection.resolverState) {
             ResolverState.NotEligible -> terminalNotEligibleAnalysis(selection, fundamentals)
+            ResolverState.Unavailable,
+            ResolverState.ProviderUncertain,
+            -> unavailableAnalysis(selection, fundamentals)
             else -> null
         }
+    }
+
+    /** Zero-valued state only: no intrinsic/gap/scoring anchor is created. */
+    private fun unavailableAnalysis(
+        selection: DcfSourceSelection,
+        fundamentals: FundamentalSnapshot?,
+    ): DcfAnalysis {
+        val source = selection.providerQualities.firstOrNull()?.source
+            ?: selection.reasons.firstOrNull()?.provider
+            ?: DcfSource.Unknown
+        val reason = selection.reasons
+            .firstOrNull { it.upstreamStatus?.isNotBlank() == true }
+            ?.let { "valuation unavailable: ${it.upstreamStatus}" }
+            ?: "valuation unavailable: required annual driver evidence was exhausted"
+        return DcfAnalysis(
+            bearIntrinsicValueCents = 0L,
+            baseIntrinsicValueCents = 0L,
+            bullIntrinsicValueCents = 0L,
+            waccBps = 0,
+            baseGrowthBps = 0,
+            netDebtDollars = 0L,
+            source = source,
+            sourceFingerprint = selection.inputFingerprint ?: selection.decisionFingerprint,
+            resolverState = ResolverState.Unavailable,
+            decisionFingerprint = selection.decisionFingerprint,
+            engineVersion = ENGINE_VERSION,
+            modelPolicyVersion = MODEL_POLICY_VERSION,
+            businessClass = fundamentals?.let {
+                DcfAnalysisEngine.classifyBusiness(
+                    it.sectorName,
+                    it.industryName,
+                    it.sectorKey,
+                    it.industryKey,
+                )
+            } ?: BusinessClass.Unclassified,
+            model = ValuationModel.None,
+            provenance = DataProvenance(
+                source = source,
+                providerState = ProviderState.Unavailable,
+                fallbackReason = selection.reasons.firstOrNull()?.code,
+            ),
+            providerReasons = selection.reasons,
+            reasonCodes = selection.reasons.map { it.code.name },
+            valuationUnavailableReason = reason,
+        )
     }
 
     private fun terminalNotEligibleAnalysis(
@@ -2896,6 +3148,17 @@ class DefaultDashboardRepository(
             resolverState = ResolverState.NotEligible,
             // Encode fundamentals fingerprint so we can re-open when inputs change.
             decisionFingerprint = notEligibleDecisionFingerprint(fundFp, selection.decisionFingerprint),
+            engineVersion = ENGINE_VERSION,
+            modelPolicyVersion = MODEL_POLICY_VERSION,
+            businessClass = fundamentals?.let {
+                DcfAnalysisEngine.classifyBusiness(
+                    it.sectorName,
+                    it.industryName,
+                    it.sectorKey,
+                    it.industryKey,
+                )
+            } ?: BusinessClass.Unclassified,
+            model = ValuationModel.None,
             provenance = DataProvenance(
                 source = source,
                 providerState = ProviderState.NotEligible,
@@ -2912,6 +3175,7 @@ class DefaultDashboardRepository(
             fundamentals.betaMillis,
             fundamentals.totalDebtDollars,
             fundamentals.totalCashDollars,
+            fundamentals.retentionBps,
         ).joinToString("|")
 
     private fun notEligibleDecisionFingerprint(
@@ -3048,7 +3312,16 @@ class DefaultDashboardRepository(
     }
 
     companion object {
-        private const val DEFAULT_PROFILE = "sp500"
+        /** Product cold-start for release builds. */
+        const val PRODUCT_DEFAULT_PROFILE = "sp500"
+
+        /**
+         * Live / agent / debug QA universe. Hard-capped membership (≤[QA_MAX_SYMBOLS]).
+         * Same standing rule as Windows `npm run tauri:dev:qa`.
+         */
+        const val QA_PROFILE = "qa"
+        const val QA_MAX_SYMBOLS = 20
+
         private const val REFRESH_CONCURRENCY = 4
         private const val ENRICHMENT_CONCURRENCY = 2
         private const val MAX_RETRY_ROUNDS = 3

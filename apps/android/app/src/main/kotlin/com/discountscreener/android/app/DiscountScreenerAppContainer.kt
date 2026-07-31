@@ -7,6 +7,7 @@ import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
 import com.discountscreener.android.domain.logging.AndroidAppLogger
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
@@ -38,6 +39,13 @@ class DiscountScreenerAppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     private val repository by lazy {
+        // Debug installs (agent live QA / make android-run) always start on profile qa (≤20).
+        // Release keeps full product default (sp500). Silence is not permission for full-universe thrash.
+        val startupProfile = if (BuildConfig.DEBUG) {
+            DefaultDashboardRepository.QA_PROFILE
+        } else {
+            DefaultDashboardRepository.PRODUCT_DEFAULT_PROFILE
+        }
         DefaultDashboardRepository(
             stateStore = SQLiteStateStore(appContext),
             profileCatalog = ProfileCatalog(appContext.assets),
@@ -45,6 +53,7 @@ class DiscountScreenerAppContainer(context: Context) {
             universeCatalog = UniverseCatalog(appContext.assets),
             secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
             logger = AndroidAppLogger(),
+            defaultProfile = startupProfile,
         )
     }
 

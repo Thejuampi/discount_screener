@@ -3,10 +3,13 @@ mod chart_patterns;
 mod commands;
 mod congress;
 mod congress_scoring;
+#[cfg(test)]
+mod cross_platform_parity;
 mod crypto_cycle;
 mod crypto_md;
 mod db;
 mod dcf_model;
+mod driver_resolution;
 mod edgar;
 mod email;
 mod engine;
@@ -33,6 +36,7 @@ mod stooq;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
+mod valuation_divergence;
 mod yahoo_session;
 
 use state::AppState;
@@ -179,6 +183,7 @@ pub fn run() {
             commands::set_scoring_model,
             commands::get_index_estimates,
             commands::get_quant_lens,
+            commands::run_qa_valuation_divergence_audit,
             commands::list_universe_profiles,
             commands::get_universe_profile,
             commands::set_universe_profile,

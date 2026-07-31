@@ -31,6 +31,7 @@ import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
@@ -50,7 +51,10 @@ import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.getOrNull
+import com.discountscreener.core.engine.ENGINE_VERSION
+import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -89,16 +93,39 @@ class DefaultDashboardRepositoryTest {
     private val legacyModel = OpportunityScoringModel.Legacy
 
     @Test
-    fun bootstrap_uses_sp500_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
+    fun bootstrap_uses_qa_profile_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
         val store = SQLiteStateStore(context)
         try {
             store.replaceTrackedSymbols(listOf("MSTR"))
-            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            val repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertEquals("qa", snapshot.currentProfile)
+            assertTrue(snapshot.trackedSymbols.size in 1..DefaultDashboardRepository.QA_MAX_SYMBOLS)
+            assertTrue(snapshot.trackedSymbols.size <= 20)
+            assertFalse(snapshot.trackedSymbols.contains("MSTR"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun bootstrap_product_default_sp500_still_available_when_requested() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context)
+        try {
+            val repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                defaultProfile = DefaultDashboardRepository.PRODUCT_DEFAULT_PROFILE,
+            )
             val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
 
             assertEquals("sp500", snapshot.currentProfile)
             assertTrue(snapshot.trackedSymbols.size > 400)
-            assertFalse(snapshot.trackedSymbols.contains("MSTR"))
         } finally {
             store.close()
         }
@@ -1096,7 +1123,7 @@ class DefaultDashboardRepositoryTest {
                             symbol = symbol,
                             snapshot = null,
                             externalSignal = null,
-                            fundamentals = null,
+                            fundamentals = dcfFundamentals(symbol),
                             coverage = ProviderCoverage(
                                 core = ProviderComponentState.Missing,
                                 external = ProviderComponentState.Missing,
@@ -1174,11 +1201,7 @@ class DefaultDashboardRepositoryTest {
                             symbol = symbol,
                             snapshot = null,
                             externalSignal = null,
-                            fundamentals = FundamentalSnapshot(
-                                symbol = symbol,
-                                marketCapDollars = 600_000_000_000L,
-                                sharesOutstanding = 4_800_000_000L,
-                            ),
+                            fundamentals = dcfFundamentals(symbol),
                             coverage = ProviderCoverage(
                                 core = ProviderComponentState.Missing,
                                 external = ProviderComponentState.Missing,
@@ -1513,9 +1536,13 @@ class DefaultDashboardRepositoryTest {
                             waccBps = 800,
                             baseGrowthBps = 500,
                             netDebtDollars = 0L,
-                            source = null,
-                            resolverState = ResolverState.RestoredOnly,
-                        ),
+                        source = null,
+                        resolverState = ResolverState.RestoredOnly,
+                        engineVersion = ENGINE_VERSION,
+                        modelPolicyVersion = MODEL_POLICY_VERSION,
+                        businessClass = BusinessClass.OperatingNonFinancial,
+                        model = ValuationModel.FcffWacc,
+                    ),
                     ),
                 ),
             )
@@ -1611,6 +1638,7 @@ class DefaultDashboardRepositoryTest {
         store: SQLiteStateStore,
         client: FakeYahooFinanceClient,
         secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
+        defaultProfile: String = DefaultDashboardRepository.QA_PROFILE,
     ) = DefaultDashboardRepository(
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
@@ -1619,6 +1647,7 @@ class DefaultDashboardRepositoryTest {
         secondaryTimeseriesProvider = secondaryTimeseriesProvider,
         nowProvider = { 1_700_000_000L },
         ioDispatcher = dispatcher,
+        defaultProfile = defaultProfile,
     )
 
     private fun assertCandleFingerprintChanges(mutated: HistoricalCandle) {
@@ -1676,6 +1705,10 @@ class DefaultDashboardRepositoryTest {
         waccBps = 900,
         baseGrowthBps = 300,
         netDebtDollars = 0L,
+        engineVersion = ENGINE_VERSION,
+        modelPolicyVersion = MODEL_POLICY_VERSION,
+        businessClass = BusinessClass.OperatingNonFinancial,
+        model = ValuationModel.FcffWacc,
     )
 
     private fun providerUncertainDcfAnalysis() = DcfAnalysis(
@@ -1686,6 +1719,10 @@ class DefaultDashboardRepositoryTest {
         baseGrowthBps = 300,
         netDebtDollars = 0L,
         resolverState = ResolverState.ProviderUncertain,
+        engineVersion = ENGINE_VERSION,
+        modelPolicyVersion = MODEL_POLICY_VERSION,
+        businessClass = BusinessClass.OperatingNonFinancial,
+        model = ValuationModel.FcffWacc,
     )
 
     private data class QuantLensProjectionParityExpectation(
@@ -2332,7 +2369,11 @@ private fun companyNameFor(symbol: String): String = when (symbol) {
 
 private fun dcfFundamentals(symbol: String) = FundamentalSnapshot(
     symbol = symbol,
+    sectorName = "Technology",
+    industryName = "Semiconductors",
     marketCapDollars = 600_000_000_000L,
+    totalDebtDollars = 50_000_000_000L,
+    totalCashDollars = 10_000_000_000L,
     sharesOutstanding = 4_800_000_000L,
     betaMillis = 1_000,
 )
@@ -2369,6 +2410,12 @@ private fun richTimeseries() = FundamentalTimeseries(
         com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 12_000_000_000.0),
         com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 13_000_000_000.0),
     ),
+    revenue = listOf(
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 200_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 220_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 245_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 270_000_000_000.0),
+    ),
     dilutedAverageShares = listOf(
         com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 5_100_000_000.0),
         com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 5_000_000_000.0),
@@ -2388,6 +2435,18 @@ private fun richTimeseries() = FundamentalTimeseries(
         com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 80_000_000_000.0),
     ),
     taxRateForCalcs = listOf(
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 0.21),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 0.21),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 0.21),
+        com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 0.21),
+    ),
+    totalDebt = listOf(
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 45_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 47_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 49_000_000_000.0),
+        com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 50_000_000_000.0),
+    ),
+    marginalTaxRate = listOf(
         com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 0.21),
         com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 0.21),
         com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 0.21),

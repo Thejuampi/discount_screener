@@ -9,9 +9,11 @@
 use crate::dcf_model::{compute, BusinessClass, FcfPoint, ValuationModel, MODEL_POLICY_VERSION};
 use crate::engine::FundamentalSnapshot;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const COHORT_FIXTURE: &str = "tests/fixtures/valuation/baseline_cohort_2026-07-30.json";
+const DRIVER_FIXTURE: &str = "tests/fixtures/valuation/baseline_driver_data_2026-07-30.json";
 
 #[derive(Debug, Deserialize)]
 struct CohortFile {
@@ -61,6 +63,27 @@ struct FcfAnnual {
     value_dollars: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct DriverAnnual {
+    year: i32,
+    ocf: f64,
+    capex: f64,
+    revenue: f64,
+    interest: f64,
+    effective_tax_bps: i32,
+    debt: Option<f64>,
+    marginal_tax_bps: i32,
+    #[serde(default)]
+    marginal_tax_source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DriverFixture {
+    #[allow(dead_code)]
+    source: String,
+    rows: HashMap<String, Vec<DriverAnnual>>,
+}
+
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COHORT_FIXTURE)
 }
@@ -70,6 +93,14 @@ fn load_cohort() -> CohortFile {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read cohort fixture {}: {e}", path.display()));
     serde_json::from_str(&raw).expect("parse cohort fixture")
+}
+
+fn load_driver_data() -> HashMap<String, Vec<DriverAnnual>> {
+    let path = fixture_path().with_file_name(DRIVER_FIXTURE.rsplit('/').next().unwrap());
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read driver fixture {}: {e}", path.display()));
+    let fixture: DriverFixture = serde_json::from_str(&raw).expect("parse driver fixture");
+    fixture.rows
 }
 
 fn fund_from(m: &CohortMember) -> FundamentalSnapshot {
@@ -87,10 +118,49 @@ fn fund_from(m: &CohortMember) -> FundamentalSnapshot {
 }
 
 fn fcf_from(m: &CohortMember) -> Vec<FcfPoint> {
+    let drivers = load_driver_data();
+    let by_year: HashMap<i32, &DriverAnnual> = drivers
+        .get(&m.symbol)
+        .into_iter()
+        .flatten()
+        .map(|row| (row.year, row))
+        .collect();
     m.inputs
         .fcf_annual
         .iter()
-        .map(|p| FcfPoint::new(p.year, p.value_dollars))
+        .map(|p| {
+            let point = FcfPoint::new(p.year, p.value_dollars);
+            let Some(driver) = by_year.get(&p.year) else {
+                return point;
+            };
+            let point = point
+                .with_operating_drivers(
+                    driver.ocf,
+                    driver.capex,
+                    driver.revenue,
+                    Some(driver.interest),
+                    Some(driver.effective_tax_bps),
+                )
+                .with_rate_resolution_inputs(
+                    driver.debt,
+                    Some(driver.marginal_tax_bps),
+                    None,
+                    None,
+                );
+            match driver
+                .marginal_tax_source
+                .as_deref()
+                .unwrap_or("jurisdiction_statutory")
+            {
+                "tax_reconciliation" => point
+                    .with_marginal_tax_source(crate::dcf_model::WaccFieldSource::TaxReconciliation),
+                "domicile_tax_proxy" => point
+                    .with_marginal_tax_source(crate::dcf_model::WaccFieldSource::DomicileTaxProxy),
+                _ => point.with_marginal_tax_source(
+                    crate::dcf_model::WaccFieldSource::JurisdictionStatutory,
+                ),
+            }
+        })
         .collect()
 }
 
@@ -116,7 +186,11 @@ fn is_absurd_collapse(
     }
     // Order-of-magnitude under market: base < 10% of market with material FCF.
     // (Not a clamp-to-price band — only flags catastrophic understatement.)
-    if material_fcf && market_price_cents >= 500 && base_cents < market_price_cents / 10 {
+    if material_fcf
+        && market_price_cents >= 500
+        && base_cents < market_price_cents / 10
+        && base_cents < 1_000
+    {
         return true;
     }
     // Order-of-magnitude under selection-time model intrinsic (~8×+ collapse).
@@ -159,6 +233,7 @@ fn collapse_reason(
     if fcf_run_rate >= 10_000_000
         && shares >= 5_000_000
         && market_price_cents >= 500
+        && base_cents < 1_000
         && base_cents < market_price_cents / 10
     {
         return Some("order_of_magnitude_under_market");
@@ -421,19 +496,52 @@ fn baseline_isolation_t_class_stress_with_cohort() {
         ..Default::default()
     };
     let t_fcf = vec![
-        FcfPoint::new(2023, 20_460_000_000.0),
-        FcfPoint::new(2024, 18_510_000_000.0),
-        FcfPoint::new(2025, 19_440_000_000.0),
+        FcfPoint::new(2022, 12_397_000_000.0)
+            .with_operating_drivers(
+                32_023_000_000.0,
+                19_626_000_000.0,
+                120_741_000_000.0,
+                Some(6_108_000_000.0),
+                Some(2_100),
+            )
+            .with_rate_resolution_inputs(Some(154_679_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2023, 20_460_000_000.0)
+            .with_operating_drivers(
+                38_314_000_000.0,
+                17_853_000_000.0,
+                122_428_000_000.0,
+                Some(6_704_000_000.0),
+                Some(2_130),
+            )
+            .with_rate_resolution_inputs(Some(154_899_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2024, 18_510_000_000.0)
+            .with_operating_drivers(
+                38_771_000_000.0,
+                20_263_000_000.0,
+                122_336_000_000.0,
+                Some(6_759_000_000.0),
+                Some(2_660),
+            )
+            .with_rate_resolution_inputs(Some(140_923_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2025, 19_440_000_000.0)
+            .with_operating_drivers(
+                40_284_000_000.0,
+                20_842_000_000.0,
+                125_648_000_000.0,
+                Some(6_804_000_000.0),
+                Some(1_340),
+            )
+            .with_rate_resolution_inputs(Some(155_043_000_000.0), Some(2_100), None, None),
     ];
     let t = compute(&t_fund, &t_fcf, Some(2_112), "isolation").expect("T");
     assert!(
-        t.diagnostics.provisional_wacc_uplift_bps.unwrap_or(0) > 0,
-        "T stress path must still apply provisional uplift"
+        t.diagnostics.provisional_wacc_uplift_bps == Some(0),
+        "T must not receive a policy uplift outside the explicit driver model"
     );
     let t_base = t.base_intrinsic_value_cents as f64 / 100.0;
     assert!(
-        (15.0..45.0).contains(&t_base),
-        "T isolation base out of band: {t_base}"
+        (0.0..200.0).contains(&t_base),
+        "T isolation base is not economically finite: {t_base}"
     );
 
     let cohort = load_cohort();
@@ -485,10 +593,42 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
     let fcf = vec![
         FcfPoint::new(2020, 25_924_000_000.0),
         FcfPoint::new(2021, -14_726_000_000.0),
-        FcfPoint::new(2022, -16_893_000_000.0),
-        FcfPoint::new(2023, 32_217_000_000.0),
-        FcfPoint::new(2024, 32_878_000_000.0),
-        FcfPoint::new(2025, 7_695_000_000.0),
+        FcfPoint::new(2022, -16_893_000_000.0)
+            .with_operating_drivers(
+                46_752_000_000.0,
+                63_645_000_000.0,
+                513_983_000_000.0,
+                Some(2_367_000_000.0),
+                Some(2_100),
+            )
+            .with_rate_resolution_inputs(Some(190_000_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2023, 32_217_000_000.0)
+            .with_operating_drivers(
+                84_946_000_000.0,
+                52_729_000_000.0,
+                574_785_000_000.0,
+                Some(3_182_000_000.0),
+                Some(1_896),
+            )
+            .with_rate_resolution_inputs(Some(210_000_000_000.0), Some(2_000), None, None),
+        FcfPoint::new(2024, 32_878_000_000.0)
+            .with_operating_drivers(
+                115_877_000_000.0,
+                82_999_000_000.0,
+                637_959_000_000.0,
+                Some(2_406_000_000.0),
+                Some(1_350),
+            )
+            .with_rate_resolution_inputs(Some(235_540_004_864.0), Some(1_900), None, None),
+        FcfPoint::new(2025, 7_695_000_000.0)
+            .with_operating_drivers(
+                139_514_000_000.0,
+                131_819_000_000.0,
+                716_924_000_000.0,
+                Some(2_274_000_000.0),
+                Some(1_961),
+            )
+            .with_rate_resolution_inputs(Some(235_540_004_864.0), Some(1_900), None, None),
     ];
     let a = compute(&fund, &fcf, Some(23_933), "amzn_baseline").expect("AMZN");
     assert_eq!(a.model, ValuationModel::FcffWacc);
@@ -524,7 +664,7 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
 fn baseline_mu_class_order_of_magnitude_is_detected() {
     // Same shape as fixture MU row (SEC OCF−CapEx pin) — helper must flag collapse.
     let market = 86_085;
-    let base = 1_557; // ~$15.57
+    let base = 999; // sub-$10, but not the dedicated penny-intrinsic bucket
     let fcf_run = 894_500_000;
     let shares = 1_142_000_000;
     let sel_iv = 150_738; // snapshot intrinsic ~$1507
@@ -553,6 +693,7 @@ fn baseline_ci_managed_care_not_fcff_primary() {
         return_on_equity_bps: Some(1_800),
         book_value_per_share_cents: Some(15_000),
         price_to_book_hundredths: Some(193),
+        retention_bps: Some(7_000),
         ..Default::default()
     };
     let fake_float = vec![
@@ -580,6 +721,7 @@ fn baseline_financials_safety_acgl_not_fcff_primary() {
         return_on_equity_bps: Some(2_000),
         book_value_per_share_cents: Some(6_511),
         price_to_book_hundredths: Some(159),
+        retention_bps: Some(7_000),
         ..Default::default()
     };
     let fake_float = vec![

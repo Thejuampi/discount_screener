@@ -13,6 +13,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import kotlin.math.abs
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
 
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -83,9 +86,75 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
 internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? {
     val usGaap = facts["facts"]?.jsonObject?.get("us-gaap")?.jsonObject ?: return null
 
-    val opCfRecords = annualFyRecords(usGaap, "NetCashProvidedByUsedInOperatingActivities")
-    val capexRecords = annualFyRecords(usGaap, "PaymentsToAcquirePropertyPlantAndEquipment")
+    val opCfRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "NetCashProvidedByUsedInOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation",
+        ),
+    )
+    val capexRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PaymentsToAcquireProductiveAssets",
+            "PaymentsToAcquireOtherPropertyPlantAndEquipment",
+            "PaymentsForCapitalImprovements",
+        ),
+    )
+    val revenueRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "SalesRevenueNet",
+            "SalesRevenueGoodsNet",
+            "RevenueFromContractWithCustomerIncludingAssessedTax",
+            "RevenuesFromExternalCustomers",
+        ),
+    )
+    val interestRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "InterestExpenseNonOperating",
+            "InterestExpenseNonoperating",
+            "InterestExpenseDebt",
+            "InterestAndDebtExpense",
+            "InterestExpense",
+            "InterestExpenseOtherLongTermDebt",
+            "InterestIncomeExpenseNet",
+            "InterestIncomeExpenseNonoperatingNet",
+            "FinanceLeaseInterestExpense",
+            "InterestPaidNet",
+        ),
+    )
+    val pretaxRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
+        ),
+    )
+    val taxExpenseRecords = annualFyRecordsAny(
+        usGaap,
+        listOf("IncomeTaxExpenseBenefit", "IncomeTaxExpenseBenefitContinuingOperations"),
+    )
     val sharesRecords = annualFyRecords(usGaap, "WeightedAverageNumberOfDilutedSharesOutstanding")
+    val debtRecords = annualDebtRecords(usGaap)
+    val marginalTaxRecords = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate",
+            "IncomeTaxReconciliationFederalStatutoryIncomeTaxRate",
+            "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate",
+            "StatutoryFederalIncomeTaxRate",
+            "StatutoryIncomeTaxRate",
+        ),
+    )
 
     if (opCfRecords.isEmpty() || capexRecords.isEmpty()) return null
 
@@ -101,13 +170,85 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
     val capitalExpenditure = capexRecords
         .filter { capex -> capex.asOfDate in acceptedDates }
         .map { capex -> capex.copy(value = -Math.abs(capex.value)) }
+    val revenue = revenueRecords.filter { it.asOfDate in acceptedDates }
+    val interestExpense = interestRecords.filter { it.asOfDate in acceptedDates }
+    val pretaxIncome = pretaxRecords.filter { it.asOfDate in acceptedDates }
+    val pretaxByDate = pretaxIncome.associateBy { it.asOfDate }
+    val taxRateForCalcs = taxExpenseRecords
+        .filter { it.asOfDate in acceptedDates }
+        .mapNotNull { tax ->
+            val pretax = pretaxByDate[tax.asOfDate]?.value ?: return@mapNotNull null
+            if (abs(pretax) <= 0.0) return@mapNotNull null
+            AnnualReportedValue(tax.asOfDate, abs(tax.value) / abs(pretax))
+        }
+    val totalDebt = debtRecords.filter { it.asOfDate in acceptedDates }
+    val marginalTaxRate = marginalTaxRecords.filter { it.asOfDate in acceptedDates }
 
     return FundamentalTimeseries(
         freeCashFlow = freeCashFlow,
         operatingCashFlow = acceptedOperatingCashFlow,
         capitalExpenditure = capitalExpenditure,
+        revenue = revenue,
         dilutedAverageShares = sharesRecords,
+        interestExpense = interestExpense,
+        pretaxIncome = pretaxIncome,
+        taxRateForCalcs = taxRateForCalcs,
+        totalDebt = totalDebt,
+        marginalTaxRate = marginalTaxRate,
     )
+}
+
+private fun annualFyRecordsAny(
+    usGaap: JsonObject,
+    concepts: List<String>,
+): List<AnnualReportedValue> {
+    val byDate = linkedMapOf<String, AnnualReportedValue>()
+    concepts.forEach { concept ->
+        annualFyRecords(usGaap, concept).forEach { record ->
+            byDate.putIfAbsent(record.asOfDate, record)
+        }
+    }
+    return byDate.values.sortedBy { it.asOfDate }
+}
+
+private fun annualDebtRecords(usGaap: JsonObject): List<AnnualReportedValue> {
+    val current = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "LongTermDebtAndFinanceLeaseObligationsCurrent",
+            "LongTermDebtCurrent",
+            "DebtCurrent",
+            "ShortTermBorrowings",
+        ),
+    )
+    val nonCurrent = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+            "LongTermDebtNoncurrent",
+        ),
+    )
+    val reportedTotal = annualFyRecordsAny(
+        usGaap,
+        listOf(
+            "DebtAndCapitalLeaseObligations",
+            "LongTermDebtAndCapitalLeaseObligations",
+            "LongTermDebt",
+            "DebtInstrumentCarryingAmount",
+        ),
+    )
+    val components = (current + nonCurrent)
+        .groupBy { it.asOfDate }
+        .map { (_, records) ->
+            records.first().copy(
+                value = records.sumOf { abs(it.value) },
+                concept = "total_debt",
+            )
+        }
+    return (components + reportedTotal)
+        .groupBy { it.asOfDate }
+        .map { (_, records) -> records.maxByOrNull { abs(it.value) }!! }
+        .sortedBy { it.asOfDate }
 }
 
 private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualReportedValue> {
@@ -127,7 +268,25 @@ private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualRep
         val endDate = obj["end"]?.jsonPrimitive?.content ?: continue
         val value = obj["val"]?.jsonPrimitive?.double ?: continue
         if (!byDate.containsKey(endDate)) {
-            byDate[endDate] = AnnualReportedValue(asOfDate = endDate, value = value)
+            val startDate = obj["start"]?.jsonPrimitive?.content
+            val durationDays = startDate?.let {
+                runCatching {
+                    ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.parse(endDate)).toInt()
+                }.getOrNull()
+            }
+            byDate[endDate] = AnnualReportedValue(
+                asOfDate = endDate,
+                value = value,
+                periodStart = startDate,
+                periodEnd = endDate,
+                durationDays = durationDays,
+                fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
+                    ?: endDate.take(4).toIntOrNull(),
+                source = com.discountscreener.core.model.DcfSource.SecEdgar,
+                concept = concept,
+                unit = usGaap[concept]?.jsonObject?.get("units")?.jsonObject?.keys?.firstOrNull(),
+                filedAt = obj["filed"]?.jsonPrimitive?.content,
+            )
         }
     }
     return byDate.values.sortedBy { it.asOfDate }

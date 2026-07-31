@@ -7,6 +7,7 @@ import com.discountscreener.core.model.ComputationResult
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
+import com.discountscreener.core.model.ExpectedValueRangeBand
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProviderDecisionReasonCode
@@ -227,9 +228,51 @@ class ScreenDataProjectionEngine {
             revisions = request.revisionsBySymbol[symbol].orEmpty(),
             alerts = request.alertsBySymbol[symbol].orEmpty(),
             waccBps = dcfAnalysis?.waccBps,
-            waccProvisional = dcfAnalysis?.waccInputs?.isProvisional() == true,
+            waccProvisional = dcfAnalysis?.waccInputs?.isProvisional() == true ||
+                dcfAnalysis?.pointEstimateUnreliable == true,
             waccAssumptionLabels = dcfAnalysis?.waccInputs?.summaryLabels().orEmpty(),
+            valuationUnavailableReason = valuationUnavailableReason(detail, dcfAnalysis),
+            valuationModelLabel = valuationModelLabel(dcfAnalysis),
+            latestFcfDollars = dcfAnalysis?.latestFcfDollars,
+            fcfRunRateDollars = dcfAnalysis?.fcfRunRateDollars,
+            fcfRunRateNormalized = dcfAnalysis?.fcfRunRateNormalized == true,
+            provisionalWaccUpliftBps = dcfAnalysis?.provisionalWaccUpliftBps ?: 0,
+            valuationDriver = dcfAnalysis?.valuationDriver,
+            latestRevenueDollars = dcfAnalysis?.latestRevenueDollars,
+            normalizedFcffDollars = dcfAnalysis?.normalizedFcffDollars,
+            normalizedOcfMarginBps = dcfAnalysis?.normalizedOcfMarginBps,
+            normalizedCapexIntensityBps = dcfAnalysis?.normalizedCapexIntensityBps,
+            normalizedAfterTaxInterestMarginBps = dcfAnalysis?.normalizedAfterTaxInterestMarginBps,
+            capexSpikeYears = dcfAnalysis?.capexSpikeYears.orEmpty(),
+            driverRegime = dcfAnalysis?.driverRegime,
+            growthDispersionBps = dcfAnalysis?.growthDispersionBps,
+            growthDriver = dcfAnalysis?.growthDriver,
         )
+    }
+
+    private fun valuationModelLabel(analysis: DcfAnalysis?): String? = when (analysis?.model) {
+        com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
+        com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
+        com.discountscreener.core.model.ValuationModel.None, null -> null
+    }
+
+    private fun valuationUnavailableReason(
+        detail: SymbolDetail,
+        dcfAnalysis: DcfAnalysis?,
+    ): String? {
+        if (dcfAnalysis != null && dcfAnalysis.baseIntrinsicValueCents > 0L) return null
+        dcfAnalysis?.valuationUnavailableReason?.takeIf { it.isNotBlank() }?.let { return it }
+        if (dcfAnalysis?.resolverState == ResolverState.NotEligible) {
+            return "No usable free cash flow history for FCFF."
+        }
+        val fund = detail.fundamentals
+        val businessClass = DcfAnalysisEngine.classifyBusiness(
+            fund?.sectorName,
+            fund?.industryName,
+            fund?.sectorKey,
+            fund?.industryKey,
+        )
+        return DcfAnalysisEngine.classificationUnavailableReason(businessClass)
     }
 
     private fun chartSummary(
@@ -442,27 +485,36 @@ class ScreenDataProjectionEngine {
         }
     }
 
-    private fun dcfCompactLabel(analysis: DcfAnalysis): String = when (analysis.resolverState) {
-        ResolverState.RestoredOnly -> "Saved model"
-        else -> "DCF model"
+    private fun modelKindLabel(analysis: DcfAnalysis): String = when (analysis.model) {
+        com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
+        com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
+        com.discountscreener.core.model.ValuationModel.None -> "Model"
     }
 
-    private fun dcfSourceLabel(analysis: DcfAnalysis): String = when (analysis.resolverState) {
-        ResolverState.ProviderUncertain -> "DCF base - source uncertain"
-        ResolverState.RestoredOnly -> if (isSourceFreeDcf(analysis)) {
-            "Source unknown - saved model"
-        } else {
-            "Saved DCF base"
-        }
-        else -> if (isSourceFreeDcf(analysis)) {
-            "Source unknown - saved model"
-        } else {
-            when (analysis.source) {
-                DcfSource.YahooFinance -> "DCF base - Yahoo Finance"
-                DcfSource.SecEdgar -> "DCF base - SEC EDGAR"
-                DcfSource.Derived -> "DCF base - derived"
-                DcfSource.Restored -> "Saved DCF base"
-                DcfSource.Unknown, null -> "Source unknown - saved model"
+    private fun dcfCompactLabel(analysis: DcfAnalysis): String = when (analysis.resolverState) {
+        ResolverState.RestoredOnly -> "Saved model"
+        else -> modelKindLabel(analysis)
+    }
+
+    private fun dcfSourceLabel(analysis: DcfAnalysis): String {
+        val kind = modelKindLabel(analysis)
+        return when (analysis.resolverState) {
+            ResolverState.ProviderUncertain -> "$kind base - source uncertain"
+            ResolverState.RestoredOnly -> if (isSourceFreeDcf(analysis)) {
+                "Source unknown - saved model"
+            } else {
+                "Saved $kind base"
+            }
+            else -> if (isSourceFreeDcf(analysis)) {
+                "Source unknown - saved model"
+            } else {
+                when (analysis.source) {
+                    DcfSource.YahooFinance -> "$kind base - Yahoo Finance"
+                    DcfSource.SecEdgar -> "$kind base - SEC EDGAR"
+                    DcfSource.Derived -> "$kind base - derived"
+                    DcfSource.Restored -> "Saved $kind base"
+                    DcfSource.Unknown, null -> "Source unknown - saved model"
+                }
             }
         }
     }
@@ -664,36 +716,49 @@ class ScreenDataProjectionEngine {
         detail: SymbolDetail,
         dcfAnalysis: DcfAnalysis?,
     ): QuantLensLensRowState? {
-        if (dcfAnalysis != null && isLiveCompleteDcf(dcfAnalysis)) {
-            return QuantLensLensRowState(
-                lensId = QuantLensLensId.ExpectedValueRange,
-                primaryStatus = QuantLensPrimaryStatus.Available,
-                band = "ScenarioWeighted",
-                label = QuantLensRowLabel.EvRange,
-                reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
-                evLowUpsideBps = projectedUpsideBps(detail.marketPriceCents, dcfAnalysis.bearIntrinsicValueCents),
-                evHighUpsideBps = projectedUpsideBps(detail.marketPriceCents, dcfAnalysis.bullIntrinsicValueCents),
-            )
-        }
         if (dcfAnalysis?.resolverState == ResolverState.ProviderUncertain) {
             return QuantLensLensRowState(
                 lensId = QuantLensLensId.ExpectedValueRange,
                 primaryStatus = QuantLensPrimaryStatus.Unavailable,
-                band = "Unavailable",
+                band = ExpectedValueRangeBand.Unavailable.name,
                 label = QuantLensRowLabel.EvUnavailable,
                 freshnessQualifier = QuantLensFreshnessQualifier.ProviderUncertain,
                 reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
             )
         }
-        if (detail.externalSignalLowFairValueCents != null && detail.externalSignalHighFairValueCents != null) {
+
+        val selection = QuantLensExpectedValuePolicy.select(detail, dcfAnalysis)
+        if (selection.band == ExpectedValueRangeBand.Disputed) {
+            return QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = QuantLensPrimaryStatus.Disputed,
+                band = ExpectedValueRangeBand.Disputed.name,
+                label = QuantLensRowLabel.EvDisputed,
+                reasonCodes = selection.reasonCodes,
+            )
+        }
+
+        if (selection.band == ExpectedValueRangeBand.ScenarioWeighted) {
+            return QuantLensLensRowState(
+                lensId = QuantLensLensId.ExpectedValueRange,
+                primaryStatus = selection.primaryStatus,
+                band = selection.band.name,
+                label = QuantLensRowLabel.EvRange,
+                reasonCodes = selection.reasonCodes,
+                evLowUpsideBps = projectedUpsideBps(detail.marketPriceCents, selection.lowFairValueCents),
+                evHighUpsideBps = projectedUpsideBps(detail.marketPriceCents, selection.highFairValueCents),
+            )
+        }
+
+        if (selection.band == ExpectedValueRangeBand.ReferenceOnly) {
             return QuantLensLensRowState(
                 lensId = QuantLensLensId.ExpectedValueRange,
                 primaryStatus = QuantLensPrimaryStatus.Partial,
-                band = "ReferenceOnly",
+                band = selection.band.name,
                 label = QuantLensRowLabel.EvRange,
-                reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
-                evLowUpsideBps = projectedUpsideBps(detail.marketPriceCents, detail.externalSignalLowFairValueCents),
-                evHighUpsideBps = projectedUpsideBps(detail.marketPriceCents, detail.externalSignalHighFairValueCents),
+                reasonCodes = selection.reasonCodes,
+                evLowUpsideBps = projectedUpsideBps(detail.marketPriceCents, selection.lowFairValueCents),
+                evHighUpsideBps = projectedUpsideBps(detail.marketPriceCents, selection.highFairValueCents),
             )
         }
         return null
