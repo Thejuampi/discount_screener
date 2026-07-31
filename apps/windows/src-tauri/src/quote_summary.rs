@@ -1,6 +1,8 @@
 //! Pure parse of Yahoo `v10/finance/quoteSummary` JSON (Android port).
 //! Network + crumb stay in `fetcher` / `yahoo_session`.
 
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::engine::{ExternalValuationSignal, FundamentalSnapshot, MarketSnapshot};
@@ -14,9 +16,147 @@ pub struct FetchResult {
     pub fundamentals: Option<FundamentalSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardForecastProviderError {
+    MissingPayload,
+    MissingForwardPeriod,
+    MissingForecastEndDate,
+    InvalidForecastEndDate,
+    MissingCurrency,
+    CurrencyMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardForecastEvidence {
+    pub eps_low_cents: Option<i64>,
+    pub eps_mean_cents: Option<i64>,
+    pub eps_high_cents: Option<i64>,
+    pub analyst_count: Option<i32>,
+    pub revenue_growth_bps: Option<i32>,
+    pub revenue_analyst_count: Option<i32>,
+    pub earnings_growth_bps: Option<i32>,
+    pub currency: String,
+    pub revenue_currency: String,
+    pub reporting_currency: String,
+    pub observed_epoch_day: i64,
+    pub forecast_period_end_epoch_day: i64,
+    pub source_fingerprint: String,
+}
+
+pub fn parse_forward_forecast_evidence(
+    root: &Value,
+    display_symbol: &str,
+    observed_epoch_day: i64,
+) -> Result<ForwardForecastEvidence, ForwardForecastProviderError> {
+    let result = root
+        .pointer("/quoteSummary/result/0")
+        .or_else(|| root.pointer("/payload/quoteSummary/result/0"))
+        .ok_or(ForwardForecastProviderError::MissingPayload)?;
+    let trend = result
+        .pointer("/earningsTrend/trend")
+        .and_then(Value::as_array)
+        .ok_or(ForwardForecastProviderError::MissingPayload)?;
+    let forward = trend
+        .iter()
+        .find(|row| row.get("period").and_then(Value::as_str) == Some("+1y"))
+        .ok_or(ForwardForecastProviderError::MissingForwardPeriod)?;
+    let end_date = forward
+        .get("endDate")
+        .and_then(Value::as_str)
+        .ok_or(ForwardForecastProviderError::MissingForecastEndDate)?;
+    let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|_| ForwardForecastProviderError::InvalidForecastEndDate)?;
+    let unix_epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid Unix epoch");
+    let forecast_period_end_epoch_day = end_date.signed_duration_since(unix_epoch).num_days();
+
+    let earnings = forward
+        .get("earningsEstimate")
+        .ok_or(ForwardForecastProviderError::MissingPayload)?;
+    let revenue = forward.get("revenueEstimate");
+    let currency = earnings
+        .get("earningsCurrency")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ForwardForecastProviderError::MissingCurrency)?
+        .trim()
+        .to_ascii_uppercase();
+    let revenue_currency = revenue
+        .and_then(|value| value.get("revenueCurrency"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ForwardForecastProviderError::MissingCurrency)?
+        .trim()
+        .to_ascii_uppercase();
+    if revenue_currency != currency {
+        return Err(ForwardForecastProviderError::CurrencyMismatch);
+    }
+    let reporting_currency = result
+        .pointer("/price/currency")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ForwardForecastProviderError::MissingCurrency)?
+        .trim()
+        .to_ascii_uppercase();
+    if reporting_currency != currency {
+        return Err(ForwardForecastProviderError::CurrencyMismatch);
+    }
+
+    let source_payload =
+        serde_json::to_string(forward).map_err(|_| ForwardForecastProviderError::MissingPayload)?;
+    let source_hash = fnv1a64(source_payload.as_bytes());
+    Ok(ForwardForecastEvidence {
+        eps_low_cents: raw_scaled(earnings, "low", 100),
+        eps_mean_cents: raw_scaled(earnings, "avg", 100),
+        eps_high_cents: raw_scaled(earnings, "high", 100),
+        analyst_count: raw_scaled(earnings, "numberOfAnalysts", 1)
+            .and_then(|value| i32::try_from(value).ok()),
+        revenue_growth_bps: revenue
+            .and_then(|value| raw_scaled(value, "growth", 10_000))
+            .and_then(|value| i32::try_from(value).ok()),
+        revenue_analyst_count: revenue
+            .and_then(|value| raw_scaled(value, "numberOfAnalysts", 1))
+            .and_then(|value| i32::try_from(value).ok()),
+        earnings_growth_bps: raw_scaled(forward, "growth", 10_000)
+            .and_then(|value| i32::try_from(value).ok()),
+        currency,
+        revenue_currency,
+        reporting_currency,
+        observed_epoch_day,
+        forecast_period_end_epoch_day,
+        source_fingerprint: format!(
+            "yahoo-earnings-trend/1|symbol={}|hash={source_hash:016x}",
+            display_symbol.trim().to_ascii_uppercase()
+        ),
+    })
+}
+
+fn raw_scaled(obj: &Value, field: &str, scale: i64) -> Option<i64> {
+    let value = raw_double(obj, field)?;
+    if !value.is_finite() {
+        return None;
+    }
+    let scaled = value * scale as f64;
+    if scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i64)
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Modules requested by the Android client (+ calendarEvents for Windows earnings field).
 pub const QUOTE_SUMMARY_MODULES: &str =
     "price,financialData,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents";
+pub const FORWARD_FORECAST_MODULES: &str = "earningsTrend,price";
 
 /// Map share-class dots to Yahoo path form: `BRK.B` → `BRK-B`, keep exchange suffixes.
 pub fn yahoo_request_symbol(symbol: &str) -> String {
@@ -463,10 +603,123 @@ mod tests {
         serde_json::from_str(&raw).expect("json")
     }
 
+    fn forward_fixtures() -> Vec<Value> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/yahoo/earningsTrend/reported5.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("json")
+    }
+
+    #[test]
+    fn parses_five_real_forward_forecasts_without_target_or_price_inputs() {
+        let expected = [
+            ("DVN", 382, 505, 629, 12, 1_176, 691),
+            ("GDDY", 749, 897, 1_075, 13, 584, 1_477),
+            ("WYNN", 402, 502, 581, 9, 417, 1_344),
+            ("SNDK", 15_428, 21_295, 39_608, 21, 15_139, 21_934),
+            ("BR", 1_024, 1_042, 1_057, 8, 463, 908),
+        ];
+        for (row, expected) in forward_fixtures().iter().zip(expected) {
+            let symbol = row["symbol"].as_str().expect("symbol");
+            let parsed = parse_forward_forecast_evidence(row, symbol, 20_665)
+                .unwrap_or_else(|e| panic!("{symbol}: {e:?}"));
+            assert_eq!(
+                (
+                    symbol,
+                    parsed.eps_low_cents,
+                    parsed.eps_mean_cents,
+                    parsed.eps_high_cents,
+                    parsed.analyst_count,
+                    parsed.revenue_growth_bps,
+                    parsed.earnings_growth_bps,
+                ),
+                (
+                    expected.0,
+                    Some(expected.1),
+                    Some(expected.2),
+                    Some(expected.3),
+                    Some(expected.4),
+                    Some(expected.5),
+                    Some(expected.6),
+                )
+            );
+            assert_eq!(parsed.currency, "USD");
+            assert_eq!(parsed.revenue_currency, "USD");
+            assert_eq!(parsed.reporting_currency, "USD");
+            assert!(parsed.forecast_period_end_epoch_day > parsed.observed_epoch_day);
+            assert!(parsed
+                .source_fingerprint
+                .starts_with("yahoo-earnings-trend/1|"));
+        }
+    }
+
+    #[test]
+    fn forward_parser_has_typed_missing_period_and_currency_failures() {
+        let mut row = forward_fixtures().remove(0);
+        row["quoteSummary"]["result"][0]["earningsTrend"]["trend"][0]["period"] =
+            Value::String("0y".into());
+        assert_eq!(
+            parse_forward_forecast_evidence(&row, "DVN", 20_665),
+            Err(ForwardForecastProviderError::MissingForwardPeriod)
+        );
+
+        let mut row = forward_fixtures().remove(0);
+        row["quoteSummary"]["result"][0]["earningsTrend"]["trend"][0]["earningsEstimate"]
+            ["earningsCurrency"] = Value::Null;
+        assert_eq!(
+            parse_forward_forecast_evidence(&row, "DVN", 20_665),
+            Err(ForwardForecastProviderError::MissingCurrency)
+        );
+
+        let mut row = forward_fixtures().remove(0);
+        row["quoteSummary"]["result"][0]["price"]["currency"] = Value::String("EUR".into());
+        assert_eq!(
+            parse_forward_forecast_evidence(&row, "DVN", 20_665),
+            Err(ForwardForecastProviderError::CurrencyMismatch)
+        );
+
+        let mut row = forward_fixtures().remove(0);
+        row["quoteSummary"]["result"][0]["earningsTrend"]["trend"][0]["endDate"] = Value::Null;
+        assert_eq!(
+            parse_forward_forecast_evidence(&row, "DVN", 20_665),
+            Err(ForwardForecastProviderError::MissingForecastEndDate)
+        );
+
+        let mut row = forward_fixtures().remove(0);
+        row["quoteSummary"]["result"][0]["earningsTrend"]["trend"][0]["endDate"] =
+            Value::String("not-a-date".into());
+        assert_eq!(
+            parse_forward_forecast_evidence(&row, "DVN", 20_665),
+            Err(ForwardForecastProviderError::InvalidForecastEndDate)
+        );
+    }
+
+    #[test]
+    fn target_and_market_price_mutations_do_not_change_forward_evidence() {
+        let row = forward_fixtures().remove(0);
+        let expected = parse_forward_forecast_evidence(&row, "DVN", 20_665).expect("baseline");
+        let mut mutated = row;
+        mutated["quoteSummary"]["result"][0]["price"]["regularMarketPrice"] =
+            serde_json::json!({"raw": 999999.0});
+        mutated["quoteSummary"]["result"][0]["financialData"]["targetMeanPrice"] =
+            serde_json::json!({"raw": 0.01});
+        assert_eq!(
+            parse_forward_forecast_evidence(&mutated, "DVN", 20_665),
+            Ok(expected)
+        );
+    }
+
     #[test]
     fn yahoo_request_symbol_maps_share_class_dot_to_hyphen() {
         assert_eq!(yahoo_request_symbol("BF.B"), "BF-B");
         assert_eq!(yahoo_request_symbol("BRK.B"), "BRK-B");
+    }
+
+    #[test]
+    fn forward_consensus_remains_demand_only() {
+        assert!(!QUOTE_SUMMARY_MODULES.contains("earningsTrend"));
+        assert!(FORWARD_FORECAST_MODULES.starts_with("earningsTrend"));
     }
 
     #[test]

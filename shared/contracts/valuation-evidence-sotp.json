@@ -1,0 +1,274 @@
+{
+  "contract": "valuation-evidence-sotp",
+  "specId": "SPEC-valuation-evidence-sotp",
+  "schemaVersion": 1,
+  "engineVersion": "valuation-evidence-sotp/1",
+  "modelPolicyVersion": "evidence-sotp-policy/1",
+  "resolverPolicyVersion": "pit-evidence-resolver/1",
+  "publicUnits": {
+    "money": "cents",
+    "rates": "bps",
+    "quantities": "millis",
+    "ratios": "bps",
+    "parity": "exact"
+  },
+  "pointInTimeFixtures": [
+    {
+      "name": "replay_original_fact_before_amendment",
+      "decisionAt": "2025-02-28T23:59:59Z",
+      "observations": [
+        {
+          "id": "revenue-2024-original",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "original",
+          "supersedes": null,
+          "sourceVintage": "10-k-2024-original",
+          "retrievedAt": "2025-02-10T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 100000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "sec:0000000000:10-k:2025-02-10:revenue",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        },
+        {
+          "id": "revenue-2024-amended",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-03-15T12:00:00Z",
+          "publicationAt": "2025-03-15T12:00:00Z",
+          "revisionId": "amendment-1",
+          "supersedes": "original",
+          "sourceVintage": "10-k-2024-amended",
+          "retrievedAt": "2025-03-15T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 120000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "sec:0000000000:10-k-a:2025-03-15:revenue",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        }
+      ],
+      "expected": {
+        "selectedIds": ["revenue-2024-original"],
+        "selectedValuesCents": [100000],
+        "rejectedCodes": ["not_known_at_decision"],
+        "fingerprint": "fnv1a64:73d40a89806c85b0"
+      }
+    },
+    {
+      "name": "replay_amendment_after_decision",
+      "decisionAt": "2025-03-31T23:59:59Z",
+      "observations": [
+        {
+          "id": "revenue-2024-original",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "original",
+          "supersedes": null,
+          "sourceVintage": "10-k-2024-original",
+          "retrievedAt": "2025-02-10T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 100000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "sec:0000000000:10-k:2025-02-10:revenue",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        },
+        {
+          "id": "revenue-2024-amended",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-03-15T12:00:00Z",
+          "publicationAt": "2025-03-15T12:00:00Z",
+          "revisionId": "amendment-1",
+          "supersedes": "original",
+          "sourceVintage": "10-k-2024-amended",
+          "retrievedAt": "2025-03-15T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 120000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "sec:0000000000:10-k-a:2025-03-15:revenue",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        }
+      ],
+      "expected": {
+        "selectedIds": ["revenue-2024-amended"],
+        "selectedValuesCents": [120000],
+        "rejectedCodes": [],
+        "fingerprint": "fnv1a64:bddc35f777315252"
+      }
+    },
+    {
+      "name": "retrieval_failure_is_not_a_zero_fact",
+      "decisionAt": "2025-03-31T23:59:59Z",
+      "observations": [
+        {
+          "id": "cost-2024-failed",
+          "factKey": "sustaining_capex",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "retrieval-attempt-1",
+          "supersedes": null,
+          "sourceVintage": "10-k-2024",
+          "retrievedAt": "2025-02-10T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": null,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "sustaining capital expenditure",
+          "sourceLocation": "sec:0000000000:10-k:2025-02-10:capex",
+          "extractionMethod": "retrieval_failure",
+          "quality": "unavailable",
+          "retrievalState": "failed"
+        }
+      ],
+      "expected": {
+        "selectedIds": [],
+        "selectedValuesCents": [],
+        "rejectedCodes": ["retrieval_failure"],
+        "fingerprint": "fnv1a64:c976adde5dd9cdd9"
+      }
+    }
+  ],
+  "routingFixtures": [
+    { "name": "insurance_uses_residual_income", "sector": "Financial Services", "industry": "Insurance - Property & Casualty", "assetClass": "equity", "expectedFamily": "financial_services", "expectedModel": "residual_income_equity" },
+    { "name": "managed_care_uses_residual_income", "sector": "Healthcare", "industry": "Healthcare Plans", "assetClass": "equity", "expectedFamily": "financial_services", "expectedModel": "residual_income_equity" },
+    { "name": "miner_is_finite_resource", "sector": "Basic Materials", "industry": "Gold", "assetClass": "equity", "expectedFamily": "resource_producer", "expectedModel": "resource_finite" },
+    { "name": "pipeline_is_contracted_infrastructure", "sector": "Energy", "industry": "Oil & Gas Midstream", "assetClass": "equity", "expectedFamily": "contracted_infrastructure", "expectedModel": "contracted_infrastructure" },
+    { "name": "utility_is_regulated_family", "sector": "Utilities", "industry": "Regulated Electric", "assetClass": "equity", "expectedFamily": "regulated_utility", "expectedModel": "regulated_utility" },
+    { "name": "pharma_is_operating_fcff", "sector": "Healthcare", "industry": "Drug Manufacturers - General", "assetClass": "equity", "expectedFamily": "operating_non_financial", "expectedModel": "fcff_wacc" },
+    { "name": "missing_classification_refuses", "sector": null, "industry": null, "assetClass": "equity", "expectedFamily": "unclassified", "expectedModel": "none" },
+    { "name": "etf_is_not_eligible", "sector": null, "industry": null, "assetClass": "etf", "expectedFamily": "not_eligible", "expectedModel": "none" }
+  ],
+  "consolidationFixtures": [
+    {
+      "name": "complete_bridge_publishes_price",
+      "components": [
+        { "id": "industrial", "enterpriseValueCents": 100000, "material": true, "quality": "solid", "model": "fcff_wacc" },
+        { "id": "insurance", "enterpriseValueCents": 50000, "material": true, "quality": "provisional", "model": "residual_income_equity" }
+      ],
+      "corporateOverheadEnterpriseValueCents": -10000,
+      "separatelyValuedInvestmentsCents": 5000,
+      "netDebtCents": 30000,
+      "nciCents": 2000,
+      "preferredClaimsCents": 1000,
+      "otherSeniorClaimsCents": 500,
+      "shares": 100,
+      "expected": {
+        "status": "published",
+        "coveredEnterpriseValueCents": 145000,
+        "equityValueCents": 111500,
+        "intrinsicPriceCents": 1115,
+        "valuationScoreEligible": true,
+        "reasonCodes": []
+      }
+    },
+    {
+      "name": "material_component_refuses_equity_publication",
+      "components": [
+        { "id": "industrial", "enterpriseValueCents": 100000, "material": true, "quality": "solid", "model": "fcff_wacc" },
+        { "id": "unresolved_segment", "enterpriseValueCents": null, "material": true, "quality": "unavailable", "model": "none" }
+      ],
+      "corporateOverheadEnterpriseValueCents": 0,
+      "separatelyValuedInvestmentsCents": 0,
+      "netDebtCents": 30000,
+      "nciCents": 0,
+      "preferredClaimsCents": 0,
+      "otherSeniorClaimsCents": 0,
+      "shares": 100,
+      "expected": {
+        "status": "covered_ev_only",
+        "coveredEnterpriseValueCents": 100000,
+        "equityValueCents": null,
+        "intrinsicPriceCents": null,
+        "valuationScoreEligible": false,
+        "reasonCodes": ["incomplete_segment_disclosures"]
+      }
+    },
+    {
+      "name": "net_debt_can_exceed_enterprise_value",
+      "components": [
+        { "id": "distressed", "enterpriseValueCents": 1000, "material": true, "quality": "solid", "model": "fcff_wacc" }
+      ],
+      "corporateOverheadEnterpriseValueCents": 0,
+      "separatelyValuedInvestmentsCents": 0,
+      "netDebtCents": 2000,
+      "nciCents": 0,
+      "preferredClaimsCents": 0,
+      "otherSeniorClaimsCents": 0,
+      "shares": 100,
+      "expected": {
+        "status": "published",
+        "coveredEnterpriseValueCents": 1000,
+        "equityValueCents": 0,
+        "intrinsicPriceCents": 0,
+        "valuationScoreEligible": true,
+        "reasonCodes": []
+      }
+    }
+  ],
+  "validationFixtures": [
+    {
+      "name": "historical_membership_is_required_for_primary_accuracy",
+      "decisionAt": "2023-01-01T00:00:00Z",
+      "membership": [
+        { "symbol": "AAA", "effectiveFrom": "2022-01-01", "effectiveTo": "2024-01-01", "knowledgeAt": "2022-01-01T00:00:00Z", "sourceLocation": "licensed:index:2022" }
+      ],
+      "forecast": { "symbol": "AAA", "driver": "production", "decisionAt": "2023-01-01T00:00:00Z", "forecastMillis": 1100 },
+      "actual": { "symbol": "AAA", "driver": "production", "economicPeriodEnd": "2023-12-31", "knowledgeAt": "2024-02-01T00:00:00Z", "actualMillis": 1000 },
+      "expected": { "status": "measured", "sampleCount": 1, "meanAbsoluteErrorBps": 1000, "marketOutcomeDiagnosticUsedForPrimary": false }
+    },
+    {
+      "name": "current_membership_cannot_substitute_for_historical",
+      "decisionAt": "2023-01-01T00:00:00Z",
+      "membership": [],
+      "forecast": { "symbol": "AAA", "driver": "production", "decisionAt": "2023-01-01T00:00:00Z", "forecastMillis": 1100 },
+      "actual": { "symbol": "AAA", "driver": "production", "economicPeriodEnd": "2023-12-31", "knowledgeAt": "2024-02-01T00:00:00Z", "actualMillis": 1000 },
+      "expected": { "status": "unavailable", "sampleCount": 0, "meanAbsoluteErrorBps": null, "marketOutcomeDiagnosticUsedForPrimary": false, "reasonCode": "historical_validation_coverage_unavailable" }
+    }
+  ],
+  "desktop": {
+    "supported": false,
+    "refusalReason": "desktop_surface_unsupported"
+  }
+}

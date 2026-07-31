@@ -60,6 +60,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Este tipo de activo no se valúa con el modelo de equity (ETF/fondo/REIT/crypto).",
     en: "This asset type is not valued with the equity model family (ETF/fund/REIT/crypto).",
   },
+  "detail.dcfUnavailableAcquisitionGrowth": {
+    es: "El crecimiento reportado incluye adquisiciones materiales; falta evidencia de crecimiento orgánico para FCFF.",
+    en: "Reported growth includes material acquisitions; FCFF needs organic-growth evidence.",
+  },
   "detail.dcfUnavailableMissingBook": {
     es: "Falta book equity / ROE para residual income (servicios financieros).",
     en: "Book equity / ROE missing for residual income (financial services).",
@@ -67,6 +71,10 @@ const T: Record<string, { es: string; en: string }> = {
   "detail.dcfUnavailableMissingFcf": {
     es: "Sin historial de free cash flow usable para FCFF.",
     en: "No usable free cash flow history for FCFF.",
+  },
+  "detail.dcfUnavailableNonPositiveFcff": {
+    es: "Los drivers existen, pero el FCFF anual normalizado no es positivo en este ciclo.",
+    en: "The drivers exist, but normalized annual FCFF is not positive in this cycle.",
   },
   "detail.dcfUnavailableMissingShares": {
     es: "Falta el número de acciones para valorar.",
@@ -76,8 +84,32 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Sin datos de flujo de caja suficientes",
     en: "Not enough cash-flow data",
   },
+  "detail.forwardEarningsValue": {
+    es: "Valor por ganancias forward",
+    en: "Forward earnings value",
+  },
+  "detail.valuationDisputed": {
+    es: "Valoración en disputa",
+    en: "Valuation disputed",
+  },
+  "detail.valuationDisputedHint": {
+    es: "Los modelos materiales no concuerdan; no hay un valor único confiable.",
+    en: "Material models disagree; there is no reliable single value.",
+  },
+  "detail.valuationInfoAria": {
+    es: "Ver diagnóstico técnico de valoración",
+    en: "Show technical valuation diagnostics",
+  },
+  "detail.valuationInfoTitle": {
+    es: "Diagnóstico para localizar y corregir",
+    en: "Diagnostics for locating and fixing",
+  },
   "detail.waccInputs":          { es: "WACC inputs", en: "WACC inputs" },
   "detail.residualIncomeValue": { es: "Residual income", en: "Residual income" },
+  "detail.analystGapLabel":     { es: "Analistas", en: "Analysts" },
+  "detail.dcfVsMarketUpside":  { es: "DCF +{pct}% vs mercado", en: "DCF +{pct}% vs market" },
+  "detail.dcfVsMarketDownside": { es: "DCF −{pct}% vs mercado", en: "DCF −{pct}% vs market" },
+  "detail.dcfVsMarketFlat":    { es: "DCF en línea con mercado", en: "DCF in line with market" },
   "quant.title":                { es: "Quant Lens", en: "Quant Lens" },
   "quant.loading":              { es: "Calculando Quant Lens…", en: "Computing Quant Lens…" },
   "scoring.group":              { es: "Modelo de scoring", en: "Scoring model" },

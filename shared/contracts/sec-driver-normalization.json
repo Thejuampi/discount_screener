@@ -1,0 +1,111 @@
+{
+  "contract": "sec-driver-normalization",
+  "version": "1",
+  "fingerprint": "sec-driver-normalization/5",
+  "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
+  "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
+  "investmentCategories": {
+    "development": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireOtherPropertyPlantAndEquipment", "PaymentsForCapitalImprovements", "PaymentsToExploreAndDevelopOilAndGasProperties"],
+    "propertyAcquisition": [
+      "PaymentsToAcquireOilAndGasProperty",
+      "PaymentsToAcquireOilAndGasPropertyAndEquipment",
+      "PaymentsToAcquireRoyaltyInterestsInMiningProperties",
+      "PaymentsToAcquireMineralRights",
+      "PaymentsToAcquireMiningAssets",
+      "PaymentsToAcquireCommercialRealEstate",
+      "PaymentsToAcquireAndDevelopRealEstate",
+      "PaymentsToAcquireRealEstateHeldForInvestment",
+      "PaymentsToAcquireHeldForSaleRealEstate",
+      "PaymentsToAcquireOtherRealEstate",
+      "PaymentsToAcquirePartnersInterestInRealEstatePartnershipNetOfCashAcquired",
+      "PaymentsToAcquireWaterSystems",
+      "PaymentsToAcquireWasteWaterSystems",
+      "PaymentsToAcquireWaterAndWasteWaterSystems"
+    ],
+    "businessAcquisition": [
+      "PaymentsToAcquireBusinessesNetOfCashAcquired",
+      "PaymentsToAcquireBusinesses",
+      "PaymentsToAcquireBusinessesGross",
+      "PaymentsToAcquireBusinessesAndInterestInAffiliates",
+      "OtherPaymentsToAcquireBusinesses",
+      "PaymentsToAcquireBusinessInterests",
+      "PaymentsToAcquireBusinessTwoNetOfCashAcquired",
+      "PaymentsToAcquireBusinessThreeNetOfCashAcquired",
+      "PaymentsToAcquireAdditionalInterestInSubsidiaries",
+      "PaymentsToAcquireInterestInSubsidiariesAndAffiliates",
+      "PaymentsToAcquireInterestInJointVenture",
+      "PaymentsToAcquireLimitedPartnershipInterests"
+    ]
+  },
+  "rejection": { "propertyAcquisition": "RejectedAcquisition", "businessAcquisition": "RejectedAcquisition", "unknown": "NoApprovedConcept", "invalidUnit": "InvalidUnit", "misalignedPeriod": "MisalignedPeriod" },
+  "precedence": ["consolidated", "10-K/A", "filed_desc", "accession_desc", "declared_qname_order"],
+  "fcffConsumption": "development_only",
+  "valuationPolicy": {
+    "materialAcquisitionRevenueBps": 1000,
+    "contaminatedTransition": "exclude_current_year_revenue_growth",
+    "minimumCleanRecentGrowthTransitions": 2,
+    "onLatestContaminatedOrInsufficientClean": "normalize_near_term_growth_to_zero"
+  },
+  "drivers": {
+    "operatingCashFlow": {
+      "qnames": ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation"],
+      "unit": "USD",
+      "periodShape": "duration",
+      "operation": "select_one_equivalent"
+    },
+    "revenue": {
+      "qnames": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "SalesRevenueGoodsNet", "RevenueFromContractWithCustomerIncludingAssessedTax", "RevenuesFromExternalCustomers"],
+      "unit": "USD",
+      "periodShape": "duration",
+      "operation": "select_one_equivalent"
+    },
+    "interestExpense": {
+      "qnames": ["InterestExpenseNonOperating", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense", "InterestExpense", "InterestExpenseOtherLongTermDebt", "InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet", "FinanceLeaseInterestExpense", "InterestPaidNet"],
+      "unit": "USD",
+      "periodShape": "duration",
+      "operation": "select_one_equivalent"
+    },
+    "totalDebt": {
+      "qnames": ["DebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt", "DebtInstrumentCarryingAmount"],
+      "unit": "USD",
+      "periodShape": "instant",
+      "operation": "select_one_equivalent"
+    },
+    "currentDebt": {
+      "qnames": ["LongTermDebtAndFinanceLeaseObligationsCurrent", "LongTermDebtCurrent", "DebtCurrent", "ShortTermBorrowings"],
+      "unit": "USD",
+      "periodShape": "instant",
+      "operation": "sum_disjoint_components"
+    },
+    "nonCurrentDebt": {
+      "qnames": ["LongTermDebtAndFinanceLeaseObligationsNoncurrent", "LongTermDebtNoncurrent"],
+      "unit": "USD",
+      "periodShape": "instant",
+      "operation": "sum_disjoint_components"
+    },
+    "taxExpense": {
+      "qnames": ["IncomeTaxExpenseBenefit", "IncomeTaxExpenseBenefitContinuingOperations"],
+      "unit": "USD",
+      "periodShape": "duration",
+      "operation": "derive_effective_tax"
+    },
+    "pretaxIncome": {
+      "qnames": ["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign"],
+      "unit": "USD",
+      "periodShape": "duration",
+      "operation": "derive_effective_tax"
+    },
+    "marginalTaxReference": {
+      "qnames": ["IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate", "IncomeTaxReconciliationFederalStatutoryIncomeTaxRate", "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate", "StatutoryFederalIncomeTaxRate", "StatutoryIncomeTaxRate"],
+      "unit": "pure",
+      "periodShape": "duration",
+      "operation": "reference_policy"
+    },
+    "dilutedAverageShares": {
+      "qnames": ["WeightedAverageNumberOfDilutedSharesOutstanding"],
+      "unit": "shares",
+      "periodShape": "duration",
+      "operation": "select_one_equivalent"
+    }
+  }
+}

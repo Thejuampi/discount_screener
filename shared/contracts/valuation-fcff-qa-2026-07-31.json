@@ -1,0 +1,37 @@
+{
+  "contract": "valuation-fcff-qa-2026-07-31",
+  "version": "1",
+  "asOf": "2026-07-31",
+  "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+  "purpose": "Evidence ledger for the nine user-reported QA cases. Market and analyst values reproduce the report and are validation metadata only.",
+  "modelInputPolicy": {
+    "allowed": ["aligned_annual_sec_drivers", "current_split_consistent_shares", "capital_structure", "beta", "versioned_market_params"],
+    "forbidden": ["market_price", "analyst_target", "ticker_exception", "intrinsic_price_cap", "sector_haircut"]
+  },
+  "fcffPolicy": {
+    "baseMargin": "median_aligned_annual_fcff_margin",
+    "evenMedian": "mean_of_two_central_observations",
+    "negativeYears": "retained",
+    "acquisitionContaminatedTransition": "year_y_minus_1_to_y_only",
+    "minimumCleanRecentGrowthTransitions": 2,
+    "latestContaminatedOrInsufficientCleanGrowth": "zero_near_term_growth",
+    "provisionalWaccUpliftBps": 175,
+    "fullUpliftDebtWeightBps": 4000
+  },
+  "reportedCases": [
+    { "symbol": "DVN", "marketPriceCents": 4460, "analystTargetCents": 5938, "reportedDcfCents": 16434, "reportedDcfRangeCents": [11184, 37764], "expectedPolicyEvidence": ["provisional_wacc_uplift_nonzero", "ordered_scenarios"] },
+    { "symbol": "MU", "marketPriceCents": 83212, "analystTargetCents": 150738, "reportedDcfCents": null, "reportedUnavailableCopy": "missing_fcf_history", "expectedPolicyEvidence": ["aligned_rows_retained", "negative_year_retained", "median_aligned_margin", "not_missing_history"] },
+    { "symbol": "GDDY", "marketPriceCents": 7894, "analystTargetCents": 11193, "reportedDcfCents": 18061, "reportedDcfRangeCents": [13631, 18616], "expectedPolicyEvidence": ["provisional_wacc_uplift_nonzero", "ordered_scenarios"] },
+    { "symbol": "BR", "marketPriceCents": 15417, "analystTargetCents": 20650, "reportedDcfCents": 14193, "reportedDcfRangeCents": [10103, 14470], "expectedPolicyEvidence": ["historical_acquisition_transition_only", "dcf_downside_separate_from_analyst_gap"] },
+    { "symbol": "BSX", "marketPriceCents": 4555, "analystTargetCents": 6428, "reportedDcfCents": 4250, "reportedDcfRangeCents": [2872, 4319], "expectedPolicyEvidence": ["latest_acquisition_uses_zero_growth", "dcf_downside_separate_from_analyst_gap"] },
+    { "symbol": "ADSK", "marketPriceCents": 23306, "analystTargetCents": 31389, "reportedDcfCents": 16309, "reportedDcfRangeCents": [13032, 16326], "expectedPolicyEvidence": ["historical_acquisition_transition_only", "dcf_downside_separate_from_analyst_gap"] },
+    { "symbol": "AVGO", "marketPriceCents": 38678, "analystTargetCents": 52788, "reportedDcfCents": 8661, "reportedDcfRangeCents": [6884, 8664], "expectedPolicyEvidence": ["current_split_consistent_shares", "historical_acquisition_transition_only", "dcf_downside_separate_from_analyst_gap"] },
+    { "symbol": "JBL", "marketPriceCents": 31241, "analystTargetCents": 44144, "reportedDcfCents": 8223, "reportedDcfRangeCents": [5620, 9664], "expectedPolicyEvidence": ["current_split_consistent_shares", "valid_downside_not_automatically_model_error", "dcf_downside_separate_from_analyst_gap"] },
+    { "symbol": "HPE", "marketPriceCents": 4765, "analystTargetCents": 6434, "reportedDcfCents": 1986, "reportedDcfRangeCents": [1271, 1994], "expectedPolicyEvidence": ["latest_acquisition_uses_zero_growth", "dcf_downside_separate_from_analyst_gap"] }
+  ],
+  "executableRegressionOwners": {
+    "windows": ["dcf_model::tests::mu_cycle_uses_median_aligned_fcff_margin_and_retains_negative_year", "dcf_model::tests::historical_acquisition_excludes_only_its_growth_transition", "dcf_model::tests::levered_provisional_wacc_applies_full_debt_scaled_uplift"],
+    "android": ["DcfAnalysisEngineTest.mu_cycle_uses_median_aligned_fcff_margin_and_retains_negative_year", "DcfAnalysisEngineTest.historical_acquisition_excludes_only_its_growth_transition", "DcfAnalysisEngineTest.levered_provisional_policy_uses_observed_cod_with_debt_scaled_uplift"],
+    "ui": ["detailValuationPresentation.test.ts"]
+  }
+}

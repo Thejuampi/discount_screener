@@ -1,0 +1,15 @@
+{
+  "contract": "sec-driver-normalization-fixtures",
+  "policyFingerprint": "sec-driver-normalization/5",
+  "capturedAt": "2026-07-30",
+  "source": "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
+  "fixtures": [
+    { "name": "crgy_2024_development_vs_property_acquisition", "issuer": "CRGY", "cik": "0001866175", "facts": [{ "qname": "PaymentsToExploreAndDevelopOilAndGasProperties", "valueDollars": 685684000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0001866175-26-000026", "filed": "2026-02-25", "expected": "SelectedDevelopment" }, { "qname": "PaymentsToAcquireOilAndGasProperty", "valueDollars": 558600000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0001866175-26-000026", "filed": "2026-02-25", "expected": "RejectedAcquisition" }] },
+    { "name": "att_2024_productive_assets", "issuer": "T", "cik": "0000732717", "facts": [{ "qname": "PaymentsToAcquireProductiveAssets", "valueDollars": 20263000000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0000732717-26-000120", "filed": "2026-02-09", "expected": "SelectedDevelopment" }] },
+    { "name": "exxon_2024_ppe", "issuer": "XOM", "cik": "0000034088", "facts": [{ "qname": "PaymentsToAcquirePropertyPlantAndEquipment", "valueDollars": 24306000000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0000034088-26-000045", "filed": "2026-02-18", "expected": "SelectedDevelopment" }] },
+    { "name": "tesla_2024_ppe", "issuer": "TSLA", "cik": "0001318605", "facts": [{ "qname": "PaymentsToAcquirePropertyPlantAndEquipment", "valueDollars": 11342000000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0001628280-26-003952", "filed": "2026-01-29", "expected": "SelectedDevelopment" }] },
+    { "name": "coca_cola_2024_ppe", "issuer": "KO", "cik": "0000021344", "facts": [{ "qname": "PaymentsToAcquirePropertyPlantAndEquipment", "valueDollars": 2064000000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0001628280-26-010047", "filed": "2026-02-20", "expected": "SelectedDevelopment" }] },
+    { "name": "ford_2024_productive_assets", "issuer": "F", "cik": "0000037996", "facts": [{ "qname": "PaymentsToAcquireProductiveAssets", "valueDollars": 8684000000, "start": "2024-01-01", "end": "2024-12-31", "unit": "USD", "form": "10-K", "accession": "0000037996-26-000015", "filed": "2026-02-11", "expected": "SelectedDevelopment" }] },
+    { "name": "cisco_2024_business_acquisition", "issuer": "CSCO", "cik": "0000858877", "facts": [{ "qname": "PaymentsToAcquireBusinessesNetOfCashAcquired", "valueDollars": 25994000000, "start": "2023-07-30", "end": "2024-07-27", "unit": "USD", "form": "10-K", "accession": "0000858877-25-000111", "filed": "2025-09-03", "expected": "RejectedAcquisition" }] }
+  ]
+}

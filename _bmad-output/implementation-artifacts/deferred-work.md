@@ -19,3 +19,13 @@
 - `apps/windows/src-tauri/src/regime/`: distinguish all-time-high drawdown from a one-year high, validate CNN snapshot age/ranges, and retain failed-source data only with an explicit stale state.
 - `apps/windows/src-tauri/src/regime/composite.rs`: reconcile `cash_buffer_pct` with suggested exposure or expose the otherwise unallocated remainder explicitly.
 - `apps/windows/src/components/RegimeBanner.tsx`: add responsive behavior for the fixed three-column banner grid on narrow Windows viewports.
+
+## 2026-07-30 — Detail decision-summary clarity
+
+- source_spec: none
+  summary: Make the Detail analysis summary present its operational plan as primary and neutralize the raw score-decision copy so “wait” is never shown beside “good investment timing.”
+  evidence: The user chose the recurrent SEC-to-QuantEngine data-normalization issue as the first independent deliverable; this presentation fix can be reviewed and shipped separately.
+- source_spec: `_bmad-output/implementation-artifacts/spec-evidence-routed-operating-valuation-core.md`
+  summary: Make legacy Windows cost-of-equity resolution return a typed refusal on extreme fixed-point rate inputs.
+  status: resolved 2026-07-31
+  evidence: `dcf_model::resolve_cost_of_equity` now uses checked integer arithmetic and returns typed invalid-market/arithmetic-overflow/out-of-range failures; `cost_of_equity_extremes_refuse_instead_of_saturating` covers the boundary.

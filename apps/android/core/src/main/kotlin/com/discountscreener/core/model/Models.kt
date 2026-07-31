@@ -408,6 +408,8 @@ data class FundamentalTimeseries(
     val freeCashFlow: List<AnnualReportedValue> = emptyList(),
     val operatingCashFlow: List<AnnualReportedValue> = emptyList(),
     val capitalExpenditure: List<AnnualReportedValue> = emptyList(),
+    /** Property/business acquisition cash: growth-evidence only, never recurring CapEx. */
+    val acquisitionInvestment: List<AnnualReportedValue> = emptyList(),
     /** Annual revenue aligned with the cash-flow driver rows. */
     val revenue: List<AnnualReportedValue> = emptyList(),
     val dilutedAverageShares: List<AnnualReportedValue> = emptyList(),

@@ -28,6 +28,8 @@ cd apps/windows/src-tauri
 cargo test --lib dcf_model::
 cargo test --lib valuation_baseline::
 cargo test --lib quant_lens::
+cargo test --lib quote_summary::
+cargo test --lib operating_valuation::
 ```
 
 Optional Android: `scripts/validate-android.ps1` when touching Kotlin engine.
@@ -104,6 +106,14 @@ Binary (frontend already up), only if needed:
 | Unclassified | “Valoración no disponible” + **categoría no catalogada** (fail-closed) |
 | Not eligible | ETF/REIT/crypto message |
 | Missing FCF/book | Specific missing-driver message |
+| Forward selected | “Valor por ganancias forward” + soft / no confiable; no invented bear/bull range |
+| FCFF ↔ forward disputed | Both named anchors, **no** single value/upside |
+| Any unavailable/disputed route | Keyboard-focusable `(i)` with provider, period, reasons/refusals, policy/fingerprints, and stable code locators |
+
+The `(i)` tooltip is an engineering diagnostic, not generic investor copy. For
+a provider/model failure, verify it names the owning boundary well enough to
+start debugging without reconstructing the pipeline from logs. Escape must
+close it; focus/hover/click must expose it.
 
 ## Notes
 

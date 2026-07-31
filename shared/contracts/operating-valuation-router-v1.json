@@ -1,0 +1,203 @@
+{
+  "contract": "operating-valuation-router",
+  "schemaVersion": 1,
+  "engineVersion": "operating-valuation-router/1",
+  "modelPolicyVersion": "forward-earnings-policy/1",
+  "routerPolicyVersion": "operating-model-router-policy/1",
+  "scope": "Pure headless arithmetic and routing over provider-normalized evidence; no provider, cache, runtime, Quant Lens, or UI integration.",
+  "arithmetic": {
+    "moneyUnit": "cents",
+    "rateUnit": "bps",
+    "dateUnit": "epoch_day",
+    "intermediate": "checked_integer",
+    "rounding": "half_up_after_each_named_step",
+    "projection": "integer_recurrence_without_pow",
+    "comparison": "exact"
+  },
+  "inputBoundary": {
+    "allowed": [
+      "business_class",
+      "provider_normalized_forward_forecast",
+      "resolved_cost_of_equity",
+      "versioned_projection_policy",
+      "fcff_candidate",
+      "explicit_structural_distortions"
+    ],
+    "forbidden": [
+      "market_price",
+      "analyst_target",
+      "analyst_target_range",
+      "price_multiple",
+      "ranking_gap",
+      "quant_lens_score"
+    ]
+  },
+  "executableFixtures": [
+    {
+      "name": "fixed_point_forward_and_disputed_route",
+      "input": {
+        "asOfEpochDay": 20000,
+        "forecast": {
+          "epsLowCents": 900,
+          "epsMeanCents": 1000,
+          "epsHighCents": 1100,
+          "analystCount": 8,
+          "nearGrowthBps": 600,
+          "currency": "USD",
+          "observedEpochDay": 19990,
+          "forecastPeriodEndEpochDay": 20200,
+          "sourceFingerprint": "forecast:test"
+        },
+        "costOfEquity": {
+          "costOfEquityBps": 900,
+          "betaSource": "industry_shrink",
+          "provisional": false,
+          "marketParamsAsOfEpoch": 1728000000,
+          "sourceFingerprint": "rate:test"
+        },
+        "policy": {
+          "version": "forward-earnings-policy/1",
+          "expectedCurrency": "USD",
+          "maxAgeDays": 90,
+          "minForecastHorizonDays": 180,
+          "maxForecastHorizonDays": 730,
+          "minAnalystCount": 3,
+          "holdYears": 2,
+          "fadeYears": 4,
+          "maxProjectionYears": 20,
+          "macroStableGrowthBps": 300,
+          "riskFreeRateBps": 430,
+          "riskFreeBufferBps": 100
+          ,"minimumTerminalSpreadBps": 100
+        },
+        "route": {
+          "businessClass": "operating_non_financial",
+          "fcffCandidate": {
+            "status": "available",
+            "intrinsicValueCents": 5000,
+            "quality": "solid",
+            "refusalCodes": [],
+            "fingerprint": "fcff:test"
+          },
+          "structuralDistortions": ["latest_capex_spike"]
+        }
+      },
+      "expected": {
+        "forwardCandidate": {
+          "model": "forward_earnings_power",
+          "status": "available",
+          "intrinsicValueCents": 18176,
+          "costOfEquityBps": 900,
+          "stableGrowthBps": 300,
+          "projectionYears": 7,
+          "quality": "soft",
+          "evidenceFamily": "analyst_derived_model",
+          "refusals": [],
+          "provenance": {
+            "asOfEpochDay": 20000,
+            "forecast": {
+              "epsLowCents": 900,
+              "epsMeanCents": 1000,
+              "epsHighCents": 1100,
+              "analystCount": 8,
+              "nearGrowthBps": 600,
+              "currency": "USD",
+              "observedEpochDay": 19990,
+              "forecastPeriodEndEpochDay": 20200,
+              "sourceFingerprint": "forecast:test"
+            },
+            "costOfEquity": {
+              "costOfEquityBps": 900,
+              "betaSource": "industry_shrink",
+              "provisional": false,
+              "marketParamsAsOfEpoch": 1728000000,
+              "sourceFingerprint": "rate:test"
+            },
+            "policy": {
+              "version": "forward-earnings-policy/1",
+              "expectedCurrency": "USD",
+              "maxAgeDays": 90,
+              "minForecastHorizonDays": 180,
+              "maxForecastHorizonDays": 730,
+              "minAnalystCount": 3,
+              "holdYears": 2,
+              "fadeYears": 4,
+              "maxProjectionYears": 20,
+              "macroStableGrowthBps": 300,
+              "riskFreeRateBps": 430,
+              "riskFreeBufferBps": 100,
+              "minimumTerminalSpreadBps": 100
+            }
+          },
+          "fingerprint": "operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300"
+        },
+        "routeDecision": {
+          "status": "disputed",
+          "selectedModel": null,
+          "selectedValueCents": null,
+          "candidateDifferenceBps": 11370,
+          "reasons": [
+            "structural_distortion_present",
+            "candidate_disagreement"
+          ],
+          "structuralDistortions": ["latest_capex_spike"],
+          "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/5000/solid//9:fcff:test|forward=available/18176/soft/analystderivedmodel//7/448:operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"
+        }
+      }
+    }
+  ],
+  "executableSyntheticCases": [
+    {"name":"representative_fcff_retained","mutation":"none","businessClass":"operating_non_financial","structuralDistortions":[],"expectedCandidateStatus":"available","expectedRefusals":[],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"stale_forward_cannot_displace_fcff","mutation":"stale_forecast","businessClass":"operating_non_financial","structuralDistortions":["source_discontinuity"],"expectedCandidateStatus":"unavailable","expectedRefusals":["stale_forecast"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"sparse_forward_cannot_displace_fcff","mutation":"sparse_coverage","businessClass":"operating_non_financial","structuralDistortions":["source_discontinuity"],"expectedCandidateStatus":"unavailable","expectedRefusals":["sparse_coverage"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"financial_services_fail_closed","mutation":"none","businessClass":"financial_services","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"available","expectedRefusals":[],"expectedRouteStatus":"unavailable","expectedSelectedModel":null},
+    {"name":"not_eligible_fail_closed","mutation":"none","businessClass":"not_eligible","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"available","expectedRefusals":[],"expectedRouteStatus":"not_eligible","expectedSelectedModel":null},
+    {"name":"unclassified_fail_closed","mutation":"none","businessClass":"unclassified","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"available","expectedRefusals":[],"expectedRouteStatus":"unavailable","expectedSelectedModel":null},
+    {"name":"non_positive_eps_refused","mutation":"non_positive_eps","businessClass":"operating_non_financial","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"unavailable","expectedRefusals":["non_positive_forward_eps"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"invalid_terminal_policy_refused","mutation":"invalid_terminal_policy","businessClass":"operating_non_financial","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"unavailable","expectedRefusals":["invalid_policy"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"arithmetic_overflow_refused","mutation":"arithmetic_overflow","businessClass":"operating_non_financial","structuralDistortions":["latest_capex_spike"],"expectedCandidateStatus":"unavailable","expectedRefusals":["arithmetic_overflow"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"},
+    {"name":"reason_order_is_canonical","mutation":"multiple_refusals","businessClass":"operating_non_financial","structuralDistortions":["source_discontinuity"],"expectedCandidateStatus":"unavailable","expectedRefusals":["missing_forward_eps","sparse_coverage","currency_mismatch"],"expectedRouteStatus":"selected","expectedSelectedModel":"fcff_wacc"}
+  ],
+  "routerGoldenCases": [
+    {"name":"dispute_threshold_exact_is_selected","forwardValueCents":18176,"fcffValueCents":10906,"structuralDistortions":["latest_capex_spike"],"expected":{"status":"selected","selectedModel":"forward_earnings_power","selectedValueCents":18176,"candidateDifferenceBps":5000,"reasons":["structural_distortion_present","selected_forward_earnings_power"],"structuralDistortions":["latest_capex_spike"],"fingerprint":"operating-model-router-policy/1|class=operatingnonfinancial|status=selected|selected=forwardearningspower|fcff=available/10906/solid//9:fcff:test|forward=available/18176/soft/analystderivedmodel//7/448:operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|structural=latestcapexspike|reasons=structuraldistortionpresent,selectedforwardearningspower"}},
+    {"name":"first_representable_value_above_threshold_is_disputed","forwardValueCents":18176,"fcffValueCents":10904,"structuralDistortions":["latest_capex_spike"],"expected":{"status":"disputed","selectedModel":null,"selectedValueCents":null,"candidateDifferenceBps":5001,"reasons":["structural_distortion_present","candidate_disagreement"],"structuralDistortions":["latest_capex_spike"],"fingerprint":"operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/10904/solid//9:fcff:test|forward=available/18176/soft/analystderivedmodel//7/448:operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"}},
+    {"name":"multiple_distortions_are_sorted_and_deduplicated","forwardValueCents":18176,"fcffValueCents":5000,"structuralDistortions":["latest_capex_spike","thin_normalized_fcff_margin","latest_capex_spike"],"expected":{"status":"disputed","selectedModel":null,"selectedValueCents":null,"candidateDifferenceBps":11370,"reasons":["structural_distortion_present","candidate_disagreement"],"structuralDistortions":["thin_normalized_fcff_margin","latest_capex_spike"],"fingerprint":"operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/5000/solid//9:fcff:test|forward=available/18176/soft/analystderivedmodel//7/448:operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|structural=thinnormalizedfcffmargin,latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"}}
+  ],
+  "arithmeticGoldenCases": [
+    {"name":"negative_half_bp_fade_rounds_away_from_zero","nearGrowthBps":601,"holdYears":0,"fadeYears":2,"expectedIntrinsicValueCents":16893,"expectedFingerprint":"operating-valuation-router/1|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=0/2/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=601|stable=300"}
+  ],
+  "validationCohorts": {
+    "role": "External diagnostic evidence only. These anchors and error bands are not deserialized by either engine.",
+    "reported": [
+      {"symbol":"DVN","businessClass":"operating_non_financial","epsLowCents":382,"epsMeanCents":505,"epsHighCents":629,"analystCount":12,"forecastEndEpochDay":21183,"nearGrowthBps":300,"resolvedCostOfEquityBps":1200,"holdYears":0,"fcffValidationOnlyCents":12321,"routeEvidence":["through_cycle_required"],"validationOnly":{"analystTargetCents":5938}},
+      {"symbol":"GDDY","businessClass":"operating_non_financial","epsLowCents":749,"epsMeanCents":897,"epsHighCents":1075,"analystCount":13,"forecastEndEpochDay":21183,"nearGrowthBps":584,"resolvedCostOfEquityBps":1070,"holdYears":0,"fcffValidationOnlyCents":15214,"routeEvidence":["extreme_leverage"],"validationOnly":{"analystTargetCents":11193}},
+      {"symbol":"WYNN","businessClass":"operating_non_financial","epsLowCents":402,"epsMeanCents":502,"epsHighCents":581,"analystCount":9,"forecastEndEpochDay":21183,"nearGrowthBps":880,"resolvedCostOfEquityBps":876,"holdYears":0,"fcffValidationOnlyCents":0,"routeEvidence":["trailing_unavailable","thin_normalized_fcff_margin"],"validationOnly":{"analystTargetCents":13332}},
+      {"symbol":"SNDK","businessClass":"operating_non_financial","epsLowCents":15428,"epsMeanCents":21295,"epsHighCents":39608,"analystCount":21,"forecastEndEpochDay":20999,"nearGrowthBps":300,"resolvedCostOfEquityBps":1300,"holdYears":0,"fcffValidationOnlyCents":null,"routeEvidence":["trailing_unavailable","thin_normalized_fcff_margin","durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":221777}},
+      {"symbol":"BR","businessClass":"operating_non_financial","epsLowCents":1024,"epsMeanCents":1042,"epsHighCents":1057,"analystCount":8,"forecastEndEpochDay":20999,"nearGrowthBps":686,"resolvedCostOfEquityBps":880,"holdYears":3,"fcffValidationOnlyCents":14927,"routeEvidence":["durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":20650}},
+      {"symbol":"BSX","businessClass":"operating_non_financial","epsLowCents":332,"epsMeanCents":348,"epsHighCents":390,"analystCount":27,"forecastEndEpochDay":21183,"nearGrowthBps":505,"resolvedCostOfEquityBps":875,"holdYears":0,"fcffValidationOnlyCents":3554,"routeEvidence":["acquisition_discontinuity"],"validationOnly":{"analystTargetCents":6428}},
+      {"symbol":"AMZN","businessClass":"operating_non_financial","epsLowCents":775,"epsMeanCents":1004,"epsHighCents":1512,"analystCount":55,"forecastEndEpochDay":21183,"nearGrowthBps":1343,"resolvedCostOfEquityBps":880,"holdYears":0,"fcffValidationOnlyCents":885,"routeEvidence":["thin_normalized_fcff_margin","durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":31307}},
+      {"symbol":"AVGO","businessClass":"operating_non_financial","epsLowCents":1622,"epsMeanCents":1949,"epsHighCents":2201,"analystCount":46,"forecastEndEpochDay":21122,"nearGrowthBps":2000,"resolvedCostOfEquityBps":1049,"holdYears":0,"fcffValidationOnlyCents":11962,"routeEvidence":["durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":52788}},
+      {"symbol":"HPE","businessClass":"operating_non_financial","epsLowCents":369,"epsMeanCents":401,"epsHighCents":450,"analystCount":19,"forecastEndEpochDay":21122,"nearGrowthBps":1430,"resolvedCostOfEquityBps":1042,"holdYears":0,"fcffValidationOnlyCents":1296,"routeEvidence":["thin_normalized_fcff_margin","acquisition_discontinuity"],"validationOnly":{"analystTargetCents":6434}},
+      {"symbol":"MU","businessClass":"operating_non_financial","epsLowCents":8953,"epsMeanCents":15374,"epsHighCents":22127,"analystCount":37,"forecastEndEpochDay":21061,"nearGrowthBps":300,"resolvedCostOfEquityBps":1254,"holdYears":0,"fcffValidationOnlyCents":5149,"routeEvidence":["thin_normalized_fcff_margin","latest_capex_spike","durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":150738}},
+      {"symbol":"ORCL","businessClass":"operating_non_financial","epsLowCents":828,"epsMeanCents":1089,"epsHighCents":1351,"analystCount":40,"forecastEndEpochDay":21335,"nearGrowthBps":2000,"resolvedCostOfEquityBps":1124,"holdYears":0,"fcffValidationOnlyCents":1399,"routeEvidence":["latest_capex_spike","durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":24815}},
+      {"symbol":"AAPL","businessClass":"operating_non_financial","epsLowCents":879,"epsMeanCents":973,"epsHighCents":1096,"analystCount":41,"forecastEndEpochDay":21091,"nearGrowthBps":1003,"resolvedCostOfEquityBps":970,"holdYears":10,"fcffValidationOnlyCents":11162,"routeEvidence":["durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":32166}},
+      {"symbol":"CPRT","businessClass":"operating_non_financial","epsLowCents":155,"epsMeanCents":168,"epsHighCents":178,"analystCount":13,"forecastEndEpochDay":21030,"nearGrowthBps":508,"resolvedCostOfEquityBps":887,"holdYears":7,"fcffValidationOnlyCents":1945,"routeEvidence":["stale_sec_period"],"validationOnly":{"analystTargetCents":4030}},
+      {"symbol":"CEG","businessClass":"operating_non_financial","epsLowCents":1225,"epsMeanCents":1338,"epsHighCents":1487,"analystCount":21,"forecastEndEpochDay":21183,"nearGrowthBps":828,"resolvedCostOfEquityBps":913,"holdYears":5,"fcffValidationOnlyCents":null,"routeEvidence":["trailing_unavailable","thin_normalized_fcff_margin"],"validationOnly":{"analystTargetCents":35286}},
+      {"symbol":"ALB","businessClass":"operating_non_financial","epsLowCents":620,"epsMeanCents":1247,"epsHighCents":2235,"analystCount":18,"forecastEndEpochDay":21183,"nearGrowthBps":300,"resolvedCostOfEquityBps":984,"holdYears":0,"fcffValidationOnlyCents":null,"routeEvidence":["trailing_unavailable","thin_normalized_fcff_margin"],"validationOnly":{"analystTargetCents":18716}}
+    ],
+    "holdout": [
+      {"symbol":"T","businessClass":"operating_non_financial","epsLowCents":243,"epsMeanCents":256,"epsHighCents":270,"analystCount":24,"forecastEndEpochDay":21183,"nearGrowthBps":588,"resolvedCostOfEquityBps":1200,"holdYears":0,"fcffValidationOnlyCents":5907,"routeEvidence":["through_cycle_required"],"validationOnly":{"analystTargetCents":2871}},
+      {"symbol":"MSFT","businessClass":"operating_non_financial","epsLowCents":1900,"epsMeanCents":2308,"epsHighCents":2600,"analystCount":28,"forecastEndEpochDay":21365,"nearGrowthBps":1871,"resolvedCostOfEquityBps":949,"holdYears":0,"fcffValidationOnlyCents":26336,"routeEvidence":["durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":56158}},
+      {"symbol":"NVDA","businessClass":"operating_non_financial","epsLowCents":965,"epsMeanCents":1287,"epsHighCents":1600,"analystCount":50,"forecastEndEpochDay":21214,"nearGrowthBps":2000,"resolvedCostOfEquityBps":1275,"holdYears":0,"fcffValidationOnlyCents":27522,"routeEvidence":["trailing_fcff_high_growth_evidence"],"validationOnly":{"analystTargetCents":30283}},
+      {"symbol":"JNJ","businessClass":"operating_non_financial","epsLowCents":1225,"epsMeanCents":1283,"epsHighCents":1354,"analystCount":23,"forecastEndEpochDay":21183,"nearGrowthBps":860,"resolvedCostOfEquityBps":635,"holdYears":0,"fcffValidationOnlyCents":24928,"routeEvidence":["trailing_fcff_mature_defensive"],"validationOnly":{"analystTargetCents":27059}},
+      {"symbol":"XOM","businessClass":"operating_non_financial","epsLowCents":746,"epsMeanCents":1059,"epsHighCents":1350,"analystCount":23,"forecastEndEpochDay":21183,"nearGrowthBps":300,"resolvedCostOfEquityBps":1100,"holdYears":0,"fcffValidationOnlyCents":null,"routeEvidence":["trailing_unavailable","through_cycle_required"],"validationOnly":{"analystTargetCents":16723}},
+      {"symbol":"V","businessClass":"financial_services","epsLowCents":1436,"epsMeanCents":1495,"epsHighCents":1542,"analystCount":41,"forecastEndEpochDay":21091,"nearGrowthBps":1192,"resolvedCostOfEquityBps":798,"holdYears":3,"fcffValidationOnlyCents":null,"routeEvidence":["financial_model_required"],"validationOnly":{"analystTargetCents":41216}},
+      {"symbol":"WMT","businessClass":"operating_non_financial","epsLowCents":310,"epsMeanCents":328,"epsHighCents":362,"analystCount":39,"forecastEndEpochDay":21214,"nearGrowthBps":884,"resolvedCostOfEquityBps":716,"holdYears":3,"fcffValidationOnlyCents":4050,"routeEvidence":["thin_normalized_fcff_margin"],"validationOnly":{"analystTargetCents":13810}},
+      {"symbol":"GOOGL","businessClass":"operating_non_financial","epsLowCents":1339,"epsMeanCents":1477,"epsHighCents":1721,"analystCount":55,"forecastEndEpochDay":21183,"nearGrowthBps":2000,"resolvedCostOfEquityBps":954,"holdYears":0,"fcffValidationOnlyCents":30041,"routeEvidence":["latest_capex_spike","durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":42695}},
+      {"symbol":"META","businessClass":"operating_non_financial","epsLowCents":2793,"epsMeanCents":3441,"epsHighCents":4323,"analystCount":53,"forecastEndEpochDay":21183,"nearGrowthBps":1964,"resolvedCostOfEquityBps":954,"holdYears":0,"fcffValidationOnlyCents":65165,"routeEvidence":["latest_capex_spike"],"validationOnly":{"analystTargetCents":77868}},
+      {"symbol":"HD","businessClass":"operating_non_financial","epsLowCents":1505,"epsMeanCents":1609,"epsHighCents":1660,"analystCount":34,"forecastEndEpochDay":21214,"nearGrowthBps":568,"resolvedCostOfEquityBps":865,"holdYears":3,"fcffValidationOnlyCents":24764,"routeEvidence":["durable_excess_return_evidence"],"validationOnly":{"analystTargetCents":37034}},
+      {"symbol":"PG","businessClass":"operating_non_financial","epsLowCents":707,"epsMeanCents":741,"epsHighCents":755,"analystCount":19,"forecastEndEpochDay":21365,"nearGrowthBps":444,"resolvedCostOfEquityBps":649,"holdYears":3,"fcffValidationOnlyCents":17400,"routeEvidence":["trailing_fcff_mature_defensive"],"validationOnly":{"analystTargetCents":16100}},
+      {"symbol":"MRK","businessClass":"operating_non_financial","epsLowCents":890,"epsMeanCents":964,"epsHighCents":1019,"analystCount":19,"forecastEndEpochDay":21183,"nearGrowthBps":300,"resolvedCostOfEquityBps":625,"holdYears":0,"fcffValidationOnlyCents":14303,"routeEvidence":["trailing_fcff_mature_defensive"],"validationOnly":{"analystTargetCents":13519}}
+    ]
+  }
+}

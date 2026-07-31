@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import { api, fmt } from "../api";
 import type { SymbolDetail, OpportunityRow, PriceProvenance } from "../api";
 import { CandleChart } from "./CandleChart";
@@ -31,6 +31,15 @@ import { buildMarketContextNarrative } from "../marketContextNarrative";
 import { buildConditionalPlan, type PlanStance } from "../conditionalPlan";
 import { verdictFromTechnicalScore } from "../technicalVerdict";
 import { UI, UiInspectable } from "../uiInspect";
+import {
+  detailValuationPresentation,
+  dcfMarketRelation,
+} from "../detailValuationPresentation";
+import {
+  CLOSED_VALUATION_TOOLTIP,
+  nextValuationTooltipState,
+  valuationTooltipDescribedBy,
+} from "../valuationTooltipState";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -44,30 +53,38 @@ function gapToneClass(tone: DirectionalTone): string {
   return "gap-grey";
 }
 
-/** Policy defaults / provisional rates → never treat base as a trusted point. */
-function dcfPointUnreliable(a: DcfAnalysis): boolean {
-  if (a.diagnostics?.point_estimate_unreliable) return true;
-  const i = a.wacc_inputs;
+function ValuationInfoTooltip({ lines }: { lines: string[] }) {
+  const { t } = useT();
+  const [tooltip, setTooltip] = useState(CLOSED_VALUATION_TOOLTIP);
+  const tipId = `valuation-info-${useId().replace(/:/g, "")}`;
+  if (lines.length === 0) return null;
   return (
-    i.cost_of_debt === "default"
-    || i.tax_rate === "default"
-    || i.beta === "default"
-    || i.wacc_clamped
+    <span className="valuation-info-wrap">
+      <button
+        type="button"
+        className="market-context-info"
+        aria-label={t("detail.valuationInfoAria")}
+        aria-describedby={valuationTooltipDescribedBy(tooltip, tipId)}
+        aria-expanded={tooltip.open}
+        onMouseEnter={() => setTooltip((state) => nextValuationTooltipState(state, "pointer_enter"))}
+        onMouseLeave={() => setTooltip((state) => nextValuationTooltipState(state, "pointer_leave"))}
+        onFocus={() => setTooltip((state) => nextValuationTooltipState(state, "focus"))}
+        onBlur={() => setTooltip((state) => nextValuationTooltipState(state, "blur"))}
+        onClick={() => setTooltip((state) => nextValuationTooltipState(state, "toggle"))}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setTooltip((state) => nextValuationTooltipState(state, "escape"));
+          }
+        }}
+      >ⓘ</button>
+      {tooltip.open && (
+        <span id={tipId} role="tooltip" className="market-context-tooltip valuation-info-tooltip">
+          <span className="valuation-info-title">{t("detail.valuationInfoTitle")}</span>
+          {lines.map((line) => <span className="valuation-info-line" key={line}>{line}</span>)}
+        </span>
+      )}
+    </span>
   );
-}
-
-/** Map backend valuation refusal strings to i18n keys (fail-closed messaging). */
-function valuationUnavailableI18nKey(reason: string | null | undefined): string {
-  if (!reason) return "detail.dcfUnavailableHint";
-  const r = reason.toLowerCase();
-  if (r.includes("unclassified")) return "detail.dcfUnavailableUnclassified";
-  if (r.includes("not eligible") || r.includes("etf") || r.includes("reit")) {
-    return "detail.dcfUnavailableNotEligible";
-  }
-  if (r.includes("book")) return "detail.dcfUnavailableMissingBook";
-  if (r.includes("fcf") || r.includes("free cash")) return "detail.dcfUnavailableMissingFcf";
-  if (r.includes("share")) return "detail.dcfUnavailableMissingShares";
-  return "detail.dcfUnavailableHint";
 }
 
 interface Props {
@@ -157,14 +174,13 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const confidence = row?.confidence ?? detail?.confidence ?? "Low";
   // Prefer live detail analysis over list-row cache (row can hold stale FCFF for financials).
   const dcfAnalysis = detail?.dcf_analysis ?? null;
-  const dcfValue =
-    dcfAnalysis?.base_intrinsic_value_cents
-    ?? detail?.dcf_value_cents
-    ?? row?.dcf_value_cents
-    ?? null;
-  const hasDcf = dcfValue != null && dcfValue > 0;
+  const valuation = detailValuationPresentation(detail);
+  const dcfValue = valuation.kind === "selected"
+    ? valuation.valueCents
+    : null;
+  const hasDcf = valuation.kind === "selected";
+  const dcfVsMarket = dcfMarketRelation(dcfValue, marketPrice);
   const valuationReason = detail?.valuation_unavailable_reason ?? null;
-  const valuationReasonKey = valuationUnavailableI18nKey(valuationReason);
 
   const f = detail?.fundamentals;
   // Unknown row type stays neutral until the scored row arrives; never guess
@@ -175,11 +191,13 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const hasValidData = marketPrice > 0;
   // Prefer a reserved loading slot over appear/disappear when EDGAR is slow.
   // Classification refuse is immediate unavailable (no timeout theater).
-  const dcfSlotState: "hidden" | "loading" | "ready" | "unavailable" = technicalOnly
+  const dcfSlotState: "hidden" | "loading" | "ready" | "disputed" | "unavailable" = technicalOnly
     ? "hidden"
-    : hasDcf
+    : valuation.kind === "selected"
       ? "ready"
-      : valuationReason || dcfWaitTimedOut
+      : valuation.kind === "disputed"
+        ? "disputed"
+      : valuation.kind === "unavailable" || valuationReason || dcfWaitTimedOut
         ? "unavailable"
         : "loading";
 
@@ -260,11 +278,15 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         {dcfSlotState === "unavailable" && (
           <div className="price-main dcf-slot dcf-slot--unavailable">
             <span className="price-value price-value--muted">—</span>
-            <span className="price-label">{t("detail.dcfUnavailable")}</span>
+            <span className="price-label">
+              {t("detail.dcfUnavailable")}
+              <ValuationInfoTooltip lines={valuation.diagnostics} />
+            </span>
             <div className="muted small dcf-slot-hint">
-              {t(valuationReasonKey)}
+              {t(valuation.kind === "unavailable" ? valuation.reasonKey : "detail.dcfUnavailableHint")}
               {valuationReason
-                && valuationReasonKey === "detail.dcfUnavailableHint"
+                && valuation.kind === "unavailable"
+                && valuation.reasonKey === "detail.dcfUnavailableHint"
                 && (
                   <span className="dcf-slot-reason-raw" title={valuationReason}>
                     {" "}
@@ -276,22 +298,31 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             </div>
           </div>
         )}
+        {dcfSlotState === "disputed" && valuation.kind === "disputed" && (
+          <div className="price-main dcf-slot dcf-slot--disputed">
+            <span className="price-value price-value--muted">—</span>
+            <span className="price-label">
+              {t("detail.valuationDisputed")}
+              <ValuationInfoTooltip lines={valuation.diagnostics} />
+            </span>
+            <div className="muted small dcf-overview-range">
+              {t("detail.dcfValue")}: {valuation.fcffValueCents ? fmt.dollars(valuation.fcffValueCents) : "—"}
+              {" · "}
+              {t("detail.forwardEarningsValue")}: {valuation.forwardValueCents ? fmt.dollars(valuation.forwardValueCents) : "—"}
+            </div>
+            <div className="muted small dcf-slot-hint">{t("detail.valuationDisputedHint")}</div>
+          </div>
+        )}
         {/* Overview: base is the hero (sell-side style PT); range secondary.
             Full WACC/FCF diagnostics stay in Quant Lens. */}
-        {dcfSlotState === "ready" && dcfValue != null && dcfValue > 0 && (
+        {dcfSlotState === "ready" && valuation.kind === "selected" && dcfValue != null && dcfValue > 0 && (
           <div className="price-main dcf-slot dcf-slot--ready">
             {(() => {
-              const unreliable = dcfAnalysis ? dcfPointUnreliable(dcfAnalysis) : false;
-              const label =
-                dcfAnalysis?.model === "residual_income_equity"
-                  ? t("detail.residualIncomeValue")
-                  : t("detail.dcfValue");
-              const hasRange =
-                dcfAnalysis != null
-                && dcfAnalysis.bear_intrinsic_value_cents > 0
-                && dcfAnalysis.bull_intrinsic_value_cents > 0
-                && (dcfAnalysis.bear_intrinsic_value_cents !== dcfAnalysis.bull_intrinsic_value_cents
-                  || dcfAnalysis.bear_intrinsic_value_cents !== dcfValue);
+              const unreliable = valuation.quality === "soft";
+              const label = t(valuation.labelKey);
+              const hasRange = valuation.range != null
+                && (valuation.range.lowCents !== valuation.range.highCents
+                  || valuation.range.lowCents !== dcfValue);
               return (
                 <>
                   <span
@@ -306,11 +337,11 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
                   >
                     {fmt.dollars(dcfValue)}
                   </span>
-                  {hasRange && dcfAnalysis && (
+                  {hasRange && valuation.range && (
                     <div className="muted small dcf-overview-range">
-                      {fmt.dollars(dcfAnalysis.bear_intrinsic_value_cents)}
+                      {fmt.dollars(valuation.range.lowCents)}
                       {" – "}
-                      {fmt.dollars(dcfAnalysis.bull_intrinsic_value_cents)}
+                      {fmt.dollars(valuation.range.highCents)}
                     </div>
                   )}
                   <span className="price-label">
@@ -318,7 +349,15 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
                     {unreliable && (
                       <span className="wacc-unreliable"> · {t("detail.dcfUnreliable")}</span>
                     )}
+                    <ValuationInfoTooltip lines={valuation.diagnostics} />
                   </span>
+                  {dcfVsMarket && (
+                    <div
+                      className={`muted small dcf-market-relation dcf-market-relation--${dcfVsMarket.tone}`}
+                    >
+                      {t(dcfVsMarket.key, { pct: dcfVsMarket.pct })}
+                    </div>
+                  )}
                 </>
               );
             })()}
@@ -329,7 +368,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             className={`gap-pill ${gapToneClass(gapPresentation.tone)}`}
             title={renderText(gapPresentation.text, t)}
           >
-            {gapPresentation.marker} {renderText(gapPresentation.compactText, t)}
+            {t("detail.analystGapLabel")} · {gapPresentation.marker}{" "}
+            {renderText(gapPresentation.compactText, t)}
           </div>
         )}
         {!technicalOnly && (

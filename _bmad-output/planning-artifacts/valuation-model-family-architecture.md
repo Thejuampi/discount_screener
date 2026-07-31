@@ -441,6 +441,52 @@ Android: package `com.discountscreener.core.valuation` (or evolve `DcfAnalysisEn
 
 ---
 
+### AD-VM-011: Operating Valuation May Route Between Audited Cash and Forward Earnings Power
+
+**Decision:** `OperatingNonFinancial` may produce two separately identified
+candidates: the existing `FcffWacc` cash model and a soft
+`ForwardEarningsPower` equity model. The operating router may select the
+forward candidate only when it receives explicit, versioned structural
+distortion evidence and a complete/current normalized forecast. It retains
+both candidates and exposes disagreement; it never averages the conflict away
+or publishes a singular selected value while status is `Disputed`.
+
+`ForwardEarningsPower` discounts a provider-normalized forward EPS path with
+cost of equity. It is neither FCFF nor FCFE, and its Yahoo consensus evidence is
+tagged `AnalystDerivedModel`. A Yahoo target and this candidate therefore remain
+visually distinct but are one correlated family for confidence counting.
+
+The pure contract is
+`shared/contracts/operating-valuation-router-v1.json`: cents/bps/epoch-day
+inputs, checked integer recurrence, half-up rounding after named steps, dynamic
+stable growth, canonical reason ordering, and exact Rust/Kotlin equality.
+Each forward candidate carries the complete typed normalized
+`ForwardEarningsInput` as provenance. The router accepts it only when an exact
+recomputation reproduces the candidate, preventing post-compute mutation of
+quality, values, refusals, rate evidence, or forecast evidence.
+Market price, analyst target/range, price multiples, ranking gaps, and Quant
+Lens scores are absent from engine/router inputs. `FinancialServices`,
+`NotEligible`, and `Unclassified` fail closed before operating routing.
+
+**Windows runtime integration:** `quote_summary.rs` owns a separate demand-only
+Yahoo `earningsTrend` parser and fingerprint; it is deliberately absent from
+the full-universe module list. `operating_valuation_runtime.rs` normalizes the
+provider row, resolves cost of equity with checked fixed-point arithmetic,
+derives typed structural evidence, and calls the pure router. `ScreenerState`
+retains the FCFF candidate, complete route envelope, and optional selected
+value separately. The periodic EDGAR worker does not compute or publish
+operating FCFF: doing so would bypass the Yahoo-aware router, race a newer
+demand result, and repeatedly refetch unopened names. Detail/Quant Lens demand
+orchestration is the sole operating valuation producer; the periodic worker
+continues residual-income financials and insider evidence only.
+
+Detail and Quant Lens consume `Selected`, `Disputed`, and `Unavailable`
+directly. `Disputed` has no single value/upside. The forward candidate remains
+soft and analyst-correlated, so Yahoo target plus Yahoo forward consensus count
+as one evidence family. The Detail `(i)` trail exposes provider state, forecast
+period, refusal/reason codes, policy versions, fingerprints, and stable owning
+function locators (never volatile line numbers).
+
 ## End-to-End Data Flow
 
 ```text

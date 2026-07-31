@@ -9,6 +9,7 @@ use crate::crypto_cycle::FngCache;
 use crate::db::Db;
 use crate::engine::ScreenerState;
 use crate::feed_log::FeedLog;
+use crate::fetcher::YahooClient;
 use crate::launch_profile::ForcedProfile;
 use crate::news::NewsCache;
 use crate::profiles::{compose_universe, resolve_profile_membership};
@@ -128,6 +129,8 @@ pub struct AppState {
     pub edgar_cik_map: Arc<Mutex<Option<HashMap<String, u64>>>>,
     /// Symbols with an in-flight demand-driven valuation (avoid duplicate EDGAR hits).
     pub valuation_inflight: Arc<Mutex<HashSet<String>>>,
+    /// One bounded Yahoo session for demand-only operating forecasts.
+    pub valuation_yahoo: Option<Arc<YahooClient>>,
 }
 
 impl AppState {
@@ -152,6 +155,10 @@ impl AppState {
                 .map_err(|e| format!("initialize FMP analyst forecast service: {e}"))?,
         );
         let (scalp_ws_tx, _) = tokio::sync::watch::channel(String::new());
+        // Forward forecasts are demand-only optional evidence. A client/TLS
+        // construction failure must not prevent the workstation from opening;
+        // the runtime router will expose provider unavailability instead.
+        let valuation_yahoo = YahooClient::new().ok().map(Arc::new);
 
         let locked = forced.is_some();
         let (profile, symbols, stale, db_err) = match forced {
@@ -205,6 +212,7 @@ impl AppState {
             initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),
             edgar_cik_map: Arc::new(Mutex::new(None)),
             valuation_inflight: Arc::new(Mutex::new(HashSet::new())),
+            valuation_yahoo,
         })
     }
 

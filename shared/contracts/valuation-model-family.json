@@ -10,6 +10,15 @@
     "executableSurfaces": ["windows", "android"],
     "deferredSurfaces": ["desktop"]
   },
+  "fcffRobustEvidencePolicy": {
+    "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+    "baseMargin": "median_aligned_annual_fcff_margin",
+    "negativeYears": "retained",
+    "acquisitionGrowth": "exclude_only_year_y_minus_1_to_y_when_year_y_is_material",
+    "minimumCleanRecentGrowthTransitions": 2,
+    "provisionalWaccUplift": "round(175 * min(debt_weight / 0.40, 1))",
+    "qaEvidenceCorpus": "shared/contracts/valuation-fcff-qa-2026-07-31.json"
+  },
   "driverResolutionContract": {
     "scope": "OperatingNonFinancial only; FinancialServices bypasses FCFF rate resolution",
     "costOfDebtOrder": [
@@ -51,6 +60,14 @@
     "epsilon": null,
     "oneCentMutationMustFail": true,
     "oneBpMutationMustFail": true
+  },
+  "operatingValuationRouterContract": {
+    "path": "shared/contracts/operating-valuation-router-v1.json",
+    "status": "headless_core_only",
+    "runtimeIntegrated": false,
+    "model": "ForwardEarningsPower",
+    "evidenceFamily": "AnalystDerivedModel",
+    "priceAndTargetAreEngineInputs": false
   },
   "forbiddenAcceptancePatterns": [
     "assert_intrinsic_over_price_ratio_bounded",
@@ -237,9 +254,9 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/7-explicit-driver-resolution",
+        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
         "latestFcfDollars": 19440000000,
-        "fcfRunRateDollars": 24363147200,
+        "fcfRunRateDollars": 24652137600,
         "acceptance": [
           "fcf_run_rate_recent_window_average",
           "base_is_derived_only_from_operating_and_rate_drivers",
@@ -318,9 +335,9 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/7-explicit-driver-resolution",
+        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
         "latestFcfDollars": 7695000000,
-        "fcfRunRateDollars": 19787102400,
+        "fcfRunRateDollars": 24375416000,
         "valuationDriver": "driver_based_fcff",
         "acceptance": [
           "bear_less_than_or_equal_to_base_less_than_or_equal_to_bull",

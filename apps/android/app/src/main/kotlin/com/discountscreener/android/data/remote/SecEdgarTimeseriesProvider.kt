@@ -2,10 +2,12 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.engine.SecDriverNormalizationPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -88,72 +90,34 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
 
     val opCfRecords = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "NetCashProvidedByUsedInOperatingActivities",
-            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
-            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.OperatingCashFlow),
     )
-    val capexRecords = annualFyRecordsAny(
-        usGaap,
-        listOf(
-            "PaymentsToAcquirePropertyPlantAndEquipment",
-            "PaymentsToAcquireProductiveAssets",
-            "PaymentsToAcquireOtherPropertyPlantAndEquipment",
-            "PaymentsForCapitalImprovements",
-        ),
-    )
+    val capexRecords = annualRecurringDevelopmentRecords(usGaap)
+    val acquisitionRecords = annualAcquisitionInvestmentRecords(usGaap)
     val revenueRecords = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "RevenueFromContractWithCustomerExcludingAssessedTax",
-            "Revenues",
-            "SalesRevenueNet",
-            "SalesRevenueGoodsNet",
-            "RevenueFromContractWithCustomerIncludingAssessedTax",
-            "RevenuesFromExternalCustomers",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.Revenue),
     )
     val interestRecords = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "InterestExpenseNonOperating",
-            "InterestExpenseNonoperating",
-            "InterestExpenseDebt",
-            "InterestAndDebtExpense",
-            "InterestExpense",
-            "InterestExpenseOtherLongTermDebt",
-            "InterestIncomeExpenseNet",
-            "InterestIncomeExpenseNonoperatingNet",
-            "FinanceLeaseInterestExpense",
-            "InterestPaidNet",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.InterestExpense),
     )
     val pretaxRecords = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.PretaxIncome),
     )
     val taxExpenseRecords = annualFyRecordsAny(
         usGaap,
-        listOf("IncomeTaxExpenseBenefit", "IncomeTaxExpenseBenefitContinuingOperations"),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.TaxExpense),
     )
-    val sharesRecords = annualFyRecords(usGaap, "WeightedAverageNumberOfDilutedSharesOutstanding")
+    val sharesRecords = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.DilutedAverageShares),
+    )
     val debtRecords = annualDebtRecords(usGaap)
     val marginalTaxRecords = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate",
-            "IncomeTaxReconciliationFederalStatutoryIncomeTaxRate",
-            "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate",
-            "StatutoryFederalIncomeTaxRate",
-            "StatutoryIncomeTaxRate",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.MarginalTaxReference),
     )
 
     if (opCfRecords.isEmpty() || capexRecords.isEmpty()) return null
@@ -188,6 +152,7 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
         freeCashFlow = freeCashFlow,
         operatingCashFlow = acceptedOperatingCashFlow,
         capitalExpenditure = capitalExpenditure,
+        acquisitionInvestment = acquisitionRecords.filter { it.asOfDate in acceptedDates },
         revenue = revenue,
         dilutedAverageShares = sharesRecords,
         interestExpense = interestExpense,
@@ -200,62 +165,78 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
 
 private fun annualFyRecordsAny(
     usGaap: JsonObject,
-    concepts: List<String>,
+    operator: SecDriverNormalizationPolicy.DriverOperator,
 ): List<AnnualReportedValue> {
     val byDate = linkedMapOf<String, AnnualReportedValue>()
-    concepts.forEach { concept ->
-        annualFyRecords(usGaap, concept).forEach { record ->
+    operator.qnames.forEach { concept ->
+        annualFyRecords(usGaap, concept, operator).forEach { record ->
             byDate.putIfAbsent(record.asOfDate, record)
         }
     }
     return byDate.values.sortedBy { it.asOfDate }
 }
 
+private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
+    annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringDevelopmentConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+
+private fun annualAcquisitionInvestmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
+    annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.acquisitionInvestmentConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+
 private fun annualDebtRecords(usGaap: JsonObject): List<AnnualReportedValue> {
     val current = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "LongTermDebtAndFinanceLeaseObligationsCurrent",
-            "LongTermDebtCurrent",
-            "DebtCurrent",
-            "ShortTermBorrowings",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.CurrentDebt),
     )
     val nonCurrent = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
-            "LongTermDebtNoncurrent",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.NonCurrentDebt),
     )
     val reportedTotal = annualFyRecordsAny(
         usGaap,
-        listOf(
-            "DebtAndCapitalLeaseObligations",
-            "LongTermDebtAndCapitalLeaseObligations",
-            "LongTermDebt",
-            "DebtInstrumentCarryingAmount",
-        ),
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.TotalDebt),
     )
-    val components = (current + nonCurrent)
-        .groupBy { it.asOfDate }
-        .map { (_, records) ->
-            records.first().copy(
-                value = records.sumOf { abs(it.value) },
+    val currentByDate = current.associateBy { it.asOfDate }
+    val nonCurrentByDate = nonCurrent.associateBy { it.asOfDate }
+    val components = currentByDate.keys.intersect(nonCurrentByDate.keys)
+        .map { date ->
+            val currentRecord = requireNotNull(currentByDate[date])
+            val nonCurrentRecord = requireNotNull(nonCurrentByDate[date])
+            currentRecord.copy(
+                value = abs(currentRecord.value) + abs(nonCurrentRecord.value),
                 concept = "total_debt",
             )
         }
-    return (components + reportedTotal)
+    return (reportedTotal + components)
         .groupBy { it.asOfDate }
-        .map { (_, records) -> records.maxByOrNull { abs(it.value) }!! }
+        .map { (_, records) -> records.first() }
         .sortedBy { it.asOfDate }
 }
 
-private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualReportedValue> {
+private fun annualFyRecords(
+    usGaap: JsonObject,
+    concept: String,
+    operator: SecDriverNormalizationPolicy.DriverOperator,
+): List<AnnualReportedValue> {
     val entries = usGaap[concept]
         ?.jsonObject?.get("units")
         ?.jsonObject?.entries
-        ?.firstOrNull()
+        ?.firstOrNull { it.key == operator.unit }
         ?.value?.jsonArray
         ?: return emptyList()
 
@@ -264,29 +245,50 @@ private fun annualFyRecords(usGaap: JsonObject, concept: String): List<AnnualRep
         val obj = entry.jsonObject
         val fp = obj["fp"]?.jsonPrimitive?.content ?: continue
         val form = obj["form"]?.jsonPrimitive?.content ?: continue
-        if (fp != "FY" || !form.startsWith("10-K")) continue
+        if (fp != "FY" || form !in SecDriverNormalizationPolicy.acceptedForms) continue
         val endDate = obj["end"]?.jsonPrimitive?.content ?: continue
         val value = obj["val"]?.jsonPrimitive?.double ?: continue
-        if (!byDate.containsKey(endDate)) {
-            val startDate = obj["start"]?.jsonPrimitive?.content
-            val durationDays = startDate?.let {
-                runCatching {
-                    ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.parse(endDate)).toInt()
-                }.getOrNull()
-            }
-            byDate[endDate] = AnnualReportedValue(
-                asOfDate = endDate,
-                value = value,
-                periodStart = startDate,
-                periodEnd = endDate,
-                durationDays = durationDays,
-                fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
-                    ?: endDate.take(4).toIntOrNull(),
-                source = com.discountscreener.core.model.DcfSource.SecEdgar,
-                concept = concept,
-                unit = usGaap[concept]?.jsonObject?.get("units")?.jsonObject?.keys?.firstOrNull(),
-                filedAt = obj["filed"]?.jsonPrimitive?.content,
+        val startDate = obj["start"]?.jsonPrimitive?.content
+        val durationDays = startDate?.let {
+            runCatching {
+                ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.parse(endDate)).toInt()
+            }.getOrNull()
+        }
+        val unit = operator.unit
+        val consolidated = obj["segment"] == null || obj["segment"] == JsonNull
+        if (operator.periodShape == SecDriverNormalizationPolicy.PeriodShape.Duration &&
+            durationDays !in SecDriverNormalizationPolicy.minimumDurationDays..
+                SecDriverNormalizationPolicy.maximumDurationDays
+        ) continue
+        if (operator.periodShape == SecDriverNormalizationPolicy.PeriodShape.Instant && startDate != null) continue
+        val record = AnnualReportedValue(
+            asOfDate = endDate,
+            value = value,
+            periodStart = startDate,
+            periodEnd = endDate,
+            durationDays = durationDays,
+            fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
+                ?: endDate.take(4).toIntOrNull(),
+            source = com.discountscreener.core.model.DcfSource.SecEdgar,
+            concept = concept,
+            unit = unit,
+            filedAt = obj["filed"]?.jsonPrimitive?.content,
+        )
+        // Investment concepts cross the stronger, generated policy boundary.
+        // Property/business-acquisition facts never become CapEx merely because
+        // their cash-flow period looks annual.
+        val investmentCategory = SecDriverNormalizationPolicy.investmentCategory(concept)
+        if (investmentCategory == SecDriverNormalizationPolicy.InvestmentCategory.Development &&
+            !SecDriverNormalizationPolicy.isAcceptedRecurringDevelopment(
+                concept, record.unit, record.durationDays, form, consolidated,
             )
+        ) continue
+        if (!consolidated) continue
+        val existing = byDate[endDate]
+        // Restated/comparative observations are equivalent, never additive. SEC
+        // filing date is primary precedence; accession is the stable tie-break.
+        if (existing == null || record.filedAt.orEmpty() > existing.filedAt.orEmpty()) {
+            byDate[endDate] = record
         }
     }
     return byDate.values.sortedBy { it.asOfDate }
