@@ -302,7 +302,8 @@ export default function App() {
           setUniverseProfile(plan.name);
           setSymbolsTotal(current.symbols_total);
           setSymbolsLoaded(current.symbols_loaded);
-          localStorage.setItem(UNIVERSE_STORAGE_KEY, canonicalUniverseName(plan.name));
+          // A forced QA launch is temporary: preserve the user's normal
+          // universe preference for the next unforced application start.
           await api.startFeed();
           return;
         }

@@ -491,7 +491,10 @@ impl FcfPoint {
     ) -> Self {
         self.total_debt_dollars = total_debt_dollars;
         self.marginal_tax_bps = marginal_tax_bps;
-        self.marginal_tax_source = marginal_tax_bps.map(|_| WaccFieldSource::ReportedMarginalTax);
+        // Contract fixtures use the explicit US statutory table as their
+        // declared source; provider adapters override this with filing-level
+        // reconciliation or domicile provenance before runtime resolution.
+        self.marginal_tax_source = marginal_tax_bps.map(|_| WaccFieldSource::JurisdictionStatutory);
         self.market_yield_bps = market_yield_bps;
         self.rated_or_synthetic_spread_bps = rated_or_synthetic_spread_bps;
         self
@@ -2702,7 +2705,10 @@ mod tests {
             a.wacc_inputs.cost_of_debt,
             WaccFieldSource::InterestOverAverageDebt
         );
-        assert_eq!(a.wacc_inputs.tax_rate, WaccFieldSource::ReportedMarginalTax);
+        assert_eq!(
+            a.wacc_inputs.tax_rate,
+            WaccFieldSource::JurisdictionStatutory
+        );
         assert!(
             a.reason_codes
                 .iter()
@@ -2948,7 +2954,7 @@ mod tests {
         );
         assert_eq!(
             analysis.wacc_inputs.tax_rate,
-            WaccFieldSource::ReportedMarginalTax
+            WaccFieldSource::JurisdictionStatutory
         );
     }
 
@@ -2995,7 +3001,10 @@ mod tests {
             a.wacc_inputs.cost_of_debt,
             WaccFieldSource::InterestOverAverageDebt
         );
-        assert_eq!(a.wacc_inputs.tax_rate, WaccFieldSource::ReportedMarginalTax);
+        assert_eq!(
+            a.wacc_inputs.tax_rate,
+            WaccFieldSource::JurisdictionStatutory
+        );
         assert!(!a.diagnostics.point_estimate_unreliable);
         assert!(!a.wacc_inputs.point_estimate_unreliable());
     }

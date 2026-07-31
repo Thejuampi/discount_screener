@@ -2447,10 +2447,10 @@ private fun richTimeseries() = FundamentalTimeseries(
         com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 50_000_000_000.0),
     ),
     marginalTaxRate = listOf(
-        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 0.21),
-        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 0.21),
-        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 0.21),
-        com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 0.21),
+        com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 0.21, concept = "JurisdictionStatutory"),
+        com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 0.21, concept = "JurisdictionStatutory"),
+        com.discountscreener.core.model.AnnualReportedValue("2022-01-01", 0.21, concept = "JurisdictionStatutory"),
+        com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 0.21, concept = "JurisdictionStatutory"),
     ),
     netIncome = listOf(
         com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 48_000_000_000.0),

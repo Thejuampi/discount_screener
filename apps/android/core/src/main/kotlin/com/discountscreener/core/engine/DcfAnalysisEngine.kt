@@ -718,19 +718,19 @@ object DcfAnalysisEngine {
                     tax?.toString() ?: "-",
                     dollars(debtByPeriod[period]?.value),
                     normalizeTaxBps(marginalTaxByPeriod[period]?.value)?.toString() ?: "-",
-                    marginalTaxSourceToken(marginalTaxByPeriod[period]?.concept),
+                    marginalTaxSourceToken(marginalTaxByPeriod[period]),
                     marketYieldByPeriod[period]?.value?.roundToInt()?.toString() ?: "-",
                     ratedSpreadByPeriod[period]?.value?.roundToInt()?.toString() ?: "-",
                 ).joinToString(":")
             }
     }
 
-    private fun marginalTaxSourceToken(concept: String?): String = when {
-        concept?.contains("Reconciliation", ignoreCase = true) == true -> "tax_reconciliation"
-        concept?.contains("Statutory", ignoreCase = true) == true -> "jurisdiction_statutory"
-        concept?.contains("Domicile", ignoreCase = true) == true -> "domicile_tax_proxy"
-        concept != null -> "reported_marginal_tax"
-        else -> "-"
+    private fun marginalTaxSourceToken(point: AnnualReportedValue?): String = when {
+        point == null -> "-"
+        point.concept?.contains("Reconciliation", ignoreCase = true) == true -> "tax_reconciliation"
+        point.concept?.contains("Statutory", ignoreCase = true) == true -> "jurisdiction_statutory"
+        point.concept?.contains("Domicile", ignoreCase = true) == true -> "domicile_tax_proxy"
+        else -> "unavailable"
     }
 
     private data class DriverRow(

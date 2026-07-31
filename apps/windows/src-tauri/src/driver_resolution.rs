@@ -129,7 +129,7 @@ pub fn resolve_rate_inputs_for_source(
                         tax,
                         point
                             .marginal_tax_source
-                            .unwrap_or(WaccFieldSource::ReportedMarginalTax),
+                            .unwrap_or(WaccFieldSource::Unavailable),
                     )
                 })
         })
@@ -235,7 +235,6 @@ pub fn resolve_rate_inputs_for_source(
         WaccFieldSource::TaxReconciliation,
         WaccFieldSource::JurisdictionStatutory,
         WaccFieldSource::DomicileTaxProxy,
-        WaccFieldSource::ReportedMarginalTax,
     ]
     .into_iter()
     .find(|source| {
@@ -268,11 +267,7 @@ pub fn resolve_rate_inputs_for_source(
         .iter()
         .filter(|year| valid_tax_periods.contains(year))
         .count();
-    let quality = if period_count >= 3
-        && !matches!(
-            tax_source,
-            WaccFieldSource::JurisdictionStatutory | WaccFieldSource::DomicileTaxProxy
-        ) {
+    let quality = if period_count >= 3 && !matches!(tax_source, WaccFieldSource::DomicileTaxProxy) {
         EvidenceQuality::Solid
     } else if period_count >= 1 {
         EvidenceQuality::Provisional
@@ -415,6 +410,18 @@ mod tests {
         let error =
             resolve_rate_inputs(&[point(2021, Some(100.0), Some(5.0), None)], Some(100), 430)
                 .unwrap_err();
+        assert!(error.contains("marginal tax is unavailable"));
+    }
+
+    #[test]
+    fn unlabelled_marginal_tax_is_not_used() {
+        let error = resolve_rate_inputs(
+            &[point(2021, Some(100.0), Some(5.0), Some(2_100))
+                .with_marginal_tax_source(WaccFieldSource::Unavailable)],
+            Some(100),
+            430,
+        )
+        .unwrap_err();
         assert!(error.contains("marginal tax is unavailable"));
     }
 

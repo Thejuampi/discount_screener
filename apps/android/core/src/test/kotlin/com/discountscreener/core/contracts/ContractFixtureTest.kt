@@ -116,7 +116,11 @@ class ContractFixtureTest {
                             AnnualReportedValue("${point.year}-12-31", point.valueDollars)
                         },
                         marginalTaxRate = input.marginalTaxBpsAnnual.map { point ->
-                            AnnualReportedValue("${point.year}-12-31", point.valueDollars / 10_000.0)
+                            AnnualReportedValue(
+                                "${point.year}-12-31",
+                                point.valueDollars / 10_000.0,
+                                concept = "JurisdictionStatutory",
+                            )
                         },
                     ),
                     marketPriceCents = (input.marketPriceDollars * 100.0).toLong(),

@@ -66,6 +66,18 @@ class DriverResolutionTest {
         assertTrue(error.message.orEmpty().contains("provider inconsistency"))
     }
 
+    @Test
+    fun unlabelled_marginal_tax_is_not_used() {
+        val unlabelled = financingTimeseries().copy(
+            marginalTaxRate = financingTimeseries().marginalTaxRate.map { it.copy(concept = null) },
+        )
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            resolveRateInputs(unlabelled, 120L, 430).getOrThrow()
+        }
+        assertTrue(error.message.orEmpty().contains("marginal tax is unavailable"))
+    }
+
     private fun financingTimeseries() = FundamentalTimeseries(
         interestExpense = listOf(
             AnnualReportedValue("2021-12-31", 5.0),

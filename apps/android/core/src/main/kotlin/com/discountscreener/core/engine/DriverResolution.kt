@@ -139,7 +139,6 @@ internal fun resolveRateInputs(
         WaccFieldSource.TaxReconciliation,
         WaccFieldSource.JurisdictionStatutory,
         WaccFieldSource.DomicileTaxProxy,
-        WaccFieldSource.ReportedMarginalTax,
     ).firstOrNull { source ->
         taxByPeriod.any { (period, _, candidate) ->
             candidate == source && debtPeriods.contains(period)
@@ -155,10 +154,7 @@ internal fun resolveRateInputs(
     require(taxPeriods.isNotEmpty()) {
         "fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources"
     }
-    val quality = if (taxPeriods.size >= 3 && selectedTaxSource !in setOf(
-            WaccFieldSource.JurisdictionStatutory,
-            WaccFieldSource.DomicileTaxProxy,
-        )) {
+    val quality = if (taxPeriods.size >= 3 && selectedTaxSource != WaccFieldSource.DomicileTaxProxy) {
         DriverEvidenceQuality.Solid
     } else {
         DriverEvidenceQuality.Provisional
@@ -203,7 +199,7 @@ private fun taxSource(concept: String?): WaccFieldSource = when {
         WaccFieldSource.JurisdictionStatutory
     concept?.contains("Domicile", ignoreCase = true) == true ->
         WaccFieldSource.DomicileTaxProxy
-    else -> WaccFieldSource.ReportedMarginalTax
+    else -> WaccFieldSource.Unavailable
 }
 
 internal fun annualKey(value: com.discountscreener.core.model.AnnualReportedValue): String =

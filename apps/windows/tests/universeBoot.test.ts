@@ -57,7 +57,7 @@ test("canonicalUniverseName never persists test alias", () => {
   assert.equal(canonicalUniverseName("sp500"), "sp500");
 });
 
-test("unlocked maps test alias to qa before apply", () => {
+test("unlocked ignores a QA value persisted by an earlier forced QA session", () => {
   const plan = planUniverseBoot(
     {
       name: "sp500",
@@ -65,10 +65,10 @@ test("unlocked maps test alias to qa before apply", () => {
       symbols_loaded: 0,
       profile_locked: false,
     },
-    "test",
+    "qa",
   );
   assert.equal(plan.kind, "apply_saved");
   if (plan.kind === "apply_saved") {
-    assert.equal(plan.name, "qa");
+    assert.equal(plan.name, "sp500");
   }
 });
