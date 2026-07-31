@@ -28,7 +28,11 @@ export function planUniverseBoot(
   const saved = savedLocal && savedLocal.length > 0 ? savedLocal : "sp500";
   // Never persist alias `test` — callers should only store canonical ids.
   const canonical = saved === "test" ? "qa" : saved;
-  return { kind: "apply_saved", name: canonical };
+  // QA is a launch-scoped test profile, never the regular application's saved
+  // starting universe. This also repairs sessions where an earlier forced QA
+  // launch overwrote localStorage.
+  const name = canonical === "qa" ? "sp500" : canonical;
+  return { kind: "apply_saved", name };
 }
 
 /** Canonical id for persistence (never alias `test`). */
