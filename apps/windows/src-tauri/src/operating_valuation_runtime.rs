@@ -11,8 +11,13 @@ use crate::operating_valuation::{
     OperatingRouteInput, ProjectionPolicy, StructuralDistortion,
 };
 use crate::quote_summary::{ForwardForecastEvidence, ForwardForecastProviderError};
+use crate::source_continuity::{
+    emits_source_discontinuity, evaluate_source_continuity, ContinuityStatus,
+    SourceContinuityDecision, SourceContinuityEvidence, SourceContinuityPolicy,
+    CONTINUITY_POLICY_VERSION,
+};
 
-pub const RUNTIME_POLICY_VERSION: &str = "operating-valuation-runtime/3";
+pub const RUNTIME_POLICY_VERSION: &str = "operating-valuation-runtime/4";
 pub const FORWARD_RETRY_AFTER_SECONDS: i64 = 90;
 
 pub fn fundamentals_fingerprint(fundamentals: &FundamentalSnapshot) -> String {
@@ -60,6 +65,10 @@ pub struct OperatingRuntimeDiagnostics {
     pub runtime_policy_version: String,
     pub router_policy_version: String,
     pub model_policy_version: String,
+    #[serde(default)]
+    pub continuity_policy_version: String,
+    #[serde(default)]
+    pub continuity_status: Option<ContinuityStatus>,
     pub source_fingerprints: Vec<String>,
     pub code_locators: Vec<String>,
 }
@@ -196,14 +205,46 @@ fn through_cycle_business(fundamentals: &FundamentalSnapshot) -> bool {
     )
 }
 
+/// Build pure continuity evidence from fundamentals + FCFF diagnostics.
+pub fn continuity_evidence_from_runtime(
+    fundamentals: &FundamentalSnapshot,
+    fcff: Option<&DcfAnalysis>,
+    as_of_epoch_day: i64,
+) -> SourceContinuityEvidence {
+    let years = fcff
+        .map(|analysis| analysis.diagnostics.fcf_years.as_slice())
+        .unwrap_or(&[]);
+    SourceContinuityEvidence {
+        latest_sec_fiscal_year: years.last().copied(),
+        sec_series_length: years.len() as u32,
+        last_sec_ocf_dollars: fcff.and_then(|analysis| analysis.diagnostics.latest_ocf_dollars),
+        last_sec_fcf_dollars: fcff.and_then(|analysis| analysis.diagnostics.latest_fcf_dollars),
+        yahoo_ocf_dollars: fundamentals.operating_cash_flow_dollars,
+        yahoo_fcf_dollars: fundamentals.free_cash_flow_dollars,
+        sec_cik: None,
+        yahoo_cik: None,
+        as_of_epoch_day,
+    }
+}
+
+pub fn evaluate_runtime_continuity(
+    fundamentals: &FundamentalSnapshot,
+    fcff: Option<&DcfAnalysis>,
+    as_of_epoch_day: i64,
+) -> SourceContinuityDecision {
+    let evidence = continuity_evidence_from_runtime(fundamentals, fcff, as_of_epoch_day);
+    evaluate_source_continuity(&evidence, &SourceContinuityPolicy::default())
+}
+
 pub fn derive_structural_distortions(
     fundamentals: &FundamentalSnapshot,
     fcff: Option<&DcfAnalysis>,
     fcff_failure: Option<&str>,
-    current_year: i32,
+    as_of_epoch_day: i64,
 ) -> Vec<StructuralDistortion> {
+    let continuity = evaluate_runtime_continuity(fundamentals, fcff, as_of_epoch_day);
+    let source_discontinuity = emits_source_discontinuity(&continuity);
     let latest_year = fcff.and_then(|analysis| analysis.diagnostics.fcf_years.last().copied());
-    let source_discontinuity = latest_year.is_none_or(|year| year < current_year - 1);
     let normalized_margin_bps = fcff.and_then(|analysis| {
         let normalized = i128::from(analysis.diagnostics.normalized_fcff_dollars?);
         let revenue = i128::from(analysis.diagnostics.latest_revenue_dollars?);
@@ -320,12 +361,16 @@ pub fn route_runtime_valuation(input: RuntimeValuationInput<'_>) -> OperatingVal
         policy,
     });
     let fcff_candidate = fcff_candidate(input.fcff_analysis, input.fcff_failure);
-    let current_year = epoch_day_year(input.as_of_epoch_day);
+    let continuity = evaluate_runtime_continuity(
+        input.fundamentals,
+        input.fcff_analysis,
+        input.as_of_epoch_day,
+    );
     let structural_distortions = derive_structural_distortions(
         input.fundamentals,
         input.fcff_analysis,
         input.fcff_failure,
-        current_year,
+        input.as_of_epoch_day,
     );
     let decision = route_operating_models(OperatingRouteInput {
         business_class: input.business_class,
@@ -347,6 +392,7 @@ pub fn route_runtime_valuation(input: RuntimeValuationInput<'_>) -> OperatingVal
     };
     let mut source_fingerprints = vec![decision.forward_candidate.fingerprint.clone()];
     source_fingerprints.push(fundamentals_fingerprint(input.fundamentals));
+    source_fingerprints.push(continuity.fingerprint.clone());
     if !decision.fcff_candidate.fingerprint.is_empty() {
         source_fingerprints.push(decision.fcff_candidate.fingerprint.clone());
     }
@@ -373,9 +419,12 @@ pub fn route_runtime_valuation(input: RuntimeValuationInput<'_>) -> OperatingVal
             runtime_policy_version: RUNTIME_POLICY_VERSION.into(),
             router_policy_version: crate::operating_valuation::ROUTER_POLICY_VERSION.into(),
             model_policy_version: crate::dcf_model::MODEL_POLICY_VERSION.into(),
+            continuity_policy_version: CONTINUITY_POLICY_VERSION.into(),
+            continuity_status: Some(continuity.status),
             source_fingerprints,
             code_locators: vec![
                 "operating_valuation_runtime.rs#route_runtime_valuation".into(),
+                "source_continuity.rs#evaluate_source_continuity".into(),
                 "operating_valuation.rs#route_operating_models".into(),
                 "operating_valuation.rs#value_forward_earnings".into(),
                 "dcf_model.rs#compute".into(),
@@ -451,14 +500,6 @@ fn fcff_candidate(analysis: Option<&DcfAnalysis>, failure: Option<&str>) -> Fcff
     }
 }
 
-fn epoch_day_year(epoch_day: i64) -> i32 {
-    use chrono::{Datelike, TimeDelta};
-    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid Unix epoch");
-    epoch
-        .checked_add_signed(TimeDelta::days(epoch_day))
-        .map_or(1970, |date| date.year())
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -470,6 +511,7 @@ mod tests {
     use crate::engine::FundamentalSnapshot;
     use crate::operating_valuation::{OperatingModel, RouteStatus, StructuralDistortion};
     use crate::quote_summary::ForwardForecastEvidence;
+    use crate::source_continuity::ContinuityStatus;
 
     use super::*;
 
@@ -499,6 +541,9 @@ mod tests {
             return_on_equity_bps: Some(3_055),
             debt_to_equity_hundredths: Some(4_046),
             beta_millis: Some(1_350),
+            // Aligned Yahoo cash so continuity does not invent discontinuity.
+            operating_cash_flow_dollars: Some(115_000_000_000),
+            free_cash_flow_dollars: Some(8_000_000_000),
             ..Default::default()
         }
     }
@@ -534,11 +579,37 @@ mod tests {
                 normalized_fcff_dollars: Some(normalized),
                 latest_revenue_dollars: Some(revenue),
                 fcf_years: vec![2023, 2024, 2025],
+                latest_fcf_dollars: Some(7_695_000_000),
+                latest_ocf_dollars: Some(115_900_000_000),
                 driver_input_fingerprint: Some("fcff:test".into()),
                 valuation_driver: "driver_based_fcff".into(),
                 ..Default::default()
             },
         }
+    }
+
+    fn sndk_fund() -> FundamentalSnapshot {
+        FundamentalSnapshot {
+            symbol: "SNDK".into(),
+            sector_key: Some("technology".into()),
+            industry_key: Some("semiconductors".into()),
+            return_on_equity_bps: Some(1_200),
+            debt_to_equity_hundredths: Some(2_000),
+            beta_millis: Some(1_400),
+            operating_cash_flow_dollars: Some(4_640_000_000),
+            free_cash_flow_dollars: Some(2_260_000_000),
+            ..Default::default()
+        }
+    }
+
+    fn sndk_fcff() -> DcfAnalysis {
+        let mut analysis = fcff(500, 50, 1_000);
+        analysis.diagnostics.fcf_years = vec![2020, 2021, 2022];
+        analysis.diagnostics.latest_fcf_dollars = Some(-120_000_000);
+        analysis.diagnostics.latest_ocf_dollars = Some(84_000_000);
+        analysis.diagnostics.normalized_fcff_dollars = Some(-50_000_000);
+        analysis.diagnostics.latest_revenue_dollars = Some(2_000_000_000);
+        analysis
     }
 
     #[test]
@@ -553,9 +624,30 @@ mod tests {
     #[test]
     fn thin_fcff_and_durable_returns_are_structural_evidence() {
         let analysis = fcff(900, 10, 1_000);
-        let distortions = derive_structural_distortions(&fund(), Some(&analysis), None, 2026);
+        let distortions = derive_structural_distortions(&fund(), Some(&analysis), None, 20_665);
         assert!(distortions.contains(&StructuralDistortion::ThinNormalizedFcffMargin));
         assert!(distortions.contains(&StructuralDistortion::DurableExcessReturnEvidence));
+        assert!(!distortions.contains(&StructuralDistortion::SourceDiscontinuity));
+    }
+
+    #[test]
+    fn sndk_class_emits_source_discontinuity_via_continuity_gate() {
+        let analysis = sndk_fcff();
+        let continuity = evaluate_runtime_continuity(&sndk_fund(), Some(&analysis), 20_665);
+        assert_eq!(continuity.status, ContinuityStatus::Discontinuous);
+        let distortions =
+            derive_structural_distortions(&sndk_fund(), Some(&analysis), None, 20_665);
+        assert!(distortions.contains(&StructuralDistortion::SourceDiscontinuity));
+        assert!(continuity.fingerprint.contains(CONTINUITY_POLICY_VERSION));
+    }
+
+    #[test]
+    fn continuous_issuer_does_not_force_forward_from_calendar_age() {
+        let analysis = fcff(25_000, 200, 1_000);
+        let continuity = evaluate_runtime_continuity(&fund(), Some(&analysis), 20_665);
+        assert_eq!(continuity.status, ContinuityStatus::Continuous);
+        let distortions = derive_structural_distortions(&fund(), Some(&analysis), None, 20_665);
+        assert!(!distortions.contains(&StructuralDistortion::SourceDiscontinuity));
     }
 
     #[test]

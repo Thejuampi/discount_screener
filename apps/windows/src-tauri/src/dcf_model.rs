@@ -222,6 +222,9 @@ impl WaccInputProvenance {
 pub struct DcfDiagnostics {
     /// Most recent fiscal FCF observation, never a normalized replacement.
     pub latest_fcf_dollars: Option<i64>,
+    /// Most recent fiscal OCF observation when the provider supplied it.
+    #[serde(default)]
+    pub latest_ocf_dollars: Option<i64>,
     /// FCFF run-rate actually used by the valuation model.
     #[serde(default)]
     pub fcf_run_rate_dollars: Option<i64>,
@@ -971,6 +974,7 @@ fn residual_income(
         reason_codes: reasons,
         diagnostics: DcfDiagnostics {
             latest_fcf_dollars: None,
+            latest_ocf_dollars: None,
             fcf_run_rate_dollars: None,
             shares_outstanding: shares_u,
             cost_of_equity_bps: Some(re_base),
@@ -1706,6 +1710,11 @@ fn fcff_driver_wacc(
             latest_fcf_dollars: fcf_history
                 .last()
                 .map(|point| point.value_dollars.round() as i64),
+            latest_ocf_dollars: fcf_history.last().and_then(|point| {
+                point
+                    .operating_cash_flow_dollars
+                    .map(|value| value.round() as i64)
+            }),
             fcf_run_rate_dollars: Some(drivers.normalized_fcff_dollars.round() as i64),
             shares_outstanding: Some(shares.round() as u64),
             cost_of_equity_bps: Some(resolved.cost_of_equity_bps),
@@ -1944,6 +1953,11 @@ fn fcff_wacc(
             latest_fcf_dollars: fcf_history
                 .last()
                 .map(|point| point.value_dollars.round() as i64),
+            latest_ocf_dollars: fcf_history.last().and_then(|point| {
+                point
+                    .operating_cash_flow_dollars
+                    .map(|value| value.round() as i64)
+            }),
             fcf_run_rate_dollars: Some(run_rate.round() as i64),
             shares_outstanding: fundamentals.shares_outstanding.filter(|&s| s > 0),
             cost_of_equity_bps: Some(resolved.cost_of_equity_bps),
