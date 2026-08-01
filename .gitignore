@@ -58,3 +58,8 @@ schwab reports/
 *.sqlite-shm
 *.db
 history.sqlite
+
+# Agent / local git worktrees
+.worktrees/
+worktrees/
+
