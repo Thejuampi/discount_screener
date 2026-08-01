@@ -1,0 +1,145 @@
+{
+  "contract": "source-continuity",
+  "schemaVersion": 1,
+  "policyVersion": "source-continuity/1",
+  "scope": "Pure SEC vs Yahoo cash-flow continuity gate. No market price, analyst target, or per-ticker exception lists. Relative fiscal lag is supporting evidence only — never an absolute year wall.",
+  "inputBoundary": {
+    "allowed": [
+      "latest_sec_fiscal_year",
+      "sec_series_length",
+      "last_sec_ocf_dollars",
+      "last_sec_fcf_dollars",
+      "yahoo_ocf_dollars",
+      "yahoo_fcf_dollars",
+      "sec_cik",
+      "yahoo_cik",
+      "as_of_epoch_day",
+      "versioned_policy_thresholds"
+    ],
+    "forbidden": [
+      "market_price",
+      "analyst_target",
+      "ticker_allowlist",
+      "absolute_year_wall"
+    ]
+  },
+  "policyDefaults": {
+    "scaleRatioThreshold": 5,
+    "materialityFloorDollars": 10000000,
+    "minConfidentSeriesLength": 4
+  },
+  "outcomes": [
+    "continuous",
+    "discontinuous",
+    "insufficient_evidence"
+  ],
+  "reasonCodes": [
+    "sec_series_absent",
+    "sec_series_short",
+    "sec_fiscal_lag_supporting",
+    "scale_mismatch_ocf",
+    "scale_mismatch_fcf",
+    "scale_sign_conflict",
+    "entity_cik_mismatch",
+    "yahoo_cash_missing",
+    "aligned_scale",
+    "sec_series_present"
+  ],
+  "routing": {
+    "emitsSourceDiscontinuity": ["discontinuous"],
+    "doesNotEmitSourceDiscontinuity": ["continuous", "insufficient_evidence"]
+  },
+  "executableFixtures": [
+    {
+      "name": "sndk_class_discontinuous",
+      "evidence": {
+        "latestSecFiscalYear": 2022,
+        "secSeriesLength": 3,
+        "lastSecOcfDollars": 84000000,
+        "lastSecFcfDollars": -120000000,
+        "yahooOcfDollars": 4640000000,
+        "yahooFcfDollars": 2260000000,
+        "secCik": null,
+        "yahooCik": null,
+        "asOfEpochDay": 20665
+      },
+      "expectedStatus": "discontinuous",
+      "expectedReasonsInclude": [
+        "scale_mismatch_ocf",
+        "scale_mismatch_fcf",
+        "scale_sign_conflict",
+        "sec_series_short",
+        "sec_fiscal_lag_supporting"
+      ],
+      "expectedEmitsSourceDiscontinuity": true
+    },
+    {
+      "name": "aapl_class_continuous",
+      "evidence": {
+        "latestSecFiscalYear": 2025,
+        "secSeriesLength": 5,
+        "lastSecOcfDollars": 118000000000,
+        "lastSecFcfDollars": 99000000000,
+        "yahooOcfDollars": 118300000000,
+        "yahooFcfDollars": 98800000000,
+        "secCik": 320193,
+        "yahooCik": 320193,
+        "asOfEpochDay": 20665
+      },
+      "expectedStatus": "continuous",
+      "expectedReasonsInclude": ["aligned_scale", "sec_series_present"],
+      "expectedEmitsSourceDiscontinuity": false
+    },
+    {
+      "name": "calendar_lag_without_scale_mismatch_stays_continuous",
+      "evidence": {
+        "latestSecFiscalYear": 2024,
+        "secSeriesLength": 5,
+        "lastSecOcfDollars": 118000000000,
+        "lastSecFcfDollars": 99000000000,
+        "yahooOcfDollars": 118300000000,
+        "yahooFcfDollars": 98800000000,
+        "secCik": null,
+        "yahooCik": null,
+        "asOfEpochDay": 20665
+      },
+      "expectedStatus": "continuous",
+      "expectedReasonsInclude": ["sec_fiscal_lag_supporting", "aligned_scale"],
+      "expectedEmitsSourceDiscontinuity": false
+    },
+    {
+      "name": "missing_yahoo_cash_is_insufficient_evidence",
+      "evidence": {
+        "latestSecFiscalYear": 2025,
+        "secSeriesLength": 5,
+        "lastSecOcfDollars": 118000000000,
+        "lastSecFcfDollars": 99000000000,
+        "yahooOcfDollars": null,
+        "yahooFcfDollars": null,
+        "secCik": null,
+        "yahooCik": null,
+        "asOfEpochDay": 20665
+      },
+      "expectedStatus": "insufficient_evidence",
+      "expectedReasonsInclude": ["yahoo_cash_missing"],
+      "expectedEmitsSourceDiscontinuity": false
+    },
+    {
+      "name": "entity_cik_mismatch_is_discontinuous",
+      "evidence": {
+        "latestSecFiscalYear": 2025,
+        "secSeriesLength": 5,
+        "lastSecOcfDollars": 118000000000,
+        "lastSecFcfDollars": 99000000000,
+        "yahooOcfDollars": 118300000000,
+        "yahooFcfDollars": 98800000000,
+        "secCik": 320193,
+        "yahooCik": 999999,
+        "asOfEpochDay": 20665
+      },
+      "expectedStatus": "discontinuous",
+      "expectedReasonsInclude": ["entity_cik_mismatch"],
+      "expectedEmitsSourceDiscontinuity": true
+    }
+  ]
+}

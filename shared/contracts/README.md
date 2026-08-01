@@ -33,6 +33,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
 - `valuation-evidence-sotp.json`:
   point-in-time evidence replay, closed-world component routing, evidence-backed SOTP bridge, refusal states, and historical driver-validation goldens; Windows and Android compare fixed-point outputs and fingerprints exactly
+- `source-continuity-v1.json`:
+  pure SEC vs Yahoo cash continuity gate (SNDK-class); Continuous / Discontinuous / InsufficientEvidence with versioned scale thresholds; no price/target and no absolute year walls
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

@@ -38,6 +38,7 @@ mod schwab_api;
 mod sec_driver_normalization_policy_generated;
 mod sec_normalization;
 mod smc;
+pub mod source_continuity;
 mod state;
 mod stooq;
 mod ticker_search;
