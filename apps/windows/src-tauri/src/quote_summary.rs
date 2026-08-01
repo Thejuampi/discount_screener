@@ -1,5 +1,20 @@
 //! Pure parse of Yahoo `v10/finance/quoteSummary` JSON (Android port).
 //! Network + crumb stay in `fetcher` / `yahoo_session`.
+//!
+//! # Financial residual-income driver field precedence
+//!
+//! Residual income for `FinancialServices` needs reported book, ROE, and retention.
+//! Providers often split these across modules; never invent drivers and never fall
+//! back to FCFF when they are absent.
+//!
+//! | Driver | Source precedence | Notes |
+//! | --- | --- | --- |
+//! | **Payout → retention** | `financialData.payoutRatio` then `summaryDetail.payoutRatio` | Keep only finite values in `[0, 1]`; `retention = (1 − payout) × 10_000` bps. Empty Yahoo objects (`{}`) are treated as missing. |
+//! | **Book / BVPS** | `defaultKeyStatistics.bookValue` (or `bookValuePerShare`), else `price / priceToBook` | Positive book only. Price is `financialData.currentPrice` → `price.regularMarketPrice` → cents fallback. |
+//! | **ROE** | `financialData.returnOnEquity` only | Reported ROE; no EPS/book synthesis. |
+//!
+//! Thin fundamentals refreshes must preserve already-resolved `retention_bps` /
+//! `book_value_per_share_cents` / `return_on_equity_bps` (see `ScreenerState::ingest_fundamentals`).
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -365,9 +380,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
         price_to_book_hundredths: statistics
             .and_then(|s| raw_double(s, "priceToBook"))
             .map(|v| (v * 100.0) as u32),
-        return_on_equity_bps: financial_data
-            .and_then(|f| raw_double(f, "returnOnEquity"))
-            .map(|v| (v * 10_000.0) as i32),
+        return_on_equity_bps: resolve_return_on_equity_bps(financial_data),
         ebitda_dollars: financial_data
             .and_then(|f| raw_double(f, "ebitda"))
             .map(|v| v as i64),
@@ -399,28 +412,13 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
         earnings_growth_bps: financial_data
             .and_then(|f| raw_double(f, "earningsGrowth"))
             .map(|v| (v * 10_000.0) as i32),
-        book_value_per_share_cents: statistics
-            .and_then(|s| raw_double(s, "bookValue").or_else(|| raw_double(s, "bookValuePerShare")))
-            .filter(|v| *v > 0.0)
-            .map(|v| (v * 100.0).round() as i64)
-            .or_else(|| {
-                // Derive BVPS = price / P/B when Yahoo omits bookValue.
-                let price = financial_data
-                    .and_then(|f| raw_double(f, "currentPrice"))
-                    .or_else(|| price.and_then(|p| raw_double(p, "regularMarketPrice")))
-                    .or_else(|| market_price_cents.map(|c| c as f64 / 100.0))?;
-                let pb = statistics.and_then(|s| raw_double(s, "priceToBook"))?;
-                if price > 0.0 && pb > 0.0 {
-                    Some(((price / pb) * 100.0).round() as i64)
-                } else {
-                    None
-                }
-            }),
-        retention_bps: financial_data
-            .and_then(|f| raw_double(f, "payoutRatio"))
-            .or_else(|| summary_detail.and_then(|detail| raw_double(detail, "payoutRatio")))
-            .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
-            .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32),
+        book_value_per_share_cents: resolve_book_value_per_share_cents(
+            statistics,
+            financial_data,
+            price,
+            market_price_cents,
+        ),
+        retention_bps: resolve_retention_bps(financial_data, summary_detail),
     });
 
     FetchResult {
@@ -550,6 +548,53 @@ fn derive_shares_outstanding(
         }
         _ => None,
     }
+}
+
+/// Reported ROE only (`financialData.returnOnEquity`). No EPS/book synthesis.
+fn resolve_return_on_equity_bps(financial_data: Option<&Value>) -> Option<i32> {
+    financial_data
+        .and_then(|f| raw_double(f, "returnOnEquity"))
+        .filter(|roe| roe.is_finite())
+        .map(|v| (v * 10_000.0) as i32)
+}
+
+/// BVPS: statistics bookValue/bookValuePerShare, else price / P/B.
+fn resolve_book_value_per_share_cents(
+    statistics: Option<&Value>,
+    financial_data: Option<&Value>,
+    price: Option<&Value>,
+    market_price_cents: Option<i64>,
+) -> Option<i64> {
+    if let Some(cents) = statistics
+        .and_then(|s| raw_double(s, "bookValue").or_else(|| raw_double(s, "bookValuePerShare")))
+        .filter(|v| *v > 0.0)
+        .map(|v| (v * 100.0).round() as i64)
+    {
+        return Some(cents);
+    }
+    // Derive BVPS = price / P/B when Yahoo omits bookValue.
+    let price_dollars = financial_data
+        .and_then(|f| raw_double(f, "currentPrice"))
+        .or_else(|| price.and_then(|p| raw_double(p, "regularMarketPrice")))
+        .or_else(|| market_price_cents.map(|c| c as f64 / 100.0))?;
+    let pb = statistics.and_then(|s| raw_double(s, "priceToBook"))?;
+    if price_dollars > 0.0 && pb > 0.0 {
+        Some(((price_dollars / pb) * 100.0).round() as i64)
+    } else {
+        None
+    }
+}
+
+/// Retention from payout: financialData first, then summaryDetail (COF-class).
+fn resolve_retention_bps(
+    financial_data: Option<&Value>,
+    summary_detail: Option<&Value>,
+) -> Option<i32> {
+    financial_data
+        .and_then(|f| raw_double(f, "payoutRatio"))
+        .or_else(|| summary_detail.and_then(|detail| raw_double(detail, "payoutRatio")))
+        .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
+        .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32)
 }
 
 fn is_usable_name(name: &str, symbol: &str) -> bool {
@@ -709,6 +754,167 @@ mod tests {
                 .and_then(|value| value.retention_bps),
             Some(8_347),
             "a thin refresh must not erase an already resolved payout/retention driver"
+        );
+    }
+
+    /// Bank / insurer / consumer-finance all resolve retention when payout lives
+    /// only on `summaryDetail` (financialData empty object).
+    #[test]
+    fn financial_fixtures_resolve_summary_detail_payout_for_residual_income() {
+        let cases = [
+            (
+                "JPM-retention.json",
+                "JPM",
+                7_200,  // 1 - 0.28
+                11_540, // book $115.40
+                1_620,  // ROE 16.2%
+            ),
+            (
+                "ACGL-retention.json",
+                "ACGL",
+                7_000, // 1 - 0.30
+                6_511, // book $65.11
+                2_000, // ROE 20%
+            ),
+            (
+                "COF-retention.json",
+                "COF",
+                8_347,  // 1 - 0.16530001
+                16_786, // book $167.859
+                903,    // ROE 9.03% (truncated)
+            ),
+        ];
+        for (fixture_name, symbol, retention_bps, bvps_cents, roe_bps) in cases {
+            let result = parse_quote_summary(&fixture(fixture_name), symbol);
+            let snapshot = result
+                .snapshot
+                .unwrap_or_else(|| panic!("{symbol}: snapshot"));
+            let fundamentals = result
+                .fundamentals
+                .unwrap_or_else(|| panic!("{symbol}: fundamentals"));
+            assert_eq!(
+                fundamentals.retention_bps,
+                Some(retention_bps),
+                "{symbol} retention from summaryDetail payout"
+            );
+            assert_eq!(
+                fundamentals.book_value_per_share_cents,
+                Some(bvps_cents),
+                "{symbol} reported book"
+            );
+            assert_eq!(
+                fundamentals.return_on_equity_bps,
+                Some(roe_bps),
+                "{symbol} reported ROE"
+            );
+            let analysis = crate::dcf_model::compute_from_fundamentals(
+                &fundamentals,
+                Some(snapshot.market_price_cents),
+                "yahoo_fixture",
+            )
+            .unwrap_or_else(|e| panic!("{symbol}: residual income expected, got {e}"));
+            assert_eq!(
+                analysis.model,
+                crate::dcf_model::ValuationModel::ResidualIncomeEquity,
+                "{symbol} must route to residual income"
+            );
+            assert_eq!(
+                analysis.business_class,
+                crate::dcf_model::BusinessClass::FinancialServices
+            );
+            assert!(
+                analysis.base_intrinsic_value_cents > 0,
+                "{symbol} intrinsic must be positive"
+            );
+            assert!(analysis
+                .reason_codes
+                .iter()
+                .any(|r| { r == &format!("retention_source=reported:{retention_bps}bps") }));
+        }
+    }
+
+    #[test]
+    fn payout_prefers_financial_data_over_summary_detail() {
+        let mut root = fixture("COF-retention.json");
+        root["quoteSummary"]["result"][0]["financialData"]["payoutRatio"] =
+            serde_json::json!({ "raw": 0.40 });
+        // summaryDetail still 0.1653 — financialData must win.
+        let fund = parse_quote_summary(&root, "COF")
+            .fundamentals
+            .expect("fundamentals");
+        assert_eq!(fund.retention_bps, Some(6_000)); // 1 - 0.40
+    }
+
+    #[test]
+    fn missing_payout_in_both_modules_yields_no_retention_and_ri_unavailable() {
+        let mut root = fixture("JPM-retention.json");
+        root["quoteSummary"]["result"][0]["financialData"]
+            .as_object_mut()
+            .unwrap()
+            .remove("payoutRatio");
+        root["quoteSummary"]["result"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("summaryDetail");
+        let result = parse_quote_summary(&root, "JPM");
+        let snapshot = result.snapshot.expect("snapshot");
+        let fundamentals = result.fundamentals.expect("fundamentals");
+        assert_eq!(
+            fundamentals.retention_bps, None,
+            "no payout module must leave retention unresolved"
+        );
+        let err = crate::dcf_model::compute_from_fundamentals(
+            &fundamentals,
+            Some(snapshot.market_price_cents),
+            "yahoo_fixture",
+        )
+        .expect_err("RI must refuse without retention");
+        assert!(
+            err.contains("retention") || err.contains("payout"),
+            "typed missing-driver reason, got: {err}"
+        );
+        // Even with a float-like FCF series attached, financials must not FCFF.
+        let fake_fcf = [
+            crate::dcf_model::FcfPoint::new(2022, 5_000_000_000.0),
+            crate::dcf_model::FcfPoint::new(2023, 6_000_000_000.0),
+            crate::dcf_model::FcfPoint::new(2024, 7_000_000_000.0),
+        ];
+        let err2 = crate::dcf_model::compute(
+            &fundamentals,
+            &fake_fcf,
+            Some(snapshot.market_price_cents),
+            "yahoo_fixture",
+        )
+        .expect_err("must not silent-FCFF financials");
+        assert!(
+            err2.contains("retention") || err2.contains("payout"),
+            "still retention refuse, not FCFF: {err2}"
+        );
+    }
+
+    #[test]
+    fn thin_refresh_preserves_book_roe_and_retention_for_financials() {
+        let result = parse_quote_summary(&fixture("ACGL-retention.json"), "ACGL");
+        let snapshot = result.snapshot.expect("snapshot");
+        let fundamentals = result.fundamentals.expect("fundamentals");
+        let mut state = crate::engine::ScreenerState::new();
+        state.ingest_snapshot(snapshot);
+        state.ingest_fundamentals(fundamentals.clone());
+        assert!(state.dcf_analyses.get("ACGL").is_some());
+
+        state.ingest_fundamentals(crate::engine::FundamentalSnapshot {
+            symbol: "ACGL".into(),
+            ..Default::default()
+        });
+        let merged = state.fundamentals.get("ACGL").expect("merged ACGL");
+        assert_eq!(merged.retention_bps, fundamentals.retention_bps);
+        assert_eq!(
+            merged.book_value_per_share_cents,
+            fundamentals.book_value_per_share_cents
+        );
+        assert_eq!(
+            merged.return_on_equity_bps,
+            fundamentals.return_on_equity_bps
         );
     }
 

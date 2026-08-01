@@ -3547,6 +3547,30 @@ mod tests {
     }
 
     #[test]
+    fn financials_without_retention_fail_not_fcff_fallback() {
+        let mut f = acgl_like_fund();
+        f.retention_bps = None;
+        let fake_fcf = sample_fcf();
+        let err = compute(&f, &fake_fcf, Some(10_336), "test").unwrap_err();
+        assert!(
+            err.contains("retention") || err.contains("payout"),
+            "expected missing retention refuse, got {err}"
+        );
+    }
+
+    #[test]
+    fn financials_without_roe_fail_not_fcff_fallback() {
+        let mut f = acgl_like_fund();
+        f.return_on_equity_bps = None;
+        let fake_fcf = sample_fcf();
+        let err = compute(&f, &fake_fcf, Some(10_336), "test").unwrap_err();
+        assert!(
+            err.contains("return on equity") || err.contains("equity"),
+            "expected missing ROE refuse, got {err}"
+        );
+    }
+
+    #[test]
     fn cost_of_equity_extremes_refuse_instead_of_saturating() {
         let fund = FundamentalSnapshot {
             symbol: "EXTREME".into(),

@@ -507,6 +507,56 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun financials_without_retention_do_not_silent_fcff_fallback() {
+        val fund = FundamentalSnapshot(
+            symbol = "JPM",
+            sectorName = "Financial Services",
+            industryName = "Banks - Diversified",
+            sharesOutstanding = 2_861_450_000L,
+            returnOnEquityBps = 1_620,
+            bookValuePerShareCents = 11_540,
+            marketCapDollars = 568_000_000_000L,
+            retentionBps = null,
+        )
+        val result = DcfAnalysisEngine.compute(
+            fundamentals = fund,
+            timeseries = completeTimeseries(),
+            marketPriceCents = 19_850,
+        )
+        assertTrue(result.isFailure)
+        val msg = result.exceptionOrNull()!!.message!!
+        assertTrue(
+            msg.contains("retention") || msg.contains("payout"),
+            "expected retention refuse, got: $msg",
+        )
+    }
+
+    @Test
+    fun jpm_like_bank_fixture_drivers_resolve_residual_income() {
+        val fund = FundamentalSnapshot(
+            symbol = "JPM",
+            sectorName = "Financial Services",
+            industryName = "Banks - Diversified",
+            sharesOutstanding = 2_861_450_000L,
+            returnOnEquityBps = 1_620,
+            bookValuePerShareCents = 11_540,
+            betaMillis = 1_080,
+            retentionBps = 7_200,
+            marketCapDollars = 568_000_000_000L,
+        )
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = fund,
+            timeseries = completeTimeseries(),
+            marketPriceCents = 19_850,
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(BusinessClass.FinancialServices, analysis.businessClass)
+        assertEquals(ValuationModel.ResidualIncomeEquity, analysis.model)
+        assertTrue(analysis.baseIntrinsicValueCents > 0)
+        assertTrue(analysis.reasonCodes.any { it.contains("retention_source=reported:7200bps") })
+    }
+
+    @Test
     fun unclassified_refuses_without_fcff_fallback() {
         val result = DcfAnalysisEngine.compute(
             fundamentals = completeFundamentals().copy(

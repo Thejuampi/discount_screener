@@ -102,6 +102,15 @@ private const val QUOTE_PAGE_ACCEPT =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 private const val QUOTE_PAGE_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
+/**
+ * Yahoo quoteSummary modules for list + financial RI drivers.
+ *
+ * Financial residual-income field precedence (parity with Windows `quote_summary.rs`):
+ * - payout → retention: `financialData.payoutRatio` then `summaryDetail.payoutRatio`
+ *   (finite `[0,1]` only; empty `{}` is missing)
+ * - book / BVPS: `defaultKeyStatistics.bookValue` | `bookValuePerShare`, else price / P/B
+ * - ROE: `financialData.returnOnEquity` only (reported; no synthesis)
+ */
 internal const val QUOTE_SUMMARY_MODULES =
     "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend"
 
@@ -664,7 +673,12 @@ private fun buildQuoteContext(
         trailingPeHundredths = statistics.rawDouble("trailingPE")?.times(100.0)?.roundToLong()?.toInt(),
         forwardPeHundredths = statistics.rawDouble("forwardPE")?.times(100.0)?.roundToLong()?.toInt(),
         priceToBookHundredths = statistics.rawDouble("priceToBook")?.times(100.0)?.roundToLong()?.toInt(),
-        returnOnEquityBps = financialData.rawDouble("returnOnEquity")?.times(10_000.0)?.roundToLong()?.toInt(),
+        // Reported ROE only (financialData); no EPS/book synthesis.
+        returnOnEquityBps = financialData.rawDouble("returnOnEquity")
+            ?.takeIf { it.isFinite() }
+            ?.times(10_000.0)
+            ?.roundToLong()
+            ?.toInt(),
         ebitdaDollars = financialData.rawDouble("ebitda")?.toLong(),
         enterpriseValueDollars = statistics.rawDouble("enterpriseValue")?.toLong(),
         enterpriseToEbitdaHundredths = statistics.rawDouble("enterpriseToEbitda")?.times(100.0)?.roundToLong()?.toInt(),
@@ -676,10 +690,15 @@ private fun buildQuoteContext(
         betaMillis = statistics.rawDouble("beta")?.times(1_000.0)?.roundToLong()?.toInt(),
         trailingEpsCents = statistics.rawDouble("trailingEps")?.times(100.0)?.roundToLong()?.toLong(),
         earningsGrowthBps = financialData.rawDouble("earningsGrowth")?.times(10_000.0)?.roundToLong()?.toInt(),
-        retentionBps = (financialData.rawDouble("payoutRatio")
-            ?: summaryDetail.rawDouble("payoutRatio"))
-            ?.takeIf { it.isFinite() && it in 0.0..1.0 }
-            ?.let { ((1.0 - it) * 10_000.0).roundToLong().toInt() },
+        // BVPS: statistics bookValue/bookValuePerShare, else price / P/B.
+        bookValuePerShareCents = resolveBookValuePerShareCents(
+            statistics = statistics,
+            financialData = financialData,
+            price = price,
+            chartMarketPriceCents = chartMarketPriceCents,
+        ),
+        // Retention: financialData.payoutRatio then summaryDetail.payoutRatio (COF-class).
+        retentionBps = resolveRetentionBps(financialData, summaryDetail),
     ).takeIf(FundamentalSnapshot::hasAnyValues)
 
     val snapshot = if (marketPriceCents != null && intrinsicValueCents != null && profitable != null) {
@@ -992,6 +1011,48 @@ internal fun resolveMarketCapDollars(
     val price = marketPriceDollars?.takeIf { it.isFinite() && it > 0.0 } ?: return null
     val derived = shares * price
     return derived.takeIf { it.isFinite() && it > 0.0 }?.toLong()
+}
+
+/** BVPS: statistics bookValue/bookValuePerShare, else price / P/B. */
+internal fun resolveBookValuePerShareCents(
+    statistics: JsonObject,
+    financialData: JsonObject,
+    price: JsonObject,
+    chartMarketPriceCents: Long?,
+): Long? {
+    statistics.rawDouble("bookValue")
+        ?.takeIf { it > 0.0 }
+        ?.times(100.0)
+        ?.roundToLong()
+        ?.let { return it }
+    statistics.rawDouble("bookValuePerShare")
+        ?.takeIf { it > 0.0 }
+        ?.times(100.0)
+        ?.roundToLong()
+        ?.let { return it }
+    val priceDollars = financialData.rawDouble("currentPrice")
+        ?: price.rawDouble("regularMarketPrice")
+        ?: chartMarketPriceCents?.takeIf { it > 0 }?.div(100.0)
+        ?: return null
+    val pb = statistics.rawDouble("priceToBook") ?: return null
+    if (priceDollars <= 0.0 || pb <= 0.0) return null
+    val bvps = priceDollars / pb
+    return bvps.takeIf { it.isFinite() && it > 0.0 }?.times(100.0)?.roundToLong()
+}
+
+/**
+ * Retention from payout: financialData first, then summaryDetail (COF-class).
+ * Empty Yahoo objects omit `raw` and resolve as missing.
+ */
+internal fun resolveRetentionBps(
+    financialData: JsonObject,
+    summaryDetail: JsonObject,
+): Int? {
+    val payout = financialData.rawDouble("payoutRatio")
+        ?: summaryDetail.rawDouble("payoutRatio")
+        ?: return null
+    if (!payout.isFinite() || payout !in 0.0..1.0) return null
+    return ((1.0 - payout) * 10_000.0).roundToLong().toInt()
 }
 
 private fun dollarsToCents(value: Double): Long? =

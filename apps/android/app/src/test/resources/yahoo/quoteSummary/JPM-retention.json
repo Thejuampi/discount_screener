@@ -1,0 +1,36 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {
+          "longName": "JPMorgan Chase & Co.",
+          "regularMarketPrice": { "raw": 198.5 },
+          "regularMarketPreviousClose": { "raw": 197.2 },
+          "marketCap": { "raw": 568000000000 }
+        },
+        "financialData": {
+          "currentPrice": { "raw": 198.5 },
+          "returnOnEquity": { "raw": 0.162 },
+          "payoutRatio": {}
+        },
+        "summaryDetail": {
+          "dividendRate": { "raw": 5.0 },
+          "payoutRatio": { "raw": 0.28 }
+        },
+        "defaultKeyStatistics": {
+          "sharesOutstanding": { "raw": 2861450000 },
+          "trailingEps": { "raw": 17.95 },
+          "bookValue": { "raw": 115.4 },
+          "priceToBook": { "raw": 1.72 },
+          "beta": { "raw": 1.08 }
+        },
+        "assetProfile": {
+          "sectorKey": "financial-services",
+          "sectorDisp": "Financial Services",
+          "industryKey": "banks-diversified",
+          "industryDisp": "Banks - Diversified"
+        }
+      }
+    ]
+  }
+}
