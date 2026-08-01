@@ -1,0 +1,265 @@
+{
+  "contract": "industry-beta-policy",
+  "version": "1",
+  "policyVersion": "industry-beta-policy/1",
+  "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
+  "notes": [
+    "Versioned sector/industry levered-beta priors for CoE shrink. Sole industry-prior source for Windows dcf_model and Android DcfAnalysisEngine.",
+    "Through-cycle industries (commodity E&P, integrated oil, specialty chemicals) carry higher priors so temporarily bond-like trailing betas are pulled toward cycle risk — not max(re, magic_constant) floors.",
+    "Unmapped sector/industry uses defaultPrior with provisional provenance. No per-ticker floors. Price and analyst targets are never CoE inputs.",
+    "Shrink weights are intentional Bayes/Blume estimation (company 67% / industry 33%). Match order: industryKey → industryNameContains → sectorKey → sectorNameContains → default."
+  ],
+  "shrink": {
+    "companyWeightPct": 67,
+    "industryWeightPct": 33
+  },
+  "defaultPrior": {
+    "betaMillis": 1000,
+    "throughCycle": false,
+    "provisional": true,
+    "entryId": "default"
+  },
+  "entries": [
+    {
+      "id": "oil_gas_ep",
+      "industryKeys": ["oil-gas-e-p"],
+      "industryNameContains": [
+        "oil & gas e&p",
+        "oil & gas exploration",
+        "oil and gas e&p",
+        "oil and gas exploration"
+      ],
+      "sectorKeys": [],
+      "sectorNameContains": [],
+      "betaMillis": 1500,
+      "throughCycle": true
+    },
+    {
+      "id": "oil_gas_integrated",
+      "industryKeys": ["oil-gas-integrated"],
+      "industryNameContains": [
+        "oil & gas integrated",
+        "oil and gas integrated"
+      ],
+      "sectorKeys": [],
+      "sectorNameContains": [],
+      "betaMillis": 1400,
+      "throughCycle": true
+    },
+    {
+      "id": "specialty_chemicals",
+      "industryKeys": ["specialty-chemicals"],
+      "industryNameContains": ["specialty chemicals"],
+      "sectorKeys": [],
+      "sectorNameContains": [],
+      "betaMillis": 1300,
+      "throughCycle": true
+    },
+    {
+      "id": "utilities",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["utilities"],
+      "sectorNameContains": ["utilit"],
+      "betaMillis": 600,
+      "throughCycle": false
+    },
+    {
+      "id": "consumer_staples",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["consumer-defensive", "consumer-staples"],
+      "sectorNameContains": ["consumer staples", "consumer defensive"],
+      "betaMillis": 700,
+      "throughCycle": false
+    },
+    {
+      "id": "healthcare",
+      "industryKeys": [],
+      "industryNameContains": ["pharma"],
+      "sectorKeys": ["healthcare"],
+      "sectorNameContains": ["health"],
+      "betaMillis": 900,
+      "throughCycle": false
+    },
+    {
+      "id": "semiconductors",
+      "industryKeys": ["semiconductors", "semiconductor-equipment-materials"],
+      "industryNameContains": ["semiconductor"],
+      "sectorKeys": [],
+      "sectorNameContains": [],
+      "betaMillis": 1300,
+      "throughCycle": false
+    },
+    {
+      "id": "software_technology",
+      "industryKeys": ["software-infrastructure", "software-application", "software-systems"],
+      "industryNameContains": ["software", "information technology"],
+      "sectorKeys": ["technology"],
+      "sectorNameContains": ["technolog"],
+      "betaMillis": 1200,
+      "throughCycle": false
+    },
+    {
+      "id": "energy_sector",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["energy"],
+      "sectorNameContains": ["energy"],
+      "betaMillis": 1100,
+      "throughCycle": false
+    },
+    {
+      "id": "financials",
+      "industryKeys": [],
+      "industryNameContains": ["bank", "insurance"],
+      "sectorKeys": ["financial-services", "financials"],
+      "sectorNameContains": ["financial"],
+      "betaMillis": 900,
+      "throughCycle": false
+    },
+    {
+      "id": "real_estate",
+      "industryKeys": [],
+      "industryNameContains": ["reit"],
+      "sectorKeys": ["real-estate"],
+      "sectorNameContains": ["real estate"],
+      "betaMillis": 850,
+      "throughCycle": false
+    },
+    {
+      "id": "consumer_cyclical",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["consumer-cyclical", "consumer-discretionary"],
+      "sectorNameContains": ["consumer cyclical", "consumer discretionary"],
+      "betaMillis": 1100,
+      "throughCycle": false
+    },
+    {
+      "id": "communication_services",
+      "industryKeys": ["telecom-services"],
+      "industryNameContains": ["telecom"],
+      "sectorKeys": ["communication-services"],
+      "sectorNameContains": ["communication services"],
+      "betaMillis": 900,
+      "throughCycle": false
+    },
+    {
+      "id": "industrials",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["industrials"],
+      "sectorNameContains": ["industrial"],
+      "betaMillis": 1000,
+      "throughCycle": false
+    },
+    {
+      "id": "basic_materials",
+      "industryKeys": [],
+      "industryNameContains": [],
+      "sectorKeys": ["basic-materials"],
+      "sectorNameContains": ["basic materials"],
+      "betaMillis": 1100,
+      "throughCycle": false
+    }
+  ],
+  "goldenCases": [
+    {
+      "name": "dvn_class_low_trailing_beta_pulls_toward_through_cycle",
+      "sectorName": "Energy",
+      "industryName": "Oil & Gas E&P",
+      "sectorKey": "energy",
+      "industryKey": "oil-gas-e-p",
+      "companyBetaMillis": 430,
+      "rfBps": 430,
+      "erpBps": 450,
+      "expectedIndustryBetaMillis": 1500,
+      "expectedEntryId": "oil_gas_ep",
+      "expectedThroughCycle": true,
+      "expectedIndustryProvisional": false,
+      "expectedShrunkBetaMillis": 783,
+      "expectedCostOfEquityBps": 782,
+      "pureTrailingCostOfEquityBps": 624,
+      "mustExceedPureTrailingCoe": true
+    },
+    {
+      "name": "software_control_stable_within_policy",
+      "sectorName": "Technology",
+      "industryName": "Software - Infrastructure",
+      "sectorKey": "technology",
+      "industryKey": "software-infrastructure",
+      "companyBetaMillis": 1000,
+      "rfBps": 430,
+      "erpBps": 450,
+      "expectedIndustryBetaMillis": 1200,
+      "expectedEntryId": "software_technology",
+      "expectedThroughCycle": false,
+      "expectedIndustryProvisional": false,
+      "expectedShrunkBetaMillis": 1066,
+      "expectedCostOfEquityBps": 910,
+      "pureTrailingCostOfEquityBps": 880,
+      "mustExceedPureTrailingCoe": false
+    },
+    {
+      "name": "unmapped_uses_default_prior_provisional",
+      "sectorName": "Unknown Sector XYZ",
+      "industryName": "Unknown Industry XYZ",
+      "sectorKey": null,
+      "industryKey": null,
+      "companyBetaMillis": 800,
+      "rfBps": 430,
+      "erpBps": 450,
+      "expectedIndustryBetaMillis": 1000,
+      "expectedEntryId": "default",
+      "expectedThroughCycle": false,
+      "expectedIndustryProvisional": true,
+      "expectedShrunkBetaMillis": 866,
+      "expectedCostOfEquityBps": 820,
+      "pureTrailingCostOfEquityBps": 790,
+      "mustExceedPureTrailingCoe": false
+    },
+    {
+      "name": "missing_company_beta_uses_through_cycle_industry_prior",
+      "sectorName": "Energy",
+      "industryName": "Oil & Gas E&P",
+      "sectorKey": "energy",
+      "industryKey": "oil-gas-e-p",
+      "companyBetaMillis": null,
+      "rfBps": 430,
+      "erpBps": 450,
+      "expectedIndustryBetaMillis": 1500,
+      "expectedEntryId": "oil_gas_ep",
+      "expectedThroughCycle": true,
+      "expectedIndustryProvisional": false,
+      "expectedShrunkBetaMillis": 1500,
+      "expectedCostOfEquityBps": 1105,
+      "pureTrailingCostOfEquityBps": null,
+      "mustExceedPureTrailingCoe": false
+    },
+    {
+      "name": "xom_integrated_through_cycle_prior",
+      "sectorName": "Energy",
+      "industryName": "Oil & Gas Integrated",
+      "sectorKey": "energy",
+      "industryKey": "oil-gas-integrated",
+      "companyBetaMillis": 900,
+      "rfBps": 430,
+      "erpBps": 450,
+      "expectedIndustryBetaMillis": 1400,
+      "expectedEntryId": "oil_gas_integrated",
+      "expectedThroughCycle": true,
+      "expectedIndustryProvisional": false,
+      "expectedShrunkBetaMillis": 1065,
+      "expectedCostOfEquityBps": 909,
+      "pureTrailingCostOfEquityBps": 835,
+      "mustExceedPureTrailingCoe": true
+    }
+  ],
+  "forbidden": [
+    "per_ticker_beta_floor",
+    "price_or_target_as_coe_input",
+    "max_re_magic_constant_without_provenance",
+    "silent_default_masquerading_as_mapped_industry"
+  ]
+}

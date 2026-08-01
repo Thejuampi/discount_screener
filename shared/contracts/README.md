@@ -31,6 +31,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   golden resolver-state cases for selected, unavailable, disabled/absent, and uncertain DCF source decisions
 - `valuation-model-family.json`:
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
+- `industry-beta-policy-v1.json`:
+  versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:
   point-in-time evidence replay, closed-world component routing, evidence-backed SOTP bridge, refusal states, and historical driver-validation goldens; Windows and Android compare fixed-point outputs and fingerprints exactly
 - `persistence-semantics.md`:

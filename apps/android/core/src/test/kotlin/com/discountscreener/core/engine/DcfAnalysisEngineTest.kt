@@ -7,6 +7,8 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.WaccFieldSource
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -190,6 +192,103 @@ class DcfAnalysisEngineTest {
         assertTrue(!analysis.waccInputs.isProvisional())
         assertTrue(analysis.waccInputs.summaryLabels().none { it.contains("beta=default") })
         assertTrue(analysis.waccInputs.summaryLabels().none { it.contains("tax=") })
+    }
+
+    @Test
+    fun dvn_class_through_cycle_industry_prior_raises_coe_above_pure_trailing() {
+        val fundamentals = FundamentalSnapshot(
+            symbol = "DVN",
+            sectorName = "Energy",
+            industryName = "Oil & Gas E&P",
+            sectorKey = "energy",
+            industryKey = "oil-gas-e-p",
+            betaMillis = 430,
+        )
+        val params = MarketParams(rfBps = 430, erpBps = 450, provisional = false)
+        val resolved = DcfAnalysisEngine.resolveCostOfEquity(fundamentals, params)
+        val pure = DcfAnalysisEngine.pureTrailingCostOfEquityBps(430, params)
+
+        assertEquals(1_500, resolved.industryBetaMillis)
+        assertTrue(resolved.throughCyclePrior)
+        assertEquals("oil_gas_ep", resolved.industryBetaEntryId)
+        assertEquals(INDUSTRY_BETA_POLICY_VERSION, resolved.industryBetaPolicyVersion)
+        assertEquals(782, resolved.costOfEquityBps)
+        assertEquals(624, pure)
+        assertTrue(resolved.costOfEquityBps > pure)
+        assertTrue(resolved.sourceFingerprint.contains(INDUSTRY_BETA_POLICY_VERSION))
+        assertTrue(resolved.sourceFingerprint.contains("through_cycle=true"))
+        assertTrue(!resolved.sourceFingerprint.contains("price"))
+        assertTrue(!resolved.sourceFingerprint.contains("target"))
+    }
+
+    @Test
+    fun software_control_industry_prior_stable_within_policy() {
+        val prior = resolveIndustryBetaPrior(
+            sectorName = "Technology",
+            industryName = "Software - Infrastructure",
+            sectorKey = "technology",
+            industryKey = "software-infrastructure",
+        )
+        assertEquals(1_200, prior.betaMillis)
+        assertTrue(!prior.throughCycle)
+        assertTrue(!prior.provisional)
+        assertEquals("software_technology", prior.entryId)
+
+        val fundamentals = FundamentalSnapshot(
+            symbol = "SOFT",
+            sectorName = "Technology",
+            industryName = "Software - Infrastructure",
+            sectorKey = "technology",
+            industryKey = "software-infrastructure",
+            betaMillis = 1_000,
+        )
+        val resolved = DcfAnalysisEngine.resolveCostOfEquity(
+            fundamentals,
+            MarketParams(rfBps = 430, erpBps = 450, provisional = false),
+        )
+        assertEquals(910, resolved.costOfEquityBps)
+        assertTrue(!resolved.throughCyclePrior)
+    }
+
+    @Test
+    fun unmapped_industry_prior_is_provisional_default() {
+        val prior = resolveIndustryBetaPrior(
+            sectorName = "Unknown Sector XYZ",
+            industryName = "Unknown Industry XYZ",
+        )
+        assertEquals(1_000, prior.betaMillis)
+        assertTrue(prior.provisional)
+        assertEquals("default", prior.entryId)
+
+        val fundamentals = FundamentalSnapshot(
+            symbol = "UNK",
+            sectorName = "Unknown Sector XYZ",
+            industryName = "Unknown Industry XYZ",
+            betaMillis = 800,
+        )
+        val resolved = DcfAnalysisEngine.resolveCostOfEquity(
+            fundamentals,
+            MarketParams(rfBps = 430, erpBps = 450, provisional = false),
+        )
+        assertEquals(820, resolved.costOfEquityBps)
+        assertTrue(resolved.provisional)
+    }
+
+    @Test
+    fun industry_beta_policy_entries_match_shared_contract() {
+        val contractPath = resolveSharedContract("industry-beta-policy-v1.json")
+        val text = Files.readString(contractPath)
+        assertTrue(text.contains("\"policyVersion\": \"$INDUSTRY_BETA_POLICY_VERSION\""))
+        for ((id, beta, throughCycle) in industryBetaPolicyEntrySnapshots()) {
+            assertTrue(text.contains("\"id\": \"$id\""), "missing entry $id")
+            assertTrue(
+                text.contains("\"betaMillis\": $beta") || text.contains("\"betaMillis\":$beta"),
+                "beta pin for $id",
+            )
+            if (throughCycle) {
+                assertTrue(text.contains("\"throughCycle\": true") || text.contains("\"throughCycle\":true"))
+            }
+        }
     }
 
     @Test
@@ -579,6 +678,16 @@ class DcfAnalysisEngineTest {
             BusinessClass.NotEligible,
             DcfAnalysisEngine.classifyBusiness("Real Estate", "REIT"),
         )
+    }
+
+    private fun resolveSharedContract(fileName: String): Path {
+        var current = Path.of("").toAbsolutePath()
+        repeat(8) {
+            val candidate = current.resolve("shared/contracts/$fileName")
+            if (Files.exists(candidate)) return candidate
+            current = current.parent ?: return@repeat
+        }
+        error("shared contract $fileName not found")
     }
 
     private fun completeFundamentals() = FundamentalSnapshot(

@@ -308,6 +308,11 @@ pub fn route_runtime_valuation(input: RuntimeValuationInput<'_>) -> OperatingVal
                     provisional: true,
                     market_params_as_of_epoch: input.market_params.as_of_epoch,
                     source_fingerprint: format!("cost-of-equity-unavailable:{error:?}"),
+                    industry_beta_millis: 0,
+                    through_cycle_prior: false,
+                    industry_beta_policy_version: crate::dcf_model::INDUSTRY_BETA_POLICY_VERSION
+                        .into(),
+                    industry_beta_entry_id: "unavailable".into(),
                 },
                 Some(error),
             ),

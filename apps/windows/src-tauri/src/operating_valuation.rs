@@ -872,6 +872,7 @@ mod tests {
                 provisional: false,
                 market_params_as_of_epoch: Some(1_728_000_000),
                 source_fingerprint: "rate:test".into(),
+                ..Default::default()
             },
             policy: ProjectionPolicy {
                 version: "forward-earnings-policy/1".into(),
@@ -1172,6 +1173,7 @@ mod tests {
                 provisional: true,
                 market_params_as_of_epoch: None,
                 source_fingerprint: format!("poc5-resolved-rate:{}", row.symbol),
+                ..Default::default()
             },
             policy: ProjectionPolicy {
                 version: "forward-earnings-policy/1-poc".into(),
@@ -1547,6 +1549,7 @@ mod tests {
                     provisional: true,
                     market_params_as_of_epoch: None,
                     source_fingerprint: format!("poc5-resolved-rate:{}", row.symbol),
+                    ..Default::default()
                 },
                 policy: ProjectionPolicy {
                     version: "forward-earnings-policy/1-poc".into(),
