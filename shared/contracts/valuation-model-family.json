@@ -11,7 +11,7 @@
     "deferredSurfaces": ["desktop"]
   },
   "fcffRobustEvidencePolicy": {
-    "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+    "modelPolicyVersion": "business-class-policy/13-industry-beta-policy-v1",
     "baseMargin": "median_aligned_annual_fcff_margin",
     "negativeYears": "retained",
     "acquisitionGrowth": "exclude_only_year_y_minus_1_to_y_when_year_y_is_material",
@@ -254,7 +254,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+        "modelPolicyVersion": "business-class-policy/13-industry-beta-policy-v1",
         "latestFcfDollars": 19440000000,
         "fcfRunRateDollars": 24652137600,
         "acceptance": [
@@ -335,7 +335,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+        "modelPolicyVersion": "business-class-policy/13-industry-beta-policy-v1",
         "latestFcfDollars": 7695000000,
         "fcfRunRateDollars": 24375416000,
         "valuationDriver": "driver_based_fcff",

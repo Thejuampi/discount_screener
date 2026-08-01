@@ -9,10 +9,12 @@ use crate::engine::FundamentalSnapshot;
 use crate::sec_driver_normalization_policy_generated::MATERIAL_ACQUISITION_REVENUE_BPS;
 
 pub const ENGINE_VERSION: &str = "valuation-model-family/1";
-/// Policy bump: closed-world business-class routing (no silent FCFF default).
-/// Unclassified sector/industry → valuation unavailable (never absurd FCFF).
-/// See `_bmad-output/implementation-artifacts/spec-dcf-street-calibration-provisional-wacc.md`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/12-robust-fcff-growth-evidence";
+/// Policy bump: versioned industry-beta priors + through-cycle commodity pull
+/// (industry-beta-policy/1). Unclassified sector/industry still refuse FCFF.
+/// See `shared/contracts/industry-beta-policy-v1.json`.
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/13-industry-beta-policy-v1";
+/// Sole industry-prior table version for CoE shrink (cache fingerprint input).
+pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/1";
 
 // ── Market policy (versioned; not eternal magic for valuation truth) ───────────
 /// Default US 10Y-style nominal risk-free (bps). Shells may override via MarketParams.
@@ -22,6 +24,8 @@ const DEFAULT_ERP_BPS: i32 = 450;
 const BETA_COMPANY_WEIGHT_PCT: i64 = 67;
 const BETA_INDUSTRY_WEIGHT_PCT: i64 = 33;
 const DEFAULT_INDUSTRY_BETA_MILLIS: i32 = 1_000;
+const INDUSTRY_BETA_POLICY_JSON: &str =
+    include_str!("../../../../shared/contracts/industry-beta-policy-v1.json");
 const PROJECTION_YEARS: i32 = 5;
 /// Operating drivers are regime-sensitive; use a recent multi-year window
 /// rather than allowing a 15-year history to dominate a changed business.
@@ -322,6 +326,49 @@ pub struct ResolvedCostOfEquity {
     pub provisional: bool,
     pub market_params_as_of_epoch: Option<i64>,
     pub source_fingerprint: String,
+    /// Industry prior used in shrink (millis), from versioned policy table.
+    #[serde(default)]
+    pub industry_beta_millis: i32,
+    /// True when the matched policy entry is marked through-cycle (commodity/cycle risk).
+    #[serde(default)]
+    pub through_cycle_prior: bool,
+    /// Policy table version fingerprint (`industry-beta-policy/1`).
+    #[serde(default = "default_industry_beta_policy_version")]
+    pub industry_beta_policy_version: String,
+    /// Matched entry id (or `default` for unmapped provisional prior).
+    #[serde(default)]
+    pub industry_beta_entry_id: String,
+}
+
+impl Default for ResolvedCostOfEquity {
+    fn default() -> Self {
+        Self {
+            cost_of_equity_bps: 0,
+            beta_source: WaccFieldSource::Unavailable,
+            provisional: true,
+            market_params_as_of_epoch: None,
+            source_fingerprint: String::new(),
+            industry_beta_millis: DEFAULT_INDUSTRY_BETA_MILLIS,
+            through_cycle_prior: false,
+            industry_beta_policy_version: INDUSTRY_BETA_POLICY_VERSION.into(),
+            industry_beta_entry_id: "default".into(),
+        }
+    }
+}
+
+fn default_industry_beta_policy_version() -> String {
+    INDUSTRY_BETA_POLICY_VERSION.into()
+}
+
+/// Resolved industry beta prior from the versioned policy table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndustryBetaPrior {
+    pub beta_millis: i32,
+    pub entry_id: String,
+    pub through_cycle: bool,
+    /// True when the prior is the unmapped default (provisional provenance).
+    pub provisional: bool,
+    pub policy_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2120,37 +2167,173 @@ struct ResolvedWacc {
     rate_reasons: Vec<String>,
 }
 
-fn industry_beta_millis(fundamentals: &FundamentalSnapshot) -> i32 {
-    let blob = [
-        fundamentals.sector_name.as_deref().unwrap_or(""),
-        fundamentals.industry_name.as_deref().unwrap_or(""),
-        fundamentals.sector_key.as_deref().unwrap_or(""),
-    ]
-    .join(" ")
-    .to_ascii_lowercase();
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryBetaPolicyFile {
+    policy_version: String,
+    shrink: IndustryBetaShrinkWeights,
+    default_prior: IndustryBetaDefaultPrior,
+    entries: Vec<IndustryBetaPolicyEntry>,
+    #[serde(default)]
+    golden_cases: Vec<IndustryBetaGoldenCase>,
+}
 
-    if blob.contains("utilit") {
-        return 600;
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryBetaShrinkWeights {
+    company_weight_pct: i64,
+    industry_weight_pct: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryBetaDefaultPrior {
+    beta_millis: i32,
+    through_cycle: bool,
+    provisional: bool,
+    entry_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryBetaPolicyEntry {
+    id: String,
+    #[serde(default)]
+    industry_keys: Vec<String>,
+    #[serde(default)]
+    industry_name_contains: Vec<String>,
+    #[serde(default)]
+    sector_keys: Vec<String>,
+    #[serde(default)]
+    sector_name_contains: Vec<String>,
+    beta_millis: i32,
+    through_cycle: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryBetaGoldenCase {
+    name: String,
+    sector_name: Option<String>,
+    industry_name: Option<String>,
+    sector_key: Option<String>,
+    industry_key: Option<String>,
+    company_beta_millis: Option<i32>,
+    rf_bps: i32,
+    erp_bps: i32,
+    expected_industry_beta_millis: i32,
+    expected_entry_id: String,
+    expected_through_cycle: bool,
+    expected_industry_provisional: bool,
+    expected_shrunk_beta_millis: i32,
+    expected_cost_of_equity_bps: i32,
+    pure_trailing_cost_of_equity_bps: Option<i32>,
+    must_exceed_pure_trailing_coe: bool,
+}
+
+fn industry_beta_policy() -> &'static IndustryBetaPolicyFile {
+    use std::sync::OnceLock;
+    static POLICY: OnceLock<IndustryBetaPolicyFile> = OnceLock::new();
+    POLICY.get_or_init(|| {
+        serde_json::from_str(INDUSTRY_BETA_POLICY_JSON)
+            .expect("industry-beta-policy-v1.json must parse")
+    })
+}
+
+/// Resolve the versioned industry beta prior for sector/industry labels.
+/// Unmapped text returns the default prior with provisional provenance.
+pub fn resolve_industry_beta_prior(
+    sector_name: Option<&str>,
+    industry_name: Option<&str>,
+    sector_key: Option<&str>,
+    industry_key: Option<&str>,
+) -> IndustryBetaPrior {
+    let policy = industry_beta_policy();
+    let sk = sector_key.unwrap_or("").trim().to_ascii_lowercase();
+    let ik = industry_key.unwrap_or("").trim().to_ascii_lowercase();
+    let sn = sector_name.unwrap_or("").trim().to_ascii_lowercase();
+    let inn = industry_name.unwrap_or("").trim().to_ascii_lowercase();
+
+    let matched = match_industry_beta_entry(policy, &sk, &ik, &sn, &inn);
+    match matched {
+        Some(entry) => IndustryBetaPrior {
+            beta_millis: entry.beta_millis,
+            entry_id: entry.id.clone(),
+            through_cycle: entry.through_cycle,
+            provisional: false,
+            policy_version: policy.policy_version.clone(),
+        },
+        None => IndustryBetaPrior {
+            beta_millis: policy.default_prior.beta_millis,
+            entry_id: policy.default_prior.entry_id.clone(),
+            through_cycle: policy.default_prior.through_cycle,
+            provisional: policy.default_prior.provisional,
+            policy_version: policy.policy_version.clone(),
+        },
     }
-    if blob.contains("consumer staples") || blob.contains("consumer defensive") {
-        return 700;
+}
+
+fn match_industry_beta_entry<'a>(
+    policy: &'a IndustryBetaPolicyFile,
+    sector_key: &str,
+    industry_key: &str,
+    sector_name: &str,
+    industry_name: &str,
+) -> Option<&'a IndustryBetaPolicyEntry> {
+    if !industry_key.is_empty() {
+        for entry in &policy.entries {
+            if entry
+                .industry_keys
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(industry_key))
+            {
+                return Some(entry);
+            }
+        }
     }
-    if blob.contains("health") || blob.contains("pharma") {
-        return 900;
+    if !industry_name.is_empty() {
+        for entry in &policy.entries {
+            if entry
+                .industry_name_contains
+                .iter()
+                .any(|token| industry_name.contains(&token.to_ascii_lowercase()))
+            {
+                return Some(entry);
+            }
+        }
     }
-    if blob.contains("technolog") || blob.contains("software") || blob.contains("semiconductor") {
-        return 1_200;
+    if !sector_key.is_empty() {
+        for entry in &policy.entries {
+            if entry
+                .sector_keys
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(sector_key))
+            {
+                return Some(entry);
+            }
+        }
     }
-    if blob.contains("energy") {
-        return 1_100;
+    if !sector_name.is_empty() {
+        for entry in &policy.entries {
+            if entry
+                .sector_name_contains
+                .iter()
+                .any(|token| sector_name.contains(&token.to_ascii_lowercase()))
+            {
+                return Some(entry);
+            }
+        }
     }
-    if blob.contains("financial") || blob.contains("insurance") || blob.contains("bank") {
-        return 900;
-    }
-    if blob.contains("real estate") || blob.contains("reit") {
-        return 850;
-    }
-    DEFAULT_INDUSTRY_BETA_MILLIS
+    None
+}
+
+fn industry_beta_prior_for(fundamentals: &FundamentalSnapshot) -> IndustryBetaPrior {
+    resolve_industry_beta_prior(
+        fundamentals.sector_name.as_deref(),
+        fundamentals.industry_name.as_deref(),
+        fundamentals.sector_key.as_deref(),
+        fundamentals.industry_key.as_deref(),
+    )
 }
 
 fn cost_of_equity_bps(
@@ -2174,6 +2357,33 @@ fn div_round_half_up_i128(numerator: i128, denominator: i128) -> Option<i128> {
         .map(|value| value / denominator)
 }
 
+/// Pure trailing CoE (company beta only) for diagnostics/tests — never a production path.
+fn pure_trailing_cost_of_equity_bps(
+    company_beta_millis: i32,
+    market_params: &MarketParams,
+) -> Result<i32, CostOfEquityResolutionError> {
+    if market_params.rf_bps < 0 || market_params.erp_bps <= 0 || company_beta_millis <= 0 {
+        return Err(CostOfEquityResolutionError::InvalidMarketParameters);
+    }
+    let equity_premium = div_round_half_up_i128(
+        i128::from(company_beta_millis)
+            .checked_mul(i128::from(market_params.erp_bps))
+            .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?,
+        1_000,
+    )
+    .and_then(|value| i32::try_from(value).ok())
+    .ok_or(CostOfEquityResolutionError::ResultOutOfRange)?;
+    let re = market_params
+        .rf_bps
+        .checked_add(equity_premium)
+        .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
+    let minimum = market_params
+        .rf_bps
+        .checked_add(50)
+        .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
+    Ok(re.max(minimum))
+}
+
 pub fn resolve_cost_of_equity(
     fundamentals: &FundamentalSnapshot,
     market_params: &MarketParams,
@@ -2181,15 +2391,20 @@ pub fn resolve_cost_of_equity(
     if market_params.rf_bps < 0 || market_params.erp_bps <= 0 {
         return Err(CostOfEquityResolutionError::InvalidMarketParameters);
     }
-    let industry = i64::from(industry_beta_millis(fundamentals));
-    let (beta_millis, source, provisional) = match fundamentals.beta_millis {
+    let prior = industry_beta_prior_for(fundamentals);
+    let industry = i64::from(prior.beta_millis);
+    let shrink = &industry_beta_policy().shrink;
+    // Policy table owns weights; constants remain the documented 67/33 identity.
+    debug_assert_eq!(shrink.company_weight_pct, BETA_COMPANY_WEIGHT_PCT);
+    debug_assert_eq!(shrink.industry_weight_pct, BETA_INDUSTRY_WEIGHT_PCT);
+    let (beta_millis, source, beta_provisional) = match fundamentals.beta_millis {
         Some(b) if b > 0 => {
             let company = i64::from(b);
             let weighted = company
-                .checked_mul(BETA_COMPANY_WEIGHT_PCT)
+                .checked_mul(shrink.company_weight_pct)
                 .and_then(|value| {
                     industry
-                        .checked_mul(BETA_INDUSTRY_WEIGHT_PCT)
+                        .checked_mul(shrink.industry_weight_pct)
                         .and_then(|industry_value| value.checked_add(industry_value))
                 })
                 .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
@@ -2198,12 +2413,13 @@ pub fn resolve_cost_of_equity(
                     .and_then(|value| i64::try_from(value).ok())
                     .ok_or(CostOfEquityResolutionError::ResultOutOfRange)?,
                 WaccFieldSource::IndustryShrink,
-                false,
+                // Unmapped default prior is provisional; mapped industry shrink is intentional.
+                prior.provisional,
             )
         }
-        // Missing company beta is intentionally shrunk to the industry prior;
-        // this is an explicit Bayesian estimate, not a weak magic default.
-        _ => (industry, WaccFieldSource::IndustryShrink, false),
+        // Missing company beta uses the industry prior (Bayesian estimate).
+        // Unmapped default remains provisional; mapped prior is not weak noise.
+        _ => (industry, WaccFieldSource::IndustryShrink, prior.provisional),
     };
     let equity_premium = div_round_half_up_i128(
         i128::from(beta_millis)
@@ -2222,21 +2438,29 @@ pub fn resolve_cost_of_equity(
         .checked_add(50)
         .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
     let cost_of_equity_bps = re.max(minimum);
+    let provisional = beta_provisional || market_params.provisional;
     Ok(ResolvedCostOfEquity {
         cost_of_equity_bps,
         beta_source: source,
-        provisional: provisional || market_params.provisional,
+        provisional,
         market_params_as_of_epoch: market_params.as_of_epoch,
         source_fingerprint: format!(
-            "cost-of-equity/1|rf={}|erp={}|asof={:?}|beta_raw={:?}|beta_industry={}|beta_source={}|provisional={}",
+            "cost-of-equity/2|rf={}|erp={}|asof={:?}|beta_raw={:?}|beta_industry={}|beta_source={}|industry_beta_policy={}|entry={}|through_cycle={}|provisional={}",
             market_params.rf_bps,
             market_params.erp_bps,
             market_params.as_of_epoch,
             fundamentals.beta_millis,
-            industry,
+            prior.beta_millis,
             source.as_str(),
-            provisional || market_params.provisional,
+            prior.policy_version,
+            prior.entry_id,
+            prior.through_cycle,
+            provisional,
         ),
+        industry_beta_millis: prior.beta_millis,
+        through_cycle_prior: prior.through_cycle,
+        industry_beta_policy_version: prior.policy_version,
+        industry_beta_entry_id: prior.entry_id,
     })
 }
 
@@ -3614,5 +3838,184 @@ mod tests {
             resolve_cost_of_equity(&fund, &invalid),
             Err(CostOfEquityResolutionError::InvalidMarketParameters)
         );
+    }
+
+    #[test]
+    fn industry_beta_policy_version_is_embedded_and_matches_constant() {
+        let policy = industry_beta_policy();
+        assert_eq!(policy.policy_version, INDUSTRY_BETA_POLICY_VERSION);
+        assert_eq!(policy.shrink.company_weight_pct, BETA_COMPANY_WEIGHT_PCT);
+        assert_eq!(policy.shrink.industry_weight_pct, BETA_INDUSTRY_WEIGHT_PCT);
+        assert_eq!(
+            policy.default_prior.beta_millis,
+            DEFAULT_INDUSTRY_BETA_MILLIS
+        );
+        assert!(policy.default_prior.provisional);
+        assert!(!policy.entries.is_empty());
+    }
+
+    #[test]
+    fn industry_beta_policy_golden_cases_exact_fixed_point() {
+        let policy = industry_beta_policy();
+        assert!(
+            !policy.golden_cases.is_empty(),
+            "policy must ship executable golden cases"
+        );
+        for case in &policy.golden_cases {
+            let prior = resolve_industry_beta_prior(
+                case.sector_name.as_deref(),
+                case.industry_name.as_deref(),
+                case.sector_key.as_deref(),
+                case.industry_key.as_deref(),
+            );
+            assert_eq!(
+                prior.beta_millis, case.expected_industry_beta_millis,
+                "{} industry beta",
+                case.name
+            );
+            assert_eq!(
+                prior.entry_id, case.expected_entry_id,
+                "{} entry",
+                case.name
+            );
+            assert_eq!(
+                prior.through_cycle, case.expected_through_cycle,
+                "{} through_cycle",
+                case.name
+            );
+            assert_eq!(
+                prior.provisional, case.expected_industry_provisional,
+                "{} provisional",
+                case.name
+            );
+
+            let fund = FundamentalSnapshot {
+                symbol: case.name.clone(),
+                sector_name: case.sector_name.clone(),
+                industry_name: case.industry_name.clone(),
+                sector_key: case.sector_key.clone(),
+                industry_key: case.industry_key.clone(),
+                beta_millis: case.company_beta_millis,
+                ..Default::default()
+            };
+            let params = MarketParams {
+                rf_bps: case.rf_bps,
+                erp_bps: case.erp_bps,
+                as_of_epoch: None,
+                provisional: false,
+            };
+            let resolved =
+                resolve_cost_of_equity(&fund, &params).expect("cost of equity should resolve");
+            assert_eq!(
+                resolved.cost_of_equity_bps, case.expected_cost_of_equity_bps,
+                "{} coe",
+                case.name
+            );
+            assert_eq!(
+                resolved.industry_beta_millis, case.expected_industry_beta_millis,
+                "{} industry prior on resolved",
+                case.name
+            );
+            assert_eq!(
+                resolved.through_cycle_prior, case.expected_through_cycle,
+                "{} through_cycle on resolved",
+                case.name
+            );
+            assert_eq!(
+                resolved.industry_beta_policy_version,
+                INDUSTRY_BETA_POLICY_VERSION
+            );
+            assert!(
+                resolved
+                    .source_fingerprint
+                    .contains(INDUSTRY_BETA_POLICY_VERSION),
+                "{} fingerprint must cite policy version",
+                case.name
+            );
+            assert!(
+                resolved
+                    .source_fingerprint
+                    .contains(&format!("through_cycle={}", case.expected_through_cycle)),
+                "{} fingerprint must cite through_cycle prior",
+                case.name
+            );
+            // No price / target leakage in CoE fingerprint.
+            assert!(!resolved.source_fingerprint.contains("price"));
+            assert!(!resolved.source_fingerprint.contains("target"));
+
+            if let Some(pure) = case.pure_trailing_cost_of_equity_bps {
+                let company = case
+                    .company_beta_millis
+                    .expect("pure trailing requires company beta");
+                let trailing =
+                    pure_trailing_cost_of_equity_bps(company, &params).expect("pure trailing coe");
+                assert_eq!(trailing, pure, "{} pure trailing", case.name);
+                if case.must_exceed_pure_trailing_coe {
+                    assert!(
+                        resolved.cost_of_equity_bps > trailing,
+                        "{} through-cycle CoE {} must exceed pure trailing {}",
+                        case.name,
+                        resolved.cost_of_equity_bps,
+                        trailing
+                    );
+                }
+            }
+
+            // Reconstruct shrunk beta from identity and assert golden pin.
+            let industry = i64::from(prior.beta_millis);
+            let shrunk = match case.company_beta_millis {
+                Some(b) if b > 0 => {
+                    let weighted = i64::from(b) * BETA_COMPANY_WEIGHT_PCT
+                        + industry * BETA_INDUSTRY_WEIGHT_PCT;
+                    div_round_half_up_i128(i128::from(weighted), 100).unwrap() as i32
+                }
+                _ => prior.beta_millis,
+            };
+            assert_eq!(
+                shrunk, case.expected_shrunk_beta_millis,
+                "{} shrunk beta",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn dvn_class_coe_not_bond_like_from_low_trailing_beta_alone() {
+        let fund = FundamentalSnapshot {
+            symbol: "DVN".into(),
+            sector_name: Some("Energy".into()),
+            industry_name: Some("Oil & Gas E&P".into()),
+            sector_key: Some("energy".into()),
+            industry_key: Some("oil-gas-e-p".into()),
+            beta_millis: Some(430),
+            ..Default::default()
+        };
+        let params = MarketParams {
+            rf_bps: 430,
+            erp_bps: 450,
+            as_of_epoch: None,
+            provisional: false,
+        };
+        let resolved = resolve_cost_of_equity(&fund, &params).unwrap();
+        let pure = pure_trailing_cost_of_equity_bps(430, &params).unwrap();
+        assert!(resolved.through_cycle_prior);
+        assert_eq!(resolved.industry_beta_entry_id, "oil_gas_ep");
+        assert!(resolved.cost_of_equity_bps > pure);
+        // Industry prior must be the elevated through-cycle table value, not sector 1.1.
+        assert_eq!(resolved.industry_beta_millis, 1_500);
+    }
+
+    #[test]
+    fn software_control_industry_prior_stable_within_policy() {
+        let prior = resolve_industry_beta_prior(
+            Some("Technology"),
+            Some("Software - Infrastructure"),
+            Some("technology"),
+            Some("software-infrastructure"),
+        );
+        assert_eq!(prior.beta_millis, 1_200);
+        assert!(!prior.through_cycle);
+        assert!(!prior.provisional);
+        assert_eq!(prior.entry_id, "software_technology");
     }
 }

@@ -19,13 +19,15 @@ import kotlin.math.roundToLong
  * See `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`.
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
-/** Parity with Windows driver-based FCFF policy (closed-world routing preserved). */
-const val MODEL_POLICY_VERSION = "business-class-policy/12-robust-fcff-growth-evidence"
+/** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
+const val MODEL_POLICY_VERSION = "business-class-policy/13-industry-beta-policy-v1"
+/** Sole industry-prior table version for CoE shrink (parity with Windows). */
+const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/1"
 
 private const val DEFAULT_RF_BPS = 430
 private const val DEFAULT_ERP_BPS = 450
-private const val BETA_COMPANY_WEIGHT = 0.67
-private const val BETA_INDUSTRY_WEIGHT = 0.33
+private const val BETA_COMPANY_WEIGHT_PCT = 67L
+private const val BETA_INDUSTRY_WEIGHT_PCT = 33L
 private const val DEFAULT_INDUSTRY_BETA_MILLIS = 1_000
 private const val PROJECTION_YEARS = 5
 /** Driver ratios are regime-sensitive; keep the recent multi-year window. */
@@ -1092,45 +1094,85 @@ object DcfAnalysisEngine {
     private fun parseYmd(value: String): java.time.LocalDate? =
         runCatching { java.time.LocalDate.parse(value) }.getOrNull()
 
-    private fun industryBetaMillis(fundamentals: FundamentalSnapshot): Int {
-        val blob = listOfNotNull(
-            fundamentals.sectorName,
-            fundamentals.industryName,
-            fundamentals.sectorKey,
-        ).joinToString(" ").lowercase()
-        return when {
-            blob.contains("utilit") -> 600
-            blob.contains("consumer staples") || blob.contains("consumer defensive") -> 700
-            blob.contains("health") || blob.contains("pharma") -> 900
-            blob.contains("technolog") || blob.contains("software") || blob.contains("semiconductor") -> 1_200
-            blob.contains("energy") -> 1_100
-            blob.contains("financial") || blob.contains("insurance") || blob.contains("bank") -> 900
-            blob.contains("real estate") || blob.contains("reit") -> 850
-            else -> DEFAULT_INDUSTRY_BETA_MILLIS
-        }
-    }
-
     private fun costOfEquityBps(
         fundamentals: FundamentalSnapshot,
         marketParams: MarketParams,
     ): Triple<Int, WaccFieldSource, Boolean> {
-        val industry = industryBetaMillis(fundamentals) / 1_000.0
-        val (raw, source, provisional) = when (val b = fundamentals.betaMillis) {
-            null -> Triple(industry, WaccFieldSource.IndustryShrink, false)
+        val resolved = resolveCostOfEquity(fundamentals, marketParams)
+        return Triple(resolved.costOfEquityBps, resolved.betaSource, resolved.provisional)
+    }
+
+    /**
+     * Provider-independent CoE resolution — exact fixed-point parity with Windows
+     * `dcf_model::resolve_cost_of_equity` and `industry-beta-policy-v1.json`.
+     */
+    fun resolveCostOfEquity(
+        fundamentals: FundamentalSnapshot,
+        marketParams: MarketParams,
+    ): ResolvedCostOfEquity {
+        require(marketParams.rfBps >= 0 && marketParams.erpBps > 0) {
+            "invalid market parameters for cost of equity"
+        }
+        val prior = resolveIndustryBetaPrior(
+            sectorName = fundamentals.sectorName,
+            industryName = fundamentals.industryName,
+            sectorKey = fundamentals.sectorKey,
+            industryKey = fundamentals.industryKey,
+        )
+        val industry = prior.betaMillis.toLong()
+        val (betaMillis, source, betaProvisional) = when (val b = fundamentals.betaMillis) {
+            null -> Triple(industry, WaccFieldSource.IndustryShrink, prior.provisional)
             else -> if (b > 0) {
-                val company = b / 1_000.0
-                val shrunk = BETA_COMPANY_WEIGHT * company + BETA_INDUSTRY_WEIGHT * industry
-                Triple(shrunk, WaccFieldSource.IndustryShrink, false)
+                val weighted = b.toLong() * BETA_COMPANY_WEIGHT_PCT +
+                    industry * BETA_INDUSTRY_WEIGHT_PCT
+                val shrunk = divRoundHalfUp(weighted, 100L)
+                Triple(shrunk, WaccFieldSource.IndustryShrink, prior.provisional)
             } else {
-                Triple(industry, WaccFieldSource.IndustryShrink, false)
+                Triple(industry, WaccFieldSource.IndustryShrink, prior.provisional)
             }
         }
-        val re = marketParams.rfBps + (raw * marketParams.erpBps).roundToInt()
-        return Triple(
-            re.coerceAtLeast(marketParams.rfBps + 50),
-            source,
-            provisional || marketParams.provisional,
+        val equityPremium = divRoundHalfUp(betaMillis * marketParams.erpBps.toLong(), 1_000L)
+            .toInt()
+        val re = marketParams.rfBps + equityPremium
+        val costOfEquityBps = re.coerceAtLeast(marketParams.rfBps + 50)
+        val provisional = betaProvisional || marketParams.provisional
+        // Match Windows `{:?}` Option debug: `None` / `Some(n)`.
+        val asOfDebug = "None"
+        val betaSourceToken = "industry_shrink"
+        return ResolvedCostOfEquity(
+            costOfEquityBps = costOfEquityBps,
+            betaSource = source,
+            provisional = provisional,
+            marketParamsAsOfEpoch = null,
+            sourceFingerprint =
+                "cost-of-equity/2|rf=${marketParams.rfBps}|erp=${marketParams.erpBps}|" +
+                    "asof=$asOfDebug|beta_raw=${fundamentals.betaMillis}|" +
+                    "beta_industry=${prior.betaMillis}|beta_source=$betaSourceToken|" +
+                    "industry_beta_policy=${prior.policyVersion}|entry=${prior.entryId}|" +
+                    "through_cycle=${prior.throughCycle}|provisional=$provisional",
+            industryBetaMillis = prior.betaMillis,
+            throughCyclePrior = prior.throughCycle,
+            industryBetaPolicyVersion = prior.policyVersion,
+            industryBetaEntryId = prior.entryId,
         )
+    }
+
+    /** Half-up division for non-negative numerators (Windows `div_round_half_up_i128` parity). */
+    fun divRoundHalfUp(numerator: Long, denominator: Long): Long {
+        require(numerator >= 0 && denominator > 0)
+        return (numerator + denominator / 2) / denominator
+    }
+
+    fun pureTrailingCostOfEquityBps(
+        companyBetaMillis: Int,
+        marketParams: MarketParams,
+    ): Int {
+        require(companyBetaMillis > 0 && marketParams.rfBps >= 0 && marketParams.erpBps > 0)
+        val premium = divRoundHalfUp(
+            companyBetaMillis.toLong() * marketParams.erpBps.toLong(),
+            1_000L,
+        ).toInt()
+        return (marketParams.rfBps + premium).coerceAtLeast(marketParams.rfBps + 50)
     }
 
     private fun resolveMarketCapDollars(
