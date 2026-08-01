@@ -265,6 +265,15 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun cof_reads_reported_payout_from_summary_detail_for_residual_income() {
+        assertEquals(true, QUOTE_SUMMARY_MODULES.split(',').contains("summaryDetail"))
+        val root = loadQuoteSummaryFixture("COF-retention")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "COF", null, diagnostics)
+        assertEquals(8_347, parsed.fundamentals?.retentionBps)
+    }
+
+    @Test
     fun parses_loews_long_name_from_chart_meta_when_quote_html_is_unavailable() {
         // Live sample shape from query1 chart/L (HTML quote/L returns HTTP 404).
         val root = chartMetaJson(

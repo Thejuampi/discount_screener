@@ -6,20 +6,21 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engine::FundamentalSnapshot;
+use crate::sec_driver_normalization_policy_generated::MATERIAL_ACQUISITION_REVENUE_BPS;
 
 pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: closed-world business-class routing (no silent FCFF default).
 /// Unclassified sector/industry → valuation unavailable (never absurd FCFF).
 /// See `_bmad-output/implementation-artifacts/spec-dcf-street-calibration-provisional-wacc.md`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/7-explicit-driver-resolution";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/12-robust-fcff-growth-evidence";
 
 // ── Market policy (versioned; not eternal magic for valuation truth) ───────────
 /// Default US 10Y-style nominal risk-free (bps). Shells may override via MarketParams.
 const DEFAULT_RF_BPS: i32 = 430;
 /// Versioned equity risk premium (bps).
 const DEFAULT_ERP_BPS: i32 = 450;
-const BETA_COMPANY_WEIGHT: f64 = 0.67;
-const BETA_INDUSTRY_WEIGHT: f64 = 0.33;
+const BETA_COMPANY_WEIGHT_PCT: i64 = 67;
+const BETA_INDUSTRY_WEIGHT_PCT: i64 = 33;
 const DEFAULT_INDUSTRY_BETA_MILLIS: i32 = 1_000;
 const PROJECTION_YEARS: i32 = 5;
 /// Operating drivers are regime-sensitive; use a recent multi-year window
@@ -35,6 +36,11 @@ const WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS: i32 = 150;
 /// invent a still-cheaper bull WACC. Bull band = 0 ⇒ bull uses the same soft base
 /// WACC (growth stress only). Bear alone encodes further discount-rate understatement.
 const WACC_SCENARIO_BULL_BAND_UNRELIABLE_BPS: i32 = 0;
+/// Provisional rate inputs have repeatedly understated levered operating-company
+/// discount rates. Scale the versioned uplift by net-debt weight; this changes
+/// an uncertain input, never the valuation output or its relationship to price.
+const PROVISIONAL_WACC_BASE_UPLIFT_BPS: i32 = 175;
+const PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT: f64 = 0.40;
 const ROE_BEAR_HAIRCUT_BPS: i32 = 300;
 const ROE_BULL_BOOST_BPS: i32 = 200;
 const GROWTH_RECENT_WINDOW: usize = 4;
@@ -302,6 +308,27 @@ pub struct MarketParams {
     pub provisional: bool,
 }
 
+/// Provider-independent cost-of-equity resolution consumed by pure equity
+/// valuation candidates. Extracting this DTO does not change the legacy FCFF
+/// or residual-income runtime paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedCostOfEquity {
+    pub cost_of_equity_bps: i32,
+    pub beta_source: WaccFieldSource,
+    pub provisional: bool,
+    pub market_params_as_of_epoch: Option<i64>,
+    pub source_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostOfEquityResolutionError {
+    InvalidMarketParameters,
+    ArithmeticOverflow,
+    ResultOutOfRange,
+}
+
 impl MarketParams {
     pub fn default_usd() -> Self {
         Self {
@@ -374,7 +401,7 @@ fn driver_input_fingerprint(history: &[FcfPoint]) -> String {
         .iter()
         .map(|point| {
             format!(
-                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 point.year,
                 point.value_dollars.round() as i64,
                 point
@@ -387,6 +414,10 @@ fn driver_input_fingerprint(history: &[FcfPoint]) -> String {
                     .map_or_else(|| "-".into(), |value| value.to_string()),
                 point
                     .revenue_dollars
+                    .map(|value| value.round() as i64)
+                    .map_or_else(|| "-".into(), |value| value.to_string()),
+                point
+                    .acquisition_investment_dollars
                     .map(|value| value.round() as i64)
                     .map_or_else(|| "-".into(), |value| value.to_string()),
                 point
@@ -431,6 +462,9 @@ pub struct FcfPoint {
     pub capital_expenditure_dollars: Option<f64>,
     /// Annual revenue used to normalize operating cash-flow and CapEx margins.
     pub revenue_dollars: Option<f64>,
+    /// Cash paid for property/business acquisitions. It is not recurring CapEx
+    /// but is material evidence that reported revenue growth may be inorganic.
+    pub acquisition_investment_dollars: Option<f64>,
     /// Annual interest expense used to bridge levered OCF to after-tax FCFF.
     pub interest_expense_dollars: Option<f64>,
     /// Effective tax rate in basis points used for the interest add-back.
@@ -456,6 +490,7 @@ impl FcfPoint {
             operating_cash_flow_dollars: None,
             capital_expenditure_dollars: None,
             revenue_dollars: None,
+            acquisition_investment_dollars: None,
             interest_expense_dollars: None,
             tax_rate_bps: None,
             total_debt_dollars: None,
@@ -479,6 +514,11 @@ impl FcfPoint {
         self.revenue_dollars = Some(revenue_dollars);
         self.interest_expense_dollars = interest_expense_dollars.map(f64::abs);
         self.tax_rate_bps = tax_rate_bps;
+        self
+    }
+
+    pub fn with_acquisition_investment(mut self, dollars: Option<f64>) -> Self {
+        self.acquisition_investment_dollars = dollars.map(f64::abs);
         self
     }
 
@@ -859,7 +899,8 @@ fn residual_income(
         .filter(|&retention| (0..=10_000).contains(&retention))
         .ok_or_else(|| "retention/payout is missing or invalid".to_string())?;
 
-    let (re_base, beta_source, beta_provisional) = cost_of_equity_bps(fundamentals, market_params);
+    let (re_base, beta_source, beta_provisional) = cost_of_equity_bps(fundamentals, market_params)
+        .map_err(|error| format!("cost of equity unavailable: {error:?}"))?;
     let retention = retention_bps as f64 / 10_000.0;
     let fade_years = PROJECTION_YEARS;
 
@@ -1032,6 +1073,7 @@ struct DriverPoint {
     after_tax_interest_margin_bps: i32,
     revenue_growth_bps: Option<i32>,
     capex_spike: bool,
+    acquisition_contaminated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1048,6 +1090,7 @@ struct DriverModelInputs {
     normalized_capex_intensity_bps: i32,
     normalized_after_tax_interest_margin_bps: i32,
     capex_spike_years: Vec<i32>,
+    acquisition_contaminated_growth_years: Vec<i32>,
     driver_regime: String,
     growth_dispersion_bps: i32,
     growth_fade_exponent: f64,
@@ -1097,6 +1140,12 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         if !fcff.is_finite() {
             continue;
         }
+        let acquisition_contaminated = point
+            .acquisition_investment_dollars
+            .filter(|value| value.is_finite())
+            .is_some_and(|acquisition| {
+                acquisition.abs() * 10_000.0 >= revenue * MATERIAL_ACQUISITION_REVENUE_BPS as f64
+            });
         points.push((
             point.year,
             revenue,
@@ -1105,6 +1154,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             capex_intensity_bps,
             after_tax_interest_margin_bps,
             false,
+            acquisition_contaminated,
         ));
     }
     if points.len() < 3 {
@@ -1123,6 +1173,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             capex_intensity_bps,
             interest_margin_bps,
             _,
+            acquisition_contaminated,
         ),
     ) in points.iter().enumerate()
     {
@@ -1154,6 +1205,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             after_tax_interest_margin_bps: *interest_margin_bps,
             revenue_growth_bps,
             capex_spike,
+            acquisition_contaminated: *acquisition_contaminated,
         });
     }
 
@@ -1175,38 +1227,54 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .filter(|point| !point.capex_spike)
         .collect();
 
+    let acquisition_contaminated_growth_years: Vec<i32> = recent_points
+        .iter()
+        .filter(|point| point.revenue_growth_bps.is_some() && point.acquisition_contaminated)
+        .map(|point| point.year)
+        .collect();
+    let latest_growth_is_acquisition_contaminated = recent_points
+        .last()
+        .is_some_and(|point| point.revenue_growth_bps.is_some() && point.acquisition_contaminated);
     let mut recent_growths: Vec<i32> = recent_points
         .iter()
+        .filter(|point| !point.acquisition_contaminated)
         .filter_map(|point| point.revenue_growth_bps)
         .collect();
-    if recent_growths.len() < 2 {
+    let acquisition_growth_must_be_zero = !acquisition_contaminated_growth_years.is_empty()
+        && (latest_growth_is_acquisition_contaminated || recent_growths.len() < 2);
+    if recent_growths.len() < 2 && acquisition_contaminated_growth_years.is_empty() {
         recent_growths = driver_points
             .iter()
+            .filter(|point| !point.acquisition_contaminated)
             .filter_map(|point| point.revenue_growth_bps)
             .collect();
     }
-    if recent_baseline.len() < 2 || recent_growths.len() < 2 {
+    if recent_baseline.len() < 2 || (recent_growths.len() < 2 && !acquisition_growth_must_be_zero) {
         return None;
     }
 
     let prior_growths: Vec<i32> = prior_points
         .iter()
+        .filter(|point| !point.acquisition_contaminated)
         .filter_map(|point| point.revenue_growth_bps)
         .collect();
-    let regime = classify_driver_regime(&recent_growths, &prior_growths);
+    let regime = if acquisition_growth_must_be_zero {
+        DriverRegime::StableOperating
+    } else {
+        classify_driver_regime(&recent_growths, &prior_growths)
+    };
     let use_cycle_blend = regime == DriverRegime::CyclicalOrTransition
         && prior_baseline.len() >= 2
         && prior_growths.len() >= 2;
-    let scenario_points: Vec<&DriverPoint> = if use_cycle_blend {
-        recent_baseline
-            .iter()
-            .chain(prior_baseline.iter())
-            .copied()
-            .collect()
+    // Margin evidence keeps every aligned annual identity, including CapEx
+    // expansion years. CapEx spike detection is useful for diagnostics and
+    // component context, but deleting the cash outflow would overstate FCFF.
+    let aligned_margin_points: Vec<&DriverPoint> = if use_cycle_blend {
+        recent_points.iter().chain(prior_points.iter()).collect()
     } else {
-        recent_baseline.clone()
+        recent_points.iter().collect()
     };
-    let margins: Vec<i32> = scenario_points
+    let margins: Vec<i32> = aligned_margin_points
         .iter()
         .map(|point| point.fcff_margin_bps)
         .collect();
@@ -1222,7 +1290,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .iter()
         .map(|point| point.after_tax_interest_margin_bps)
         .collect();
-    let scenario_growths: Vec<i32> = if use_cycle_blend {
+    let scenario_growths: Vec<i32> = if acquisition_growth_must_be_zero {
+        vec![0, 0]
+    } else if use_cycle_blend {
         recent_growths
             .iter()
             .copied()
@@ -1260,21 +1330,27 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
                 recent_interest_margin_bps,
             )
         };
-    let base_fcff_margin_bps = normalized_ocf_margin_bps
-        .saturating_add(normalized_interest_margin_bps)
-        .saturating_sub(normalized_capex_intensity_bps);
+    // Preserve the annual identity before applying a robust statistic. Taking
+    // independent component medians can synthesize a non-existent year and can
+    // turn a cyclical issuer with a positive median annual FCFF margin negative.
+    let base_fcff_margin_bps = median_bps(&margins);
     let scenario_bear_margin_bps = quantile_bps(&margins, 0.25).min(base_fcff_margin_bps);
     let scenario_bull_margin_bps = quantile_bps(&margins, 0.75).max(base_fcff_margin_bps);
     let scenario_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
     let scenario_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
-    let base_growth_bps = if use_cycle_blend {
+    let base_growth_bps = if acquisition_growth_must_be_zero {
+        0
+    } else if use_cycle_blend {
         blend_recent_prior(median_bps(&recent_growths), median_bps(&prior_growths))
             .clamp(scenario_bear_growth_bps, scenario_bull_growth_bps)
     } else {
         median_bps(&recent_growths)
     };
-    let growth_dispersion_bps =
-        quantile_bps(&recent_growths, 0.75).saturating_sub(quantile_bps(&recent_growths, 0.25));
+    let growth_dispersion_bps = if acquisition_growth_must_be_zero {
+        0
+    } else {
+        quantile_bps(&recent_growths, 0.75).saturating_sub(quantile_bps(&recent_growths, 0.25))
+    };
     let latest_revenue_dollars = driver_points.last()?.revenue_dollars;
     let normalized_fcff_dollars = latest_revenue_dollars * base_fcff_margin_bps as f64 / 10_000.0;
     if !normalized_fcff_dollars.is_finite() {
@@ -1298,9 +1374,18 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             .filter(|point| point.capex_spike)
             .map(|point| point.year)
             .collect(),
-        driver_regime: regime.as_str().into(),
+        acquisition_contaminated_growth_years,
+        driver_regime: if acquisition_growth_must_be_zero {
+            "acquisition_normalized".into()
+        } else {
+            regime.as_str().into()
+        },
         growth_dispersion_bps,
-        growth_fade_exponent: growth_fade_exponent(regime),
+        growth_fade_exponent: if acquisition_growth_must_be_zero {
+            1.0
+        } else {
+            growth_fade_exponent(regime)
+        },
         tax_defaulted: points.iter().any(|point| point.6),
     })
 }
@@ -1449,10 +1534,7 @@ fn fcff_driver_wacc(
     drivers: DriverModelInputs,
 ) -> Result<DcfAnalysis, String> {
     if drivers.base_fcff_margin_bps <= 0 {
-        return Err(
-            "driver-normalized FCFF is not positive after recent-history and CapEx-regime normalization"
-                .into(),
-        );
+        return Err("non_positive_normalized_fcff: aligned annual FCFF evidence has a non-positive robust margin".into());
     }
     let g_stable_base = market_params
         .stable_growth_bps()
@@ -1541,8 +1623,9 @@ fn fcff_driver_wacc(
             "growth_fade=regime:{}_exponent:{:.2}",
             drivers.driver_regime, drivers.growth_fade_exponent
         ),
+        format!("fcff_margin=median_aligned_annual:{}", drivers.base_fcff_margin_bps),
         format!(
-            "fcff_bridge=ocf_margin:{}+after_tax_interest_margin:{}-capex_intensity:{}",
+            "fcff_component_diagnostics=ocf_margin:{};after_tax_interest_margin:{};capex_intensity:{}",
             drivers.normalized_ocf_margin_bps,
             drivers.normalized_after_tax_interest_margin_bps,
             drivers.normalized_capex_intensity_bps
@@ -1554,6 +1637,17 @@ fn fcff_driver_wacc(
             "capex=investment_spike_years:{}",
             drivers
                 .capex_spike_years
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if !drivers.acquisition_contaminated_growth_years.is_empty() {
+        reasons.push(format!(
+            "growth=acquisition_contaminated_years_excluded:{}",
+            drivers
+                .acquisition_contaminated_growth_years
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
@@ -2048,24 +2142,88 @@ fn industry_beta_millis(fundamentals: &FundamentalSnapshot) -> i32 {
 fn cost_of_equity_bps(
     fundamentals: &FundamentalSnapshot,
     market_params: &MarketParams,
-) -> (i32, WaccFieldSource, bool) {
-    let industry = industry_beta_millis(fundamentals) as f64 / 1_000.0;
-    let (raw, source, provisional) = match fundamentals.beta_millis {
+) -> Result<(i32, WaccFieldSource, bool), CostOfEquityResolutionError> {
+    let resolved = resolve_cost_of_equity(fundamentals, market_params)?;
+    Ok((
+        resolved.cost_of_equity_bps,
+        resolved.beta_source,
+        resolved.provisional,
+    ))
+}
+
+fn div_round_half_up_i128(numerator: i128, denominator: i128) -> Option<i128> {
+    if numerator < 0 || denominator <= 0 {
+        return None;
+    }
+    numerator
+        .checked_add(denominator / 2)
+        .map(|value| value / denominator)
+}
+
+pub fn resolve_cost_of_equity(
+    fundamentals: &FundamentalSnapshot,
+    market_params: &MarketParams,
+) -> Result<ResolvedCostOfEquity, CostOfEquityResolutionError> {
+    if market_params.rf_bps < 0 || market_params.erp_bps <= 0 {
+        return Err(CostOfEquityResolutionError::InvalidMarketParameters);
+    }
+    let industry = i64::from(industry_beta_millis(fundamentals));
+    let (beta_millis, source, provisional) = match fundamentals.beta_millis {
         Some(b) if b > 0 => {
-            let company = b as f64 / 1_000.0;
-            let shrunk = BETA_COMPANY_WEIGHT * company + BETA_INDUSTRY_WEIGHT * industry;
-            (shrunk, WaccFieldSource::IndustryShrink, false)
+            let company = i64::from(b);
+            let weighted = company
+                .checked_mul(BETA_COMPANY_WEIGHT_PCT)
+                .and_then(|value| {
+                    industry
+                        .checked_mul(BETA_INDUSTRY_WEIGHT_PCT)
+                        .and_then(|industry_value| value.checked_add(industry_value))
+                })
+                .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
+            (
+                div_round_half_up_i128(i128::from(weighted), 100)
+                    .and_then(|value| i64::try_from(value).ok())
+                    .ok_or(CostOfEquityResolutionError::ResultOutOfRange)?,
+                WaccFieldSource::IndustryShrink,
+                false,
+            )
         }
         // Missing company beta is intentionally shrunk to the industry prior;
         // this is an explicit Bayesian estimate, not a weak magic default.
         _ => (industry, WaccFieldSource::IndustryShrink, false),
     };
-    let re = market_params.rf_bps + (raw * market_params.erp_bps as f64).round() as i32;
-    (
-        re.max(market_params.rf_bps + 50),
-        source,
-        provisional || market_params.provisional,
+    let equity_premium = div_round_half_up_i128(
+        i128::from(beta_millis)
+            .checked_mul(i128::from(market_params.erp_bps))
+            .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?,
+        1_000,
     )
+    .and_then(|value| i32::try_from(value).ok())
+    .ok_or(CostOfEquityResolutionError::ResultOutOfRange)?;
+    let re = market_params
+        .rf_bps
+        .checked_add(equity_premium)
+        .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
+    let minimum = market_params
+        .rf_bps
+        .checked_add(50)
+        .ok_or(CostOfEquityResolutionError::ArithmeticOverflow)?;
+    let cost_of_equity_bps = re.max(minimum);
+    Ok(ResolvedCostOfEquity {
+        cost_of_equity_bps,
+        beta_source: source,
+        provisional: provisional || market_params.provisional,
+        market_params_as_of_epoch: market_params.as_of_epoch,
+        source_fingerprint: format!(
+            "cost-of-equity/1|rf={}|erp={}|asof={:?}|beta_raw={:?}|beta_industry={}|beta_source={}|provisional={}",
+            market_params.rf_bps,
+            market_params.erp_bps,
+            market_params.as_of_epoch,
+            fundamentals.beta_millis,
+            industry,
+            source.as_str(),
+            provisional || market_params.provisional,
+        ),
+    })
 }
 
 fn resolve_market_cap(
@@ -2100,7 +2258,8 @@ fn derive_wacc(
     let (market_cap, market_cap_source) = resolve_market_cap(fundamentals, market_price_cents)
         .ok_or_else(|| "market cap is missing".to_string())?;
     let (cost_of_equity_bps, beta_source, beta_prov) =
-        cost_of_equity_bps(fundamentals, market_params);
+        cost_of_equity_bps(fundamentals, market_params)
+            .map_err(|error| format!("cost of equity unavailable: {error:?}"))?;
 
     let total_debt_source = if fundamentals.total_debt_dollars.is_some() {
         WaccFieldSource::Reported
@@ -2119,8 +2278,8 @@ fn derive_wacc(
     let total_cash = fundamentals.total_cash_dollars.unwrap_or(0).max(0) as f64;
     let net_debt = (total_debt - total_cash).max(0.0);
     let base = market_cap + net_debt;
-    let mut equity_w = if base > 0.0 { market_cap / base } else { 1.0 };
-    let mut debt_w = if base > 0.0 { net_debt / base } else { 0.0 };
+    let equity_w = if base > 0.0 { market_cap / base } else { 1.0 };
+    let debt_w = if base > 0.0 { net_debt / base } else { 0.0 };
 
     let (
         cost_of_debt_bps,
@@ -2156,8 +2315,16 @@ fn derive_wacc(
     let weighted = (equity_w * cost_of_equity_bps as f64) + (debt_w * after_tax_debt as f64);
     let soft_wacc_bps = weighted.round() as i32;
 
-    let provisional_wacc_uplift_bps = 0;
-    let wacc_bps = soft_wacc_bps;
+    let provisional_rate_evidence = market_params.provisional
+        || rate_quality == crate::driver_resolution::EvidenceQuality::Provisional;
+    let provisional_wacc_uplift_bps = if provisional_rate_evidence && debt_w > 0.0 {
+        (PROVISIONAL_WACC_BASE_UPLIFT_BPS as f64
+            * (debt_w / PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT).min(1.0))
+        .round() as i32
+    } else {
+        0
+    };
+    let wacc_bps = soft_wacc_bps.saturating_add(provisional_wacc_uplift_bps);
 
     Ok(ResolvedWacc {
         wacc_bps,
@@ -2178,7 +2345,8 @@ fn derive_wacc(
             // default is permitted.
             wacc_clamped: beta_prov
                 || market_params.provisional
-                || rate_quality == crate::driver_resolution::EvidenceQuality::Provisional,
+                || rate_quality == crate::driver_resolution::EvidenceQuality::Provisional
+                || provisional_wacc_uplift_bps > 0,
         },
         rate_quality,
         rate_reasons,
@@ -2286,6 +2454,109 @@ mod tests {
     }
 
     #[test]
+    fn material_acquisition_uses_zero_near_term_growth_not_a_refusal() {
+        let history = sample_fcf()
+            .into_iter()
+            .map(|point| {
+                if point.year == 2024 {
+                    point.with_acquisition_investment(Some(23_000_000.0))
+                } else {
+                    point
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let analysis = compute(&operating_fund(), &history, Some(1_000), "test")
+            .expect("acquisition-normalized FCFF");
+        assert_eq!(analysis.base_growth_bps, 0);
+        assert_eq!(analysis.diagnostics.driver_regime, "acquisition_normalized");
+    }
+
+    #[test]
+    fn historical_acquisition_excludes_only_its_growth_transition() {
+        let history = vec![
+            (2021, 200_000_000.0, None),
+            (2022, 220_000_000.0, Some(30_000_000.0)),
+            (2023, 242_000_000.0, None),
+            (2024, 266_200_000.0, None),
+            (2025, 292_820_000.0, None),
+        ]
+        .into_iter()
+        .map(|(year, revenue, acquisition)| {
+            FcfPoint::new(year, 80_000_000.0)
+                .with_operating_drivers(
+                    100_000_000.0,
+                    25_000_000.0,
+                    revenue,
+                    Some(10_000_000.0),
+                    Some(2_000),
+                )
+                .with_rate_resolution_inputs(Some(100_000_000.0), Some(2_100), None, None)
+                .with_acquisition_investment(acquisition)
+        })
+        .collect::<Vec<_>>();
+
+        let analysis = compute(&operating_fund(), &history, Some(1_000), "test")
+            .expect("clean post-acquisition growth remains usable");
+        assert!(analysis.base_growth_bps > 0);
+        assert_ne!(analysis.diagnostics.driver_regime, "acquisition_normalized");
+        assert!(analysis
+            .reason_codes
+            .iter()
+            .any(|reason| { reason == "growth=acquisition_contaminated_years_excluded:2022" }));
+    }
+
+    #[test]
+    fn mu_cycle_uses_median_aligned_fcff_margin_and_retains_negative_year() {
+        let history = vec![
+            FcfPoint::new(2023, -6_117_000_000.0)
+                .with_operating_drivers(
+                    1_559_000_000.0,
+                    7_676_000_000.0,
+                    15_540_000_000.0,
+                    Some(388_000_000.0),
+                    Some(313),
+                )
+                .with_rate_resolution_inputs(Some(13_330_000_000.0), Some(2_100), None, None),
+            FcfPoint::new(2024, 121_000_000.0)
+                .with_operating_drivers(
+                    8_507_000_000.0,
+                    8_386_000_000.0,
+                    25_111_000_000.0,
+                    Some(562_000_000.0),
+                    Some(3_500),
+                )
+                .with_rate_resolution_inputs(Some(13_397_000_000.0), Some(2_100), None, None),
+            FcfPoint::new(2025, 1_668_000_000.0)
+                .with_operating_drivers(
+                    17_525_000_000.0,
+                    15_857_000_000.0,
+                    37_378_000_000.0,
+                    Some(477_000_000.0),
+                    Some(1_164),
+                )
+                .with_rate_resolution_inputs(Some(14_577_000_000.0), Some(2_100), None, None),
+        ];
+        let fund = FundamentalSnapshot {
+            symbol: "MU".into(),
+            sector_name: Some("Technology".into()),
+            industry_name: Some("Semiconductors".into()),
+            market_cap_dollars: Some(959_177_950_000),
+            shares_outstanding: Some(1_129_393_151),
+            beta_millis: Some(1_200),
+            total_debt_dollars: Some(14_577_000_000),
+            total_cash_dollars: Some(12_000_000_000),
+            ..Default::default()
+        };
+
+        let analysis = compute(&fund, &history, Some(83_398), "sec_edgar")
+            .expect("MU has a positive robust aligned FCFF base");
+        assert!(analysis.base_intrinsic_value_cents > 0);
+        assert!(analysis.diagnostics.normalized_fcff_dollars.unwrap_or(0) > 0);
+        assert!(analysis.diagnostics.fcf_annual_dollars[0] < 0);
+    }
+
+    #[test]
     fn amzn_driver_fcff_uses_operating_bridge_and_revenue_growth() {
         let fund = FundamentalSnapshot {
             symbol: "AMZN".into(),
@@ -2305,7 +2576,7 @@ mod tests {
         assert_eq!(analysis.diagnostics.latest_fcf_dollars, Some(7_695_000_000));
         assert_eq!(
             analysis.diagnostics.normalized_fcff_dollars,
-            Some(19_787_102_400)
+            Some(24_375_416_000)
         );
         assert_eq!(analysis.diagnostics.normalized_ocf_margin_bps, Some(1_478));
         assert_eq!(
@@ -2609,7 +2880,7 @@ mod tests {
     #[test]
     fn provisional_wacc_stress_is_asymmetric_and_reaches_market_like_bear() {
         // Default path keeps a provisional rate estimate visibly stressed in the
-        // bear case, without applying a hidden base-rate uplift.
+        // bear case, with the documented debt-scaled provisional base uplift.
         let a = compute(&operating_fund(), &sample_fcf(), Some(1_000), "sec_edgar").expect("dcf");
         assert!(a.diagnostics.point_estimate_unreliable);
         let base_w = a.wacc_bps;
@@ -2619,10 +2890,9 @@ mod tests {
         // Bull must not cheapen further: same WACC as base (band = 0).
         assert_eq!(bull_w, base_w);
         assert_eq!(WACC_SCENARIO_BULL_BAND_UNRELIABLE_BPS, 0);
-        // The uncertainty comes from the scenario band, not a valuation uplift.
         let uplift = a.diagnostics.provisional_wacc_uplift_bps.unwrap_or(0);
         assert!(
-            uplift == 0 && bear_w - base_w >= WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS,
+            uplift > 0 && bear_w - base_w >= WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS,
             "expected explicit provisional rate stress, uplift={uplift} bear_band={}",
             bear_w - base_w
         );
@@ -2700,7 +2970,7 @@ mod tests {
         .expect("t dcf");
         assert_eq!(a.model, ValuationModel::FcffWacc);
         assert!(a.diagnostics.point_estimate_unreliable);
-        assert_eq!(a.diagnostics.provisional_wacc_uplift_bps, Some(0));
+        assert_eq!(a.diagnostics.provisional_wacc_uplift_bps, Some(175));
         assert_eq!(
             a.wacc_inputs.cost_of_debt,
             WaccFieldSource::InterestOverAverageDebt
@@ -2945,8 +3215,17 @@ mod tests {
 
     #[test]
     fn explicit_rate_resolution_has_no_debt_weight_uplift() {
-        let analysis = compute(&operating_fund(), &sample_fcf(), Some(1_000), "test")
-            .expect("explicit rate inputs");
+        let mut params = MarketParams::default_usd();
+        params.provisional = false;
+        let analysis = compute_with_params(
+            &operating_fund(),
+            &sample_fcf(),
+            Some(1_000),
+            &params,
+            "test",
+            false,
+        )
+        .expect("explicit rate inputs");
         assert_eq!(analysis.diagnostics.provisional_wacc_uplift_bps, Some(0));
         assert_eq!(
             analysis.wacc_inputs.cost_of_debt,
@@ -3022,9 +3301,9 @@ mod tests {
             .any(|r| r.contains("capex=imputed_years:2022,2023")));
     }
 
-    /// Highly levered + depressed equity must not crush WACC toward after-tax CoD.
+    /// Provisional market parameters retain the documented debt-scaled uplift.
     #[test]
-    fn levered_provisional_wacc_caps_debt_weight() {
+    fn levered_provisional_wacc_applies_full_debt_scaled_uplift() {
         let fund = FundamentalSnapshot {
             symbol: "T".into(),
             sector_name: Some("Communication Services".into()),
@@ -3053,9 +3332,13 @@ mod tests {
             .collect::<Vec<_>>();
         let a = compute(&fund, &fcf, Some(2_300), "sec_edgar").expect("dcf");
         let dw = a.diagnostics.debt_weight_bps.expect("debt weight");
-        assert!(dw > 0);
+        assert!(dw >= 4_000);
         assert!(a.diagnostics.point_estimate_unreliable);
-        assert_eq!(a.diagnostics.provisional_wacc_uplift_bps, Some(0));
+        assert_eq!(a.diagnostics.provisional_wacc_uplift_bps, Some(175));
+        assert!(a
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "wacc=provisional_base_uplift:175"));
     }
 
     #[derive(Deserialize)]
@@ -3261,5 +3544,37 @@ mod tests {
         let fake_fcf = sample_fcf();
         let err = compute(&f, &fake_fcf, Some(10_000), "test").unwrap_err();
         assert!(err.contains("book"), "expected missing book, got {err}");
+    }
+
+    #[test]
+    fn cost_of_equity_extremes_refuse_instead_of_saturating() {
+        let fund = FundamentalSnapshot {
+            symbol: "EXTREME".into(),
+            sector_name: Some("Technology".into()),
+            industry_name: Some("Software".into()),
+            beta_millis: Some(i32::MAX),
+            ..Default::default()
+        };
+        let params = MarketParams {
+            rf_bps: i32::MAX,
+            erp_bps: i32::MAX,
+            as_of_epoch: None,
+            provisional: false,
+        };
+        assert!(matches!(
+            resolve_cost_of_equity(&fund, &params),
+            Err(CostOfEquityResolutionError::ResultOutOfRange)
+                | Err(CostOfEquityResolutionError::ArithmeticOverflow)
+        ));
+        let invalid = MarketParams {
+            rf_bps: 400,
+            erp_bps: 0,
+            as_of_epoch: None,
+            provisional: false,
+        };
+        assert_eq!(
+            resolve_cost_of_equity(&fund, &invalid),
+            Err(CostOfEquityResolutionError::InvalidMarketParameters)
+        );
     }
 }

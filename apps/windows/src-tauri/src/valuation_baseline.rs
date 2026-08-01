@@ -535,8 +535,8 @@ fn baseline_isolation_t_class_stress_with_cohort() {
     ];
     let t = compute(&t_fund, &t_fcf, Some(2_112), "isolation").expect("T");
     assert!(
-        t.diagnostics.provisional_wacc_uplift_bps == Some(0),
-        "T must not receive a policy uplift outside the explicit driver model"
+        t.diagnostics.provisional_wacc_uplift_bps == Some(175),
+        "T must receive the documented full debt-scaled provisional uplift"
     );
     let t_base = t.base_intrinsic_value_cents as f64 / 100.0;
     assert!(
@@ -760,4 +760,147 @@ fn baseline_quarantine_entries_are_explicit_not_green() {
         "expected 0 quarantines in pinned top-20; got {} — replace with usable High+20% names",
         q.len()
     );
+}
+
+#[test]
+fn qa_2026_07_31_corpus_is_complete_and_never_promotes_validation_anchors_to_inputs() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../shared/contracts/valuation-fcff-qa-2026-07-31.json");
+    let contract: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read FCFF QA corpus"))
+            .expect("parse FCFF QA corpus");
+    assert_eq!(
+        contract["modelPolicyVersion"].as_str(),
+        Some(MODEL_POLICY_VERSION)
+    );
+    let cases = contract["reportedCases"]
+        .as_array()
+        .expect("reported cases");
+    let symbols: Vec<_> = cases
+        .iter()
+        .filter_map(|case| case["symbol"].as_str())
+        .collect();
+    assert_eq!(
+        symbols,
+        vec!["DVN", "MU", "GDDY", "BR", "BSX", "ADSK", "AVGO", "JBL", "HPE"]
+    );
+    let forbidden = contract["modelInputPolicy"]["forbidden"]
+        .as_array()
+        .expect("forbidden inputs");
+    assert!(forbidden.iter().any(|value| value == "market_price"));
+    assert!(forbidden.iter().any(|value| value == "analyst_target"));
+    assert!(cases.iter().all(|case| {
+        case["expectedPolicyEvidence"]
+            .as_array()
+            .is_some_and(|evidence| !evidence.is_empty())
+    }));
+}
+
+/// Headless, live-data diagnostic used by the local FCFF proof of concept.
+///
+/// This is ignored in normal test runs because it calls Yahoo and SEC. It does
+/// not start Tauri or write application state.
+#[test]
+#[ignore = "live Yahoo/SEC headless valuation PoC"]
+fn live_headless_current_engine_poc() {
+    let symbols = std::env::var("DS_DCF_POC_SYMBOLS").unwrap_or_else(|_| {
+        "DVN,GDDY,WYNN,SNDK,BR,BSX,AMZN,AVGO,HPE,MU,ORCL,AAPL,CPRT,CEG,ALB".into()
+    });
+    let yahoo = crate::fetcher::YahooClient::new().expect("Yahoo client");
+    let yahoo_raw = reqwest::blocking::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("Yahoo raw client");
+    let yahoo_session = crate::yahoo_session::YahooSession::new();
+    let yahoo_user_agent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36";
+    let yahoo_crumb = yahoo_session
+        .ensure_crumb(&yahoo_raw, yahoo_user_agent)
+        .expect("Yahoo raw crumb");
+    let edgar_client = crate::edgar::edgar_client();
+    let cik_map = crate::edgar::fetch_cik_map(&edgar_client).expect("SEC CIK map");
+    let mut rows = Vec::new();
+
+    for symbol in symbols.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let mut row = serde_json::json!({ "symbol": symbol });
+        let trend_url = format!(
+            "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=earningsTrend&crumb={yahoo_crumb}"
+        );
+        if let Ok(response) = yahoo_raw
+            .get(trend_url)
+            .header("User-Agent", yahoo_user_agent)
+            .send()
+        {
+            if let Ok(payload) = response.json::<serde_json::Value>() {
+                row["earningsTrend"] = payload
+                    .pointer("/quoteSummary/result/0/earningsTrend/trend")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+            }
+        }
+        match yahoo.fetch_symbol(symbol) {
+            Ok(fetched) => {
+                row["snapshot"] = serde_json::to_value(&fetched.snapshot).unwrap();
+                row["fundamentals"] = serde_json::to_value(&fetched.fundamentals).unwrap();
+                if let (Some(mut fund), Some(cik)) =
+                    (fetched.fundamentals, cik_map.get(symbol).copied())
+                {
+                    if fund.shares_outstanding.unwrap_or(0) == 0 {
+                        fund.shares_outstanding =
+                            crate::edgar::fetch_shares_outstanding(&edgar_client, symbol, cik)
+                                .unwrap_or(None);
+                    }
+                    match crate::edgar::fetch_fcf_history(&edgar_client, symbol, cik) {
+                        Ok(Some(history)) => {
+                            row["fcfHistory"] = serde_json::Value::Array(
+                                history
+                                    .iter()
+                                    .map(|point| {
+                                        serde_json::json!({
+                                            "year": point.year,
+                                            "reportedFcfDollars": point.value_dollars,
+                                            "operatingCashFlowDollars": point.operating_cash_flow_dollars,
+                                            "capitalExpenditureDollars": point.capital_expenditure_dollars,
+                                            "revenueDollars": point.revenue_dollars,
+                                            "acquisitionInvestmentDollars": point.acquisition_investment_dollars,
+                                            "interestExpenseDollars": point.interest_expense_dollars,
+                                            "taxRateBps": point.tax_rate_bps,
+                                            "totalDebtDollars": point.total_debt_dollars,
+                                            "marginalTaxBps": point.marginal_tax_bps,
+                                        })
+                                    })
+                                    .collect(),
+                            );
+                            let price = fetched
+                                .snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.market_price_cents);
+                            match crate::dcf_model::compute(&fund, &history, price, "sec_edgar_poc")
+                            {
+                                Ok(analysis) => {
+                                    row["analysis"] = serde_json::to_value(analysis).unwrap();
+                                }
+                                Err(error) => row["analysisError"] = error.into(),
+                            }
+                        }
+                        Ok(None) => row["historyError"] = "no FCF history".into(),
+                        Err(error) => row["historyError"] = error.into(),
+                    }
+                } else {
+                    row["setupError"] = "fundamentals or CIK missing".into();
+                }
+            }
+            Err(error) => row["fetchError"] = error.to_string().into(),
+        }
+        eprintln!("POC {}", serde_json::to_string(&row).unwrap());
+        rows.push(row);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    let output_name =
+        std::env::var("DS_DCF_POC_OUTPUT").unwrap_or_else(|_| "poc-current-engine.json".into());
+    let output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../.agents/workspace/tmp")
+        .join(output_name);
+    std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).expect("write PoC report");
 }

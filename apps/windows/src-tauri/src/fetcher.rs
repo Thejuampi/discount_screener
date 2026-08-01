@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use crate::engine::HistoricalCandle;
 use crate::quote_summary::{
-    apply_asset_class_overrides, parse_quote_summary, with_price_fallback, yahoo_request_symbol,
-    QUOTE_SUMMARY_MODULES,
+    apply_asset_class_overrides, parse_forward_forecast_evidence, parse_quote_summary,
+    with_price_fallback, yahoo_request_symbol, ForwardForecastEvidence,
+    ForwardForecastProviderError, FORWARD_FORECAST_MODULES, QUOTE_SUMMARY_MODULES,
 };
 use crate::ticker_search::{parse_search_quotes, YahooSearchQuote};
 use crate::yahoo_session::{is_auth_error, is_rate_limit_error, YahooSession};
@@ -30,6 +31,23 @@ const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 pub use crate::quote_summary::FetchResult;
+
+#[derive(Debug)]
+pub enum ForwardForecastFetchError {
+    Transport(io::Error),
+    Provider(ForwardForecastProviderError),
+}
+
+impl std::fmt::Display for ForwardForecastFetchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "forward_forecast_transport:{error}"),
+            Self::Provider(error) => write!(formatter, "forward_forecast_provider:{error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ForwardForecastFetchError {}
 
 /// Android `ChartMetaProbe` — lightweight recovery from chart meta.
 struct ChartMetaProbe {
@@ -332,6 +350,22 @@ impl YahooClient {
         Ok(result)
     }
 
+    /// Demand-only operational consensus. This must never be folded into the
+    /// full-universe quoteSummary module set.
+    pub fn fetch_forward_forecast(
+        &self,
+        symbol: &str,
+        observed_epoch_day: i64,
+    ) -> Result<ForwardForecastEvidence, ForwardForecastFetchError> {
+        let display = symbol.trim().to_ascii_uppercase();
+        let request_symbol = yahoo_request_symbol(&display);
+        let root = self
+            .fetch_quote_summary_modules_json(&request_symbol, FORWARD_FORECAST_MODULES)
+            .map_err(ForwardForecastFetchError::Transport)?;
+        parse_forward_forecast_evidence(&root, &display, observed_epoch_day)
+            .map_err(ForwardForecastFetchError::Provider)
+    }
+
     /// Android `fetchChartMetaProbe` — Day range chart, price + company name only.
     fn fetch_chart_meta_probe(
         &self,
@@ -369,12 +403,20 @@ impl YahooClient {
     }
 
     fn fetch_quote_summary_json(&self, request_symbol: &str) -> io::Result<Value> {
+        self.fetch_quote_summary_modules_json(request_symbol, QUOTE_SUMMARY_MODULES)
+    }
+
+    fn fetch_quote_summary_modules_json(
+        &self,
+        request_symbol: &str,
+        modules: &str,
+    ) -> io::Result<Value> {
         let once = || -> io::Result<Value> {
             let crumb = self.session.ensure_crumb(&self.client, USER_AGENT)?;
             let url = format!(
                 "{QUOTE_SUMMARY_URL}{}?modules={}&crumb={}",
                 urlencoding_minimal(request_symbol),
-                urlencoding_minimal(QUOTE_SUMMARY_MODULES),
+                urlencoding_minimal(modules),
                 urlencoding_minimal(&crumb),
             );
             let resp = self
@@ -853,6 +895,45 @@ mod list_ready_tests {
                 "{symbol} should eventually include target, analyst count, and sector"
             );
             eprintln!("{symbol}: price/name visible and enrichment complete");
+        }
+    }
+
+    #[test]
+    #[ignore = "live demand-only Yahoo forward forecast audit"]
+    fn five_live_reported_names_have_normalizable_forward_evidence() {
+        let client = YahooClient::new().expect("Yahoo client");
+        let observed_epoch_day = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64
+            / 86_400;
+        for symbol in ["DVN", "GDDY", "WYNN", "SNDK", "BR"] {
+            let evidence = client
+                .fetch_forward_forecast(symbol, observed_epoch_day)
+                .unwrap_or_else(|error| panic!("{symbol} forward forecast: {error}"));
+            assert_eq!(evidence.currency, evidence.revenue_currency, "{symbol}");
+            assert!(
+                evidence.eps_mean_cents.is_some_and(|value| value > 0),
+                "{symbol}"
+            );
+            assert!(
+                evidence.analyst_count.is_some_and(|count| count > 0),
+                "{symbol}"
+            );
+            assert!(
+                evidence.forecast_period_end_epoch_day > observed_epoch_day,
+                "{symbol}"
+            );
+            assert!(evidence
+                .source_fingerprint
+                .contains(&format!("symbol={symbol}")));
+            eprintln!(
+                "{symbol}: eps={:?} coverage={:?} end={} fingerprint={}",
+                evidence.eps_mean_cents,
+                evidence.analyst_count,
+                evidence.forecast_period_end_epoch_day,
+                evidence.source_fingerprint
+            );
         }
     }
 }

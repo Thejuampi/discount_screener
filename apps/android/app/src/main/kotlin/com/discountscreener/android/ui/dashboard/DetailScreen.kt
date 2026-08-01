@@ -503,6 +503,14 @@ private fun QuantLensContent(
         return
     }
 
+    var showSupportingModules by remember(quantLens) { mutableStateOf(false) }
+    val sections = quantLens?.sections.orEmpty()
+    // The decision owns the first viewport; all research modules remain inspectable on demand.
+    val decisionSections = sections.filter {
+        it.lensId == QuantLensLensId.ExpectedValueRange || it.lensId == QuantLensLensId.EvidenceStrength
+    }
+    val supportingSections = sections.filterNot { it in decisionSections }
+
     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -522,8 +530,20 @@ private fun QuantLensContent(
         notice?.let { activeNotice ->
             item { InlineNoticeCard(activeNotice) }
         }
-        items(quantLens?.sections.orEmpty(), key = { it.lensId.name }) { section ->
+        items(decisionSections, key = { it.lensId.name }) { section ->
             QuantLensSection(section, onAction)
+        }
+        if (supportingSections.isNotEmpty()) {
+            item {
+                TextButton(onClick = { showSupportingModules = !showSupportingModules }) {
+                    Text(if (showSupportingModules) "Less supporting research" else "More supporting research")
+                }
+            }
+        }
+        if (showSupportingModules) {
+            items(supportingSections, key = { it.lensId.name }) { section ->
+                QuantLensSection(section, onAction)
+            }
         }
     }
 }

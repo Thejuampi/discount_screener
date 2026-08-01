@@ -28,6 +28,8 @@ cd apps/windows/src-tauri
 cargo test --lib dcf_model::
 cargo test --lib valuation_baseline::
 cargo test --lib quant_lens::
+cargo test --lib quote_summary::
+cargo test --lib operating_valuation::
 ```
 
 Optional Android: `scripts/validate-android.ps1` when touching Kotlin engine.
@@ -91,7 +93,7 @@ Binary (frontend already up), only if needed:
 | 2 | **AMZN** | Ordered bear≤base≤bull; not ~$1; not inverted scenarios | Penny intrinsic; bull &lt; bear |
 | 3 | **CI** | **Residual income** (not FCFF DCF copy); no $700+ float mirage | Model label/path is FCFF; value absurdly high vs book/analysts |
 | 4 | **UNH** or **ELV** | Same managed-care family as CI → residual income | FCFF primary |
-| 5 | **JPM** or **ACGL** | Residual income / financial | FCFF on OCF−PPE |
+| 5 | **JPM**, **ACGL**, or **COF** | Residual income / financial; COF resolves reported payout from Yahoo `summaryDetail` | FCFF on OCF−PPE or COF unavailable for missing retention |
 | 6 | **AAPL** or **MSFT** | FCFF operating; sensible vs market order of magnitude | Unclassified refuse; penny; inverted scenarios |
 | 7 | **Unknown / garbage sector** (if you can force) | Slot **unavailable** with classified refuse copy | Silent invented DCF |
 
@@ -104,6 +106,30 @@ Binary (frontend already up), only if needed:
 | Unclassified | “Valoración no disponible” + **categoría no catalogada** (fail-closed) |
 | Not eligible | ETF/REIT/crypto message |
 | Missing FCF/book | Specific missing-driver message |
+| Forward selected | “Valor por ganancias forward” + soft / no confiable; no invented bear/bull range |
+| FCFF ↔ forward disputed | Both named anchors, **no** single value/upside |
+| Any unavailable/disputed route | Keyboard-focusable `(i)` with provider, period, reasons/refusals, policy/fingerprints, and stable code locators |
+
+The `(i)` tooltip is an engineering diagnostic, not generic investor copy. For
+a provider/model failure, verify it names the owning boundary well enough to
+start debugging without reconstructing the pipeline from logs. Escape must
+close it; focus/hover/click must expose it.
+
+## Exact Tauri backend probe (debug builds only)
+
+Windows debug builds expose the active WebView2 DevTools Protocol endpoint at
+`http://127.0.0.1:9222/json/list`. It is loopback-only and absent from release
+builds. Evaluate the following in that page target to exercise the same IPC
+bridge as `apps/windows/src/api.ts#getSymbolDetail`:
+
+```js
+await window.__TAURI_INTERNALS__.invoke("get_symbol_detail", { symbol: "COF" })
+```
+
+For a Detail failure, capture both the returned backend fields
+(`dcf_analysis`, `valuation_status`, `valuation_unavailable_reason`, and required
+fundamentals) and the rendered `.detail-panel` text. A backend-only green result
+does not pass QA if the presentation boundary suppresses it.
 
 ## Notes
 

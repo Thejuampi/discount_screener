@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
@@ -344,18 +345,28 @@ class CrossPlatformParityExportTest {
     }
 
     private fun findFixturePath(relative: String): Path {
+        return findOptionalFixturePath(relative)
+            ?: error("fixture not found: $relative from ${Paths.get("").toAbsolutePath()}")
+    }
+
+    private fun findOptionalFixturePath(relative: String): Path? {
         var current = Paths.get("").toAbsolutePath()
         repeat(8) {
             val candidate = current.resolve(relative).normalize()
             if (Files.exists(candidate)) return candidate
             current = current.parent ?: return@repeat
         }
-        error("fixture not found: $relative from ${Paths.get("").toAbsolutePath()}")
+        return null
     }
 
     @Test
     fun export_random20_sp500_parity_snapshot() {
-        val path = findFixturePath(".agents/workspace/tmp/random20-inputs.json")
+        // Local agent export only: inputs live under gitignored .agents/workspace/tmp.
+        val optionalPath = findOptionalFixturePath(".agents/workspace/tmp/random20-inputs.json")
+        assumeTrue(optionalPath != null) {
+            "skip: local random20-inputs.json missing (not shipped to CI)"
+        }
+        val path = checkNotNull(optionalPath)
         val file = json.decodeFromString<Random20File>(Files.readString(path))
         assertTrue(file.members.size == 20, "expected 20 random symbols, got ${file.members.size}")
 

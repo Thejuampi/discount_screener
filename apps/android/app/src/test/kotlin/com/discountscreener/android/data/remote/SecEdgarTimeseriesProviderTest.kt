@@ -17,17 +17,17 @@ class SecEdgarTimeseriesProviderTest {
                   "NetCashProvidedByUsedInOperatingActivities": {
                     "units": {
                       "USD": [
-                        { "fp": "FY", "form": "10-K", "end": "2021-12-31", "val": 100.0 },
-                        { "fp": "FY", "form": "10-K", "end": "2022-12-31", "val": 110.0 },
-                        { "fp": "FY", "form": "10-K", "end": "2023-12-31", "val": 120.0 }
+                        { "fp": "FY", "form": "10-K", "start": "2021-01-01", "end": "2021-12-31", "val": 100.0 },
+                        { "fp": "FY", "form": "10-K", "start": "2022-01-01", "end": "2022-12-31", "val": 110.0 },
+                        { "fp": "FY", "form": "10-K", "start": "2023-01-01", "end": "2023-12-31", "val": 120.0 }
                       ]
                     }
                   },
                   "PaymentsToAcquirePropertyPlantAndEquipment": {
                     "units": {
                       "USD": [
-                        { "fp": "FY", "form": "10-K", "end": "2021-12-31", "val": 10.0 },
-                        { "fp": "FY", "form": "10-K", "end": "2022-12-31", "val": 20.0 }
+                        { "fp": "FY", "form": "10-K", "start": "2021-01-01", "end": "2021-12-31", "val": 10.0 },
+                        { "fp": "FY", "form": "10-K", "start": "2022-01-01", "end": "2022-12-31", "val": 20.0 }
                       ]
                     }
                   }

@@ -1135,6 +1135,26 @@ mod tests {
     }
 
     #[test]
+    fn desktop_refuses_unimplemented_evidence_sotp_families() {
+        for (sector_key, sector_name, industry_key, industry_name) in [
+            ("energy", "Energy", "oil-gas", "Oil & Gas"),
+            ("energy", "Energy", "midstream", "Oil & Gas Midstream"),
+            ("utilities", "Utilities", "regulated-electric", "Regulated Electric"),
+        ] {
+            let fundamentals = sample_fundamentals(
+                "UNSUPPORTED",
+                sector_key,
+                sector_name,
+                industry_key,
+                industry_name,
+            );
+            let error = compute_dcf_analysis(&fundamentals, &sample_dcf_timeseries())
+                .expect_err("desktop must fail closed for unimplemented SOTP families");
+            assert!(error.to_string().contains("evidence/SOTP family route is unsupported"));
+        }
+    }
+
+    #[test]
     fn derive_base_growth_uses_the_earliest_positive_history_point() {
         let declining_then_partial_recovery = vec![
             ("2021-12-31".to_string(), 10.0),

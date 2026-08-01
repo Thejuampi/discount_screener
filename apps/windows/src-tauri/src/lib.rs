@@ -13,12 +13,17 @@ mod driver_resolution;
 mod edgar;
 mod email;
 mod engine;
+pub mod evidence_sotp;
+#[cfg(test)]
+mod evidence_sotp_contract;
 mod feed_log;
 mod fetcher;
 mod fibonacci;
 mod index_estimates;
 mod launch_profile;
 mod news;
+pub mod operating_valuation;
+pub mod operating_valuation_runtime;
 mod opportunity_v3;
 mod price_path;
 mod profiles;
@@ -30,12 +35,16 @@ mod scalp_ws;
 mod scalping;
 mod schwab;
 mod schwab_api;
+mod sec_driver_normalization_policy_generated;
+mod sec_normalization;
 mod smc;
 mod state;
 mod stooq;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
+#[cfg(test)]
+mod valuation_decision_contract;
 mod valuation_divergence;
 mod yahoo_session;
 
@@ -47,8 +56,26 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+#[cfg(all(debug_assertions, target_os = "windows"))]
+fn enable_local_webview_debugging() {
+    const ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    let existing = std::env::var(ENV).unwrap_or_default();
+    if existing.contains("--remote-debugging-port") {
+        return;
+    }
+    let args = format!(
+        "{} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222",
+        existing.trim()
+    );
+    std::env::set_var(ENV, args.trim());
+    eprintln!("discount_screener: local WebView debug endpoint on 127.0.0.1:9222");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(all(debug_assertions, target_os = "windows"))]
+    enable_local_webview_debugging();
+
     tauri::Builder::default()
         // Single-instance MUST be the first plugin: if another instance is already
         // running, this callback fires in that instance and we focus its window
@@ -167,6 +194,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_opportunities,
             commands::get_symbol_detail,
+            commands::debug_seed_cof_native_e2e,
             commands::get_analyst_forecasts,
             commands::load_analyst_forecasts,
             commands::tipranks_settings_status,

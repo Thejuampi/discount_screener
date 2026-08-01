@@ -35,6 +35,112 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun material_acquisition_uses_zero_near_term_growth_not_a_refusal() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                acquisitionInvestment = listOf(
+                    AnnualReportedValue("2024-12-31", 23_000_000.0),
+                ),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+
+        assertEquals(0, analysis.baseGrowthBps)
+        assertEquals("acquisition_normalized", analysis.driverRegime)
+    }
+
+    @Test
+    fun historical_acquisition_excludes_only_its_growth_transition() {
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                revenue = listOf(
+                    AnnualReportedValue("2021-12-31", 200_000_000.0),
+                    AnnualReportedValue("2022-12-31", 220_000_000.0),
+                    AnnualReportedValue("2023-12-31", 242_000_000.0),
+                    AnnualReportedValue("2024-12-31", 266_200_000.0),
+                ),
+                acquisitionInvestment = listOf(
+                    AnnualReportedValue("2022-12-31", 30_000_000.0),
+                ),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+
+        assertTrue(analysis.baseGrowthBps > 0)
+        assertTrue(analysis.driverRegime != "acquisition_normalized")
+        assertTrue(
+            analysis.reasonCodes.any {
+                it == "growth=acquisition_contaminated_years_excluded:2022"
+            },
+        )
+    }
+
+    @Test
+    fun mu_cycle_uses_median_aligned_fcff_margin_and_retains_negative_year() {
+        val years = listOf("2023-08-31", "2024-08-31", "2025-08-31")
+        val analysis = DcfAnalysisEngine.compute(
+            fundamentals = FundamentalSnapshot(
+                symbol = "MU",
+                sectorName = "Technology",
+                industryName = "Semiconductors",
+                marketCapDollars = 95_917_795_000L,
+                sharesOutstanding = 1_129_393_151L,
+                betaMillis = 1_200,
+                totalDebtDollars = 14_577_000_000L,
+                totalCashDollars = 12_000_000_000L,
+            ),
+            timeseries = FundamentalTimeseries(
+                freeCashFlow = listOf(
+                    AnnualReportedValue(years[0], -6_117_000_000.0),
+                    AnnualReportedValue(years[1], 121_000_000.0),
+                    AnnualReportedValue(years[2], 1_668_000_000.0),
+                ),
+                operatingCashFlow = listOf(
+                    AnnualReportedValue(years[0], 1_559_000_000.0),
+                    AnnualReportedValue(years[1], 8_507_000_000.0),
+                    AnnualReportedValue(years[2], 17_525_000_000.0),
+                ),
+                capitalExpenditure = listOf(
+                    AnnualReportedValue(years[0], -7_676_000_000.0),
+                    AnnualReportedValue(years[1], -8_386_000_000.0),
+                    AnnualReportedValue(years[2], -15_857_000_000.0),
+                ),
+                revenue = listOf(
+                    AnnualReportedValue(years[0], 15_540_000_000.0),
+                    AnnualReportedValue(years[1], 25_111_000_000.0),
+                    AnnualReportedValue(years[2], 37_378_000_000.0),
+                ),
+                interestExpense = listOf(
+                    AnnualReportedValue(years[0], 388_000_000.0),
+                    AnnualReportedValue(years[1], 562_000_000.0),
+                    AnnualReportedValue(years[2], 477_000_000.0),
+                ),
+                taxRateForCalcs = listOf(
+                    AnnualReportedValue(years[0], 0.0313),
+                    AnnualReportedValue(years[1], 0.35),
+                    AnnualReportedValue(years[2], 0.1164),
+                ),
+                totalDebt = listOf(
+                    AnnualReportedValue(years[0], 13_330_000_000.0),
+                    AnnualReportedValue(years[1], 13_397_000_000.0),
+                    AnnualReportedValue(years[2], 14_577_000_000.0),
+                ),
+                marginalTaxRate = years.map {
+                    AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+                },
+            ),
+            marketPriceCents = 83_398,
+        ).getOrThrow()
+
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+        assertTrue((analysis.normalizedFcffDollars ?: 0L) > 0L)
+        assertTrue((analysis.latestFcfDollars ?: 0L) > 0L)
+        assertTrue(analysis.reasonCodes.any { it.startsWith("fcff_margin=median_aligned_annual:") })
+    }
+
+    @Test
     fun compute_derives_market_cap_from_price_times_shares_when_missing() {
         val fundamentals = completeFundamentals().copy(marketCapDollars = null)
         val analysis = DcfAnalysisEngine.compute(
@@ -132,7 +238,7 @@ class DcfAnalysisEngineTest {
         // avg=25M; latest 40M > 1.25×avg → recovery blend 32.5M (Windows parity).
         assertTrue(analysis.fcfRunRateDollars != null && analysis.fcfRunRateDollars > 0L)
         assertTrue(analysis.fcfRunRateNormalized)
-        assertEquals(0, analysis.provisionalWaccUpliftBps)
+        assertTrue(analysis.provisionalWaccUpliftBps > 0)
         assertTrue(analysis.reasonCodes.none { it.startsWith("calibration_target=") })
     }
 
@@ -176,7 +282,7 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
-    fun levered_policy_uses_observed_cod_without_cap_or_uplift() {
+    fun levered_provisional_policy_uses_observed_cod_with_debt_scaled_uplift() {
         val analysis = DcfAnalysisEngine.compute(
             fundamentals = completeFundamentals().copy(
                 marketCapDollars = 10_000_000_000L,
@@ -196,7 +302,7 @@ class DcfAnalysisEngineTest {
 
         assertEquals(WaccFieldSource.InterestOverAverageDebt, analysis.waccInputs.costOfDebt)
         assertTrue(analysis.debtWeightBps > 4_000)
-        assertEquals(0, analysis.provisionalWaccUpliftBps)
+        assertEquals(175, analysis.provisionalWaccUpliftBps)
         assertTrue(analysis.waccInputs.waccClamped)
         assertTrue(analysis.pointEstimateUnreliable)
     }
@@ -318,7 +424,7 @@ class DcfAnalysisEngineTest {
 
         assertEquals("driver_based_fcff", analysis.valuationDriver)
         assertEquals(7_695_000_000L, analysis.latestFcfDollars)
-        assertEquals(19_787_102_400L, analysis.normalizedFcffDollars)
+        assertEquals(24_375_416_000L, analysis.normalizedFcffDollars)
         assertEquals(1_478, analysis.normalizedOcfMarginBps)
         assertEquals(1_238, analysis.normalizedCapexIntensityBps)
         assertEquals(listOf(2025), analysis.capexSpikeYears)

@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Serialize;
@@ -15,7 +16,8 @@ use crate::engine::{
     CandidateRow, ConfidenceBand, HistoricalCandle, InsiderData, SymbolDetail,
 };
 use crate::fetcher::{
-    asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready, YahooClient,
+    asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready,
+    ForwardForecastFetchError, YahooClient,
 };
 use crate::opportunity_v3::{
     composite_score_v3, composite_score_v3_ext, composite_score_v3_short_ext, decision_state_v3,
@@ -34,6 +36,19 @@ use crate::ticker_search::{
 };
 
 const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
+
+struct ValuationInflightGuard {
+    symbol: String,
+    inflight: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for ValuationInflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.remove(&self.symbol);
+        }
+    }
+}
 
 // ── Response types ────────────────────────────────────────────────────────────
 
@@ -191,7 +206,7 @@ fn build_opportunity_rows(
                 .unwrap_or(&daily_candles_default);
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
             let model = ScoringModel::parse(&screener.scoring_model);
-            let dcf_analysis = screener.dcf_analyses.get(&row.symbol);
+            let dcf_analysis = screener.selected_dcf_analysis(&row.symbol);
             let equity = !is_crypto(row.symbol.as_str()) && !is_etf(row.symbol.as_str());
             let (
                 fund_score,
@@ -545,6 +560,44 @@ pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<Symbo
     screener.detail(&symbol)
 }
 
+/// Deterministic native-E2E setup. This is inert in release builds and unless
+/// the dedicated runner opts in; the assertion path itself still uses the real
+/// `get_symbol_detail` command and the normal DetailPanel renderer.
+#[tauri::command]
+pub fn debug_seed_cof_native_e2e(state: State<AppState>) -> Result<SymbolDetail, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+
+    seed_cof_native_e2e(&state)
+}
+
+pub(crate) fn seed_cof_native_e2e(state: &AppState) -> Result<SymbolDetail, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/yahoo/quoteSummary/COF-retention.json"
+    ))
+    .map_err(|error| format!("parse COF native E2E fixture: {error}"))?;
+    let fetched = crate::quote_summary::parse_quote_summary(&fixture, "COF");
+    let snapshot = fetched
+        .snapshot
+        .ok_or_else(|| "COF native E2E fixture has no market snapshot".to_string())?;
+    let fundamentals = fetched
+        .fundamentals
+        .ok_or_else(|| "COF native E2E fixture has no fundamentals".to_string())?;
+
+    let mut screener = state.screener.lock().unwrap();
+    screener.ingest_snapshot(snapshot);
+    screener.ingest_fundamentals(fundamentals);
+    screener.ensure_model_routed_valuation("COF");
+    screener
+        .detail("COF")
+        .ok_or_else(|| "COF detail missing after native E2E seed".to_string())
+}
+
 /// Kick a background valuation for one equity when detail is open and no DCF yet.
 fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     if is_crypto(symbol) || is_etf(symbol) {
@@ -552,9 +605,6 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     }
     {
         let mut s = state.screener.lock().unwrap();
-        if s.dcf_analyses.contains_key(symbol) || s.dcf_values.contains_key(symbol) {
-            return;
-        }
         // Need fundamentals before EDGAR compute is useful. Missing shares may
         // be recovered from SEC DEI in the demand path below; do not refuse
         // before trying the provider fallback.
@@ -574,10 +624,28 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
             crate::dcf_model::BusinessClass::Unclassified
                 | crate::dcf_model::BusinessClass::NotEligible
         ) {
-            if let Some(reason) = crate::dcf_model::classification_unavailable_reason(class) {
-                s.set_valuation_error(symbol.to_string(), reason.to_string());
-            }
-            s.clear_dcf(symbol);
+            let market_params = crate::dcf_model::MarketParams::default_usd();
+            let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
+                crate::operating_valuation_runtime::RuntimeValuationInput {
+                    business_class: class,
+                    fundamentals: &fund,
+                    fcff_analysis: None,
+                    fcff_failure: Some("business_class_refusal"),
+                    forward_evidence: Err(
+                        crate::operating_valuation_runtime::ForwardSourceFailure::NotAttempted,
+                    ),
+                    market_params: &market_params,
+                    as_of_epoch_day: current_epoch_day(),
+                },
+            );
+            s.ingest_operating_valuation(symbol.to_string(), None, envelope);
+            return;
+        }
+        if (class == crate::dcf_model::BusinessClass::FinancialServices
+            && (s.dcf_analyses.contains_key(symbol) || s.dcf_values.contains_key(symbol)))
+            || (class == crate::dcf_model::BusinessClass::OperatingNonFinancial
+                && s.has_current_operating_valuation(symbol))
+        {
             return;
         }
     }
@@ -588,27 +656,107 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
         }
     }
 
-    let symbol = symbol.to_string();
+    let worker_symbol = symbol.to_string();
     let screener = Arc::clone(&state.screener);
     let cik_cache = Arc::clone(&state.edgar_cik_map);
     let inflight = Arc::clone(&state.valuation_inflight);
     let feed_log = Arc::clone(&state.feed_log);
+    let valuation_yahoo = state.valuation_yahoo.clone();
 
-    let _ = thread::Builder::new()
-        .name(format!("edgar-dcf-{symbol}"))
+    let spawn_result = thread::Builder::new()
+        .name(format!("edgar-dcf-{worker_symbol}"))
         .spawn(move || {
-            let result = compute_demand_valuation_once(&symbol, &screener, &cik_cache);
+            let _inflight_guard = ValuationInflightGuard {
+                symbol: worker_symbol.clone(),
+                inflight,
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                compute_demand_valuation_once(
+                    &worker_symbol,
+                    &screener,
+                    &cik_cache,
+                    &valuation_yahoo,
+                )
+            }));
 
-            if let Err(e) = result {
-                feed_log.warn(&format!("demand-valuation {symbol}: {e}"));
-                let mut state = screener.lock().unwrap();
-                // An exhausted driver path invalidates any older FCFF cache;
-                // never leave a stale intrinsic while showing a new error.
-                state.clear_dcf(&symbol);
-                state.set_valuation_error(symbol.clone(), e);
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    feed_log.warn(&format!("demand-valuation {worker_symbol}: {error}"));
+                    record_demand_valuation_failure(&worker_symbol, &screener, &error);
+                }
+                Err(_) => {
+                    let error = "valuation worker panicked";
+                    feed_log.warn(&format!("demand-valuation {worker_symbol}: {error}"));
+                    record_demand_valuation_failure(&worker_symbol, &screener, error);
+                }
             }
-            inflight.lock().unwrap().remove(&symbol);
         });
+    if let Err(error) = spawn_result {
+        state.valuation_inflight.lock().unwrap().remove(symbol);
+        state
+            .feed_log
+            .warn(&format!("demand-valuation {symbol}: start worker: {error}"));
+        record_demand_valuation_failure(
+            symbol,
+            &state.screener,
+            &format!("start valuation worker: {error}"),
+        );
+    }
+}
+
+fn record_demand_valuation_failure(
+    symbol: &str,
+    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    error: &str,
+) {
+    let mut state = screener.lock().unwrap();
+    let Some(fund) = state.fundamentals.get(symbol).cloned() else {
+        state.set_valuation_error(symbol.to_string(), error.to_string());
+        return;
+    };
+    let class = crate::dcf_model::classify_business(
+        fund.sector_name.as_deref(),
+        fund.industry_name.as_deref(),
+        fund.sector_key.as_deref(),
+        fund.industry_key.as_deref(),
+        false,
+    );
+    if class != crate::dcf_model::BusinessClass::OperatingNonFinancial {
+        state.clear_dcf(symbol);
+        state.set_valuation_error(symbol.to_string(), error.to_string());
+        return;
+    }
+    let market_params = crate::dcf_model::MarketParams::default_usd();
+    let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
+        crate::operating_valuation_runtime::RuntimeValuationInput {
+            business_class: class,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some(error),
+            forward_evidence: Err(
+                crate::operating_valuation_runtime::ForwardSourceFailure::Transport,
+            ),
+            market_params: &market_params,
+            as_of_epoch_day: current_epoch_day(),
+        },
+    );
+    state.clear_dcf(symbol);
+    state.ingest_operating_valuation(symbol.to_string(), None, envelope);
+}
+
+fn current_epoch_day() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() / 86_400) as i64)
+        .unwrap_or(0)
+}
+
+fn financial_required_drivers_missing(fund: &crate::engine::FundamentalSnapshot) -> bool {
+    fund.shares_outstanding.unwrap_or(0) == 0
+        || fund.book_value_per_share_cents.unwrap_or(0) <= 0
+        || !matches!(fund.return_on_equity_bps, Some(1..=9_999))
+        || !matches!(fund.retention_bps, Some(0..=10_000))
 }
 
 /// Compute one demand-driven valuation using the same route as Detail.
@@ -620,8 +768,36 @@ fn compute_demand_valuation_once(
     symbol: &str,
     screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
     cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
+    valuation_yahoo: &Option<Arc<YahooClient>>,
 ) -> Result<(), String> {
-    let (mut fund, price, class) = {
+    compute_demand_valuation_once_with_financial_refresh(
+        symbol,
+        screener,
+        cik_cache,
+        valuation_yahoo,
+        |symbol| {
+            let Some(yahoo) = valuation_yahoo.as_deref() else {
+                return Ok(None);
+            };
+            yahoo
+                .fetch_symbol(symbol)
+                .map(|result| result.fundamentals)
+                .map_err(|error| format!("financial fundamentals refresh failed: {error}"))
+        },
+    )
+}
+
+fn compute_demand_valuation_once_with_financial_refresh<F>(
+    symbol: &str,
+    screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
+    valuation_yahoo: &Option<Arc<YahooClient>>,
+    refresh_financial_fundamentals: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<Option<crate::engine::FundamentalSnapshot>, String>,
+{
+    let (mut fund, price, class, existing_fcff) = {
         let s = screener.lock().unwrap();
         let fund = s
             .fundamentals
@@ -639,7 +815,12 @@ fn compute_demand_valuation_once(
             fund.industry_key.as_deref(),
             false,
         );
-        (fund, price, class)
+        let existing_fcff = s.dcf_analyses.get(symbol).cloned().filter(|analysis| {
+            analysis.model == crate::dcf_model::ValuationModel::FcffWacc
+                && analysis.engine_version == crate::dcf_model::ENGINE_VERSION
+                && analysis.model_policy_version == crate::dcf_model::MODEL_POLICY_VERSION
+        });
+        (fund, price, class, existing_fcff)
     };
 
     if matches!(
@@ -652,34 +833,48 @@ fn compute_demand_valuation_once(
             .into());
     }
 
-    let needs_cik = class == crate::dcf_model::BusinessClass::OperatingNonFinancial
-        || fund.shares_outstanding.unwrap_or(0) == 0;
-    let cik = if needs_cik {
-        let client = edgar::edgar_client();
-        let mut guard = cik_cache.lock().unwrap();
-        if guard.is_none() {
-            *guard = Some(edgar::fetch_cik_map(&client)?);
-        }
-        guard
-            .as_ref()
-            .and_then(|map| map.get(symbol).copied())
-            .ok_or_else(|| format!("no CIK for {symbol}"))?
-    } else {
-        0
-    };
-
-    let mut shares_resolved_from_sec = false;
-    if fund.shares_outstanding.unwrap_or(0) == 0 {
-        let shares = edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik)?
-            .ok_or_else(|| "share count is missing from Yahoo and SEC DEI".to_string())?;
-        fund.shares_outstanding = Some(shares);
-        shares_resolved_from_sec = true;
-        // Persist the provider-resolved unit conversion so Detail and future
-        // demand computations see the same auditable share count.
-        screener.lock().unwrap().ingest_fundamentals(fund.clone());
-    }
-
     if class == crate::dcf_model::BusinessClass::FinancialServices {
+        // A symbol can remain in memory from a quoteSummary fetched before a newly
+        // required module/field was available. Detail is the bounded recovery
+        // boundary: refresh the full Yahoo fundamentals once before refusing the
+        // residual-income model. This avoids requiring an app restart for COF-like
+        // missing payout/retention snapshots.
+        if financial_required_drivers_missing(&fund) {
+            if let Some(refreshed) = refresh_financial_fundamentals(symbol)? {
+                let mut state = screener.lock().unwrap();
+                state.ingest_fundamentals(refreshed);
+                fund = state
+                    .fundamentals
+                    .get(symbol)
+                    .cloned()
+                    .ok_or_else(|| "refreshed financial fundamentals missing".to_string())?;
+            }
+        }
+
+        let cik = if fund.shares_outstanding.unwrap_or(0) == 0 {
+            let client = edgar::edgar_client();
+            let mut guard = cik_cache.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(edgar::fetch_cik_map(&client)?);
+            }
+            guard
+                .as_ref()
+                .and_then(|map| map.get(symbol).copied())
+                .ok_or_else(|| format!("no CIK for {symbol}"))?
+        } else {
+            0
+        };
+        let mut shares_resolved_from_sec = false;
+        if fund.shares_outstanding.unwrap_or(0) == 0 {
+            let shares = edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik)?
+                .ok_or_else(|| "share count is missing from Yahoo and SEC DEI".to_string())?;
+            fund.shares_outstanding = Some(shares);
+            shares_resolved_from_sec = true;
+            screener.lock().unwrap().ingest_fundamentals(fund.clone());
+        }
+        if !matches!(fund.retention_bps, Some(0..=10_000)) {
+            return Err("retention/payout is missing or invalid after Yahoo refresh".into());
+        }
         let mut analysis =
             crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
         if shares_resolved_from_sec {
@@ -692,21 +887,107 @@ fn compute_demand_valuation_once(
         return Ok(());
     }
 
-    let client = edgar::edgar_client();
-    let fcf = edgar::fetch_fcf_history(&client, symbol, cik)?
-        .ok_or_else(|| "no FCF history".to_string())?;
-    let mut analysis = crate::dcf_model::compute(&fund, &fcf, price, "sec_edgar")?;
-    if shares_resolved_from_sec {
-        analysis.reason_codes.push("shares=sec_dei_fallback".into());
-        analysis
-            .diagnostics
-            .driver_provenance
-            .push("shares=sec_dei_fallback".into());
+    let as_of_epoch_day = current_epoch_day();
+    let forward_evidence = valuation_yahoo.as_deref().map_or_else(
+        || Err(crate::operating_valuation_runtime::ForwardSourceFailure::Transport),
+        |valuation_yahoo| {
+            valuation_yahoo
+                .fetch_forward_forecast(symbol, as_of_epoch_day)
+                .map_err(|error| match error {
+                    ForwardForecastFetchError::Provider(reason) => {
+                        crate::operating_valuation_runtime::ForwardSourceFailure::Provider(reason)
+                    }
+                    ForwardForecastFetchError::Transport(error)
+                        if crate::yahoo_session::is_rate_limit_error(&error) =>
+                    {
+                        crate::operating_valuation_runtime::ForwardSourceFailure::RateLimited
+                    }
+                    ForwardForecastFetchError::Transport(_) => {
+                        crate::operating_valuation_runtime::ForwardSourceFailure::Transport
+                    }
+                })
+        },
+    );
+
+    let mut fcff_failure = None;
+    let mut analysis = existing_fcff;
+    // A current FCFF candidate plus a resolved share count needs only the
+    // demand-only Yahoo forecast. Avoid a redundant SEC round trip on Detail.
+    let cik_result = (analysis.is_none() || fund.shares_outstanding.unwrap_or(0) == 0).then(|| {
+        (|| -> Result<u64, String> {
+            let client = edgar::edgar_client();
+            let mut guard = cik_cache.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(edgar::fetch_cik_map(&client)?);
+            }
+            guard
+                .as_ref()
+                .and_then(|map| map.get(symbol).copied())
+                .ok_or_else(|| format!("no CIK for {symbol}"))
+        })()
+    });
+    match cik_result {
+        Some(Ok(cik)) => {
+            let mut shares_resolved_from_sec = false;
+            if fund.shares_outstanding.unwrap_or(0) == 0 {
+                match edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik) {
+                    Ok(Some(shares)) => {
+                        fund.shares_outstanding = Some(shares);
+                        shares_resolved_from_sec = true;
+                        screener.lock().unwrap().ingest_fundamentals(fund.clone());
+                    }
+                    Ok(None) => fcff_failure = Some("missing_shares:yahoo_and_sec_dei".to_string()),
+                    Err(error) => fcff_failure = Some(format!("sec_shares:{error}")),
+                }
+            }
+            if analysis.is_none() && fcff_failure.is_none() {
+                match edgar::fetch_fcf_history(&edgar::edgar_client(), symbol, cik) {
+                    Ok(Some(fcf)) => {
+                        match crate::dcf_model::compute(&fund, &fcf, None, "sec_edgar") {
+                            Ok(mut computed) => {
+                                if shares_resolved_from_sec {
+                                    computed.reason_codes.push("shares=sec_dei_fallback".into());
+                                    computed
+                                        .diagnostics
+                                        .driver_provenance
+                                        .push("shares=sec_dei_fallback".into());
+                                }
+                                analysis = Some(computed);
+                            }
+                            Err(error) => fcff_failure = Some(format!("fcff_compute:{error}")),
+                        }
+                    }
+                    Ok(None) => fcff_failure = Some("missing_sec_fcff_history".into()),
+                    Err(error) => fcff_failure = Some(format!("sec_fcff:{error}")),
+                }
+            }
+        }
+        Some(Err(error)) => fcff_failure = Some(format!("sec_cik:{error}")),
+        None => {}
     }
-    screener
-        .lock()
-        .unwrap()
-        .ingest_dcf_analysis(symbol.to_string(), analysis);
+
+    let market_params = crate::dcf_model::MarketParams::default_usd();
+    let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
+        crate::operating_valuation_runtime::RuntimeValuationInput {
+            business_class: class,
+            fundamentals: &fund,
+            fcff_analysis: analysis.as_ref(),
+            fcff_failure: fcff_failure.as_deref(),
+            forward_evidence,
+            market_params: &market_params,
+            as_of_epoch_day,
+        },
+    );
+    let final_fundamentals_fingerprint =
+        crate::operating_valuation_runtime::fundamentals_fingerprint(&fund);
+    let mut state = screener.lock().unwrap();
+    let inputs_are_current = state.fundamentals.get(symbol).is_some_and(|current| {
+        crate::operating_valuation_runtime::fundamentals_fingerprint(current)
+            == final_fundamentals_fingerprint
+    });
+    if inputs_are_current {
+        state.ingest_operating_valuation(symbol.to_string(), analysis, envelope);
+    }
     Ok(())
 }
 
@@ -1021,11 +1302,20 @@ pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::In
     let profile_name = state.active_profile.lock().unwrap().clone();
     let screener = state.screener.lock().unwrap();
     let rows = screener.candidate_rows();
+    let selected_dcf = rows
+        .iter()
+        .filter_map(|row| {
+            screener
+                .selected_dcf_analysis(&row.symbol)
+                .cloned()
+                .map(|analysis| (row.symbol.clone(), analysis))
+        })
+        .collect();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    crate::index_estimates::compute(&rows, &screener.dcf_analyses, &profile_name, now)
+    crate::index_estimates::compute(&rows, &selected_dcf, &profile_name, now)
 }
 
 #[tauri::command]
@@ -1033,6 +1323,7 @@ pub fn get_quant_lens(
     symbol: String,
     state: State<AppState>,
 ) -> Result<crate::quant_lens::QuantLensReport, String> {
+    request_demand_valuation_if_needed(&symbol, &state);
     let mut screener = state.screener.lock().unwrap();
     screener.ensure_model_routed_valuation(&symbol);
 
@@ -1081,15 +1372,22 @@ pub async fn run_qa_valuation_divergence_audit(
     let screener = Arc::clone(&state.screener);
     let cik_cache = Arc::clone(&state.edgar_cik_map);
     let feed_log = Arc::clone(&state.feed_log);
+    let valuation_yahoo = state.valuation_yahoo.clone();
     tauri::async_runtime::spawn_blocking(move || {
         for symbol in &symbols {
             let needs_valuation = {
                 let mut s = screener.lock().unwrap();
                 s.ensure_model_routed_valuation(symbol);
-                !s.dcf_analyses.contains_key(symbol) && !s.dcf_values.contains_key(symbol)
+                !s.has_current_operating_valuation(symbol)
+                    && !s.dcf_analyses.get(symbol).is_some_and(|analysis| {
+                        analysis.business_class
+                            == crate::dcf_model::BusinessClass::FinancialServices
+                    })
             };
             if needs_valuation {
-                if let Err(error) = compute_demand_valuation_once(symbol, &screener, &cik_cache) {
+                if let Err(error) =
+                    compute_demand_valuation_once(symbol, &screener, &cik_cache, &valuation_yahoo)
+                {
                     feed_log.warn(&format!("qa-divergence-audit {symbol}: {error}"));
                     screener
                         .lock()
@@ -1485,8 +1783,10 @@ fn needs_enrichment_retry(
 #[cfg(test)]
 mod feed_coordinator_tests {
     use super::{
-        batch_retry_delay_ms, format_incomplete_retry_status, format_terminal_incomplete_status,
-        ingest_fetch_result, mark_initial_pass_complete_if_current, needs_enrichment_retry,
+        batch_retry_delay_ms, compute_demand_valuation_once_with_financial_refresh,
+        financial_required_drivers_missing, format_incomplete_retry_status,
+        format_terminal_incomplete_status, ingest_fetch_result,
+        mark_initial_pass_complete_if_current, needs_enrichment_retry,
         reset_initial_pass_completion, resolve_regime_score_status,
         symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
         RegimeScoreStatus,
@@ -1494,6 +1794,75 @@ mod feed_coordinator_tests {
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
     use crate::opportunity_v3::ScoringModel;
+
+    #[test]
+    fn financial_detail_refreshes_when_retention_is_missing() {
+        let mut cof = FundamentalSnapshot {
+            symbol: "COF".into(),
+            shares_outstanding: Some(480_000_000),
+            book_value_per_share_cents: Some(15_000),
+            return_on_equity_bps: Some(903),
+            retention_bps: None,
+            ..Default::default()
+        };
+        assert!(financial_required_drivers_missing(&cof));
+
+        cof.retention_bps = Some(8_347);
+        assert!(!financial_required_drivers_missing(&cof));
+    }
+
+    #[test]
+    fn cof_stale_detail_demand_refresh_replaces_unavailable_with_residual_income() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/yahoo/quoteSummary/COF-retention.json"
+        ))
+        .expect("COF fixture JSON");
+        let fetched = crate::quote_summary::parse_quote_summary(&fixture, "COF");
+        let snapshot = fetched.snapshot.expect("COF snapshot");
+        let fresh_fundamentals = fetched.fundamentals.expect("COF fundamentals");
+
+        let mut stale_fundamentals = fresh_fundamentals.clone();
+        stale_fundamentals.retention_bps = None;
+        let mut state = ScreenerState::new();
+        state.ingest_snapshot(snapshot);
+        state.ingest_fundamentals(stale_fundamentals);
+        state.set_valuation_error(
+            "COF".into(),
+            "retention/payout is missing or invalid".into(),
+        );
+        let before = state.detail("COF").expect("stale COF detail");
+        assert!(before.dcf_analysis.is_none());
+        assert!(before
+            .valuation_unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("retention/payout")));
+
+        let screener = std::sync::Arc::new(std::sync::Mutex::new(state));
+        let cik_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut refresh_calls = 0;
+        compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            |requested_symbol| {
+                refresh_calls += 1;
+                assert_eq!(requested_symbol, "COF");
+                Ok(Some(fresh_fundamentals))
+            },
+        )
+        .expect("demand valuation should recover stale COF");
+
+        assert_eq!(refresh_calls, 1, "Detail must issue one bounded refresh");
+        let state = screener.lock().unwrap();
+        let after = state.detail("COF").expect("refreshed COF detail");
+        assert_eq!(after.dcf_value_cents, Some(16_881));
+        assert_eq!(
+            after.dcf_analysis.as_ref().map(|analysis| analysis.model),
+            Some(crate::dcf_model::ValuationModel::ResidualIncomeEquity)
+        );
+        assert_eq!(after.valuation_unavailable_reason, None);
+    }
 
     #[test]
     fn regime_row_status_distinguishes_all_four_states_and_keeps_zero_included() {
@@ -2252,9 +2621,11 @@ fn spawn_feed_workers(
                             continue;
                         }
 
-                        // Valuation model family: financials → residual income (no FCFF on
-                        // float OCF). Operating → FCFF from EDGAR FCF history.
-                        let is_financial = {
+                        // Operating valuations are demand-driven and must pass through the
+                        // single evidence router (including Yahoo forward evidence). This
+                        // periodic worker only maintains residual-income financials plus
+                        // insider evidence; it must never publish a legacy FCFF candidate.
+                        let business_class = {
                             let s = screener.lock().unwrap();
                             s.fundamentals
                                 .get(sym)
@@ -2265,12 +2636,12 @@ fn spawn_feed_workers(
                                         fund.sector_key.as_deref(),
                                         fund.industry_key.as_deref(),
                                         false,
-                                    ) == crate::dcf_model::BusinessClass::FinancialServices
+                                    )
                                 })
-                                .unwrap_or(false)
+                                .unwrap_or(crate::dcf_model::BusinessClass::Unclassified)
                         };
 
-                        if is_financial {
+                        if business_class == crate::dcf_model::BusinessClass::FinancialServices {
                             let mut s = screener.lock().unwrap();
                             let fund = s.fundamentals.get(sym).cloned();
                             let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
@@ -2283,34 +2654,14 @@ fn spawn_feed_workers(
                                     s.ingest_dcf_analysis(sym.to_string(), analysis);
                                 }
                             }
-                        } else {
-                            match edgar::fetch_fcf_history(&edgar_client, sym, cik) {
-                                Ok(Some(fcf)) => {
-                                    if !generation_is_current(&feed_gen, generation) {
-                                        return;
-                                    }
-                                    let mut s = screener.lock().unwrap();
-                                    let fund = s.fundamentals.get(sym).cloned();
-                                    let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
-                                    if let Some(fund) = fund {
-                                        if let Ok(analysis) = crate::dcf_model::compute(
-                                            &fund,
-                                            &fcf,
-                                            price,
-                                            "sec_edgar",
-                                        ) {
-                                            s.ingest_dcf_analysis(sym.to_string(), analysis);
-                                        }
-                                    } else if let Ok(Some(legacy)) =
-                                        edgar::fetch_dcf(&edgar_client, sym, cik, shares)
-                                    {
-                                        s.ingest_dcf(sym.to_string(), legacy.value_per_share_cents);
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(_) => {}
-                            }
-                            thread::sleep(std::time::Duration::from_millis(125));
+                        } else if matches!(
+                            business_class,
+                            crate::dcf_model::BusinessClass::Unclassified
+                                | crate::dcf_model::BusinessClass::NotEligible
+                        ) {
+                            // Closed-world refusal also clears any legacy value restored
+                            // before classification became available.
+                            screener.lock().unwrap().clear_dcf(sym);
                         }
 
                         if let Ok(Some(ins)) = edgar::fetch_insider_activity(&edgar_client, cik) {

@@ -10,22 +10,44 @@ interface Props {
 
 export function QuantLensPanel({ symbol }: Props) {
   const { t } = useT();
-  const [report, setReport] = useState<QuantLensReport | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [result, setResult] = useState<{ symbol: string; report: QuantLensReport } | null>(null);
+  const [failure, setFailure] = useState<{ symbol: string; message: string } | null>(null);
+  const report = result?.symbol === symbol ? result.report : null;
+  const err = failure?.symbol === symbol ? failure.message : null;
 
   useEffect(() => {
     let cancelled = false;
-    setReport(null);
-    api
-      .getQuantLens(symbol)
-      .then((r) => {
-        if (!cancelled) setReport(r);
-      })
-      .catch((e) => {
-        if (!cancelled) setErr(String(e));
-      });
+    let issuedGeneration = 0;
+    let settledGeneration = 0;
+    const timers: number[] = [];
+    const refresh = () => {
+      const generation = ++issuedGeneration;
+      api
+        .getQuantLens(symbol)
+        .then((r) => {
+          if (!cancelled && generation >= settledGeneration) {
+            settledGeneration = generation;
+            setResult({ symbol, report: r });
+            setFailure(null);
+          }
+        })
+        .catch((e) => {
+          if (!cancelled && generation >= settledGeneration) {
+            settledGeneration = generation;
+            setFailure({ symbol, message: String(e) });
+          }
+        });
+    };
+    refresh();
+    // The first command starts the bounded demand valuation. Re-read the
+    // cache while that worker resolves instead of leaving Quant Lens frozen
+    // on its pre-route report until the panel is reopened.
+    for (const delay of [1_200, 3_500, 8_000, 15_000, 20_000]) {
+      timers.push(window.setTimeout(refresh, delay));
+    }
     return () => {
       cancelled = true;
+      for (const timer of timers) window.clearTimeout(timer);
     };
   }, [symbol]);
 

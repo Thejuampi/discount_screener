@@ -304,6 +304,14 @@ pub struct SymbolDetail {
     pub technical_breakdown: Option<TechnicalBreakdown>,
     pub dcf_value_cents: Option<i64>,
     pub dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
+    #[serde(default)]
+    pub valuation_status: Option<crate::operating_valuation::RouteStatus>,
+    #[serde(default)]
+    pub selected_valuation_value_cents: Option<i64>,
+    #[serde(default)]
+    pub selected_valuation_model: Option<crate::operating_valuation::OperatingModel>,
+    #[serde(default)]
+    pub operating_valuation: Option<crate::operating_valuation_runtime::OperatingValuationEnvelope>,
     /// Why model valuation is missing (classification refuse, missing FCF, etc.).
     /// Machine-readable English; UI maps known prefixes to i18n.
     #[serde(default)]
@@ -2044,6 +2052,9 @@ pub struct ScreenerState {
     pub crypto_metrics: HashMap<String, crate::crypto_cycle::CryptoMetrics>,
     pub dcf_values: HashMap<String, i64>, // symbol → base dcf value in cents/share
     pub dcf_analyses: HashMap<String, crate::dcf_model::DcfAnalysis>,
+    pub selected_valuation_values: HashMap<String, i64>,
+    pub operating_valuations:
+        HashMap<String, crate::operating_valuation_runtime::OperatingValuationEnvelope>,
     /// Last valuation failure reason per symbol (cleared on successful ingest).
     pub valuation_errors: HashMap<String, String>,
     pub insider_data: HashMap<String, InsiderData>, // symbol → insider activity
@@ -2176,6 +2187,10 @@ impl ScreenerState {
     }
 
     pub fn ingest_fundamentals(&mut self, mut fund: FundamentalSnapshot) {
+        let previous_fingerprint = self
+            .fundamentals
+            .get(&fund.symbol)
+            .map(crate::operating_valuation_runtime::fundamentals_fingerprint);
         if let Some(previous) = self.fundamentals.get(&fund.symbol) {
             macro_rules! preserve {
                 ($($field:ident),+ $(,)?) => {$ (
@@ -2207,9 +2222,14 @@ impl ScreenerState {
                 trailing_eps_cents,
                 earnings_growth_bps,
                 book_value_per_share_cents,
+                retention_bps,
             );
         }
         let symbol = fund.symbol.clone();
+        let next_fingerprint = crate::operating_valuation_runtime::fundamentals_fingerprint(&fund);
+        if previous_fingerprint.is_some_and(|value| value != next_fingerprint) {
+            self.clear_dcf(&symbol);
+        }
         self.fundamentals.insert(symbol.clone(), fund);
         // Financial-services residual income can run from fundamentals alone (no FCF).
         try_ingest_fundamentals_valuation(self, &symbol);
@@ -2270,14 +2290,112 @@ impl ScreenerState {
             }
         }
         self.valuation_errors.remove(&symbol);
+        self.selected_valuation_values.remove(&symbol);
+        self.operating_valuations.remove(&symbol);
         self.dcf_values
             .insert(symbol.clone(), analysis.base_intrinsic_value_cents);
         self.dcf_analyses.insert(symbol, analysis);
     }
 
+    pub fn ingest_operating_valuation(
+        &mut self,
+        symbol: String,
+        fcff_analysis: Option<crate::dcf_model::DcfAnalysis>,
+        envelope: crate::operating_valuation_runtime::OperatingValuationEnvelope,
+    ) {
+        if let Some(analysis) = fcff_analysis {
+            self.ingest_dcf_analysis(symbol.clone(), analysis);
+        }
+        self.selected_valuation_values.remove(&symbol);
+        if envelope.decision.status == crate::operating_valuation::RouteStatus::Selected {
+            if let Some(value) = envelope
+                .decision
+                .selected_value_cents
+                .filter(|value| *value > 0)
+            {
+                self.selected_valuation_values.insert(symbol.clone(), value);
+            }
+        }
+        self.valuation_errors.remove(&symbol);
+        self.operating_valuations.insert(symbol, envelope);
+    }
+
+    pub fn has_current_operating_valuation(&self, symbol: &str) -> bool {
+        self.operating_valuations
+            .get(symbol)
+            .is_some_and(|envelope| {
+                let versions_match = envelope.diagnostics.runtime_policy_version
+                    == crate::operating_valuation_runtime::RUNTIME_POLICY_VERSION
+                    && envelope.diagnostics.router_policy_version
+                        == crate::operating_valuation::ROUTER_POLICY_VERSION
+                    && envelope.diagnostics.model_policy_version
+                        == crate::dcf_model::MODEL_POLICY_VERSION;
+                let fundamentals_match = self.fundamentals.get(symbol).is_some_and(|fund| {
+                    let fingerprint =
+                        crate::operating_valuation_runtime::fundamentals_fingerprint(fund);
+                    envelope
+                        .diagnostics
+                        .source_fingerprints
+                        .contains(&fingerprint)
+                });
+                let forward = &envelope.decision.forward_candidate.provenance;
+                let now_epoch_day = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| (duration.as_secs() / 86_400) as i64)
+                    .unwrap_or(i64::MAX);
+                let now_epoch_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or(i64::MAX);
+                let age = now_epoch_day.checked_sub(forward.forecast.observed_epoch_day);
+                let horizon = forward
+                    .forecast
+                    .forecast_period_end_epoch_day
+                    .checked_sub(now_epoch_day);
+                let forward_current = if envelope.diagnostics.forward_source_state
+                    == crate::operating_valuation_runtime::ForwardSourceState::NotAttempted
+                {
+                    true
+                } else if envelope.diagnostics.forward_source_state
+                    == crate::operating_valuation_runtime::ForwardSourceState::Unavailable
+                {
+                    now_epoch_seconds
+                        .checked_sub(envelope.diagnostics.computed_at_epoch_seconds)
+                        .is_some_and(|seconds| {
+                            (0..crate::operating_valuation_runtime::FORWARD_RETRY_AFTER_SECONDS)
+                                .contains(&seconds)
+                        })
+                } else {
+                    age.is_some_and(|days| (0..=forward.policy.max_age_days).contains(&days))
+                        && horizon.is_some_and(|days| {
+                            days >= forward.policy.min_forecast_horizon_days
+                                && days <= forward.policy.max_forecast_horizon_days
+                        })
+                };
+                versions_match && fundamentals_match && forward_current
+            })
+    }
+
+    /// DCF analysis is a scoring/index input only when it is the selected
+    /// operating model (or the financial-services primary). Disputed and
+    /// forward-selected FCFF candidates remain diagnostic evidence only.
+    pub fn selected_dcf_analysis(&self, symbol: &str) -> Option<&crate::dcf_model::DcfAnalysis> {
+        let analysis = self.dcf_analyses.get(symbol)?;
+        if let Some(envelope) = self.operating_valuations.get(symbol) {
+            return (envelope.decision.status == crate::operating_valuation::RouteStatus::Selected
+                && envelope.decision.selected_model
+                    == Some(crate::operating_valuation::OperatingModel::FcffWacc))
+            .then_some(analysis);
+        }
+        (analysis.business_class == crate::dcf_model::BusinessClass::FinancialServices)
+            .then_some(analysis)
+    }
+
     pub fn clear_dcf(&mut self, symbol: &str) {
         self.dcf_values.remove(symbol);
         self.dcf_analyses.remove(symbol);
+        self.selected_valuation_values.remove(symbol);
+        self.operating_valuations.remove(symbol);
     }
 
     pub fn set_valuation_error(&mut self, symbol: String, reason: String) {
@@ -2286,6 +2404,19 @@ impl ScreenerState {
 
     /// Prefer classification refusal over last compute error over nothing.
     pub fn valuation_unavailable_reason(&self, symbol: &str) -> Option<String> {
+        if let Some(envelope) = self.operating_valuations.get(symbol) {
+            return match envelope.decision.status {
+                crate::operating_valuation::RouteStatus::Selected
+                | crate::operating_valuation::RouteStatus::Disputed => None,
+                crate::operating_valuation::RouteStatus::Unavailable
+                | crate::operating_valuation::RouteStatus::NotEligible => Some(format!(
+                    "operating_route:{:?}; reasons={:?}; forward_refusals={:?}",
+                    envelope.decision.status,
+                    envelope.decision.reasons,
+                    envelope.decision.forward_candidate.refusals
+                )),
+            };
+        }
         if self.dcf_analyses.contains_key(symbol) {
             return None;
         }
@@ -2315,6 +2446,11 @@ impl ScreenerState {
                 || analysis.model_policy_version != crate::dcf_model::MODEL_POLICY_VERSION
         });
         if stale_policy {
+            self.clear_dcf(symbol);
+        }
+        if self.operating_valuations.contains_key(symbol)
+            && !self.has_current_operating_valuation(symbol)
+        {
             self.clear_dcf(symbol);
         }
         let class = crate::dcf_model::classify_business(
@@ -2430,7 +2566,23 @@ impl ScreenerState {
                         .and_then(|f| f.enterprise_to_ebitda_hundredths),
                     beta_millis: fund.and_then(|f| f.beta_millis),
                     shares_outstanding: fund.and_then(|f| f.shares_outstanding),
-                    dcf_value_cents: self.dcf_values.get(&snap.symbol).copied(),
+                    dcf_value_cents: if self.operating_valuations.get(&snap.symbol).is_some_and(
+                        |envelope| {
+                            envelope.decision.status
+                                == crate::operating_valuation::RouteStatus::Selected
+                                && envelope.decision.selected_model
+                                    == Some(crate::operating_valuation::OperatingModel::FcffWacc)
+                        },
+                    ) {
+                        self.dcf_values.get(&snap.symbol).copied()
+                    } else if self.dcf_analyses.get(&snap.symbol).is_some_and(|analysis| {
+                        analysis.business_class
+                            == crate::dcf_model::BusinessClass::FinancialServices
+                    }) {
+                        self.dcf_values.get(&snap.symbol).copied()
+                    } else {
+                        None
+                    },
                     insider_net_shares_90d: self
                         .insider_data
                         .get(&snap.symbol)
@@ -2514,6 +2666,16 @@ impl ScreenerState {
             },
             dcf_value_cents: self.dcf_values.get(symbol).copied(),
             dcf_analysis: self.dcf_analyses.get(symbol).cloned(),
+            valuation_status: self
+                .operating_valuations
+                .get(symbol)
+                .map(|value| value.decision.status),
+            selected_valuation_value_cents: self.selected_valuation_values.get(symbol).copied(),
+            selected_valuation_model: self
+                .operating_valuations
+                .get(symbol)
+                .and_then(|value| value.decision.selected_model),
+            operating_valuation: self.operating_valuations.get(symbol).cloned(),
             valuation_unavailable_reason: self.valuation_unavailable_reason(symbol),
             insider_net_shares_90d: self.insider_data.get(symbol).map(|i| i.net_shares_90d),
             insider_buy_count: self.insider_data.get(symbol).map(|i| i.buy_count),
@@ -2621,6 +2783,11 @@ mod valuation_routing_tests {
         ENGINE_VERSION,
         MODEL_POLICY_VERSION,
     };
+    use crate::operating_valuation::{OperatingModel, RouteStatus};
+    use crate::operating_valuation_runtime::{
+        route_runtime_valuation, ForwardSourceFailure, RuntimeValuationInput,
+    };
+    use crate::quote_summary::ForwardForecastEvidence;
 
     fn stale_fcff_acgl() -> DcfAnalysis {
         DcfAnalysis {
@@ -2651,6 +2818,356 @@ mod valuation_routing_tests {
             reason_codes: vec![],
             diagnostics: Default::default(),
         }
+    }
+
+    fn current_operating_fcff(base: i64) -> DcfAnalysis {
+        let mut analysis = stale_fcff_acgl();
+        analysis.base_intrinsic_value_cents = base;
+        analysis.bear_intrinsic_value_cents = base / 2;
+        analysis.bull_intrinsic_value_cents = base * 2;
+        analysis.engine_version = ENGINE_VERSION.into();
+        analysis.model_policy_version = MODEL_POLICY_VERSION.into();
+        analysis.business_class = BusinessClass::OperatingNonFinancial;
+        analysis.model = ValuationModel::FcffWacc;
+        analysis.diagnostics.latest_revenue_dollars = Some(1_000);
+        analysis.diagnostics.normalized_fcff_dollars = Some(10);
+        analysis.diagnostics.fcf_years = vec![2023, 2024, 2025];
+        analysis.diagnostics.driver_input_fingerprint = Some("state:test".into());
+        analysis
+    }
+
+    fn operating_fund() -> FundamentalSnapshot {
+        FundamentalSnapshot {
+            symbol: "AMZN".into(),
+            sector_key: Some("consumer-cyclical".into()),
+            industry_key: Some("internet-retail".into()),
+            beta_millis: Some(1_350),
+            debt_to_equity_hundredths: Some(4_046),
+            return_on_equity_bps: Some(3_055),
+            shares_outstanding: Some(1_000_000),
+            ..Default::default()
+        }
+    }
+
+    fn forward() -> ForwardForecastEvidence {
+        ForwardForecastEvidence {
+            eps_low_cents: Some(775),
+            eps_mean_cents: Some(1_004),
+            eps_high_cents: Some(1_512),
+            analyst_count: Some(55),
+            revenue_growth_bps: Some(1_327),
+            revenue_analyst_count: Some(60),
+            earnings_growth_bps: Some(1_358),
+            currency: "USD".into(),
+            revenue_currency: "USD".into(),
+            reporting_currency: "USD".into(),
+            observed_epoch_day: 20_665,
+            forecast_period_end_epoch_day: 21_183,
+            source_fingerprint: "yahoo-earnings-trend/1|symbol=AMZN|hash=state".into(),
+        }
+    }
+
+    #[test]
+    fn operating_route_is_atomic_and_keeps_fcff_provenance_separate() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AMZN".into(),
+            company_name: Some("Amazon".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 30_000,
+            previous_close_cents: 19_900,
+            next_earnings_epoch: None,
+        });
+        let fcff = current_operating_fcff(1_000);
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: Some(&fcff),
+            fcff_failure: None,
+            forward_evidence: Ok(forward()),
+            market_params: &market,
+            as_of_epoch_day: 20_665,
+        });
+        assert_eq!(envelope.decision.status, RouteStatus::Disputed);
+        state.ingest_operating_valuation("AMZN".into(), Some(fcff), envelope);
+        assert_eq!(state.dcf_values.get("AMZN"), Some(&1_000));
+        assert_eq!(state.selected_valuation_values.get("AMZN"), None);
+        let retained = state.operating_valuations.get("AMZN").expect("route");
+        assert_eq!(retained.decision.selected_model, None);
+        assert!(retained
+            .decision
+            .forward_candidate
+            .intrinsic_value_cents
+            .is_some());
+        assert_eq!(
+            retained.decision.fcff_candidate.intrinsic_value_cents,
+            Some(1_000)
+        );
+        assert_eq!(state.candidate_rows()[0].dcf_value_cents, None);
+        assert!(state.selected_dcf_analysis("AMZN").is_none());
+    }
+
+    #[test]
+    fn provider_failure_selected_fcff_projects_through_detail() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AMZN".into(),
+            company_name: Some("Amazon".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 30_000,
+            previous_close_cents: 19_900,
+            next_earnings_epoch: None,
+        });
+        let fcff = current_operating_fcff(25_000);
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: Some(&fcff),
+            fcff_failure: None,
+            forward_evidence: Err(ForwardSourceFailure::Transport),
+            market_params: &market,
+            as_of_epoch_day: 20_665,
+        });
+        state.ingest_operating_valuation("AMZN".into(), Some(fcff), envelope);
+        let detail = state.detail("AMZN").expect("detail");
+        assert_eq!(detail.valuation_status, Some(RouteStatus::Selected));
+        assert_eq!(
+            detail.selected_valuation_model,
+            Some(OperatingModel::FcffWacc)
+        );
+        assert_eq!(detail.selected_valuation_value_cents, Some(25_000));
+        assert!(detail.operating_valuation.is_some());
+    }
+
+    #[test]
+    fn selected_forward_is_not_projected_as_independent_dcf_ranking_evidence() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AMZN".into(),
+            company_name: Some("Amazon".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 30_000,
+            previous_close_cents: 19_900,
+            next_earnings_epoch: None,
+        });
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some("missing_fcff"),
+            forward_evidence: Ok(forward()),
+            market_params: &market,
+            as_of_epoch_day: 20_665,
+        });
+        assert_eq!(
+            envelope.decision.selected_model,
+            Some(OperatingModel::ForwardEarningsPower)
+        );
+        state.ingest_operating_valuation("AMZN".into(), None, envelope);
+
+        assert!(state.selected_valuation_values.contains_key("AMZN"));
+        assert_eq!(state.candidate_rows()[0].dcf_value_cents, None);
+        assert!(state.selected_dcf_analysis("AMZN").is_none());
+    }
+
+    #[test]
+    fn route_currentness_tracks_fundamentals_age_and_provider_failures() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        let today = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64
+            / 86_400;
+        let mut current_forward = forward();
+        current_forward.observed_epoch_day = today;
+        current_forward.forecast_period_end_epoch_day = today + 365;
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some("missing_fcff"),
+            forward_evidence: Ok(current_forward),
+            market_params: &market,
+            as_of_epoch_day: today,
+        });
+        state.ingest_operating_valuation("AMZN".into(), None, envelope);
+        assert!(state.has_current_operating_valuation("AMZN"));
+
+        state
+            .fundamentals
+            .get_mut("AMZN")
+            .unwrap()
+            .total_debt_dollars = Some(999);
+        assert!(!state.has_current_operating_valuation("AMZN"));
+
+        let changed = state.fundamentals.get("AMZN").unwrap().clone();
+        let failed = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &changed,
+            fcff_analysis: Some(&current_operating_fcff(25_000)),
+            fcff_failure: None,
+            forward_evidence: Err(ForwardSourceFailure::RateLimited),
+            market_params: &market,
+            as_of_epoch_day: today,
+        });
+        state.ingest_operating_valuation(
+            "AMZN".into(),
+            Some(current_operating_fcff(25_000)),
+            failed,
+        );
+        assert!(state.has_current_operating_valuation("AMZN"));
+        state
+            .operating_valuations
+            .get_mut("AMZN")
+            .unwrap()
+            .diagnostics
+            .computed_at_epoch_seconds -=
+            crate::operating_valuation_runtime::FORWARD_RETRY_AFTER_SECONDS + 1;
+        assert!(!state.has_current_operating_valuation("AMZN"));
+    }
+
+    #[test]
+    fn successful_forward_currentness_enforces_every_age_horizon_and_version_boundary() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        let today = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64
+            / 86_400;
+        let mut evidence = forward();
+        evidence.observed_epoch_day = today;
+        evidence.forecast_period_end_epoch_day = today + 365;
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some("missing_fcff"),
+            forward_evidence: Ok(evidence),
+            market_params: &market,
+            as_of_epoch_day: today,
+        });
+        state.ingest_operating_valuation("AMZN".into(), None, envelope);
+        assert!(state.has_current_operating_valuation("AMZN"));
+
+        let original = state.operating_valuations["AMZN"].clone();
+        state
+            .operating_valuations
+            .get_mut("AMZN")
+            .unwrap()
+            .decision
+            .forward_candidate
+            .provenance
+            .forecast
+            .observed_epoch_day = today - 91;
+        assert!(!state.has_current_operating_valuation("AMZN"));
+
+        state
+            .operating_valuations
+            .insert("AMZN".into(), original.clone());
+        state
+            .operating_valuations
+            .get_mut("AMZN")
+            .unwrap()
+            .decision
+            .forward_candidate
+            .provenance
+            .forecast
+            .forecast_period_end_epoch_day = today + 179;
+        assert!(!state.has_current_operating_valuation("AMZN"));
+
+        state
+            .operating_valuations
+            .insert("AMZN".into(), original.clone());
+        state
+            .operating_valuations
+            .get_mut("AMZN")
+            .unwrap()
+            .decision
+            .forward_candidate
+            .provenance
+            .forecast
+            .forecast_period_end_epoch_day = today + 731;
+        assert!(!state.has_current_operating_valuation("AMZN"));
+
+        state.operating_valuations.insert("AMZN".into(), original);
+        state
+            .operating_valuations
+            .get_mut("AMZN")
+            .unwrap()
+            .diagnostics
+            .runtime_policy_version = "stale-runtime-policy".into();
+        assert!(!state.has_current_operating_valuation("AMZN"));
+    }
+
+    #[test]
+    fn total_refusal_clears_selected_value_and_serializes_client_contract() {
+        let mut state = ScreenerState::new();
+        let fund = operating_fund();
+        state.fundamentals.insert("AMZN".into(), fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "AMZN".into(),
+            company_name: Some("Amazon".into()),
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 30_000,
+            previous_close_cents: 19_900,
+            next_earnings_epoch: None,
+        });
+        let market = crate::dcf_model::MarketParams::default_usd();
+        let selected = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some("missing_fcff"),
+            forward_evidence: Ok(forward()),
+            market_params: &market,
+            as_of_epoch_day: 20_665,
+        });
+        state.ingest_operating_valuation("AMZN".into(), None, selected);
+        assert!(state.selected_valuation_values.contains_key("AMZN"));
+
+        let unavailable = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &fund,
+            fcff_analysis: None,
+            fcff_failure: Some("missing_fcff"),
+            forward_evidence: Err(ForwardSourceFailure::Transport),
+            market_params: &market,
+            as_of_epoch_day: 20_665,
+        });
+        state.ingest_operating_valuation("AMZN".into(), None, unavailable);
+        assert!(!state.selected_valuation_values.contains_key("AMZN"));
+        let detail = state.detail("AMZN").expect("detail");
+        assert_eq!(detail.selected_valuation_value_cents, None);
+        assert_eq!(detail.valuation_status, Some(RouteStatus::Unavailable));
+
+        let json = serde_json::to_value(detail).expect("serialize detail");
+        assert_eq!(json["valuation_status"], "unavailable");
+        assert!(json.get("operating_valuation").is_some());
+        assert!(json["operating_valuation"]["diagnostics"]
+            .get("runtimePolicyVersion")
+            .is_some());
+        assert!(json["operating_valuation"]["decision"]
+            .get("forwardCandidate")
+            .is_some());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::dcf_model::{BusinessClass, DcfAnalysis, ValuationModel};
 use crate::engine::{CandidateRow, ChartSummary, HistoricalCandle, SymbolDetail};
+use crate::operating_valuation::{CandidateStatus, OperatingModel, RouteStatus};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantLensSection {
@@ -108,6 +109,71 @@ fn usable_model(dcf: Option<&DcfAnalysis>) -> bool {
     !matches!(model_quality(dcf), ModelQuality::Unusable)
 }
 
+#[derive(Clone, Copy)]
+struct RuntimeModelAnchor<'a> {
+    base_cents: i64,
+    low_cents: i64,
+    high_cents: i64,
+    label: &'static str,
+    quality: ModelQuality,
+    analyst_correlated: bool,
+    dcf: Option<&'a DcfAnalysis>,
+}
+
+fn runtime_model_anchor<'a>(
+    detail: &'a SymbolDetail,
+    dcf: Option<&'a DcfAnalysis>,
+) -> Option<RuntimeModelAnchor<'a>> {
+    let route = detail.operating_valuation.as_ref();
+    if let Some(envelope) = route {
+        if envelope.decision.status != RouteStatus::Selected {
+            return None;
+        }
+        match envelope.decision.selected_model? {
+            OperatingModel::ForwardEarningsPower => {
+                let candidate = &envelope.decision.forward_candidate;
+                let base = candidate.intrinsic_value_cents?;
+                return (candidate.status == CandidateStatus::Available).then_some(
+                    RuntimeModelAnchor {
+                        base_cents: base,
+                        low_cents: 0,
+                        high_cents: 0,
+                        label: "Forward earnings value",
+                        quality: ModelQuality::Soft,
+                        analyst_correlated: true,
+                        dcf: None,
+                    },
+                );
+            }
+            OperatingModel::FcffWacc => {
+                let analysis = dcf?;
+                return usable_model(Some(analysis)).then_some(RuntimeModelAnchor {
+                    base_cents: analysis.base_intrinsic_value_cents,
+                    low_cents: analysis.bear_intrinsic_value_cents,
+                    high_cents: analysis.bull_intrinsic_value_cents,
+                    label: valuation_source_label(analysis),
+                    quality: model_quality(Some(analysis)),
+                    analyst_correlated: false,
+                    dcf: Some(analysis),
+                });
+            }
+        }
+    }
+
+    let analysis = dcf.filter(|analysis| {
+        usable_model(dcf) && analysis.business_class != BusinessClass::OperatingNonFinancial
+    })?;
+    Some(RuntimeModelAnchor {
+        base_cents: analysis.base_intrinsic_value_cents,
+        low_cents: analysis.bear_intrinsic_value_cents,
+        high_cents: analysis.bull_intrinsic_value_cents,
+        label: valuation_source_label(analysis),
+        quality: model_quality(Some(analysis)),
+        analyst_correlated: false,
+        dcf: Some(analysis),
+    })
+}
+
 fn complete_analyst(detail: &SymbolDetail) -> bool {
     detail.intrinsic_value_cents > 0
         && detail.low_fair_value_cents.is_some_and(|v| v > 0)
@@ -118,11 +184,12 @@ fn relative_disagreement_bps(a_cents: i64, b_cents: i64) -> Option<i32> {
     if a_cents <= 0 || b_cents <= 0 {
         return None;
     }
-    let mid = (a_cents + b_cents) as f64 / 2.0;
+    let mid = (i128::from(a_cents) + i128::from(b_cents)) as f64 / 2.0;
     if mid <= 0.0 {
         return None;
     }
-    Some((((a_cents - b_cents).abs() as f64 / mid) * 10_000.0).round() as i32)
+    let distance = (i128::from(a_cents) - i128::from(b_cents)).abs() as f64;
+    Some(((distance / mid) * 10_000.0).round() as i32)
 }
 
 fn valuation_source_label(a: &DcfAnalysis) -> &'static str {
@@ -135,7 +202,11 @@ fn valuation_source_label(a: &DcfAnalysis) -> &'static str {
 
 fn weighted_three(low: i64, base: i64, high: i64) -> i64 {
     if low > 0 && high > 0 {
-        (low + 2 * base + high) / 4
+        let weighted = i128::from(low)
+            .saturating_add(i128::from(base).saturating_mul(2))
+            .saturating_add(i128::from(high))
+            / 4;
+        i64::try_from(weighted).unwrap_or(i64::MAX)
     } else {
         base
     }
@@ -143,7 +214,8 @@ fn weighted_three(low: i64, base: i64, high: i64) -> i64 {
 
 fn upside_bps(price: i64, fair: i64) -> i32 {
     if price > 0 && fair > 0 {
-        (((fair - price) as f64 / price as f64) * 10_000.0).round() as i32
+        let delta = i128::from(fair) - i128::from(price);
+        ((delta as f64 / price as f64) * 10_000.0).round() as i32
     } else {
         0
     }
@@ -165,16 +237,20 @@ fn evidence_strength(
         notes.push("analyst_range");
     }
 
-    let mq = model_quality(dcf);
+    let anchor = runtime_model_anchor(detail, dcf);
+    let mq = anchor.map_or(ModelQuality::Unusable, |value| value.quality);
     match mq {
         ModelQuality::Solid => {
             families_ok += 1;
             notes.push("model_solid");
         }
         ModelQuality::Soft => {
-            // Soft model is evidence of *something*, but weaker — still one family.
-            families_ok += 1;
-            notes.push("model_soft");
+            if anchor.is_some_and(|value| value.analyst_correlated) && analyst_ok {
+                notes.push("forward_model_correlated_with_analyst");
+            } else {
+                families_ok += 1;
+                notes.push("model_soft");
+            }
         }
         ModelQuality::Unusable => {}
     }
@@ -185,12 +261,10 @@ fn evidence_strength(
     }
 
     // Cross-source agreement is a separate family (bonus) or conflict.
-    if usable_model(dcf) && analyst_ok {
-        if let Some(a) = dcf {
-            if let Some(rel) = relative_disagreement_bps(
-                a.base_intrinsic_value_cents,
-                detail.intrinsic_value_cents,
-            ) {
+    if analyst_ok {
+        if let Some(a) = anchor.filter(|value| !value.analyst_correlated) {
+            if let Some(rel) = relative_disagreement_bps(a.base_cents, detail.intrinsic_value_cents)
+            {
                 if rel <= MODEL_ANALYST_AGREE_BPS {
                     families_ok += 1;
                     notes.push("model_analyst_agree");
@@ -204,6 +278,15 @@ fn evidence_strength(
                 }
             }
         }
+    }
+
+    if detail
+        .operating_valuation
+        .as_ref()
+        .is_some_and(|value| value.decision.status == RouteStatus::Disputed)
+    {
+        conflict += 1;
+        notes.push("operating_candidates_disputed");
     }
 
     // Soft model alone never upgrades to Strong.
@@ -262,8 +345,53 @@ fn evidence_strength(
 
 fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> QuantLensSection {
     let price = detail.market_price_cents;
-    let mq = model_quality(dcf);
-    let model = dcf.filter(|_| usable_model(dcf));
+    if let Some(envelope) = detail
+        .operating_valuation
+        .as_ref()
+        .filter(|value| value.decision.status == RouteStatus::Disputed)
+    {
+        let fcff = envelope.decision.fcff_candidate.intrinsic_value_cents;
+        let forward = envelope.decision.forward_candidate.intrinsic_value_cents;
+        return QuantLensSection {
+            id: "ev_range".into(),
+            title: "Expected value range".into(),
+            status: "Disputed".into(),
+            summary: format!(
+                "FCFF DCF {} vs Forward earnings value {} — no single EV",
+                fcff.map_or_else(
+                    || "unavailable".into(),
+                    |v| format!("${:.2}", v as f64 / 100.0)
+                ),
+                forward.map_or_else(
+                    || "unavailable".into(),
+                    |v| format!("${:.2}", v as f64 / 100.0)
+                ),
+            ),
+            metrics: vec![
+                ("primary".into(), "disputed".into()),
+                ("upside_bps".into(), "n/a".into()),
+                (
+                    "fcff_base_cents".into(),
+                    fcff.map_or_else(|| "null".into(), |v| v.to_string()),
+                ),
+                (
+                    "forward_base_cents".into(),
+                    forward.map_or_else(|| "null".into(), |v| v.to_string()),
+                ),
+                (
+                    "candidate_difference_bps".into(),
+                    envelope
+                        .decision
+                        .candidate_difference_bps
+                        .map_or_else(|| "null".into(), |v| v.to_string()),
+                ),
+            ],
+        };
+    }
+
+    let anchor = runtime_model_anchor(detail, dcf);
+    let mq = anchor.map_or(ModelQuality::Unusable, |value| value.quality);
+    let model = anchor;
     let analyst_ok = complete_analyst(detail);
 
     let analyst_low = detail.low_fair_value_cents.unwrap_or(0);
@@ -279,7 +407,7 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
     }
 
     let disagreement = match (model, analyst_ok) {
-        (Some(a), true) => relative_disagreement_bps(a.base_intrinsic_value_cents, analyst_base),
+        (Some(a), true) => relative_disagreement_bps(a.base_cents, analyst_base),
         _ => None,
     };
 
@@ -312,12 +440,12 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
         ),
         Primary::Model => {
             let a = model.expect("model primary");
-            let low = a.bear_intrinsic_value_cents;
-            let base = a.base_intrinsic_value_cents;
-            let high = a.bull_intrinsic_value_cents;
+            let low = a.low_cents;
+            let base = a.base_cents;
+            let high = a.high_cents;
             let w = weighted_three(low, base, high);
             let up = upside_bps(price, w);
-            let label = valuation_source_label(a);
+            let label = a.label;
             let soft = if mq == ModelQuality::Soft {
                 " · provisional inputs"
             } else {
@@ -355,21 +483,21 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
         }
         Primary::Disputed => {
             let a = model.expect("disputed model");
-            let m_up = upside_bps(price, a.base_intrinsic_value_cents);
+            let m_up = upside_bps(price, a.base_cents);
             let an_up = upside_bps(price, analyst_base);
             let rel = disagreement.unwrap_or(0);
             (
                 "Disputed",
                 format!(
                     "{} base ${:.2} ({m_up} bps) vs analyst ${:.2} ({an_up} bps) · diverge {rel} bps — no single EV",
-                    valuation_source_label(a),
-                    a.base_intrinsic_value_cents as f64 / 100.0,
+                    a.label,
+                    a.base_cents as f64 / 100.0,
                     analyst_base as f64 / 100.0,
                 ),
                 // Keep model as metric anchors but do not present as sole truth.
-                a.bear_intrinsic_value_cents,
-                a.base_intrinsic_value_cents,
-                a.bull_intrinsic_value_cents,
+                a.low_cents,
+                a.base_cents,
+                a.high_cents,
                 "disputed",
             )
         }
@@ -400,7 +528,49 @@ fn expected_value_range(detail: &SymbolDetail, dcf: Option<&DcfAnalysis>) -> Qua
         ),
     ];
 
-    if let Some(a) = model {
+    if let Some(anchor) = model {
+        if anchor.analyst_correlated {
+            let forward = &detail
+                .operating_valuation
+                .as_ref()
+                .expect("runtime anchor")
+                .decision
+                .forward_candidate;
+            metrics.push(("model_base_cents".into(), anchor.base_cents.to_string()));
+            metrics.push((
+                "model_upside_bps".into(),
+                upside_bps(price, anchor.base_cents).to_string(),
+            ));
+            metrics.push((
+                "discount_rate_bps".into(),
+                forward.cost_of_equity_bps.to_string(),
+            ));
+            metrics.push(("discount_rate_kind".into(), "cost_of_equity".into()));
+            metrics.push(("evidence_family".into(), "analyst_derived_model".into()));
+            metrics.push((
+                "forecast_analyst_count".into(),
+                forward
+                    .provenance
+                    .forecast
+                    .analyst_count
+                    .map_or_else(|| "null".into(), |v| v.to_string()),
+            ));
+            metrics.push((
+                "forecast_period_end_epoch_day".into(),
+                forward
+                    .provenance
+                    .forecast
+                    .forecast_period_end_epoch_day
+                    .to_string(),
+            ));
+            metrics.push((
+                "forward_source_fingerprint".into(),
+                forward.provenance.forecast.source_fingerprint.clone(),
+            ));
+        }
+    }
+
+    if let Some(a) = model.and_then(|value| value.dcf) {
         metrics.push((
             "model_bear_cents".into(),
             a.bear_intrinsic_value_cents.to_string(),
@@ -836,6 +1006,14 @@ mod tests {
         WaccInputProvenance,
     };
     use crate::engine::SymbolDetail;
+    use crate::operating_valuation_runtime::{route_runtime_valuation, RuntimeValuationInput};
+    use crate::quote_summary::ForwardForecastEvidence;
+
+    #[test]
+    fn extreme_provider_values_do_not_overflow_disagreement_or_upside_math() {
+        assert!(relative_disagreement_bps(i64::MAX, 1).is_some());
+        assert_eq!(upside_bps(1, i64::MAX), i32::MAX);
+    }
 
     fn detail_tsla_like() -> SymbolDetail {
         SymbolDetail {
@@ -869,6 +1047,10 @@ mod tests {
             technical_breakdown: None,
             dcf_value_cents: Some(3_499),
             dcf_analysis: None,
+            valuation_status: None,
+            selected_valuation_value_cents: None,
+            selected_valuation_model: None,
+            operating_valuation: None,
             valuation_unavailable_reason: None,
             insider_net_shares_90d: None,
             insider_buy_count: None,
@@ -927,10 +1109,74 @@ mod tests {
         a
     }
 
+    fn forward_evidence() -> ForwardForecastEvidence {
+        ForwardForecastEvidence {
+            eps_low_cents: Some(775),
+            eps_mean_cents: Some(1_004),
+            eps_high_cents: Some(1_512),
+            analyst_count: Some(55),
+            revenue_growth_bps: Some(1_327),
+            revenue_analyst_count: Some(60),
+            earnings_growth_bps: Some(1_358),
+            currency: "USD".into(),
+            revenue_currency: "USD".into(),
+            reporting_currency: "USD".into(),
+            observed_epoch_day: 20_665,
+            forecast_period_end_epoch_day: 21_183,
+            source_fingerprint: "yahoo-earnings-trend/1|symbol=TEST|hash=quant".into(),
+        }
+    }
+
+    fn with_runtime_route(mut detail: SymbolDetail, fcff: Option<&DcfAnalysis>) -> SymbolDetail {
+        detail.fundamentals.sector_key = Some("consumer-cyclical".into());
+        detail.fundamentals.industry_key = Some("internet-retail".into());
+        detail.fundamentals.beta_millis = Some(1_350);
+        detail.fundamentals.debt_to_equity_hundredths = Some(4_046);
+        detail.fundamentals.return_on_equity_bps = Some(3_055);
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &detail.fundamentals,
+            fcff_analysis: fcff,
+            fcff_failure: fcff.is_none().then_some("no trailing FCFF"),
+            forward_evidence: Ok(forward_evidence()),
+            market_params: &crate::dcf_model::MarketParams::default_usd(),
+            as_of_epoch_day: 20_665,
+        });
+        detail.valuation_status = Some(envelope.decision.status);
+        detail.selected_valuation_model = envelope.decision.selected_model;
+        detail.selected_valuation_value_cents = envelope.decision.selected_value_cents;
+        detail.operating_valuation = Some(envelope);
+        detail
+    }
+
+    fn with_runtime_fcff_selected(mut detail: SymbolDetail, fcff: &DcfAnalysis) -> SymbolDetail {
+        detail.fundamentals.sector_key = Some("consumer-cyclical".into());
+        detail.fundamentals.industry_key = Some("internet-retail".into());
+        detail.fundamentals.beta_millis = Some(1_350);
+        detail.fundamentals.debt_to_equity_hundredths = Some(4_046);
+        detail.fundamentals.return_on_equity_bps = Some(3_055);
+        let envelope = route_runtime_valuation(RuntimeValuationInput {
+            business_class: BusinessClass::OperatingNonFinancial,
+            fundamentals: &detail.fundamentals,
+            fcff_analysis: Some(fcff),
+            fcff_failure: None,
+            forward_evidence: Err(
+                crate::operating_valuation_runtime::ForwardSourceFailure::Transport,
+            ),
+            market_params: &crate::dcf_model::MarketParams::default_usd(),
+            as_of_epoch_day: 20_665,
+        });
+        detail.valuation_status = Some(envelope.decision.status);
+        detail.selected_valuation_model = envelope.decision.selected_model;
+        detail.selected_valuation_value_cents = envelope.decision.selected_value_cents;
+        detail.operating_valuation = Some(envelope);
+        detail
+    }
+
     #[test]
     fn tsla_junk_fcff_is_disputed_not_strong_ev() {
-        let detail = detail_tsla_like();
         let dcf = junk_fcff_tsla();
+        let detail = with_runtime_fcff_selected(detail_tsla_like(), &dcf);
         let ev = expected_value_range(&detail, Some(&dcf));
         assert_eq!(ev.status, "Disputed");
         assert!(
@@ -967,8 +1213,8 @@ mod tests {
 
     #[test]
     fn aligned_solid_model_can_be_primary() {
-        let detail = detail_tsla_like();
         let dcf = solid_aligned_model();
+        let detail = with_runtime_fcff_selected(detail_tsla_like(), &dcf);
         let ev = expected_value_range(&detail, Some(&dcf));
         assert_eq!(ev.status, "Available");
         assert!(ev.summary.contains("FCFF DCF"));
@@ -1050,5 +1296,61 @@ mod tests {
         let ev = expected_value_range(&detail, Some(&dcf));
         assert_eq!(ev.status, "Available");
         assert!(ev.summary.contains("Residual income"));
+    }
+
+    #[test]
+    fn forward_and_yahoo_target_are_one_correlated_family_without_agreement_bonus() {
+        let mut detail = with_runtime_route(detail_tsla_like(), None);
+        let selected = detail
+            .selected_valuation_value_cents
+            .expect("forward selected");
+        detail.intrinsic_value_cents = selected;
+        detail.low_fair_value_cents = Some(selected * 8 / 10);
+        detail.high_fair_value_cents = Some(selected * 12 / 10);
+
+        let evidence = evidence_strength(&detail, None, None);
+        assert_eq!(evidence.status, "Sparse");
+        assert_eq!(
+            evidence
+                .metrics
+                .iter()
+                .find(|(k, _)| k == "families")
+                .map(|(_, v)| v.as_str()),
+            Some("1")
+        );
+        let notes = evidence
+            .metrics
+            .iter()
+            .find(|(k, _)| k == "notes")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(notes.contains("forward_model_correlated_with_analyst"));
+        assert!(!notes.contains("model_analyst_agree"));
+        assert_ne!(evidence.status, "Strong");
+    }
+
+    #[test]
+    fn operating_candidate_dispute_has_no_single_expected_value() {
+        let fcff = junk_fcff_tsla();
+        let detail = with_runtime_route(detail_tsla_like(), Some(&fcff));
+        assert_eq!(detail.valuation_status, Some(RouteStatus::Disputed));
+
+        let ev = expected_value_range(&detail, Some(&fcff));
+        assert_eq!(ev.status, "Disputed");
+        assert!(ev.summary.contains("no single EV"));
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "primary")
+                .map(|(_, v)| v.as_str()),
+            Some("disputed")
+        );
+        assert_eq!(
+            ev.metrics
+                .iter()
+                .find(|(k, _)| k == "upside_bps")
+                .map(|(_, v)| v.as_str()),
+            Some("n/a")
+        );
     }
 }

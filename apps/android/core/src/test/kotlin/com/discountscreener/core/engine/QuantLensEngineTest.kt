@@ -133,6 +133,31 @@ class QuantLensEngineTest {
     }
 
     @Test
+    fun expected_value_marks_2501_to_5000_bps_gap_as_tension_without_primary() {
+        val selection = QuantLensExpectedValuePolicy.select(
+            detail = detail(
+                marketPriceCents = 20_000,
+                externalSignalLowFairValueCents = 20_000,
+                externalSignalFairValueCents = 22_501,
+                externalSignalHighFairValueCents = 25_000,
+            ),
+            dcf = DcfAnalysis(
+                bearIntrinsicValueCents = 16_000,
+                baseIntrinsicValueCents = 17_499,
+                bullIntrinsicValueCents = 19_000,
+                waccBps = 900,
+                baseGrowthBps = 300,
+                netDebtDollars = 0,
+                source = DcfSource.YahooFinance,
+            ),
+        )
+
+        assertEquals(QuantLensPrimaryStatus.Disputed, selection.primaryStatus)
+        assertEquals(ExpectedValueRangeBand.Tension, selection.band)
+        assertEquals(null, selection.weightedFairValueCents)
+    }
+
+    @Test
     fun expected_value_keeps_one_or_two_anchors_sparse_reference_only() {
         val report = QuantLensEngine.analyze(
             minimalInput(

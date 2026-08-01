@@ -1,5 +1,29 @@
 # Test Automation Summary
 
+## Native COF valuation regression (2026-07-31)
+
+### Generated test
+
+- `apps/windows/e2e/native/cof-detail.native.e2e.mjs`
+  - Builds and launches the real Tauri executable hidden with locked universe profile `qa`.
+  - Uses isolated app-data directories and WebView2 CDP on localhost port 9333.
+  - Seeds the captured Yahoo COF quote-summary through the real Rust parser and valuation engine; no live-provider dependency.
+  - Calls the exact UI backend protocol: `get_symbol_detail({ symbol: "COF" })`.
+  - Drives the real Screener and COF row, then asserts the hero valuation slot renders the backend residual-income base and bear/bull range.
+  - Rejects `Valoración no disponible` / `Valuation unavailable` specifically inside `.price-summary .dcf-slot`.
+
+### Coverage and verification
+
+- Backend command path: 1/1 critical COF command covered.
+- Native UI workflow: 1/1 critical COF hero-slot workflow covered.
+- `npm run test:e2e:native:cof` — passed; `$168.81` with `$157.70–$177.42` rendered.
+- Manual mutation (`residual_income_equity` presenter route disabled) — test failed on hero copy `Valoración no disponible`, then passed after restoration.
+- The repository OAuth credential cannot update GitHub Actions workflows; the test is therefore a documented local merge gate until a workflow-scoped credential adds it to CI.
+
+### Boundary
+
+The existing `npm run test:e2e` browser suite remains useful for mocked UI states, but it is not accepted as coverage for native Rust-to-React valuation contracts.
+
 ## Scope
 
 FMP analyst forecasts in the Windows stock-detail and Settings workflows.

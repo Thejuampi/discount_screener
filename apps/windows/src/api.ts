@@ -188,6 +188,10 @@ export interface SymbolDetail {
   technical_breakdown: TechnicalBreakdown | null;
   dcf_value_cents: number | null;
   dcf_analysis: DcfAnalysis | null;
+  valuation_status?: RouteStatus | null;
+  selected_valuation_value_cents?: number | null;
+  selected_valuation_model?: OperatingModel | null;
+  operating_valuation?: OperatingValuationEnvelope | null;
   /** Why model valuation is missing (classification refuse, missing FCF, …). */
   valuation_unavailable_reason?: string | null;
   insider_net_shares_90d: number | null;
@@ -454,7 +458,106 @@ export type ValuationModel =
 export type BusinessClass =
   | "operating_non_financial"
   | "financial_services"
-  | "not_eligible";
+  | "not_eligible"
+  | "unclassified";
+
+export type OperatingModel = "fcff_wacc" | "forward_earnings_power";
+export type CandidateStatus = "available" | "unavailable";
+export type RouteStatus = "selected" | "disputed" | "unavailable" | "not_eligible";
+export type OperatingModelQuality = "solid" | "soft";
+export type EvidenceFamily = "cash_flow_model" | "analyst_derived_model";
+export type ForwardSourceState = "not_attempted" | "selected" | "rejected" | "unavailable";
+
+export interface ForwardForecast {
+  epsLowCents: number | null;
+  epsMeanCents: number | null;
+  epsHighCents: number | null;
+  analystCount: number | null;
+  nearGrowthBps: number;
+  currency: string;
+  observedEpochDay: number;
+  forecastPeriodEndEpochDay: number;
+  sourceFingerprint: string;
+}
+
+export interface ProjectionPolicy {
+  version: string;
+  expectedCurrency: string;
+  maxAgeDays: number;
+  minForecastHorizonDays: number;
+  maxForecastHorizonDays: number;
+  minAnalystCount: number;
+  holdYears: number;
+  fadeYears: number;
+  maxProjectionYears: number;
+  macroStableGrowthBps: number;
+  riskFreeRateBps: number;
+  riskFreeBufferBps: number;
+  minimumTerminalSpreadBps: number;
+}
+
+export interface ForwardEarningsCandidate {
+  model: OperatingModel;
+  status: CandidateStatus;
+  intrinsicValueCents: number | null;
+  costOfEquityBps: number;
+  stableGrowthBps: number | null;
+  projectionYears: number | null;
+  quality: OperatingModelQuality;
+  evidenceFamily: EvidenceFamily;
+  refusals: string[];
+  provenance: {
+    asOfEpochDay: number;
+    forecast: ForwardForecast;
+    costOfEquity: {
+      costOfEquityBps: number;
+      betaSource: string;
+      provisional: boolean;
+      marketParamsAsOfEpoch: number | null;
+      sourceFingerprint: string;
+    };
+    policy: ProjectionPolicy;
+  };
+  fingerprint: string;
+}
+
+export interface FcffCandidate {
+  status: CandidateStatus;
+  intrinsicValueCents: number | null;
+  quality: OperatingModelQuality;
+  refusalCodes: string[];
+  fingerprint: string;
+}
+
+export interface OperatingRouteDecision {
+  status: RouteStatus;
+  selectedModel: OperatingModel | null;
+  selectedValueCents: number | null;
+  candidateDifferenceBps: number | null;
+  reasons: string[];
+  structuralDistortions: string[];
+  fcffCandidate: FcffCandidate;
+  forwardCandidate: ForwardEarningsCandidate;
+  fingerprint: string;
+}
+
+export interface OperatingValuationEnvelope {
+  decision: OperatingRouteDecision;
+  diagnostics: {
+    provider: string;
+    forwardSourceState: ForwardSourceState;
+    forwardSourceFailure: string | { provider: string } | null;
+    rateFailure: string | null;
+    forecastPeriodEndEpochDay: number | null;
+    latestFiscalYear: number | null;
+    computedAtEpochSeconds: number;
+    runtimePolicyVersion: string;
+    routerPolicyVersion: string;
+    modelPolicyVersion: string;
+    sourceFingerprints: string[];
+    codeLocators: string[];
+  };
+}
 
 export type DiscountRateKind = "wacc" | "cost_of_equity";
 

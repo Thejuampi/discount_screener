@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "tipranks-forecast-panel/1",
+  "canonicalOrdering": "analystIdentity ascending after newest observation per eligible identity",
+  "units": { "target": "minor units", "weight": "thousandths", "difference": "bps" },
+  "fixtures": [
+    {
+      "name": "weighted-three-current-identities",
+      "cacheAgeSeconds": 86400,
+      "observations": [
+        { "identity": "a", "target": 10000, "ageSeconds": 1000, "weightMillis": 1000 },
+        { "identity": "b", "target": 12000, "ageSeconds": 2000, "weightMillis": 1000 },
+        { "identity": "c", "target": 14000, "ageSeconds": 3000, "weightMillis": 1000 }
+      ],
+      "expected": { "availability": "Available", "coverage": "Sufficient", "confidence": "Solid", "simple": 12000, "weighted": 12000, "identities": 3 }
+    },
+    {
+      "name": "sparse-visible-reference-only",
+      "cacheAgeSeconds": 86400,
+      "observations": [ { "identity": "a", "target": 10000, "ageSeconds": 1000, "weightMillis": 1000 } ],
+      "expected": { "availability": "ReferenceOnly", "coverage": "Sparse", "confidence": "Soft", "simple": 10000, "weighted": null, "identities": 1 }
+    },
+    {
+      "name": "stale-fourth-observation-does-not-poison-eligible-consensus",
+      "cacheAgeSeconds": 604800,
+      "observations": [
+        { "identity": "a", "target": 10000, "ageSeconds": 1000, "weightMillis": 1000 },
+        { "identity": "b", "target": 11000, "ageSeconds": 2000, "weightMillis": 1000 },
+        { "identity": "c", "target": 12000, "ageSeconds": 3000, "weightMillis": 1000 },
+        { "identity": "old", "target": 99000, "ageSeconds": 7776001, "weightMillis": 1000 }
+      ],
+      "expected": { "availability": "Available", "coverage": "Sufficient", "confidence": "Solid", "simple": 33000, "weighted": 11000, "identities": 3 }
+    }
+  ]
+}

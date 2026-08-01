@@ -1,5 +1,24 @@
 # Shared Contracts
 
+## Evidence-routed operating valuation
+
+`operating-valuation-router-v1.json` freezes the provider-independent,
+fixed-point `ForwardEarningsPower` candidate and operating-model router. Its
+`executableFixtures`, `routerGoldenCases`, and `arithmeticGoldenCases` are exact
+arithmetic/parity goldens. `executableSyntheticCases` covers refusal/fail-closed
+boundaries. The reported and holdout cohorts under `validationCohorts` carry
+durable normalized engine inputs and run in the normal Rust/Kotlin test gates;
+their analyst anchors remain nested under `validationOnly` and are forbidden
+from engine DTOs, routing, fingerprints, and runtime acceptance logic.
+
+The contract remains provider-independent and is also the arithmetic authority
+for the Windows production adapter. Provider/runtime behavior lives outside the
+JSON: demand-only Yahoo normalization in `quote_summary.rs`, orchestration in
+`operating_valuation_runtime.rs`, atomic lifecycle in `engine.rs`, and
+selected/disputed/unavailable presentation in Detail and Quant Lens. Provider
+payloads, cache state, UI strings, analyst targets, and market prices are never
+added to this engine contract.
+
 This directory holds language-neutral fixtures, golden cases, and behavior notes that both apps validate.
 
 ## Files
@@ -12,6 +31,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   golden resolver-state cases for selected, unavailable, disabled/absent, and uncertain DCF source decisions
 - `valuation-model-family.json`:
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
+- `valuation-evidence-sotp.json`:
+  point-in-time evidence replay, closed-world component routing, evidence-backed SOTP bridge, refusal states, and historical driver-validation goldens; Windows and Android compare fixed-point outputs and fingerprints exactly
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

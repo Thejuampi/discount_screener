@@ -20,7 +20,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows driver-based FCFF policy (closed-world routing preserved). */
-const val MODEL_POLICY_VERSION = "business-class-policy/7-explicit-driver-resolution"
+const val MODEL_POLICY_VERSION = "business-class-policy/12-robust-fcff-growth-evidence"
 
 private const val DEFAULT_RF_BPS = 430
 private const val DEFAULT_ERP_BPS = 450
@@ -37,6 +37,8 @@ private const val WACC_SCENARIO_BAND_BPS = 100
 private const val WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS = 150
 /** Bull does not further cheapen a known-soft base WACC. */
 private const val WACC_SCENARIO_BULL_BAND_UNRELIABLE_BPS = 0
+private const val PROVISIONAL_WACC_BASE_UPLIFT_BPS = 175
+private const val PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT = 0.40
 private const val ROE_BEAR_HAIRCUT_BPS = 300
 private const val ROE_BULL_BOOST_BPS = 200
 private const val GROWTH_RECENT_WINDOW = 4
@@ -467,6 +469,7 @@ object DcfAnalysisEngine {
         val fcffMarginBps: Int,
         val ocfMarginBps: Int,
         val capexIntensityBps: Int,
+        val acquisitionInvestmentDollars: Double?,
         val afterTaxInterestMarginBps: Int,
         val revenueGrowthBps: Int?,
         val capexSpike: Boolean,
@@ -485,6 +488,7 @@ object DcfAnalysisEngine {
         val normalizedCapexIntensityBps: Int,
         val normalizedAfterTaxInterestMarginBps: Int,
         val capexSpikeYears: List<Int>,
+        val acquisitionContaminatedGrowthYears: List<Int>,
         val driverRegime: String,
         val growthDispersionBps: Int,
         val growthFadeExponent: Double,
@@ -498,6 +502,7 @@ object DcfAnalysisEngine {
      */
     private fun driverModelInputs(timeseries: FundamentalTimeseries): DriverModelInputs? {
         val capexByPeriod = timeseries.capitalExpenditure.associateBy(::annualKey)
+        val acquisitionByPeriod = timeseries.acquisitionInvestment.associateBy(::annualKey)
         val revenueByPeriod = timeseries.revenue.associateBy(::annualKey)
         val interestByPeriod = timeseries.interestExpense.associateBy(::annualKey)
         val taxByPeriod = timeseries.taxRateForCalcs.associateBy(::annualKey)
@@ -535,6 +540,7 @@ object DcfAnalysisEngine {
                     fcffMarginBps = fcffMargin,
                     ocfMarginBps = (operating.value / revenue * 10_000.0).roundToInt(),
                     capexIntensityBps = (kotlin.math.abs(capex) / revenue * 10_000.0).roundToInt(),
+                    acquisitionInvestmentDollars = acquisitionByPeriod[period]?.value?.let { kotlin.math.abs(it) },
                     afterTaxInterestMarginBps = afterTaxInterestMargin,
                     taxMissing = false,
                 )
@@ -566,6 +572,7 @@ object DcfAnalysisEngine {
                         fcffMarginBps = row.fcffMarginBps,
                         ocfMarginBps = row.ocfMarginBps,
                         capexIntensityBps = row.capexIntensityBps,
+                        acquisitionInvestmentDollars = row.acquisitionInvestmentDollars,
                         afterTaxInterestMarginBps = row.afterTaxInterestMarginBps,
                         revenueGrowthBps = growth,
                         capexSpike = spike,
@@ -582,20 +589,51 @@ object DcfAnalysisEngine {
         val priorStart = (recentStart - DRIVER_RECENT_WINDOW).coerceAtLeast(0)
         val priorPoints = driverPoints.subList(priorStart, recentStart)
         val priorBaseline = priorPoints.filterNot { it.capexSpike }
-        var recentGrowths = recentPoints.mapNotNull { it.revenueGrowthBps }
-            .let { if (it.size >= 2) it else driverPoints.mapNotNull { point -> point.revenueGrowthBps } }
-        if (recentBaseline.size < 2 || recentGrowths.size < 2) return null
-
-        val priorGrowths = priorPoints.mapNotNull { it.revenueGrowthBps }
-        val regime = classifyDriverRegime(recentGrowths, priorGrowths)
+        val isAcquisitionContaminated: (DriverPoint) -> Boolean = { point ->
+            point.revenueGrowthBps != null &&
+                point.acquisitionInvestmentDollars?.takeIf { it.isFinite() }?.let { acquisition ->
+                    kotlin.math.abs(acquisition) * 10_000.0 >=
+                        point.revenueDollars * SecDriverNormalizationPolicy.materialAcquisitionRevenueBps
+                } == true
+        }
+        val acquisitionContaminatedGrowthYears = recentPoints
+            .filter(isAcquisitionContaminated)
+            .map { it.year }
+        val latestGrowthIsAcquisitionContaminated = recentPoints.lastOrNull()
+            ?.let(isAcquisitionContaminated) == true
+        var recentGrowths = recentPoints
+            .filterNot(isAcquisitionContaminated)
+            .mapNotNull { it.revenueGrowthBps }
+        val acquisitionGrowthMustBeZero = acquisitionContaminatedGrowthYears.isNotEmpty() &&
+            (latestGrowthIsAcquisitionContaminated || recentGrowths.size < 2)
+        if (recentGrowths.size < 2 && acquisitionContaminatedGrowthYears.isEmpty()) {
+            recentGrowths = driverPoints
+                .filterNot(isAcquisitionContaminated)
+                .mapNotNull { it.revenueGrowthBps }
+        }
+        if (recentBaseline.size < 2 || (recentGrowths.size < 2 && !acquisitionGrowthMustBeZero)) return null
+        val priorGrowths = priorPoints
+            .filterNot(isAcquisitionContaminated)
+            .mapNotNull { it.revenueGrowthBps }
+        val regime = if (acquisitionGrowthMustBeZero) {
+            DriverRegime.StableOperating
+        } else {
+            classifyDriverRegime(recentGrowths, priorGrowths)
+        }
         val useCycleBlend = regime == DriverRegime.CyclicalOrTransition &&
             priorBaseline.size >= 2 && priorGrowths.size >= 2
-        val scenarioPoints = if (useCycleBlend) recentBaseline + priorBaseline else recentBaseline
-        val margins = scenarioPoints.map { it.fcffMarginBps }
+        // Keep every aligned annual FCFF identity in margin evidence. A CapEx
+        // spike is diagnostic, not permission to delete the cash outflow.
+        val alignedMarginPoints = if (useCycleBlend) recentPoints + priorPoints else recentPoints
+        val margins = alignedMarginPoints.map { it.fcffMarginBps }
         val recentOcfMargins = recentBaseline.map { it.ocfMarginBps }
         val recentCapexIntensities = recentBaseline.map { it.capexIntensityBps }
         val recentInterestMargins = recentBaseline.map { it.afterTaxInterestMarginBps }
-        val scenarioGrowths = if (useCycleBlend) recentGrowths + priorGrowths else recentGrowths
+        val scenarioGrowths = when {
+            acquisitionGrowthMustBeZero -> listOf(0, 0)
+            useCycleBlend -> recentGrowths + priorGrowths
+            else -> recentGrowths
+        }
 
         val recentOcfMargin = medianBps(recentOcfMargins)
         val recentCapexIntensity = medianBps(recentCapexIntensities)
@@ -612,19 +650,26 @@ object DcfAnalysisEngine {
         } else {
             Triple(recentOcfMargin, recentCapexIntensity, recentInterestMargin)
         }
-        val baseMargin = normalizedOcfMargin + normalizedInterestMargin - normalizedCapexIntensity
+        // Apply the robust statistic after the annual FCFF identity. Independent
+        // component medians can synthesize a year that never existed.
+        val baseMargin = medianBps(margins)
         val bearMargin = quantileBps(margins, 0.25).coerceAtMost(baseMargin)
         val bullMargin = quantileBps(margins, 0.75).coerceAtLeast(baseMargin)
         val bearGrowth = quantileBps(scenarioGrowths, 0.25)
         val bullGrowth = quantileBps(scenarioGrowths, 0.75)
-        val baseGrowth = if (useCycleBlend) {
+        val baseGrowth = if (acquisitionGrowthMustBeZero) {
+            0
+        } else if (useCycleBlend) {
             blendRecentPrior(medianBps(recentGrowths), medianBps(priorGrowths))
                 .coerceIn(bearGrowth, bullGrowth)
         } else {
             medianBps(recentGrowths)
         }
-        val growthDispersion = quantileBps(recentGrowths, 0.75) -
-            quantileBps(recentGrowths, 0.25)
+        val growthDispersion = if (acquisitionGrowthMustBeZero) {
+            0
+        } else {
+            quantileBps(recentGrowths, 0.75) - quantileBps(recentGrowths, 0.25)
+        }
         val latestRevenue = driverPoints.lastOrNull()?.revenueDollars ?: return null
         val normalizedFcff = latestRevenue * baseMargin / 10_000.0
         if (!normalizedFcff.isFinite()) return null
@@ -642,9 +687,10 @@ object DcfAnalysisEngine {
             normalizedCapexIntensityBps = normalizedCapexIntensity,
             normalizedAfterTaxInterestMarginBps = normalizedInterestMargin,
             capexSpikeYears = driverPoints.filter { it.capexSpike }.map { it.year },
-            driverRegime = regime.asString(),
+            acquisitionContaminatedGrowthYears = acquisitionContaminatedGrowthYears,
+            driverRegime = if (acquisitionGrowthMustBeZero) "acquisition_normalized" else regime.asString(),
             growthDispersionBps = growthDispersion,
-            growthFadeExponent = growthFadeExponent(regime),
+            growthFadeExponent = if (acquisitionGrowthMustBeZero) 1.0 else growthFadeExponent(regime),
             taxDefaulted = raw.any { it.taxMissing },
         )
     }
@@ -688,6 +734,7 @@ object DcfAnalysisEngine {
     private fun driverInputFingerprint(timeseries: FundamentalTimeseries): String {
         val operatingByPeriod = timeseries.operatingCashFlow.associateBy(::annualKey)
         val capexByPeriod = timeseries.capitalExpenditure.associateBy(::annualKey)
+        val acquisitionByPeriod = timeseries.acquisitionInvestment.associateBy(::annualKey)
         val revenueByPeriod = timeseries.revenue.associateBy(::annualKey)
         val interestByPeriod = timeseries.interestExpense.associateBy(::annualKey)
         val taxByPeriod = timeseries.taxRateForCalcs.associateBy(::annualKey)
@@ -714,6 +761,7 @@ object DcfAnalysisEngine {
                     dollars(operatingByPeriod[period]?.value),
                     dollars(capex),
                     dollars(revenueByPeriod[period]?.value),
+                    dollars(acquisitionByPeriod[period]?.value?.let { kotlin.math.abs(it) }),
                     dollars(interest),
                     tax?.toString() ?: "-",
                     dollars(debtByPeriod[period]?.value),
@@ -740,6 +788,7 @@ object DcfAnalysisEngine {
         val fcffMarginBps: Int,
         val ocfMarginBps: Int,
         val capexIntensityBps: Int,
+        val acquisitionInvestmentDollars: Double?,
         val afterTaxInterestMarginBps: Int,
         val taxMissing: Boolean,
     )
@@ -828,7 +877,7 @@ object DcfAnalysisEngine {
         drivers: DriverModelInputs,
     ): DcfAnalysis {
         if (drivers.baseFcffMarginBps <= 0) {
-            error("driver-normalized FCFF is not positive after recent-history and CapEx-regime normalization")
+            error("non_positive_normalized_fcff: aligned annual FCFF evidence has a non-positive robust margin")
         }
         val stableGrowthBase = marketParams.stableGrowthBps()
             .coerceAtMost(resolvedWacc.waccBps - GORDON_RATE_EPSILON_BPS)
@@ -880,14 +929,21 @@ object DcfAnalysisEngine {
             add("fcff=ocf_plus_after_tax_interest_minus_capex")
             add("growth=recent_driver_median:regime=${drivers.driverRegime}")
             add("growth_fade=regime:${drivers.driverRegime}_exponent:${"%.2f".format(java.util.Locale.US, drivers.growthFadeExponent)}")
+            add("fcff_margin=median_aligned_annual:${drivers.baseFcffMarginBps}")
             add(
-                "fcff_bridge=ocf_margin:${drivers.normalizedOcfMarginBps}+" +
-                    "after_tax_interest_margin:${drivers.normalizedAfterTaxInterestMarginBps}-" +
+                "fcff_component_diagnostics=ocf_margin:${drivers.normalizedOcfMarginBps};" +
+                    "after_tax_interest_margin:${drivers.normalizedAfterTaxInterestMarginBps};" +
                     "capex_intensity:${drivers.normalizedCapexIntensityBps}",
             )
             add("scenario_stress=growth_margin_and_discount_rate")
             if (drivers.capexSpikeYears.isNotEmpty()) {
                 add("capex=investment_spike_years:${drivers.capexSpikeYears.joinToString(",")}")
+            }
+            if (drivers.acquisitionContaminatedGrowthYears.isNotEmpty()) {
+                add(
+                    "growth=acquisition_contaminated_years_excluded:" +
+                        drivers.acquisitionContaminatedGrowthYears.joinToString(","),
+                )
             }
             addAll(resolvedWacc.rateReasons)
             if (marketParams.provisional) add("market_params=provisional")
@@ -1119,8 +1175,8 @@ object DcfAnalysisEngine {
         val totalCash = (fundamentals.totalCashDollars ?: 0L).coerceAtLeast(0).toDouble()
         val netDebt = (totalDebt - totalCash).coerceAtLeast(0.0)
         val debtWeightBase = marketCap + netDebt
-        var equityWeight = if (debtWeightBase > 0.0) marketCap / debtWeightBase else 1.0
-        var debtWeight = if (debtWeightBase > 0.0) netDebt / debtWeightBase else 0.0
+        val equityWeight = if (debtWeightBase > 0.0) marketCap / debtWeightBase else 1.0
+        val debtWeight = if (debtWeightBase > 0.0) netDebt / debtWeightBase else 0.0
 
         val costOfDebtSource = resolvedRates?.costOfDebtSource ?: WaccFieldSource.NotApplicable
         val costOfDebtBps = resolvedRates?.costOfDebtBps ?: 0
@@ -1129,8 +1185,15 @@ object DcfAnalysisEngine {
         val afterTaxCostOfDebtBps = (costOfDebtBps * (1.0 - taxRateBps / 10_000.0)).roundToInt()
         val softWaccBps =
             ((equityWeight * costOfEquityBps) + (debtWeight * afterTaxCostOfDebtBps)).roundToInt()
-        val provisionalUplift = 0
-        val waccBps = softWaccBps
+        val provisionalRateEvidence = marketParams.provisional ||
+            resolvedRates?.quality == DriverEvidenceQuality.Provisional
+        val provisionalUplift = if (provisionalRateEvidence && debtWeight > 0.0) {
+            (PROVISIONAL_WACC_BASE_UPLIFT_BPS *
+                (debtWeight / PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT).coerceAtMost(1.0)).roundToInt()
+        } else {
+            0
+        }
+        val waccBps = softWaccBps + provisionalUplift
 
         return ResolvedWacc(
             waccBps = waccBps,
@@ -1144,7 +1207,7 @@ object DcfAnalysisEngine {
                 costOfDebt = costOfDebtSource,
                 taxRate = taxRateSource,
                 waccClamped = betaProv || marketParams.provisional ||
-                    resolvedRates?.quality == DriverEvidenceQuality.Provisional,
+                    resolvedRates?.quality == DriverEvidenceQuality.Provisional || provisionalUplift > 0,
             ),
             rateReasons = resolvedRates?.reasons.orEmpty().let { reasons ->
                 if (reasons.isEmpty()) {

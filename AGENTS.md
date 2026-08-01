@@ -2,6 +2,10 @@
 
 Agent-facing rules for Discount Screener. Prefer this file plus [`_bmad-output/project-context.md`](_bmad-output/project-context.md) before inventing valuation, ranking, or UI semantics.
 
+## Product Audience
+
+Discount Screener is currently a personal workstation for **Juan**, a single self-directed analyst/investor. Treat multi-user growth metrics, onboarding funnels, and generic consumer personas as out of scope unless Juan explicitly asks for them. Preserve professional, evidence-first presentation, provenance, uncertainty, and the no-investment-advice boundary.
+
 ## Monorepo Layout
 
 | Path | Role |
@@ -32,7 +36,7 @@ You do **not** need to master the full BMAD catalog to work here. Learn **lanes 
 | Bugfix, rename, small tweak, spike, “just ship it” | **Direct** | Implement with TDD / existing tools; skip BMAD skills unless the user invokes one |
 | Clear feature / refactor with bounded scope | **Express** | `bmad-quick-dev` (optional `bmad-code-review` after) |
 | Ambiguous intent, multi-surface contract, or “lock the WHAT” | **Spec** | `bmad-spec` → then implement (`bmad-quick-dev` or direct) |
-| Large / cross-platform / domain-hard change (valuation, ranking, Quant Lens semantics) | **Planning** | Only as needed: `bmad-prd` and/or `bmad-architecture` → epics → readiness → sprint → implement |
+| Large / cross-platform / domain-hard change (valuation, ranking, Quant Lens semantics) | **Planning** | Only as needed: decision/spec + `bmad-prd` and/or `bmad-architecture` → implement directly with TDD and required gates |
 | Idea still unproven | **Forge / recon** | `bmad-forge-idea` or `bmad-deep-recon` — not a full PRD yet |
 | Lost in brownfield process state | **Help** | `bmad-help` once; do not dump the whole skill catalog |
 
@@ -43,11 +47,11 @@ When the user wants a **complete** feature from zero (new estimation model, full
 1. Read existing `_bmad-output/` + this file + `project-context.md` (reuse; don’t rewrite).
 2. Optional: forge/recon if the idea is still soft.
 3. `bmad-prd` → `bmad-ux` if UI → `bmad-architecture` (invariants + owning modules) → epics/stories → `bmad-check-implementation-readiness`.
-4. Only after readiness is acceptable: `bmad-sprint-planning`, then **fresh** sessions of `bmad-quick-dev` per story.
+4. Once the product/architecture decision is sufficient: implement directly, using focused `bmad-quick-dev` sessions when useful. Do not add sprint machinery unless Juan explicitly asks for it.
 5. If reality diverges mid-build: `bmad-correct-course` and update artifacts — do not silently ignore the plan or silently rewrite everything.
 6. When new hard product rules appear, update `project-context.md` / this file — not only chat memory.
 
-**Stop and implement only when** PRD (and UX if UI), architecture, epics, and readiness exist for that slice (or the user explicitly waives planning).
+**Stop and implement only when** the material product decisions, architecture invariants, executable scope, and verification gates exist for that slice (or the user explicitly waives planning). These can be lean documents; no sprint or role ceremony is required.
 
 ### Highest-value skills (prefer these)
 
@@ -59,7 +63,7 @@ When the user wants a **complete** feature from zero (new estimation model, full
 | 4 | `bmad-help` | Router when lost (once, not a tour) |
 | 5 | `bmad-review` / `bmad-code-review` | Adversarial check on non-trivial diffs |
 
-PRD, architecture, epics, readiness, sprint, forge, recon, party mode: **situational**, not daily defaults.
+PRD, architecture, epics, readiness, forge, recon, and party mode are **situational**, not daily defaults. Sprint planning is excluded by default for this single-user/single-developer project.
 
 ### Common misuses (avoid)
 
@@ -83,7 +87,9 @@ PRD, architecture, epics, readiness, sprint, forge, recon, party mode: **situati
 - **Do** use BMAD when the user explicitly asks (PRD, architecture, sprint status, party mode, “run bmad …”).
 - **Do** keep BMAD outputs under `_bmad-output/` (planning vs implementation paths already configured).
 - **Do** keep BMAD commits/tooling noise separate from unrelated product changes when practical.
+- **Do** use BMAD as durable engineering memory: product decisions, architecture invariants, contracts, executable specs, and verification evidence.
 - **Don’t** invent a PRD/epic/sprint for a one-line fix or pure mechanical change.
+- **Don’t** introduce sprints, velocity, story points, backlog grooming, or simulated PM/architect/QA handoffs unless Juan explicitly requests that process.
 - **Don’t** open party mode or multi-agent theater by default — only for contested product/architecture decisions.
 - **Don’t** re-run the full Phase 1–3 stack if a recent PRD/architecture already covers the slice; extend or correct-course instead of rewriting.
 - **Don’t** treat skill-manifest package paths as the runtime tree; installed skills live in IDE skill dirs; config/scripts live in `_bmad/`.
@@ -199,6 +205,10 @@ Cache keys and revisions must invalidate when engine/policy/source fingerprints 
 - Shared goldens under `shared/contracts/valuation-model-family.json` — dual implementations must not drift.
 
 Provider **source selection** (Yahoo vs SEC) is a separate layer: [`_bmad-output/implementation-artifacts/dcf-source-consistency-architecture.md`](_bmad-output/implementation-artifacts/dcf-source-consistency-architecture.md).
+
+### SEC FCFF driver normalization
+
+For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cross a canonical normalization boundary before FCFF. Recurring development CapEx is consumed separately from the reviewed US-GAAP taxonomy set of property/business acquisition cash; acquisition facts stay visible as rejected evidence and are never added to FCFF. Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition from Y−1 to Y. Exclude that transition and retain clean recent observations when at least two exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance. Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved, consolidated USD annual evidence is unavailable—not zero or an imputed cash flow. Financial services remain on residual income.
 
 ## Quant Lens (signal vs noise)
 
@@ -342,6 +352,7 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
    - `cargo test --lib dcf_model::`
    - `cargo test --lib valuation_baseline::`
    - `cargo test --lib quant_lens::` if Quant Lens / EV agreement is in scope  
+   - `npm run test:e2e:native:cof` from `apps/windows` when Detail valuation routing or its backend contract changes
 
 2. **Live valuation QA (always after model changes that affect UI numbers)**  
    Full checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).  
@@ -380,11 +391,15 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Default “not financial ⇒ FCFF” | CI Healthcare Plans → absurd DCF; UI did not refuse | Closed-world `Unclassified` + reason in UI |
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
+| Backend DCF green, Detail still unavailable | COF returned valid residual income while the UI discarded it because operating `valuation_status` was null | Probe the active Tauri invoke over local CDP and assert the rendered Detail; typed residual income is independently publishable |
+| Whole-Detail text assertion | Mutation stayed green because Quant Lens echoed `$168.81` while the hero slot still said unavailable | Scope native regression assertions to `.price-summary .dcf-slot`, not the whole Detail panel |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
 | Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
 | Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |
 | `tauri dev -- -- --profile qa` | Cargo steals `--profile` → compile error / full universe fallback | `npm run tauri:dev:qa` or `DS_UNIVERSE_PROFILE=qa`; binary `--universe qa` |
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
+| One acquisition zeroes the whole growth window | Historical M&A made BSX/ADSK/AVGO-class estimates ignore later clean growth | Contaminate only Y−1→Y; require two clean recent transitions and a clean latest transition, otherwise zero growth explicitly |
+| Analyst gap pill sits beside DCF with no source | A positive Street upside looked like it described a below-market DCF | Label the analyst relation and show DCF-vs-market independently |
 
 ### Where longer checklists live
 

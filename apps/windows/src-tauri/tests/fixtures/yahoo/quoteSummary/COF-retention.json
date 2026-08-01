@@ -1,0 +1,36 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {
+          "longName": "Capital One Financial Corporation",
+          "regularMarketPrice": { "raw": 209.01 },
+          "regularMarketPreviousClose": { "raw": 210.14 },
+          "marketCap": { "raw": 128224468992 }
+        },
+        "financialData": {
+          "currentPrice": { "raw": 209.01 },
+          "returnOnEquity": { "raw": 0.0903 },
+          "payoutRatio": {}
+        },
+        "summaryDetail": {
+          "dividendRate": { "raw": 3.2 },
+          "payoutRatio": { "raw": 0.16530001 }
+        },
+        "defaultKeyStatistics": {
+          "sharesOutstanding": { "raw": 613484836 },
+          "trailingEps": { "raw": 18.16 },
+          "bookValue": { "raw": 167.859 },
+          "priceToBook": { "raw": 1.24 },
+          "beta": { "raw": 1.022 }
+        },
+        "assetProfile": {
+          "sectorKey": "financial-services",
+          "sectorDisp": "Financial Services",
+          "industryKey": "credit-services",
+          "industryDisp": "Credit Services"
+        }
+      }
+    ]
+  }
+}

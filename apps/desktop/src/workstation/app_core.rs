@@ -2005,6 +2005,43 @@ fn desktop_business_class(fundamentals: &FundamentalSnapshot) -> &'static str {
     ]) {
         return "financial";
     }
+    // Evidence/SOTP family routes are not implemented on desktop yet.  Do
+    // not let them fall through to the legacy generic FCFF path.
+    if contains(&[
+        "midstream",
+        "pipeline",
+        "toll road",
+        "airport services",
+        "marine ports",
+        "contracted infrastructure",
+    ]) {
+        return "unsupported_contracted_infrastructure";
+    }
+    if contains(&[
+        "regulated electric",
+        "regulated gas",
+        "regulated water",
+        "regulated utility",
+        "electric utilities",
+        "gas utilities",
+        "water utilities",
+    ]) || sector.contains("utilities") {
+        return "unsupported_regulated_utility";
+    }
+    if contains(&[
+        "oil",
+        "gas",
+        "coal",
+        "gold",
+        "silver",
+        "copper",
+        "mining",
+        "metals",
+        "exploration",
+        "resource producer",
+    ]) || sector.contains("energy") || sector.contains("basic materials") {
+        return "unsupported_resource_producer";
+    }
     if contains(&[
         "technology",
         "industrials",
@@ -2061,6 +2098,13 @@ fn compute_dcf_analysis(
         }
         "financial" => {
             return compute_residual_income_analysis(fundamentals, timeseries);
+        }
+        "unsupported_resource_producer"
+        | "unsupported_contracted_infrastructure"
+        | "unsupported_regulated_utility" => {
+            return Err(io::Error::other(
+                "desktop evidence/SOTP family route is unsupported: valuation refused (use Windows or Android)",
+            ));
         }
         _ => {}
     }
