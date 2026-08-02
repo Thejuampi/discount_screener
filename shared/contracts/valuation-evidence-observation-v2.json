@@ -1,0 +1,470 @@
+{
+  "contract": "valuation-evidence-observation-v2",
+  "schemaVersion": 2,
+  "fingerprintScheme": "sha256_canonical_v1",
+  "status": "foundation_0a",
+  "notes": [
+    "Point-in-time evidence envelope for analyst-method automation (AD-1/AD-2/AD-12).",
+    "Does not reinterpret EvidenceObservation v1; FNV fingerprints remain for SOTP v1 only.",
+    "SHA-256 digests are exact cross-platform goldens (Rust + Kotlin).",
+    "No AMZN-special fields; fixtures use generic issuer IDs."
+  ],
+  "domainTags": {
+    "observation": "ds.valuation.evidence_observation.v2",
+    "evidenceSet": "ds.valuation.evidence_set.v2",
+    "modelRun": "ds.valuation.model_run.v2"
+  },
+  "enums": {
+    "evidenceLane": [
+      "reported_actual",
+      "issuer_guidance",
+      "external_consensus",
+      "internal_forecast",
+      "analyst_stated_method"
+    ],
+    "metricBasis": [
+      "reported_gaap",
+      "adjusted_normalized",
+      "provider_unknown",
+      "transcription_claim"
+    ],
+    "accountingRegime": [
+      "domestic_us_gaap",
+      "ifrs",
+      "not_applicable",
+      "unsupported"
+    ],
+    "datePrecision": [
+      "exact_date",
+      "month_label",
+      "fiscal_period",
+      "provider_horizon"
+    ],
+    "availabilityBasis": [
+      "primary_publication",
+      "provider_certified_vintage",
+      "first_observed_capture"
+    ],
+    "replayMode": [
+      "operational",
+      "certified_backfill_research"
+    ],
+    "storageDisposition": [
+      "metadata_only",
+      "encrypted_artifact",
+      "prohibited"
+    ],
+    "unit": [
+      "money_cents",
+      "rate_bps",
+      "quantity_millis",
+      "shares",
+      "text",
+      "boolean",
+      "multiple_hundredths"
+    ]
+  },
+  "resolutionPartitionKeyOrder": [
+    "issuerId",
+    "securityId",
+    "evidenceLane",
+    "metricId",
+    "metricBasis",
+    "accountingRegime",
+    "economicPeriodStart",
+    "economicPeriodEnd",
+    "unit",
+    "currency"
+  ],
+  "canonicalFieldOrder": [
+    "recordKind",
+    "schemaVersion",
+    "fingerprintScheme",
+    "id",
+    "issuerId",
+    "securityId",
+    "evidenceLane",
+    "providerId",
+    "lineageGroupId",
+    "metricId",
+    "metricBasis",
+    "accountingRegime",
+    "economicPeriodStart",
+    "economicPeriodEnd",
+    "datePrecision",
+    "publicationAtUnixMs",
+    "sourceAvailableAtUnixMs",
+    "ingestedAtUnixMs",
+    "availabilityBasis",
+    "providerVintageId",
+    "unit",
+    "valueCents",
+    "valueBps",
+    "valueMillis",
+    "textValue",
+    "currency",
+    "definition",
+    "sourceLocation",
+    "extractionMethod",
+    "quality",
+    "retrievalState",
+    "revisionId",
+    "supersedes",
+    "externalFileReference",
+    "storageDisposition"
+  ],
+  "fixtures": {
+    "partition": [
+      {
+        "name": "same_metric_different_basis_different_partition",
+        "a": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "evidenceLane": "analyst_stated_method",
+          "metricId": "diluted_eps",
+          "metricBasis": "reported_gaap",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2028-01-01",
+          "economicPeriodEnd": "2028-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "b": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "evidenceLane": "analyst_stated_method",
+          "metricId": "diluted_eps",
+          "metricBasis": "adjusted_normalized",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2028-01-01",
+          "economicPeriodEnd": "2028-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "expectSamePartition": false
+      },
+      {
+        "name": "two_issuers_same_fact_different_partition",
+        "a": {
+          "issuerId": "issuer:0001018724",
+          "securityId": null,
+          "evidenceLane": "reported_actual",
+          "metricId": "revenue",
+          "metricBasis": "reported_gaap",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "b": {
+          "issuerId": "issuer:0000320193",
+          "securityId": null,
+          "evidenceLane": "reported_actual",
+          "metricId": "revenue",
+          "metricBasis": "reported_gaap",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "expectSamePartition": false
+      },
+      {
+        "name": "provider_alone_does_not_change_partition",
+        "a": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:x",
+          "evidenceLane": "external_consensus",
+          "metricId": "diluted_eps",
+          "metricBasis": "provider_unknown",
+          "accountingRegime": "not_applicable",
+          "economicPeriodStart": "2026-01-01",
+          "economicPeriodEnd": "2026-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "b": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:x",
+          "evidenceLane": "external_consensus",
+          "metricId": "diluted_eps",
+          "metricBasis": "provider_unknown",
+          "accountingRegime": "not_applicable",
+          "economicPeriodStart": "2026-01-01",
+          "economicPeriodEnd": "2026-12-31",
+          "unit": "money_cents",
+          "currency": "USD"
+        },
+        "expectSamePartition": true
+      }
+    ],
+    "replayAdmission": [
+      {
+        "name": "operational_all_clocks_on_or_before_decision",
+        "replayMode": "operational",
+        "decisionAtUnixMs": 1743465600000,
+        "publicationAtUnixMs": 1743465600000,
+        "sourceAvailableAtUnixMs": 1743465600000,
+        "ingestedAtUnixMs": 1743465600000,
+        "availabilityBasis": "primary_publication",
+        "providerVintageId": null,
+        "expectAdmit": true,
+        "liveProjectionEligible": true
+      },
+      {
+        "name": "operational_ingested_after_decision_refuses",
+        "replayMode": "operational",
+        "decisionAtUnixMs": 1743465600000,
+        "publicationAtUnixMs": 1743465600000,
+        "sourceAvailableAtUnixMs": 1743465600000,
+        "ingestedAtUnixMs": 1743552000000,
+        "availabilityBasis": "primary_publication",
+        "providerVintageId": null,
+        "expectAdmit": false,
+        "refusalCode": "look_ahead_ingestion"
+      },
+      {
+        "name": "certified_ingested_after_with_vintage_admits_not_live",
+        "replayMode": "certified_backfill_research",
+        "decisionAtUnixMs": 1743465600000,
+        "publicationAtUnixMs": 1743465600000,
+        "sourceAvailableAtUnixMs": 1743465600000,
+        "ingestedAtUnixMs": 1743552000000,
+        "availabilityBasis": "provider_certified_vintage",
+        "providerVintageId": "vendor:vintage:2025-04-01",
+        "expectAdmit": true,
+        "liveProjectionEligible": false
+      },
+      {
+        "name": "certified_ingested_after_without_vintage_refuses",
+        "replayMode": "certified_backfill_research",
+        "decisionAtUnixMs": 1743465600000,
+        "publicationAtUnixMs": 1743465600000,
+        "sourceAvailableAtUnixMs": 1743465600000,
+        "ingestedAtUnixMs": 1743552000000,
+        "availabilityBasis": "first_observed_capture",
+        "providerVintageId": null,
+        "expectAdmit": false,
+        "refusalCode": "missing_provider_vintage"
+      },
+      {
+        "name": "publication_after_decision_refuses",
+        "replayMode": "operational",
+        "decisionAtUnixMs": 1743465600000,
+        "publicationAtUnixMs": 1743552000000,
+        "sourceAvailableAtUnixMs": 1743465600000,
+        "ingestedAtUnixMs": 1743465600000,
+        "availabilityBasis": "primary_publication",
+        "providerVintageId": null,
+        "expectAdmit": false,
+        "refusalCode": "look_ahead_publication"
+      }
+    ],
+    "lineage": [
+      {
+        "name": "lineage_union_two_observations_same_group",
+        "lineageGroupIds": ["lineage:jpm-amzn-2026-07-31", "lineage:jpm-amzn-2026-07-31"],
+        "expectedComponentCount": 1
+      },
+      {
+        "name": "lineage_disjoint_two_groups",
+        "lineageGroupIds": ["lineage:a", "lineage:b"],
+        "expectedComponentCount": 2
+      },
+      {
+        "name": "lineage_three_connected_via_shared_id",
+        "lineageGroupIds": ["g1", "g1", "g1"],
+        "expectedComponentCount": 1
+      }
+    ],
+    "canonical": [
+      {
+        "name": "baseline_observation",
+        "observation": {
+          "id": "obs:fixture:1",
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "evidenceLane": "analyst_stated_method",
+          "providerId": "manual_import",
+          "lineageGroupId": "lineage:jpm-amzn-2026-07-31",
+          "metricId": "diluted_eps",
+          "metricBasis": "transcription_claim",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2028-01-01",
+          "economicPeriodEnd": "2028-12-31",
+          "datePrecision": "fiscal_period",
+          "publicationAtUnixMs": 1753920000000,
+          "sourceAvailableAtUnixMs": 1753920000000,
+          "ingestedAtUnixMs": 1753920000000,
+          "availabilityBasis": "primary_publication",
+          "providerVintageId": null,
+          "unit": "money_cents",
+          "valueCents": 1300,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "FY2028E GAAP diluted EPS claim (unverified transcription)",
+          "sourceLocation": "manual:transcription",
+          "extractionMethod": "manual_entry",
+          "quality": "provisional",
+          "retrievalState": "retrieved",
+          "revisionId": "r1",
+          "supersedes": null,
+          "externalFileReference": null,
+          "storageDisposition": "metadata_only"
+        },
+        "expectedSha256": "sha256:18ad8a23cbc8e036a39fecee1d2ef42171ef14257325a44668064e3eddd0f8b1",
+        "notes": "Unverified transcription uses metricBasis=transcription_claim; it must not masquerade as reported_gaap."
+      },
+      {
+        "name": "null_security_vs_empty_security_differ",
+        "observationNull": {
+          "id": "obs:n",
+          "issuerId": "issuer:x",
+          "securityId": null,
+          "evidenceLane": "reported_actual",
+          "providerId": "fixture",
+          "lineageGroupId": "g",
+          "metricId": "revenue",
+          "metricBasis": "reported_gaap",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "datePrecision": "fiscal_period",
+          "publicationAtUnixMs": 1,
+          "sourceAvailableAtUnixMs": 1,
+          "ingestedAtUnixMs": 1,
+          "availabilityBasis": "primary_publication",
+          "providerVintageId": null,
+          "unit": "money_cents",
+          "valueCents": 1,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "d",
+          "sourceLocation": "s",
+          "extractionMethod": "manual_entry",
+          "quality": "solid",
+          "retrievalState": "retrieved",
+          "revisionId": "r",
+          "supersedes": null,
+          "externalFileReference": null,
+          "storageDisposition": "metadata_only"
+        },
+        "observationEmpty": {
+          "id": "obs:n",
+          "issuerId": "issuer:x",
+          "securityId": "",
+          "evidenceLane": "reported_actual",
+          "providerId": "fixture",
+          "lineageGroupId": "g",
+          "metricId": "revenue",
+          "metricBasis": "reported_gaap",
+          "accountingRegime": "domestic_us_gaap",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "datePrecision": "fiscal_period",
+          "publicationAtUnixMs": 1,
+          "sourceAvailableAtUnixMs": 1,
+          "ingestedAtUnixMs": 1,
+          "availabilityBasis": "primary_publication",
+          "providerVintageId": null,
+          "unit": "money_cents",
+          "valueCents": 1,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "d",
+          "sourceLocation": "s",
+          "extractionMethod": "manual_entry",
+          "quality": "solid",
+          "retrievalState": "retrieved",
+          "revisionId": "r",
+          "supersedes": null,
+          "externalFileReference": null,
+          "storageDisposition": "metadata_only"
+        },
+        "expectDigestsDiffer": true
+      }
+    ],
+    "persistAdmission": [
+      {
+        "name": "transcription_claim_baseline_admits",
+        "fromCanonical": "baseline_observation",
+        "expectOk": true
+      },
+      {
+        "name": "unit_money_with_bps_refuses",
+        "unit": "money_cents",
+        "valueCents": null,
+        "valueBps": 100,
+        "valueMillis": null,
+        "textValue": null,
+        "storageDisposition": "metadata_only",
+        "quality": "provisional",
+        "retrievalState": "retrieved",
+        "publicationAtUnixMs": 1,
+        "sourceAvailableAtUnixMs": 1,
+        "ingestedAtUnixMs": 1,
+        "expectRefusal": "unit_value_slot_mismatch"
+      },
+      {
+        "name": "storage_prohibited_refuses",
+        "unit": "money_cents",
+        "valueCents": 1,
+        "valueBps": null,
+        "valueMillis": null,
+        "textValue": null,
+        "storageDisposition": "prohibited",
+        "quality": "provisional",
+        "retrievalState": "retrieved",
+        "publicationAtUnixMs": 1,
+        "sourceAvailableAtUnixMs": 1,
+        "ingestedAtUnixMs": 1,
+        "expectRefusal": "storage_prohibited"
+      },
+      {
+        "name": "clock_ingestion_before_source_refuses",
+        "unit": "money_cents",
+        "valueCents": 1,
+        "valueBps": null,
+        "valueMillis": null,
+        "textValue": null,
+        "storageDisposition": "metadata_only",
+        "quality": "provisional",
+        "retrievalState": "retrieved",
+        "publicationAtUnixMs": 1,
+        "sourceAvailableAtUnixMs": 10,
+        "ingestedAtUnixMs": 5,
+        "expectRefusal": "clock_order_ingestion_before_source"
+      }
+    ],
+    "evidenceSet": [
+      {
+        "name": "order_independent_two_members",
+        "fingerprintsA": ["sha256:bbb", "sha256:aaa"],
+        "fingerprintsB": ["sha256:aaa", "sha256:bbb"],
+        "expectSame": true,
+        "expectedSha256": "sha256:0e2e803826b99c6b8ea7ab08302fc1ddb6705b70ec2b0c6d008289ad388872de"
+      },
+      {
+        "name": "membership_sensitive",
+        "fingerprintsA": ["sha256:aaa", "sha256:bbb"],
+        "fingerprintsB": ["sha256:aaa"],
+        "expectSame": false
+      }
+    ]
+  },
+  "qualityTokens": ["solid", "soft", "provisional"],
+  "retrievalStateTokens": ["retrieved", "not_retrieved", "partial"],
+  "transcriptionPolicy": {
+    "unverifiedManualImportMetricBasis": "transcription_claim",
+    "mustNotUseForUnverified": "reported_gaap",
+    "notes": "Claims of GAAP EPS remain transcription_claim until entitled source admission promotes metric basis."
+  }
+}

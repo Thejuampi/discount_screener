@@ -68,8 +68,19 @@ pub fn analyze(
         symbol: detail.symbol.clone(),
         primary_status: primary.into(),
         sections,
-        model_version: 4, // high-SNR evidence families + disputed EV
+        // v5: additive manual-analyst-method diagnostic section may be attached by the
+        // command layer after primary_status is frozen (never ranking / Strong).
+        model_version: 5,
     }
+}
+
+/// Append diagnostic-only sections without re-evaluating primary_status / Strong.
+pub fn attach_diagnostic_sections(
+    mut report: QuantLensReport,
+    extras: impl IntoIterator<Item = QuantLensSection>,
+) -> QuantLensReport {
+    report.sections.extend(extras);
+    report
 }
 
 fn scenarios_ordered(a: &DcfAnalysis) -> bool {
@@ -1352,5 +1363,33 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("n/a")
         );
+    }
+
+    #[test]
+    fn diagnostic_sections_do_not_rewrite_primary_status() {
+        let detail = detail_tsla_like();
+        let mut base = analyze(&detail, None, None, None, &[]);
+        // Use a status that would visibly regress if diagnostic sections were folded
+        // back through worst-status/primary computation.
+        base.primary_status = "Strong".into();
+        let primary = base.primary_status.clone();
+        let diagnostic = QuantLensSection {
+            id: "manual_analyst_method".into(),
+            title: "Manual analyst method".into(),
+            status: "Provisional".into(),
+            summary: "diagnostic only".into(),
+            metrics: vec![
+                ("ranking_eligible".into(), "false".into()),
+                ("strong_eligible".into(), "false".into()),
+            ],
+        };
+        let attached = attach_diagnostic_sections(base, [diagnostic]);
+        assert_eq!(attached.primary_status, primary);
+        assert_eq!(attached.primary_status, "Strong");
+        assert!(attached
+            .sections
+            .iter()
+            .any(|s| s.id == "manual_analyst_method"));
+        assert_eq!(attached.model_version, 5);
     }
 }

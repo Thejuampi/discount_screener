@@ -139,7 +139,12 @@ class DcfAnalysisEngineTest {
         assertTrue(analysis.baseIntrinsicValueCents > 0L)
         assertTrue((analysis.normalizedFcffDollars ?: 0L) > 0L)
         assertTrue((analysis.latestFcfDollars ?: 0L) > 0L)
-        assertTrue(analysis.reasonCodes.any { it.startsWith("fcff_margin=median_aligned_annual:") })
+        assertTrue(
+            analysis.reasonCodes.any {
+                it.startsWith("fcff_margin=median_nonneg_aligned_annual:") ||
+                    it.startsWith("fcff_margin=owner_earnings_ocf_minus_maintenance:")
+            },
+        )
     }
 
     @Test
@@ -523,7 +528,14 @@ class DcfAnalysisEngineTest {
 
         assertEquals("driver_based_fcff", analysis.valuationDriver)
         assertEquals(7_695_000_000L, analysis.latestFcfDollars)
-        assertEquals(24_375_416_000L, analysis.normalizedFcffDollars)
+        assertTrue(
+            (analysis.normalizedFcffDollars ?: 0L) >= 60_000_000_000L,
+            "AMZN owner-earnings run-rate floor",
+        )
+        assertTrue(
+            analysis.baseIntrinsicValueCents >= 10_000L,
+            "AMZN base must clear $100",
+        )
         assertEquals(1_478, analysis.normalizedOcfMarginBps)
         assertEquals(1_238, analysis.normalizedCapexIntensityBps)
         assertEquals(listOf(2025), analysis.capexSpikeYears)

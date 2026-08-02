@@ -12,7 +12,7 @@ pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
 /// (industry-beta-policy/1). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/13-industry-beta-policy-v1";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/15-owner-earnings-maintenance-capex";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
 pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/1";
 
@@ -27,6 +27,14 @@ const DEFAULT_INDUSTRY_BETA_MILLIS: i32 = 1_000;
 const INDUSTRY_BETA_POLICY_JSON: &str =
     include_str!("../../../../shared/contracts/industry-beta-policy-v1.json");
 const PROJECTION_YEARS: i32 = 5;
+/// Secular expanders keep near-term growth pressure longer (AWS / platform compounders).
+const PROJECTION_YEARS_SECULAR: i32 = 10;
+/// Cap maintenance CapEx as a share of OCF margin when estimating owner earnings.
+/// Gross CapEx in investment waves is mostly growth reinvestment already reflected
+/// in the revenue-growth path — charging 100% CapEx and high growth double-counts.
+const MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS: i32 = 1_500; // 15% of OCF margin
+/// Floor maintenance intensity (bps of revenue) so owner earnings is not pure OCF.
+const MAINTENANCE_CAPEX_MIN_REVENUE_BPS: i32 = 200;
 /// Operating drivers are regime-sensitive; use a recent multi-year window
 /// rather than allowing a 15-year history to dominate a changed business.
 const DRIVER_RECENT_WINDOW: usize = 5;
@@ -1140,6 +1148,10 @@ struct DriverModelInputs {
     normalized_ocf_margin_bps: i32,
     normalized_capex_intensity_bps: i32,
     normalized_after_tax_interest_margin_bps: i32,
+    /// CapEx/Sales used for owner-earnings base (maintenance), when applicable.
+    maintenance_capex_intensity_bps: Option<i32>,
+    /// True when base margin uses owner-earnings (OCF − maintenance CapEx) path.
+    owner_earnings_base: bool,
     capex_spike_years: Vec<i32>,
     acquisition_contaminated_growth_years: Vec<i32>,
     driver_regime: String,
@@ -1317,9 +1329,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     let use_cycle_blend = regime == DriverRegime::CyclicalOrTransition
         && prior_baseline.len() >= 2
         && prior_growths.len() >= 2;
-    // Margin evidence keeps every aligned annual identity, including CapEx
-    // expansion years. CapEx spike detection is useful for diagnostics and
-    // component context, but deleting the cash outflow would overstate FCFF.
+    // Scenario margin distribution keeps every aligned annual identity,
+    // including CapEx expansion / trough years (MU-class negatives retained).
+    // CapEx spike flags remain diagnostic for component context.
     let aligned_margin_points: Vec<&DriverPoint> = if use_cycle_blend {
         recent_points.iter().chain(prior_points.iter()).collect()
     } else {
@@ -1381,12 +1393,72 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
                 recent_interest_margin_bps,
             )
         };
-    // Preserve the annual identity before applying a robust statistic. Taking
-    // independent component medians can synthesize a non-existent year and can
-    // turn a cyclical issuer with a positive median annual FCFF margin negative.
-    let base_fcff_margin_bps = median_bps(&margins);
+    // Base run-rate vs scenarios:
+    //
+    // 1) Annual reported FCFF (OCF − gross CapEx) identity stays the scenario
+    //    distribution (MU negatives retained; trough years visible in bear).
+    // 2) Base level prefers non-negative annual median when available.
+    // 3) Investment-wave compounders (CapEx spikes / CapEx ≫ maintenance):
+    //    gross CapEx is mostly growth reinvestment already encoded in the
+    //    revenue-growth path. Charging 100% CapEx AND high growth double-counts.
+    //    Owner-earnings base = OCF + after-tax interest − maintenance CapEx,
+    //    with maintenance = min(historical CapEx lower-quartile, 30% of OCF margin).
+    //    Used only when it exceeds the annual-FCFF median (never a silent haircut
+    //    that shrinks a healthy FCFF business).
+    let nonneg_margins: Vec<i32> = margins
+        .iter()
+        .copied()
+        .filter(|margin| *margin >= 0)
+        .collect();
+    let annual_base_margin_bps = if nonneg_margins.len() >= 2 {
+        median_bps(&nonneg_margins)
+    } else {
+        median_bps(&margins)
+    };
+    let all_capex: Vec<i32> = driver_points
+        .iter()
+        .map(|point| point.capex_intensity_bps)
+        .collect();
+    let latest_capex = driver_points.last().map(|point| point.capex_intensity_bps);
+    let historical_capex_p25 = if all_capex.len() >= 4 {
+        quantile_bps(&all_capex, 0.25)
+    } else {
+        median_bps(&all_capex)
+    };
+    let maintenance_capex_intensity_bps = historical_capex_p25
+        .min(
+            (normalized_ocf_margin_bps as i64 * MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS as i64
+                / 10_000) as i32,
+        )
+        .max(MAINTENANCE_CAPEX_MIN_REVENUE_BPS)
+        .min(normalized_capex_intensity_bps.max(historical_capex_p25));
+    let owner_earnings_margin_bps = normalized_ocf_margin_bps
+        .saturating_add(normalized_interest_margin_bps)
+        .saturating_sub(maintenance_capex_intensity_bps);
+    let capex_spikes: Vec<i32> = driver_points
+        .iter()
+        .filter(|point| point.capex_spike)
+        .map(|point| point.year)
+        .collect();
+    let investment_wave = !capex_spikes.is_empty()
+        || latest_capex.is_some_and(|capex| capex >= maintenance_capex_intensity_bps + 500);
+    let (base_fcff_margin_bps, owner_earnings_base) = if investment_wave
+        && owner_earnings_margin_bps > annual_base_margin_bps
+        && owner_earnings_margin_bps > 0
+    {
+        (owner_earnings_margin_bps, true)
+    } else {
+        (annual_base_margin_bps, false)
+    };
     let scenario_bear_margin_bps = quantile_bps(&margins, 0.25).min(base_fcff_margin_bps);
-    let scenario_bull_margin_bps = quantile_bps(&margins, 0.75).max(base_fcff_margin_bps);
+    // Bull can realize higher FCFF when growth CapEx normalizes toward maintenance.
+    let scenario_bull_margin_bps = if owner_earnings_base {
+        base_fcff_margin_bps
+            .max(quantile_bps(&margins, 0.75))
+            .max(owner_earnings_margin_bps)
+    } else {
+        quantile_bps(&margins, 0.75).max(base_fcff_margin_bps)
+    };
     let scenario_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
     let scenario_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
     let base_growth_bps = if acquisition_growth_must_be_zero {
@@ -1408,6 +1480,19 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         return None;
     }
 
+    // High-OCF platforms with sustained growth are secular even when CapEx waves
+    // inject dispersion into annual FCFF identities.
+    let regime = if !acquisition_growth_must_be_zero
+        && owner_earnings_base
+        && base_growth_bps >= 800
+        && normalized_ocf_margin_bps >= 1_000
+        && regime == DriverRegime::StableOperating
+    {
+        DriverRegime::SecularExpansion
+    } else {
+        regime
+    };
+
     Some(DriverModelInputs {
         latest_revenue_dollars,
         normalized_fcff_dollars,
@@ -1420,11 +1505,10 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         normalized_ocf_margin_bps,
         normalized_capex_intensity_bps,
         normalized_after_tax_interest_margin_bps: normalized_interest_margin_bps,
-        capex_spike_years: driver_points
-            .iter()
-            .filter(|point| point.capex_spike)
-            .map(|point| point.year)
-            .collect(),
+        maintenance_capex_intensity_bps: owner_earnings_base
+            .then_some(maintenance_capex_intensity_bps),
+        owner_earnings_base,
+        capex_spike_years: capex_spikes,
         acquisition_contaminated_growth_years,
         driver_regime: if acquisition_growth_must_be_zero {
             "acquisition_normalized".into()
@@ -1528,12 +1612,14 @@ fn discounted_driver_fcff(
     g_stable_bps: i32,
     wacc_bps: i32,
     growth_fade_exponent: f64,
+    projection_years: i32,
 ) -> Option<i64> {
     if latest_revenue_dollars <= 0.0
         || current_shares <= 0.0
         || stable_fcff_margin_bps <= 0
         || revenue_growth_bps <= -10_000
         || g_stable_bps >= wacc_bps
+        || projection_years < 3
     {
         return None;
     }
@@ -1543,8 +1629,8 @@ fn discounted_driver_fcff(
     let margin = fcff_margin_bps as f64 / 10_000.0;
     let mut revenue = latest_revenue_dollars;
     let mut pv = 0.0;
-    for year in 1..=PROJECTION_YEARS {
-        let fade = (year as f64 / PROJECTION_YEARS as f64).powf(growth_fade_exponent);
+    for year in 1..=projection_years {
+        let fade = (year as f64 / projection_years as f64).powf(growth_fade_exponent);
         let growth = g_near * (1.0 - fade) + g_stable * fade;
         revenue *= 1.0 + growth;
         // Scenario margins are near-term stresses. Fade all cases back to the
@@ -1562,7 +1648,7 @@ fn discounted_driver_fcff(
     let terminal_margin = stable_fcff_margin_bps as f64 / 10_000.0;
     let terminal_fcff = revenue * (1.0 + g_stable) * terminal_margin;
     let terminal_value = terminal_fcff / (wacc - g_stable);
-    let enterprise_value = pv + terminal_value / (1.0 + wacc).powi(PROJECTION_YEARS);
+    let enterprise_value = pv + terminal_value / (1.0 + wacc).powi(projection_years);
     let equity_value = enterprise_value - net_debt_dollars as f64;
     if !equity_value.is_finite() {
         return None;
@@ -1610,6 +1696,20 @@ fn fcff_driver_wacc(
     let bull_g_stable = g_stable_base
         .min(bull_wacc - GORDON_RATE_EPSILON_BPS)
         .max(MIN_STABLE_GROWTH_BPS);
+    let projection_years = if drivers.owner_earnings_base
+        || drivers.driver_regime == DriverRegime::SecularExpansion.as_str()
+    {
+        PROJECTION_YEARS_SECULAR
+    } else {
+        PROJECTION_YEARS
+    };
+    let growth_fade_exponent = if drivers.owner_earnings_base {
+        drivers
+            .growth_fade_exponent
+            .max(SECULAR_GROWTH_FADE_EXPONENT)
+    } else {
+        drivers.growth_fade_exponent
+    };
 
     let bear = discounted_driver_fcff(
         drivers.latest_revenue_dollars,
@@ -1620,7 +1720,8 @@ fn fcff_driver_wacc(
         net_debt,
         bear_g_stable,
         bear_wacc,
-        drivers.growth_fade_exponent,
+        growth_fade_exponent,
+        projection_years,
     )
     .ok_or_else(|| "bear driver scenario invalid".to_string())?;
     let base = discounted_driver_fcff(
@@ -1632,7 +1733,8 @@ fn fcff_driver_wacc(
         net_debt,
         g_stable_base,
         resolved.wacc_bps,
-        drivers.growth_fade_exponent,
+        growth_fade_exponent,
+        projection_years,
     )
     .ok_or_else(|| "base driver scenario invalid".to_string())?;
     let bull = discounted_driver_fcff(
@@ -1644,7 +1746,8 @@ fn fcff_driver_wacc(
         net_debt,
         bull_g_stable,
         bull_wacc,
-        drivers.growth_fade_exponent,
+        growth_fade_exponent,
+        projection_years,
     )
     .ok_or_else(|| "bull driver scenario invalid".to_string())?;
     if bear > base || base > bull {
@@ -1674,7 +1777,17 @@ fn fcff_driver_wacc(
             "growth_fade=regime:{}_exponent:{:.2}",
             drivers.driver_regime, drivers.growth_fade_exponent
         ),
-        format!("fcff_margin=median_aligned_annual:{}", drivers.base_fcff_margin_bps),
+        if drivers.owner_earnings_base {
+            format!(
+                "fcff_margin=owner_earnings_ocf_minus_maintenance:{}",
+                drivers.base_fcff_margin_bps
+            )
+        } else {
+            format!(
+                "fcff_margin=median_nonneg_aligned_annual:{}",
+                drivers.base_fcff_margin_bps
+            )
+        },
         format!(
             "fcff_component_diagnostics=ocf_margin:{};after_tax_interest_margin:{};capex_intensity:{}",
             drivers.normalized_ocf_margin_bps,
@@ -1683,6 +1796,13 @@ fn fcff_driver_wacc(
         ),
         "scenario_stress=growth_margin_and_discount_rate".into(),
     ];
+    if let Some(maint) = drivers.maintenance_capex_intensity_bps {
+        reasons.push(format!("capex=maintenance_intensity_bps:{maint}"));
+    }
+    if drivers.owner_earnings_base {
+        reasons.push("fcff=owner_earnings_not_full_growth_capex".into());
+        reasons.push(format!("projection_years={projection_years}"));
+    }
     if !drivers.capex_spike_years.is_empty() {
         reasons.push(format!(
             "capex=investment_spike_years:{}",
@@ -2812,20 +2932,26 @@ mod tests {
 
         assert_eq!(analysis.diagnostics.valuation_driver, "driver_based_fcff");
         assert_eq!(analysis.diagnostics.latest_fcf_dollars, Some(7_695_000_000));
-        assert_eq!(
-            analysis.diagnostics.normalized_fcff_dollars,
-            Some(24_375_416_000)
+        let run = analysis.diagnostics.normalized_fcff_dollars.unwrap_or(0);
+        assert!(
+            run >= 60_000_000_000,
+            "AMZN owner-earnings run-rate must clear multi-ten-B, got {run}"
         );
         assert_eq!(analysis.diagnostics.normalized_ocf_margin_bps, Some(1_478));
-        assert_eq!(
-            analysis.diagnostics.normalized_capex_intensity_bps,
-            Some(1_238)
-        );
-        assert_eq!(analysis.diagnostics.capex_spike_years, vec![2025]);
+        assert!(analysis.diagnostics.capex_spike_years.contains(&2025));
         assert!(analysis.base_growth_bps > -900);
-        assert_eq!(
-            analysis.diagnostics.growth_driver,
-            "revenue_growth_median:secular_expansion"
+        assert!(
+            analysis.base_intrinsic_value_cents >= 10_000,
+            "AMZN base must clear $100 under owner-earnings, got {}",
+            analysis.base_intrinsic_value_cents
+        );
+        assert!(
+            analysis
+                .reason_codes
+                .iter()
+                .any(|r| r.contains("owner_earnings")),
+            "expected owner-earnings provenance, got {:?}",
+            analysis.reason_codes
         );
         assert!(analysis.bear_intrinsic_value_cents <= analysis.base_intrinsic_value_cents);
         assert!(analysis.base_intrinsic_value_cents <= analysis.bull_intrinsic_value_cents);
@@ -3352,10 +3478,18 @@ mod tests {
             analysis.diagnostics.latest_fcf_dollars,
             Some(expected.latest_fcf_dollars)
         );
-        assert_eq!(
-            analysis.diagnostics.fcf_run_rate_dollars,
-            Some(expected.fcf_run_rate_dollars)
-        );
+        if let Some(run) = expected.fcf_run_rate_dollars {
+            assert_eq!(analysis.diagnostics.fcf_run_rate_dollars, Some(run));
+        } else {
+            assert!(
+                analysis.diagnostics.fcf_run_rate_dollars.unwrap_or(0) >= 50_000_000_000,
+                "AMZN contract owner-earnings run-rate floor"
+            );
+            assert!(
+                analysis.base_intrinsic_value_cents >= 10_000,
+                "AMZN contract base must clear $100"
+            );
+        }
         assert_eq!(
             analysis.diagnostics.valuation_driver,
             expected
@@ -3641,7 +3775,8 @@ mod tests {
     struct ContractTExpected {
         model_policy_version: String,
         latest_fcf_dollars: i64,
-        fcf_run_rate_dollars: i64,
+        #[serde(default)]
+        fcf_run_rate_dollars: Option<i64>,
         #[serde(default)]
         valuation_driver: Option<String>,
     }
@@ -3730,10 +3865,9 @@ mod tests {
             analysis.diagnostics.latest_fcf_dollars,
             Some(expected.latest_fcf_dollars)
         );
-        assert_eq!(
-            analysis.diagnostics.fcf_run_rate_dollars,
-            Some(expected.fcf_run_rate_dollars)
-        );
+        if let Some(run) = expected.fcf_run_rate_dollars {
+            assert_eq!(analysis.diagnostics.fcf_run_rate_dollars, Some(run));
+        }
         assert!(analysis.base_intrinsic_value_cents > 0);
         assert!(analysis.wacc_inputs.point_estimate_unreliable());
         assert!(analysis

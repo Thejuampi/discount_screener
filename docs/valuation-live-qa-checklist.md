@@ -126,10 +126,31 @@ bridge as `apps/windows/src/api.ts#getSymbolDetail`:
 await window.__TAURI_INTERNALS__.invoke("get_symbol_detail", { symbol: "COF" })
 ```
 
+### Attach CLI (preferred for agents)
+
+With **one** long-lived `npm run tauri:dev:qa` already running, from `apps/windows`:
+
+```text
+npm run ds-ui -- status
+npm run ds-ui -- open-detail COF
+npm run ds-ui -- dcf-slot
+npm run ds-ui -- invoke get_symbol_detail "{\"symbol\":\"COF\"}"
+npm run ds-ui -- screenshot
+npm run ds-ui -- qa-snapshot CI
+npm run live-qa:checklist
+```
+
+Implementation: `apps/windows/scripts/ds-ui.mjs` + `e2e/native/cdp-client.mjs`
++ DEV bridge `window.__DS_AGENT__` in `App.tsx`.
+Does not start/stop the app. Screenshots default to
+`.agents/workspace/tmp/ui-shots/`. Full attach report example:
+`_bmad-output/implementation-artifacts/live-qa-wave1-ds-ui-2026-08-01.md`.
+
 For a Detail failure, capture both the returned backend fields
 (`dcf_analysis`, `valuation_status`, `valuation_unavailable_reason`, and required
-fundamentals) and the rendered `.detail-panel` text. A backend-only green result
-does not pass QA if the presentation boundary suppresses it.
+fundamentals) and the rendered `.detail-panel` / `.price-summary .dcf-slot` text.
+A backend-only green result does not pass QA if the presentation boundary
+suppresses it.
 
 ## Notes
 

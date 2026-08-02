@@ -589,10 +589,28 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
         total_cash_dollars: Some(143_088_992_256),
         ..Default::default()
     };
-    // Contiguous positive suffix after CapEx-trough years (matches contract fixture spirit).
+    // Live-shaped path: trough years ALSO carry full operating drivers (SEC complete).
+    // The old fixture omitted drivers on 2020–2021 so they never entered the recent
+    // window — that masked the median-collapse bug that priced live AMZN near $5.
     let fcf = vec![
-        FcfPoint::new(2020, 25_924_000_000.0),
-        FcfPoint::new(2021, -14_726_000_000.0),
+        FcfPoint::new(2020, 25_924_000_000.0)
+            .with_operating_drivers(
+                66_064_000_000.0,
+                40_140_000_000.0,
+                386_064_000_000.0,
+                Some(1_647_000_000.0),
+                Some(1_184),
+            )
+            .with_rate_resolution_inputs(Some(180_000_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2021, -14_726_000_000.0)
+            .with_operating_drivers(
+                46_327_000_000.0,
+                61_053_000_000.0,
+                469_822_000_000.0,
+                Some(1_809_000_000.0),
+                Some(1_256),
+            )
+            .with_rate_resolution_inputs(Some(185_000_000_000.0), Some(2_100), None, None),
         FcfPoint::new(2022, -16_893_000_000.0)
             .with_operating_drivers(
                 46_752_000_000.0,
@@ -643,19 +661,20 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
         "amzn_baseline base_cents={} run_rate={} wacc={} growth={}",
         base, run, a.wacc_bps, a.base_growth_bps
     );
+    // Investment-wave undervaluation: full gross CapEx as FCFF + 5y Gordon → ~$50
+    // while market/street are multi-hundreds. Owner-earnings path must clear $100.
     assert!(
-        base >= 500,
-        "AMZN-class mega-cap must not collapse to penny intrinsic, base_cents={base}"
-    );
-    // Multi-ten-billion normalized FCF: never a $1 mirage (user-reported failure mode).
-    // Full AMZN economic calibration is tracked separately; this is the anti-collapse floor.
-    assert!(
-        run >= 10_000_000_000,
-        "AMZN fixture must keep multi-ten-B normalized FCF run-rate, got {run}"
+        base >= 10_000,
+        "AMZN-class owner-earnings base must clear $100 after CapEx-wave fix, base_cents={base}"
     );
     assert!(
-        base >= 1_000,
-        "AMZN-class with multi-ten-B FCF must not price under $10, base_cents={base}"
+        run >= 50_000_000_000,
+        "AMZN full-driver fixture must keep multi-ten-B owner-earnings run-rate, got {run}"
+    );
+    // Not a price clamp: refuse catastrophic understatement (< ~1/4 of sample market).
+    assert!(
+        base >= 23_933 / 4,
+        "AMZN base must not be <~1/4 sample market after owner-earnings fix, base_cents={base}"
     );
 }
 

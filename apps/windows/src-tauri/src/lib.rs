@@ -1,4 +1,6 @@
 mod analyst_forecasts;
+pub mod analyst_method_import;
+pub mod analyst_method_service;
 mod chart_patterns;
 mod commands;
 mod congress;
@@ -19,7 +21,11 @@ mod evidence_sotp_contract;
 mod feed_log;
 mod fetcher;
 mod fibonacci;
+pub mod forward_earnings_multiple;
+#[cfg(test)]
+mod forward_earnings_multiple_contract;
 mod index_estimates;
+pub mod issuer_identity;
 mod launch_profile;
 mod news;
 pub mod operating_valuation;
@@ -47,6 +53,10 @@ mod valuation_baseline;
 #[cfg(test)]
 mod valuation_decision_contract;
 mod valuation_divergence;
+pub mod valuation_dossier_view;
+pub mod valuation_evidence;
+#[cfg(test)]
+mod valuation_evidence_contract;
 mod yahoo_session;
 
 use state::AppState;
@@ -92,7 +102,19 @@ pub fn run() {
         ))
         .setup(|app| {
             // ── State / DB ────────────────────────────────────────────────────
-            let app_data_dir = app.path().app_data_dir().expect("resolve app data dir");
+            let platform_app_data_dir = app.path().app_data_dir().expect("resolve app data dir");
+            // Windows KnownFolder resolution can ignore child-process APPDATA overrides.
+            // Native E2E therefore gets an explicit, debug-only isolated data root so
+            // fixture ledger writes can never reuse the operator's real history.sqlite.
+            let app_data_dir =
+                if cfg!(debug_assertions) && std::env::var("DS_NATIVE_E2E").as_deref() == Ok("1") {
+                    std::env::var_os("DS_NATIVE_E2E_DATA_DIR")
+                        .filter(|value| !value.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or(platform_app_data_dir)
+                } else {
+                    platform_app_data_dir
+                };
             let db_path = app_data_dir.join("history.sqlite");
 
             // Launch profile: --profile / --profile=NAME wins over DS_UNIVERSE_PROFILE.
@@ -212,6 +234,8 @@ pub fn run() {
             commands::set_scoring_model,
             commands::get_index_estimates,
             commands::get_quant_lens,
+            commands::get_valuation_dossier,
+            commands::debug_seed_amzn_analyst_method_e2e,
             commands::run_qa_valuation_divergence_audit,
             commands::list_universe_profiles,
             commands::get_universe_profile,

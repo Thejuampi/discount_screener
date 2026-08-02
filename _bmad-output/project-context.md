@@ -12,8 +12,8 @@ sections_completed:
   - anti_patterns
   - valuation_quant_lens_rules
 status: 'complete'
-date_updated: '2026-07-31'
-rule_count: 55
+date_updated: '2026-08-02'
+rule_count: 60
 optimized_for_llm: true
 ---
 
@@ -82,10 +82,21 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - **Structural constraints only.** Allowed: \(g < r\), model eligibility, clean-surplus identities, missing-driver unavailability, debt-scaled provisional WACC uplift. Forbidden: hard `intrinsic/price` caps, sector FCF haircuts, silent FCFF fallback for financials, acceptance tests that only require market proximity.
 - **Provenance is mandatory** for model id, business class, discount-rate kind, engine/policy version, and WACC/CoE input sources. UI labels must distinguish FCFF DCF vs residual income vs analyst.
 - **Quant Lens is high-SNR.** Count independent evidence families (analyst range, model quality, history, agreement) — do not double-count gap + analyst. Strong requires solid model quality and zero conflicts. When model and analyst diverge materially, EV status is **Disputed** (show both anchors; no single absurd weighted upside). Soft model + agreement → prefer analyst as primary fair value.
+- **Manual analyst method (ForwardEarningsMultiple) is diagnostic-only in Slice 1C.** Project via `ValuationDossierView` / Quant Lens section `manual_analyst_method` after `primary_status` is frozen. Never feed ranking, Strong, EV blending, or FCFF router selection. Never write the candidate into `dcf_values`, `selected_valuation_values`, or `snapshots.intrinsic_value_cents`. UI must label “manual analyst method” and show metric claim, forecast period, target horizon precision, source verification, and refusal.
 - **Valuation decision policy is core-owned.** Keep `Availability`, `Coverage`, freshness, confidence, and relation separate. For compatible positive anchors use integer half-up `differenceBps`; reduce all pairs to `Aligned` (≤2500), `Tension` (2501–5000), or `Disputed` (>5000). Never synthesize cross-provider analyst consensus. TipRanks is per-symbol, cache-first, explicit-load-only, and needs three distinct observations no older than 90 days before it is decision eligible.
 - **TipRanks credentials and budget are durable boundaries.** Keep API keys in an Android Keystore AES-GCM envelope excluded from backup; never log/render them. Persist forecast cache separately from a conservative `reserved`/`sent` ledger and provider usage snapshots. No automatic retries; only explicit forecast calls consume the monthly forecast budget.
 - **Contracts:** `shared/contracts/valuation-model-family.json` and source-selection contracts; keep Windows/Android/desktop engines aligned.
 - Design authority: `_bmad-output/planning-artifacts/valuation-model-family-architecture.md` and root `AGENTS.md` / `Agents.md`.
+
+### Analyst-Method Evidence Lifecycle Rules
+
+- **Evidence binding is semantic.** Frozen IDs and numeric units are necessary but insufficient: EPS and multiple observations must prove compatible metric roles, basis, fiscal period/horizon, currency/share basis, and lineage.
+- **Trusted revision is publish-or-invalidate.** After a control envelope safely establishes issuer/security/projection/supersession authority, semantic refusal must atomically invalidate the stale current candidate; malformed or foreign envelopes must not invalidate anything.
+- **Idempotency is command identity.** Persist and fingerprint explicit role bindings plus evidence set, immutable identity/share vintage, method/engine/policy, replay mode, the stable semantic `decisionAt`, projection key, and supersession intent. Processing/retry time is separate: identical transport retried later is a no-op, while a decision-only mutation conflicts. Equal results do not make two commands identical.
+- **Current is eligibility, not a pointer.** A candidate is current only while operational, non-invalidated, policy/engine-current, identity/share-vintage-current, and fully reconstructible from frozen command, membership, roles, result, supersession and revision lineage. Raw current-pointer access is not a publication API.
+- **Lineage integrity is transitive.** Validate the entire reachable revision ancestry, not only the candidate edge: every predecessor exists, has one consistent intent, remains in issuer/security partition, and no node is revisited.
+- **Closure is independently earned.** Domain-hard slices move from design-ready → implemented → independently closed. Before the next consuming slice, run an adversarial invariant matrix, per-field negative mutations, transaction rollback/reopen, and reconcile durable status artifacts with code and gates.
+- **Publication read is eligibility-gated.** `load_analyst_method_publication` / `eligible_current_projection_run_id` reconstruct the full command, membership, roles, identity, result, supersession and revision lineage before exposing a current candidate; raw projection pointers are not a UI API.
 
 ### Code Quality & Style Rules
 
@@ -141,4 +152,4 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Update it when technology versions, architecture boundaries, or verification gates change.
 - Remove rules that become obsolete or too obvious to preserve LLM context efficiency.
 
-Last Updated: 2026-07-26
+Last Updated: 2026-08-02

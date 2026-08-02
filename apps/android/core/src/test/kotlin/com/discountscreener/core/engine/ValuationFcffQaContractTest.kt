@@ -20,7 +20,7 @@ class ValuationFcffQaContractTest {
             orderedSymbols,
         )
         assertTrue(text.contains("\"forbidden\": [\"market_price\", \"analyst_target\""))
-        assertTrue(text.contains("\"baseMargin\": \"median_aligned_annual_fcff_margin\""))
+        assertTrue(text.contains("owner_earnings_ocf_minus_maintenance"))
         assertTrue(text.contains("\"provisionalWaccUpliftBps\": 175"))
     }
 

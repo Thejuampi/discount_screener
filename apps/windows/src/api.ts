@@ -695,6 +695,81 @@ export interface QuantLensReport {
   model_version: number;
 }
 
+/** Slice 1C additive market-reference lane (diagnostic only). */
+export type AnalystMethodLaneStatus = "available" | "unavailable" | "absent";
+
+export interface AnalystMethodCandidateView {
+  status: AnalystMethodLaneStatus;
+  runId: string | null;
+  projectionKey: string | null;
+  /** Exact fixed-point decimal strings: Rust i64 values must not cross JS Number. */
+  targetValueCents: string | null;
+  epsCents: string | null;
+  multipleHundredths: number | null;
+  forecastPeriodEnd: string | null;
+  economicPeriodStart: string | null;
+  targetAsOf: string | null;
+  datePrecision: string | null;
+  currency: string | null;
+  metricId: string | null;
+  metricBasis: string | null;
+  multipleProvenance: string | null;
+  scenario: string | null;
+  quality: string | null;
+  importQualityLabel: string | null;
+  sourceVerification: string | null;
+  methodLabel: string;
+  engineId: string | null;
+  methodPolicyVersion: string | null;
+  decisionAtUnixMs: number | null;
+  computationCreatedAtUnixMs: number | null;
+  evidenceObservedAtUnixMs: number | null;
+  replayMode: string | null;
+  issuerId: string | null;
+  securityId: string | null;
+  ticker: string | null;
+  identityVintage: string | null;
+  identityFingerprint: string | null;
+  shareBasisId: string | null;
+  shareBasisVintageFingerprint: string | null;
+  shareBasisDescription: string | null;
+  perShareBasisId: string | null;
+  corporateActionVintage: string | null;
+  fiscalCalendarVintage: string | null;
+  fiscalPeriodCoordinate: string | null;
+  fiscalCalendarVerification: string | null;
+  horizonComparisonEligible: boolean;
+  epsObservationId: string | null;
+  multipleObservationId: string | null;
+  lineageGroupId: string | null;
+  epsProviderId: string | null;
+  multipleProviderId: string | null;
+  epsProviderVintageId: string | null;
+  multipleProviderVintageId: string | null;
+  epsSourceLocation: string | null;
+  multipleSourceLocation: string | null;
+  epsExtractionMethod: string | null;
+  multipleExtractionMethod: string | null;
+  epsRevisionId: string | null;
+  multipleRevisionId: string | null;
+  epsPublicationAtUnixMs: number | null;
+  multiplePublicationAtUnixMs: number | null;
+  epsSourceAvailableAtUnixMs: number | null;
+  multipleSourceAvailableAtUnixMs: number | null;
+  epsIngestedAtUnixMs: number | null;
+  multipleIngestedAtUnixMs: number | null;
+  reasonCode: string | null;
+  diagnosticOnly: boolean;
+  rankingEligible: boolean;
+  strongEligible: boolean;
+}
+
+export interface ValuationDossierView {
+  symbol: string;
+  viewVersion: number;
+  analystMethod: AnalystMethodCandidateView;
+}
+
 export interface TickerSearchSuggestion {
   symbol: string;
   company_name: string | null;
@@ -740,6 +815,8 @@ export const api = {
   runQaValuationDivergenceAudit: () =>
     invoke<ValuationDivergenceAudit>("run_qa_valuation_divergence_audit"),
   getQuantLens: (symbol: string) => invoke<QuantLensReport>("get_quant_lens", { symbol }),
+  getValuationDossier: (symbol: string) =>
+    invoke<ValuationDossierView>("get_valuation_dossier", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
   listUniverseProfiles: () => invoke<UniverseProfileInfo[]>("list_universe_profiles"),

@@ -20,7 +20,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/13-industry-beta-policy-v1"
+const val MODEL_POLICY_VERSION = "business-class-policy/15-owner-earnings-maintenance-capex"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/1"
 
@@ -30,6 +30,9 @@ private const val BETA_COMPANY_WEIGHT_PCT = 67L
 private const val BETA_INDUSTRY_WEIGHT_PCT = 33L
 private const val DEFAULT_INDUSTRY_BETA_MILLIS = 1_000
 private const val PROJECTION_YEARS = 5
+private const val PROJECTION_YEARS_SECULAR = 10
+private const val MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS = 1_500
+private const val MAINTENANCE_CAPEX_MIN_REVENUE_BPS = 200
 /** Driver ratios are regime-sensitive; keep the recent multi-year window. */
 private const val DRIVER_RECENT_WINDOW = 5
 private const val COE_SCENARIO_BAND_BPS = 75
@@ -489,6 +492,8 @@ object DcfAnalysisEngine {
         val normalizedOcfMarginBps: Int,
         val normalizedCapexIntensityBps: Int,
         val normalizedAfterTaxInterestMarginBps: Int,
+        val maintenanceCapexIntensityBps: Int? = null,
+        val ownerEarningsBase: Boolean = false,
         val capexSpikeYears: List<Int>,
         val acquisitionContaminatedGrowthYears: List<Int>,
         val driverRegime: String,
@@ -624,8 +629,8 @@ object DcfAnalysisEngine {
         }
         val useCycleBlend = regime == DriverRegime.CyclicalOrTransition &&
             priorBaseline.size >= 2 && priorGrowths.size >= 2
-        // Keep every aligned annual FCFF identity in margin evidence. A CapEx
-        // spike is diagnostic, not permission to delete the cash outflow.
+        // Scenario margin distribution keeps every aligned annual identity
+        // (including CapEx trough years). CapEx spike flags stay diagnostic.
         val alignedMarginPoints = if (useCycleBlend) recentPoints + priorPoints else recentPoints
         val margins = alignedMarginPoints.map { it.fcffMarginBps }
         val recentOcfMargins = recentBaseline.map { it.ocfMarginBps }
@@ -652,11 +657,37 @@ object DcfAnalysisEngine {
         } else {
             Triple(recentOcfMargin, recentCapexIntensity, recentInterestMargin)
         }
-        // Apply the robust statistic after the annual FCFF identity. Independent
-        // component medians can synthesize a year that never existed.
-        val baseMargin = medianBps(margins)
+        // Parity with Windows owner-earnings / maintenance CapEx policy.
+        val nonnegMargins = margins.filter { it >= 0 }
+        val annualBaseMargin = if (nonnegMargins.size >= 2) {
+            medianBps(nonnegMargins)
+        } else {
+            medianBps(margins)
+        }
+        val allCapex = driverPoints.map { it.capexIntensityBps }
+        val latestCapex = driverPoints.lastOrNull()?.capexIntensityBps
+        val historicalCapexP25 = if (allCapex.size >= 4) {
+            quantileBps(allCapex, 0.25)
+        } else {
+            medianBps(allCapex)
+        }
+        val maintenanceCapex = historicalCapexP25
+            .coerceAtMost((normalizedOcfMargin.toLong() * MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS / 10_000L).toInt())
+            .coerceAtLeast(MAINTENANCE_CAPEX_MIN_REVENUE_BPS)
+            .coerceAtMost(normalizedCapexIntensity.coerceAtLeast(historicalCapexP25))
+        val ownerEarningsMargin = (normalizedOcfMargin + normalizedInterestMargin - maintenanceCapex)
+            .coerceAtLeast(0)
+        val capexSpikes = driverPoints.filter { it.capexSpike }.map { it.year }
+        val investmentWave = capexSpikes.isNotEmpty() ||
+            (latestCapex != null && latestCapex >= maintenanceCapex + 500)
+        val ownerEarningsBase = investmentWave && ownerEarningsMargin > annualBaseMargin && ownerEarningsMargin > 0
+        val baseMargin = if (ownerEarningsBase) ownerEarningsMargin else annualBaseMargin
         val bearMargin = quantileBps(margins, 0.25).coerceAtMost(baseMargin)
-        val bullMargin = quantileBps(margins, 0.75).coerceAtLeast(baseMargin)
+        val bullMargin = if (ownerEarningsBase) {
+            maxOf(baseMargin, quantileBps(margins, 0.75), ownerEarningsMargin)
+        } else {
+            quantileBps(margins, 0.75).coerceAtLeast(baseMargin)
+        }
         val bearGrowth = quantileBps(scenarioGrowths, 0.25)
         val bullGrowth = quantileBps(scenarioGrowths, 0.75)
         val baseGrowth = if (acquisitionGrowthMustBeZero) {
@@ -676,6 +707,16 @@ object DcfAnalysisEngine {
         val normalizedFcff = latestRevenue * baseMargin / 10_000.0
         if (!normalizedFcff.isFinite()) return null
 
+        var effectiveRegime = regime
+        if (!acquisitionGrowthMustBeZero &&
+            ownerEarningsBase &&
+            baseGrowth >= 800 &&
+            normalizedOcfMargin >= 1_000 &&
+            regime == DriverRegime.StableOperating
+        ) {
+            effectiveRegime = DriverRegime.SecularExpansion
+        }
+
         return DriverModelInputs(
             latestRevenueDollars = latestRevenue,
             normalizedFcffDollars = normalizedFcff,
@@ -688,11 +729,17 @@ object DcfAnalysisEngine {
             normalizedOcfMarginBps = normalizedOcfMargin,
             normalizedCapexIntensityBps = normalizedCapexIntensity,
             normalizedAfterTaxInterestMarginBps = normalizedInterestMargin,
-            capexSpikeYears = driverPoints.filter { it.capexSpike }.map { it.year },
+            maintenanceCapexIntensityBps = if (ownerEarningsBase) maintenanceCapex else null,
+            ownerEarningsBase = ownerEarningsBase,
+            capexSpikeYears = capexSpikes,
             acquisitionContaminatedGrowthYears = acquisitionContaminatedGrowthYears,
-            driverRegime = if (acquisitionGrowthMustBeZero) "acquisition_normalized" else regime.asString(),
+            driverRegime = if (acquisitionGrowthMustBeZero) "acquisition_normalized" else effectiveRegime.asString(),
             growthDispersionBps = growthDispersion,
-            growthFadeExponent = if (acquisitionGrowthMustBeZero) 1.0 else growthFadeExponent(regime),
+            growthFadeExponent = if (acquisitionGrowthMustBeZero) {
+                1.0
+            } else {
+                growthFadeExponent(effectiveRegime)
+            },
             taxDefaulted = raw.any { it.taxMissing },
         )
     }
@@ -834,9 +881,10 @@ object DcfAnalysisEngine {
         gStableBps: Int,
         waccBps: Int,
         growthFadeExponent: Double,
+        projectionYears: Int = PROJECTION_YEARS,
     ): Long? {
         if (latestRevenueDollars <= 0.0 || currentShares <= 0.0 || stableFcffMarginBps <= 0 ||
-            revenueGrowthBps <= -10_000 || gStableBps >= waccBps
+            revenueGrowthBps <= -10_000 || gStableBps >= waccBps || projectionYears < 3
         ) return null
         val wacc = waccBps / 10_000.0
         val nearGrowth = revenueGrowthBps / 10_000.0
@@ -844,8 +892,8 @@ object DcfAnalysisEngine {
         val margin = fcffMarginBps / 10_000.0
         var revenue = latestRevenueDollars
         var presentValue = 0.0
-        for (year in 1..PROJECTION_YEARS) {
-            val fade = (year.toDouble() / PROJECTION_YEARS).pow(growthFadeExponent)
+        for (year in 1..projectionYears) {
+            val fade = (year.toDouble() / projectionYears).pow(growthFadeExponent)
             val growth = nearGrowth * (1.0 - fade) + stableGrowth * fade
             revenue *= 1.0 + growth
             // Bear/bull margins are near-term stresses. Fade them to the
@@ -860,7 +908,7 @@ object DcfAnalysisEngine {
         val terminalMargin = stableFcffMarginBps / 10_000.0
         val terminalFcff = revenue * (1.0 + stableGrowth) * terminalMargin
         val terminalValue = terminalFcff / (wacc - stableGrowth)
-        val enterpriseValue = presentValue + terminalValue / (1.0 + wacc).pow(PROJECTION_YEARS)
+        val enterpriseValue = presentValue + terminalValue / (1.0 + wacc).pow(projectionYears)
         val equityValue = enterpriseValue - netDebtDollars
         if (!equityValue.isFinite()) return null
         // Common equity is bounded below by zero. Keep a zero bear case when
@@ -901,23 +949,34 @@ object DcfAnalysisEngine {
             .coerceAtMost(bullWacc - GORDON_RATE_EPSILON_BPS)
             .coerceAtLeast(MIN_STABLE_GROWTH_BPS)
 
+        val projectionYears =
+            if (drivers.ownerEarningsBase || drivers.driverRegime == "secular_expansion") {
+                PROJECTION_YEARS_SECULAR
+            } else {
+                PROJECTION_YEARS
+            }
+        val growthFade = if (drivers.ownerEarningsBase) {
+            maxOf(drivers.growthFadeExponent, SECULAR_GROWTH_FADE_EXPONENT)
+        } else {
+            drivers.growthFadeExponent
+        }
         val bear = discountedDriverFcff(
             drivers.latestRevenueDollars, drivers.bearFcffMarginBps,
             drivers.baseFcffMarginBps, drivers.bearGrowthBps,
             currentShares, netDebtDollars, bearStableGrowth, bearWacc,
-            drivers.growthFadeExponent,
+            growthFade, projectionYears,
         ) ?: error("bear driver scenario invalid")
         val base = discountedDriverFcff(
             drivers.latestRevenueDollars, drivers.baseFcffMarginBps,
             drivers.baseFcffMarginBps, drivers.baseGrowthBps,
             currentShares, netDebtDollars, stableGrowthBase, resolvedWacc.waccBps,
-            drivers.growthFadeExponent,
+            growthFade, projectionYears,
         ) ?: error("base driver scenario invalid")
         val bull = discountedDriverFcff(
             drivers.latestRevenueDollars, drivers.bullFcffMarginBps,
             drivers.baseFcffMarginBps, drivers.bullGrowthBps,
             currentShares, netDebtDollars, bullStableGrowth, bullWacc,
-            drivers.growthFadeExponent,
+            growthFade, projectionYears,
         ) ?: error("bull driver scenario invalid")
         check(bear <= base && base <= bull) {
             "driver scenarios not ordered after driver transition"
@@ -930,8 +989,17 @@ object DcfAnalysisEngine {
             add("valuation_driver=driver_based_fcff")
             add("fcff=ocf_plus_after_tax_interest_minus_capex")
             add("growth=recent_driver_median:regime=${drivers.driverRegime}")
-            add("growth_fade=regime:${drivers.driverRegime}_exponent:${"%.2f".format(java.util.Locale.US, drivers.growthFadeExponent)}")
-            add("fcff_margin=median_aligned_annual:${drivers.baseFcffMarginBps}")
+            add("growth_fade=regime:${drivers.driverRegime}_exponent:${"%.2f".format(java.util.Locale.US, growthFade)}")
+            if (drivers.ownerEarningsBase) {
+                add("fcff_margin=owner_earnings_ocf_minus_maintenance:${drivers.baseFcffMarginBps}")
+                add("fcff=owner_earnings_not_full_growth_capex")
+                add("projection_years=$projectionYears")
+                drivers.maintenanceCapexIntensityBps?.let {
+                    add("capex=maintenance_intensity_bps:$it")
+                }
+            } else {
+                add("fcff_margin=median_nonneg_aligned_annual:${drivers.baseFcffMarginBps}")
+            }
             add(
                 "fcff_component_diagnostics=ocf_margin:${drivers.normalizedOcfMarginBps};" +
                     "after_tax_interest_margin:${drivers.normalizedAfterTaxInterestMarginBps};" +

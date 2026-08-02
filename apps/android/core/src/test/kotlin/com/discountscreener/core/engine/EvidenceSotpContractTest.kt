@@ -7,7 +7,9 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 class EvidenceSotpContractTest {
     private val json = Json { ignoreUnknownKeys = true }
@@ -16,10 +18,21 @@ class EvidenceSotpContractTest {
     fun shared_point_in_time_fixtures_execute_on_android() {
         val contract = json.decodeFromString<EvidenceSotpContract>(Files.readString(findFixture()))
         contract.pointInTimeFixtures.forEach { fixture ->
+            val refusalCode = fixture.expected.refusalCode
+            if (refusalCode != null) {
+                val err = assertFailsWith<ValuationRefusalException>(fixture.name) {
+                    EvidenceSotpEngine.replay(fixture.observations, fixture.decisionAt)
+                }
+                assertEquals(refusalCode, err.reasonCode, fixture.name)
+                fixture.expected.refusalDetailContains?.let { needle ->
+                    assertTrue(err.detail.contains(needle), fixture.name)
+                }
+                return@forEach
+            }
             val replay = EvidenceSotpEngine.replay(fixture.observations, fixture.decisionAt)
-            assertEquals(fixture.expected.selectedIds, replay.selected.map { it.id }, fixture.name)
-            assertEquals(fixture.expected.selectedValuesCents, replay.selected.mapNotNull { it.valueCents }, fixture.name)
-            assertEquals(fixture.expected.rejectedCodes, replay.rejected.map { it.code.serialized }, fixture.name)
+            assertEquals(fixture.expected.selectedIds.orEmpty(), replay.selected.map { it.id }, fixture.name)
+            assertEquals(fixture.expected.selectedValuesCents.orEmpty(), replay.selected.mapNotNull { it.valueCents }, fixture.name)
+            assertEquals(fixture.expected.rejectedCodes.orEmpty(), replay.rejected.map { it.code.serialized }, fixture.name)
             assertEquals(fixture.expected.fingerprint, replay.fingerprint, fixture.name)
         }
     }
@@ -101,10 +114,12 @@ private data class PitFixture(
 
 @Serializable
 private data class PitExpected(
-    val selectedIds: List<String>,
-    val selectedValuesCents: List<Long>,
-    val rejectedCodes: List<String>,
-    val fingerprint: String,
+    val selectedIds: List<String>? = null,
+    val selectedValuesCents: List<Long>? = null,
+    val rejectedCodes: List<String>? = null,
+    val fingerprint: String? = null,
+    val refusalCode: String? = null,
+    val refusalDetailContains: String? = null,
 )
 
 @Serializable

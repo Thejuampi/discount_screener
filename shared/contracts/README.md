@@ -35,6 +35,12 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:
   point-in-time evidence replay, closed-world component routing, evidence-backed SOTP bridge, refusal states, and historical driver-validation goldens; Windows and Android compare fixed-point outputs and fingerprints exactly
+- `valuation-evidence-observation-v2.json`:
+  Foundation 0A envelope for analyst-method automation — partition keys, clocks, replay modes, lineage, SHA-256 canonical field order; does not replace SOTP v1 FNV rows
+- `valuation-forward-earnings-multiple-v1.json`:
+  Slice 1A pure market-reference lane: `eps_cents × multiple_hundredths / 100` (half-up); `$13 × 28 = $364` transcription golden; refusals; market price/target mutation-invariant; not an intrinsic router branch
+- `valuation-forward-earnings-import-v1.json`:
+  Slice 1B typed JSON import document (observations V2 + FEM section); `fixture_transcription` / `manual_transcription_unverified`; unverified requires `transcription_claim`
 - `source-continuity-v1.json`:
   pure SEC vs Yahoo cash continuity gate (SNDK-class); Continuous / Discontinuous / InsufficientEvidence with versioned scale thresholds; no price/target and no absolute year walls
 - `persistence-semantics.md`:

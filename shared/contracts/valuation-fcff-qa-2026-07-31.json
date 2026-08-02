@@ -2,14 +2,14 @@
   "contract": "valuation-fcff-qa-2026-07-31",
   "version": "1",
   "asOf": "2026-07-31",
-  "modelPolicyVersion": "business-class-policy/13-industry-beta-policy-v1",
+  "modelPolicyVersion": "business-class-policy/15-owner-earnings-maintenance-capex",
   "purpose": "Evidence ledger for the nine user-reported QA cases. Market and analyst values reproduce the report and are validation metadata only.",
   "modelInputPolicy": {
     "allowed": ["aligned_annual_sec_drivers", "current_split_consistent_shares", "capital_structure", "beta", "versioned_market_params"],
     "forbidden": ["market_price", "analyst_target", "ticker_exception", "intrinsic_price_cap", "sector_haircut"]
   },
   "fcffPolicy": {
-    "baseMargin": "median_aligned_annual_fcff_margin",
+    "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median",
     "evenMedian": "mean_of_two_central_observations",
     "negativeYears": "retained",
     "acquisitionContaminatedTransition": "year_y_minus_1_to_y_only",

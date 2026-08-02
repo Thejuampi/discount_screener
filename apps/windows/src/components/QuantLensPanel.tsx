@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { QuantLensReport } from "../api";
+import {
+  ANALYST_METHOD_POLL_INTERVAL_MS,
+  analystMethodPresentation,
+  composeQuantLensPanel,
+  formatCentsAsCurrency,
+  formatMultipleHundredths,
+} from "../detailValuationPresentation";
+import type { AnalystMethodPresentation } from "../detailValuationPresentation";
 import { useT } from "../i18n";
 import { UI, UiInspectable } from "../uiInspect";
 
@@ -11,9 +19,16 @@ interface Props {
 export function QuantLensPanel({ symbol }: Props) {
   const { t } = useT();
   const [result, setResult] = useState<{ symbol: string; report: QuantLensReport } | null>(null);
+  const [analystResult, setAnalystResult] = useState<{
+    symbol: string;
+    presentation: AnalystMethodPresentation;
+  } | null>(null);
   const [failure, setFailure] = useState<{ symbol: string; message: string } | null>(null);
-  const report = result?.symbol === symbol ? result.report : null;
+  const rawReport = result?.symbol === symbol ? result.report : null;
+  const analyst = analystResult?.symbol === symbol ? analystResult.presentation : null;
   const err = failure?.symbol === symbol ? failure.message : null;
+  const composed = composeQuantLensPanel(symbol, rawReport, analyst, err);
+  const report = composed.report;
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +66,48 @@ export function QuantLensPanel({ symbol }: Props) {
     };
   }, [symbol]);
 
-  if (err) return <div className="ql-panel muted">{err}</div>;
+  useEffect(() => {
+    let cancelled = false;
+    let issuedGeneration = 0;
+    let settledGeneration = 0;
+    const refreshDossier = () => {
+      const generation = ++issuedGeneration;
+      api
+        .getValuationDossier(symbol)
+        .then((dossier) => {
+          if (!cancelled && generation >= settledGeneration) {
+            settledGeneration = generation;
+            setAnalystResult({ symbol, presentation: analystMethodPresentation(dossier) });
+          }
+        })
+        .catch(() => {
+          if (!cancelled && generation >= settledGeneration) {
+            settledGeneration = generation;
+            setAnalystResult({
+              symbol,
+              presentation: {
+                kind: "unavailable",
+                methodLabel: "manual analyst method",
+                reasonCode: "publication_read_failed",
+                diagnosticOnly: true,
+                rankingEligible: false,
+                strongEligible: false,
+              },
+            });
+          }
+        });
+    };
+    refreshDossier();
+    // Cache-only read: keep observing publication for an import that completes
+    // after the bounded demand-valuation refresh window. Cleanup is mandatory.
+    const timer = window.setInterval(refreshDossier, ANALYST_METHOD_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [symbol]);
+
+  if (err && !report) return <div className="ql-panel muted">{err}</div>;
   if (!report) return <div className="ql-panel muted">{t("quant.loading")}</div>;
 
   return (
@@ -72,11 +128,18 @@ export function QuantLensPanel({ symbol }: Props) {
           {report.primary_status}
         </span>
       </div>
+      {composed.coreWarning && (
+        <p className="muted" data-ql-core-warning="true">
+          Quant Lens core unavailable: {composed.coreWarning}
+        </p>
+      )}
       <div className="ql-sections">
         {report.sections.map((s) => (
           <div
             key={s.id}
-            className={`ql-section${s.status === "Disputed" || s.status === "Mixed" ? " ql-section-warn" : ""}`}
+            data-ql-section={s.id}
+            data-presentation-source={metricValue(s.metrics, "presentation_source")}
+            className={`ql-section${s.status === "Disputed" || s.status === "Mixed" ? " ql-section-warn" : ""}${s.id === "manual_analyst_method" ? " ql-section-diagnostic" : ""}`}
           >
             <div className="ql-section-head">
               <strong>{s.title}</strong>
@@ -92,7 +155,7 @@ export function QuantLensPanel({ symbol }: Props) {
                   .map(([k, v]) => (
                     <li key={k}>
                       <span>{metricLabel(k)}</span>
-                      <span>{formatMetric(k, v)}</span>
+                      <span>{formatMetric(k, v, metricValue(s.metrics, "currency"))}</span>
                     </li>
                   ))}
               </ul>
@@ -158,21 +221,58 @@ function metricLabel(key: string): string {
     scenario_stress: "scenarios",
     bvps_cents: "BVPS",
     roe0_bps: "ROE",
+    // Slice 1C manual analyst method (diagnostic lane)
+    lane: "lane",
+    method_label: "method",
+    target_value_cents: "target value",
+    eps_cents: "EPS claim",
+    multiple_hundredths: "multiple",
+    forecast_period_end: "forecast period",
+    target_as_of: "target as-of",
+    date_precision: "date precision",
+    currency: "currency",
+    metric_id: "metric",
+    metric_basis: "metric basis",
+    source_verification: "source verification",
+    multiple_provenance: "multiple provenance",
+    scenario: "scenario",
+    import_quality_label: "import quality",
+    quality: "quality",
+    diagnostic_only: "diagnostic only",
+    ranking_eligible: "ranking eligible",
+    strong_eligible: "Strong eligible",
+    engine_id: "engine",
+    method_policy_version: "policy",
+    reason_code: "reason",
+    run_id: "run",
+    share_basis_id: "share basis",
+    identity_vintage: "identity vintage",
+    lineage_group_id: "lineage group",
+    method: "method id",
+    presentation_source: "presentation source",
   };
   return map[key] ?? key;
 }
 
-function formatMetric(key: string, value: string): string {
+function metricValue(metrics: [string, string][], key: string): string | undefined {
+  return metrics.find(([candidate]) => candidate === key)?.[1];
+}
+
+function formatMetric(key: string, value: string, currency = "USD"): string {
   if (value === "n/a" || value === "null" || value === "—") return value;
+  if (key === "multiple_hundredths") {
+    return formatMultipleHundredths(value);
+  }
   if (
     key.endsWith("_cents")
     || key === "low_cents"
     || key === "base_cents"
     || key === "high_cents"
     || key === "bvps_cents"
+    || key === "target_value_cents"
+    || key === "eps_cents"
   ) {
-    const n = Number(value);
-    if (Number.isFinite(n)) return `$${(n / 100).toFixed(2)}`;
+    return formatCentsAsCurrency(value, currency);
   }
   if (
     key === "latest_fcf_dollars"

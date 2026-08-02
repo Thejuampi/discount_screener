@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: code review of plan-foundation-0a-execution-2026-08-01.md (2026-08-02)
+
+- Quant Lens still runs demand FCFF/model routing for the core report when opening the panel — pre-existing Detail/QL path, not a FEM ranking write. Address only if 1C is redefined to forbid any valuation demand side-effect when reading the diagnostic lane.
+- `QuantLensSection` is untyped regarding diagnostic-only membership; a future refactor that recomputes `worst_status` over all sections could re-pollute `primary_status`. Add a typed diagnostic flag when the section model is next revised.
+
 ## 2026-07-16 — Windows dashboard startup review
 
 - `apps/windows/src-tauri/src/commands.rs` / remote ticker search: distinguish transient failure from a successful empty Yahoo result before caching an empty response, so a temporary outage does not suppress results for the cache TTL.

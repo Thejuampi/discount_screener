@@ -18,6 +18,12 @@ Use this index to find active implementation work, story files, QA outputs, and 
 
 - [Test Summary](tests/test-summary.md)
 
+## Learning And Retrospective Artifacts
+
+- [Valuation Automation Learning Ledger](valuation-automation-learning-ledger.md) - living, evidence-linked lessons for analyst-method automation; implementation is still in progress.
+- [Valuation Calibration Retrospective](retro-valuation-calibration-session-2026-07-30.md) - multi-name baseline, fail-closed routing, and operational QA lessons.
+- [Analyst-Method Automation Pre-1C Retrospective](retro-analyst-method-automation-pre-1c-2026-08-02.md) - autonomous team retro; independent closure protocol and the publication-readiness 1B.3 gate.
+
 ## Story Workflow
 
 1. Check `sprint-status.yaml`.

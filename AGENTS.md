@@ -311,6 +311,7 @@ That is the standing rule for agents and humans. It is not optional, not “pref
 | Membership | **≤20 persistent feed symbols**: SP500 ∩ latest snapshot gap≥25% ∩ score DESC ∩ top 20; thin DB → priority fill; **never** full SP500 |
 | Hard cap | `persistent_feed_workers ≤ 20` (fail closed). Checklist names: **one-shot** `ensure_symbol_loaded` only — must not grow the feed |
 | Process | **One** long-lived `qa` process; reuse it. Restart only after native rebuild, then one `qa` start again |
+| Attach UI control | With the debug app running: `npm run ds-ui -- status\|self-check\|open-detail SYM\|dcf-slot\|screenshot\|invoke …` (`apps/windows/scripts/ds-ui.mjs`, CDP `127.0.0.1:9222`, DEV `window.__DS_AGENT__`) — do **not** restart the app for each probe. Gate: `npm run ds-ui:self-check` then `npm run live-qa:checklist` |
 | Lock | Launch lock blocks UI/`localStorage` from switching to `sp500` — leave it locked for the QA session |
 | Invalid profile | Explicit bad flag / env **fails closed** — never silent full universe |
 | Coverage honesty | `qa` is a **top-ranking sample**, not the whole product surface. Checklist (T/AMZN/CI/…) uses names already in the 20 or one-shot loads |
@@ -342,6 +343,23 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 | Green CI with wrong asserts is theater | Assert user-visible failure modes (wrong class, penny mega-cap, inverted scenarios), not only constants |
 | Quarantine is a ticket, not a trophy | Do not claim “N names green” while slots are quarantined unless acceptance **explicitly** allows reduced N |
 | Stale UI hides backend truth | After policy bumps, verify Detail does not keep a previous absurd DCF |
+
+### Analyst-method lifecycle closure (mandatory)
+
+For evidence-ledger, analyst-import, model-run, or current-projection work, keep three states distinct: **design-ready**, **implemented**, and **independently closed**. A green builder handoff may establish the second state; it cannot establish the third by itself. Before the next slice may expose or consume the result, an independent adversarial checkpoint must trace the complete command from control-envelope admission through semantic admission, persistence, invalidation, restart, and read projection.
+
+Reserved claims carry these proof obligations:
+
+| Claim | Required proof |
+| --- | --- |
+| `evidence-bound` | Values come from frozen observation IDs whose metric role, basis, period/horizon, currency/share basis, and lineage are compatible—not merely from the right numeric unit. |
+| `atomic` | The entire business transition is one transaction: publish the replacement **or** append the refusal/invalidation and clear stale current state. A helper or inner DB commit is insufficient. |
+| `idempotent` | Exact retry compares the full semantic command: role bindings, issuer/security/identity vintage, evidence set, method/engine/policy, replay mode, stable decision instant, projection key, and supersession intent. Per-attempt processing time is separate; equal output alone is insufficient. |
+| `reconstructible` | Explicit persisted fields and immutable membership can rebuild the command, result, supersession, and complete reachable revision ancestry. An opaque fingerprint, mutable “current identity” lookup, or immediate-parent-only check is insufficient. |
+| `dual-lock` | Both platforms execute the same shared negative and positive fixtures. A contract field silently ignored by both readers is not coverage. |
+| `fail-closed` | Counterexamples prove refusal **and** the required state effect: no partial writes, no foreign invalidation, no stale projection after a trusted rejected revision. |
+
+Slice closure requires a named invariant/attack matrix, negative mutations for every semantic fingerprint field, a mid-transaction rollback/reopen test, and reconciliation of plan/checkpoint status with the code and gates. Treat green tests as evidence for the encoded properties, never as the conclusion that all required properties were encoded.
 
 ### Manual procedures (must follow — write them here so they stay visible)
 
@@ -383,16 +401,38 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
    - Run the merge bar above.  
    - If the name is High-SNR for operators, consider one live Detail check.
 
+6. **When projecting a new evidence-led valuation lane into Detail / Quant Lens**
+   - Resolve ticker, security, identity vintage, and share basis fail-closed; never select a supposed current identity with unordered or lexical `LIMIT 1`.
+   - Exercise the exact production presenter/read endpoint, not an unused helper with isolated unit tests.
+   - Preserve fixed-point integers across IPC as exact decimal strings when the Rust/SQLite domain exceeds JavaScript safe integers.
+   - Add a DOM-scoped native assertion for the lane plus restart/stale/refusal counterexamples.
+   - Run the architecture-named Android, native E2E, and live `qa` gates before marking the slice independently closed; a plan may not silently downgrade them to optional.
+
 ### Anti-patterns that already bit us (do not repeat)
 
 | Anti-pattern | What happened | Do instead |
 | --- | --- | --- |
 | “T looks good vs Street → ship” | Soft WACC / FCF run-rate changes broke other names (e.g. AMZN-class) | Multi-name baseline green **before** claiming done |
+| “Typed/atomic/idempotent” asserted from local helpers | Each checkpoint was green while the write boundary, whole lifecycle, or semantic command still had bypasses | Apply the analyst-method proof obligations above and require an independent closure checkpoint |
+| Correct eligibility helper with no mandatory caller | The pure rule rejected stale policy/identity/replay states, but the public read path still returned the raw current pointer | Make the admitted read model the only publishable API; repository-search every bypass before closure |
+| Semantic parse fails before supersession handling | A trusted rejected revision can return early while the stale prior projection remains current | Parse a safe control envelope first; then atomically publish the new candidate or invalidate the prior one |
+| Same output treated as same command | Different EPS/P-E role bindings can share an evidence set and result, defeating an outcome-only lifecycle hash | Persist and fingerprint explicit semantic bindings and every transition coordinate |
+| Mutation test changes the claimed field and membership | The role-binding test stayed green because the evidence-set hash changed, so it did not prove role IDs were identity-bearing | Hold every other byte constant and mutate exactly one semantic field; manually remove that field and require the test to turn red |
+| Opaque run FP over mutable identity rows | `ORDER BY ... LIMIT 1` can select an arbitrary/old identity vintage and a hash alone cannot reconstruct the run | Persist exact immutable identity/share-basis references and supersession command fields |
+| Read model resolves “current” identity with `LIMIT 1` | A valid ledger can contain multiple historical aliases/share bases, making lexical order choose another issuer or a pre-split candidate | Use an authoritative current coordinate or fail closed with an explicit ambiguity/stale reason; test the public dossier after restart |
+| `ON CONFLICT DO UPDATE` on a “vintage” row | Historical run coordinates silently changed in place despite vintage IDs and fingerprints | Vintage writes are insert-or-identical-no-op; different content under the same key is a conflict and requires a new vintage ID |
+| Current revision edge green, ancestor graph unchecked | An upstream cycle, conflicting predecessor, or foreign partition could survive while the descendant remained eligible | Reconstruct the entire reachable ancestry; require existence, one intent, partition consistency, and no revisited revision, with reopen corruption tests |
+| “AMZN $5 disputed = OK” | Full SEC history put CapEx-trough years in the recent window; plain median FCFF margin collapsed run-rate; labeling disputed hid a real engine bug | Base margin = median of **non-negative** annual FCFF when ≥2 exist; scenarios keep full distribution; baseline fixture must include full drivers on trough years; never green-light sub-$50 AMZN-class as product success |
 | Default “not financial ⇒ FCFF” | CI Healthcare Plans → absurd DCF; UI did not refuse | Closed-world `Unclassified` + reason in UI |
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
 | Backend DCF green, Detail still unavailable | COF returned valid residual income while the UI discarded it because operating `valuation_status` was null | Probe the active Tauri invoke over local CDP and assert the rendered Detail; typed residual income is independently publishable |
+| Presenter tests cover dead code | The dedicated analyst-method presenter and cache-only endpoint were green but the mounted Quant Lens panel used a different backend section path | Repository-search the production import/call site and require a DOM-scoped native assertion on the exact lane selector |
+| Rust `i64` serialized as JavaScript `number` | Exact fixed-point FEM values could round above `2^53−1`, while Rust overflow/parity tests stayed green | Cross IPC as decimal strings and format with `BigInt`; never detour through `f64`/`Number` |
+| Required native/live gates relabeled optional | Builder evidence stopped at unit tests although the architecture required restart, DOM-native, Android, and one-process live `qa` proof | Closure gates come from the governing architecture; record actual commands/results before changing status |
 | Whole-Detail text assertion | Mutation stayed green because Quant Lens echoed `$168.81` while the hero slot still said unavailable | Scope native regression assertions to `.price-summary .dcf-slot`, not the whole Detail panel |
+| Attach UI without agent bridge / stale slot | DOM row-click + previous symbol text made live checklist “PASS” while Detail never changed | Require DEV `window.__DS_AGENT__`; `ds-ui open-detail` must exit non-zero if selection/slot not settled; `self-check` before claiming live QA green |
+| business_class string mismatch in asserts | Checklist compared PascalCase to snake_case so class asserts never fired | Normalize class tokens (`financial_services` / `FinancialServices`) before asserting |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
 | Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
 | Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |
