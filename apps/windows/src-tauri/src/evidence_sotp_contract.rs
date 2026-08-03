@@ -25,10 +25,18 @@ struct PitFixture {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PitExpected {
-    selected_ids: Vec<String>,
-    selected_values_cents: Vec<i64>,
-    rejected_codes: Vec<EvidenceRejectionCode>,
-    fingerprint: String,
+    #[serde(default)]
+    selected_ids: Option<Vec<String>>,
+    #[serde(default)]
+    selected_values_cents: Option<Vec<i64>>,
+    #[serde(default)]
+    rejected_codes: Option<Vec<EvidenceRejectionCode>>,
+    #[serde(default)]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    refusal_code: Option<String>,
+    #[serde(default)]
+    refusal_detail_contains: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +90,22 @@ struct ConsolidationExpected {
 fn shared_point_in_time_fixtures_execute_on_windows() {
     let contract = load_contract();
     for fixture in contract.point_in_time_fixtures {
+        if let Some(code) = fixture.expected.refusal_code.as_deref() {
+            let err = replay_point_in_time(&fixture.observations, &fixture.decision_at)
+                .expect_err(&format!("{}: expected refusal", fixture.name));
+            let code_json = serde_json::to_string(&err.code).unwrap_or_default();
+            assert_eq!(code_json.trim_matches('"'), code, "{}", fixture.name);
+            if let Some(needle) = fixture.expected.refusal_detail_contains.as_deref() {
+                assert!(
+                    err.detail.contains(needle),
+                    "{}: detail={} missing {}",
+                    fixture.name,
+                    err.detail,
+                    needle
+                );
+            }
+            continue;
+        }
         let replay = replay_point_in_time(&fixture.observations, &fixture.decision_at)
             .unwrap_or_else(|error| panic!("{}: {error}", fixture.name));
         assert_eq!(
@@ -90,7 +114,7 @@ fn shared_point_in_time_fixtures_execute_on_windows() {
                 .iter()
                 .map(|row| row.id.clone())
                 .collect::<Vec<_>>(),
-            fixture.expected.selected_ids,
+            fixture.expected.selected_ids.clone().unwrap_or_default(),
             "{}",
             fixture.name
         );
@@ -100,7 +124,11 @@ fn shared_point_in_time_fixtures_execute_on_windows() {
                 .iter()
                 .filter_map(|row| row.value_cents)
                 .collect::<Vec<_>>(),
-            fixture.expected.selected_values_cents,
+            fixture
+                .expected
+                .selected_values_cents
+                .clone()
+                .unwrap_or_default(),
             "{}",
             fixture.name
         );
@@ -110,15 +138,13 @@ fn shared_point_in_time_fixtures_execute_on_windows() {
                 .iter()
                 .map(|row| row.code)
                 .collect::<Vec<_>>(),
-            fixture.expected.rejected_codes,
+            fixture.expected.rejected_codes.clone().unwrap_or_default(),
             "{}",
             fixture.name
         );
-        assert_eq!(
-            replay.fingerprint, fixture.expected.fingerprint,
-            "{}",
-            fixture.name
-        );
+        if let Some(fp) = fixture.expected.fingerprint.as_deref() {
+            assert_eq!(replay.fingerprint, fp, "{}", fixture.name);
+        }
     }
 }
 

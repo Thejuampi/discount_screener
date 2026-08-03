@@ -1,0 +1,60 @@
+{
+  "contract": "valuation-high-signal-screener-cohort-v1",
+  "status": "goal_gate",
+  "asOf": "2026-08-02",
+  "source": "Live Windows screener cohort (26 names). Integration gate recomputes Yahoo+SEC+live US 10Y; passes only when every member is high-signal.",
+  "goal": "Every cohort symbol publishes a high-signal owner-facing forecast (solid quality, coherent scale, correct model class). Street is an external diagnostic, not a clamp, but material disagreement still fails the high-signal bar until the model is solid and disagreement is within policy.",
+  "policy": {
+    "forbidden": [
+      "clamp_intrinsic_to_price",
+      "clamp_intrinsic_to_street",
+      "if_ticker_special_case",
+      "sector_fcf_haircut",
+      "min_wacc_as_truth",
+      "quarantine_as_green"
+    ],
+    "required": [
+      "solid_rate_and_driver_quality",
+      "ordered_scenarios_when_present",
+      "business_class_routing",
+      "order_of_magnitude_sanity_vs_market",
+      "multi_name_gate_not_single_ticker"
+    ]
+  },
+  "highSignalCriteria": {
+    "version": "high-signal-criteria/1",
+    "mustBeAvailable": true,
+    "mustBeSolidQuality": true,
+    "pointEstimateUnreliableForbidden": true,
+    "provisionalRatesForbidden": true,
+    "requirePositiveBaseCents": true,
+    "requireOrderedScenariosWhenPresent": true,
+    "maxBaseOverMarketMultiple": 3.0,
+    "minBaseOverMarketMultiple": 0.10,
+    "minMarketPriceCentsForOomCheck": 500,
+    "financialsRequireResidualIncome": true,
+    "operatingRequireFcffOrForwardWhenSelected": true,
+    "maxStreetRelativeDisagreementBps": 3500,
+    "notes": [
+      "Street disagreement is measured as abs(our/street - 1) in bps when street > 0.",
+      "Failing street band without solid quality is expected today; both must pass for high signal.",
+      "Do not pass by matching Street while quality remains soft."
+    ]
+  },
+  "cohort": {
+    "id": "screener-visible-2026-08-02",
+    "size": 26,
+    "symbols": [
+      "DVN", "FIS", "AVY", "SW", "COF", "MPWR", "APH", "EME", "CHTR", "BKR",
+      "INTU", "TER", "AVGO", "EPAM", "T", "GEHC", "DAL", "WDC", "GOOGL", "GOOG",
+      "HPE", "CRM", "SLB", "EXE", "OMC", "PTC"
+    ]
+  },
+  "fixtures": {
+    "windowsObservationSnapshot": "apps/windows/src-tauri/tests/fixtures/valuation/high_signal_screener_observation_2026-08-02.json"
+  },
+  "gates": {
+    "offlineIntegration": "cargo test --lib valuation_high_signal::high_signal_screener_cohort_all_members_pass",
+    "liveOptional": "cargo test --lib valuation_high_signal::live_high_signal_screener_cohort -- --ignored --nocapture"
+  }
+}

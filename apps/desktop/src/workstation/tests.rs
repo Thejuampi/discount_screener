@@ -5139,7 +5139,7 @@ mod tests {
     }
 
     #[test]
-    fn score_opportunity_forecasts_counts_supportive_analyst_weighted_and_dcf_signals() {
+    fn score_opportunity_forecasts_counts_supportive_analyst_weighted_without_dcf() {
         let mut app = AppState::default();
         let selected_detail = detail();
         app.analysis_cache.insert(
@@ -5157,17 +5157,18 @@ mod tests {
             },
         );
 
+        // Quant Engine is present but must not change ranking while excluded.
         assert_eq!(
             score_opportunity_forecasts(&app, &selected_detail),
             (
-                Some(5),
-                vec!["Supportive", "5+Analysts", "Rec<=2.0", "Weighted+", "DCF+"],
+                Some(4),
+                vec!["Supportive", "5+Analysts", "Rec<=2.0", "Weighted+"],
             )
         );
     }
 
     #[test]
-    fn score_opportunity_forecasts_penalizes_expensive_dcf_without_other_support() {
+    fn score_opportunity_forecasts_ignores_expensive_dcf_without_other_support() {
         let mut app = AppState::default();
         let mut selected_detail = detail();
         selected_detail.external_status = ExternalSignalStatus::Missing;
@@ -5191,7 +5192,7 @@ mod tests {
 
         assert_eq!(
             score_opportunity_forecasts(&app, &selected_detail),
-            (Some(-1), vec!["DCF-"])
+            (None, Vec::<&'static str>::new())
         );
     }
 

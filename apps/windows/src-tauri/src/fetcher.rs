@@ -393,6 +393,54 @@ impl YahooClient {
         })
     }
 
+    /// US 10Y constant-maturity yield via Yahoo `^TNX` (price = percent yield).
+    ///
+    /// Returns `(rf_bps, as_of_unix_secs)` when the chart probe succeeds. Used to
+    /// build solid `MarketParams` for high-signal valuation paths.
+    pub fn fetch_us_10y_yield_bps(&self) -> Option<(i32, i64)> {
+        let url = format!("{CHART_API_URL}%5ETNX?range=5d&interval=1d&includePrePost=false");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("Origin", "https://finance.yahoo.com")
+            .header("Referer", "https://finance.yahoo.com/")
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .ok()?;
+        // ^TNX regularMarketPrice is percent (e.g. 4.25 → 425 bps).
+        let yield_pct = resp
+            .pointer("/chart/result/0/meta/regularMarketPrice")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                resp.pointer("/chart/result/0/indicators/quote/0/close")
+                    .and_then(|v| v.as_array())
+                    .and_then(|closes| {
+                        closes
+                            .iter()
+                            .rev()
+                            .find_map(|v| v.as_f64().filter(|p| p.is_finite() && *p > 0.0))
+                    })
+            })?;
+        if !(0.5..=20.0).contains(&yield_pct) {
+            return None;
+        }
+        let rf_bps = (yield_pct * 100.0).round() as i32;
+        let as_of = resp
+            .pointer("/chart/result/0/meta/regularMarketTime")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+            });
+        Some((rf_bps, as_of))
+    }
+
     /// Seconds left on Yahoo rate-limit cooldown (0 if clear).
     pub fn rate_limit_remaining_secs(&self) -> u64 {
         self.session.rate_limit_remaining_secs()

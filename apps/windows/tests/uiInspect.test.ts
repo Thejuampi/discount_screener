@@ -29,6 +29,7 @@ const KNOWN_API_COMMANDS = new Set([
   "set_scoring_model",
   "get_index_estimates",
   "get_quant_lens",
+  "get_valuation_dossier",
   "start_feed",
   "get_feed_status",
   "list_universe_profiles",

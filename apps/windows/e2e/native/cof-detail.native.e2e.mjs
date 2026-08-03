@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CdpClient, tauriInvoke, waitUntil } from "./cdp-client.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const windowsRoot = resolve(scriptDir, "../..");
@@ -13,75 +14,8 @@ const binary = join(windowsRoot, "src-tauri", "target", "debug", "discount-scree
 const tempBase = resolve(repoRoot, ".agents", "workspace", "tmp", "native-cof-e2e");
 const runDir = join(tempBase, `${process.pid}-${Date.now()}`);
 
-function delay(ms) {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-}
-
-async function waitUntil(description, predicate, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await predicate();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await delay(200);
-  }
-  throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError}` : ""}`);
-}
-
-class CdpClient {
-  constructor(url) {
-    this.socket = new WebSocket(url);
-    this.nextId = 1;
-    this.pending = new Map();
-  }
-
-  async connect() {
-    await new Promise((resolveOpen, rejectOpen) => {
-      this.socket.addEventListener("open", resolveOpen, { once: true });
-      this.socket.addEventListener("error", rejectOpen, { once: true });
-    });
-    this.socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data);
-      if (message.id == null) return;
-      const waiter = this.pending.get(message.id);
-      if (!waiter) return;
-      this.pending.delete(message.id);
-      if (message.error) waiter.reject(new Error(JSON.stringify(message.error)));
-      else waiter.resolve(message.result);
-    });
-  }
-
-  call(method, params = {}) {
-    const id = this.nextId++;
-    return new Promise((resolveCall, rejectCall) => {
-      this.pending.set(id, { resolve: resolveCall, reject: rejectCall });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const response = await this.call("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (response.exceptionDetails) {
-      throw new Error(response.exceptionDetails.exception?.description ?? "CDP evaluation failed");
-    }
-    return response.result.value;
-  }
-
-  close() {
-    this.socket.close();
-  }
-}
-
 async function invoke(cdp, command, args = {}) {
-  return cdp.evaluate(`window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(args)})`);
+  return tauriInvoke(cdp, command, args);
 }
 
 mkdirSync(runDir, { recursive: true });

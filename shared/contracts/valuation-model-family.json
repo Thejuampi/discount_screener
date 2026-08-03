@@ -11,9 +11,13 @@
     "deferredSurfaces": ["desktop"]
   },
   "fcffRobustEvidencePolicy": {
-    "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
-    "baseMargin": "median_aligned_annual_fcff_margin",
-    "negativeYears": "retained",
+    "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
+    "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median",
+    "scenarioMargins": "full_aligned_annual_including_negatives",
+    "negativeYears": "retained_in_scenario_distribution_and_history_diagnostics",
+    "maintenanceCapex": "normalized_capex_intensity * asset_renewal_rate / (asset_renewal_rate + revenue_growth); growth CapEx is earned by revenue growth, never a share of OCF margin",
+    "assetRenewalRateBps": 1000,
+    "projectionYearsSecularOrOwnerEarnings": 10,
     "acquisitionGrowth": "exclude_only_year_y_minus_1_to_y_when_year_y_is_material",
     "minimumCleanRecentGrowthTransitions": 2,
     "provisionalWaccUplift": "round(175 * min(debt_weight / 0.40, 1))",
@@ -254,7 +258,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+        "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
         "latestFcfDollars": 19440000000,
         "fcfRunRateDollars": 24652137600,
         "acceptance": [
@@ -335,16 +339,18 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/12-robust-fcff-growth-evidence",
+        "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
         "latestFcfDollars": 7695000000,
-        "fcfRunRateDollars": 24375416000,
+        "fcfRunRateDollars": null,
         "valuationDriver": "driver_based_fcff",
         "acceptance": [
           "bear_less_than_or_equal_to_base_less_than_or_equal_to_bull",
           "revenue_growth_and_normalized_fcff_margin_drive_projection",
           "latest_reported_fcf_and_normalized_fcff_remain_distinct",
           "capex_spike_is_visible_as_a_driver_diagnostic",
-          "material_model_analyst_disagreement_remains_visible_not_blended"
+          "material_model_analyst_disagreement_remains_visible_not_blended",
+          "owner_earnings_base_when_investment_wave_not_full_growth_capex",
+          "amzn_base_clears_100_dollars_not_sub_60_absurd_band"
         ]
       },
       "evidence": "user-reported Windows detail snapshot plus SEC companyfacts sampled 2026-07-30"

@@ -1,0 +1,226 @@
+{
+  "contract": "valuation-forward-earnings-import-v1",
+  "schemaVersion": 1,
+  "status": "slice_1b",
+  "notes": [
+    "Typed manual/fixture import for ForwardEarningsMultiple market-reference lane.",
+    "Observations are EvidenceObservationV2; FEM arithmetic is pure; ledger commit uses 1B-0.1 typed boundary.",
+    "qualityLabel is provenance of the import batch; observation.quality remains solid|soft|provisional.",
+    "Unverified labels require metricBasis=transcription_claim on EPS and multiple observations.",
+    "1B.1: FEM eps/multiple are derived from epsObservationId and multipleObservationId — no duplicate numeric fields on fem."
+  ],
+  "qualityLabels": [
+    "fixture_transcription",
+    "manual_transcription_unverified"
+  ],
+  "fixtures": {
+    "available": [
+      {
+        "name": "fixture_transcription_thirteen_times_twenty_eight",
+        "admissionContext": {
+          "decisionAtUnixMs": 1753920000000,
+          "shareBasisId": "share_basis:amzn-us:post-split-2022"
+        },
+        "import": {
+          "schemaVersion": 1,
+          "qualityLabel": "fixture_transcription",
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "runId": "run:fixture:amzn-fem-1",
+          "decisionAtUnixMs": 1753920000000,
+          "projectionKey": "proj:issuer:0001018724:sec:amzn-us:forward_earnings_multiple",
+          "replayMode": "operational",
+          "supersedesRunId": null,
+          "fem": {
+            "epsObservationId": "obs:fixture:eps:1",
+            "epsShareBasisId": "share_basis:amzn-us:post-split-2022",
+            "multipleObservationId": "obs:fixture:pe:1",
+            "multipleProvenance": "analyst_stated",
+            "forecastPeriodEnd": "2028-12-31",
+            "targetAsOf": "2027-12",
+            "datePrecision": "month_label",
+            "marketPriceCents": 20000,
+            "statedTargetCents": 36500
+          },
+          "observations": [
+            {
+              "id": "obs:fixture:eps:1",
+              "issuerId": "issuer:0001018724",
+              "securityId": "sec:amzn-us",
+              "evidenceLane": "analyst_stated_method",
+              "providerId": "manual_import",
+              "lineageGroupId": "lineage:jpm-amzn-2026-07-31",
+              "metricId": "gaap_diluted_eps",
+              "metricBasis": "transcription_claim",
+              "accountingRegime": "domestic_us_gaap",
+              "economicPeriodStart": "2028-01-01",
+              "economicPeriodEnd": "2028-12-31",
+              "datePrecision": "fiscal_period",
+              "publicationAtUnixMs": 1753920000000,
+              "sourceAvailableAtUnixMs": 1753920000000,
+              "ingestedAtUnixMs": 1753920000000,
+              "availabilityBasis": "primary_publication",
+              "providerVintageId": null,
+              "unit": "money_cents",
+              "valueCents": 1300,
+              "valueBps": null,
+              "valueMillis": null,
+              "textValue": null,
+              "currency": "USD",
+              "definition": "FY2028E GAAP diluted EPS claim (unverified transcription)",
+              "sourceLocation": "manual:transcription",
+              "extractionMethod": "fixture_transcription",
+              "quality": "provisional",
+              "retrievalState": "retrieved",
+              "revisionId": "r1",
+              "supersedes": null,
+              "externalFileReference": null,
+              "storageDisposition": "metadata_only"
+            },
+            {
+              "id": "obs:fixture:pe:1",
+              "issuerId": "issuer:0001018724",
+              "securityId": "sec:amzn-us",
+              "evidenceLane": "analyst_stated_method",
+              "providerId": "manual_import",
+              "lineageGroupId": "lineage:jpm-amzn-2026-07-31",
+              "metricId": "forward_pe",
+              "metricBasis": "transcription_claim",
+              "accountingRegime": "not_applicable",
+              "economicPeriodStart": "2028-01-01",
+              "economicPeriodEnd": "2028-12-31",
+              "datePrecision": "month_label",
+              "publicationAtUnixMs": 1753920000000,
+              "sourceAvailableAtUnixMs": 1753920000000,
+              "ingestedAtUnixMs": 1753920000000,
+              "availabilityBasis": "primary_publication",
+              "providerVintageId": null,
+              "unit": "multiple_hundredths",
+              "valueCents": null,
+              "valueBps": null,
+              "valueMillis": 2800,
+              "textValue": null,
+              "currency": "USD",
+              "definition": "Forward P/E claim 28.00x (unverified transcription)",
+              "sourceLocation": "manual:transcription",
+              "extractionMethod": "fixture_transcription",
+              "quality": "provisional",
+              "retrievalState": "retrieved",
+              "revisionId": "r1",
+              "supersedes": null,
+              "externalFileReference": null,
+              "storageDisposition": "metadata_only"
+            }
+          ]
+        },
+        "expectedTargetValueCents": 36400,
+        "expectedObservationCount": 2
+      }
+    ],
+    "refusals": [
+      {
+        "name": "reported_gaap_with_unverified_label_refuses",
+        "importPatch": {
+          "qualityLabel": "manual_transcription_unverified",
+          "observations0MetricBasis": "reported_gaap"
+        },
+        "expectedReasonCode": "unverified_requires_transcription_claim"
+      },
+      {
+        "name": "invalid_observation_storage_prohibited",
+        "importPatch": {
+          "observations0StorageDisposition": "prohibited"
+        },
+        "expectedReasonCode": "observation_invalid:storage_prohibited"
+      },
+      {
+        "name": "impossible_forecast_calendar_date_refuses",
+        "jsonPointerPatch": {
+          "/fem/forecastPeriodEnd": "2028-02-30",
+          "/observations/0/economicPeriodEnd": "2028-02-30",
+          "/observations/1/economicPeriodEnd": "2028-02-30"
+        },
+        "expectedReasonCode": "invalid_iso_date:forecast_period_end"
+      },
+      {
+        "name": "impossible_eps_calendar_date_refuses",
+        "jsonPointerPatch": {
+          "/observations/0/economicPeriodEnd": "2028-04-31"
+        },
+        "expectedReasonCode": "invalid_iso_date:eps_period_end"
+      },
+      {
+        "name": "impossible_exact_target_calendar_date_refuses",
+        "jsonPointerPatch": {
+          "/fem/datePrecision": "exact_date",
+          "/fem/targetAsOf": "2027-02-29"
+        },
+        "expectedReasonCode": "invalid_iso_date:target_as_of"
+      },
+      {
+        "name": "economic_period_start_after_end_refuses",
+        "jsonPointerPatch": {
+          "/observations/0/economicPeriodStart": "2029-01-01",
+          "/observations/1/economicPeriodStart": "2029-01-01"
+        },
+        "expectedReasonCode": "economic_period_start_after_end"
+      },
+      {
+        "name": "invalid_month_label_refuses",
+        "jsonPointerPatch": {
+          "/fem/targetAsOf": "2027-13"
+        },
+        "expectedReasonCode": "invalid_target_as_of_month_label"
+      },
+      {
+        "name": "target_after_forecast_period_refuses",
+        "jsonPointerPatch": {
+          "/fem/targetAsOf": "2029-01"
+        },
+        "expectedReasonCode": "target_as_of_after_forecast_period_end"
+      },
+      {
+        "name": "unsupported_target_precision_refuses",
+        "jsonPointerPatch": {
+          "/fem/datePrecision": "quarter_label"
+        },
+        "expectedReasonCode": "invalid_date_precision:quarter_label"
+      },
+      {
+        "name": "multiple_period_relationship_mismatch_refuses",
+        "jsonPointerPatch": {
+          "/observations/1/economicPeriodStart": "2028-02-01"
+        },
+        "expectedReasonCode": "period_mismatch_eps_multiple"
+      },
+      {
+        "name": "split_vintage_eps_share_basis_mismatch_refuses",
+        "jsonPointerPatch": {
+          "/fem/epsShareBasisId": "share_basis:amzn-us:pre-split-2022"
+        },
+        "expectedReasonCode": "eps_share_basis_mismatch"
+      },
+      {
+        "name": "decision_only_mutation_refuses",
+        "jsonPointerPatch": {
+          "/decisionAtUnixMs": 1753920000001
+        },
+        "expectedReasonCode": "decision_at_mismatch"
+      },
+      {
+        "name": "negative_decision_coordinate_refuses",
+        "jsonPointerPatch": {
+          "/decisionAtUnixMs": -1
+        },
+        "expectedReasonCode": "invalid_decision_at_unix_ms"
+      },
+      {
+        "name": "zero_decision_coordinate_refuses",
+        "jsonPointerPatch": {
+          "/decisionAtUnixMs": 0
+        },
+        "expectedReasonCode": "invalid_decision_at_unix_ms"
+      }
+    ]
+  }
+}

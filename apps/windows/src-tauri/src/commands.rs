@@ -636,6 +636,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                     ),
                     market_params: &market_params,
                     as_of_epoch_day: current_epoch_day(),
+                    market_price_cents: None,
                 },
             );
             s.ingest_operating_valuation(symbol.to_string(), None, envelope);
@@ -739,6 +740,7 @@ fn record_demand_valuation_failure(
             ),
             market_params: &market_params,
             as_of_epoch_day: current_epoch_day(),
+            market_price_cents: None,
         },
     );
     state.clear_dcf(symbol);
@@ -757,6 +759,16 @@ fn financial_required_drivers_missing(fund: &crate::engine::FundamentalSnapshot)
         || fund.book_value_per_share_cents.unwrap_or(0) <= 0
         || !matches!(fund.return_on_equity_bps, Some(1..=9_999))
         || !matches!(fund.retention_bps, Some(0..=10_000))
+}
+
+/// Prefer live US 10Y for solid rate quality; fall back to provisional defaults.
+fn resolve_market_params(yahoo: Option<&YahooClient>) -> crate::dcf_model::MarketParams {
+    if let Some(client) = yahoo {
+        if let Some((rf_bps, as_of)) = client.fetch_us_10y_yield_bps() {
+            return crate::dcf_model::MarketParams::from_live_risk_free(rf_bps, as_of);
+        }
+    }
+    crate::dcf_model::MarketParams::default_usd()
 }
 
 /// Compute one demand-driven valuation using the same route as Detail.
@@ -875,8 +887,15 @@ where
         if !matches!(fund.retention_bps, Some(0..=10_000)) {
             return Err("retention/payout is missing or invalid after Yahoo refresh".into());
         }
-        let mut analysis =
-            crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
+        let market_params = resolve_market_params(valuation_yahoo.as_deref());
+        let mut analysis = crate::dcf_model::compute_with_params(
+            &fund,
+            &[],
+            price,
+            &market_params,
+            "fundamentals",
+            false,
+        )?;
         if shares_resolved_from_sec {
             analysis.reason_codes.push("shares=sec_dei_fallback".into());
         }
@@ -943,7 +962,15 @@ where
             if analysis.is_none() && fcff_failure.is_none() {
                 match edgar::fetch_fcf_history(&edgar::edgar_client(), symbol, cik) {
                     Ok(Some(fcf)) => {
-                        match crate::dcf_model::compute(&fund, &fcf, None, "sec_edgar") {
+                        let market_params = resolve_market_params(valuation_yahoo.as_deref());
+                        match crate::dcf_model::compute_with_params(
+                            &fund,
+                            &fcf,
+                            None,
+                            &market_params,
+                            "sec_edgar",
+                            false,
+                        ) {
                             Ok(mut computed) => {
                                 if shares_resolved_from_sec {
                                     computed.reason_codes.push("shares=sec_dei_fallback".into());
@@ -966,7 +993,7 @@ where
         None => {}
     }
 
-    let market_params = crate::dcf_model::MarketParams::default_usd();
+    let market_params = resolve_market_params(valuation_yahoo.as_deref());
     let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
         crate::operating_valuation_runtime::RuntimeValuationInput {
             business_class: class,
@@ -976,6 +1003,7 @@ where
             forward_evidence,
             market_params: &market_params,
             as_of_epoch_day,
+            market_price_cents: price,
         },
     );
     let final_fundamentals_fingerprint =
@@ -1341,9 +1369,92 @@ pub fn get_quant_lens(
         .take(40)
         .map(|(s, c)| (s.clone(), c.clone()))
         .collect();
-    Ok(crate::quant_lens::analyze(
-        &detail, candles, dcf, opp, &peers,
+    let report = crate::quant_lens::analyze(&detail, candles, dcf, opp, &peers);
+    // Release screener before SQLite dossier read; FEM is diagnostic-only and
+    // must never write dcf/selected/intrinsic maps or change primary_status.
+    drop(screener);
+    let extras = match crate::valuation_dossier_view::load_valuation_dossier(&state.db, &symbol) {
+        Ok(dossier) => {
+            crate::valuation_dossier_view::analyst_method_quant_section(&dossier.analyst_method)
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
+        Err(_) => {
+            let dossier = crate::valuation_dossier_view::publication_read_failure_dossier(&symbol);
+            crate::valuation_dossier_view::analyst_method_quant_section(&dossier.analyst_method)
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
+    };
+    Ok(crate::quant_lens::attach_diagnostic_sections(
+        report, extras,
     ))
+}
+
+/// Cache-only ValuationDossierView for the additive market-reference lane (1C).
+/// Never triggers providers, FCFF, or ranking mutation.
+#[tauri::command]
+pub fn get_valuation_dossier(
+    symbol: String,
+    state: State<AppState>,
+) -> Result<crate::valuation_dossier_view::ValuationDossierView, String> {
+    Ok(
+        crate::valuation_dossier_view::load_valuation_dossier(&state.db, &symbol).unwrap_or_else(
+            |_| crate::valuation_dossier_view::publication_read_failure_dossier(&symbol),
+        ),
+    )
+}
+
+/// Seed AMZN-shaped identity + fixture analyst-method import for native 1C E2E.
+/// Inert unless debug + DS_NATIVE_E2E=1.
+#[tauri::command]
+pub fn debug_seed_amzn_analyst_method_e2e(
+    state: State<AppState>,
+) -> Result<crate::valuation_dossier_view::ValuationDossierView, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+    seed_amzn_analyst_method_e2e(&state)
+}
+
+pub(crate) fn seed_amzn_analyst_method_e2e(
+    state: &AppState,
+) -> Result<crate::valuation_dossier_view::ValuationDossierView, String> {
+    if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
+        return Err("native E2E fixture seeding is disabled".into());
+    }
+    let identity = crate::issuer_identity::fixture_amzn_shaped();
+    state.db.upsert_identity_bundle(
+        &identity.issuer.issuer_id,
+        &identity.issuer.cik,
+        identity.issuer.legal_name.as_deref(),
+        &identity.security.security_id,
+        &identity.security.currency,
+        identity.security.share_class_label.as_deref(),
+        &identity.ticker_alias.ticker,
+        &identity.ticker_alias.effective_from,
+        &identity.ticker_alias.identity_vintage,
+        &identity.share_basis.basis_id,
+        &identity.share_basis.vintage_fingerprint,
+        &identity.share_basis.description,
+    )?;
+    let import_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../shared/contracts/valuation-forward-earnings-import-v1.json");
+    let raw =
+        std::fs::read_to_string(&import_path).map_err(|e| format!("read import fixture: {e}"))?;
+    let contract: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse import fixture: {e}"))?;
+    let import_json = contract["fixtures"]["available"][0]["import"].to_string();
+    let decision_at = contract["fixtures"]["available"][0]["admissionContext"]["decisionAtUnixMs"]
+        .as_i64()
+        .unwrap_or(1_753_920_000_000);
+    crate::analyst_method_service::commit_analyst_method_import(
+        &state.db,
+        &import_json,
+        &identity,
+        decision_at,
+    )?;
+    crate::valuation_dossier_view::load_valuation_dossier(&state.db, "AMZN")
 }
 
 /// Run the bounded DCF-vs-analyst audit used to investigate model outliers.

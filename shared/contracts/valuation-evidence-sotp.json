@@ -168,6 +168,124 @@
         "rejectedCodes": ["retrieval_failure"],
         "fingerprint": "fnv1a64:c976adde5dd9cdd9"
       }
+    },
+    {
+      "name": "equal_rank_conflicting_money_refuses",
+      "decisionAt": "2025-03-31T23:59:59Z",
+      "observations": [
+        {
+          "id": "revenue-a",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "r1",
+          "supersedes": null,
+          "sourceVintage": "fixture",
+          "retrievedAt": "2025-02-10T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 100000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "fixture:a",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        },
+        {
+          "id": "revenue-b",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "r2",
+          "supersedes": null,
+          "sourceVintage": "fixture",
+          "retrievedAt": "2025-02-10T12:02:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 120000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "fixture:b",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        }
+      ],
+      "expected": {
+        "refusalCode": "duplicate_evidence",
+        "refusalDetailContains": "conflicting evidence at the same publication rank"
+      }
+    },
+    {
+      "name": "equal_rank_identical_money_selects_last_revision",
+      "decisionAt": "2025-03-31T23:59:59Z",
+      "observations": [
+        {
+          "id": "revenue-a",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "r1",
+          "supersedes": null,
+          "sourceVintage": "fixture",
+          "retrievedAt": "2025-02-10T12:01:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 100000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "fixture:a",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        },
+        {
+          "id": "revenue-b",
+          "factKey": "revenue",
+          "economicPeriodStart": "2024-01-01",
+          "economicPeriodEnd": "2024-12-31",
+          "knowledgeAt": "2025-02-10T12:00:00Z",
+          "publicationAt": "2025-02-10T12:00:00Z",
+          "revisionId": "r2",
+          "supersedes": null,
+          "sourceVintage": "fixture",
+          "retrievedAt": "2025-02-10T12:02:00Z",
+          "sourceRegime": "domestic_us_gaap",
+          "unit": "money_cents",
+          "valueCents": 100000,
+          "valueBps": null,
+          "valueMillis": null,
+          "textValue": null,
+          "currency": "USD",
+          "definition": "consolidated revenue",
+          "sourceLocation": "fixture:b",
+          "extractionMethod": "structured_xbrl",
+          "quality": "solid",
+          "retrievalState": "retrieved"
+        }
+      ],
+      "expected": {
+        "selectedIds": ["revenue-b"],
+        "selectedValuesCents": [100000],
+        "rejectedCodes": [],
+        "fingerprint": "fnv1a64:6c5e692694f50817"
+      }
     }
   ],
   "routingFixtures": [

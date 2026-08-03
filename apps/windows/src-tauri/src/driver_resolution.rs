@@ -267,7 +267,10 @@ pub fn resolve_rate_inputs_for_source(
         .iter()
         .filter(|year| valid_tax_periods.contains(year))
         .count();
-    let quality = if period_count >= 3 && !matches!(tax_source, WaccFieldSource::DomicileTaxProxy) {
+    // Two aligned fiscal periods of interest/debt + non-proxy tax is enough for
+    // solid rate quality when market rf is live. Three remains preferred depth;
+    // a single period stays provisional.
+    let quality = if period_count >= 2 && !matches!(tax_source, WaccFieldSource::DomicileTaxProxy) {
         EvidenceQuality::Solid
     } else if period_count >= 1 {
         EvidenceQuality::Provisional

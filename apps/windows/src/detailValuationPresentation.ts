@@ -1,9 +1,275 @@
+import type {
+  AnalystMethodCandidateView,
+  DcfAnalysis,
+  OperatingValuationEnvelope,
+  QuantLensReport,
+  QuantLensSection,
+  SymbolDetail,
+  ValuationDossierView,
+} from "./api";
+
 export type DcfMarketRelation = {
   bps: number;
   key: "detail.dcfVsMarketUpside" | "detail.dcfVsMarketDownside" | "detail.dcfVsMarketFlat";
   pct: string;
   tone: "positive" | "negative" | "neutral";
 };
+
+/** Slice 1C market-reference presentation — never an intrinsic/selected DCF substitute. */
+export type AnalystMethodPresentation =
+  | {
+      kind: "available";
+      methodLabel: string;
+      targetValueCents: string;
+      epsCents: string;
+      multipleHundredths: number;
+      forecastPeriodEnd: string;
+      targetAsOf: string;
+      datePrecision: string;
+      sourceVerification: string;
+      metricId: string | null;
+      metricBasis: string | null;
+      quality: string | null;
+      importQualityLabel: string | null;
+      currency: string | null;
+      multipleProvenance: string | null;
+      scenario: string | null;
+      engineId: string | null;
+      methodPolicyVersion: string | null;
+      runId: string | null;
+      identityVintage: string | null;
+      shareBasisId: string | null;
+      lineageGroupId: string | null;
+      diagnosticOnly: true;
+      rankingEligible: false;
+      strongEligible: false;
+    }
+  | {
+      kind: "unavailable";
+      methodLabel: string;
+      reasonCode: string;
+      diagnosticOnly: true;
+      rankingEligible: false;
+      strongEligible: false;
+    }
+  | { kind: "absent" };
+
+export function analystMethodPresentation(
+  dossier: ValuationDossierView | null | undefined,
+): AnalystMethodPresentation {
+  const lane = dossier?.analystMethod;
+  if (!lane || lane.status === "absent") return { kind: "absent" };
+  if (lane.status === "unavailable") {
+    return {
+      kind: "unavailable",
+      methodLabel: lane.methodLabel || "manual analyst method",
+      reasonCode: lane.reasonCode || "unavailable",
+      diagnosticOnly: true,
+      rankingEligible: false,
+      strongEligible: false,
+    };
+  }
+  if (
+    lane.targetValueCents == null
+    || lane.epsCents == null
+    || lane.multipleHundredths == null
+  ) {
+    return {
+      kind: "unavailable",
+      methodLabel: lane.methodLabel || "manual analyst method",
+      reasonCode: lane.reasonCode || "missing_result",
+      diagnosticOnly: true,
+      rankingEligible: false,
+      strongEligible: false,
+    };
+  }
+  return {
+    kind: "available",
+    methodLabel: lane.methodLabel || "manual analyst method",
+    targetValueCents: lane.targetValueCents,
+    epsCents: lane.epsCents,
+    multipleHundredths: lane.multipleHundredths,
+    forecastPeriodEnd: lane.forecastPeriodEnd || "—",
+    targetAsOf: lane.targetAsOf || "—",
+    datePrecision: lane.datePrecision || "—",
+    sourceVerification: lane.sourceVerification || "source_not_verified",
+    metricId: lane.metricId,
+    metricBasis: lane.metricBasis,
+    quality: lane.quality,
+    importQualityLabel: lane.importQualityLabel,
+    currency: lane.currency,
+    multipleProvenance: lane.multipleProvenance,
+    scenario: lane.scenario,
+    engineId: lane.engineId,
+    methodPolicyVersion: lane.methodPolicyVersion,
+    runId: lane.runId,
+    identityVintage: lane.identityVintage,
+    shareBasisId: lane.shareBasisId,
+    lineageGroupId: lane.lineageGroupId,
+    diagnosticOnly: true,
+    rankingEligible: false,
+    strongEligible: false,
+  };
+}
+
+function exactInteger(value: string | number): bigint | null {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) return null;
+    return BigInt(value);
+  }
+  if (!/^-?\d+$/.test(value)) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function fixedHundredths(value: string | number): string | null {
+  const integer = exactInteger(value);
+  if (integer == null) return null;
+  const negative = integer < 0n;
+  const absolute = negative ? -integer : integer;
+  const whole = absolute / 100n;
+  const fraction = (absolute % 100n).toString().padStart(2, "0");
+  return `${negative ? "-" : ""}${whole}.${fraction}`;
+}
+
+/** Format cents without converting the fixed-point integer through JS Number. */
+export function formatCentsAsCurrency(cents: string | number, currency = "USD"): string {
+  const fixed = fixedHundredths(cents);
+  if (fixed == null) return "—";
+  const symbols: Record<string, string> = { USD: "$", EUR: "€", GBP: "£" };
+  const normalized = currency.trim().toUpperCase() || "USD";
+  return symbols[normalized] ? `${symbols[normalized]}${fixed}` : `${normalized} ${fixed}`;
+}
+
+/** Compatibility helper for USD diagnostic display. */
+export function formatCentsAsDollars(cents: string | number): string {
+  return formatCentsAsCurrency(cents, "USD");
+}
+
+/** Format multiple hundredths as X.XXx without precision loss. */
+export function formatMultipleHundredths(hundredths: string | number): string {
+  const fixed = fixedHundredths(hundredths);
+  return fixed == null ? "—" : `${fixed}x`;
+}
+
+export const ANALYST_METHOD_POLL_INTERVAL_MS = 15_000;
+
+/** Dedicated 1C presenter output consumed by the real Quant Lens panel. */
+export function analystMethodQuantLensSection(
+  presentation: AnalystMethodPresentation,
+): QuantLensSection | null {
+  if (presentation.kind === "absent") return null;
+  if (presentation.kind === "unavailable") {
+    return {
+      id: "manual_analyst_method",
+      title: presentation.methodLabel,
+      status: "Unavailable",
+      summary: `Diagnostic market-reference method unavailable (${presentation.reasonCode}).`,
+      metrics: [
+        ["presentation_source", "valuation_dossier_presenter"],
+        ["lane", "diagnostic only"],
+        ["reason_code", presentation.reasonCode],
+        ["ranking_eligible", "false"],
+        ["strong_eligible", "false"],
+      ],
+    };
+  }
+  const currency = presentation.currency || "USD";
+  return {
+    id: "manual_analyst_method",
+    title: presentation.methodLabel,
+    status: "Provisional",
+    summary: `${formatCentsAsCurrency(presentation.epsCents, currency)} EPS × ${formatMultipleHundredths(presentation.multipleHundredths)} = ${formatCentsAsCurrency(presentation.targetValueCents, currency)}`,
+    metrics: [
+      ["presentation_source", "valuation_dossier_presenter"],
+      ["lane", "diagnostic only"],
+      ["target_value_cents", presentation.targetValueCents],
+      ["eps_cents", presentation.epsCents],
+      ["multiple_hundredths", String(presentation.multipleHundredths)],
+      ["forecast_period_end", presentation.forecastPeriodEnd],
+      ["target_as_of", presentation.targetAsOf],
+      ["date_precision", presentation.datePrecision],
+      ["currency", currency],
+      ["source_verification", presentation.sourceVerification],
+      ["multiple_provenance", presentation.multipleProvenance ?? "n/a"],
+      ["scenario", presentation.scenario ?? "n/a"],
+      ["metric_id", presentation.metricId ?? "n/a"],
+      ["metric_basis", presentation.metricBasis ?? "n/a"],
+      ["quality", presentation.quality ?? "n/a"],
+      ["import_quality_label", presentation.importQualityLabel ?? "n/a"],
+      ["diagnostic_only", "true"],
+      ["ranking_eligible", "false"],
+      ["strong_eligible", "false"],
+      ["engine_id", presentation.engineId ?? "n/a"],
+      ["method_policy_version", presentation.methodPolicyVersion ?? "n/a"],
+      ["run_id", presentation.runId ?? "n/a"],
+      ["share_basis_id", presentation.shareBasisId ?? "n/a"],
+      ["identity_vintage", presentation.identityVintage ?? "n/a"],
+      ["lineage_group_id", presentation.lineageGroupId ?? "n/a"],
+      ["method", "forward_earnings_multiple"],
+    ],
+  };
+}
+
+export type QuantLensPanelComposition = {
+  report: QuantLensReport | null;
+  coreWarning: string | null;
+};
+
+/**
+ * Compose the independently readable dossier lane with the Quant Lens core.
+ * A core failure must not suppress an available/refused analyst-method lane.
+ */
+export function composeQuantLensPanel(
+  symbol: string,
+  report: QuantLensReport | null,
+  presentation: AnalystMethodPresentation | null,
+  coreFailure: string | null,
+): QuantLensPanelComposition {
+  if (report) {
+    return {
+      report: presentation ? attachAnalystMethodPresentation(report, presentation) : report,
+      coreWarning: coreFailure,
+    };
+  }
+  const section = presentation ? analystMethodQuantLensSection(presentation) : null;
+  if (!section) return { report: null, coreWarning: coreFailure };
+  return {
+    report: {
+      symbol,
+      primary_status: "Unavailable",
+      sections: [section],
+      model_version: 0,
+    },
+    coreWarning: coreFailure || "Quant Lens core unavailable; showing the independent analyst-method dossier.",
+  };
+}
+
+/** Dossier is authoritative for this lane; remove a backend duplicate before attaching it. */
+export function attachAnalystMethodPresentation(
+  report: QuantLensReport,
+  presentation: AnalystMethodPresentation,
+): QuantLensReport {
+  const section = analystMethodQuantLensSection(presentation);
+  return {
+    ...report,
+    sections: [
+      ...report.sections.filter((candidate) => candidate.id !== "manual_analyst_method"),
+      ...(section ? [section] : []),
+    ],
+  };
+}
+
+/** Guard: dossier candidate must never be treated as selected intrinsic. */
+export function analystMethodIsIntrinsicSelection(
+  lane: AnalystMethodCandidateView | null | undefined,
+): false {
+  void lane;
+  return false;
+}
 
 /** Keep backend refusal semantics distinct: present-but-non-positive is not missing history. */
 export function valuationUnavailableI18nKey(reason: string | null | undefined): string {
@@ -221,4 +487,3 @@ export function detailValuationPresentation(
   }
   return { kind: "none", diagnostics };
 }
-import type { DcfAnalysis, OperatingValuationEnvelope, SymbolDetail } from "./api";

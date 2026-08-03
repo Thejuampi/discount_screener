@@ -113,6 +113,70 @@ export default function App() {
     setSelectedSymbol(symbol);
   }, []);
 
+  // Debug-only agent bridge (WebView CDP / ds-ui). Not shipped in release production builds.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    type AgentBridge = {
+      version: number;
+      openSymbol: (symbol: string) => void;
+      closeDetail: () => void;
+      setViewMode: (mode: ViewMode) => void;
+      setListFilter: (query: string) => void;
+      setAssetFilter: (filter: "all" | "stock" | "etf" | "crypto") => void;
+      snapshot: () => {
+        selectedSymbol: string | null;
+        viewMode: ViewMode;
+        listFilter: string;
+        assetFilter: string;
+        symbols: string[];
+        profileLocked: boolean;
+        universeProfile: string;
+        scoringModel: string;
+      };
+    };
+    const bridge: AgentBridge = {
+      version: 1,
+      openSymbol: (symbol: string) => {
+        var sym = String(symbol || "").trim().toUpperCase();
+        if (!sym) return;
+        setFilter("");
+        openSymbol(sym);
+        void api.ensureSymbolLoaded(sym).catch((e) => {
+          console.error("agent ensureSymbolLoaded failed", e);
+        });
+      },
+      closeDetail: () => setSelectedSymbol(null),
+      setViewMode: (mode: ViewMode) => handleViewModeChange(mode),
+      setListFilter: (query: string) => setFilter(query),
+      setAssetFilter: (next) => handleAssetFilterChange(next),
+      snapshot: () => ({
+        selectedSymbol,
+        viewMode,
+        listFilter: filter,
+        assetFilter,
+        symbols: rows.map((r) => r.symbol),
+        profileLocked,
+        universeProfile,
+        scoringModel,
+      }),
+    };
+    (window as Window & { __DS_AGENT__?: AgentBridge }).__DS_AGENT__ = bridge;
+    return () => {
+      var w = window as Window & { __DS_AGENT__?: AgentBridge };
+      if (w.__DS_AGENT__ === bridge) delete w.__DS_AGENT__;
+    };
+  }, [
+    openSymbol,
+    selectedSymbol,
+    viewMode,
+    filter,
+    assetFilter,
+    rows,
+    profileLocked,
+    universeProfile,
+    scoringModel,
+  ]);
+
   useEffect(() => {
     api.getAutostartEnabled().then(setAutostartOn).catch(console.error);
     api.listUniverseProfiles().then(setUniverseProfiles).catch(console.error);

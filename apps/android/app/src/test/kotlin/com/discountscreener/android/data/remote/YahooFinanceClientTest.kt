@@ -271,6 +271,64 @@ class YahooFinanceClientTest {
         val diagnostics = mutableListOf<ProviderDiagnostic>()
         val parsed = parseQuoteSummary(root, "COF", null, diagnostics)
         assertEquals(8_347, parsed.fundamentals?.retentionBps)
+        assertEquals(16_786L, parsed.fundamentals?.bookValuePerShareCents)
+        assertEquals(903, parsed.fundamentals?.returnOnEquityBps)
+    }
+
+    @Test
+    fun financial_fixtures_resolve_summary_detail_payout_book_and_roe() {
+        data class Case(
+            val fixture: String,
+            val symbol: String,
+            val retentionBps: Int,
+            val bookCents: Long,
+            val roeBps: Int,
+        )
+        val cases = listOf(
+            Case("JPM-retention", "JPM", 7_200, 11_540L, 1_620),
+            Case("ACGL-retention", "ACGL", 7_000, 6_511L, 2_000),
+            Case("COF-retention", "COF", 8_347, 16_786L, 903),
+        )
+        for (case in cases) {
+            val root = loadQuoteSummaryFixture(case.fixture)
+            val diagnostics = mutableListOf<ProviderDiagnostic>()
+            val fund = parseQuoteSummary(root, case.symbol, null, diagnostics).fundamentals
+            assertEquals("${case.symbol} retention", case.retentionBps, fund?.retentionBps)
+            assertEquals("${case.symbol} book", case.bookCents, fund?.bookValuePerShareCents)
+            assertEquals("${case.symbol} roe", case.roeBps, fund?.returnOnEquityBps)
+        }
+    }
+
+    @Test
+    fun payout_prefers_financial_data_over_summary_detail() {
+        val financialData = kotlinx.serialization.json.buildJsonObject {
+            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
+                put("raw", kotlinx.serialization.json.JsonPrimitive(0.40))
+            })
+        }
+        val summaryDetail = kotlinx.serialization.json.buildJsonObject {
+            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
+                put("raw", kotlinx.serialization.json.JsonPrimitive(0.1653))
+            })
+        }
+        assertEquals(6_000, resolveRetentionBps(financialData, summaryDetail))
+    }
+
+    @Test
+    fun missing_payout_in_both_modules_yields_null_retention() {
+        val empty = kotlinx.serialization.json.JsonObject(emptyMap())
+        assertNull(resolveRetentionBps(empty, empty))
+        // Empty Yahoo payout object (no raw) is missing.
+        val emptyPayout = kotlinx.serialization.json.buildJsonObject {
+            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {})
+        }
+        assertNull(resolveRetentionBps(emptyPayout, empty))
+        val summaryOnly = kotlinx.serialization.json.buildJsonObject {
+            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
+                put("raw", kotlinx.serialization.json.JsonPrimitive(0.28))
+            })
+        }
+        assertEquals(7_200, resolveRetentionBps(empty, summaryOnly))
     }
 
     @Test

@@ -589,10 +589,28 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
         total_cash_dollars: Some(143_088_992_256),
         ..Default::default()
     };
-    // Contiguous positive suffix after CapEx-trough years (matches contract fixture spirit).
+    // Live-shaped path: trough years ALSO carry full operating drivers (SEC complete).
+    // The old fixture omitted drivers on 2020–2021 so they never entered the recent
+    // window — that masked the median-collapse bug that priced live AMZN near $5.
     let fcf = vec![
-        FcfPoint::new(2020, 25_924_000_000.0),
-        FcfPoint::new(2021, -14_726_000_000.0),
+        FcfPoint::new(2020, 25_924_000_000.0)
+            .with_operating_drivers(
+                66_064_000_000.0,
+                40_140_000_000.0,
+                386_064_000_000.0,
+                Some(1_647_000_000.0),
+                Some(1_184),
+            )
+            .with_rate_resolution_inputs(Some(180_000_000_000.0), Some(2_100), None, None),
+        FcfPoint::new(2021, -14_726_000_000.0)
+            .with_operating_drivers(
+                46_327_000_000.0,
+                61_053_000_000.0,
+                469_822_000_000.0,
+                Some(1_809_000_000.0),
+                Some(1_256),
+            )
+            .with_rate_resolution_inputs(Some(185_000_000_000.0), Some(2_100), None, None),
         FcfPoint::new(2022, -16_893_000_000.0)
             .with_operating_drivers(
                 46_752_000_000.0,
@@ -643,19 +661,28 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
         "amzn_baseline base_cents={} run_rate={} wacc={} growth={}",
         base, run, a.wacc_bps, a.base_growth_bps
     );
+    // Investment-wave undervaluation: charging full gross CapEx as FCFF + 5y Gordon
+    // priced this class near $50 while market/street were multi-hundreds. The
+    // owner-earnings path must stay well clear of that collapse.
+    //
+    // Levels moved down at policy /16: /15 floored AMZN sustaining CapEx at ~2.0% of
+    // revenue against a ~$300B gross asset base (well under its ~$60B annual D&A),
+    // which inflated the base. /16 charges ~5.8%. This fixture is also stricter than
+    // live AMZN — its six-year window makes 2025 look like a CapEx spike, so the
+    // normalized OCF margin is 12.32% here vs 14.78% on the full SEC history
+    // (live run-rate $65.7B, base > $100). See `live_fcff_driver_audit_cohort`.
     assert!(
-        base >= 500,
-        "AMZN-class mega-cap must not collapse to penny intrinsic, base_cents={base}"
+        base >= 10_000,
+        "AMZN-class owner-earnings base must stay clear of the all-CapEx-is-maintenance collapse (~$50), base_cents={base}"
     );
-    // Multi-ten-billion normalized FCF: never a $1 mirage (user-reported failure mode).
-    // Full AMZN economic calibration is tracked separately; this is the anti-collapse floor.
     assert!(
-        run >= 10_000_000_000,
-        "AMZN fixture must keep multi-ten-B normalized FCF run-rate, got {run}"
+        run >= 50_000_000_000,
+        "AMZN full-driver fixture must keep multi-ten-B owner-earnings run-rate, got {run}"
     );
+    // Not a price clamp: refuse catastrophic understatement (< ~1/4 of sample market).
     assert!(
-        base >= 1_000,
-        "AMZN-class with multi-ten-B FCF must not price under $10, base_cents={base}"
+        base >= 23_933 / 4,
+        "AMZN base must not be <~1/4 sample market after owner-earnings fix, base_cents={base}"
     );
 }
 

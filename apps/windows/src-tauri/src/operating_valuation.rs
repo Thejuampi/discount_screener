@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dcf_model::{BusinessClass, ResolvedCostOfEquity};
 
-pub const ENGINE_VERSION: &str = "operating-valuation-router/1";
+pub const ENGINE_VERSION: &str = "operating-valuation-router/2";
 pub const ROUTER_POLICY_VERSION: &str = "operating-model-router-policy/1";
 pub const DISPUTED_DIFFERENCE_BPS: i64 = 5_000;
 const BPS_SCALE: i128 = 10_000;
@@ -156,6 +156,62 @@ pub struct ForwardEarningsInput {
     pub forecast: ForwardForecast,
     pub cost_of_equity: ResolvedCostOfEquity,
     pub policy: ProjectionPolicy,
+    /// Return on total capital (bps) used to charge perpetual growth. `None`
+    /// means *no evidence*, and [`terminal_payout_bps`] then assumes the issuer
+    /// earns exactly its cost of capital so growth is value-neutral. It is not a
+    /// floor on measured returns — see that function.
+    #[serde(default)]
+    pub return_on_capital_bps: Option<i32>,
+}
+
+/// Minimum spread the return on capital must keep over perpetual growth.
+///
+/// This is a **mathematical guard only** — it keeps `1 - g/ROIC` positive and
+/// bounded when the measured return approaches or falls below `g`. It carries no
+/// economic claim about the business, and it deliberately sits just above `g`
+/// rather than at the cost of capital. Mirrors the FCFF lane's
+/// `minimum_terminal_spread_bps`.
+pub const MIN_TERMINAL_ROIC_SPREAD_BPS: i32 = 100;
+
+/// Share of terminal earnings that is actually distributable (bps of earnings).
+///
+/// A business growing perpetually at `g` must retain `b = g / ROIC` of its
+/// earnings to fund the capital that growth consumes; only `1 - b` reaches the
+/// owner. Capitalizing the **full** analyst EPS while also granting `g` forever
+/// is free-lunch growth, and it is the reason the forward lane priced the
+/// cohort at a median 1.5x market with the error rising monotonically as return
+/// on capital fell (CHTR at 5.0% ROIC came out 5.5x market).
+///
+/// Two different problems meet here and are kept strictly apart:
+///
+/// * **Missing evidence** — `return_on_capital_bps` is `None`. The honest prior
+///   is that the issuer merely earns its cost of capital, so growth is
+///   value-neutral (`terminal` collapses to `EPS / r`). That is an economic
+///   statement about ignorance.
+/// * **Arithmetic safety** — a measured return at or below `g` would make the
+///   payout non-positive. [`MIN_TERMINAL_ROIC_SPREAD_BPS`] bounds it. That is a
+///   statement about the formula, not about the business.
+///
+/// Collapsing the two — flooring *observed* returns at the cost of equity —
+/// is what flattened every sub-cost-of-capital issuer onto one payout: SW at
+/// 1.5% ROIC, OMC at 2.9% and CHTR at 5.0% were all charged as if they earned
+/// their cost of capital, which erased exactly the differentiation this function
+/// exists to make.
+pub fn terminal_payout_bps(
+    return_on_capital_bps: Option<i32>,
+    cost_of_equity_bps: i32,
+    stable_growth_bps: i32,
+) -> i32 {
+    if cost_of_equity_bps <= 0 {
+        return BPS_SCALE as i32;
+    }
+    if stable_growth_bps <= 0 {
+        return BPS_SCALE as i32;
+    }
+    let observed = return_on_capital_bps.unwrap_or(cost_of_equity_bps);
+    let effective = observed.max(stable_growth_bps.saturating_add(MIN_TERMINAL_ROIC_SPREAD_BPS));
+    let retention = i64::from(stable_growth_bps) * BPS_SCALE as i64 / i64::from(effective);
+    (BPS_SCALE as i64 - retention).clamp(0, BPS_SCALE as i64) as i32
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,13 +293,19 @@ pub fn value_forward_earnings(input: &ForwardEarningsInput) -> ForwardEarningsCa
         };
     }
 
+    let stable = stable_growth_bps.expect("validated stable growth");
     let value = project_forward_value(
         input.forecast.eps_mean_cents.expect("validated EPS"),
         input.forecast.near_growth_bps,
         input.cost_of_equity.cost_of_equity_bps,
-        stable_growth_bps.expect("validated stable growth"),
+        stable,
         input.policy.hold_years,
         input.policy.fade_years,
+        terminal_payout_bps(
+            input.return_on_capital_bps,
+            input.cost_of_equity.cost_of_equity_bps,
+            stable,
+        ),
     );
     match value {
         Some(value) if value > 0 => ForwardEarningsCandidate {
@@ -253,7 +315,13 @@ pub fn value_forward_earnings(input: &ForwardEarningsInput) -> ForwardEarningsCa
             cost_of_equity_bps: input.cost_of_equity.cost_of_equity_bps,
             stable_growth_bps,
             projection_years,
-            quality: ModelQuality::Soft,
+            // Solid when CoE is market-sourced (non-provisional). Soft when rates
+            // still bootstrap from policy defaults.
+            quality: if input.cost_of_equity.provisional {
+                ModelQuality::Soft
+            } else {
+                ModelQuality::Solid
+            },
             evidence_family: EvidenceFamily::AnalystDerivedModel,
             refusals: Vec::new(),
             provenance: input.clone(),
@@ -336,15 +404,31 @@ pub fn route_operating_models(input: OperatingRouteInput) -> OperatingRouteDecis
             match (forward_available, fcff_available) {
                 (Some(forward), Some(fcff)) => {
                     let difference = difference_bps(forward, fcff);
+                    // Material disagreement between two live candidates is a
+                    // refusal, not a preference. Candidate quality decides which
+                    // lane leads *when they agree*; it never converts a dispute
+                    // into a selection.
+                    let fwd_solid = input.forward_candidate.quality == ModelQuality::Solid;
+                    let fcff_solid = input.fcff_candidate.quality == ModelQuality::Solid;
                     if difference.is_some_and(|value| value > DISPUTED_DIFFERENCE_BPS) {
                         reasons.push(RouteReason::CandidateDisagreement);
                         (RouteStatus::Disputed, None, None, difference)
-                    } else {
+                    } else if fwd_solid || !fcff_solid {
                         reasons.push(RouteReason::SelectedForwardEarningsPower);
                         (
                             RouteStatus::Selected,
                             Some(OperatingModel::ForwardEarningsPower),
                             Some(forward),
+                            difference,
+                        )
+                    } else {
+                        // Forward soft, FCFF solid — keep FCFF under distortion only
+                        // when forward quality is weaker.
+                        reasons.push(RouteReason::SelectedRepresentativeFcff);
+                        (
+                            RouteStatus::Selected,
+                            Some(OperatingModel::FcffWacc),
+                            Some(fcff),
                             difference,
                         )
                     }
@@ -376,6 +460,10 @@ pub fn route_operating_models(input: OperatingRouteInput) -> OperatingRouteDecis
                 }
             }
         }
+        // No structural distortion: FCFF is the primary whenever it exists, and the
+        // forward lane keeps its distortion-only mandate. Candidate quality decides
+        // *within* the distorted branch above; it never promotes the analyst-derived
+        // lane across the undistorted cohort — that is a policy change, not a fix.
         BusinessClass::OperatingNonFinancial => match fcff_available {
             Some(fcff) => {
                 if forward_available.is_some() {
@@ -522,6 +610,11 @@ fn validate_forward_input(input: &ForwardEarningsInput) -> Vec<CandidateRefusal>
     refusals
 }
 
+/// Analyst EPS over the explicit horizon is taken as given evidence — the
+/// forecast already prices whatever reinvestment the next few years need. Only
+/// the **perpetuity** is charged for the capital its growth consumes, via
+/// `terminal_payout_bps`; that is where the free-growth error concentrated
+/// (~70% of a typical name's value sits in the terminal).
 fn project_forward_value(
     eps_mean_cents: i64,
     near_growth_bps: i32,
@@ -529,6 +622,7 @@ fn project_forward_value(
     stable_growth_bps: i32,
     hold_years: i32,
     fade_years: i32,
+    terminal_payout_bps: i32,
 ) -> Option<i64> {
     let rate_denominator = BPS_SCALE.checked_add(i128::from(cost_of_equity_bps))?;
     let mut discounted_earnings =
@@ -550,8 +644,13 @@ fn project_forward_value(
         discounted_earnings = grow_discounted(discounted_earnings, growth, rate_denominator)?;
         present_value = present_value.checked_add(discounted_earnings)?;
     }
-    let terminal = mul_div_half_up(
+    let distributable = mul_div_half_up(
         discounted_earnings,
+        i128::from(terminal_payout_bps),
+        BPS_SCALE,
+    )?;
+    let terminal = mul_div_half_up(
+        distributable,
         BPS_SCALE.checked_add(i128::from(stable_growth_bps))?,
         i128::from(cost_of_equity_bps).checked_sub(i128::from(stable_growth_bps))?,
     )?;
@@ -636,7 +735,7 @@ fn fingerprint_part(value: &str) -> String {
 
 fn forward_fingerprint(input: &ForwardEarningsInput, stable_growth_bps: Option<i32>) -> String {
     format!(
-        "{ENGINE_VERSION}|policy={}|expected_currency={}|max_age={}|forecast_window={}/{}|min_coverage={}|projection={}/{}/{}|macro_growth={}|rf={}|rf_buffer={}|terminal_spread={}|forecast={}|rate={}|rate_bps={}|beta_source={}|provisional={}|market_asof={}|asof={}|observed={}|period_end={}|currency={}|eps={}/{}/{}|coverage={}|growth={}|stable={}",
+        "{ENGINE_VERSION}|policy={}|expected_currency={}|max_age={}|forecast_window={}/{}|min_coverage={}|projection={}/{}/{}|macro_growth={}|rf={}|rf_buffer={}|terminal_spread={}|forecast={}|rate={}|rate_bps={}|beta_source={}|provisional={}|market_asof={}|asof={}|observed={}|period_end={}|currency={}|eps={}/{}/{}|coverage={}|growth={}|stable={}|roic={}|terminal_payout={}",
         fingerprint_part(&input.policy.version),
         fingerprint_part(&input.policy.expected_currency),
         input.policy.max_age_days,
@@ -666,6 +765,15 @@ fn forward_fingerprint(input: &ForwardEarningsInput, stable_growth_bps: Option<i
         input.forecast.analyst_count.map_or_else(|| "none".into(), |value| value.to_string()),
         input.forecast.near_growth_bps,
         stable_growth_bps.map_or_else(|| "none".into(), |value| value.to_string()),
+        input.return_on_capital_bps.map_or_else(|| "none".into(), |value| value.to_string()),
+        stable_growth_bps.map_or_else(|| "none".into(), |stable| {
+            terminal_payout_bps(
+                input.return_on_capital_bps,
+                input.cost_of_equity.cost_of_equity_bps,
+                stable,
+            )
+            .to_string()
+        }),
     )
 }
 
@@ -799,6 +907,13 @@ mod tests {
         resolved_cost_of_equity_bps: i32,
         #[serde(rename = "holdYears")]
         hold_years: u32,
+        /// Frozen unlevered return on capital. `None` is an explicit resolution,
+        /// not a default: `returnOnCapitalAbsentReason` records which of the three
+        /// no-evidence cases the row is (GDDY, WYNN, BSX, ALB).
+        #[serde(rename = "returnOnCapitalBps")]
+        return_on_capital_bps: Option<i32>,
+        #[serde(default, rename = "returnOnCapitalAbsentReason")]
+        return_on_capital_absent_reason: Option<String>,
         #[serde(rename = "fcffValidationOnlyCents")]
         fcff_validation_only_cents: Option<i64>,
         #[serde(default, rename = "routedPocValidationOnlyCents")]
@@ -854,6 +969,7 @@ mod tests {
 
     fn input() -> ForwardEarningsInput {
         ForwardEarningsInput {
+            return_on_capital_bps: None,
             as_of_epoch_day: 20_000,
             forecast: ForwardForecast {
                 eps_low_cents: Some(900),
@@ -872,6 +988,7 @@ mod tests {
                 provisional: false,
                 market_params_as_of_epoch: Some(1_728_000_000),
                 source_fingerprint: "rate:test".into(),
+                ..Default::default()
             },
             policy: ProjectionPolicy {
                 version: "forward-earnings-policy/1".into(),
@@ -913,9 +1030,13 @@ mod tests {
     fn forward_candidate_uses_fixed_point_recurrence() {
         let candidate = value_forward_earnings(&input());
         assert_eq!(candidate.status, CandidateStatus::Available);
-        assert_eq!(candidate.intrinsic_value_cents, Some(18_176));
+        assert_eq!(candidate.intrinsic_value_cents, Some(14_056));
         assert_eq!(candidate.stable_growth_bps, Some(300));
-        assert_eq!(candidate.quality, ModelQuality::Soft);
+        assert_eq!(
+            candidate.quality,
+            ModelQuality::Solid,
+            "non-provisional CoE earns solid forward quality"
+        );
         assert_eq!(
             candidate.evidence_family,
             EvidenceFamily::AnalystDerivedModel
@@ -1154,6 +1275,9 @@ mod tests {
         row: &ValidationRow,
     ) -> (ForwardEarningsCandidate, OperatingRouteDecision) {
         let forward = value_forward_earnings(&ForwardEarningsInput {
+            // Frozen rows carry no FCFF diagnostics, so this is the unlevered-ROE
+            // branch of the production resolver, not the through-cycle one.
+            return_on_capital_bps: row.return_on_capital_bps,
             as_of_epoch_day: 20_665,
             forecast: ForwardForecast {
                 eps_low_cents: Some(row.eps_low_cents),
@@ -1169,9 +1293,12 @@ mod tests {
             cost_of_equity: ResolvedCostOfEquity {
                 cost_of_equity_bps: row.resolved_cost_of_equity_bps,
                 beta_source: crate::dcf_model::WaccFieldSource::IndustryShrink,
-                provisional: true,
-                market_params_as_of_epoch: None,
+                // Durable cohort rows use market-sourced CoE semantics (solid when
+                // non-provisional). Soft rates must not be the default for these pins.
+                provisional: false,
+                market_params_as_of_epoch: Some(1_728_000_000),
                 source_fingerprint: format!("poc5-resolved-rate:{}", row.symbol),
+                ..Default::default()
             },
             policy: ProjectionPolicy {
                 version: "forward-earnings-policy/1-poc".into(),
@@ -1223,31 +1350,31 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read contract"))
                 .expect("parse contract");
         let expected = [
-            ("DVN", Some(5_613)),
-            ("GDDY", Some(12_827)),
-            ("WYNN", Some(10_741)),
-            ("SNDK", Some(212_949)),
-            ("BR", Some(22_403)),
-            ("BSX", Some(6_481)),
-            ("AMZN", Some(25_081)),
-            ("AVGO", Some(46_264)),
-            ("HPE", Some(7_938)),
-            ("MU", Some(161_129)),
-            ("ORCL", Some(23_228)),
-            ("AAPL", Some(28_177)),
-            ("CPRT", Some(3_406)),
-            ("CEG", Some(31_403)),
-            ("ALB", Some(18_233)),
-            ("T", Some(3_127)),
-            ("MSFT", Some(61_424)),
+            ("DVN", Some(5_018)),
+            ("GDDY", Some(11_155)),
+            ("WYNN", Some(8_631)),
+            ("SNDK", Some(207_006)),
+            ("BR", Some(20_858)),
+            ("BSX", Some(5_245)),
+            ("AMZN", Some(23_092)),
+            ("AVGO", Some(43_101)),
+            ("HPE", Some(5_620)),
+            ("MU", Some(158_235)),
+            ("ORCL", Some(20_778)),
+            ("AAPL", Some(27_823)),
+            ("CPRT", Some(3_178)),
+            ("CEG", Some(27_689)),
+            ("ALB", Some(15_492)),
+            ("T", Some(2_749)),
+            ("MSFT", Some(57_583)),
             ("NVDA", Some(27_522)),
             ("JNJ", Some(24_928)),
-            ("XOM", Some(13_227)),
+            ("XOM", Some(11_695)),
             ("V", None),
-            ("WMT", Some(11_246)),
-            ("GOOGL", Some(40_710)),
-            ("META", Some(93_724)),
-            ("HD", Some(33_234)),
+            ("WMT", Some(9_909)),
+            ("GOOGL", Some(39_040)),
+            ("META", Some(86_464)),
+            ("HD", Some(31_356)),
             ("PG", Some(17_400)),
             ("MRK", Some(14_303)),
         ];
@@ -1287,6 +1414,40 @@ mod tests {
         assert!(holdout_errors.iter().copied().fold(0.0, f64::max) < 21.0);
     }
 
+    /// Every cohort row states its return on capital, and the four rows that have
+    /// none say *which* no-evidence case they are. A silent `null` would be
+    /// indistinguishable from an unwired field, and the value-neutral prior it
+    /// triggers is a real 25-35% haircut on the terminal — too consequential to
+    /// reach by omission.
+    #[test]
+    fn every_cohort_row_resolves_return_on_capital_explicitly() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../shared/contracts/operating-valuation-router-v1.json"
+        );
+        let contract: SharedContract =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read contract"))
+                .expect("parse contract");
+        let mut violations: Vec<String> = contract
+            .validation_cohorts
+            .reported
+            .iter()
+            .chain(contract.validation_cohorts.holdout.iter())
+            .filter_map(|row| {
+                match (
+                    row.return_on_capital_bps,
+                    row.return_on_capital_absent_reason.as_deref(),
+                ) {
+                    (Some(value), None) if value > 0 => None,
+                    (None, Some(_)) => None,
+                    other => Some(format!("{}: {other:?}", row.symbol)),
+                }
+            })
+            .collect();
+        violations.sort();
+        assert_eq!(violations, Vec::<String>::new());
+    }
+
     #[test]
     fn shared_contract_matches_exactly_and_keeps_validation_anchors_external() {
         let path = concat!(
@@ -1319,6 +1480,7 @@ mod tests {
 
         for fixture in contract.executable_fixtures {
             let forward_input = ForwardEarningsInput {
+                return_on_capital_bps: None,
                 as_of_epoch_day: fixture.input.as_of_epoch_day,
                 forecast: fixture.input.forecast,
                 cost_of_equity: fixture.input.cost_of_equity,
@@ -1530,6 +1692,7 @@ mod tests {
                 .and_then(|value| i32::try_from(value).ok());
             let forward = value_forward_earnings(&ForwardEarningsInput {
                 as_of_epoch_day,
+                return_on_capital_bps: None,
                 forecast: ForwardForecast {
                     eps_low_cents: eps_cents("/earningsEstimate/low/raw"),
                     eps_mean_cents: eps_cents("/earningsEstimate/avg/raw"),
@@ -1547,6 +1710,7 @@ mod tests {
                     provisional: true,
                     market_params_as_of_epoch: None,
                     source_fingerprint: format!("poc5-resolved-rate:{}", row.symbol),
+                    ..Default::default()
                 },
                 policy: ProjectionPolicy {
                     version: "forward-earnings-policy/1-poc".into(),

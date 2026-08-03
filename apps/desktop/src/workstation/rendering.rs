@@ -794,19 +794,24 @@ fn score_opportunity_forecasts(
         }
     }
 
-    if let Some(AnalysisCacheEntry::Ready { analysis, .. }) =
-        app.detail_analysis_entry(&detail.symbol)
-    {
-        available = true;
-        match dcf_signal(analysis, detail.market_price_cents) {
-            DcfSignal::Opportunity => {
-                score += 1;
-                signals.push("DCF+");
-            }
-            DcfSignal::Fair => {}
-            DcfSignal::Expensive => {
-                score -= 1;
-                signals.push("DCF-");
+    // Quant Engine stays out of ranking while model quality is still noisy.
+    // Detail still computes/shows DCF; do not let demand valuation reorder scores.
+    const RANKING_INCLUDES_QUANT_ENGINE: bool = false;
+    if RANKING_INCLUDES_QUANT_ENGINE {
+        if let Some(AnalysisCacheEntry::Ready { analysis, .. }) =
+            app.detail_analysis_entry(&detail.symbol)
+        {
+            available = true;
+            match dcf_signal(analysis, detail.market_price_cents) {
+                DcfSignal::Opportunity => {
+                    score += 1;
+                    signals.push("DCF+");
+                }
+                DcfSignal::Fair => {}
+                DcfSignal::Expensive => {
+                    score -= 1;
+                    signals.push("DCF-");
+                }
             }
         }
     }

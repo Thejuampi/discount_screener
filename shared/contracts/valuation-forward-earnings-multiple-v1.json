@@ -1,0 +1,228 @@
+{
+  "contract": "valuation-forward-earnings-multiple-v1",
+  "engineId": "forward_earnings_multiple/1",
+  "methodPolicyVersion": "fem-policy-v1",
+  "status": "slice_1a",
+  "notes": [
+    "Pure market-reference lane: target_value_cents = round_half_up(eps_cents * multiple_hundredths / 100).",
+    "Subject market price and stated target are never arithmetic inputs.",
+    "No AMZN-special code paths; fixtures use generic issuer IDs.",
+    "Transcription fixture is fixture_transcription quality; production import remains manual_transcription_unverified (1B)."
+  ],
+  "formula": {
+    "epsUnit": "money_cents",
+    "multipleUnit": "multiple_hundredths",
+    "resultUnit": "money_cents",
+    "expression": "round_half_up(eps_cents * multiple_hundredths / 100)"
+  },
+  "fixtures": {
+    "available": [
+      {
+        "name": "fixture_transcription_thirteen_times_twenty_eight",
+        "input": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1753920000000,
+          "marketPriceCents": 20000,
+          "statedTargetCents": 36500
+        },
+        "expectedTargetValueCents": 36400,
+        "notes": "Stated target $365 is a validation claim only; engine must not use it to produce 364."
+      },
+      {
+        "name": "synthetic_issuer_same_arithmetic",
+        "input": {
+          "issuerId": "issuer:0000999999",
+          "securityId": "sec:syn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1753920000000
+        },
+        "expectedTargetValueCents": 36400
+      },
+      {
+        "name": "half_up_rounding",
+        "input": {
+          "issuerId": "issuer:0000999999",
+          "securityId": "sec:syn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 150,
+          "multipleHundredths": 333,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedTargetValueCents": 500
+      },
+      {
+        "name": "extreme_i64_max_times_one_hundred_wide_intermediate",
+        "input": {
+          "issuerId": "issuer:0000999999",
+          "securityId": "sec:syn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "transcription_claim",
+          "epsCents": 9223372036854775807,
+          "multipleHundredths": 100,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedTargetValueCents": 9223372036854775807,
+        "notes": "Product exceeds i64; Rust i128 / Kotlin BigInteger intermediate required (1B-0)."
+      }
+    ],
+    "refusals": [
+      {
+        "name": "extreme_overflow_result",
+        "input": {
+          "issuerId": "issuer:0000999999",
+          "securityId": "sec:syn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "transcription_claim",
+          "epsCents": 9223372036854775807,
+          "multipleHundredths": 200,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedReasonCode": "overflow"
+      },
+      {
+        "name": "zero_eps",
+        "input": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 0,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedReasonCode": "non_positive_eps"
+      },
+      {
+        "name": "zero_multiple",
+        "input": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 0,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedReasonCode": "non_positive_multiple"
+      },
+      {
+        "name": "missing_metric",
+        "input": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "  ",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1
+        },
+        "expectedReasonCode": "missing_metric_id"
+      },
+      {
+        "name": "peer_policy_zero_peers",
+        "input": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "peer_policy_derived",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1,
+          "peerCount": 0
+        },
+        "expectedReasonCode": "unsupported_provenance"
+      }
+    ],
+    "mutationInvariants": [
+      {
+        "name": "price_and_target_do_not_change_result",
+        "base": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1,
+          "marketPriceCents": 1,
+          "statedTargetCents": 99999
+        },
+        "mutated": {
+          "issuerId": "issuer:0001018724",
+          "securityId": "sec:amzn-us",
+          "metricId": "gaap_diluted_eps",
+          "metricBasis": "reported_gaap",
+          "epsCents": 1300,
+          "multipleHundredths": 2800,
+          "multipleProvenance": "analyst_stated",
+          "forecastPeriodEnd": "2028-12-31",
+          "targetAsOf": "2027-12",
+          "datePrecision": "month_label",
+          "currency": "USD",
+          "evidenceObservedAtUnixMs": 1,
+          "marketPriceCents": 9999999,
+          "statedTargetCents": 1
+        }
+      }
+    ]
+  }
+}

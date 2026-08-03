@@ -30,6 +30,8 @@ zip = "2.2"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 keyring = { version = "3.6", features = ["windows-native"] }
+sha2 = "0.10"
+unicode-normalization = "0.1"
 
 [profile.release]
 panic = "abort"

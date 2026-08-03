@@ -159,6 +159,11 @@ data class ResolvedCostOfEquity(
     val provisional: Boolean,
     val marketParamsAsOfEpoch: Long?,
     val sourceFingerprint: String,
+    /** Industry prior used in shrink (millis); from industry-beta-policy/1. */
+    val industryBetaMillis: Int = 1_000,
+    val throughCyclePrior: Boolean = false,
+    val industryBetaPolicyVersion: String = INDUSTRY_BETA_POLICY_VERSION,
+    val industryBetaEntryId: String = "default",
 )
 
 @Serializable

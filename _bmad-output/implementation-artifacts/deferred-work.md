@@ -1,5 +1,21 @@
 # Deferred Work
 
+## 2026-08-02 — Quant / valuation motor (handover)
+
+Source: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuation-engine-2026-08-02.md)
+
+- **P0 (active):** Fix owner-earnings **maintenance CapEx** so CHTR-class structural network CapEx is not treated as nearly all growth (FCFF/sh ~$141 fails sniff vs ~$30–70). No ticker ifs; multi-name baseline must stay green; do not blindly undo AMZN OE path.
+- **Blocked on P0:** Re-close EPS-vs-FCFF for CHTR; re-run attribution section-3 method column as “clean evidence.”
+- **Open process workstreams:** continuous CoE risk function; CapEx cycle regime (MPWR/WDC); high-signal 26/26; version governance hardening.
+- **Separate project (do not assume):** PIT fundamentals store + empirical fade calibration + primary PIT driver backtest.
+- **Deferred doc:** full `valuation-policy-calibration-process.md` until FCFF run-rate sniff is honest (schema of attribution is already in contract).
+- **Agreed findings to preserve:** horizon inert when hold/fade match baseline; CHTR vs T are different overvalue mechanisms; naive FCFF must use WACC+net debt (CoE-on-FCFF was a bug).
+
+## Deferred from: code review of plan-foundation-0a-execution-2026-08-01.md (2026-08-02)
+
+- Quant Lens still runs demand FCFF/model routing for the core report when opening the panel — pre-existing Detail/QL path, not a FEM ranking write. Address only if 1C is redefined to forbid any valuation demand side-effect when reading the diagnostic lane.
+- `QuantLensSection` is untyped regarding diagnostic-only membership; a future refactor that recomputes `worst_status` over all sections could re-pollute `primary_status`. Add a typed diagnostic flag when the section model is next revised.
+
 ## 2026-07-16 — Windows dashboard startup review
 
 - `apps/windows/src-tauri/src/commands.rs` / remote ticker search: distinguish transient failure from a successful empty Yahoo result before caching an empty response, so a temporary outage does not suppress results for the cache TTL.

@@ -33,7 +33,10 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Evidence/SOTP Implementation Notes](../_bmad-output/implementation-artifacts/spec-valuation-evidence-sotp-implementation.md) - executable-slice ownership, refusal boundaries, and provider/QA boundaries.
 - [Valuation live QA checklist](valuation-live-qa-checklist.md) - **Windows live QA = profile `qa` only** (`npm run tauri:dev:qa`); checklist T/AMZN/CI/bank/industrial + merge-bar tests.
 - [Multi-name valuation baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar; quarantine ≠ success.
-- [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules.
+- [Handover — Quant Valuation Engine (2026-08-02)](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - continuity brief for the next agent on the quant/valuation motor (waterfall, CHTR FCFF blocker, P0+).
+- [Gap attribution contract](../shared/contracts/valuation-gap-attribution-v1.json) - Shapley policy-delta telemetry; Street diagnostic only.
+- [High-signal screener cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json) - 26-name recompute goal gate.
+- [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules, numerical conclusion protocol.
 - [Valuation Change Visibility PRD](../_bmad-output/planning-artifacts/prd.md) - feature PRD for valuation-change visibility.
 - [Planning Artifacts Index](../_bmad-output/planning-artifacts/index.md) - local navigation for BMad planning files.
 - [Valuation Change Visibility Architecture](../_bmad-output/planning-artifacts/architecture.md) - technical decisions for that feature slice.

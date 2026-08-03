@@ -1,0 +1,36 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {
+          "longName": "Arch Capital Group Ltd.",
+          "regularMarketPrice": { "raw": 103.36 },
+          "regularMarketPreviousClose": { "raw": 102.8 },
+          "marketCap": { "raw": 36100000000 }
+        },
+        "financialData": {
+          "currentPrice": { "raw": 103.36 },
+          "returnOnEquity": { "raw": 0.2 },
+          "payoutRatio": {}
+        },
+        "summaryDetail": {
+          "dividendRate": { "raw": 0.0 },
+          "payoutRatio": { "raw": 0.3 }
+        },
+        "defaultKeyStatistics": {
+          "sharesOutstanding": { "raw": 349390000 },
+          "trailingEps": { "raw": 10.5 },
+          "bookValue": { "raw": 65.11 },
+          "priceToBook": { "raw": 1.59 },
+          "beta": { "raw": 0.292 }
+        },
+        "assetProfile": {
+          "sectorKey": "financial-services",
+          "sectorDisp": "Financial Services",
+          "industryKey": "insurance-property-casualty",
+          "industryDisp": "Insurance - Property & Casualty"
+        }
+      }
+    ]
+  }
+}

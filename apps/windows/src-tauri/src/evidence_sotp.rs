@@ -297,12 +297,12 @@ pub fn replay_point_in_time(
         if rows.len() >= 2 {
             let last = rows[rows.len() - 1];
             let previous = rows[rows.len() - 2];
+            // Parity with Kotlin EvidenceObservation.valueKey(): compare the full
+            // optional value payload as one tuple. Requiring every slot to differ
+            // (&& cents != && bps != …) fails when unused slots are both None.
             if last.knowledge_at == previous.knowledge_at
                 && last.publication_at == previous.publication_at
-                && last.value_cents != previous.value_cents
-                && last.value_bps != previous.value_bps
-                && last.value_millis != previous.value_millis
-                && last.text_value != previous.text_value
+                && value_payload(last) != value_payload(previous)
             {
                 return Err(ValuationRefusal::new(
                     ValuationRefusalReasonCode::DuplicateEvidence,
@@ -2289,6 +2289,18 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Value identity for equal-rank conflict detection (Kotlin `valueKey()` parity).
+fn value_payload(
+    row: &EvidenceObservation,
+) -> (Option<i64>, Option<i32>, Option<i64>, Option<&str>) {
+    (
+        row.value_cents,
+        row.value_bps,
+        row.value_millis,
+        row.text_value.as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2411,6 +2423,39 @@ mod tests {
             replay.rejected[0].code,
             EvidenceRejectionCode::NotKnownAtDecision
         );
+    }
+
+    /// Parity with Kotlin `valueKey()`: same knowledge+publication rank and a
+    /// different money payload must refuse even when other value slots are None.
+    /// (Rust previously required every optional slot to differ via `&&`, so
+    /// `None != None` short-circuited and silently accepted conflicts.)
+    #[test]
+    fn equal_rank_conflicting_money_observations_refuse() {
+        let mut a = evidence("a", "revenue", "2025-02-10T12:00:00Z", 100_000);
+        let mut b = evidence("b", "revenue", "2025-02-10T12:00:00Z", 120_000);
+        a.revision_id = "r1".into();
+        b.revision_id = "r2".into();
+        let err = replay_point_in_time(&[a, b], "2025-03-31T23:59:59Z")
+            .expect_err("equal-rank conflict must refuse");
+        assert_eq!(err.code, ValuationRefusalReasonCode::DuplicateEvidence);
+        assert!(
+            err.detail
+                .contains("conflicting evidence at the same publication rank"),
+            "detail={}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn equal_rank_identical_money_selects_last_revision() {
+        let mut a = evidence("a", "revenue", "2025-02-10T12:00:00Z", 100_000);
+        let mut b = evidence("b", "revenue", "2025-02-10T12:00:00Z", 100_000);
+        a.revision_id = "r1".into();
+        b.revision_id = "r2".into();
+        let replay =
+            replay_point_in_time(&[a, b], "2025-03-31T23:59:59Z").expect("identical value");
+        assert_eq!(replay.selected.len(), 1);
+        assert_eq!(replay.selected[0].id, "b");
     }
 
     #[test]
