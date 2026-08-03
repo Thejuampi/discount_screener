@@ -17,6 +17,13 @@ import kotlin.math.roundToInt
 private const val DCF_OPPORTUNITY_THRESHOLD_BPS = 2_000
 private const val DCF_EXPENSIVE_THRESHOLD_BPS = -1_000
 
+/**
+ * Quant Engine (FCFF / residual income / DCF scenarios) is diagnostic-only for ranking
+ * until model quality is trustworthy. Detail / Quant Lens still compute and display it.
+ * Flip only after an explicit product decision to re-enable.
+ */
+private const val RANKING_INCLUDES_QUANT_ENGINE = false
+
 // AggressiveV2 tuning constants. Centralised so future calibration changes one place.
 private const val V2_FUND_FCF_YIELD_LOWER = -0.02
 private const val V2_FUND_FCF_YIELD_UPPER = 0.08
@@ -420,7 +427,7 @@ object OpportunityEngine {
                 signals += "Weighted+"
             }
         }
-        if (analysis != null) {
+        if (RANKING_INCLUDES_QUANT_ENGINE && analysis != null) {
             available = true
             when (dcfSignal(analysis, detail.marketPriceCents)) {
                 DcfSignal.Opportunity -> {
@@ -614,7 +621,7 @@ object OpportunityEngine {
             }
         }
 
-        if (analysis != null) {
+        if (RANKING_INCLUDES_QUANT_ENGINE && analysis != null) {
             available = true
             when (val marginBps = dcfMarginOfSafetyBps(analysis, detail.marketPriceCents) ?: 0) {
                 in 4_000..Int.MAX_VALUE -> {
@@ -785,12 +792,14 @@ object OpportunityEngine {
             }
         }
 
-        analysis?.let { dcf ->
-            dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
-                valuationInputs += WeightedForecastRamp(
-                    ramp = smoothRamp(marginBps.toDouble(), V2_FORECAST_UPSIDE_LOWER_BPS, V2_FORECAST_UPSIDE_UPPER_BPS),
-                    reliability = V2_FORECAST_DCF_RELIABILITY,
-                )
+        if (RANKING_INCLUDES_QUANT_ENGINE) {
+            analysis?.let { dcf ->
+                dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
+                    valuationInputs += WeightedForecastRamp(
+                        ramp = smoothRamp(marginBps.toDouble(), V2_FORECAST_UPSIDE_LOWER_BPS, V2_FORECAST_UPSIDE_UPPER_BPS),
+                        reliability = V2_FORECAST_DCF_RELIABILITY,
+                    )
+                }
             }
         }
 
@@ -1028,12 +1037,14 @@ object OpportunityEngine {
             }
         }
 
-        analysis?.let { dcf ->
-            dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
-                valuationInputs += WeightedForecastRamp(
-                    ramp = smoothRamp(marginBps.toDouble(), V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
-                    reliability = V3_FORECAST_DCF_RELIABILITY,
-                )
+        if (RANKING_INCLUDES_QUANT_ENGINE) {
+            analysis?.let { dcf ->
+                dcfMarginOfSafetyBps(dcf, detail.marketPriceCents)?.let { marginBps ->
+                    valuationInputs += WeightedForecastRamp(
+                        ramp = smoothRamp(marginBps.toDouble(), V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
+                        reliability = V3_FORECAST_DCF_RELIABILITY,
+                    )
+                }
             }
         }
 
@@ -1086,18 +1097,20 @@ object OpportunityEngine {
             reliableEvidenceWeight += weight * externalFreshness
         }
 
-        analysis?.let { dcf ->
-            val base = dcf.baseIntrinsicValueCents
-            val bear = dcf.bearIntrinsicValueCents
-            val bull = dcf.bullIntrinsicValueCents
-            if (base > 0L && bull >= base && base >= bear && bull > bear) {
-                val widthFraction = (bull - bear).toDouble() / base.toDouble()
-                acc.add(
-                    V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
-                    -smoothRamp(widthFraction, V3_FORECAST_DCF_WIDTH_LOWER, V3_FORECAST_DCF_WIDTH_UPPER),
-                    "DcfUnc",
-                )
-                reliableEvidenceWeight += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT
+        if (RANKING_INCLUDES_QUANT_ENGINE) {
+            analysis?.let { dcf ->
+                val base = dcf.baseIntrinsicValueCents
+                val bear = dcf.bearIntrinsicValueCents
+                val bull = dcf.bullIntrinsicValueCents
+                if (base > 0L && bull >= base && base >= bear && bull > bear) {
+                    val widthFraction = (bull - bear).toDouble() / base.toDouble()
+                    acc.add(
+                        V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
+                        -smoothRamp(widthFraction, V3_FORECAST_DCF_WIDTH_LOWER, V3_FORECAST_DCF_WIDTH_UPPER),
+                        "DcfUnc",
+                    )
+                    reliableEvidenceWeight += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT
+                }
             }
         }
 

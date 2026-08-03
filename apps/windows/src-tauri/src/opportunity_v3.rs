@@ -63,6 +63,10 @@ const V3_FORECAST_DCF_WIDTH_LOWER: f64 = 0.2;
 const V3_FORECAST_DCF_WIDTH_UPPER: f64 = 1.0;
 const V3_FORECAST_FRESHNESS_WEIGHT: f64 = 4.0;
 const V3_FORECAST_DCF_RELIABILITY: f64 = 0.75;
+/// Quant Engine (FCFF / residual income / scenario width) is diagnostic-only for
+/// ranking until model quality is trustworthy. Detail / Quant Lens still compute
+/// and display it. Flip only after an explicit product decision to re-enable.
+const RANKING_INCLUDES_QUANT_ENGINE: bool = false;
 const V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT: f64 = 25.0;
 const V3_FORECAST_FULL_WEIGHT: f64 = V3_FORECAST_VALUATION_WEIGHT
     + V3_FORECAST_REC_WEIGHT
@@ -315,7 +319,10 @@ struct WeightedForecastRamp {
     reliability: f64,
 }
 
-/// Android AggressiveV3 forecast: reliability-weighted valuation blend + gates.
+/// Android AggressiveV3 forecast: reliability-weighted Street valuation + gates.
+///
+/// Quant Engine analysis is accepted for API parity but ignored while
+/// [`RANKING_INCLUDES_QUANT_ENGINE`] is false (product: engine still too noisy).
 pub fn score_forecast_v3(
     row: &CandidateRow,
     dcf: Option<&DcfAnalysis>,
@@ -361,19 +368,22 @@ pub fn score_forecast_v3(
         }
     }
 
-    if let Some(analysis) = dcf {
-        if analysis.base_intrinsic_value_cents > 0 && row.market_price_cents > 0 {
-            if let Some(margin_bps) =
-                checked_upside_bps(row.market_price_cents, analysis.base_intrinsic_value_cents)
-            {
-                valuation_inputs.push(WeightedForecastRamp {
-                    ramp: smooth_ramp(
-                        margin_bps as f64,
-                        V3_FORECAST_UPSIDE_LOWER_BPS,
-                        V3_FORECAST_UPSIDE_UPPER_BPS,
-                    ),
-                    reliability: V3_FORECAST_DCF_RELIABILITY,
-                });
+    // Keep the blend path for a future re-enable; do not feed model noise into rank now.
+    if RANKING_INCLUDES_QUANT_ENGINE {
+        if let Some(analysis) = dcf {
+            if analysis.base_intrinsic_value_cents > 0 && row.market_price_cents > 0 {
+                if let Some(margin_bps) =
+                    checked_upside_bps(row.market_price_cents, analysis.base_intrinsic_value_cents)
+                {
+                    valuation_inputs.push(WeightedForecastRamp {
+                        ramp: smooth_ramp(
+                            margin_bps as f64,
+                            V3_FORECAST_UPSIDE_LOWER_BPS,
+                            V3_FORECAST_UPSIDE_UPPER_BPS,
+                        ),
+                        reliability: V3_FORECAST_DCF_RELIABILITY,
+                    });
+                }
             }
         }
     }
@@ -454,22 +464,24 @@ pub fn score_forecast_v3(
         }
     }
 
-    if let Some(analysis) = dcf {
-        let base = analysis.base_intrinsic_value_cents;
-        let bear = analysis.bear_intrinsic_value_cents;
-        let bull = analysis.bull_intrinsic_value_cents;
-        if base > 0 && bull >= base && base >= bear && bull > bear {
-            let width = (bull - bear) as f64 / base as f64;
-            acc.add(
-                V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
-                -smooth_ramp(
-                    width,
-                    V3_FORECAST_DCF_WIDTH_LOWER,
-                    V3_FORECAST_DCF_WIDTH_UPPER,
-                ),
-                "DcfUnc",
-            );
-            reliable += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT;
+    if RANKING_INCLUDES_QUANT_ENGINE {
+        if let Some(analysis) = dcf {
+            let base = analysis.base_intrinsic_value_cents;
+            let bear = analysis.bear_intrinsic_value_cents;
+            let bull = analysis.bull_intrinsic_value_cents;
+            if base > 0 && bull >= base && base >= bear && bull > bear {
+                let width = (bull - bear) as f64 / base as f64;
+                acc.add(
+                    V3_FORECAST_DCF_UNCERTAINTY_WEIGHT,
+                    -smooth_ramp(
+                        width,
+                        V3_FORECAST_DCF_WIDTH_LOWER,
+                        V3_FORECAST_DCF_WIDTH_UPPER,
+                    ),
+                    "DcfUnc",
+                );
+                reliable += V3_FORECAST_DCF_UNCERTAINTY_WEIGHT;
+            }
         }
     }
 
@@ -700,12 +712,114 @@ pub fn setup_from_v3_composite(composite: i32) -> (i32, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ConfidenceBand, QualificationStatus};
 
     #[test]
     fn rsi_level_ramp_mid_zone_positive() {
         assert!((v3_rsi_level_ramp(55.0) - 1.0).abs() < 1e-9);
         assert!(v3_rsi_level_ramp(30.0) < 0.0);
         assert!(v3_rsi_level_ramp(85.0) < 0.0);
+    }
+
+    fn forecast_row() -> CandidateRow {
+        CandidateRow {
+            symbol: "TEST".into(),
+            company_name: None,
+            market_price_cents: 10_000,
+            previous_close_cents: 10_000,
+            next_earnings_epoch: None,
+            // Street target mean mapped into intrinsic_value_cents on Windows rows.
+            intrinsic_value_cents: 15_000,
+            gap_bps: Some(5_000),
+            qualification: QualificationStatus::Qualified,
+            confidence: ConfidenceBand::High,
+            signal_status: ExternalSignalStatus::Supportive,
+            analyst_opinion_count: Some(12),
+            recommendation_mean_hundredths: Some(200),
+            sector_name: None,
+            low_fair_value_cents: Some(12_000),
+            high_fair_value_cents: Some(18_000),
+            strong_buy_count: Some(4),
+            buy_count: Some(4),
+            hold_count: Some(2),
+            sell_count: Some(1),
+            strong_sell_count: Some(1),
+            free_cash_flow_dollars: None,
+            operating_cash_flow_dollars: None,
+            market_cap_dollars: None,
+            return_on_equity_bps: None,
+            earnings_growth_bps: None,
+            debt_to_equity_hundredths: None,
+            total_cash_dollars: None,
+            total_debt_dollars: None,
+            forward_pe_hundredths: None,
+            price_to_book_hundredths: None,
+            enterprise_to_ebitda_hundredths: None,
+            beta_millis: None,
+            shares_outstanding: None,
+            dcf_value_cents: None,
+            insider_net_shares_90d: None,
+            insider_buy_count: None,
+            insider_sell_count: None,
+        }
+    }
+
+    fn huge_dcf() -> DcfAnalysis {
+        use crate::dcf_model::{
+            BusinessClass, DiscountRateKind, ValuationModel, WaccFieldSource, WaccInputProvenance,
+        };
+        DcfAnalysis {
+            bear_intrinsic_value_cents: 40_000,
+            base_intrinsic_value_cents: 80_000,
+            bull_intrinsic_value_cents: 160_000,
+            wacc_bps: 900,
+            base_growth_bps: 500,
+            net_debt_dollars: 0,
+            wacc_inputs: WaccInputProvenance {
+                market_cap: WaccFieldSource::Reported,
+                beta: WaccFieldSource::Reported,
+                total_debt: WaccFieldSource::Reported,
+                total_cash: WaccFieldSource::Reported,
+                cost_of_debt: WaccFieldSource::Default,
+                tax_rate: WaccFieldSource::Default,
+                wacc_clamped: false,
+            },
+            source: "test".into(),
+            engine_version: "test".into(),
+            model_policy_version: "test".into(),
+            business_class: BusinessClass::OperatingNonFinancial,
+            model: ValuationModel::FcffWacc,
+            discount_rate_kind: DiscountRateKind::Wacc,
+            stable_growth_bps: 250,
+            book_value_per_share_cents: None,
+            roe0_bps: None,
+            reason_codes: vec![],
+            diagnostics: Default::default(),
+        }
+    }
+
+    #[test]
+    fn forecast_score_ignores_quant_engine_while_ranking_flag_is_off() {
+        assert!(
+            !RANKING_INCLUDES_QUANT_ENGINE,
+            "product policy: Quant Engine stays out of ranking until quality improves"
+        );
+        let row = forecast_row();
+        let without = score_forecast_v3(&row, None);
+        let with = score_forecast_v3(&row, Some(&huge_dcf()));
+        assert_eq!(
+            without.0, with.0,
+            "opening/having DCF must not change forecast score; without={:?} with={:?}",
+            without.0, with.0
+        );
+        assert_eq!(
+            without.1, with.1,
+            "DCF signals must not appear in forecast signals while excluded from ranking"
+        );
+        assert!(
+            without.0.is_some(),
+            "Street-only path should still produce a forecast score"
+        );
     }
 
     #[test]

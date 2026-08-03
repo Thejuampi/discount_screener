@@ -904,21 +904,19 @@ fn forward_lane_retention_decomposition_audit() {
             .as_ref()
             .ok()
             .map(|evidence| (evidence.revenue_growth_bps, evidence.earnings_growth_bps));
-        let forward_evidence =
-            fetched_forecast
-                .map_err(|error| match error {
-                    crate::fetcher::ForwardForecastFetchError::Provider(reason) => {
-                        crate::operating_valuation_runtime::ForwardSourceFailure::Provider(reason)
-                    }
-                    crate::fetcher::ForwardForecastFetchError::Transport(error)
-                        if crate::yahoo_session::is_rate_limit_error(&error) =>
-                    {
-                        crate::operating_valuation_runtime::ForwardSourceFailure::RateLimited
-                    }
-                    crate::fetcher::ForwardForecastFetchError::Transport(_) => {
-                        crate::operating_valuation_runtime::ForwardSourceFailure::Transport
-                    }
-                });
+        let forward_evidence = fetched_forecast.map_err(|error| match error {
+            crate::fetcher::ForwardForecastFetchError::Provider(reason) => {
+                crate::operating_valuation_runtime::ForwardSourceFailure::Provider(reason)
+            }
+            crate::fetcher::ForwardForecastFetchError::Transport(error)
+                if crate::yahoo_session::is_rate_limit_error(&error) =>
+            {
+                crate::operating_valuation_runtime::ForwardSourceFailure::RateLimited
+            }
+            crate::fetcher::ForwardForecastFetchError::Transport(_) => {
+                crate::operating_valuation_runtime::ForwardSourceFailure::Transport
+            }
+        });
         let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
             crate::operating_valuation_runtime::RuntimeValuationInput {
                 business_class: class,
@@ -1027,8 +1025,15 @@ fn forward_lane_retention_decomposition_audit() {
         // Explicitly projects `resolved_bps`, not the production rate: production
         // still reads the flat cap, so reusing its value would print the same
         // number in both columns and hide the whole comparison.
-        let value_blend =
-            project_probe(eps as f64, growth.resolved_bps, rate, stable, hold, fade, None);
+        let value_blend = project_probe(
+            eps as f64,
+            growth.resolved_bps,
+            rate,
+            stable,
+            hold,
+            fade,
+            None,
+        );
         eprintln!(
             "G0 {:<6} consensus={:>6} own={:>7?} dev={:>6} w_cons={:>5} g0_old={:>6} g0_new={:>6} $old={:>9.2} $new={:>9.2} delta={:>7.1}%",
             symbol,
@@ -1047,10 +1052,8 @@ fn forward_lane_retention_decomposition_audit() {
             },
         );
         // Production resolution, exactly as the router sees it.
-        let production_roic = crate::operating_valuation_runtime::return_on_capital_bps(
-            &fund,
-            analysis.as_ref(),
-        );
+        let production_roic =
+            crate::operating_valuation_runtime::return_on_capital_bps(&fund, analysis.as_ref());
         let payout = crate::operating_valuation::terminal_payout_bps(production_roic, rate, stable);
         eprintln!(
             "ROW {:<6} {:>7} {:>7} {:>6} {:>6} {:>4} {:>4} {:>5} {:>6} {:>7} {:>6.0} {:>7.0} {:>7?} {:>6} {:>6} {:>6} {:>6.0} {:>7} {:>7} {:>8.0} {:>8.0}",

@@ -321,22 +321,25 @@ class AggressiveV3ScoringTest {
     }
 
     @Test
-    fun wide_dcf_scenario_scores_below_narrow_scenario() {
-        val narrow = OpportunityEngine.aggressiveV3ForecastScore(
-            baseDetail(
-                weightedExternalSignalFairValueCents = 15_000,
-                analystOpinionCount = 10,
-            ),
-            analysis = dcf(base = 15_000, bear = 14_000, bull = 16_000),
-        ).first!!
-        val wide = OpportunityEngine.aggressiveV3ForecastScore(
-            baseDetail(
-                weightedExternalSignalFairValueCents = 15_000,
-                analystOpinionCount = 10,
-            ),
+    fun forecast_score_ignores_quant_engine_analysis() {
+        val detail = baseDetail(
+            weightedExternalSignalFairValueCents = 15_000,
+            analystOpinionCount = 10,
+        )
+        val without = OpportunityEngine.aggressiveV3ForecastScore(detail, analysis = null)
+        val withHuge = OpportunityEngine.aggressiveV3ForecastScore(
+            detail,
+            analysis = dcf(base = 80_000, bear = 40_000, bull = 160_000),
+        )
+        val withWide = OpportunityEngine.aggressiveV3ForecastScore(
+            detail,
             analysis = dcf(base = 15_000, bear = 5_000, bull = 30_000),
-        ).first!!
-        assertTrue(narrow > wide, "narrow=$narrow wide=$wide")
+        )
+        assertEquals(without.first, withHuge.first)
+        assertEquals(without.first, withWide.first)
+        assertEquals(without.second, withHuge.second)
+        assertEquals(without.second, withWide.second)
+        assertNotNull(without.first)
     }
 
     @Test

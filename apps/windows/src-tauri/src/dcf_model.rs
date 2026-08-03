@@ -578,7 +578,9 @@ pub fn extract_normalized_fcff_level(
         maintenance_capex_intensity_bps: drivers.maintenance_capex_intensity_bps,
         annual_reported_fcff_margin_bps: annual_reported,
         base_growth_bps: drivers.base_growth_bps,
-        acquisition_contaminated_growth_years: drivers.acquisition_contaminated_growth_years.clone(),
+        acquisition_contaminated_growth_years: drivers
+            .acquisition_contaminated_growth_years
+            .clone(),
         normalized_after_tax_interest_margin_bps: drivers.normalized_after_tax_interest_margin_bps,
         years,
     })
@@ -1558,8 +1560,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         points.push(AlignedDriverYear {
             year: point.year,
             revenue_dollars: revenue,
-            fcff_margin_bps: bridge
-                .map(|(fcff, _)| ((fcff / revenue) * 10_000.0).round() as i32),
+            fcff_margin_bps: bridge.map(|(fcff, _)| ((fcff / revenue) * 10_000.0).round() as i32),
             ocf_margin_bps,
             capex_intensity_bps,
             after_tax_interest_margin_bps: bridge
@@ -3263,15 +3264,25 @@ mod tests {
 
     #[test]
     fn reporting_basis_break_refuses_rather_than_pooling_two_issuers() {
-        let analysis = compute(&operating_fund(), &separation_history(2024), Some(1_000), "test");
+        let analysis = compute(
+            &operating_fund(),
+            &separation_history(2024),
+            Some(1_000),
+            "test",
+        );
 
         assert!(analysis.is_err());
     }
 
     #[test]
     fn reporting_basis_break_normalizes_only_the_surviving_issuer() {
-        let analysis = compute(&operating_fund(), &separation_history(2022), Some(1_000), "test")
-            .expect("three post-break years are enough to normalize the successor");
+        let analysis = compute(
+            &operating_fund(),
+            &separation_history(2022),
+            Some(1_000),
+            "test",
+        )
+        .expect("three post-break years are enough to normalize the successor");
 
         assert_eq!(
             analysis.diagnostics.latest_revenue_dollars,

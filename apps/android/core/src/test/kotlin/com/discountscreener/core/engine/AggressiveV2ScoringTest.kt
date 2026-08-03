@@ -329,10 +329,10 @@ class AggressiveV2ScoringTest {
     // -----------------------------------------------------------------------------
 
     @Test
-    fun forecast_blends_weighted_and_dcf_upside_instead_of_summing_them() {
+    fun forecast_score_ignores_quant_engine_analysis() {
         val analysisModerate = DcfAnalysis(
             bearIntrinsicValueCents = 12_500,
-            baseIntrinsicValueCents = 13_000, // ~23% upside vs 10000 -> ramp ~+0.43
+            baseIntrinsicValueCents = 13_000,
             bullIntrinsicValueCents = 13_500,
             waccBps = 900,
             baseGrowthBps = 1_200,
@@ -340,11 +340,12 @@ class AggressiveV2ScoringTest {
         )
         val detail = baseDetail(
             marketPriceCents = 10_000,
-            weightedExternalSignalFairValueCents = 13_000, // ~30% upside, also moderate
+            weightedExternalSignalFairValueCents = 13_000,
             analystOpinionCount = 12,
         )
 
-        val onlyWeighted = OpportunityEngine.aggressiveV2ForecastScore(detail, analysis = null).first!!
+        val onlyWeighted = OpportunityEngine.aggressiveV2ForecastScore(detail, analysis = null)
+        val both = OpportunityEngine.aggressiveV2ForecastScore(detail, analysisModerate)
         val onlyDcf = OpportunityEngine.aggressiveV2ForecastScore(
             detail.copy(
                 externalSignalFairValueCents = null,
@@ -353,15 +354,11 @@ class AggressiveV2ScoringTest {
                 analystOpinionCount = null,
             ),
             analysisModerate,
-        ).first!!
-        val both = OpportunityEngine.aggressiveV2ForecastScore(detail, analysisModerate).first!!
-
-        val lower = minOf(onlyWeighted, onlyDcf)
-        val upper = maxOf(onlyWeighted, onlyDcf)
-        assertTrue(
-            both in lower..upper,
-            "weighted+DCF should blend between the standalone signals; weighted=$onlyWeighted dcf=$onlyDcf both=$both",
         )
+
+        assertEquals(onlyWeighted.first, both.first)
+        assertEquals(onlyWeighted.second, both.second)
+        assertNull(onlyDcf.first, "DCF alone must not create a ranking forecast score")
     }
 
     // -----------------------------------------------------------------------------
@@ -422,14 +419,7 @@ class AggressiveV2ScoringTest {
 
     @Test
     fun stale_forecast_bucket_decays_below_a_fresh_one() {
-        val analysis = DcfAnalysis(
-            bearIntrinsicValueCents = 15_000,
-            baseIntrinsicValueCents = 18_000,
-            bullIntrinsicValueCents = 21_000,
-            waccBps = 900,
-            baseGrowthBps = 1_200,
-            netDebtDollars = 0,
-        )
+        // Street-only anchors (Quant Engine is excluded from ranking).
         val fresh = OpportunityEngine.aggressiveV2ForecastScore(
             baseDetail(
                 weightedExternalSignalFairValueCents = 18_000,
@@ -437,7 +427,7 @@ class AggressiveV2ScoringTest {
                 recommendationMeanHundredths = 160,
                 externalSignalAgeSeconds = 0,
             ),
-            analysis,
+            analysis = null,
         ).first!!
         val stale = OpportunityEngine.aggressiveV2ForecastScore(
             baseDetail(
@@ -446,10 +436,13 @@ class AggressiveV2ScoringTest {
                 recommendationMeanHundredths = 160,
                 externalSignalAgeSeconds = 60L * 86_400L, // 60 days
             ),
-            analysis,
-        ).first!!
+            analysis = null,
+        ).first
         assertTrue(fresh > 0)
-        assertTrue(stale < fresh, "stale forecast bucket should be smaller than fresh; fresh=$fresh stale=$stale")
+        assertTrue(
+            stale == null || stale < fresh,
+            "stale forecast bucket should decay or drop below reliability; fresh=$fresh stale=$stale",
+        )
     }
 
     // -----------------------------------------------------------------------------

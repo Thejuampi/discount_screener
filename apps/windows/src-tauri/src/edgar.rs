@@ -214,7 +214,10 @@ fn annual_candidates_with_shape(
             .get("segment")
             .map_or(true, serde_json::Value::is_null);
         if consolidated {
-            consolidated_values.entry(end.clone()).or_default().push(val);
+            consolidated_values
+                .entry(end.clone())
+                .or_default()
+                .push(val);
         }
         let candidate = AnnualCandidate {
             end: end.clone(),
@@ -1077,8 +1080,7 @@ pub fn fetch_fcf_history(
                             None,
                         );
                         point = point.with_acquisition_investment(acquisition_investment_dollars);
-                        point =
-                            point.with_diluted_average_shares(by_year(&diluted_shares, v.year));
+                        point = point.with_diluted_average_shares(by_year(&diluted_shares, v.year));
                         point = point.with_reporting_basis_broken(
                             restated_revenue_years.contains(&v.year)
                                 && !restated_ocf_years.contains(&v.year),
@@ -1245,7 +1247,9 @@ mod tests {
         use crate::sec_driver_normalization_policy_generated as policy;
         let client = edgar_client();
         let cik_map = fetch_cik_map(&client).expect("CIK");
-        for &symbol in &["AAPL", "MSFT", "GOOGL", "AMZN", "CSCO", "PG", "JNJ", "TXN", "HD", "KO"] {
+        for &symbol in &[
+            "AAPL", "MSFT", "GOOGL", "AMZN", "CSCO", "PG", "JNJ", "TXN", "HD", "KO",
+        ] {
             let cik = cik_map[symbol];
             let url = format!(
                 "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
@@ -1299,7 +1303,10 @@ mod tests {
                 .json()
                 .unwrap();
             for (label, concepts) in [
-                ("REV", crate::sec_driver_normalization_policy_generated::REVENUE.qnames),
+                (
+                    "REV",
+                    crate::sec_driver_normalization_policy_generated::REVENUE.qnames,
+                ),
                 (
                     "OCF",
                     crate::sec_driver_normalization_policy_generated::OPERATING_CASH_FLOW.qnames,

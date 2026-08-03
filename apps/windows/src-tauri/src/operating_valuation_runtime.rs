@@ -765,7 +765,9 @@ fn unlevered_return_on_equity_bps(
     fundamentals: &FundamentalSnapshot,
     after_tax_cost_of_debt_bps: i32,
 ) -> Option<i32> {
-    let roe = fundamentals.return_on_equity_bps.filter(|value| *value > 0)?;
+    let roe = fundamentals
+        .return_on_equity_bps
+        .filter(|value| *value > 0)?;
     let gearing_hundredths = fundamentals.debt_to_equity_hundredths.unwrap_or(0).max(0);
     if gearing_hundredths > MAX_MEANINGFUL_GEARING_HUNDREDTHS {
         return None;
@@ -1040,7 +1042,8 @@ mod tests {
 
     #[test]
     fn production_normalization_derives_growth_hold_and_complete_provenance() {
-        let normalized = normalize_forward_evidence(&evidence(), &fund(), None).expect("normalized");
+        let normalized =
+            normalize_forward_evidence(&evidence(), &fund(), None).expect("normalized");
         assert_eq!(normalized.forecast.near_growth_bps, 1_343);
         assert_eq!(normalized.hold_years, 0);
         assert!(normalized.forecast.source_fingerprint.contains("AMZN"));
