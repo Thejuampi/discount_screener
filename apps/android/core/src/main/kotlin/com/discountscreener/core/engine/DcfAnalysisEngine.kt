@@ -20,7 +20,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/15-owner-earnings-maintenance-capex"
+const val MODEL_POLICY_VERSION = "business-class-policy/16-growth-earned-sustaining-capex"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/1"
 
@@ -31,7 +31,12 @@ private const val BETA_INDUSTRY_WEIGHT_PCT = 33L
 private const val DEFAULT_INDUSTRY_BETA_MILLIS = 1_000
 private const val PROJECTION_YEARS = 5
 private const val PROJECTION_YEARS_SECULAR = 10
-private const val MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS = 1_500
+/**
+ * Rate at which productive assets are consumed and must be replaced, as a share
+ * of the capital stock (~10-year average asset life). Splits gross CapEx into
+ * sustaining and growth spend; see [maintenanceCapexIntensityBps].
+ */
+private const val ASSET_RENEWAL_RATE_BPS = 1_000
 private const val MAINTENANCE_CAPEX_MIN_REVENUE_BPS = 200
 /** Driver ratios are regime-sensitive; keep the recent multi-year window. */
 private const val DRIVER_RECENT_WINDOW = 5
@@ -657,24 +662,26 @@ object DcfAnalysisEngine {
         } else {
             Triple(recentOcfMargin, recentCapexIntensity, recentInterestMargin)
         }
-        // Parity with Windows owner-earnings / maintenance CapEx policy.
+        val bearGrowth = quantileBps(scenarioGrowths, 0.25)
+        val bullGrowth = quantileBps(scenarioGrowths, 0.75)
+        val baseGrowth = if (acquisitionGrowthMustBeZero) {
+            0
+        } else if (useCycleBlend) {
+            blendRecentPrior(medianBps(recentGrowths), medianBps(priorGrowths))
+                .coerceIn(bearGrowth, bullGrowth)
+        } else {
+            medianBps(recentGrowths)
+        }
+
+        // Parity with Windows owner-earnings / sustaining CapEx policy.
         val nonnegMargins = margins.filter { it >= 0 }
         val annualBaseMargin = if (nonnegMargins.size >= 2) {
             medianBps(nonnegMargins)
         } else {
             medianBps(margins)
         }
-        val allCapex = driverPoints.map { it.capexIntensityBps }
         val latestCapex = driverPoints.lastOrNull()?.capexIntensityBps
-        val historicalCapexP25 = if (allCapex.size >= 4) {
-            quantileBps(allCapex, 0.25)
-        } else {
-            medianBps(allCapex)
-        }
-        val maintenanceCapex = historicalCapexP25
-            .coerceAtMost((normalizedOcfMargin.toLong() * MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS / 10_000L).toInt())
-            .coerceAtLeast(MAINTENANCE_CAPEX_MIN_REVENUE_BPS)
-            .coerceAtMost(normalizedCapexIntensity.coerceAtLeast(historicalCapexP25))
+        val maintenanceCapex = maintenanceCapexIntensityBps(normalizedCapexIntensity, baseGrowth)
         val ownerEarningsMargin = (normalizedOcfMargin + normalizedInterestMargin - maintenanceCapex)
             .coerceAtLeast(0)
         val capexSpikes = driverPoints.filter { it.capexSpike }.map { it.year }
@@ -687,16 +694,6 @@ object DcfAnalysisEngine {
             maxOf(baseMargin, quantileBps(margins, 0.75), ownerEarningsMargin)
         } else {
             quantileBps(margins, 0.75).coerceAtLeast(baseMargin)
-        }
-        val bearGrowth = quantileBps(scenarioGrowths, 0.25)
-        val bullGrowth = quantileBps(scenarioGrowths, 0.75)
-        val baseGrowth = if (acquisitionGrowthMustBeZero) {
-            0
-        } else if (useCycleBlend) {
-            blendRecentPrior(medianBps(recentGrowths), medianBps(priorGrowths))
-                .coerceIn(bearGrowth, bullGrowth)
-        } else {
-            medianBps(recentGrowths)
         }
         val growthDispersion = if (acquisitionGrowthMustBeZero) {
             0
@@ -861,6 +858,26 @@ object DcfAnalysisEngine {
         } else {
             sorted[middle]
         }
+    }
+
+    /**
+     * Sustaining CapEx intensity (bps of revenue) under the steady-state capital
+     * identity `k = c*(d + g)`: a business reinvesting `k` of revenue while
+     * growing at `g` spends `k*d/(d+g)` holding its asset base and the remainder
+     * expanding it.
+     *
+     * Growth CapEx therefore has to be earned by revenue growth. It is not a
+     * function of how profitable the business is — a cable network at 28% OCF
+     * margin needs the same plant renewal as one at 10%. Shrinking businesses do
+     * not earn negative maintenance: growth is floored at zero, so sustaining
+     * CapEx never exceeds the capital intensity it comes from.
+     */
+    private fun maintenanceCapexIntensityBps(capexIntensityBps: Int, revenueGrowthBps: Int): Int {
+        val capex = capexIntensityBps.coerceAtLeast(0)
+        val renewal = ASSET_RENEWAL_RATE_BPS.toLong()
+        val growth = revenueGrowthBps.coerceAtLeast(0).toLong()
+        val sustaining = (capex.toLong() * renewal / (renewal + growth)).toInt()
+        return sustaining.coerceIn(MAINTENANCE_CAPEX_MIN_REVENUE_BPS.coerceAtMost(capex), capex)
     }
 
     private fun quantileBps(values: List<Int>, quantile: Double): Int {

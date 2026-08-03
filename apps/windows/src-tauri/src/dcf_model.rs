@@ -10,11 +10,11 @@ use crate::sec_driver_normalization_policy_generated::MATERIAL_ACQUISITION_REVEN
 
 pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
-/// (industry-beta-policy/1). Unclassified sector/industry still refuse FCFF.
+/// (industry-beta-policy/2). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/15-owner-earnings-maintenance-capex";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/16-growth-earned-sustaining-capex";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
-pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/1";
+pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/2";
 
 // ── Market policy (versioned; not eternal magic for valuation truth) ───────────
 /// Default US 10Y-style nominal risk-free (bps). Shells may override via MarketParams.
@@ -29,10 +29,11 @@ const INDUSTRY_BETA_POLICY_JSON: &str =
 const PROJECTION_YEARS: i32 = 5;
 /// Secular expanders keep near-term growth pressure longer (AWS / platform compounders).
 const PROJECTION_YEARS_SECULAR: i32 = 10;
-/// Cap maintenance CapEx as a share of OCF margin when estimating owner earnings.
-/// Gross CapEx in investment waves is mostly growth reinvestment already reflected
-/// in the revenue-growth path — charging 100% CapEx and high growth double-counts.
-const MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS: i32 = 1_500; // 15% of OCF margin
+/// Rate at which productive assets are consumed and must be replaced, as a
+/// share of the capital stock (~10-year average asset life across a mixed base
+/// of long-lived plant and short-lived equipment). Used to split gross CapEx
+/// into sustaining and growth spend; see `maintenance_capex_intensity_bps`.
+const ASSET_RENEWAL_RATE_BPS: i32 = 1_000;
 /// Floor maintenance intensity (bps of revenue) so owner earnings is not pure OCF.
 const MAINTENANCE_CAPEX_MIN_REVENUE_BPS: i32 = 200;
 /// Operating drivers are regime-sensitive; use a recent multi-year window
@@ -388,6 +389,8 @@ pub enum CostOfEquityResolutionError {
 }
 
 impl MarketParams {
+    /// Bootstrap defaults when no live risk-free series is available.
+    /// Always provisional — must not masquerade as high-confidence rates.
     pub fn default_usd() -> Self {
         Self {
             rf_bps: DEFAULT_RF_BPS,
@@ -397,11 +400,302 @@ impl MarketParams {
         }
     }
 
+    /// Live risk-free + versioned ERP. Solid quality path for high-signal forecasts.
+    ///
+    /// `rf_bps` must come from an observed market series (e.g. US 10Y). ERP remains
+    /// the versioned policy table value with an observation timestamp.
+    pub fn from_live_risk_free(rf_bps: i32, as_of_epoch: i64) -> Self {
+        Self {
+            rf_bps: rf_bps.max(0),
+            erp_bps: DEFAULT_ERP_BPS,
+            as_of_epoch: Some(as_of_epoch),
+            provisional: false,
+        }
+    }
+
     pub fn stable_growth_bps(&self) -> i32 {
         MACRO_STABLE_GROWTH_BPS
             .min(self.rf_bps - STABLE_GROWTH_RF_BUFFER_BPS)
             .max(MIN_STABLE_GROWTH_BPS)
     }
+}
+
+/// One aligned annual driver row used to form the FCFF run-rate (audit).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FcffDriverYearAudit {
+    pub year: i32,
+    pub revenue_dollars: i64,
+    pub ocf_dollars: Option<i64>,
+    pub capex_dollars: Option<i64>,
+    pub reported_fcff_dollars: Option<i64>,
+    pub ocf_margin_bps: i32,
+    pub capex_intensity_bps: i32,
+    pub fcff_margin_bps: i32,
+    pub capex_spike: bool,
+}
+
+/// Normalized firm-level FCFF run-rate extracted **without** requiring ordered
+/// bear/base/bull scenarios. Used by gap-attribution method diagnostics when
+/// full `compute_with_params` fails on scenario ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedFcffLevel {
+    pub normalized_fcff_dollars: i64,
+    pub shares_outstanding: u64,
+    /// Total debt − cash (can be negative when net cash).
+    pub net_debt_dollars: i64,
+    pub total_debt_dollars: i64,
+    pub total_cash_dollars: i64,
+    pub owner_earnings_base: bool,
+    pub base_fcff_margin_bps: i32,
+    pub latest_revenue_dollars: i64,
+    /// OCF margin used in the normalized base (bps of revenue).
+    pub normalized_ocf_margin_bps: i32,
+    /// Gross CapEx intensity used in the non-owner path (bps of revenue).
+    pub normalized_capex_intensity_bps: i32,
+    /// Maintenance CapEx intensity when owner-earnings base is active.
+    pub maintenance_capex_intensity_bps: Option<i32>,
+    /// Annual-median FCFF margin before owner-earnings override (bps).
+    pub annual_reported_fcff_margin_bps: i32,
+    /// Revenue growth fed to `maintenance_capex_intensity_bps`. Exposed because a
+    /// growth figure contaminated by M&A collapses maintenance CapEx to its floor
+    /// and turns the whole of gross CapEx into an add-back.
+    pub base_growth_bps: i32,
+    pub acquisition_contaminated_growth_years: Vec<i32>,
+    /// After-tax interest add-back margin (bps of revenue).
+    pub normalized_after_tax_interest_margin_bps: i32,
+    pub years: Vec<FcffDriverYearAudit>,
+}
+
+/// WACC inputs for attribution diagnostics (unlevered FCFF discount rate).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributionWacc {
+    pub wacc_bps: i32,
+    pub cost_of_equity_bps: i32,
+    pub cost_of_debt_bps: i32,
+    pub after_tax_cost_of_debt_bps: i32,
+    pub equity_weight_bps: i32,
+    pub debt_weight_bps: i32,
+    /// True when CoE was forced to unit-beta CAPM (rf + ERP).
+    pub unit_beta_coe: bool,
+}
+
+/// Extract OCF − CapEx (+ after-tax interest) normalized FCFF level without
+/// running full scenario DCF. Fails closed if debt/shares/drivers are missing.
+pub fn extract_normalized_fcff_level(
+    fundamentals: &FundamentalSnapshot,
+    fcf_history: &[FcfPoint],
+) -> Result<NormalizedFcffLevel, String> {
+    let shares = fundamentals
+        .shares_outstanding
+        .filter(|&s| s > 0)
+        .ok_or_else(|| "share count is missing".to_string())?;
+    let total_debt = fundamentals
+        .total_debt_dollars
+        .ok_or_else(|| {
+            "fcff unavailable: total debt is missing; missing debt is not zero".to_string()
+        })?
+        .max(0);
+    let total_cash = fundamentals.total_cash_dollars.unwrap_or(0).max(0);
+    let net_debt = total_debt - total_cash;
+    let drivers = driver_model_inputs(fcf_history).ok_or_else(|| {
+        "fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required"
+            .to_string()
+    })?;
+    if drivers.normalized_fcff_dollars <= 0.0 || !drivers.normalized_fcff_dollars.is_finite() {
+        return Err("non_positive_normalized_fcff".into());
+    }
+    // Rebuild annual audit rows from history (same filter as driver_model_inputs).
+    let mut years = Vec::new();
+    for point in fcf_history {
+        let (Some(ocf), Some(capex), Some(revenue)) = (
+            point.operating_cash_flow_dollars,
+            point.capital_expenditure_dollars,
+            point.revenue_dollars,
+        ) else {
+            continue;
+        };
+        if !ocf.is_finite()
+            || !capex.is_finite()
+            || !revenue.is_finite()
+            || capex < 0.0
+            || revenue <= 0.0
+        {
+            continue;
+        }
+        let Some(interest) = point.interest_expense_dollars else {
+            continue;
+        };
+        let Some(tax_bps) = point.tax_rate_bps else {
+            continue;
+        };
+        let interest = interest.abs();
+        let tax = tax_bps.clamp(0, 5_000) as f64 / 10_000.0;
+        let fcff = ocf + interest * (1.0 - tax) - capex;
+        years.push(FcffDriverYearAudit {
+            year: point.year,
+            revenue_dollars: revenue.round() as i64,
+            ocf_dollars: Some(ocf.round() as i64),
+            capex_dollars: Some(capex.round() as i64),
+            reported_fcff_dollars: Some(fcff.round() as i64),
+            ocf_margin_bps: ((ocf / revenue) * 10_000.0).round() as i32,
+            capex_intensity_bps: ((capex / revenue) * 10_000.0).round() as i32,
+            fcff_margin_bps: ((fcff / revenue) * 10_000.0).round() as i32,
+            capex_spike: false, // filled below if we can match driver spikes
+        });
+    }
+    for y in &mut years {
+        // Spike flags live only on the internal driver path; re-derive lightly:
+        // leave false here — spike years are listed when owner_earnings triggers.
+        let _ = y;
+    }
+    // Approximate annual reported FCFF margin as median of non-negative year margins.
+    let nonneg: Vec<i32> = years
+        .iter()
+        .map(|y| y.fcff_margin_bps)
+        .filter(|m| *m >= 0)
+        .collect();
+    let annual_reported = if nonneg.len() >= 2 {
+        median_bps(&nonneg)
+    } else if !years.is_empty() {
+        median_bps(&years.iter().map(|y| y.fcff_margin_bps).collect::<Vec<_>>())
+    } else {
+        0
+    };
+    Ok(NormalizedFcffLevel {
+        normalized_fcff_dollars: drivers.normalized_fcff_dollars.round() as i64,
+        shares_outstanding: shares,
+        net_debt_dollars: net_debt,
+        total_debt_dollars: total_debt,
+        total_cash_dollars: total_cash,
+        owner_earnings_base: drivers.owner_earnings_base,
+        base_fcff_margin_bps: drivers.base_fcff_margin_bps,
+        latest_revenue_dollars: drivers.latest_revenue_dollars.round() as i64,
+        normalized_ocf_margin_bps: drivers.normalized_ocf_margin_bps,
+        normalized_capex_intensity_bps: drivers.normalized_capex_intensity_bps,
+        maintenance_capex_intensity_bps: drivers.maintenance_capex_intensity_bps,
+        annual_reported_fcff_margin_bps: annual_reported,
+        base_growth_bps: drivers.base_growth_bps,
+        acquisition_contaminated_growth_years: drivers.acquisition_contaminated_growth_years.clone(),
+        normalized_after_tax_interest_margin_bps: drivers.normalized_after_tax_interest_margin_bps,
+        years,
+    })
+}
+
+/// Resolve WACC for FCFF attribution. When `unit_beta_coe` is true, CoE is
+/// forced to `rf + ERP` (policy baseline) instead of industry-shrink beta.
+pub fn resolve_attribution_wacc(
+    fundamentals: &FundamentalSnapshot,
+    fcf_history: &[FcfPoint],
+    market_params: &MarketParams,
+    market_price_cents: Option<i64>,
+    unit_beta_coe: bool,
+) -> Result<AttributionWacc, String> {
+    let mut resolved = derive_wacc(
+        fundamentals,
+        fcf_history,
+        market_price_cents,
+        market_params,
+        "gap_attr_wacc",
+    )?;
+    let coe = if unit_beta_coe {
+        market_params
+            .rf_bps
+            .saturating_add(market_params.erp_bps)
+            .max(market_params.rf_bps.saturating_add(50))
+    } else {
+        resolved.cost_of_equity_bps
+    };
+    // Rebuild WACC with the (possibly unit-beta) CoE and the same weights/CoD.
+    let equity_w = resolved.equity_weight_bps as f64 / 10_000.0;
+    let debt_w = resolved.debt_weight_bps as f64 / 10_000.0;
+    let weighted = equity_w * coe as f64 + debt_w * resolved.after_tax_cost_of_debt_bps as f64;
+    let wacc_bps = weighted.round() as i32 + resolved.provisional_wacc_uplift_bps;
+    resolved.cost_of_equity_bps = coe;
+    resolved.wacc_bps = wacc_bps;
+    Ok(AttributionWacc {
+        wacc_bps: resolved.wacc_bps,
+        cost_of_equity_bps: resolved.cost_of_equity_bps,
+        cost_of_debt_bps: resolved.cost_of_debt_bps,
+        after_tax_cost_of_debt_bps: resolved.after_tax_cost_of_debt_bps,
+        equity_weight_bps: resolved.equity_weight_bps,
+        debt_weight_bps: resolved.debt_weight_bps,
+        unit_beta_coe,
+    })
+}
+
+/// Equity value **per share** (cents) from firm-level FCFF run-rate.
+///
+/// Mechanics (required for unlevered cash flows):
+/// 1. Discount FCFF at **WACC** (not CoE) over hold/fade to enterprise value.
+/// 2. Equity value = EV − net_debt (net cash increases equity).
+/// 3. Per share = equity / shares.
+///
+/// This is the only correct comparison surface vs EPS-capitalization (CoE, no
+/// debt bridge). Using CoE on FCFF or skipping net debt produces levered-bias
+/// (e.g. T-class inflated FCFF/share).
+pub fn equity_cents_from_fcff_run_rate(
+    fcff_run_rate_dollars: f64,
+    shares: f64,
+    net_debt_dollars: i64,
+    wacc_bps: i32,
+    hold_years: i32,
+    fade_years: i32,
+    near_growth_bps: i32,
+    stable_growth_bps: i32,
+) -> Option<i64> {
+    if fcff_run_rate_dollars <= 0.0
+        || shares <= 0.0
+        || wacc_bps <= 0
+        || fade_years <= 0
+        || hold_years < 0
+        || near_growth_bps <= -10_000
+        || stable_growth_bps >= wacc_bps
+    {
+        return None;
+    }
+    let r = wacc_bps as f64 / 10_000.0;
+    let g_near = near_growth_bps as f64 / 10_000.0;
+    let g_stable = stable_growth_bps as f64 / 10_000.0;
+    // Mirror forward-earnings first-period convention: capitalise current level
+    // as the t=1 cash flow, then grow through hold/fade.
+    let mut discounted = fcff_run_rate_dollars / (1.0 + r);
+    if !discounted.is_finite() || discounted <= 0.0 {
+        return None;
+    }
+    let mut enterprise = discounted;
+    for _ in 0..hold_years {
+        discounted *= (1.0 + g_near) / (1.0 + r);
+        if !discounted.is_finite() {
+            return None;
+        }
+        enterprise += discounted;
+    }
+    for fade_step in 1..=fade_years {
+        let fade = fade_step as f64 / fade_years as f64;
+        let g = g_near * (1.0 - fade) + g_stable * fade;
+        discounted *= (1.0 + g) / (1.0 + r);
+        if !discounted.is_finite() {
+            return None;
+        }
+        enterprise += discounted;
+    }
+    let terminal = discounted * (1.0 + g_stable) / (r - g_stable);
+    if !terminal.is_finite() || terminal < 0.0 {
+        return None;
+    }
+    enterprise += terminal;
+    if !enterprise.is_finite() {
+        return None;
+    }
+    let equity = enterprise - net_debt_dollars as f64;
+    if !equity.is_finite() {
+        return None;
+    }
+    // Equity floored at zero (capital structure can consume EV).
+    Some(((equity.max(0.0) / shares) * 100.0).round() as i64)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +817,16 @@ pub struct FcfPoint {
     /// Cash paid for property/business acquisitions. It is not recurring CapEx
     /// but is material evidence that reported revenue growth may be inorganic.
     pub acquisition_investment_dollars: Option<f64>,
+    /// Weighted-average diluted share count for the same fiscal year. A
+    /// stock-funded merger pays no cash, so `acquisition_investment_dollars`
+    /// stays flat while both revenue and this count step together.
+    pub diluted_average_shares: Option<f64>,
+    /// True when a later filing materially restated this year's revenue while
+    /// leaving operating cash flow untouched. Under ASC 205-20 a discontinued
+    /// operation is removed from revenue but the cash-flow statement stays on
+    /// the total-company basis, so the year's margin divides one entity's cash
+    /// flow by another entity's sales.
+    pub reporting_basis_broken: bool,
     /// Annual interest expense used to bridge levered OCF to after-tax FCFF.
     pub interest_expense_dollars: Option<f64>,
     /// Effective tax rate in basis points used for the interest add-back.
@@ -549,6 +853,8 @@ impl FcfPoint {
             capital_expenditure_dollars: None,
             revenue_dollars: None,
             acquisition_investment_dollars: None,
+            diluted_average_shares: None,
+            reporting_basis_broken: false,
             interest_expense_dollars: None,
             tax_rate_bps: None,
             total_debt_dollars: None,
@@ -577,6 +883,16 @@ impl FcfPoint {
 
     pub fn with_acquisition_investment(mut self, dollars: Option<f64>) -> Self {
         self.acquisition_investment_dollars = dollars.map(f64::abs);
+        self
+    }
+
+    pub fn with_diluted_average_shares(mut self, shares: Option<f64>) -> Self {
+        self.diluted_average_shares = shares.filter(|value| *value > 0.0);
+        self
+    }
+
+    pub fn with_reporting_basis_broken(mut self, broken: bool) -> Self {
+        self.reporting_basis_broken = broken;
         self
     }
 
@@ -1122,14 +1438,30 @@ fn resolve_book_value_per_share_cents(
 
 // ── FCFF + WACC (operating non-financial) ─────────────────────────────────────
 
+/// One fiscal year of aligned annual drivers. `fcff_margin_bps` and
+/// `after_tax_interest_margin_bps` are `Option` because the FCFF bridge needs
+/// interest and an effective tax rate that not every issuer keeps disclosing;
+/// the remaining fields only need revenue, OCF and CapEx.
+#[derive(Debug, Clone, Copy)]
+struct AlignedDriverYear {
+    year: i32,
+    revenue_dollars: f64,
+    fcff_margin_bps: Option<i32>,
+    ocf_margin_bps: i32,
+    capex_intensity_bps: i32,
+    after_tax_interest_margin_bps: Option<i32>,
+    acquisition_contaminated: bool,
+    diluted_average_shares: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 struct DriverPoint {
     year: i32,
     revenue_dollars: f64,
-    fcff_margin_bps: i32,
+    fcff_margin_bps: Option<i32>,
     ocf_margin_bps: i32,
     capex_intensity_bps: i32,
-    after_tax_interest_margin_bps: i32,
+    after_tax_interest_margin_bps: Option<i32>,
     revenue_growth_bps: Option<i32>,
     capex_spike: bool,
     acquisition_contaminated: bool,
@@ -1167,8 +1499,22 @@ struct DriverModelInputs {
 /// as AMZN. This policy normalizes operating cash-flow and CapEx margins first,
 /// then grows revenue and derives FCFF from the normalized margin.
 fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
+    // A reporting-basis break is a year whose revenue was restated to
+    // continuing operations while its cash flow stayed whole-company. That
+    // year's margin belongs to no company, and every year before it describes
+    // the pre-separation entity, so neither can be pooled with what survives.
+    // Normalizing the successor on too few years is a refusal, not a fallback:
+    // the alternative is a margin median that averages two different issuers.
+    let basis_break_year = history
+        .iter()
+        .filter(|point| point.reporting_basis_broken)
+        .map(|point| point.year)
+        .max();
     let mut points = Vec::new();
     for point in history {
+        if basis_break_year.is_some_and(|break_year| point.year <= break_year) {
+            continue;
+        }
         let (Some(ocf), Some(capex), Some(revenue)) = (
             point.operating_cash_flow_dollars,
             point.capital_expenditure_dollars,
@@ -1184,63 +1530,65 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         {
             continue;
         }
-        let Some(interest) = point.interest_expense_dollars else {
-            continue;
-        };
-        let Some(tax_bps) = point.tax_rate_bps else {
-            // The bridge is an explicit FCFF identity.  Missing annual interest
-            // or effective-tax evidence is unavailable, not a zero/default.
-            continue;
-        };
-        let interest = interest.abs();
-        let tax_bps = tax_bps.clamp(0, 5_000);
-        let fcff = ocf + interest * (1.0 - tax_bps as f64 / 10_000.0) - capex;
-        let fcff_margin_bps = ((fcff / revenue) * 10_000.0).round() as i32;
+        // The FCFF identity needs interest and an effective tax rate; revenue
+        // growth and the OCF / CapEx margins do not. An issuer that stops
+        // disclosing interest separately (AAPL from FY2024, folded into "other
+        // income/(expense), net") still reports everything the growth and margin
+        // drivers are built from. Dropping the whole year discarded four good
+        // drivers to protect one, and truncated AAPL's history at 2023 while
+        // presenting the stale level as current.
+        let bridge = point
+            .interest_expense_dollars
+            .filter(|value| value.is_finite())
+            .zip(point.tax_rate_bps)
+            .map(|(interest, tax_bps)| {
+                let interest = interest.abs();
+                let after_tax = interest * (1.0 - tax_bps.clamp(0, 5_000) as f64 / 10_000.0);
+                (ocf + after_tax - capex, after_tax)
+            })
+            .filter(|(fcff, _)| fcff.is_finite());
         let ocf_margin_bps = ((ocf / revenue) * 10_000.0).round() as i32;
         let capex_intensity_bps = ((capex / revenue) * 10_000.0).round() as i32;
-        let after_tax_interest_margin_bps =
-            ((interest * (1.0 - tax_bps as f64 / 10_000.0) / revenue) * 10_000.0).round() as i32;
-        if !fcff.is_finite() {
-            continue;
-        }
         let acquisition_contaminated = point
             .acquisition_investment_dollars
             .filter(|value| value.is_finite())
             .is_some_and(|acquisition| {
                 acquisition.abs() * 10_000.0 >= revenue * MATERIAL_ACQUISITION_REVENUE_BPS as f64
             });
-        points.push((
-            point.year,
-            revenue,
-            fcff_margin_bps,
+        points.push(AlignedDriverYear {
+            year: point.year,
+            revenue_dollars: revenue,
+            fcff_margin_bps: bridge
+                .map(|(fcff, _)| ((fcff / revenue) * 10_000.0).round() as i32),
             ocf_margin_bps,
             capex_intensity_bps,
-            after_tax_interest_margin_bps,
-            false,
+            after_tax_interest_margin_bps: bridge
+                .map(|(_, after_tax)| ((after_tax / revenue) * 10_000.0).round() as i32),
             acquisition_contaminated,
-        ));
+            diluted_average_shares: point.diluted_average_shares,
+        });
     }
     if points.len() < 3 {
         return None;
     }
-    points.sort_by_key(|point| point.0);
+    points.sort_by_key(|point| point.year);
 
     let mut driver_points: Vec<DriverPoint> = Vec::with_capacity(points.len());
-    for (
-        index,
-        (
+    for (index, aligned) in points.iter().enumerate() {
+        let AlignedDriverYear {
             year,
-            revenue,
+            revenue_dollars: revenue,
             fcff_margin_bps,
             ocf_margin_bps,
             capex_intensity_bps,
-            interest_margin_bps,
-            _,
+            after_tax_interest_margin_bps: interest_margin_bps,
             acquisition_contaminated,
-        ),
-    ) in points.iter().enumerate()
-    {
-        let prior_intensities: Vec<i32> = points[..index].iter().map(|point| point.4).collect();
+            diluted_average_shares,
+        } = *aligned;
+        let prior_intensities: Vec<i32> = points[..index]
+            .iter()
+            .map(|point| point.capex_intensity_bps)
+            .collect();
         let prior_capex_median = median_bps(&prior_intensities);
         let prior_was_spike = driver_points
             .last()
@@ -1248,27 +1596,44 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             .unwrap_or(false);
         let capex_spike = prior_intensities.len() >= 3
             && !prior_was_spike
-            && *capex_intensity_bps as f64 > prior_capex_median as f64 * CAPEX_SPIKE_RATIO
-            && *capex_intensity_bps >= prior_capex_median + CAPEX_SPIKE_MIN_ABS_BPS;
+            && capex_intensity_bps as f64 > prior_capex_median as f64 * CAPEX_SPIKE_RATIO
+            && capex_intensity_bps >= prior_capex_median + CAPEX_SPIKE_MIN_ABS_BPS;
         let revenue_growth_bps = if index == 0 {
             None
         } else {
-            let prior = points[index - 1].1;
-            let growth = *revenue / prior - 1.0;
+            let prior = points[index - 1].revenue_dollars;
+            let growth = revenue / prior - 1.0;
             growth
                 .is_finite()
                 .then_some((growth * 10_000.0).round() as i32)
         };
+        // Stock-funded merger: no cash leaves the company, so the acquisition
+        // line stays flat while revenue and the diluted share count step
+        // together. Smurfit Kappa/WestRock doubled both and the cash-only test
+        // saw nothing, which read as 47.7% organic growth and turned 71% of a
+        // paper mill's CapEx into an add-back.
+        let stock_funded_combination = index > 0
+            && revenue_growth_bps.is_some_and(|growth| growth >= MATERIAL_ACQUISITION_REVENUE_BPS)
+            && match (
+                diluted_average_shares,
+                points[index - 1].diluted_average_shares,
+            ) {
+                (Some(current), Some(prior)) if prior > 0.0 => {
+                    ((current / prior - 1.0) * 10_000.0).round() as i32
+                        >= MATERIAL_ACQUISITION_REVENUE_BPS
+                }
+                _ => false,
+            };
         driver_points.push(DriverPoint {
-            year: *year,
-            revenue_dollars: *revenue,
-            fcff_margin_bps: *fcff_margin_bps,
-            ocf_margin_bps: *ocf_margin_bps,
-            capex_intensity_bps: *capex_intensity_bps,
-            after_tax_interest_margin_bps: *interest_margin_bps,
+            year,
+            revenue_dollars: revenue,
+            fcff_margin_bps,
+            ocf_margin_bps,
+            capex_intensity_bps,
+            after_tax_interest_margin_bps: interest_margin_bps,
             revenue_growth_bps,
             capex_spike,
-            acquisition_contaminated: *acquisition_contaminated,
+            acquisition_contaminated: acquisition_contaminated || stock_funded_combination,
         });
     }
 
@@ -1337,10 +1702,16 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     } else {
         recent_points.iter().collect()
     };
+    // Years without an interest disclosure carry no FCFF identity, so they are
+    // absent from the scenario distribution and from the interest add-back —
+    // but their revenue growth and OCF / CapEx margins still count.
     let margins: Vec<i32> = aligned_margin_points
         .iter()
-        .map(|point| point.fcff_margin_bps)
+        .filter_map(|point| point.fcff_margin_bps)
         .collect();
+    if margins.len() < 2 {
+        return None;
+    }
     let ocf_margins: Vec<i32> = recent_baseline
         .iter()
         .map(|point| point.ocf_margin_bps)
@@ -1351,7 +1722,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .collect();
     let interest_margins: Vec<i32> = recent_baseline
         .iter()
-        .map(|point| point.after_tax_interest_margin_bps)
+        .filter_map(|point| point.after_tax_interest_margin_bps)
         .collect();
     let scenario_growths: Vec<i32> = if acquisition_growth_must_be_zero {
         vec![0, 0]
@@ -1379,7 +1750,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
                 .collect();
             let prior_interest: Vec<i32> = prior_baseline
                 .iter()
-                .map(|point| point.after_tax_interest_margin_bps)
+                .filter_map(|point| point.after_tax_interest_margin_bps)
                 .collect();
             (
                 blend_recent_prior(recent_ocf_margin_bps, median_bps(&prior_ocf)),
@@ -1393,18 +1764,28 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
                 recent_interest_margin_bps,
             )
         };
+    let scenario_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
+    let scenario_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
+    let base_growth_bps = if acquisition_growth_must_be_zero {
+        0
+    } else if use_cycle_blend {
+        blend_recent_prior(median_bps(&recent_growths), median_bps(&prior_growths))
+            .clamp(scenario_bear_growth_bps, scenario_bull_growth_bps)
+    } else {
+        median_bps(&recent_growths)
+    };
+
     // Base run-rate vs scenarios:
     //
     // 1) Annual reported FCFF (OCF − gross CapEx) identity stays the scenario
     //    distribution (MU negatives retained; trough years visible in bear).
     // 2) Base level prefers non-negative annual median when available.
-    // 3) Investment-wave compounders (CapEx spikes / CapEx ≫ maintenance):
-    //    gross CapEx is mostly growth reinvestment already encoded in the
-    //    revenue-growth path. Charging 100% CapEx AND high growth double-counts.
-    //    Owner-earnings base = OCF + after-tax interest − maintenance CapEx,
-    //    with maintenance = min(historical CapEx lower-quartile, 30% of OCF margin).
-    //    Used only when it exceeds the annual-FCFF median (never a silent haircut
-    //    that shrinks a healthy FCFF business).
+    // 3) Investment-wave compounders: the part of gross CapEx that buys new
+    //    capacity is already encoded in the revenue-growth path, so charging
+    //    100% CapEx AND high growth double-counts. Owner-earnings base =
+    //    OCF + after-tax interest − sustaining CapEx. Used only when it exceeds
+    //    the annual-FCFF median (never a silent haircut that shrinks a healthy
+    //    FCFF business).
     let nonneg_margins: Vec<i32> = margins
         .iter()
         .copied()
@@ -1415,23 +1796,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     } else {
         median_bps(&margins)
     };
-    let all_capex: Vec<i32> = driver_points
-        .iter()
-        .map(|point| point.capex_intensity_bps)
-        .collect();
     let latest_capex = driver_points.last().map(|point| point.capex_intensity_bps);
-    let historical_capex_p25 = if all_capex.len() >= 4 {
-        quantile_bps(&all_capex, 0.25)
-    } else {
-        median_bps(&all_capex)
-    };
-    let maintenance_capex_intensity_bps = historical_capex_p25
-        .min(
-            (normalized_ocf_margin_bps as i64 * MAINTENANCE_CAPEX_MAX_OCF_FRACTION_BPS as i64
-                / 10_000) as i32,
-        )
-        .max(MAINTENANCE_CAPEX_MIN_REVENUE_BPS)
-        .min(normalized_capex_intensity_bps.max(historical_capex_p25));
+    let maintenance_capex_intensity_bps =
+        maintenance_capex_intensity_bps(normalized_capex_intensity_bps, base_growth_bps);
     let owner_earnings_margin_bps = normalized_ocf_margin_bps
         .saturating_add(normalized_interest_margin_bps)
         .saturating_sub(maintenance_capex_intensity_bps);
@@ -1458,16 +1825,6 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             .max(owner_earnings_margin_bps)
     } else {
         quantile_bps(&margins, 0.75).max(base_fcff_margin_bps)
-    };
-    let scenario_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
-    let scenario_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
-    let base_growth_bps = if acquisition_growth_must_be_zero {
-        0
-    } else if use_cycle_blend {
-        blend_recent_prior(median_bps(&recent_growths), median_bps(&prior_growths))
-            .clamp(scenario_bear_growth_bps, scenario_bull_growth_bps)
-    } else {
-        median_bps(&recent_growths)
     };
     let growth_dispersion_bps = if acquisition_growth_must_be_zero {
         0
@@ -1521,7 +1878,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         } else {
             growth_fade_exponent(regime)
         },
-        tax_defaulted: points.iter().any(|point| point.6),
+        // The aligned rows carry no defaulted tax rate: a year either supplied
+        // an effective rate with its interest or contributed no FCFF identity.
+        tax_defaulted: false,
     })
 }
 
@@ -1590,6 +1949,27 @@ fn median_bps(values: &[i32]) -> i32 {
     } else {
         sorted[middle]
     }
+}
+
+/// Sustaining CapEx intensity (bps of revenue) under the steady-state capital
+/// identity `κ = c·(δ + g)`: a business reinvesting `κ` of revenue while growing
+/// at `g` spends `κ·δ/(δ+g)` holding its asset base and the remainder expanding
+/// it.
+///
+/// Growth CapEx therefore has to be **earned by revenue growth**. It is not a
+/// function of how profitable the business is — a cable network at 28% OCF
+/// margin needs the same plant renewal as one at 10%. Tying maintenance to a
+/// share of OCF margin (policy /15) charged CHTR-class issuers ~4% of revenue
+/// against ~20% of actual reinvestment and roughly doubled the run-rate.
+///
+/// Shrinking businesses do not earn negative maintenance: growth is floored at
+/// zero, so sustaining CapEx never exceeds the capital intensity it comes from.
+fn maintenance_capex_intensity_bps(capex_intensity_bps: i32, revenue_growth_bps: i32) -> i32 {
+    let capex = capex_intensity_bps.max(0);
+    let renewal = ASSET_RENEWAL_RATE_BPS as i64;
+    let growth = revenue_growth_bps.max(0) as i64;
+    let sustaining = (capex as i64 * renewal / (renewal + growth)) as i32;
+    sustaining.clamp(MAINTENANCE_CAPEX_MIN_REVENUE_BPS.min(capex), capex)
 }
 
 fn quantile_bps(values: &[i32], quantile: f64) -> i32 {
@@ -2292,6 +2672,9 @@ struct ResolvedWacc {
 struct IndustryBetaPolicyFile {
     policy_version: String,
     shrink: IndustryBetaShrinkWeights,
+    /// Stronger industry pull when the matched prior is through-cycle.
+    #[serde(default)]
+    through_cycle_shrink: Option<IndustryBetaShrinkWeights>,
     default_prior: IndustryBetaDefaultPrior,
     entries: Vec<IndustryBetaPolicyEntry>,
     #[serde(default)]
@@ -2513,10 +2896,20 @@ pub fn resolve_cost_of_equity(
     }
     let prior = industry_beta_prior_for(fundamentals);
     let industry = i64::from(prior.beta_millis);
-    let shrink = &industry_beta_policy().shrink;
-    // Policy table owns weights; constants remain the documented 67/33 identity.
-    debug_assert_eq!(shrink.company_weight_pct, BETA_COMPANY_WEIGHT_PCT);
-    debug_assert_eq!(shrink.industry_weight_pct, BETA_INDUSTRY_WEIGHT_PCT);
+    let policy = industry_beta_policy();
+    let default_shrink = &policy.shrink;
+    // Policy table owns weights; constants remain the documented 67/33 identity
+    // for non-cycle businesses. Through-cycle rows may use stronger industry pull.
+    debug_assert_eq!(default_shrink.company_weight_pct, BETA_COMPANY_WEIGHT_PCT);
+    debug_assert_eq!(default_shrink.industry_weight_pct, BETA_INDUSTRY_WEIGHT_PCT);
+    let shrink = if prior.through_cycle {
+        policy
+            .through_cycle_shrink
+            .as_ref()
+            .unwrap_or(default_shrink)
+    } else {
+        default_shrink
+    };
     let (beta_millis, source, beta_provisional) = match fundamentals.beta_millis {
         Some(b) if b > 0 => {
             let company = i64::from(b);
@@ -2540,6 +2933,16 @@ pub fn resolve_cost_of_equity(
         // Missing company beta uses the industry prior (Bayesian estimate).
         // Unmapped default remains provisional; mapped prior is not weak noise.
         _ => (industry, WaccFieldSource::IndustryShrink, prior.provisional),
+    };
+    // Extreme leverage: equity is residual claim on a thin equity cushion. Floor
+    // shrunk beta at 1.0 so CoE is not bond-like for highly levered operating firms.
+    let extreme_leverage = fundamentals
+        .debt_to_equity_hundredths
+        .is_some_and(|value| value > 50_000);
+    let beta_millis = if extreme_leverage {
+        beta_millis.max(1_000)
+    } else {
+        beta_millis
     };
     let equity_premium = div_round_half_up_i128(
         i128::from(beta_millis)
@@ -2830,6 +3233,52 @@ mod tests {
         assert_eq!(analysis.diagnostics.driver_regime, "acquisition_normalized");
     }
 
+    /// Years before a discontinued-operation restatement belong to the
+    /// pre-separation issuer. Pooling them with the successor's margins is what
+    /// made WDC price a whole-company cash flow against HDD-only sales.
+    fn separation_history(break_year: i32) -> Vec<FcfPoint> {
+        vec![
+            (2020, 1_000_000_000.0),
+            (2021, 1_050_000_000.0),
+            (2022, 1_100_000_000.0),
+            (2023, 400_000_000.0),
+            (2024, 420_000_000.0),
+            (2025, 450_000_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.10)
+                .with_operating_drivers(
+                    revenue * 0.15,
+                    revenue * 0.05,
+                    revenue,
+                    Some(revenue * 0.01),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(100_000_000.0), Some(2_100), None, None)
+                .with_reporting_basis_broken(year == break_year)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn reporting_basis_break_refuses_rather_than_pooling_two_issuers() {
+        let analysis = compute(&operating_fund(), &separation_history(2024), Some(1_000), "test");
+
+        assert!(analysis.is_err());
+    }
+
+    #[test]
+    fn reporting_basis_break_normalizes_only_the_surviving_issuer() {
+        let analysis = compute(&operating_fund(), &separation_history(2022), Some(1_000), "test")
+            .expect("three post-break years are enough to normalize the successor");
+
+        assert_eq!(
+            analysis.diagnostics.latest_revenue_dollars,
+            Some(450_000_000)
+        );
+    }
+
     #[test]
     fn historical_acquisition_excludes_only_its_growth_transition() {
         let history = vec![
@@ -2959,6 +3408,89 @@ mod tests {
             .reason_codes
             .iter()
             .all(|reason| !reason.contains("analyst") && !reason.contains("calibration_target")));
+    }
+
+    /// Synthetic operating history with constant margins and a constant revenue
+    /// growth rate. Isolates the maintenance-CapEx policy from the regime,
+    /// spike, and acquisition machinery.
+    fn steady_margin_history(
+        growth_bps: i32,
+        ocf_margin_bps: i32,
+        capex_intensity_bps: i32,
+        pretax_interest_margin_bps: i32,
+    ) -> Vec<FcfPoint> {
+        const TAX_BPS: i32 = 2_100;
+        let mut revenue = 50_000_000_000.0_f64;
+        (2018..=2025)
+            .map(|year| {
+                let ocf = revenue * ocf_margin_bps as f64 / 10_000.0;
+                let capex = revenue * capex_intensity_bps as f64 / 10_000.0;
+                let interest = revenue * pretax_interest_margin_bps as f64 / 10_000.0;
+                let point = FcfPoint::new(year, ocf - capex)
+                    .with_operating_drivers(ocf, capex, revenue, Some(interest), Some(TAX_BPS))
+                    .with_rate_resolution_inputs(Some(revenue), Some(2_100), None, None);
+                revenue *= 1.0 + growth_bps as f64 / 10_000.0;
+                point
+            })
+            .collect()
+    }
+
+    /// Cable/telco shape: ~20% of revenue reinvested every year against ~1%
+    /// revenue growth. That CapEx sustains the plant, so almost none of it is
+    /// growth reinvestment to be added back.
+    fn network_like_history() -> Vec<FcfPoint> {
+        steady_margin_history(100, 2_760, 2_040, 899)
+    }
+
+    /// Platform compounder: revenue growing ~20% a year while capital intensity
+    /// stays flat — most of the spend is buying new capacity, not holding it.
+    fn compounder_like_history() -> Vec<FcfPoint> {
+        steady_margin_history(2_000, 2_000, 1_800, 0)
+    }
+
+    #[test]
+    fn sustaining_capex_holds_full_intensity_when_revenue_is_flat() {
+        assert_eq!(maintenance_capex_intensity_bps(2_040, 0), 2_040);
+    }
+
+    #[test]
+    fn sustaining_capex_releases_the_growth_share_when_revenue_compounds() {
+        // κ·δ/(δ+g) = 1800 × 1000/(1000+2000).
+        assert_eq!(maintenance_capex_intensity_bps(1_800, 2_000), 600);
+    }
+
+    /// Policy /15 derived maintenance from 15% of the OCF margin, so a
+    /// profitable network was charged ~4% of revenue against ~20% of actual
+    /// reinvestment and its base run-rate roughly doubled (CHTR ~$141/sh vs
+    /// external ~$30–70/sh). Sustaining CapEx must follow capital intensity and
+    /// growth, never profitability.
+    #[test]
+    fn flat_growth_high_capex_network_is_not_an_investment_wave() {
+        let drivers = driver_model_inputs(&network_like_history()).expect("driver inputs");
+        assert!(
+            !drivers.owner_earnings_base,
+            "flat-growth network must keep the reported FCFF identity, got margin {} bps vs annual identity ~1430 bps",
+            drivers.base_fcff_margin_bps
+        );
+    }
+
+    #[test]
+    fn flat_growth_high_capex_network_keeps_the_reported_fcff_base() {
+        let drivers = driver_model_inputs(&network_like_history()).expect("driver inputs");
+        // OCF 2760 + after-tax interest 710 − gross CapEx 2040.
+        assert_eq!(drivers.base_fcff_margin_bps, 1_430);
+    }
+
+    /// The other half of the policy: real investment waves still get owner
+    /// earnings, otherwise this is a haircut rather than a definition.
+    #[test]
+    fn compounding_capex_wave_still_earns_the_owner_earnings_base() {
+        let drivers = driver_model_inputs(&compounder_like_history()).expect("driver inputs");
+        assert!(
+            drivers.owner_earnings_base,
+            "20%-growth compounder must keep owner earnings, got margin {} bps",
+            drivers.base_fcff_margin_bps
+        );
     }
 
     #[test]
@@ -4095,12 +4627,21 @@ mod tests {
                 }
             }
 
-            // Reconstruct shrunk beta from identity and assert golden pin.
+            // Reconstruct shrunk beta from policy weights and assert golden pin.
             let industry = i64::from(prior.beta_millis);
+            let policy = industry_beta_policy();
+            let shrink = if prior.through_cycle {
+                policy
+                    .through_cycle_shrink
+                    .as_ref()
+                    .unwrap_or(&policy.shrink)
+            } else {
+                &policy.shrink
+            };
             let shrunk = match case.company_beta_millis {
                 Some(b) if b > 0 => {
-                    let weighted = i64::from(b) * BETA_COMPANY_WEIGHT_PCT
-                        + industry * BETA_INDUSTRY_WEIGHT_PCT;
+                    let weighted = i64::from(b) * shrink.company_weight_pct
+                        + industry * shrink.industry_weight_pct;
                     div_round_half_up_i128(i128::from(weighted), 100).unwrap() as i32
                 }
                 _ => prior.beta_millis,

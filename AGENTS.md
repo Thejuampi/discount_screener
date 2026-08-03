@@ -344,6 +344,19 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 | Quarantine is a ticket, not a trophy | Do not claim “N names green” while slots are quarantined unless acceptance **explicitly** allows reduced N |
 | Stale UI hides backend truth | After policy bumps, verify Detail does not keep a previous absurd DCF |
 
+### Numerical conclusions — pre-presentation checklist (mandatory)
+
+Before presenting any **dollar / share / rate** figure to Juan as a **conclusion** (not as internal working scratch), the agent must run and **show** this checklist. Verification happens on the agent side first — Juan should not be the first line of sniff tests.
+
+1. **Sniff vs external / fixture anchor**  
+   Compare engine outputs (FCFF, EPS, WACC, intrinsic, etc.) to reported 10-K/10-Q (or known fixture order-of-magnitude). If >~50% away from any reasonable anchor, **do not** present as conclusion — find the bug (units, shares, maintenance CapEx, rate kind) first.
+2. **No one-name cluster claims**  
+   A conclusion that applies to “the cluster” needs **≥2** cohort names that show the same mechanism. If only one name shows it: *“specific to X, not generalizable yet.”*
+3. **Baseline / neutral declared before the experiment**  
+   For any decomposition or counterfactual, write the neutral definition and confirm it is consistent across factors **before** running, not after seeing results.
+4. **Dubious inputs labeled before dependent conclusions**  
+   If you would not trust an input enough to act on it, mark it **pending verification** and do **not** call the result “clean evidence.”
+
 ### Analyst-method lifecycle closure (mandatory)
 
 For evidence-ledger, analyst-import, model-run, or current-projection work, keep three states distinct: **design-ready**, **implemented**, and **independently closed**. A green builder handoff may establish the second state; it cannot establish the third by itself. Before the next slice may expose or consume the result, an independent adversarial checkpoint must trace the complete command from control-envelope admission through semantic admission, persistence, invalidation, restart, and read projection.
@@ -471,5 +484,6 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 - Windows regression notes under `docs/windows-dashboard-2.0-manual-regression.md`
 - Live valuation QA (**always profile `qa`**): [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md)
 - Multi-name valuation baseline: [`_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md`](_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md)
+- Quant motor handover (next agent): [`_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md`](_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md)
 - BMAD process guidance: section **BMAD Method** above; Grok quick-start rule [`.grok/rules/bmad.md`](.grok/rules/bmad.md)
 - **Preventing repeat errors:** section **Preventing repeat operational errors** above (manual procedures stay in this file)

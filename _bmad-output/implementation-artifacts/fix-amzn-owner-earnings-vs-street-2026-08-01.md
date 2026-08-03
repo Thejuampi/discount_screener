@@ -22,6 +22,10 @@ Aritmética del $50 era “coherente” con $39B FCFF @ ~10% WACC; la **definici
 
 `business-class-policy/15-owner-earnings-maintenance-capex`
 
+> **Handoff note (2026-08-02):** This OE path is intentional for AMZN-class investment waves. It was also the root of the CHTR FCFF/sh ~$141 sniff failure (maintenance CapEx capped too low for structural network CapEx).
+>
+> **Superseded 2026-08-02 by policy/16 `growth-earned-sustaining-capex`.** Rule 2 below no longer applies: maintenance is now `κ × δ/(δ+g)` (capital intensity × asset renewal share), **not** `min(CapEx p25, 15% of OCF margin)`. Growth CapEx must be earned by revenue growth, so the AMZN OE path survives (live run-rate $65.7B, maintenance 595 bps) while flat-growth networks no longer qualify as investment waves. AMZN's model value legitimately falls — the ~2.0% maintenance floor here was below any defensible renewal on a ~$300B asset base with ~$60B annual D&A. The live-after-fix table below is policy/15 and is kept as history. See [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuation-engine-2026-08-02.md) §12.
+
 1. **Scenarios** still use annual FCFF identities (negatives retained — MU).
 2. **Base** when investment wave (CapEx spikes / CapEx ≫ maintenance):
    - `owner_margin = OCF_margin + after-tax interest − maintenance_capex`

@@ -636,6 +636,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                     ),
                     market_params: &market_params,
                     as_of_epoch_day: current_epoch_day(),
+                    market_price_cents: None,
                 },
             );
             s.ingest_operating_valuation(symbol.to_string(), None, envelope);
@@ -739,6 +740,7 @@ fn record_demand_valuation_failure(
             ),
             market_params: &market_params,
             as_of_epoch_day: current_epoch_day(),
+            market_price_cents: None,
         },
     );
     state.clear_dcf(symbol);
@@ -757,6 +759,16 @@ fn financial_required_drivers_missing(fund: &crate::engine::FundamentalSnapshot)
         || fund.book_value_per_share_cents.unwrap_or(0) <= 0
         || !matches!(fund.return_on_equity_bps, Some(1..=9_999))
         || !matches!(fund.retention_bps, Some(0..=10_000))
+}
+
+/// Prefer live US 10Y for solid rate quality; fall back to provisional defaults.
+fn resolve_market_params(yahoo: Option<&YahooClient>) -> crate::dcf_model::MarketParams {
+    if let Some(client) = yahoo {
+        if let Some((rf_bps, as_of)) = client.fetch_us_10y_yield_bps() {
+            return crate::dcf_model::MarketParams::from_live_risk_free(rf_bps, as_of);
+        }
+    }
+    crate::dcf_model::MarketParams::default_usd()
 }
 
 /// Compute one demand-driven valuation using the same route as Detail.
@@ -875,8 +887,15 @@ where
         if !matches!(fund.retention_bps, Some(0..=10_000)) {
             return Err("retention/payout is missing or invalid after Yahoo refresh".into());
         }
-        let mut analysis =
-            crate::dcf_model::compute_from_fundamentals(&fund, price, "fundamentals")?;
+        let market_params = resolve_market_params(valuation_yahoo.as_deref());
+        let mut analysis = crate::dcf_model::compute_with_params(
+            &fund,
+            &[],
+            price,
+            &market_params,
+            "fundamentals",
+            false,
+        )?;
         if shares_resolved_from_sec {
             analysis.reason_codes.push("shares=sec_dei_fallback".into());
         }
@@ -943,7 +962,15 @@ where
             if analysis.is_none() && fcff_failure.is_none() {
                 match edgar::fetch_fcf_history(&edgar::edgar_client(), symbol, cik) {
                     Ok(Some(fcf)) => {
-                        match crate::dcf_model::compute(&fund, &fcf, None, "sec_edgar") {
+                        let market_params = resolve_market_params(valuation_yahoo.as_deref());
+                        match crate::dcf_model::compute_with_params(
+                            &fund,
+                            &fcf,
+                            None,
+                            &market_params,
+                            "sec_edgar",
+                            false,
+                        ) {
                             Ok(mut computed) => {
                                 if shares_resolved_from_sec {
                                     computed.reason_codes.push("shares=sec_dei_fallback".into());
@@ -966,7 +993,7 @@ where
         None => {}
     }
 
-    let market_params = crate::dcf_model::MarketParams::default_usd();
+    let market_params = resolve_market_params(valuation_yahoo.as_deref());
     let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
         crate::operating_valuation_runtime::RuntimeValuationInput {
             business_class: class,
@@ -976,6 +1003,7 @@ where
             forward_evidence,
             market_params: &market_params,
             as_of_epoch_day,
+            market_price_cents: price,
         },
     );
     let final_fundamentals_fingerprint =

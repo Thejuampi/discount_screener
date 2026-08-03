@@ -2891,6 +2891,7 @@ mod valuation_routing_tests {
             forward_evidence: Ok(forward()),
             market_params: &market,
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         assert_eq!(envelope.decision.status, RouteStatus::Disputed);
         state.ingest_operating_valuation("AMZN".into(), Some(fcff), envelope);
@@ -2935,6 +2936,7 @@ mod valuation_routing_tests {
             forward_evidence: Err(ForwardSourceFailure::Transport),
             market_params: &market,
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation("AMZN".into(), Some(fcff), envelope);
         let detail = state.detail("AMZN").expect("detail");
@@ -2970,6 +2972,7 @@ mod valuation_routing_tests {
             forward_evidence: Ok(forward()),
             market_params: &market,
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         assert_eq!(
             envelope.decision.selected_model,
@@ -3004,6 +3007,7 @@ mod valuation_routing_tests {
             forward_evidence: Ok(current_forward),
             market_params: &market,
             as_of_epoch_day: today,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation("AMZN".into(), None, envelope);
         assert!(state.has_current_operating_valuation("AMZN"));
@@ -3024,6 +3028,7 @@ mod valuation_routing_tests {
             forward_evidence: Err(ForwardSourceFailure::RateLimited),
             market_params: &market,
             as_of_epoch_day: today,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation(
             "AMZN".into(),
@@ -3063,6 +3068,7 @@ mod valuation_routing_tests {
             forward_evidence: Ok(evidence),
             market_params: &market,
             as_of_epoch_day: today,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation("AMZN".into(), None, envelope);
         assert!(state.has_current_operating_valuation("AMZN"));
@@ -3140,6 +3146,7 @@ mod valuation_routing_tests {
             forward_evidence: Ok(forward()),
             market_params: &market,
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation("AMZN".into(), None, selected);
         assert!(state.selected_valuation_values.contains_key("AMZN"));
@@ -3152,6 +3159,7 @@ mod valuation_routing_tests {
             forward_evidence: Err(ForwardSourceFailure::Transport),
             market_params: &market,
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         state.ingest_operating_valuation("AMZN".into(), None, unavailable);
         assert!(!state.selected_valuation_values.contains_key("AMZN"));

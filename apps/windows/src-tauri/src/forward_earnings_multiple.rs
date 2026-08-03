@@ -115,6 +115,13 @@ pub fn compute_forward_earnings_multiple(
         None => return refuse("overflow"),
     };
 
+    // Analyst-stated complete inputs earn solid quality. Peer-policy remains
+    // unavailable above; thin/unsupported provenance never reaches Available.
+    let quality = match input.multiple_provenance {
+        MultipleProvenance::AnalystStated => "solid",
+        MultipleProvenance::PeerPolicyDerived => "provisional",
+    };
+
     ForwardEarningsMultipleResult::Available(ForwardEarningsMultipleAvailable {
         target_value_cents: target,
         eps_cents: input.eps_cents,
@@ -122,7 +129,7 @@ pub fn compute_forward_earnings_multiple(
         engine_id: ENGINE_ID.into(),
         method_policy_version: METHOD_POLICY_VERSION.into(),
         multiple_provenance: input.multiple_provenance,
-        quality: "provisional".into(),
+        quality: quality.into(),
         forecast_period_end: input.forecast_period_end.clone(),
         target_as_of: input.target_as_of.clone(),
         date_precision: input.date_precision.clone(),

@@ -57,6 +57,9 @@ pub mod valuation_dossier_view;
 pub mod valuation_evidence;
 #[cfg(test)]
 mod valuation_evidence_contract;
+pub mod valuation_gap_attribution;
+#[cfg(test)]
+mod valuation_high_signal;
 mod yahoo_session;
 
 use state::AppState;

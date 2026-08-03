@@ -1,17 +1,22 @@
 {
   "contract": "industry-beta-policy",
-  "version": "1",
-  "policyVersion": "industry-beta-policy/1",
+  "version": "2",
+  "policyVersion": "industry-beta-policy/2",
   "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
   "notes": [
     "Versioned sector/industry levered-beta priors for CoE shrink. Sole industry-prior source for Windows dcf_model and Android DcfAnalysisEngine.",
     "Through-cycle industries (commodity E&P, integrated oil, specialty chemicals) carry higher priors so temporarily bond-like trailing betas are pulled toward cycle risk — not max(re, magic_constant) floors.",
+    "Through-cycle shrink is stronger (company 33% / industry 67%) so low trailing betas cannot keep CoE bond-like through a commodity trough.",
     "Unmapped sector/industry uses defaultPrior with provisional provenance. No per-ticker floors. Price and analyst targets are never CoE inputs.",
-    "Shrink weights are intentional Bayes/Blume estimation (company 67% / industry 33%). Match order: industryKey → industryNameContains → sectorKey → sectorNameContains → default."
+    "Default shrink weights are intentional Bayes/Blume estimation (company 67% / industry 33%). Match order: industryKey → industryNameContains → sectorKey → sectorNameContains → default."
   ],
   "shrink": {
     "companyWeightPct": 67,
     "industryWeightPct": 33
+  },
+  "throughCycleShrink": {
+    "companyWeightPct": 33,
+    "industryWeightPct": 67
   },
   "defaultPrior": {
     "betaMillis": 1000,
@@ -142,7 +147,7 @@
       "industryNameContains": ["telecom"],
       "sectorKeys": ["communication-services"],
       "sectorNameContains": ["communication services"],
-      "betaMillis": 900,
+      "betaMillis": 1100,
       "throughCycle": false
     },
     {
@@ -178,8 +183,8 @@
       "expectedEntryId": "oil_gas_ep",
       "expectedThroughCycle": true,
       "expectedIndustryProvisional": false,
-      "expectedShrunkBetaMillis": 783,
-      "expectedCostOfEquityBps": 782,
+      "expectedShrunkBetaMillis": 1147,
+      "expectedCostOfEquityBps": 946,
       "pureTrailingCostOfEquityBps": 624,
       "mustExceedPureTrailingCoe": true
     },
@@ -250,8 +255,8 @@
       "expectedEntryId": "oil_gas_integrated",
       "expectedThroughCycle": true,
       "expectedIndustryProvisional": false,
-      "expectedShrunkBetaMillis": 1065,
-      "expectedCostOfEquityBps": 909,
+      "expectedShrunkBetaMillis": 1235,
+      "expectedCostOfEquityBps": 986,
       "pureTrailingCostOfEquityBps": 835,
       "mustExceedPureTrailingCoe": true
     }

@@ -37,6 +37,10 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   point-in-time evidence replay, closed-world component routing, evidence-backed SOTP bridge, refusal states, and historical driver-validation goldens; Windows and Android compare fixed-point outputs and fingerprints exactly
 - `valuation-evidence-observation-v2.json`:
   Foundation 0A envelope for analyst-method automation — partition keys, clocks, replay modes, lineage, SHA-256 canonical field order; does not replace SOTP v1 FNV rows
+- `valuation-high-signal-screener-cohort-v1.json`:
+  goal gate for the 26-name live screener cohort — recomputes Yahoo+SEC+live US 10Y; high-signal requires solid quality, OOM sanity vs market, correct class routing, and a Street disagreement band (diagnostic, not a clamp). Windows: `cargo test --lib valuation_high_signal::`
+- `valuation-gap-attribution-v1.json`:
+  Shapley policy-delta waterfall (`rates`, `horizon`, `path`, `g_terminal`); factor baselines are own-policy only (never Street reverse-engineering); Street gap is diagnostic only and must not be an acceptance/optimize target. Method diagnostic `v_naive_fcff_baseline` must discount firm FCFF at **WACC** and subtract **net debt** before per-share (not CoE-on-unlevered). CHTR owner-earnings FCFF/sh must pass external sniff (~$30–70) before EPS-vs-FCFF conclusions — see handover `handover-quant-valuation-engine-2026-08-02.md`. Windows: `cargo test --lib valuation_gap_attribution::`
 - `valuation-forward-earnings-multiple-v1.json`:
   Slice 1A pure market-reference lane: `eps_cents × multiple_hundredths / 100` (half-up); `$13 × 28 = $364` transcription golden; refusals; market price/target mutation-invariant; not an intrinsic router branch
 - `valuation-forward-earnings-import-v1.json`:

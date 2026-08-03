@@ -18,8 +18,16 @@ Use this index to find active implementation work, story files, QA outputs, and 
 
 - [Test Summary](tests/test-summary.md)
 
+## Active quant / valuation continuity
+
+- **[Handover — Quant Valuation Engine 2026-08-02](handover-quant-valuation-engine-2026-08-02.md)** — **start here for the next agent** on the quant motor: state, shipped work, CHTR FCFF blocker, P0–P7, gates, module map.
+- [Multi-name valuation baseline policy](valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar + high-signal cohort + gap-attribution telemetry notes.
+- [Deferred Work](deferred-work.md) - includes quant P0/open process items from the handover.
+- [AMZN owner-earnings fix notes](fix-amzn-owner-earnings-vs-street-2026-08-01.md) - why policy/15 OE path exists (do not undo blindly while fixing cable CapEx).
+
 ## Learning And Retrospective Artifacts
 
+- **[Valuation agent failure modes](valuation-agent-failure-modes.md)** — read before touching the router, the payout policy, or any valuation gate. Concrete ways this work has gone wrong, with the tells.
 - [Valuation Automation Learning Ledger](valuation-automation-learning-ledger.md) - living, evidence-linked lessons for analyst-method automation; implementation is still in progress.
 - [Valuation Calibration Retrospective](retro-valuation-calibration-session-2026-07-30.md) - multi-name baseline, fail-closed routing, and operational QA lessons.
 - [Analyst-Method Automation Pre-1C Retrospective](retro-analyst-method-automation-pre-1c-2026-08-02.md) - autonomous team retro; independent closure protocol and the publication-readiness 1B.3 gate.

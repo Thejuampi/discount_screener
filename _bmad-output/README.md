@@ -5,7 +5,8 @@ This folder contains planning and implementation artifacts generated through BMa
 ## Required Agent Context
 
 - [Project Context](project-context.md) - critical implementation rules and technology versions. Agents should read this before implementation work.
-- [Agents.md](../Agents.md) - monorepo layout, **valuation model family** (dynamic params, no hard output caps), and Quant Lens SNR conventions.
+- [Agents.md](../Agents.md) - monorepo layout, **valuation model family** (dynamic params, no hard output caps), Quant Lens SNR, numerical conclusion protocol.
+- **[Handover — Quant Valuation Engine 2026-08-02](implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md)** - **next agent on quant/valuation motor starts here** (waterfall, CHTR FCFF blocker, open P0–P7).
 
 ## Current-State Documentation
 

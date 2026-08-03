@@ -38,6 +38,24 @@ A fix that improves one ticker (e.g. T levered soft WACC) must not silently dest
 | Financials | ACGL-class residual income, not FCFF-primary |
 | Quarantine | **0** for the 20-slot fixture; labeled mid-rebuild only |
 
+## High-signal screener cohort (goal gate, 2026-08-02)
+
+**Contract:** `shared/contracts/valuation-high-signal-screener-cohort-v1.json`  
+**Tests:** `cargo test --lib valuation_high_signal::`  
+**Observation pin:** `apps/windows/src-tauri/tests/fixtures/valuation/high_signal_screener_observation_2026-08-02.json`
+
+Separate from the 20-slot baseline merge bar: this is a **product goal integration** over the 26 names that were live-visible when “all soft / no confiable aún” was diagnosed. The test **recomputes** each name (Yahoo + SEC + live US 10Y) and **passes only when all 26 are high-signal** (solid rates/drivers, scale-coherent vs market, correct class, Street disagreement ≤ policy band). Soft provisional bootstrap is not a success path. Forbidden: clamp-to-Street, quarantine-as-green, single-ticker “wins,” hand-editing the observation audit to green.
+
+**Status at handoff 2026-08-02:** recompute gate still open (~16/26 last observed). Engine work continues until 26/26 without clamps. Continuity brief: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuation-engine-2026-08-02.md).
+
+## Gap attribution (telemetry, not merge bar)
+
+**Contract:** `shared/contracts/valuation-gap-attribution-v1.json`  
+**Tests:** `cargo test --lib valuation_gap_attribution::`  
+**Live diagnostic cohort:** CHTR, T, MPWR, WDC, GOOGL  
+
+Shapley policy-delta waterfall. Street diagnostic only. Method column `v_naive_fcff_baseline` must use **WACC + net-debt bridge**. CHTR FCFF/sh from owner-earnings must pass external sniff (~$30–70) before any EPS-vs-FCFF conclusion — see handoff §3.3 / §4 P0.
+
 ## Extending the cohort
 
 After the first 20 are green and stable, extend with additional High-confidence, high-score names using the same pin→fixture→sanity workflow. Do not live-depend on ranking inside tests.

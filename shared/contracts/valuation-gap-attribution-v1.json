@@ -1,0 +1,85 @@
+{
+  "contract": "valuation-gap-attribution-v1",
+  "schemaVersion": "valuation-gap-attribution/1",
+  "title": "Valuation policy-delta attribution waterfall",
+  "description": "Decomposes the value difference between active engine policy settings and own policy baselines into per-factor contributions. Permanent engine telemetry — not a one-off analysis.",
+  "decompositionMethod": "shapley",
+  "decompositionMethodNotes": [
+    "Shapley values average each factor's marginal contribution over all coalitions of the remaining factors (16 valuations for 4 factors).",
+    "Order of substitution does not bias attributions; economic interactions are distributed across factors.",
+    "attr_rounding_residual_cents is integer rounding noise only — not unattributed interaction residual.",
+    "Sequential substitution (order-dependent) is NOT used. If a future revision switches, the schema must declare sequential + document the canonical order as convention, and residual must be labeled interaction-inclusive."
+  ],
+  "factorBaselineKind": "policy_own",
+  "factorBaselineNever": [
+    "street_reverse_engineered_coe",
+    "street_reverse_engineered_horizon",
+    "street_implied_growth",
+    "market_price_implied_multiple"
+  ],
+  "streetRole": "diagnostic_only",
+  "streetRoleNotes": [
+    "diagnostic_gap_vs_street_cents / diagnostic_gap_vs_street_bps are post-hoc diagnostics only.",
+    "Street must never enter the value function or any factor baseline.",
+    "Forbidden: using diagnostic_gap_vs_street_* or attr_*_vs_street* as acceptance criteria, calibration objective, or high-signal gate.",
+    "Primary calibration criterion remains point-in-time realized driver error (PIT backtest) — a separate project when PIT store exists."
+  ],
+  "factors": ["rates", "horizon", "path", "g_terminal"],
+  "factorBaselines": {
+    "rates": {
+      "active": "resolve_cost_of_equity full (industry shrink, through-cycle prior, leverage beta floor)",
+      "baseline": "unit-beta CAPM: rf + 1.0 × ERP (no industry shrink, no leverage floor)"
+    },
+    "horizon": {
+      "active": "derive_hold_years + derive_fade_years from current engine policy",
+      "baseline": "hold=0, fade=10 (canonical long fade, no explicit hold)"
+    },
+    "path": {
+      "active": "engine near_growth_bps from forward evidence normalization",
+      "baseline": "near_growth_bps=0 (no growth capitalization beyond current EPS level)"
+    },
+    "g_terminal": {
+      "active": "ProjectionPolicy macro_stable + rf buffer + minimum terminal spread from engine",
+      "baseline": "macro_stable=300, rf_buffer=100, min_terminal_spread=100 (policy defaults)"
+    }
+  },
+  "valueSurface": {
+    "mvp": "forward_earnings_power only",
+    "outOfScopeUntilCounterfactualSurface": ["fcff_wacc", "residual_income_equity"]
+  },
+  "outputs": {
+    "vActiveCents": "value with all factors active",
+    "vBaselineCents": "value with all factors at own-policy baseline (EPS capitalised)",
+    "policyDeltaCents": "vActive − vBaseline (Shapley attributes this)",
+    "attrRatesCents": "Shapley contribution of rates",
+    "attrHorizonCents": "Shapley contribution of horizon",
+    "attrPathCents": "Shapley contribution of path",
+    "attrGTerminalCents": "Shapley contribution of g_terminal",
+    "attrRoundingResidualCents": "policyDelta − sum(attrs); integer noise only",
+    "holdActive/fadeActive/holdBaseline/fadeBaseline": "raw horizon settings for validating horizon=$0",
+    "horizonSettingsMatchBaseline": "true ⇒ horizon factor inert by construction",
+    "diagnosticGapVsStreetCents": "vActive − Street; diagnostic only",
+    "diagnosticGapVsStreetBps": "relative bps vs Street; diagnostic only",
+    "diagnosticBaselineGapVsStreetCents": "vBaseline − Street; share of gap already in baseline",
+    "diagnosticBaselineShareOfGapBps": "(vBaseline−Street)/(vActive−Street)×10000; diagnostic only",
+    "diagnosticPolicyShareOfGapBps": "policyDelta/(vActive−Street)×10000; diagnostic only",
+    "vNaiveFcffBaselineCents": "METHOD diagnostic (not Shapley): same policy baseline projection on normalized FCFF/share instead of EPS",
+    "fcffPerShareCents": "normalized FCFF run-rate / shares",
+    "diagnosticNaiveFcffGapVsStreetCents": "vNaiveFcffBaseline − Street; diagnostic only"
+  },
+  "diagnosticCohort": ["CHTR", "T", "MPWR", "WDC", "GOOGL"],
+  "enforcement": {
+    "codeGate": "valuation_gap_attribution::tests::street_diagnostic_only_enforcement_scan",
+    "forbiddenAsAcceptance": [
+      "diagnostic_gap_vs_street_cents",
+      "diagnostic_gap_vs_street_bps",
+      "attr_residual_bps",
+      "attr_*_vs_street*"
+    ]
+  },
+  "pitStoreDependency": {
+    "requiredForThisModule": false,
+    "note": "Empirical fade/hold calibration via point-in-time fundamentals is a separate project. This waterfall must not silently assume a PIT store exists."
+  },
+  "windowsModule": "apps/windows/src-tauri/src/valuation_gap_attribution.rs"
+}

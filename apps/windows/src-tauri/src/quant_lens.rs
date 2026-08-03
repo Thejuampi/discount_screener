@@ -1152,6 +1152,7 @@ mod tests {
             forward_evidence: Ok(forward_evidence()),
             market_params: &crate::dcf_model::MarketParams::default_usd(),
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         detail.valuation_status = Some(envelope.decision.status);
         detail.selected_valuation_model = envelope.decision.selected_model;
@@ -1176,6 +1177,7 @@ mod tests {
             ),
             market_params: &crate::dcf_model::MarketParams::default_usd(),
             as_of_epoch_day: 20_665,
+            market_price_cents: None,
         });
         detail.valuation_status = Some(envelope.decision.status);
         detail.selected_valuation_model = envelope.decision.selected_model;

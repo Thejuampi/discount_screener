@@ -12,6 +12,7 @@ use serde::Deserialize;
 ///   Discount rate: 10% (conservative WACC)
 ///   Result: intrinsic value per share in cents
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 const EDGAR_USER_AGENT: &str = "DiscountScreener/1.0 contact@example.com";
@@ -109,12 +110,42 @@ fn has_approved_period_shape(entry: &serde_json::Value, shape: FactPeriodShape) 
     }
 }
 
+/// A later filing that moves an annual value by at least this much is a
+/// restatement, not a rounding revision. Deliberately separate from
+/// `MATERIAL_ACQUISITION_REVENUE_BPS`: that one asks whether a business
+/// combination is big enough to distort growth, this one asks whether two
+/// filings describe the same reporting entity.
+const MATERIAL_RESTATEMENT_BPS: i64 = 1_000;
+
+fn materially_restated(candidate: i64, winner: i64) -> bool {
+    let reference = winner.abs().max(candidate.abs());
+    reference > 0 && (candidate - winner).abs() * 10_000 >= reference * MATERIAL_RESTATEMENT_BPS
+}
+
 fn extract_annual_with_shape(
     facts: &serde_json::Value,
     concept: &str,
     shape: FactPeriodShape,
+    unit: &str,
 ) -> Vec<AnnualValue> {
-    let units = facts.pointer(&format!("/facts/us-gaap/{}/units/USD", concept));
+    annual_candidates_with_shape(facts, concept, shape, unit)
+        .into_iter()
+        .map(|(value, _)| value)
+        .collect()
+}
+
+/// Same extraction as `extract_annual_with_shape`, but each year also reports
+/// whether a later filing materially restated it. A discontinued operation
+/// restates revenue to continuing operations while ASC 205-20 leaves the
+/// cash-flow statement on the total-company basis, so the pair of flags is the
+/// only evidence that a year's margin mixes two different entities.
+fn annual_candidates_with_shape(
+    facts: &serde_json::Value,
+    concept: &str,
+    shape: FactPeriodShape,
+    unit: &str,
+) -> Vec<(AnnualValue, bool)> {
+    let units = facts.pointer(&format!("/facts/us-gaap/{concept}/units/{unit}"));
     let arr = match units.and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return vec![],
@@ -133,6 +164,11 @@ fn extract_annual_with_shape(
     // a re-filed fact and a segment fact; consolidated wins over segment, then
     // the most recently filed value wins.
     let mut by_end: HashMap<String, AnnualCandidate> = HashMap::new();
+    // Every consolidated value seen for an end date, so the winner can be
+    // compared against the ones it superseded. Segment facts are excluded:
+    // a segment differing from the consolidated total is decomposition, not
+    // a restatement.
+    let mut consolidated_values: HashMap<String, Vec<i64>> = HashMap::new();
     for entry in arr {
         let form = entry["form"].as_str().unwrap_or("");
         if !crate::sec_driver_normalization_policy_generated::ACCEPTED_FORMS.contains(&form) {
@@ -177,6 +213,9 @@ fn extract_annual_with_shape(
         let consolidated = entry
             .get("segment")
             .map_or(true, serde_json::Value::is_null);
+        if consolidated {
+            consolidated_values.entry(end.clone()).or_default().push(val);
+        }
         let candidate = AnnualCandidate {
             end: end.clone(),
             fiscal_year,
@@ -206,19 +245,50 @@ fn extract_annual_with_shape(
             by_fiscal_year.insert(candidate.fiscal_year, candidate);
         }
     }
-    let mut result: Vec<AnnualValue> = by_fiscal_year
+    let mut result: Vec<(AnnualValue, bool)> = by_fiscal_year
         .into_iter()
-        .map(|(year, candidate)| AnnualValue {
-            year,
-            value_dollars: candidate.value_dollars,
+        .map(|(year, candidate)| {
+            let restated = consolidated_values
+                .get(&candidate.end)
+                .is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|value| materially_restated(*value, candidate.value_dollars))
+                });
+            (
+                AnnualValue {
+                    year,
+                    value_dollars: candidate.value_dollars,
+                },
+                restated,
+            )
         })
         .collect();
-    result.sort_by_key(|v| v.year);
+    result.sort_by_key(|(value, _)| value.year);
     result
 }
 
+/// Fiscal years for which a later filing materially restated this driver.
+fn restated_years(
+    facts: &serde_json::Value,
+    driver: crate::sec_driver_normalization_policy_generated::DriverOperator,
+) -> HashSet<i32> {
+    let shape = match driver.period_shape {
+        "duration" => FactPeriodShape::Duration,
+        "instant" => FactPeriodShape::Instant,
+        other => panic!("unsupported SEC driver shape: {other}"),
+    };
+    driver
+        .qnames
+        .iter()
+        .flat_map(|concept| annual_candidates_with_shape(facts, concept, shape, driver.unit))
+        .filter(|(_, restated)| *restated)
+        .map(|(value, _)| value.year)
+        .collect()
+}
+
 fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> {
-    extract_annual_with_shape(facts, concept, FactPeriodShape::Any)
+    extract_annual_with_shape(facts, concept, FactPeriodShape::Any, "USD")
 }
 
 /// Extract the first usable annual USD series from a list of issuer-specific
@@ -226,13 +296,14 @@ fn extract_annual(facts: &serde_json::Value, concept: &str) -> Vec<AnnualValue> 
 /// interest, and tax tags, so the provider layer resolves that taxonomy before
 /// the valuation engine sees the aligned driver rows.
 fn extract_annual_any(facts: &serde_json::Value, concepts: &[&str]) -> Vec<AnnualValue> {
-    extract_annual_any_with_shape(facts, concepts, FactPeriodShape::Any)
+    extract_annual_any_with_shape(facts, concepts, FactPeriodShape::Any, "USD")
 }
 
 fn extract_annual_any_with_shape(
     facts: &serde_json::Value,
     concepts: &[&str],
     shape: FactPeriodShape,
+    unit: &str,
 ) -> Vec<AnnualValue> {
     // Equivalent XBRL concepts are often rotated during taxonomy migrations:
     // one tag may contain the older history while another contains recent
@@ -242,7 +313,7 @@ fn extract_annual_any_with_shape(
     // gaps are filled from the alternatives.
     let mut by_year = HashMap::<i32, i64>::new();
     for concept in concepts {
-        for value in extract_annual_with_shape(facts, concept, shape) {
+        for value in extract_annual_with_shape(facts, concept, shape, unit) {
             by_year.entry(value.year).or_insert(value.value_dollars);
         }
     }
@@ -261,7 +332,11 @@ fn extract_driver_annual(
     facts: &serde_json::Value,
     driver: crate::sec_driver_normalization_policy_generated::DriverOperator,
 ) -> Vec<AnnualValue> {
-    assert_eq!(driver.unit, "USD", "USD driver contract required");
+    assert!(
+        matches!(driver.unit, "USD" | "shares"),
+        "unsupported SEC driver unit: {}",
+        driver.unit
+    );
     let shape = match driver.period_shape {
         "duration" => FactPeriodShape::Duration,
         "instant" => FactPeriodShape::Instant,
@@ -275,7 +350,7 @@ fn extract_driver_annual(
         "unsupported SEC driver operation: {}",
         driver.operation
     );
-    extract_annual_any_with_shape(facts, driver.qnames, shape)
+    extract_annual_any_with_shape(facts, driver.qnames, shape, driver.unit)
 }
 
 fn extract_total_debt(facts: &serde_json::Value) -> Vec<AnnualValue> {
@@ -902,6 +977,10 @@ pub fn fetch_fcf_history(
     let investment_evidence = extract_normalized_investment_evidence(&body);
     let capex = extract_recurring_development(&investment_evidence);
     let acquisition_investments = extract_acquisition_investments(&investment_evidence);
+    let diluted_shares = extract_driver_annual(
+        &body,
+        crate::sec_driver_normalization_policy_generated::DILUTED_AVERAGE_SHARES,
+    );
     let revenue = extract_driver_annual(
         &body,
         crate::sec_driver_normalization_policy_generated::REVENUE,
@@ -948,6 +1027,18 @@ pub fn fetch_fcf_history(
             .map(|value| value.value_dollars as f64)
     };
 
+    // A discontinued operation restates revenue down to continuing operations
+    // and leaves the cash-flow statement whole-company (ASC 205-20). Years where
+    // only one of the two moved divide one entity by another.
+    let restated_revenue_years = restated_years(
+        &body,
+        crate::sec_driver_normalization_policy_generated::REVENUE,
+    );
+    let restated_ocf_years = restated_years(
+        &body,
+        crate::sec_driver_normalization_policy_generated::OPERATING_CASH_FLOW,
+    );
+
     Ok(Some(
         fcf.into_iter()
             .map(|v| {
@@ -986,6 +1077,12 @@ pub fn fetch_fcf_history(
                             None,
                         );
                         point = point.with_acquisition_investment(acquisition_investment_dollars);
+                        point =
+                            point.with_diluted_average_shares(by_year(&diluted_shares, v.year));
+                        point = point.with_reporting_basis_broken(
+                            restated_revenue_years.contains(&v.year)
+                                && !restated_ocf_years.contains(&v.year),
+                        );
                         if marginal_tax_bps.is_some() {
                             point = point.with_marginal_tax_source(
                                 crate::dcf_model::WaccFieldSource::TaxReconciliation,
@@ -1065,6 +1162,205 @@ pub fn fetch_dcf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two 10-K filings reporting the same fiscal end. The 2025 filing restates
+    /// FY2023 revenue down to continuing operations after a separation and
+    /// leaves operating cash flow on the total-company basis — the exact WDC
+    /// signature (12.318B → 6.255B revenue, OCF untouched).
+    fn separation_facts() -> serde_json::Value {
+        let annual = |filed: &str, val: i64| {
+            serde_json::json!({
+                "form": "10-K",
+                "start": "2022-07-02",
+                "end": "2023-06-30",
+                "filed": filed,
+                "val": val,
+            })
+        };
+        serde_json::json!({
+            "facts": {
+                "us-gaap": {
+                    "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                        "units": {
+                            "USD": [
+                                annual("2023-08-22", 12_318_000_000_i64),
+                                annual("2025-08-14", 6_255_000_000_i64),
+                            ]
+                        }
+                    },
+                    "NetCashProvidedByUsedInOperatingActivities": {
+                        "units": {
+                            "USD": [
+                                annual("2023-08-22", -409_000_000_i64),
+                                annual("2025-08-14", -409_000_000_i64),
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn discontinued_operation_marks_revenue_restated_but_not_cash_flow() {
+        let facts = separation_facts();
+
+        let restated_revenue = restated_years(
+            &facts,
+            crate::sec_driver_normalization_policy_generated::REVENUE,
+        );
+        let restated_ocf = restated_years(
+            &facts,
+            crate::sec_driver_normalization_policy_generated::OPERATING_CASH_FLOW,
+        );
+
+        assert_eq!(
+            (
+                restated_revenue.contains(&2023),
+                restated_ocf.contains(&2023)
+            ),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn restatement_keeps_the_latest_filed_value() {
+        let series = extract_annual_with_shape(
+            &separation_facts(),
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            FactPeriodShape::Duration,
+            "USD",
+        );
+
+        let observed: Vec<(i32, i64)> = series
+            .iter()
+            .map(|value| (value.year, value.value_dollars))
+            .collect();
+        assert_eq!(observed, vec![(2023, 6_255_000_000)]);
+    }
+
+    #[test]
+    #[ignore = "network: driver year-coverage probe"]
+    fn probe_driver_coverage() {
+        use crate::sec_driver_normalization_policy_generated as policy;
+        let client = edgar_client();
+        let cik_map = fetch_cik_map(&client).expect("CIK");
+        for &symbol in &["AAPL", "MSFT", "GOOGL", "AMZN", "CSCO", "PG", "JNJ", "TXN", "HD", "KO"] {
+            let cik = cik_map[symbol];
+            let url = format!(
+                "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
+                cik
+            );
+            let body: serde_json::Value = client
+                .get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+            let last = |series: &[AnnualValue]| series.last().map(|v| v.year).unwrap_or(-1);
+            let ocf = extract_driver_annual(&body, policy::OPERATING_CASH_FLOW);
+            let revenue = extract_driver_annual(&body, policy::REVENUE);
+            let interest = extract_driver_annual(&body, policy::INTEREST_EXPENSE);
+            let pretax = extract_driver_annual(&body, policy::PRETAX_INCOME);
+            let tax = extract_driver_annual(&body, policy::TAX_EXPENSE);
+            let evidence = extract_normalized_investment_evidence(&body);
+            let capex = extract_recurring_development(&evidence);
+            eprintln!(
+                "COV {symbol:<6} ocf={:<5} capex={:<5} rev={:<5} int={:<5} pretax={:<5} tax={:<5}",
+                last(&ocf),
+                last(&capex),
+                last(&revenue),
+                last(&interest),
+                last(&pretax),
+                last(&tax),
+            );
+            let recent: Vec<i32> = capex.iter().rev().take(4).map(|v| v.year).collect();
+            eprintln!("    capex years (last 4, desc) = {recent:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "network: raw XBRL restatement probe"]
+    fn probe_restated_facts() {
+        let client = edgar_client();
+        let cik_map = fetch_cik_map(&client).expect("CIK");
+        for &symbol in &["WDC", "AAPL", "MSFT", "GOOGL", "AMZN"] {
+            let cik = cik_map[symbol];
+            let url = format!(
+                "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
+                cik
+            );
+            let body: serde_json::Value = client
+                .get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+            for (label, concepts) in [
+                ("REV", crate::sec_driver_normalization_policy_generated::REVENUE.qnames),
+                (
+                    "OCF",
+                    crate::sec_driver_normalization_policy_generated::OPERATING_CASH_FLOW.qnames,
+                ),
+            ] {
+                let mut by_end: HashMap<String, Vec<(String, i64, String)>> = HashMap::new();
+                for concept in concepts {
+                    let Some(arr) = body
+                        .pointer(&format!("/facts/us-gaap/{concept}/units/USD"))
+                        .and_then(|v| v.as_array())
+                    else {
+                        continue;
+                    };
+                    for entry in arr {
+                        let form = entry["form"].as_str().unwrap_or("");
+                        if !crate::sec_driver_normalization_policy_generated::ACCEPTED_FORMS
+                            .contains(&form)
+                        {
+                            continue;
+                        }
+                        if !has_approved_period_shape(entry, FactPeriodShape::Duration) {
+                            continue;
+                        }
+                        if entry["frame"].as_str().is_some_and(|f| f.contains('Q')) {
+                            continue;
+                        }
+                        if entry.get("segment").is_some_and(|s| !s.is_null()) {
+                            continue;
+                        }
+                        let end = entry["end"].as_str().unwrap_or("").to_string();
+                        if end < "2021".to_string() {
+                            continue;
+                        }
+                        by_end.entry(end).or_default().push((
+                            entry["filed"].as_str().unwrap_or("").to_string(),
+                            entry["val"].as_i64().unwrap_or(0),
+                            (*concept).to_string(),
+                        ));
+                    }
+                }
+                let mut ends: Vec<_> = by_end.into_iter().collect();
+                ends.sort();
+                for (end, mut rows) in ends {
+                    rows.sort();
+                    rows.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+                    if rows.len() < 2 {
+                        continue;
+                    }
+                    let distinct: std::collections::HashSet<i64> =
+                        rows.iter().map(|r| r.1).collect();
+                    if distinct.len() < 2 {
+                        continue;
+                    }
+                    eprintln!("{symbol} {label} end={end}");
+                    for (filed, val, concept) in rows {
+                        eprintln!("    filed={filed} val={:.3}B {concept}", val as f64 / 1e9);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn merge_capex_prefers_larger_abs_per_year() {
