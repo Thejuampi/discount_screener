@@ -10,6 +10,7 @@ use cucumber::{given, then, when, World};
 use valuation_core::evidence::{
     AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis,
 };
+use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
 
 /// The reserved absence token (FR-43). `tests/schema.rs` rejects every other
@@ -22,6 +23,17 @@ struct GrowthWorld {
     trailing: Option<Observation<f64>>,
     forward: Option<Observation<f64>>,
     fusion: Option<Fusion>,
+    curve: Option<CreditCurve>,
+    leverage: Option<Observation<f64>>,
+    coverage: Option<Observation<f64>>,
+    risk_free_bps: f64,
+    cost_of_equity: Option<Observation<f64>>,
+    debt_cost: Option<Observation<f64>>,
+    debt_weight_bps: f64,
+    tax_bps: f64,
+    /// Whatever the last `When` resolved. Every outline reports its outcome
+    /// through this, so `the outcome is ...` reads the same in all of them.
+    result: Option<Observation<f64>>,
 }
 
 impl GrowthWorld {
@@ -29,6 +41,35 @@ impl GrowthWorld {
         self.fusion
             .as_ref()
             .expect("the Growth Posterior step must run before its assertions")
+    }
+
+    fn result(&self) -> &Observation<f64> {
+        self.result
+            .as_ref()
+            .expect("a When step must run before its assertions")
+    }
+}
+
+/// Uncertainty attached to scalar inputs that the tables state as bare numbers.
+///
+/// The outlines specify point behaviour; propagation of width is unit-tested in
+/// `capital.rs` where the expected variances can be stated exactly instead of
+/// cluttering every row with a column no row asserts on. A positive nominal
+/// variance is required because a zero-width input is not a measurement.
+fn nominal(value: f64, source: &'static str) -> Observation<f64> {
+    Observation::measured(
+        value,
+        Uncertainty::from_variance(0.01, UncertaintyBasis::SampleVariance { observations: 8 })
+            .expect("nominal variance is positive"),
+        Provenance::new(source, 20_000),
+    )
+}
+
+/// A table cell that is either `ABSENT` or a number, as an Observation.
+fn observed(token: &str, source: &'static str) -> Observation<f64> {
+    match cell(token) {
+        Some(value) => nominal(value, source),
+        None => Observation::absent(AbsenceReason::NotReported, Provenance::new(source, 20_000)),
     }
 }
 
@@ -88,7 +129,111 @@ fn given_forward(world: &mut GrowthWorld, value: String, variance: String, analy
 fn when_resolved(world: &mut GrowthWorld) {
     let trailing = world.trailing.clone().expect("Trailing Channel");
     let forward = world.forward.clone().expect("Forward Channel");
-    world.fusion = Some(fuse(&[trailing, forward]));
+    let fusion = fuse(&[trailing, forward]);
+    world.result = Some(fusion.estimate().clone());
+    world.fusion = Some(fusion);
+}
+
+#[given(
+    expr = "a Credit Curve with intercept {word} bps, leverage slope {word} and coverage slope {word}"
+)]
+fn given_credit_curve(
+    world: &mut GrowthWorld,
+    intercept: String,
+    leverage_slope: String,
+    coverage_slope: String,
+) {
+    // A curve is absent either because the Shell could not fit one (ABSENT
+    // cells) or because the fit it produced is not a usable curve — a leverage
+    // slope that does not rise is a failed fit, and `fitted` refuses it.
+    world.curve = match (
+        cell(&intercept),
+        cell(&leverage_slope),
+        cell(&coverage_slope),
+    ) {
+        (Some(intercept), Some(leverage_slope), Some(coverage_slope)) => CreditCurve::fitted(
+            intercept,
+            leverage_slope,
+            coverage_slope,
+            Provenance::new("credit-curve", 20_000),
+        ),
+        _ => None,
+    };
+}
+
+#[given(expr = "an issuer with leverage {word} and interest coverage {word}")]
+fn given_issuer_structure(world: &mut GrowthWorld, leverage: String, coverage: String) {
+    world.leverage = Some(observed(&leverage, "leverage"));
+    world.coverage = Some(observed(&coverage, "coverage"));
+}
+
+#[given(expr = "a risk-free rate of {int} bps")]
+fn given_risk_free(world: &mut GrowthWorld, risk_free_bps: i64) {
+    world.risk_free_bps = risk_free_bps as f64;
+}
+
+#[when(expr = "the Cost of Debt is resolved")]
+fn when_cost_of_debt(world: &mut GrowthWorld) {
+    let leverage = world.leverage.clone().expect("leverage");
+    let coverage = world.coverage.clone().expect("coverage");
+    world.result = Some(cost_of_debt(
+        world.curve.as_ref(),
+        &leverage,
+        &coverage,
+        world.risk_free_bps,
+    ));
+}
+
+#[then(expr = "the Cost of Debt is {word} bps within 1 bp")]
+fn then_cost_of_debt(world: &mut GrowthWorld, expected: String) {
+    assert_within_one_bp(world.result(), &expected, "cost of debt");
+}
+
+#[given(expr = "a Cost of Equity of {word} bps")]
+fn given_cost_of_equity(world: &mut GrowthWorld, value: String) {
+    world.cost_of_equity = Some(observed(&value, "cost-of-equity"));
+}
+
+#[given(expr = "a Cost of Debt of {word} bps")]
+fn given_cost_of_debt(world: &mut GrowthWorld, value: String) {
+    world.debt_cost = Some(observed(&value, "cost-of-debt"));
+}
+
+#[given(expr = "a debt weight of {word} bps and a marginal tax rate of {word} bps")]
+fn given_weights(world: &mut GrowthWorld, debt_weight: String, tax: String) {
+    world.debt_weight_bps = cell(&debt_weight).expect("debt weight is always stated");
+    world.tax_bps = cell(&tax).expect("tax rate is always stated");
+}
+
+#[when(expr = "the WACC is resolved")]
+fn when_wacc(world: &mut GrowthWorld) {
+    let equity = world.cost_of_equity.clone().expect("Cost of Equity");
+    let debt = world.debt_cost.clone().expect("Cost of Debt");
+    world.result = Some(wacc(&equity, &debt, world.debt_weight_bps, world.tax_bps));
+}
+
+#[then(expr = "the WACC is {word} bps within 1 bp")]
+fn then_wacc(world: &mut GrowthWorld, expected: String) {
+    assert_within_one_bp(world.result(), &expected, "wacc");
+}
+
+fn assert_within_one_bp(actual: &Observation<f64>, expected: &str, label: &str) {
+    match cell(expected) {
+        Some(expected) => {
+            let actual = actual
+                .value()
+                .unwrap_or_else(|| panic!("expected a resolved {label}, found absence"));
+            assert!(
+                (actual - expected).abs() <= 1.0,
+                "{label} {actual} is not within 1 bp of {expected}"
+            );
+        }
+        None => assert_eq!(
+            actual.value(),
+            None,
+            "expected absence, found a resolved {label}"
+        ),
+    }
 }
 
 #[then(expr = "the point estimate is {word} bps within 1 bp")]
@@ -132,7 +277,7 @@ fn then_channel_weights(world: &mut GrowthWorld, trailing: i32, forward: i32) {
 
 #[then(expr = "the outcome is {word}")]
 fn then_outcome(world: &mut GrowthWorld, expected: String) {
-    let actual = if world.fusion().is_resolved() {
+    let actual = if world.result().is_measured() {
         "resolved"
     } else {
         "refused"

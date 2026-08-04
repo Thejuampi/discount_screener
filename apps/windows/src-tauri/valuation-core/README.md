@@ -50,10 +50,31 @@ still values with the deprecated modules. Landed so far:
 
 - `evidence` — `Observation`, `Uncertainty`, `Provenance`, `AbsenceReason`
 - `posterior` — inverse-variance fusion, largest-remainder weight reporting
+- `capital` — credit-curve cost of debt and WACC, with delta-method propagation
 
-Not yet built: growth persistence, projection, cost of capital, terminal value,
-routing, publication. The cost-of-capital module is the one that needs a
-cross-sectional fit over a universe — the defect the old engine cannot express.
+Not yet built: projection, terminal value, routing, publication.
+
+### Growth persistence was cut, not deferred
+
+The PRD specified an Ornstein-Uhlenbeck fade with a per-issuer mean-reversion
+speed `kappa = -ln(rho_1)`. A probe over 28 names measured `rho_1` on realized
+annual revenue growth: **median 0.003**, 14 of 28 at or below zero, median
+`se(rho_1)` 0.25. It is not estimable per issuer, and where it is positive the
+implied half-life is ~0.47 years against a shipping engine that fades over 5–10.
+
+`rho_1` was computed on deviations from each firm's *own* mean growth, so this
+does not say firms lack persistent growth differences. It says those deviations
+are noise, and the persistent estimable quantity is the **mean growth level** —
+whose standard error is measurable, and which is exactly what the growth
+posterior already fuses. The OU kernel, `kappa`, and the half-life are removed
+from the design rather than postponed.
+
+Re-run the probes with:
+
+```
+cargo test --lib probe_analyst_dispersion_availability -- --ignored --nocapture
+cargo test --lib probe_growth_persistence_rho1        -- --ignored --nocapture
+```
 
 ## Honest caveats
 

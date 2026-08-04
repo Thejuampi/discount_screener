@@ -54,6 +54,10 @@ pub enum UncertaintyBasis {
     SampleVariance { observations: u32 },
     /// Dispersion across `n` contributing analysts.
     AnalystDispersion { analysts: u32 },
+    /// Carried through a function of `n` uncertain inputs by the delta method.
+    /// Distinct from the two measured bases because it is derived: it inherits
+    /// whatever the inputs knew and adds nothing of its own (FR-26).
+    Propagated { inputs: u32 },
 }
 
 impl UncertaintyBasis {
@@ -61,6 +65,7 @@ impl UncertaintyBasis {
         match self {
             Self::SampleVariance { observations } => observations,
             Self::AnalystDispersion { analysts } => analysts,
+            Self::Propagated { inputs } => inputs,
         }
     }
 }

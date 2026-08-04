@@ -15,3 +15,19 @@ name = "Growth Posterior from two Evidence Channels"
 covers = "Inverse-variance fusion of the Trailing and Forward Channels, including single-channel fallback, total absence, and channel disagreement"
 frs = ["FR-12", "FR-13", "FR-14", "FR-15"]
 why_new = "First outline in the Core; no existing table covers channel fusion"
+
+[[outline]]
+id = "cost-of-debt-from-credit-curve"
+feature = "cost-of-capital.feature"
+name = "Cost of Debt from a fitted Credit Curve"
+covers = "Placing an issuer on a cross-sectionally fitted spread curve, including an unfitted curve, a fit that is not monotone in leverage, and absent leverage or coverage"
+frs = ["FR-20", "FR-21", "FR-26", "FR-27"]
+why_new = "The growth-posterior table fuses two channels of the same quantity; this evaluates a fitted function of two different quantities and has no shared columns with it"
+
+[[outline]]
+id = "wacc-from-component-costs"
+feature = "cost-of-capital.feature"
+name = "WACC from cost of equity and cost of debt"
+covers = "Weighting equity and after-tax debt costs, the U-shape in leverage, and the asymmetry between an absent debt cost at zero weight versus at positive weight"
+frs = ["FR-20", "FR-26", "FR-27", "FR-32"]
+why_new = "Separate from the cost-of-debt table because it takes component costs as given; merging them would force every curve-fitting row to carry irrelevant weight and tax columns"

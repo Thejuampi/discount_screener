@@ -36,8 +36,10 @@
 //! the behaviour it is being retired for. Nothing here is wired into the running
 //! application yet.
 
+pub mod capital;
 pub mod evidence;
 pub mod posterior;
 
 pub use evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
+pub use capital::{cost_of_debt, wacc, CreditCurve};
 pub use posterior::{fuse, Fusion};
