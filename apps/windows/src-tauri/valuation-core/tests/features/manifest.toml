@@ -47,3 +47,11 @@ name = "Business Class from sector and industry text"
 covers = "Closed-world routing of sector and industry text to a model class, the healthcare split between plans and operating health businesses, provider slugs, word-boundary matching, ineligible instruments, and the absence of any default class"
 frs = ["FR-30", "FR-32"]
 why_new = "Every other table takes numbers and returns a number within a chosen model; this one chooses the model, and its columns are text. There is no numeric table it could be a row of"
+
+[[outline]]
+id = "valuation-posterior-publication"
+feature = "valuation-posterior.feature"
+name = "Publishing a Valuation Posterior across the equity bridge"
+covers = "The equity bridge from firm value to per-share, percentile publication and its monotone widening in every input, fixed-point quantization, and the two refusal kinds -- with uncertainty reaching neither"
+frs = ["FR-3", "FR-32", "FR-33", "FR-34"]
+why_new = "The intrinsic-value table ends at a firm value in the caller's own unit; this one starts from a firm value and ends at published cents, so the two share only that seam. Merging them would make every projection row carry a share count and a class"

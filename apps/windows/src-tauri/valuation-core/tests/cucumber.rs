@@ -12,8 +12,10 @@ use valuation_core::evidence::{
 };
 use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
+use valuation_core::attribution::{Contribution, ValuationInput};
 use valuation_core::classification::{classify, BusinessClass, Instrument};
-use valuation_core::projection::{intrinsic_value, GrowthPath};
+use valuation_core::projection::{intrinsic_value, GrowthPath, Valuation};
+use valuation_core::publication::{publish, ValuationPosterior};
 
 /// The reserved absence token (FR-43). `tests/schema.rs` rejects every other
 /// spelling of absence in an Examples table, so this is the only one that
@@ -42,6 +44,10 @@ struct GrowthWorld {
     industry: String,
     instrument: Option<Instrument>,
     business_class: Option<BusinessClass>,
+    valuation: Option<Valuation>,
+    net_debt: Option<Observation<f64>>,
+    diluted_shares: Option<Observation<f64>>,
+    posterior: Option<ValuationPosterior>,
     /// Whatever the last `When` resolved. Every outline reports its outcome
     /// through this, so `the outcome is ...` reads the same in all of them.
     result: Option<Observation<f64>>,
@@ -270,13 +276,18 @@ fn when_intrinsic_value(world: &mut GrowthWorld) {
     // An unfitted path refuses the whole valuation. `intrinsic_value` takes the
     // path by reference rather than by option because a path that does not fade
     // is not representable, so the refusal happens here.
-    world.result = Some(match world.path.as_ref() {
+    let valued = match world.path.as_ref() {
         Some(path) => intrinsic_value(&base, &growth, path, &return_on_capital, &discount),
-        None => Observation::absent(
-            AbsenceReason::NotReported,
-            Provenance::new("growth-path", 20_000),
+        None => Valuation::new(
+            Observation::absent(
+                AbsenceReason::NotReported,
+                Provenance::new("growth-path", 20_000),
+            ),
+            vec![],
         ),
-    });
+    };
+    world.result = Some(valued.value().clone());
+    world.valuation = Some(valued);
 }
 
 #[then(expr = "the Intrinsic Value is {word} within 1 cent")]
@@ -327,6 +338,105 @@ fn when_business_class(world: &mut GrowthWorld) {
 fn then_business_class(world: &mut GrowthWorld, expected: String) {
     let actual = world.business_class.expect("the When step must run first");
     assert_eq!(actual.as_str(), expected);
+}
+
+/// A quantity stated as a value and a standard deviation, as an Observation.
+///
+/// A zero standard deviation is not a measurement, so it produces an input that
+/// carries a value and contributes no width — which is how the rows isolate one
+/// input's effect on the interval at a time.
+fn with_deviation(value: &str, deviation: &str, source: &'static str) -> Observation<f64> {
+    let provenance = Provenance::new(source, 20_000);
+    let Some(value) = cell(value) else {
+        return Observation::absent(AbsenceReason::NotReported, provenance);
+    };
+    let variance = cell(deviation).expect("a standard deviation is always stated").powi(2);
+    let uncertainty = Uncertainty::from_variance(
+        variance.max(f64::MIN_POSITIVE),
+        UncertaintyBasis::SampleVariance { observations: 8 },
+    )
+    .expect("a positive variance");
+    Observation::measured(value, uncertainty, provenance)
+}
+
+#[given(expr = "a firm value of {word} with standard deviation {word}")]
+fn given_firm_value(world: &mut GrowthWorld, value: String, deviation: String) {
+    let observed = with_deviation(&value, &deviation, "firm-value");
+    world.valuation = Some(Valuation::new(
+        observed.clone(),
+        vec![Contribution::new(
+            ValuationInput::BaseCashFlow,
+            observed.propagation_variance(),
+        )],
+    ));
+}
+
+#[given(expr = "net debt of {word} with standard deviation {word}")]
+fn given_net_debt(world: &mut GrowthWorld, value: String, deviation: String) {
+    world.net_debt = Some(with_deviation(&value, &deviation, "net-debt"));
+}
+
+#[given(expr = "{word} diluted shares with standard deviation {word}")]
+fn given_diluted_shares(world: &mut GrowthWorld, value: String, deviation: String) {
+    world.diluted_shares = Some(with_deviation(&value, &deviation, "diluted-shares"));
+}
+
+#[given(expr = "a Business Class of {word}")]
+fn given_business_class(world: &mut GrowthWorld, class: String) {
+    world.business_class = Some(match class.as_str() {
+        "operating_non_financial" => BusinessClass::OperatingNonFinancial,
+        "financial_services" => BusinessClass::FinancialServices,
+        "not_eligible" => BusinessClass::NotEligible,
+        "unclassified" => BusinessClass::Unclassified,
+        other => panic!("table cell {other:?} is not a business class"),
+    });
+}
+
+#[when(expr = "the Valuation Posterior is published")]
+fn when_published(world: &mut GrowthWorld) {
+    world.posterior = Some(publish(
+        world.business_class.expect("Business Class"),
+        world.valuation.as_ref().expect("firm value"),
+        world.net_debt.as_ref().expect("net debt"),
+        world.diluted_shares.as_ref().expect("diluted shares"),
+    ));
+}
+
+#[then(expr = "the published percentiles are {word}, {word} and {word} cents")]
+fn then_percentiles(world: &mut GrowthWorld, low: String, median: String, high: String) {
+    let posterior = world.posterior.as_ref().expect("the When step must run first");
+    match (cell(&low), cell(&median), cell(&high)) {
+        (Some(low), Some(median), Some(high)) => {
+            let ValuationPosterior::Published {
+                percentile_05_cents,
+                median_cents,
+                percentile_95_cents,
+                ..
+            } = posterior
+            else {
+                panic!("expected a published posterior, found {posterior:?}");
+            };
+            assert_eq!(
+                [*percentile_05_cents, *median_cents, *percentile_95_cents],
+                [low as i64, median as i64, high as i64]
+            );
+        }
+        _ => assert!(
+            !posterior.is_published(),
+            "expected a refusal, found {posterior:?}"
+        ),
+    }
+}
+
+#[then(expr = "the publication outcome is {word}")]
+fn then_publication_outcome(world: &mut GrowthWorld, expected: String) {
+    let posterior = world.posterior.as_ref().expect("the When step must run first");
+    let actual = if posterior.is_published() {
+        "published"
+    } else {
+        "refused"
+    };
+    assert_eq!(actual, expected);
 }
 
 /// A text cell is either the reserved absence token or the text itself.

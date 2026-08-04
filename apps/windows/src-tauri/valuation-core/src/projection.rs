@@ -76,6 +76,7 @@
 //! fitted relaxation speed for the universe, supplied by the Shell, in the same
 //! way and for the same reason as the credit curve.
 
+use crate::attribution::{Contribution, ValuationInput};
 use crate::evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
 
 /// Terms after which a series that has not converged is treated as unusable.
@@ -152,6 +153,37 @@ impl GrowthPath {
     }
 }
 
+/// A value together with the inputs that made it uncertain.
+///
+/// The two travel together because publishing one without the other is what
+/// makes a wide interval useless to a reader (FR-34). A refused valuation
+/// carries no contributions, exactly as an unresolved fusion carries no weights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Valuation {
+    value: Observation<f64>,
+    contributions: Vec<Contribution>,
+}
+
+impl Valuation {
+    /// Public because the operating path is not the only producer of a value —
+    /// residual income on book is another, and both publish through the same
+    /// boundary.
+    pub fn new(value: Observation<f64>, contributions: Vec<Contribution>) -> Self {
+        Self {
+            value,
+            contributions,
+        }
+    }
+
+    pub fn value(&self) -> &Observation<f64> {
+        &self.value
+    }
+
+    pub fn contributions(&self) -> &[Contribution] {
+        &self.contributions
+    }
+}
+
 /// Present value of the whole cash-flow path.
 ///
 /// `base_cash_flow` is the owner cash flow at `t = 0` in whatever unit the caller
@@ -168,7 +200,7 @@ pub fn intrinsic_value(
     path: &GrowthPath,
     return_on_capital_bps: &Observation<f64>,
     discount_rate_bps: &Observation<f64>,
-) -> Observation<f64> {
+) -> Valuation {
     let provenance = Provenance::new(
         "intrinsic_value",
         [
@@ -184,15 +216,17 @@ pub fn intrinsic_value(
         .unwrap_or_default(),
     );
 
+    let refused = |reason| Valuation::new(Observation::absent(reason, provenance.clone()), vec![]);
+
     let (Some(&base), Some(&growth), Some(&discount)) = (
         base_cash_flow.value(),
         growth_bps.value(),
         discount_rate_bps.value(),
     ) else {
-        return Observation::absent(AbsenceReason::NotReported, provenance);
+        return refused(AbsenceReason::NotReported);
     };
     if !base.is_finite() {
-        return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
+        return refused(AbsenceReason::OutOfPolicyRange);
     }
 
     // FR-29. An absent return on capital makes growth value-neutral, and value
@@ -207,11 +241,11 @@ pub fn intrinsic_value(
         unit_value(growth, path, return_on_capital, discount)
     };
     let Ok(unit) = evaluate(growth, return_on_capital, discount) else {
-        return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
+        return refused(AbsenceReason::OutOfPolicyRange);
     };
     let value = base * unit;
     if !value.is_finite() {
-        return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
+        return refused(AbsenceReason::OutOfPolicyRange);
     }
 
     // Steps are a quarter of the distance to each input's own guard, so a
@@ -219,47 +253,54 @@ pub fn intrinsic_value(
     let discount_step = ((discount - path.terminal_bps) / 4.0).min(1.0);
     let return_step = (return_on_capital / 4.0).min(1.0);
     let partials = [
+        (ValuationInput::BaseCashFlow, unit, base_cash_flow),
         (
-            unit,
-            base_cash_flow.propagation_variance(),
-            base_cash_flow.is_measured(),
+            ValuationInput::Growth,
+            base * central_difference(1.0, |step| {
+                evaluate(growth + step, return_on_capital, discount)
+            }),
+            growth_bps,
         ),
         (
-            base * central_difference(1.0, |step| evaluate(growth + step, return_on_capital, discount)),
-            growth_bps.propagation_variance(),
-            growth_bps.is_measured(),
-        ),
-        (
+            ValuationInput::ReturnOnCapital,
             base * central_difference(return_step, |step| {
                 evaluate(growth, return_on_capital + step, discount)
             }),
-            return_on_capital_bps.propagation_variance(),
-            return_on_capital_bps.is_measured(),
+            return_on_capital_bps,
         ),
         (
+            ValuationInput::DiscountRate,
             base * central_difference(discount_step, |step| {
                 evaluate(growth, return_on_capital, discount + step)
             }),
-            discount_rate_bps.propagation_variance(),
-            discount_rate_bps.is_measured(),
+            discount_rate_bps,
         ),
     ];
-    if partials.iter().any(|(partial, ..)| !partial.is_finite()) {
-        return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
+    if partials.iter().any(|(_, partial, _)| !partial.is_finite()) {
+        return refused(AbsenceReason::OutOfPolicyRange);
     }
 
-    let variance: f64 = partials
+    let contributions: Vec<Contribution> = partials
         .iter()
-        .map(|(partial, variance, _)| partial * partial * variance)
-        .sum();
-    let inputs = partials.iter().filter(|(.., measured)| *measured).count() as u32;
+        .map(|(input, partial, observation)| {
+            Contribution::new(*input, observation.propagation_variance() * partial * partial)
+        })
+        .collect();
+    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let inputs = partials
+        .iter()
+        .filter(|(.., observation)| observation.is_measured())
+        .count() as u32;
 
     match Uncertainty::from_variance(variance, UncertaintyBasis::Propagated { inputs }) {
-        Some(uncertainty) => Observation::measured(value, uncertainty, provenance),
+        Some(uncertainty) => Valuation::new(
+            Observation::measured(value, uncertainty, provenance),
+            contributions,
+        ),
         // Every input arrived without usable width, so the value is a point with
         // no interval to publish. Fabricating a width would be worse than saying
         // so (FR-33 publishes an interval, not a bare number).
-        None => Observation::absent(AbsenceReason::InsufficientObservations, provenance),
+        None => refused(AbsenceReason::InsufficientObservations),
     }
 }
 
@@ -378,6 +419,7 @@ mod tests {
             return_on_capital,
             &known(discount),
         )
+        .value()
         .value()
         .expect("resolved intrinsic value")
     }
@@ -502,7 +544,7 @@ mod tests {
             &known(800.0),
         );
         assert_eq!(
-            refused.absence_reason(),
+            refused.value().absence_reason(),
             Some(AbsenceReason::OutOfPolicyRange)
         );
     }
@@ -516,7 +558,30 @@ mod tests {
             &known(2_500.0),
             &known(800.0),
         );
-        assert_eq!(refused.absence_reason(), Some(AbsenceReason::NotReported));
+        assert_eq!(
+            refused.value().absence_reason(),
+            Some(AbsenceReason::NotReported)
+        );
+    }
+
+    /// FR-34. The delta method is a sum of squared-partial terms, so the parts
+    /// add up to the whole by construction rather than by reconciliation.
+    #[test]
+    fn contributions_sum_to_the_published_variance() {
+        let valued = intrinsic_value(
+            &known(100.0),
+            &known(1_500.0),
+            &path(),
+            &known(2_500.0),
+            &known(800.0),
+        );
+        let summed: f64 = valued.contributions().iter().copied().map(Contribution::variance).sum();
+        let total = valued
+            .value()
+            .uncertainty()
+            .map(Uncertainty::variance)
+            .expect("resolved");
+        assert!((summed - total).abs() < 1e-9 * total);
     }
 
     #[test]
@@ -539,8 +604,8 @@ mod tests {
             &known(800.0),
         );
         assert!(
-            wide.uncertainty().map(Uncertainty::variance)
-                > tight.uncertainty().map(Uncertainty::variance)
+            wide.value().uncertainty().map(Uncertainty::variance)
+                > tight.value().uncertainty().map(Uncertainty::variance)
         );
     }
 }

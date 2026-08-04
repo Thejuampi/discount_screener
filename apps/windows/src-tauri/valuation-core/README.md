@@ -54,9 +54,23 @@ still values with the deprecated modules. Landed so far:
 - `projection` — the discounted cash-flow path in closed form, with the
   retention charge and no explicit horizon
 - `classification` — closed-world business class, matched on whole words
+- `attribution` — which input a valuation's width is charged to
+- `publication` — the equity bridge, percentiles, and the fixed-point boundary
 
-Not yet built: residual income for financial services, publication and the
-fixed-point boundary.
+Not yet built: residual income for financial services, and the Shell adapter
+that fits the cross-section priors and feeds the Core real evidence.
+
+### There is no Disputed
+
+The old engine refused to publish when its two lanes disagreed by more than
+5000 bps. In all nine issuers it refused this way, the forward lane was the
+closer one — so the disagreement was information about *width*, and suppressing
+the publication threw away the estimate and the uncertainty together.
+
+`Refusal` has exactly two variants, **Eligibility** and **Evidence**, and no
+threshold on interval width, channel disagreement or distance from any price can
+construct either. That is FR-32 enforced by the type rather than intended by a
+comment.
 
 ### There is no terminal value module, on purpose
 

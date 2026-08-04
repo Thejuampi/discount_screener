@@ -33,6 +33,7 @@
 //! resolved by this code, and both are why the residual-structure gate tests the
 //! posterior against realized outcomes instead of trusting the arithmetic.
 
+use crate::attribution::apportion_bps;
 use crate::evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
 
 /// A fused estimate together with the weight each channel earned.
@@ -113,33 +114,6 @@ pub fn fuse(channels: &[Observation<f64>]) -> Fusion {
         estimate: Observation::measured(estimate, uncertainty, fused_provenance(channels)),
         weights_bps: apportion_bps(&precisions, total_precision),
     }
-}
-
-/// Largest-remainder apportionment of precision shares into basis points.
-fn apportion_bps(precisions: &[f64], total_precision: f64) -> Vec<i32> {
-    let exact: Vec<f64> = precisions
-        .iter()
-        .map(|precision| precision / total_precision * 10_000.0)
-        .collect();
-    let mut apportioned: Vec<i32> = exact.iter().map(|share| share.floor() as i32).collect();
-
-    let mut remaining = 10_000 - apportioned.iter().sum::<i32>();
-    let mut order: Vec<usize> = (0..exact.len()).collect();
-    order.sort_by(|left, right| {
-        let left_remainder = exact[*left] - exact[*left].floor();
-        let right_remainder = exact[*right] - exact[*right].floor();
-        right_remainder
-            .partial_cmp(&left_remainder)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for index in order {
-        if remaining <= 0 {
-            break;
-        }
-        apportioned[index] += 1;
-        remaining -= 1;
-    }
-    apportioned
 }
 
 fn measured_sample_size(channels: &[Observation<f64>]) -> u32 {
