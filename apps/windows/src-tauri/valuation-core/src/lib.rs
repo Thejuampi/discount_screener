@@ -39,7 +39,9 @@
 pub mod capital;
 pub mod evidence;
 pub mod posterior;
+pub mod projection;
 
 pub use evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
 pub use capital::{cost_of_debt, wacc, CreditCurve};
 pub use posterior::{fuse, Fusion};
+pub use projection::{intrinsic_value, GrowthPath};

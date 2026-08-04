@@ -31,3 +31,11 @@ name = "WACC from cost of equity and cost of debt"
 covers = "Weighting equity and after-tax debt costs, the U-shape in leverage, and the asymmetry between an absent debt cost at zero weight versus at positive weight"
 frs = ["FR-20", "FR-26", "FR-27", "FR-32"]
 why_new = "Separate from the cost-of-debt table because it takes component costs as given; merging them would force every curve-fitting row to carry irrelevant weight and tax columns"
+
+[[outline]]
+id = "intrinsic-value-from-fading-path"
+feature = "intrinsic-value.feature"
+name = "Intrinsic Value from a continuously fading growth path"
+covers = "Integrating the discounted cash-flow path with the retention charge, the ordering in return on capital, value-neutral and absent returns, the fade rate as the only horizon quantity, and the arithmetic guards on convergence and division"
+frs = ["FR-18", "FR-19", "FR-27", "FR-28", "FR-29"]
+why_new = "The wacc table resolves a rate from component rates; this integrates a cash-flow path over time and shares no column with it. The retention-charge rows were considered as an extension of that table and rejected because a terminal value is not a weighted average of anything"

@@ -12,6 +12,7 @@ use valuation_core::evidence::{
 };
 use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
+use valuation_core::projection::{intrinsic_value, GrowthPath};
 
 /// The reserved absence token (FR-43). `tests/schema.rs` rejects every other
 /// spelling of absence in an Examples table, so this is the only one that
@@ -31,6 +32,11 @@ struct GrowthWorld {
     debt_cost: Option<Observation<f64>>,
     debt_weight_bps: f64,
     tax_bps: f64,
+    base_cash_flow: Option<Observation<f64>>,
+    growth: Option<Observation<f64>>,
+    path: Option<GrowthPath>,
+    return_on_capital: Option<Observation<f64>>,
+    discount_rate: Option<Observation<f64>>,
     /// Whatever the last `When` resolved. Every outline reports its outcome
     /// through this, so `the outcome is ...` reads the same in all of them.
     result: Option<Observation<f64>>,
@@ -215,6 +221,78 @@ fn when_wacc(world: &mut GrowthWorld) {
 #[then(expr = "the WACC is {word} bps within 1 bp")]
 fn then_wacc(world: &mut GrowthWorld, expected: String) {
     assert_within_one_bp(world.result(), &expected, "wacc");
+}
+
+#[given(expr = "a base cash flow of {word}")]
+fn given_base_cash_flow(world: &mut GrowthWorld, value: String) {
+    world.base_cash_flow = Some(observed(&value, "base-cash-flow"));
+}
+
+#[given(expr = "a Growth Posterior of {word} bps")]
+fn given_growth_posterior(world: &mut GrowthWorld, value: String) {
+    world.growth = Some(observed(&value, "growth-posterior"));
+}
+
+#[given(expr = "a growth path fading to {word} bps at {word} per year")]
+fn given_growth_path(world: &mut GrowthWorld, terminal: String, fade: String) {
+    // A path is absent either because the Shell fitted no relaxation speed or
+    // because the speed it produced is not a fade — a non-positive rate never
+    // reaches the terminal rate, and `fitted` refuses it.
+    world.path = match (cell(&terminal), cell(&fade)) {
+        (Some(terminal), Some(fade)) => {
+            GrowthPath::fitted(terminal, fade, Provenance::new("growth-path", 20_000))
+        }
+        _ => None,
+    };
+}
+
+#[given(expr = "a return on capital of {word} bps")]
+fn given_return_on_capital(world: &mut GrowthWorld, value: String) {
+    world.return_on_capital = Some(observed(&value, "return-on-capital"));
+}
+
+#[given(expr = "a discount rate of {word} bps")]
+fn given_discount_rate(world: &mut GrowthWorld, value: String) {
+    world.discount_rate = Some(observed(&value, "discount-rate"));
+}
+
+#[when(expr = "the Intrinsic Value is resolved")]
+fn when_intrinsic_value(world: &mut GrowthWorld) {
+    let base = world.base_cash_flow.clone().expect("base cash flow");
+    let growth = world.growth.clone().expect("Growth Posterior");
+    let return_on_capital = world.return_on_capital.clone().expect("return on capital");
+    let discount = world.discount_rate.clone().expect("discount rate");
+    // An unfitted path refuses the whole valuation. `intrinsic_value` takes the
+    // path by reference rather than by option because a path that does not fade
+    // is not representable, so the refusal happens here.
+    world.result = Some(match world.path.as_ref() {
+        Some(path) => intrinsic_value(&base, &growth, path, &return_on_capital, &discount),
+        None => Observation::absent(
+            AbsenceReason::NotReported,
+            Provenance::new("growth-path", 20_000),
+        ),
+    });
+}
+
+#[then(expr = "the Intrinsic Value is {word} within 1 cent")]
+fn then_intrinsic_value(world: &mut GrowthWorld, expected: String) {
+    match cell(&expected) {
+        Some(expected) => {
+            let actual = world
+                .result()
+                .value()
+                .expect("expected a resolved intrinsic value, found absence");
+            assert!(
+                (actual - expected).abs() <= 0.01,
+                "intrinsic value {actual} is not within 1 cent of {expected}"
+            );
+        }
+        None => assert_eq!(
+            world.result().value(),
+            None,
+            "expected absence, found a resolved intrinsic value"
+        ),
+    }
 }
 
 fn assert_within_one_bp(actual: &Observation<f64>, expected: &str, label: &str) {

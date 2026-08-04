@@ -210,6 +210,19 @@ impl<T> Observation<T> {
     }
 }
 
+impl Observation<f64> {
+    /// The variance this observation contributes to a delta-method propagation.
+    ///
+    /// Absence reads as `0.0` here and nowhere else, and only because a
+    /// propagating caller has already established that the absent input carries
+    /// no term: either its coefficient is zero, or the caller refused. It is the
+    /// dropped term's variance, not a claim that the absent quantity is known
+    /// exactly.
+    pub fn propagation_variance(&self) -> f64 {
+        self.uncertainty().map(Uncertainty::variance).unwrap_or(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,8 +51,20 @@ still values with the deprecated modules. Landed so far:
 - `evidence` — `Observation`, `Uncertainty`, `Provenance`, `AbsenceReason`
 - `posterior` — inverse-variance fusion, largest-remainder weight reporting
 - `capital` — credit-curve cost of debt and WACC, with delta-method propagation
+- `projection` — the discounted cash-flow path in closed form, with the
+  retention charge and no explicit horizon
 
-Not yet built: projection, terminal value, routing, publication.
+Not yet built: business-class routing, publication and the fixed-point boundary.
+
+### There is no terminal value module, on purpose
+
+Terminal value is not a separate calculation here. Growth relaxes continuously
+toward the terminal rate and value is the integral over all future time, so the
+"terminal value" is the limit of the same integrand — which is why `projection`
+has a closed form and no horizon appears anywhere in it. The seam between an
+explicit projection and a bolted-on terminal value was where the old engine's
+`derive_hold_years` / `derive_fade_years` branches lived, and removing the seam
+removes them rather than reimplementing them.
 
 ### Growth persistence was cut, not deferred
 

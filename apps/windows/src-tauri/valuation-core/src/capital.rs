@@ -133,8 +133,8 @@ pub fn cost_of_debt(
         return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
     }
 
-    let variance = (curve.leverage_slope * spread).powi(2) * variance_of(leverage)
-        + (curve.coverage_slope * spread).powi(2) * variance_of(coverage);
+    let variance = (curve.leverage_slope * spread).powi(2) * leverage.propagation_variance()
+        + (curve.coverage_slope * spread).powi(2) * coverage.propagation_variance();
 
     match Uncertainty::from_variance(variance, UncertaintyBasis::Propagated { inputs: 2 }) {
         Some(uncertainty) => Observation::measured(rate, uncertainty, provenance),
@@ -195,7 +195,7 @@ pub fn wacc(
         };
         (
             debt_weight * debt_rate * after_tax,
-            (debt_weight * after_tax).powi(2) * variance_of(cost_of_debt),
+            (debt_weight * after_tax).powi(2) * cost_of_debt.propagation_variance(),
         )
     };
 
@@ -204,18 +204,11 @@ pub fn wacc(
         return Observation::absent(AbsenceReason::OutOfPolicyRange, provenance);
     }
 
-    let variance = equity_weight.powi(2) * variance_of(cost_of_equity) + debt_variance;
+    let variance = equity_weight.powi(2) * cost_of_equity.propagation_variance() + debt_variance;
     match Uncertainty::from_variance(variance, UncertaintyBasis::Propagated { inputs: 2 }) {
         Some(uncertainty) => Observation::measured(rate, uncertainty, provenance),
         None => Observation::absent(AbsenceReason::InsufficientObservations, provenance),
     }
-}
-
-fn variance_of(observation: &Observation<f64>) -> f64 {
-    observation
-        .uncertainty()
-        .map(Uncertainty::variance)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
