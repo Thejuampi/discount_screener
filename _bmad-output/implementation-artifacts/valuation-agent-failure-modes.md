@@ -270,7 +270,59 @@ improving 0.319 → 0.258.
 weight is only meaningful between like quantities.
 
 ---
-## 14. Asking the user a question the code answers
+## 14. A concept list that silently returns zero instead of refusing
+
+**What happened (2026-08-03).** The CapEx policy recognized five tangible
+concepts and no software one. FIS invests through capitalized software —
+`PaymentsForSoftware` $0.835B in FY2025 against $0.154B of plant — so the engine
+read its CapEx as 1.17% of revenue, overstated FCFF by 68% ($2.76B vs $1.62B),
+and priced both lanes at ~2.3x market. For FY2014-2021 FIS filed *no* tangible
+CapEx fact at all, and `resolve_capex_abs` imputed those holes rather than
+reporting that the driver was missing, which also truncated the usable history
+from 10 years to 4.
+
+**Tell.** A capital-intensity number that is implausible for the industry, in the
+*low* direction. A missing concept does not raise a refusal — it produces a small
+number, and small CapEx looks like a high-quality business rather than like
+absent data. Every other refusal in this engine is loud; this one is silent.
+
+**Fix.** `developmentSoftware` as a second component class, summed with the
+tangible one (`sum_disjoint_components`), suppressed when the selected tangible
+concept is `PaymentsToAcquireProductiveAssets` — whose us-gaap definition already
+includes software, so summing would double count. Contract fingerprint
+`sec-driver-normalization/6`, with FIS and INTU added to the frozen fixture
+corpus. Verified by comparing the tangible-only selection against the summed
+total for all 26 cohort names plus the four anchors: 28 unchanged, only FIS and
+INTU moved.
+
+**Rule.** When a driver comes from an enumerated concept list, the absence of
+every concept must be distinguishable from a genuine zero. Before trusting a
+driver, check it against the *industry's* plausible range, not only against
+internal consistency — and audit the raw filed facts for large recurring
+outflows the list does not recognize.
+
+---
+## 15. Assuming a data defect from an implausible number
+
+**What happened (2026-08-03).** MPWR's forward EPS of $34.80 implied a ~49% net
+margin against FY2025 revenue, which is impossible for a semiconductor issuer, so
+it was written up as a contaminated feed. Probing the raw `earningsTrend` ladder
+showed `+1y` ends **2027-12-31**, not 2026: consensus has revenue going $2.79B →
+$4.12B → $5.18B. Against FY2027 revenue the implied margin is ~33%, which is
+normal for MPWR. The number was correct; the assumption about which period it
+described was not.
+
+**Tell.** The implausibility was computed by dividing a forward figure by a
+*trailing* denominator. Any ratio mixing two periods will look wrong.
+
+**Rule.** Before calling a provider figure contaminated, print the period it
+belongs to. Two conclusions from this one: the forward lane's `+1y` is roughly 17
+months out and skips the current fiscal year entirely, and the FCFF lane anchors
+on trailing actuals — a level gap of two years of growth between the lanes is
+structural, not a disagreement about value.
+
+---
+## 16. Asking the user a question the code answers
 
 **What happened.** The user was asked whether beta came from a per-ticker
 regression or an industry table. It is in the code.
@@ -293,7 +345,7 @@ betas. That claim is withdrawn.
 
 ---
 
-## 15. Burning the data source on exploratory runs
+## 17. Burning the data source on exploratory runs
 
 **What happened.** Yahoo rate-limited twice, both times from repeated live
 diagnostic runs, blocking verification for the rest of the round.
@@ -303,7 +355,7 @@ diagnostic you will need into that one run's output.
 
 ---
 
-## 16. Reporting one finding per message
+## 18. Reporting one finding per message
 
 **What happened.** Eight rounds, each surfacing one real defect and stopping. The
 defects were real; the cadence was the problem.
@@ -311,3 +363,84 @@ defects were real; the cadence was the problem.
 **Rule.** Close blocks. Run the chain — anchors, buckets, gate — and report the end
 state with the evidence that each link passed its own check. Pause only for a
 decision that genuinely cannot be derived from the code.
+
+## 19. Citing a constant without checking it is reachable
+
+**What happened.** The 2026-08-03 cohort review reported that the FCFF lane holds a
+hard near-term growth ceiling of ~15%, from
+`MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS = 1_200` applied as
+`g_stable_base ± 1200`. The constant is declared at `dcf_model.rs:62` and the clamp
+is written at `dcf_model.rs:2366` — but line 2366 sits inside a `/* */` block kept
+for auditability. It has never executed. The live path is `fcff_driver_wacc`, where
+`base_growth_bps` is the plain median of the last five realized revenue growth rates,
+with no ceiling at all.
+
+A whole causal group ("Cause A — growth clamped") and the first item of a proposed
+work sequence were built on a dead line.
+
+**Why it slipped.** `grep` found the declaration and found a use, and the use looked
+like production code. Reading a 30-line window around it did not reveal that the
+window was itself inside a comment opened 8 lines earlier.
+
+**Rule.** A constant is not part of the model until its use site is shown to be
+reachable. Confirm by counting call sites of the enclosing function, or by deleting
+the constant and observing the compiler complain. `grep` proves a string exists, not
+that it runs.
+
+**Corollary.** The true defect was worse than the reported one: the FCFF lane observes
+no forecast of any kind. Reporting the wrong mechanism would have sent the fix to the
+wrong module.
+
+## 20. Re-deriving a claim the record already retracted
+
+**What happened.** The 2026-08-03 fix pass measured
+`corr(discount_rate, gap_vs_street) = -0.491` across the 26-name cohort and read it
+as fresh evidence of a leverage defect in the discount rate: the overvalued names
+(CHTR +254%, T +71%, FIS +59%) carry the lowest rates, the undervalued names
+(WDC -53%, MPWR -50%, TER -36%) the highest. The next step drafted was a
+leverage-responsive cost of capital.
+
+Section 18 of this same document had already recorded `corr(D/E, r) = -0.48`,
+explained it as an empirical property of the cohort's *own regression betas*
+(CHTR beta 704 at D/E 4.42x; MPWR 1710 at D/E 0; WDC 2166 at D/E 0.18), and
+**explicitly withdrawn** the claim that it was a model defect. It also recorded that
+Hamada relevering must not be added, because own-betas already embed leverage.
+
+The measurement was real. The interpretation was one already tried and retracted.
+
+**Why it slipped.** The correlation was recomputed from a fresh capture against a
+different variable name (`discount_rate` rather than `D/E`), so it did not look like
+the retracted finding. Nothing in the measurement itself carries the memory of having
+been litigated.
+
+**Rule.** Before proposing a mechanism for a correlation, grep this document and the
+handover for the *quantity*, not for your phrasing of it. A retraction is only worth
+writing down if the next agent is required to find it. Search on the number.
+
+**What survived the check, and why it is different.** The cost-of-*debt* term is a
+separate defect from the beta question, and it is real:
+
+| name  | net debt | naive FCFF WACC |
+|-------|----------|-----------------|
+| CHTR  | +$96.2B  | 493             |
+| T     | +$148.2B | 680             |
+| MPWR  | -$1.4B   | 925             |
+| WDC   | -$1.5B   | 925             |
+| GOOGL | -$121.7B | 925             |
+
+Every net-cash name lands exactly on the unit-beta cost of equity. Every levered name
+is dragged below it, because `r_d = interest_t / avg_debt_t` is a trailing accounting
+coupon on debt issued years ago and rises with nothing. WACC is therefore *strictly
+decreasing* in leverage — the model asserts a firm can lower its cost of capital
+without limit by borrowing. That is an internal coherence failure provable without
+Street, and it does not touch beta.
+
+**Rule.** `∂WACC/∂leverage < 0` across an entire cohort is a structural bug, not a
+calibration gap. It is checkable with no external reference and belongs in the gate.
+
+**Blocked on evidence, not on effort.** No leverage-responsive spread can be derived
+from a single issuer's own accounting history — the observable is one stale coupon.
+It needs a rating, a bond yield, a historical risk-free series, or a cross-sectional
+fit over a universe. The first three are external references the project does not
+carry; the fourth is a two-pass architecture the current per-name pipeline has no
+place to put. Sizing that choice is the decision, not the coding.

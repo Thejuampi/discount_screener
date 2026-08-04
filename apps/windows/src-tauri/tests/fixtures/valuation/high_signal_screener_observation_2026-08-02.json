@@ -1,6 +1,6 @@
 {
   "captureId": "recompute-live-rf",
-  "capturedAt": "unix:1785803836",
+  "capturedAt": "unix:1785804180",
   "contract": "valuation-high-signal-screener-cohort-v1",
   "feedProfile": "sp500-cohort-recompute",
   "members": [
