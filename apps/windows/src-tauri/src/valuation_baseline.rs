@@ -16,86 +16,86 @@ const COHORT_FIXTURE: &str = "tests/fixtures/valuation/baseline_cohort_2026-07-3
 const DRIVER_FIXTURE: &str = "tests/fixtures/valuation/baseline_driver_data_2026-07-30.json";
 
 #[derive(Debug, Deserialize)]
-struct CohortFile {
-    as_of: String,
-    members: Vec<CohortMember>,
+pub(crate) struct CohortFile {
+    pub(crate) as_of: String,
+    pub(crate) members: Vec<CohortMember>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CohortMember {
-    symbol: String,
+pub(crate) struct CohortMember {
+    pub(crate) symbol: String,
     #[serde(default)]
-    quarantine: bool,
+    pub(crate) quarantine: bool,
     #[serde(default)]
-    quarantine_reason: Option<String>,
-    status: String,
-    selection: SelectionMeta,
-    inputs: MemberInputs,
+    pub(crate) quarantine_reason: Option<String>,
+    pub(crate) status: String,
+    pub(crate) selection: SelectionMeta,
+    pub(crate) inputs: MemberInputs,
 }
 
 #[derive(Debug, Deserialize)]
-struct SelectionMeta {
-    gap_bps: i32,
-    confidence: String,
-    composite_score: i32,
+pub(crate) struct SelectionMeta {
+    pub(crate) gap_bps: i32,
+    pub(crate) confidence: String,
+    pub(crate) composite_score: i32,
     #[allow(dead_code)]
-    snapshot_market_price_cents: i64,
-    snapshot_intrinsic_cents: i64,
+    pub(crate) snapshot_market_price_cents: i64,
+    pub(crate) snapshot_intrinsic_cents: i64,
 }
 
 #[derive(Debug, Deserialize)]
-struct MemberInputs {
-    market_price_cents: i64,
-    shares_outstanding: Option<u64>,
-    market_cap_dollars: Option<u64>,
-    total_debt_dollars: i64,
-    total_cash_dollars: i64,
-    beta_millis: i32,
-    sector_name: String,
-    industry_name: String,
-    analyst_target_mean_cents: Option<i64>,
-    fcf_annual: Vec<FcfAnnual>,
+pub(crate) struct MemberInputs {
+    pub(crate) market_price_cents: i64,
+    pub(crate) shares_outstanding: Option<u64>,
+    pub(crate) market_cap_dollars: Option<u64>,
+    pub(crate) total_debt_dollars: i64,
+    pub(crate) total_cash_dollars: i64,
+    pub(crate) beta_millis: i32,
+    pub(crate) sector_name: String,
+    pub(crate) industry_name: String,
+    pub(crate) analyst_target_mean_cents: Option<i64>,
+    pub(crate) fcf_annual: Vec<FcfAnnual>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FcfAnnual {
-    year: i32,
-    value_dollars: f64,
+pub(crate) struct FcfAnnual {
+    pub(crate) year: i32,
+    pub(crate) value_dollars: f64,
 }
 
 #[derive(Debug, Deserialize)]
-struct DriverAnnual {
-    year: i32,
-    ocf: f64,
-    capex: f64,
-    revenue: f64,
-    interest: f64,
-    effective_tax_bps: i32,
-    debt: Option<f64>,
-    marginal_tax_bps: i32,
+pub(crate) struct DriverAnnual {
+    pub(crate) year: i32,
+    pub(crate) ocf: f64,
+    pub(crate) capex: f64,
+    pub(crate) revenue: f64,
+    pub(crate) interest: f64,
+    pub(crate) effective_tax_bps: i32,
+    pub(crate) debt: Option<f64>,
+    pub(crate) marginal_tax_bps: i32,
     #[serde(default)]
-    marginal_tax_source: Option<String>,
+    pub(crate) marginal_tax_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct DriverFixture {
+pub(crate) struct DriverFixture {
     #[allow(dead_code)]
-    source: String,
-    rows: HashMap<String, Vec<DriverAnnual>>,
+    pub(crate) source: String,
+    pub(crate) rows: HashMap<String, Vec<DriverAnnual>>,
 }
 
-fn fixture_path() -> PathBuf {
+pub(crate) fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COHORT_FIXTURE)
 }
 
-fn load_cohort() -> CohortFile {
+pub(crate) fn load_cohort() -> CohortFile {
     let path = fixture_path();
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read cohort fixture {}: {e}", path.display()));
     serde_json::from_str(&raw).expect("parse cohort fixture")
 }
 
-fn load_driver_data() -> HashMap<String, Vec<DriverAnnual>> {
+pub(crate) fn load_driver_data() -> HashMap<String, Vec<DriverAnnual>> {
     let path = fixture_path().with_file_name(DRIVER_FIXTURE.rsplit('/').next().unwrap());
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read driver fixture {}: {e}", path.display()));
@@ -103,7 +103,7 @@ fn load_driver_data() -> HashMap<String, Vec<DriverAnnual>> {
     fixture.rows
 }
 
-fn fund_from(m: &CohortMember) -> FundamentalSnapshot {
+pub(crate) fn fund_from(m: &CohortMember) -> FundamentalSnapshot {
     FundamentalSnapshot {
         symbol: m.symbol.clone(),
         sector_name: Some(m.inputs.sector_name.clone()),
@@ -117,7 +117,7 @@ fn fund_from(m: &CohortMember) -> FundamentalSnapshot {
     }
 }
 
-fn fcf_from(m: &CohortMember) -> Vec<FcfPoint> {
+pub(crate) fn fcf_from(m: &CohortMember) -> Vec<FcfPoint> {
     let drivers = load_driver_data();
     let by_year: HashMap<i32, &DriverAnnual> = drivers
         .get(&m.symbol)

@@ -50,6 +50,9 @@ mod stooq;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
+pub mod valuation_core_adapter;
+#[cfg(test)]
+mod valuation_core_measurement;
 #[cfg(test)]
 mod valuation_decision_contract;
 mod valuation_divergence;
