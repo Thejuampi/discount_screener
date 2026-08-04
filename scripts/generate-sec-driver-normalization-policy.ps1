@@ -1,7 +1,21 @@
-param([switch]$Check)
+# Emits the SEC driver normalization policy for both platforms from the one
+# contract that defines it.
+#
+# Every constant is emitted by iterating the contract, never by naming a key.
+# Hand-listing the keys is what let the script drift from its own output: it
+# stopped emitting `developmentSoftware` and `developmentAggregate` while the
+# committed Rust still carried them, so running the generator would have deleted
+# two constants the app compiles against. A loop cannot drift.
+param(
+    [switch]$Check,
+    # Write somewhere other than the repo, so a regeneration can be compared
+    # against the committed files without overwriting them first.
+    [string]$OutputRoot
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+if (-not $OutputRoot) { $OutputRoot = $root }
 $contract = Get-Content -Raw (Join-Path $root 'shared/contracts/sec-driver-normalization.json') | ConvertFrom-Json
 $categories = $contract.investmentCategories
 $drivers = $contract.drivers
@@ -41,19 +55,20 @@ internal object GeneratedSecDriverNormalizationPolicy {
     const val maximumDurationDays = $($contract.scope.durationDays[1])
     const val materialAcquisitionRevenueBps = $($contract.valuationPolicy.materialAcquisitionRevenueBps)
     val acceptedForms = $(KotlinSet $contract.scope.forms)
-    val development = $(KotlinSet $categories.development)
-    val propertyAcquisition = $(KotlinSet $categories.propertyAcquisition)
-    val businessAcquisition = $(KotlinSet $categories.businessAcquisition)
-    val operatingCashFlow = $(KotlinOperator $drivers.operatingCashFlow)
-    val revenue = $(KotlinOperator $drivers.revenue)
-    val interestExpense = $(KotlinOperator $drivers.interestExpense)
-    val totalDebt = $(KotlinOperator $drivers.totalDebt)
-    val currentDebt = $(KotlinOperator $drivers.currentDebt)
-    val nonCurrentDebt = $(KotlinOperator $drivers.nonCurrentDebt)
-    val taxExpense = $(KotlinOperator $drivers.taxExpense)
-    val pretaxIncome = $(KotlinOperator $drivers.pretaxIncome)
-    val marginalTaxReference = $(KotlinOperator $drivers.marginalTaxReference)
-    val dilutedAverageShares = $(KotlinOperator $drivers.dilutedAverageShares)
+$(
+    $categoryKotlin = @()
+    foreach ($property in $categories.psobject.Properties) {
+        $categoryKotlin += "    val $($property.Name) = $(KotlinSet $property.Value)"
+    }
+    $categoryKotlin -join "`n"
+)
+$(
+    $driverKotlin = @()
+    foreach ($property in $drivers.psobject.Properties) {
+        $driverKotlin += "    val $($property.Name) = $(KotlinOperator $property.Value)"
+    }
+    $driverKotlin -join "`n"
+)
 }
 "@
 function RustSlice($values, [int]$nestedIndent = 0) {
@@ -63,6 +78,13 @@ function RustSlice($values, [int]$nestedIndent = 0) {
     $indent = ' ' * (4 + $nestedIndent)
     $quoted = @($values | ForEach-Object { $indent + '"' + $_ + '",' }) -join "`n"
     "&[`n$quoted`n$(' ' * $nestedIndent)]"
+}
+function RustConstantName([string]$camelCase) {
+    [regex]::Replace(
+        $camelCase,
+        '([a-z0-9])([A-Z])',
+        { param($match) "$($match.Groups[1].Value)_$($match.Groups[2].Value)" }
+    ).ToUpperInvariant()
 }
 function RustOperator($driver) {
 @"
@@ -83,9 +105,13 @@ pub const MINIMUM_DURATION_DAYS: i64 = $($contract.scope.durationDays[0]);
 pub const MAXIMUM_DURATION_DAYS: i64 = $($contract.scope.durationDays[1]);
 pub const MATERIAL_ACQUISITION_REVENUE_BPS: i32 = $($contract.valuationPolicy.materialAcquisitionRevenueBps);
 pub const ACCEPTED_FORMS: &[&str] = $(RustSlice $contract.scope.forms);
-pub const DEVELOPMENT: &[&str] = $(RustSlice $categories.development);
-pub const PROPERTY_ACQUISITION: &[&str] = $(RustSlice $categories.propertyAcquisition);
-pub const BUSINESS_ACQUISITION: &[&str] = $(RustSlice $categories.businessAcquisition);
+$(
+    $categoryRust = @()
+    foreach ($property in $categories.psobject.Properties) {
+        $categoryRust += "pub const $(RustConstantName $property.Name): &[&str] = $(RustSlice $property.Value);"
+    }
+    $categoryRust -join "`n"
+)
 pub struct DriverOperator {
     pub qnames: &'static [&'static str],
     pub unit: &'static str,
@@ -95,24 +121,22 @@ pub struct DriverOperator {
 $(
     $driverRust = @()
     foreach ($property in $drivers.psobject.Properties) {
-        $driver = $property.Value
-        $constantName = [regex]::Replace(
-            $property.Name,
-            '([a-z0-9])([A-Z])',
-            { param($match) "$($match.Groups[1].Value)_$($match.Groups[2].Value)" }
-        ).ToUpperInvariant()
-        $driverRust += "pub const ${constantName}: DriverOperator = $(RustOperator $driver);"
+        $driverRust += "pub const $(RustConstantName $property.Name): DriverOperator = $(RustOperator $property.Value);"
     }
     $driverRust -join "`n"
 )
 "@
 $targets = @(
-    @{ path = Join-Path $root 'apps/android/core/src/main/kotlin/com/discountscreener/core/engine/SecDriverNormalizationPolicyGenerated.kt'; content = $kotlinOutput },
-    @{ path = Join-Path $root 'apps/windows/src-tauri/src/sec_driver_normalization_policy_generated.rs'; content = ($rustOutput.TrimEnd() + "`n") }
+    @{ path = Join-Path $OutputRoot 'apps/android/core/src/main/kotlin/com/discountscreener/core/engine/SecDriverNormalizationPolicyGenerated.kt'; content = $kotlinOutput },
+    @{ path = Join-Path $OutputRoot 'apps/windows/src-tauri/src/sec_driver_normalization_policy_generated.rs'; content = ($rustOutput.TrimEnd() + "`n") }
 )
 if ($Check) {
-    foreach ($target in $targets) {
-        if ((Get-Content -Raw $target.path) -ne $target.content) { throw "generated SEC policy is stale: $($target.path); run scripts/generate-sec-driver-normalization-policy.ps1" }
+    # Every stale target, not just the first. Throwing on the Kotlin file meant
+    # the Rust one was never compared, which is how two drifts accumulated
+    # behind one error message.
+    $stale = @($targets | Where-Object { (Get-Content -Raw $_.path) -ne $_.content } | ForEach-Object { $_.path })
+    if ($stale.Count -gt 0) {
+        throw "generated SEC policy is stale:`n  $($stale -join "`n  ")`nrun scripts/generate-sec-driver-normalization-policy.ps1"
     }
 } else {
     foreach ($target in $targets) {
