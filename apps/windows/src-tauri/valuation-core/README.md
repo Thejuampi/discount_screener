@@ -53,8 +53,10 @@ still values with the deprecated modules. Landed so far:
 - `capital` — credit-curve cost of debt and WACC, with delta-method propagation
 - `projection` — the discounted cash-flow path in closed form, with the
   retention charge and no explicit horizon
+- `classification` — closed-world business class, matched on whole words
 
-Not yet built: business-class routing, publication and the fixed-point boundary.
+Not yet built: residual income for financial services, publication and the
+fixed-point boundary.
 
 ### There is no terminal value module, on purpose
 

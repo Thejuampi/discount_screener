@@ -37,10 +37,12 @@
 //! application yet.
 
 pub mod capital;
+pub mod classification;
 pub mod evidence;
 pub mod posterior;
 pub mod projection;
 
+pub use classification::{classify, BusinessClass, Instrument};
 pub use evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
 pub use capital::{cost_of_debt, wacc, CreditCurve};
 pub use posterior::{fuse, Fusion};

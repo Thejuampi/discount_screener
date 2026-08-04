@@ -12,6 +12,7 @@ use valuation_core::evidence::{
 };
 use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
+use valuation_core::classification::{classify, BusinessClass, Instrument};
 use valuation_core::projection::{intrinsic_value, GrowthPath};
 
 /// The reserved absence token (FR-43). `tests/schema.rs` rejects every other
@@ -37,6 +38,10 @@ struct GrowthWorld {
     path: Option<GrowthPath>,
     return_on_capital: Option<Observation<f64>>,
     discount_rate: Option<Observation<f64>>,
+    sector: String,
+    industry: String,
+    instrument: Option<Instrument>,
+    business_class: Option<BusinessClass>,
     /// Whatever the last `When` resolved. Every outline reports its outcome
     /// through this, so `the outcome is ...` reads the same in all of them.
     result: Option<Observation<f64>>,
@@ -293,6 +298,43 @@ fn then_intrinsic_value(world: &mut GrowthWorld, expected: String) {
             "expected absence, found a resolved intrinsic value"
         ),
     }
+}
+
+#[given(expr = "an issuer in sector {string} and industry {string}")]
+fn given_sector_and_industry(world: &mut GrowthWorld, sector: String, industry: String) {
+    // Absent text is empty text here: the taxonomy matches nothing against it
+    // and falls through to unclassified, which is the closed-world refusal.
+    world.sector = text(&sector);
+    world.industry = text(&industry);
+}
+
+#[given(expr = "the instrument is {word}")]
+fn given_instrument(world: &mut GrowthWorld, instrument: String) {
+    world.instrument = Some(match instrument.as_str() {
+        "common_equity" => Instrument::CommonEquity,
+        "fund" => Instrument::NotCommonEquity,
+        other => panic!("table cell {other:?} is not an instrument"),
+    });
+}
+
+#[when(expr = "the Business Class is resolved")]
+fn when_business_class(world: &mut GrowthWorld) {
+    let instrument = world.instrument.expect("instrument");
+    world.business_class = Some(classify(&world.sector, &world.industry, instrument));
+}
+
+#[then(expr = "the Business Class is {word}")]
+fn then_business_class(world: &mut GrowthWorld, expected: String) {
+    let actual = world.business_class.expect("the When step must run first");
+    assert_eq!(actual.as_str(), expected);
+}
+
+/// A text cell is either the reserved absence token or the text itself.
+fn text(token: &str) -> String {
+    if token == ABSENT {
+        return String::new();
+    }
+    token.to_string()
 }
 
 fn assert_within_one_bp(actual: &Observation<f64>, expected: &str, label: &str) {

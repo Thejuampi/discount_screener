@@ -39,3 +39,11 @@ name = "Intrinsic Value from a continuously fading growth path"
 covers = "Integrating the discounted cash-flow path with the retention charge, the ordering in return on capital, value-neutral and absent returns, the fade rate as the only horizon quantity, and the arithmetic guards on convergence and division"
 frs = ["FR-18", "FR-19", "FR-27", "FR-28", "FR-29"]
 why_new = "The wacc table resolves a rate from component rates; this integrates a cash-flow path over time and shares no column with it. The retention-charge rows were considered as an extension of that table and rejected because a terminal value is not a weighted average of anything"
+
+[[outline]]
+id = "business-class-from-text"
+feature = "business-class.feature"
+name = "Business Class from sector and industry text"
+covers = "Closed-world routing of sector and industry text to a model class, the healthcare split between plans and operating health businesses, provider slugs, word-boundary matching, ineligible instruments, and the absence of any default class"
+frs = ["FR-30", "FR-32"]
+why_new = "Every other table takes numbers and returns a number within a chosen model; this one chooses the model, and its columns are text. There is no numeric table it could be a row of"
