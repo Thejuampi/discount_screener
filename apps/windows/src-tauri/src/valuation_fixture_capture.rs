@@ -128,7 +128,13 @@ fn capture_the_deep_driver_fixture() {
                     "ocf": operating_cash_flow,
                     "capex": capital_expenditure,
                     "revenue": revenue,
-                    "interest": point.interest_expense_dollars.unwrap_or(0.0),
+                    // An absent interest reading is emitted as an explicit null.
+                    // A fabricated zero was always against the no-fabrication
+                    // rule, and it is now actively ambiguous as well: zero is a
+                    // legitimate value of a signed net series, so "the issuer
+                    // filed nothing" and "the issuer's interest income exactly
+                    // offset its expense" would be written identically.
+                    "interest": point.interest_expense_dollars,
                     "effective_tax_bps": point.tax_rate_bps.unwrap_or(0),
                     "debt": point.total_debt_dollars,
                     "marginal_tax_bps": point.marginal_tax_bps.unwrap_or(2_100),

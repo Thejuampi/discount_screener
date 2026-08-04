@@ -49,6 +49,11 @@ pub struct ResolvedRateInputs {
 /// current public input surface carries the latter and the optional market
 /// fields; no source is silently substituted.  Debt and interest are paired by
 /// fiscal year, never by array position or latest as-of date.
+///
+/// A history carrying any negative interest year refuses the accounting channel
+/// for the whole issuer rather than fitting on the remaining years; see the
+/// comment at the accounting fit for why the year-level alternative is
+/// selection on the dependent variable.
 pub fn resolve_rate_inputs(
     history: &[FcfPoint],
     reported_total_debt_dollars: Option<i64>,
@@ -110,20 +115,46 @@ pub fn resolve_rate_inputs_for_source(
         .collect();
     rated_spreads.sort_by_key(|(year, _)| *year);
 
-    let accounting: Vec<(i32, f64, f64)> = history
+    // A negative interest reading is not a defective year to be trimmed. It is
+    // evidence that this issuer's filed line is a *net* series whose sign has
+    // flipped -- interest income exceeded interest expense -- and therefore that
+    // the series does not measure gross interest expense in any year, including
+    // the years that happen to be positive. Dropping only the negative years and
+    // fitting on the survivors is selection on the dependent variable: it keeps
+    // exactly the years where expense ran high relative to income and discards
+    // the ones where it ran low, biasing the fitted rate upward. So the
+    // accounting channel is refused for the whole issuer.
+    //
+    // This keys on the sign, which is an approximation of the rule that matters.
+    // A net-*expense* filer's series is equally net -- income has already been
+    // subtracted from it -- and is fitted here as though it were gross, with the
+    // cost of debt understated and nothing to detect it. Keying on the *basis*
+    // of the series rather than the sign of its value needs per-field concept
+    // provenance on `FcfPoint`, which does not exist yet. Recorded as LD-8.
+    let net_interest_years: Vec<i32> = history
         .iter()
-        .filter_map(|point| {
-            let debt = point.total_debt_dollars?;
-            let interest = point.interest_expense_dollars?;
-            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 || interest < 0.0 {
-                return None;
-            }
-            if debt == 0.0 && interest > 0.0 {
-                return None;
-            }
-            (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
+        .filter(|point| {
+            point
+                .interest_expense_dollars
+                .is_some_and(|interest| interest.is_finite() && interest < 0.0)
         })
+        .map(|point| point.year)
         .collect();
+    let accounting: Vec<(i32, f64, f64)> = if net_interest_years.is_empty() {
+        history
+            .iter()
+            .filter_map(|point| {
+                let debt = point.total_debt_dollars?;
+                let interest = point.interest_expense_dollars?;
+                if !debt.is_finite() || !interest.is_finite() || debt < 0.0 {
+                    return None;
+                }
+                (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let mut marginal_tax: Vec<(i32, i32, WaccFieldSource)> = history
         .iter()
@@ -232,6 +263,18 @@ pub fn resolve_rate_inputs_for_source(
                 periods,
                 average_debt,
             )
+        } else if !net_interest_years.is_empty() {
+            // Refusing here terminates the FCFF path for this issuer rather than
+            // degrading to a lower rung: `edgar.rs` supplies `None` for both the
+            // market yield and the rated/synthetic spread, and no producer for
+            // either exists anywhere in the tree. Channel refusal is issuer
+            // blackout, and that is the honest outcome -- the alternative is to
+            // synthesise a spread from an assumption, which is choosing an
+            // estimator to keep a number publishing.
+            return Err(format!(
+                "fcff unavailable: filed interest is net of interest income in {}, so gross interest expense is not measurable for this issuer",
+                join_years(&net_interest_years)
+            ));
         } else {
             return Err(
                 "fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods"
@@ -327,6 +370,22 @@ mod tests {
         FcfPoint::new(year, 100.0)
             .with_operating_drivers(120.0, 20.0, 1_000.0, interest, Some(2_100))
             .with_rate_resolution_inputs(debt, tax, None, None)
+    }
+
+    /// A year whose interest is written straight into the field instead of
+    /// through `with_operating_drivers`.
+    ///
+    /// Every other test in this file builds its input through `point`, and that
+    /// setter carried a blanket `.map(f64::abs)` until this wave removed it — so
+    /// the `interest < 0.0` path below had never executed anywhere, in
+    /// production or in a test. Writing the field directly keeps this test
+    /// exercising the branch on its own terms: if a future change re-installs an
+    /// absolute value on the way into `FcfPoint`, this test still feeds
+    /// `resolve_rate_inputs` a negative and still measures what it claims to.
+    fn point_with_net_interest(year: i32, debt: f64, interest: f64) -> FcfPoint {
+        let mut point = point(year, Some(debt), None, Some(2_100));
+        point.interest_expense_dollars = Some(interest);
+        point
     }
 
     #[test]
@@ -477,5 +536,41 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "marginal_tax_source=tax_reconciliation"));
+    }
+
+    /// The branch this wave brought to life, exercised on its own terms.
+    ///
+    /// The two positive years here are the same shape that
+    /// `aligned_accounting_evidence_is_provisional_or_solid` fits a rate from,
+    /// so the surviving sample is a perfectly fittable one — which is the point.
+    /// The old code dropped 2023 and fitted the rest; a rate produced that way
+    /// is measured on the years the issuer's interest income happened not to
+    /// swamp, and it is confidently wrong.
+    #[test]
+    fn a_net_interest_year_refuses_the_accounting_channel_for_the_whole_issuer() {
+        let history = vec![
+            point_with_net_interest(2021, 100.0, 5.0),
+            point_with_net_interest(2022, 110.0, 5.5),
+            point_with_net_interest(2023, 120.0, -6.0),
+        ];
+        let error = resolve_rate_inputs(&history, Some(120), 430).unwrap_err();
+        assert!(
+            error.contains("net of interest income in 2023")
+                && error.contains("not measurable for this issuer"),
+            "expected an issuer-wide refusal naming the net year, got: {error}"
+        );
+    }
+
+    /// The refusal is terminal, not a downgrade.
+    ///
+    /// `resolve_rate_inputs` returning `Err` rather than `Ok(None)` is what
+    /// makes the FCFF path go dark instead of quietly continuing on a weaker
+    /// source, and `Ok(None)` here would be indistinguishable from the debt-free
+    /// case. Asserted separately because the two are one character apart in the
+    /// code and worlds apart in the published output.
+    #[test]
+    fn a_refused_channel_is_an_error_rather_than_an_absent_rate() {
+        let history = vec![point_with_net_interest(2024, 100.0, -1.0)];
+        assert!(resolve_rate_inputs(&history, Some(100), 430).is_err());
     }
 }

@@ -49,6 +49,42 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   pure SEC vs Yahoo cash continuity gate (SNDK-class); Continuous / Discontinuous / InsufficientEvidence with versioned scale thresholds; no price/target and no absolute year walls
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
+- `sec-driver-normalization.json`:
+  the XBRL driver policy — per-driver equivalence classes (`qnames`), the netted concepts filed
+  under the opposite sign convention (`negatedQnames`), unit, period shape and operation. It is the
+  single source both generated policy files are emitted from; hand-editing a generated file instead
+  of this one is the drift the `policyFingerprint` exists to catch
+- `sec-driver-normalization-fixtures.json`:
+  frozen real filings that execute against that policy. `fixtures` carries investment-category cases
+  and runs through the investment normalizer; `interestFixtures` carries interest cases and runs
+  through the interest-expense driver, pinning the dollars the class yields per fiscal year. **Read
+  by Rust only** — Kotlin's half of this contract's dual-lock runs through the generated policy
+  constants, not through this corpus
+
+## Equivalence-class rules
+
+An equivalence class exists so a driver keeps reading when an issuer files the same line under a
+different tag. Two rules bound what "the same line" may mean; they are distinct rules and a class
+must satisfy both.
+
+- **R1 — one statement's concept.** A class holds concepts from one financial statement. A
+  cash-flow disclosure is not an equivalent of an income-statement accrual, however close the two
+  numbers usually sit. *Example:* `InterestPaidNet` is cash interest paid, disclosed on the cash
+  flow statement; it was removed from the `interestExpense` class, which measures the accrued
+  income-statement charge.
+- **R2 — one measurement basis.** A class holds concepts measured on one basis. A netted concept
+  enters only through a **declared sign convention** that maps it onto that basis — declared on the
+  concept in `negatedQnames`, never inferred from a filed value and never branched on an issuer.
+  Absent a declared convention it reads **absent**, not equivalent. *Example:* LIN files
+  `InterestIncomeExpenseNet` at −63/−200/−256/−255M for 2022-2025 against `InterestExpenseNonoperating`
+  at +63/+200/+256/+255M — exact negations of one line under the opposite convention, so the net
+  concept is declared negated. The same concept carries a lender's net interest *income*: BAC 2025
+  files +60,096M, which the declared negation carries through as a negative expense rather than as
+  the largest interest bill on the tape.
+
+R2 binds every `select_one_equivalent` list, not only `interestExpense`; a class that mixes two
+bases without a declared convention is a defect whether or not its numbers currently look
+plausible.
 
 ## Scope
 

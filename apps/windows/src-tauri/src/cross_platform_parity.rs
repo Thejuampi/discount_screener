@@ -470,15 +470,19 @@ fn compute_acgl() -> ParityRow {
 /// dollar amount below (net income, not net expense) -- that is what is passed
 /// into `with_operating_drivers` here.
 ///
-/// KNOWN HAZARD -- W2a is deliberately inert (J6 stays FALSE at exit):
-/// `FcfPoint::with_operating_drivers` still un-negates via `.map(f64::abs)`
-/// (dcf_model.rs:907), so even this correctly-signed negative value is
-/// silently flipped back to positive before it reaches `compute()`. This row
-/// exists to make that hazard observable in the exported parity snapshot; the
-/// direct, asserting pin for the same hazard is
-/// `mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers`
-/// below. Neither is fixed until a later wave removes dcf_model.rs's three
-/// `.abs()` sites.
+/// The hazard this row was planted to expose is now fixed: dcf_model.rs's three
+/// `.abs()` sites are gone, so the negative value below survives into
+/// `compute()` instead of being flipped back to a positive "expense" on the way
+/// in. The direct, asserting pin is
+/// `mpwr_negative_interest_income_reaches_with_operating_drivers_still_negated`
+/// below.
+///
+/// The exported row itself does **not** discriminate the convention and never
+/// did: MPWR files no debt, so `resolve_rate_inputs`'s zero-debt guard refuses
+/// this issuer on `interest.abs() > 0` — sign-agnostically — before the sign can
+/// reach a published number. It is kept as the negative-interest case the
+/// eventual Android port needs to see in the snapshot, not as evidence of
+/// parity.
 ///
 /// FY2024 `IncomeTaxExpenseBenefit` is filed as -1,213,788,000 (10-K filed
 /// 2025-03-03) and restated to -1,019,146,000 (10-K filed 2026-02-27) -- both a
@@ -544,15 +548,24 @@ fn compute_mpwr() -> ParityRow {
     }
 }
 
-/// Direct, asserting pin for the same hazard `compute_mpwr` documents: even a
-/// correctly-signed negative (net interest income) value is silently
-/// un-negated by `FcfPoint::with_operating_drivers` before it can reach
-/// `compute()`. W2a computes the sign correctly (see `edgar.rs`'s
-/// `concept_observations`/`concept_vintages`) but deliberately leaves
-/// dcf_model.rs's `.abs()` sites standing, so this assertion is expected to
-/// keep passing until a later wave removes them.
+/// Direct, asserting pin for the hazard `compute_mpwr` documents — now
+/// inverted, because the hazard is gone.
+///
+/// W2a wrote this test to fail on the wave that removes LD-1's three `.abs()`
+/// sites: it asserted that `FcfPoint::with_operating_drivers` un-negated MPWR's
+/// correctly-signed net interest INCOME back to a positive "expense" before it
+/// could reach `compute()`. That wave has landed, so the assertion now reads the
+/// corrected sign.
+///
+/// **Rewriting an assertion is normally how a check gets weakened, and this is
+/// the one place in this effort where it is not.** The old assertion was
+/// authored as a hazard pin whose whole purpose was to go red here; leaving it
+/// standing would have meant pinning the defect. Nothing about its strength
+/// changed: it still pins one exact dollar value on one real filed figure, and
+/// it still fails the moment an absolute value is reintroduced on this path —
+/// only now it fails on the defect rather than on the fix.
 #[test]
-fn mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers() {
+fn mpwr_negative_interest_income_reaches_with_operating_drivers_still_negated() {
     let point = FcfPoint::new(2025, 666_189_000.0).with_operating_drivers(
         838_202_000.0,
         -172_013_000.0,
@@ -562,11 +575,11 @@ fn mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers() 
     );
     assert_eq!(
         point.interest_expense_dollars,
-        Some(29_151_000.0),
-        "known hazard (W2a is deliberately inert): dcf_model.rs:907's `.map(f64::abs)` \
-         un-negates the correctly-signed net interest INCOME back to a positive \
-         'expense' before it reaches compute(); this is not fixed until a later wave \
-         removes dcf_model.rs's three `.abs()` sites"
+        Some(-29_151_000.0),
+        "MPWR's FY2025 line is net interest INCOME of $29.151M, which the contract \
+         negates on the way in; `with_operating_drivers` must store it as filed. A \
+         positive here means an absolute value has been restored at dcf_model.rs's \
+         setter and the sign convention has been silently annihilated again"
     );
 }
 

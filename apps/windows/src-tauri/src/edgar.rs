@@ -17,6 +17,7 @@ use std::fmt;
 use std::iter::once;
 use std::time::Duration;
 
+use crate::dcf_model::{FcfPoint, WaccFieldSource};
 use crate::sec_driver_normalization_policy_generated as policy;
 use crate::sec_normalization::{
     normalize_investments, EvidenceState, NormalizedInvestmentEvidence, SecFact,
@@ -1371,7 +1372,7 @@ pub fn fetch_fcf_history(
     client: &Client,
     symbol: &str,
     cik: u64,
-) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
+) -> Result<Option<Vec<FcfPoint>>, String> {
     let body = fetch_company_facts(client, symbol, cik)?;
 
     let ocf = extract_driver_annual(&body, policy::OPERATING_CASH_FLOW);
@@ -1437,7 +1438,7 @@ pub fn fetch_fcf_history(
                     ),
                     _ => None,
                 };
-                let mut point = crate::dcf_model::FcfPoint::new(v.year, v.value_dollars as f64);
+                let mut point = FcfPoint::new(v.year, v.value_dollars as f64);
                 point.capex_imputed = v.capex_imputed;
                 if !capex.is_empty() {
                     if let (Some(capital_expenditure), Some(revenue_dollars)) =
@@ -1467,9 +1468,8 @@ pub fn fetch_fcf_history(
                                 && !restated_ocf_years.contains(&v.year),
                         );
                         if marginal_tax_bps.is_some() {
-                            point = point.with_marginal_tax_source(
-                                crate::dcf_model::WaccFieldSource::TaxReconciliation,
-                            );
+                            point =
+                                point.with_marginal_tax_source(WaccFieldSource::TaxReconciliation);
                         }
                     }
                 }

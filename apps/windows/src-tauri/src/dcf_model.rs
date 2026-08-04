@@ -548,7 +548,13 @@ pub fn extract_normalized_fcff_level(
         let Some(tax_bps) = point.tax_rate_bps else {
             continue;
         };
-        let interest = interest.abs();
+        // The interest reading enters signed, and stays signed. A net-interest
+        // *income* filer's line is negative, and the FCFF identity must then
+        // subtract it: OCF already carries the interest received, so adding it
+        // back a second time double-counts income the issuer never earned twice.
+        // Restoring an `.abs()` here re-installs that defect silently --
+        // `an_interest_series_and_its_negation_no_longer_agree` is the test that
+        // fails when someone does.
         let tax = tax_bps.clamp(0, 5_000) as f64 / 10_000.0;
         let fcff = ocf + interest * (1.0 - tax) - capex;
         years.push(FcffDriverYearAudit {
@@ -846,7 +852,14 @@ pub struct FcfPoint {
     /// the total-company basis, so the year's margin divides one entity's cash
     /// flow by another entity's sales.
     pub reporting_basis_broken: bool,
-    /// Annual interest expense used to bridge levered OCF to after-tax FCFF.
+    /// Annual interest expense used to bridge levered OCF to after-tax FCFF,
+    /// **signed**: positive is a net expense, negative is net interest *income*.
+    ///
+    /// The interest-expense equivalence class admits netted concepts, which the
+    /// normalization contract negates on the way in, so the sign is a
+    /// measurement of which side of the netting the issuer landed on. The bridge
+    /// subtracts a negative reading rather than adding it, because OCF already
+    /// carries the interest received.
     pub interest_expense_dollars: Option<f64>,
     /// Effective tax rate in basis points used for the interest add-back.
     pub tax_rate_bps: Option<i32>,
@@ -904,7 +917,14 @@ impl FcfPoint {
         self.operating_cash_flow_dollars = Some(operating_cash_flow_dollars);
         self.capital_expenditure_dollars = Some(capital_expenditure_dollars.abs());
         self.revenue_dollars = Some(revenue_dollars);
-        self.interest_expense_dollars = interest_expense_dollars.map(f64::abs);
+        // Stored as filed. CapEx above is a magnitude whose filed sign is a
+        // presentation choice, but interest is not: the interest-expense class
+        // admits netted concepts, which the normalization contract negates on
+        // the way in (`sec-driver-normalization/9`, `negatedQnames`), so a
+        // negative value here means net interest *income* and is a measurement,
+        // not a formatting artefact. Absolute value would erase the one thing
+        // the sign convention exists to carry.
+        self.interest_expense_dollars = interest_expense_dollars;
         self.tax_rate_bps = tax_rate_bps;
         self
     }
@@ -1587,7 +1607,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
             .filter(|value| value.is_finite())
             .zip(point.tax_rate_bps)
             .map(|(interest, tax_bps)| {
-                let interest = interest.abs();
+                // Signed, for the reason given at the FCFF driver audit above:
+                // this is the published bridge, and a net-income filer's
+                // add-back is negative because the income is already in OCF.
                 let after_tax = interest * (1.0 - tax_bps.clamp(0, 5_000) as f64 / 10_000.0);
                 (ocf + after_tax - capex, after_tax)
             })
@@ -4803,5 +4825,164 @@ mod tests {
         assert!(!prior.through_cycle);
         assert!(!prior.provisional);
         assert_eq!(prior.entry_id, "software_technology");
+    }
+
+    // ── The interest sign survives to the bridge (LD-1) ──────────────────────
+    //
+    // The three tests below pin the property the blanket `.abs()` destroyed.
+    // Each reads `normalized_after_tax_interest_margin_bps`, which is the FCFF
+    // bridge's own add-back expressed in bps of revenue: it is produced by
+    // `driver_model_inputs` and consumed by the published normalized level, so
+    // it is the one observable that sees the interest series *inside* the model
+    // rather than after the router has had its say.
+
+    /// A history whose interest reading is the same every year, so the sign of
+    /// the add-back is the only thing under test and the robust normalization
+    /// over the series has nothing to trim.
+    fn history_with_constant_interest(interest_dollars: f64) -> Vec<FcfPoint> {
+        const REVENUE_DOLLARS: f64 = 10_000_000_000.0;
+        const OCF_DOLLARS: f64 = 2_000_000_000.0;
+        const CAPEX_DOLLARS: f64 = 500_000_000.0;
+        const EFFECTIVE_TAX_BPS: i32 = 2_100;
+        (2022..=2025)
+            .map(|year| {
+                FcfPoint::new(year, OCF_DOLLARS - CAPEX_DOLLARS)
+                    .with_operating_drivers(
+                        OCF_DOLLARS,
+                        CAPEX_DOLLARS,
+                        REVENUE_DOLLARS,
+                        Some(interest_dollars),
+                        Some(EFFECTIVE_TAX_BPS),
+                    )
+                    .with_rate_resolution_inputs(
+                        Some(5_000_000_000.0),
+                        Some(EFFECTIVE_TAX_BPS),
+                        None,
+                        None,
+                    )
+            })
+            .collect()
+    }
+
+    /// LIN FY2024 filed `InterestIncomeExpenseNet` at −256M against
+    /// `InterestExpenseNonoperating` at +256M — exact negations of one income
+    /// statement line under two sign conventions.
+    const LIN_FY2024_FILED_NET_EXPENSE_DOLLARS: f64 = -256_000_000.0;
+
+    /// BAC FY2025 filed `InterestIncomeExpenseNet` at +60,096M: a net interest
+    /// *income* of sixty billion dollars, filed positive. Scaled down here to
+    /// the synthetic issuer's revenue, because what is under test is the sign,
+    /// and a sixty-billion add-back against ten billion of revenue would be
+    /// testing the model's behaviour on an absurdity instead.
+    const BAC_CLASS_FILED_NET_INCOME_DOLLARS: f64 = 256_000_000.0;
+
+    /// The contract negates a netted concept on the way in
+    /// (`sec-driver-normalization/9`, `negatedQnames`). Extraction does that;
+    /// these tests receive its output, so they apply it explicitly rather than
+    /// pretending a filed value and a bridge input are the same number.
+    fn as_the_contract_negates_it(filed_dollars: f64) -> f64 {
+        -filed_dollars
+    }
+
+    #[test]
+    fn a_net_expense_filing_reaches_the_bridge_as_a_positive_expense() {
+        let history = history_with_constant_interest(as_the_contract_negates_it(
+            LIN_FY2024_FILED_NET_EXPENSE_DOLLARS,
+        ));
+        let level = extract_normalized_fcff_level(&operating_fund(), &history)
+            .expect("four aligned driver years");
+        assert!(
+            level.normalized_after_tax_interest_margin_bps > 0,
+            "a net expense must be added back to OCF, got {} bps",
+            level.normalized_after_tax_interest_margin_bps
+        );
+    }
+
+    #[test]
+    fn a_net_income_filing_reaches_the_bridge_as_a_negative_expense() {
+        let history = history_with_constant_interest(as_the_contract_negates_it(
+            BAC_CLASS_FILED_NET_INCOME_DOLLARS,
+        ));
+        let level = extract_normalized_fcff_level(&operating_fund(), &history)
+            .expect("four aligned driver years");
+        assert!(
+            level.normalized_after_tax_interest_margin_bps < 0,
+            "net interest INCOME is already in OCF, so the bridge must subtract it \
+             rather than add it a second time; got {} bps",
+            level.normalized_after_tax_interest_margin_bps
+        );
+    }
+
+    /// The FCFF *driver audit* reads the same signed series as the bridge.
+    ///
+    /// The audit is a third consumer of the interest reading, and it is the one
+    /// the other two tests cannot see: it feeds `annual_reported_fcff_margin_bps`
+    /// and the per-year rows, not the normalized level. Without this test, an
+    /// absolute value restored at that site alone would leave every other check
+    /// in this module green while the audit reported an issuer's FCFF above its
+    /// own unlevered cash flow.
+    #[test]
+    fn the_fcff_driver_audit_subtracts_a_net_income_reading_too() {
+        let history = history_with_constant_interest(as_the_contract_negates_it(
+            BAC_CLASS_FILED_NET_INCOME_DOLLARS,
+        ));
+        let level = extract_normalized_fcff_level(&operating_fund(), &history)
+            .expect("four aligned driver years");
+        let unlevered_dollars = history[0].operating_cash_flow_dollars.expect("ocf")
+            - history[0].capital_expenditure_dollars.expect("capex");
+        assert!(
+            level.years[0].reported_fcff_dollars.expect("audited year")
+                < unlevered_dollars.round() as i64,
+            "net interest income must pull the audited FCFF below OCF - CapEx, got {:?} against {unlevered_dollars}",
+            level.years[0].reported_fcff_dollars
+        );
+    }
+
+    /// The inverse of the invariance the pre-wave code accidentally guaranteed.
+    ///
+    /// It exists so that a reader who restores an `.abs()` on the interest
+    /// series — at the setter or at either read site — sees a named failure
+    /// explaining why the two published levels are supposed to differ, instead
+    /// of a green suite.
+    #[test]
+    fn an_interest_series_and_its_negation_no_longer_agree() {
+        let expense = extract_normalized_fcff_level(
+            &operating_fund(),
+            &history_with_constant_interest(as_the_contract_negates_it(
+                LIN_FY2024_FILED_NET_EXPENSE_DOLLARS,
+            )),
+        )
+        .expect("four aligned driver years");
+        let income = extract_normalized_fcff_level(
+            &operating_fund(),
+            &history_with_constant_interest(LIN_FY2024_FILED_NET_EXPENSE_DOLLARS),
+        )
+        .expect("four aligned driver years");
+        assert_ne!(
+            expense.normalized_fcff_dollars, income.normalized_fcff_dollars,
+            "an interest series and its exact negation published the same FCFF, \
+             which means an absolute value has been restored somewhere on the path"
+        );
+    }
+
+    /// T2.7 at the issuer level: a net-interest year does not quietly degrade
+    /// the cost of debt, it takes the whole FCFF path dark.
+    ///
+    /// The year-level test in `driver_resolution` proves the branch refuses;
+    /// only this one proves what the refusal *costs*, because there is no lower
+    /// rung to fall to — no producer of a market yield or a rated spread exists
+    /// anywhere in the tree, so the refusal reaches the caller as a terminal
+    /// error rather than as a weaker number.
+    #[test]
+    fn a_net_interest_year_takes_the_fcff_path_dark_rather_than_degrading_the_rate() {
+        let mut history = history_with_constant_interest(as_the_contract_negates_it(
+            LIN_FY2024_FILED_NET_EXPENSE_DOLLARS,
+        ));
+        history[3].interest_expense_dollars = Some(LIN_FY2024_FILED_NET_EXPENSE_DOLLARS);
+        let error = compute(&operating_fund(), &history, Some(2_000), "test").unwrap_err();
+        assert!(
+            error.contains("net of interest income"),
+            "expected the FCFF path to go dark naming the net series, got: {error}"
+        );
     }
 }

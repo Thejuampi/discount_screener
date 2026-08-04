@@ -80,6 +80,60 @@ The normalizer is a source adapter, not a second valuation engine. Its output is
 
 Post-QA valuation amendment (policy/12): acquisition evidence remains unchanged at the normalization boundary, but the valuation consumer no longer blanket-zeroes an entire recent window. Material acquisition cash in year Y excludes only growth Y−1→Y. At least two clean recent transitions with a clean latest transition retain their observed growth; otherwise near-term growth is zero with explicit provenance. Base FCFF margin is calculated from aligned annual FCFF identities, retaining negative and CapEx-expansion years.
 
+## Amendment — `sec-driver-normalization/9`, the interest sign convention (2026-08-04)
+
+**What changed.** The `interestExpense` equivalence class held two concepts filed under the
+opposite sign convention. `sec-driver-normalization.json` now declares that convention instead of
+leaving it to be discovered downstream, and the fingerprint moved `/8` to `/9`.
+
+**New contract vocabulary.**
+
+| Key | Where | Meaning |
+|---|---|---|
+| `negatedQnames` | per driver, alongside `qnames` | the subset of that driver's concepts whose filed value carries the opposite sign of the driver's measurement basis |
+| `signRationale` | per driver | the measured filings the convention is derived from, so a later reader can re-check it rather than trust it |
+| `qname_signs` / `qnameSigns` | generated policy, both platforms | an integer array **positional and parallel to `qnames`** — `-1` where the qname is in `negatedQnames`, `+1` otherwise. Every driver emits a full array; there is no "absent means one" case to get wrong |
+
+The sign is applied once, where a filed value becomes an observation, before precedence resolution
+and vintage retention. Applying it after the cross-concept merge would let a year gap-filled from a
+second concept inherit the first concept's sign.
+
+**Derivation, from filings rather than from reasoning.** LIN files `InterestIncomeExpenseNet` at
+−63/−200/−256/−255M for 2022-2025 against `InterestExpenseNonoperating` at +63/+200/+256/+255M —
+exact negations of one income-statement line. BAC 2025 files the same concept at **+60,096M**
+against pretax income of 37,695M: a lender's net interest line is income, and the declared negation
+carries it through as a negative expense rather than as the largest interest bill on the tape. The
+sign is a static property of the concept, declared on the contract; it is never a predicate on a
+filed value and never a branch on an issuer.
+
+Both concepts are income-statement concepts, so this change does not reopen the cross-statement
+rule that removed `InterestPaidNet`. The two rules are stated as two rules in
+`shared/contracts/README.md`: **R1** one statement's concept, **R2** one measurement basis.
+
+**Fixture corpus.** `sec-driver-normalization-fixtures.json` gained an `interestFixtures` array —
+LIN 2020/2024 (net expense filed negative, one year under both concepts and one under the net
+concept alone) and BAC 2025 (net income filed positive). It is exercised by
+`frozen_real_sec_fixture_corpus_executes_at_the_normalization_boundary` through
+`extract_driver_annual`, the same entry point production uses. **This corpus is read by Rust only**
+(F20); Kotlin's half of the dual-lock for this contract runs through the generated policy
+constants, not through the corpus.
+
+**LD-1, closed by this change.** A blanket `.abs()` on the interest series annihilated the sign
+before any consumer could read it, so the declared convention would have been decorative. All three
+sites are removed together, in `apps/windows/src-tauri/src/dcf_model.rs`: the FCFF driver audit, the
+`with_operating_drivers` setter, and the aligned driver bridge. Removing a subset would leave the
+contract and the code disagreeing while the suite stayed green.
+
+**LD-7, opened by this change.** `interest == 0` with `debt > 0` is not re-adjudicated here. A
+zero is now a legitimate value of a signed net series — an issuer whose interest income exactly
+offsets its expense — and is no longer distinguishable from "filed nothing" by value alone. The
+accounting cost-of-debt channel still declines to fit a rate on it, which is the conservative
+reading, but the case deserves its own evidence rather than inheriting this wave's.
+
+The canonical home of the latent-defect register is `docs/valuation-economic-contract.md`, which
+this wave does not own and which does not yet exist; **LD-1 closed and LD-7 opened must be carried
+into it** when it is written.
+
 ## Verification
 
 **Commands:**
