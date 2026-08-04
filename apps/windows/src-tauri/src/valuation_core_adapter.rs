@@ -367,9 +367,7 @@ pub fn value(
     let firm = intrinsic_value(
         &issuer.base_cash_flow(frame),
         &issuer.growth_posterior(frame),
-        cross_section
-            .growth_path()
-            .unwrap_or(&unfitted_path(frame)),
+        cross_section.growth_path().unwrap_or(&unfitted_path(frame)),
         &issuer.return_on_capital(frame),
         &discount_rate,
     );
@@ -460,7 +458,11 @@ impl IssuerEvidence {
     /// than a cross-sectional fit does.
     fn base_cash_flow(&self, frame: &MarketFrame) -> Observation<f64> {
         let provenance = self.provenance("free_cash_flow", frame);
-        let mut years: Vec<f64> = self.annuals.iter().map(|annual| f64::from(annual.year)).collect();
+        let mut years: Vec<f64> = self
+            .annuals
+            .iter()
+            .map(|annual| f64::from(annual.year))
+            .collect();
         years.sort_by(|left, right| left.partial_cmp(right).expect("years are finite"));
         let flows = self.free_cash_flow();
         if flows.len() < MIN_ANNUAL_OBSERVATIONS || flows.len() != years.len() {
@@ -597,10 +599,7 @@ impl IssuerEvidence {
     /// size of one. That understates how much the ratio could move, and the
     /// basis records the sample size precisely so the understatement is visible
     /// rather than silent.
-    fn structure_observations(
-        &self,
-        frame: &MarketFrame,
-    ) -> (Observation<f64>, Observation<f64>) {
+    fn structure_observations(&self, frame: &MarketFrame) -> (Observation<f64>, Observation<f64>) {
         let provenance = self.provenance("capital_structure", frame);
         let Some(structure) = self.capital_structure() else {
             return (
@@ -643,7 +642,11 @@ impl IssuerEvidence {
     }
 
     /// The capital asset pricing model, with the beta's width from the cohort.
-    fn cost_of_equity(&self, frame: &MarketFrame, cross_section: &CrossSection) -> Observation<f64> {
+    fn cost_of_equity(
+        &self,
+        frame: &MarketFrame,
+        cross_section: &CrossSection,
+    ) -> Observation<f64> {
         let beta = f64::from(self.beta_millis) / 1_000.0;
         measured_or_absent(
             frame.risk_free_bps + beta * frame.equity_risk_premium_bps,
@@ -749,7 +752,10 @@ fn sample_variance(values: &[f64]) -> Option<f64> {
     }
     let mean = mean(values)?;
     Some(
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+        values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
             / (values.len() - 1) as f64,
     )
 }
@@ -902,7 +908,8 @@ mod tests {
 
     #[test]
     fn a_history_on_a_straight_line_reads_its_level_at_the_latest_year() {
-        let base = issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
+        let base =
+            issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
         assert!((base.value().copied().expect("a determined level") - 500.0).abs() < 1e-9);
     }
 
@@ -911,21 +918,28 @@ mod tests {
     /// value would move a perpetuity by its whole amount.
     #[test]
     fn a_final_year_windfall_moves_the_level_by_less_than_the_windfall() {
-        let steady = issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
-        let shocked = issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 900.0]).base_cash_flow(&frame());
+        let steady =
+            issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
+        let shocked =
+            issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 900.0]).base_cash_flow(&frame());
         let (steady, shocked) = (
             steady.value().copied().expect("a determined level"),
             shocked.value().copied().expect("a determined level"),
         );
-        assert!(shocked > steady && shocked < 900.0, "level {shocked} should sit between {steady} and the windfall");
+        assert!(
+            shocked > steady && shocked < 900.0,
+            "level {shocked} should sit between {steady} and the windfall"
+        );
     }
 
     /// And the width the scatter implies is charged, rather than assumed: the
     /// shocked history is a less certain reading of the same level.
     #[test]
     fn scatter_about_the_trend_widens_the_level() {
-        let steady = issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
-        let shocked = issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 900.0]).base_cash_flow(&frame());
+        let steady =
+            issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 500.0]).base_cash_flow(&frame());
+        let shocked =
+            issuer_with_cash_flows(&[100.0, 200.0, 300.0, 400.0, 900.0]).base_cash_flow(&frame());
         assert!(
             shocked.uncertainty().map(Uncertainty::variance)
                 > steady.uncertainty().map(Uncertainty::variance)

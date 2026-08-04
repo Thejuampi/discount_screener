@@ -1,7 +1,7 @@
 {
   "contract": "sec-driver-normalization",
   "version": "1",
-  "fingerprint": "sec-driver-normalization/7",
+  "fingerprint": "sec-driver-normalization/8",
   "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
   "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
   "investmentCategories": {
@@ -69,10 +69,11 @@
       "operation": "select_one_equivalent"
     },
     "interestExpense": {
-      "qnames": ["InterestExpenseNonOperating", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense", "InterestExpense", "InterestExpenseOtherLongTermDebt", "InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet", "FinanceLeaseInterestExpense", "InterestPaidNet"],
+      "qnames": ["InterestExpenseNonOperating", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense", "InterestExpense", "InterestExpenseOtherLongTermDebt", "InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet", "FinanceLeaseInterestExpense"],
       "unit": "USD",
       "periodShape": "duration",
-      "operation": "select_one_equivalent"
+      "operation": "select_one_equivalent",
+      "rationale": "InterestPaidNet was removed. It is the supplemental cash-flow disclosure of interest actually paid, not the accrued income-statement expense, so it is not an equivalent of the other qnames and select_one_equivalent's gap filling was splicing cash into an accrual series year by year. It was EPAM's only source across nine years and padded years for several other issuers. An issuer that files no interest expense now reads as absent, which is the honest answer, rather than as a cash number standing in for an accrual."
     },
     "totalDebt": {
       "qnames": ["DebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt", "DebtInstrumentCarryingAmount"],

@@ -200,7 +200,8 @@ pub fn normalize_investments(
 
     // Each component class resolves its own equivalents first; the two classes
     // are then summed, because they are different lines on the same statement.
-    let recurring_development_by_end = select_one_equivalent_per_end(approved_tangible, &mut ledger);
+    let recurring_development_by_end =
+        select_one_equivalent_per_end(approved_tangible, &mut ledger);
     let software_development_by_end = select_one_equivalent_per_end(approved_software, &mut ledger);
 
     let mut development_total_by_end = BTreeMap::<String, i64>::new();
@@ -229,10 +230,7 @@ pub fn normalize_investments(
         let negative = tangible
             .or(software)
             .is_some_and(|fact| fact.value_dollars < 0);
-        development_total_by_end.insert(
-            end.clone(),
-            if negative { -magnitude } else { magnitude },
-        );
+        development_total_by_end.insert(end.clone(), if negative { -magnitude } else { magnitude });
     }
 
     let recurring_development = recurring_development_by_end.values().next_back().cloned();
@@ -321,7 +319,10 @@ mod tests {
     #[test]
     fn software_development_alone_still_reports_capex() {
         let normalized = normalize_investments([fact("PaymentsToDevelopSoftware", 40_000_000)]);
-        assert_eq!(normalized.development_total_by_end["2024-12-31"], 40_000_000);
+        assert_eq!(
+            normalized.development_total_by_end["2024-12-31"],
+            40_000_000
+        );
     }
 
     /// Issuers file investing outflows with either sign; the summed total must
@@ -340,7 +341,7 @@ mod tests {
 
     #[test]
     fn generated_contract_policy_is_the_category_source() {
-        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/7");
+        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/8");
         assert_eq!(
             investment_category("PaymentsToExploreAndDevelopOilAndGasProperties"),
             InvestmentCategory::Development

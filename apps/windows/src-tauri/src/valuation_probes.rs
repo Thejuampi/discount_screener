@@ -79,6 +79,16 @@ fn lag_one_autocorrelation(series: &[f64]) -> Option<f64> {
     Some(numerator / denominator)
 }
 
+/// The US federal statutory rate, used where an issuer filed no tax
+/// reconciliation to read one from.
+///
+/// A marginal rate is a property of a jurisdiction, not a measurement of an
+/// issuer, so requiring the issuer to have filed one is a stricter test than the
+/// quantity deserves — it cost this probe seven of twenty-eight names. The same
+/// default is already what the fixture capture writes.
+#[cfg(test)]
+const STATUTORY_MARGINAL_TAX_BPS: f64 = 2_100.0;
+
 /// One issuer-year carrying every term a return on capital is measured from.
 #[cfg(test)]
 struct CapitalYear {
@@ -342,7 +352,10 @@ mod tests {
                     let equity = point.stockholders_equity_dollars?;
                     let debt = point.total_debt_dollars?;
                     let interest = point.interest_expense_dollars?;
-                    let marginal_tax = point.marginal_tax_bps? as f64 / 10_000.0;
+                    let marginal_tax = point
+                        .marginal_tax_bps
+                        .map_or(STATUTORY_MARGINAL_TAX_BPS, f64::from)
+                        / 10_000.0;
                     Some(CapitalYear {
                         year: point.year,
                         nopat: (pretax + interest) * (1.0 - marginal_tax),
@@ -424,16 +437,35 @@ mod tests {
             // negative NOPAT has no logarithm and no growth rate.
             let realized_growth = (first.nopat > 0.0 && last.nopat > 0.0 && span > 0.0)
                 .then(|| (last.nopat / first.nopat).ln() / span);
-            // What the issuer actually reinvested: the capital base grew by this
-            // fraction of the earnings it produced over the same span.
-            let realized_reinvestment =
-                (total_nopat.abs() > 0.0).then(|| (last.invested_capital - first.invested_capital) / total_nopat);
+            // What the issuer actually reinvested, from the flow statements:
+            // NOPAT is earnings before growth reinvestment and FCFF is what is
+            // left after it, so their difference *is* the reinvestment, and the
+            // ratio is the retention rate the identity `g = b * r` means.
+            //
+            // The previous reading, `dIC / sum(NOPAT)`, was measuring something
+            // else. A capital base grows by retained earnings *and* by debt
+            // raised, shares issued, and businesses bought, so it read b > 1 for
+            // ten of twenty-one issuers — capital formation, not retention, and
+            // the identity presumes internally funded growth.
+            let reinvested: f64 = total_nopat - total_free_cash_flow;
+            let realized_reinvestment = (total_nopat.abs() > 0.0).then(|| reinvested / total_nopat);
+            // Kept alongside so the contaminated reading stays visible rather
+            // than being quietly replaced.
+            let capital_formation = (total_nopat.abs() > 0.0)
+                .then(|| (last.invested_capital - first.invested_capital) / total_nopat);
 
-            let average_book = usable
+            // The book candidate is the centre of the annual returns, not their
+            // plain average. A nineteen-year history contains restructuring
+            // years, spin-off years and years whose capital base was tagged
+            // wrong, and an average reports every one of them as return.
+            let annual_returns: Vec<f64> = usable
                 .iter()
                 .map(|year| year.nopat / year.invested_capital)
-                .sum::<f64>()
-                / usable.len() as f64;
+                .collect();
+            let book = valuation_core::robust_mean(&annual_returns, valuation_core::MAX_ABSOLUTE_Z);
+            let discarded = valuation_core::standardize(&annual_returns)
+                .map(|standardized| standardized.outliers(valuation_core::MAX_ABSOLUTE_Z).len())
+                .unwrap_or_default();
             let pairs: Vec<(f64, f64)> = usable
                 .iter()
                 .map(|year| (year.invested_capital, year.nopat))
@@ -449,14 +481,18 @@ mod tests {
 
             // Each candidate implies b = g / r. The realized b is filed. The gap
             // is what decides, and it needs no market price and no threshold.
-            let gap = |candidate: Option<f64>| match (candidate, realized_growth, realized_reinvestment) {
+            let gap = |candidate: Option<f64>| match (
+                candidate,
+                realized_growth,
+                realized_reinvestment,
+            ) {
                 (Some(rate), Some(growth), Some(reinvestment)) if rate > 0.0 => {
                     let distance = (growth / rate - reinvestment).abs();
                     Some(distance)
                 }
                 _ => None,
             };
-            let book_gap = gap(Some(average_book));
+            let book_gap = gap(book.clone().ok());
             let slope_gap = gap(marginal);
             // Deliberately *not* scored. `implied` is defined as `g / b`, so its
             // own `g / r` returns `b` by construction and its gap is identically
@@ -468,11 +504,13 @@ mod tests {
 
             let show = |value: Option<f64>| value.map_or("-".into(), |v| format!("{v:.3}"));
             estimator_rows.push(format!(
-                "{symbol:<7} {:>4} {:>8} {:>8} {:>9} {:>9} {:>9} {:>8} {:>8}",
+                "{symbol:<7} {:>4} {:>8} {:>8} {:>8} {:>9} {:>4} {:>9} {:>9} {:>8} {:>8}",
                 usable.len(),
                 show(realized_growth),
                 show(realized_reinvestment),
-                format!("{average_book:.3}"),
+                show(capital_formation),
+                show(book.clone().ok()),
+                discarded,
                 show(marginal),
                 show(implied),
                 show(book_gap),
@@ -488,9 +526,24 @@ mod tests {
 
         println!();
         println!("=== PROBE C: which estimator reproduces realized reinvestment ===");
+        println!("b = (NOPAT - FCFF)/NOPAT, retention from the flow statements.");
         println!(
-            "{:<7} {:>4} {:>8} {:>8} {:>9} {:>9} {:>9} {:>8} {:>8}",
-            "symbol", "n", "g", "b", "r_book", "r_slope", "r_impl", "|db|bk", "|db|sl"
+            "b_cap = dIC/NOPAT, the contaminated reading, shown so the difference is visible."
+        );
+        println!("out = annual returns discarded as |z| > 3 before the book centre was taken.");
+        println!(
+            "{:<7} {:>4} {:>8} {:>8} {:>8} {:>9} {:>4} {:>9} {:>9} {:>8} {:>8}",
+            "symbol",
+            "n",
+            "g",
+            "b",
+            "b_cap",
+            "r_book",
+            "out",
+            "r_slope",
+            "r_impl",
+            "|db|bk",
+            "|db|sl"
         );
         for row in &estimator_rows {
             println!("{row}");

@@ -9,7 +9,7 @@ internal data class GeneratedSecDriverOperator(
 )
 
 internal object GeneratedSecDriverNormalizationPolicy {
-    const val fingerprint = "sec-driver-normalization/7"
+    const val fingerprint = "sec-driver-normalization/8"
     const val requiredUnit = "USD"
     const val minimumDurationDays = 325
     const val maximumDurationDays = 380
@@ -96,7 +96,6 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "InterestIncomeExpenseNet",
         "InterestIncomeExpenseNonoperatingNet",
         "FinanceLeaseInterestExpense",
-        "InterestPaidNet",
     ),
         unit = "USD",
         periodShape = "duration",

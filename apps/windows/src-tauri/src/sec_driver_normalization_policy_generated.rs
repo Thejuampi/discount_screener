@@ -1,6 +1,6 @@
 // GENERATED FROM shared/contracts/sec-driver-normalization.json. DO NOT EDIT.
 
-pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/7";
+pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/8";
 pub const REQUIRED_UNIT: &str = "USD";
 pub const MINIMUM_DURATION_DAYS: i64 = 325;
 pub const MAXIMUM_DURATION_DAYS: i64 = 380;
@@ -85,7 +85,6 @@ pub const INTEREST_EXPENSE: DriverOperator = DriverOperator {
         "InterestIncomeExpenseNet",
         "InterestIncomeExpenseNonoperatingNet",
         "FinanceLeaseInterestExpense",
-        "InterestPaidNet",
     ],
     unit: "USD",
     period_shape: "duration",
