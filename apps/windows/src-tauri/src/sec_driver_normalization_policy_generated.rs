@@ -1,6 +1,6 @@
 // GENERATED FROM shared/contracts/sec-driver-normalization.json. DO NOT EDIT.
 
-pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/5";
+pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/6";
 pub const REQUIRED_UNIT: &str = "USD";
 pub const MINIMUM_DURATION_DAYS: i64 = 325;
 pub const MAXIMUM_DURATION_DAYS: i64 = 380;
@@ -13,6 +13,8 @@ pub const DEVELOPMENT: &[&str] = &[
     "PaymentsForCapitalImprovements",
     "PaymentsToExploreAndDevelopOilAndGasProperties",
 ];
+pub const DEVELOPMENT_SOFTWARE: &[&str] = &["PaymentsForSoftware", "PaymentsToDevelopSoftware"];
+pub const DEVELOPMENT_AGGREGATE: &[&str] = &["PaymentsToAcquireProductiveAssets"];
 pub const PROPERTY_ACQUISITION: &[&str] = &[
     "PaymentsToAcquireOilAndGasProperty",
     "PaymentsToAcquireOilAndGasPropertyAndEquipment",

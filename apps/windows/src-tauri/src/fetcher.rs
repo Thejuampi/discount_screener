@@ -984,4 +984,73 @@ mod list_ready_tests {
             );
         }
     }
+
+    /// The whole `earningsTrend` ladder plus the reported earnings history, so a
+    /// forward EPS can be read against the periods around it. `+1y` is trusted
+    /// verbatim by the forward lane; nothing in the pipeline currently checks it
+    /// against the issuer's own reported earnings.
+    ///
+    /// Run: cargo test --lib fetcher::tests::probe_forward_eps_ladder -- --ignored --nocapture
+    #[test]
+    #[ignore = "network: raw Yahoo earningsTrend probe"]
+    fn probe_forward_eps_ladder() {
+        let client = YahooClient::new().expect("Yahoo client");
+        for symbol in ["MPWR", "FIS", "HPE", "COF"] {
+            // Warms the session crumb the quote-summary endpoint requires.
+            let _ = client.fetch_symbol(symbol);
+            let Ok(root) = client.fetch_quote_summary_modules_json(symbol, FORWARD_FORECAST_MODULES)
+            else {
+                eprintln!("{symbol}: fetch fail");
+                continue;
+            };
+            let Some(result) = root.pointer("/quoteSummary/result/0") else {
+                eprintln!("{symbol}: no result");
+                continue;
+            };
+            eprintln!("\n=== {symbol} ===");
+            if let Some(trend) = result.pointer("/earningsTrend/trend").and_then(|v| v.as_array()) {
+                for row in trend {
+                    eprintln!(
+                        "  period={:<4} end={:<12} eps_avg={:<10} n={:<4} eps_yr_ago={:<10} growth={:<10} rev_avg={:<16} rev_growth={:?}",
+                        row["period"].as_str().unwrap_or("?"),
+                        row["endDate"].as_str().unwrap_or("?"),
+                        row.pointer("/earningsEstimate/avg/raw")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{v:.2}"))
+                            .unwrap_or_else(|| "-".into()),
+                        row.pointer("/earningsEstimate/numberOfAnalysts/raw")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        row.pointer("/earningsEstimate/yearAgoEps/raw")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{v:.2}"))
+                            .unwrap_or_else(|| "-".into()),
+                        row.pointer("/growth/raw")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{v:.4}"))
+                            .unwrap_or_else(|| "-".into()),
+                        row.pointer("/revenueEstimate/avg/raw")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{:.3}B", v / 1e9))
+                            .unwrap_or_else(|| "-".into()),
+                        row.pointer("/revenueEstimate/growth/raw").and_then(|v| v.as_f64()),
+                    );
+                }
+            }
+            if let Some(history) = result
+                .pointer("/earningsHistory/history")
+                .and_then(|v| v.as_array())
+            {
+                for row in history {
+                    eprintln!(
+                        "  HIST quarter={:<12} actual={:?} estimate={:?}",
+                        row["quarter"].as_str().unwrap_or("?"),
+                        row.pointer("/epsActual/raw").and_then(|v| v.as_f64()),
+                        row.pointer("/epsEstimate/raw").and_then(|v| v.as_f64()),
+                    );
+                }
+            }
+        }
+    }
 }

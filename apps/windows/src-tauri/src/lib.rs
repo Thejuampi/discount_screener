@@ -85,39 +85,53 @@ fn enable_local_webview_debugging() {
     eprintln!("discount_screener: local WebView debug endpoint on 127.0.0.1:9222");
 }
 
+/// Debug-only flag set by native e2e runners (`test:e2e:native:*`).
+/// Must never be true during normal `cargo test` / `npm test`.
+fn is_native_e2e() -> bool {
+    cfg!(debug_assertions) && std::env::var("DS_NATIVE_E2E").as_deref() == Ok("1")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(all(debug_assertions, target_os = "windows"))]
     enable_local_webview_debugging();
 
-    tauri::Builder::default()
-        // Single-instance MUST be the first plugin: if another instance is already
-        // running, this callback fires in that instance and we focus its window
-        // instead of creating a duplicate process.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let native_e2e = is_native_e2e();
+
+    // Single-instance MUST be first for normal launches: a second process focuses
+    // the existing window. Native e2e must skip this — otherwise an already-running
+    // operator instance is focused (looks like "the test opened the real app") and
+    // the isolated e2e process never becomes the WebView under test.
+    let builder = tauri::Builder::default();
+    let builder = if native_e2e {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+    };
+
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]), // pass this flag when started by autostart
         ))
-        .setup(|app| {
+        .setup(move |app| {
             // ── State / DB ────────────────────────────────────────────────────
             let platform_app_data_dir = app.path().app_data_dir().expect("resolve app data dir");
             // Windows KnownFolder resolution can ignore child-process APPDATA overrides.
             // Native E2E therefore gets an explicit, debug-only isolated data root so
             // fixture ledger writes can never reuse the operator's real history.sqlite.
-            let app_data_dir =
-                if cfg!(debug_assertions) && std::env::var("DS_NATIVE_E2E").as_deref() == Ok("1") {
-                    std::env::var_os("DS_NATIVE_E2E_DATA_DIR")
-                        .filter(|value| !value.is_empty())
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or(platform_app_data_dir)
-                } else {
-                    platform_app_data_dir
-                };
+            let app_data_dir = if native_e2e {
+                std::env::var_os("DS_NATIVE_E2E_DATA_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or(platform_app_data_dir)
+            } else {
+                platform_app_data_dir
+            };
             let db_path = app_data_dir.join("history.sqlite");
 
             // Launch profile: --profile / --profile=NAME wins over DS_UNIVERSE_PROFILE.
@@ -151,9 +165,13 @@ pub fn run() {
             scalp_ws::spawn(app.handle().clone(), scalp_rx);
 
             // ── Enable autostart on first launch (idempotent) ─────────────────
-            let autostart = app.autolaunch();
-            if let Ok(false) = autostart.is_enabled() {
-                let _ = autostart.enable();
+            // Never enable (or touch) autostart from native e2e — that would install
+            // a login-time launch of the real product as a test side effect.
+            if !native_e2e {
+                let autostart = app.autolaunch();
+                if let Ok(false) = autostart.is_enabled() {
+                    let _ = autostart.enable();
+                }
             }
 
             // ── Tray icon ─────────────────────────────────────────────────────
@@ -198,9 +216,12 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── If launched with --minimized, hide the window immediately ─────
+            // Hide immediately for tray/autostart launches and for native e2e
+            // (must not leave a visible product window during integration runs).
             let args: Vec<String> = std::env::args().collect();
-            if args.iter().any(|a| a == "--minimized") {
+            let hide_window =
+                native_e2e || args.iter().any(|a| a == "--minimized");
+            if hide_window {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }

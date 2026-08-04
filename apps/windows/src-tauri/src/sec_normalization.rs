@@ -12,6 +12,11 @@ use crate::sec_driver_normalization_policy_generated as policy;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvestmentCategory {
     Development,
+    /// Cash paid to develop or buy software. A disjoint line on the same
+    /// statement as tangible development, not an alternative tag for it: an
+    /// issuer that invests through software files both, and reading only the
+    /// tangible one understates reinvestment by whatever software costs.
+    DevelopmentSoftware,
     PropertyAcquisition,
     BusinessAcquisition,
     UnclassifiedInvestment,
@@ -56,6 +61,13 @@ pub struct NormalizedInvestmentEvidence {
     /// singular field is retained for concise callers and test ergonomics; the
     /// production SEC adapter consumes this complete, per-period series.
     pub recurring_development_by_end: BTreeMap<String, SecFact>,
+    /// One selected software-development fact per fiscal close, chosen by the
+    /// same equivalence rules within its own component class.
+    pub software_development_by_end: BTreeMap<String, SecFact>,
+    /// Total recurring development per fiscal close: the tangible component plus
+    /// the software component. This — not either component alone — is the CapEx
+    /// the FCFF bridge consumes.
+    pub development_total_by_end: BTreeMap<String, i64>,
     pub ledger: Vec<EvidenceLedgerEntry>,
 }
 
@@ -66,6 +78,8 @@ pub const POLICY_FINGERPRINT: &str = policy::POLICY_FINGERPRINT;
 pub fn investment_category(qname: &str) -> InvestmentCategory {
     if policy::DEVELOPMENT.contains(&qname) {
         InvestmentCategory::Development
+    } else if policy::DEVELOPMENT_SOFTWARE.contains(&qname) {
+        InvestmentCategory::DevelopmentSoftware
     } else if policy::PROPERTY_ACQUISITION.contains(&qname) {
         InvestmentCategory::PropertyAcquisition
     } else if policy::BUSINESS_ACQUISITION.contains(&qname) {
@@ -95,37 +109,15 @@ fn is_annual_duration(fact: &SecFact) -> bool {
     (policy::MINIMUM_DURATION_DAYS..=policy::MAXIMUM_DURATION_DAYS).contains(&days)
 }
 
-pub fn normalize_investments(
-    facts: impl IntoIterator<Item = SecFact>,
-) -> NormalizedInvestmentEvidence {
-    let mut ledger = Vec::new();
-    let mut approved = Vec::new();
-    for fact in facts {
-        let category = investment_category(&fact.qname);
-        let state = match category {
-            InvestmentCategory::PropertyAcquisition | InvestmentCategory::BusinessAcquisition => {
-                EvidenceState::RejectedAcquisition
-            }
-            InvestmentCategory::UnclassifiedInvestment => EvidenceState::NoApprovedConcept,
-            InvestmentCategory::Development if fact.unit != "USD" => EvidenceState::InvalidUnit,
-            InvestmentCategory::Development if !is_annual_duration(&fact) => {
-                EvidenceState::MisalignedPeriod
-            }
-            InvestmentCategory::Development => EvidenceState::Selected,
-        };
-        let index = ledger.len();
-        if state == EvidenceState::Selected {
-            approved.push((index, fact.clone()));
-        }
-        ledger.push(EvidenceLedgerEntry {
-            fact,
-            category,
-            state,
-        });
-    }
-
-    // Equivalent facts are selected per fiscal close, never summed. Later
-    // filing/amendment wins; accession is the deterministic final tie-breaker.
+/// Resolve one fact per fiscal close inside a single component class. Equivalent
+/// facts are selected between, never summed: later filing/amendment wins, and
+/// accession is the deterministic final tie-breaker. Marks the losers in the
+/// ledger, and drops a close entirely when two facts of identical precedence
+/// disagree on value.
+fn select_one_equivalent_per_end(
+    approved: Vec<(usize, SecFact)>,
+    ledger: &mut [EvidenceLedgerEntry],
+) -> BTreeMap<String, SecFact> {
     let mut by_end = BTreeMap::<String, Vec<(usize, SecFact)>>::new();
     for approved_fact in approved {
         by_end
@@ -133,7 +125,7 @@ pub fn normalize_investments(
             .or_default()
             .push(approved_fact);
     }
-    let mut recurring_development_by_end = BTreeMap::new();
+    let mut selected_by_end = BTreeMap::new();
     for (end, mut equivalents) in by_end {
         equivalents.sort_by_key(|(_, fact)| {
             (
@@ -158,12 +150,97 @@ pub fn normalize_investments(
         for (index, _) in equivalents.iter().skip(1) {
             ledger[*index].state = EvidenceState::RejectedEquivalent;
         }
-        recurring_development_by_end.insert(end, ledger[*selected_index].fact.clone());
+        selected_by_end.insert(end, ledger[*selected_index].fact.clone());
     }
+    selected_by_end
+}
+
+pub fn normalize_investments(
+    facts: impl IntoIterator<Item = SecFact>,
+) -> NormalizedInvestmentEvidence {
+    let mut ledger = Vec::new();
+    let mut approved_tangible = Vec::new();
+    let mut approved_software = Vec::new();
+    for fact in facts {
+        let category = investment_category(&fact.qname);
+        let state = match category {
+            InvestmentCategory::PropertyAcquisition | InvestmentCategory::BusinessAcquisition => {
+                EvidenceState::RejectedAcquisition
+            }
+            InvestmentCategory::UnclassifiedInvestment => EvidenceState::NoApprovedConcept,
+            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware
+                if fact.unit != "USD" =>
+            {
+                EvidenceState::InvalidUnit
+            }
+            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware
+                if !is_annual_duration(&fact) =>
+            {
+                EvidenceState::MisalignedPeriod
+            }
+            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware => {
+                EvidenceState::Selected
+            }
+        };
+        let index = ledger.len();
+        if state == EvidenceState::Selected {
+            match category {
+                InvestmentCategory::DevelopmentSoftware => {
+                    approved_software.push((index, fact.clone()))
+                }
+                _ => approved_tangible.push((index, fact.clone())),
+            }
+        }
+        ledger.push(EvidenceLedgerEntry {
+            fact,
+            category,
+            state,
+        });
+    }
+
+    // Each component class resolves its own equivalents first; the two classes
+    // are then summed, because they are different lines on the same statement.
+    let recurring_development_by_end = select_one_equivalent_per_end(approved_tangible, &mut ledger);
+    let software_development_by_end = select_one_equivalent_per_end(approved_software, &mut ledger);
+
+    let mut development_total_by_end = BTreeMap::<String, i64>::new();
+    for end in recurring_development_by_end
+        .keys()
+        .chain(software_development_by_end.keys())
+    {
+        if development_total_by_end.contains_key(end) {
+            continue;
+        }
+        let tangible = recurring_development_by_end.get(end);
+        let software = software_development_by_end.get(end);
+        // `PaymentsToAcquireProductiveAssets` is defined by us-gaap as the cash
+        // outflow for PP&E, software and other intangibles — the software
+        // component is already inside it, so adding it would count that spend
+        // twice. `PaymentsToAcquirePropertyPlantAndEquipment` is tangible by
+        // definition and carries no such overlap.
+        let aggregate_tangible = tangible
+            .is_some_and(|fact| policy::DEVELOPMENT_AGGREGATE.contains(&fact.qname.as_str()));
+        let magnitude = tangible.map_or(0, |fact| fact.value_dollars.abs())
+            + software
+                .filter(|_| !aggregate_tangible)
+                .map_or(0, |fact| fact.value_dollars.abs());
+        // Issuers file these outflows with either sign. Preserve whichever the
+        // dominant component used so downstream sign handling is unchanged.
+        let negative = tangible
+            .or(software)
+            .is_some_and(|fact| fact.value_dollars < 0);
+        development_total_by_end.insert(
+            end.clone(),
+            if negative { -magnitude } else { magnitude },
+        );
+    }
+
     let recurring_development = recurring_development_by_end.values().next_back().cloned();
     NormalizedInvestmentEvidence {
         recurring_development,
         recurring_development_by_end,
+        software_development_by_end,
+        development_total_by_end,
         ledger,
     }
 }
@@ -210,9 +287,60 @@ mod tests {
         );
     }
 
+    /// FIS FY2025 as filed: $0.154B of plant and $0.835B of software development.
+    /// Reading the plant line alone reports a $10.7B-revenue issuer as
+    /// reinvesting 1.4% of sales.
+    #[test]
+    fn software_development_is_summed_with_plant_not_selected_against_it() {
+        let normalized = normalize_investments([
+            fact("PaymentsToAcquirePropertyPlantAndEquipment", 154_000_000),
+            fact("PaymentsForSoftware", 835_000_000),
+        ]);
+        assert_eq!(
+            normalized.development_total_by_end["2024-12-31"],
+            989_000_000
+        );
+    }
+
+    /// `PaymentsToAcquireProductiveAssets` is defined by us-gaap as the cash
+    /// outflow for PP&E, **software** and other intangibles, so the software
+    /// component is already inside it. `PaymentsToAcquirePropertyPlantAndEquipment`
+    /// is tangible by definition and is not.
+    #[test]
+    fn software_inside_an_aggregate_capex_line_is_not_added_twice() {
+        let normalized = normalize_investments([
+            fact("PaymentsToAcquireProductiveAssets", 833_000_000),
+            fact("PaymentsForSoftware", 665_000_000),
+        ]);
+        assert_eq!(
+            normalized.development_total_by_end["2024-12-31"],
+            833_000_000
+        );
+    }
+
+    #[test]
+    fn software_development_alone_still_reports_capex() {
+        let normalized = normalize_investments([fact("PaymentsToDevelopSoftware", 40_000_000)]);
+        assert_eq!(normalized.development_total_by_end["2024-12-31"], 40_000_000);
+    }
+
+    /// Issuers file investing outflows with either sign; the summed total must
+    /// keep the convention the issuer used rather than silently flipping it.
+    #[test]
+    fn summed_development_preserves_the_filed_sign() {
+        let normalized = normalize_investments([
+            fact("PaymentsToAcquirePropertyPlantAndEquipment", -154_000_000),
+            fact("PaymentsForSoftware", -835_000_000),
+        ]);
+        assert_eq!(
+            normalized.development_total_by_end["2024-12-31"],
+            -989_000_000
+        );
+    }
+
     #[test]
     fn generated_contract_policy_is_the_category_source() {
-        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/5");
+        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/6");
         assert_eq!(
             investment_category("PaymentsToExploreAndDevelopOilAndGasProperties"),
             InvestmentCategory::Development
@@ -306,6 +434,18 @@ mod tests {
                     "RejectedAcquisition" => assert_eq!(state, EvidenceState::RejectedAcquisition),
                     other => panic!("unknown expected evidence state: {other}"),
                 }
+            }
+            // Multi-component issuers additionally pin the summed CapEx, since
+            // the per-fact state alone cannot distinguish "both selected" from
+            // "both selected and then one of them silently dropped".
+            if let Some(total) = case["expectedDevelopmentTotalDollars"].as_i64() {
+                let end = case["facts"][0]["end"].as_str().unwrap();
+                assert_eq!(
+                    normalized.development_total_by_end.get(end),
+                    Some(&total),
+                    "{}",
+                    case["name"].as_str().unwrap()
+                );
             }
         }
     }

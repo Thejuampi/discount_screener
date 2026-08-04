@@ -101,6 +101,10 @@ pub enum RouteReason {
     CandidateDisagreement,
     InvalidForwardCandidate,
     InvalidFcffCandidate,
+    /// The two lanes disagreed materially and the dispute was resolved to the
+    /// lane whose evidence set strictly contains the other's. Recorded
+    /// alongside `CandidateDisagreement`, never instead of it.
+    DisagreementResolvedToForwardEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,15 +408,27 @@ pub fn route_operating_models(input: OperatingRouteInput) -> OperatingRouteDecis
             match (forward_available, fcff_available) {
                 (Some(forward), Some(fcff)) => {
                     let difference = difference_bps(forward, fcff);
-                    // Material disagreement between two live candidates is a
-                    // refusal, not a preference. Candidate quality decides which
-                    // lane leads *when they agree*; it never converts a dispute
-                    // into a selection.
+                    // Material disagreement stays labelled `Disputed`, but it no
+                    // longer suppresses the number. This branch is reached only
+                    // under structural distortion — the exact condition under
+                    // which the trailing series is known to be contaminated —
+                    // and the forward lane observes that same filed history plus
+                    // a forecast. Its evidence set strictly contains the FCFF
+                    // lane's, so the disagreement resolves toward it on evidence
+                    // grounds alone. `Disputed` keeps the disagreement visible
+                    // and keeps the name out of ranking scores; what changes is
+                    // that a reader now gets a value instead of a blank.
                     let fwd_solid = input.forward_candidate.quality == ModelQuality::Solid;
                     let fcff_solid = input.fcff_candidate.quality == ModelQuality::Solid;
                     if difference.is_some_and(|value| value > DISPUTED_DIFFERENCE_BPS) {
                         reasons.push(RouteReason::CandidateDisagreement);
-                        (RouteStatus::Disputed, None, None, difference)
+                        reasons.push(RouteReason::DisagreementResolvedToForwardEvidence);
+                        (
+                            RouteStatus::Disputed,
+                            Some(OperatingModel::ForwardEarningsPower),
+                            Some(forward),
+                            difference,
+                        )
                     } else if fwd_solid || !fcff_solid {
                         reasons.push(RouteReason::SelectedForwardEarningsPower);
                         (
@@ -1053,11 +1069,20 @@ mod tests {
             structural_distortions: vec![StructuralDistortion::LatestCapexSpike],
         });
         assert_eq!(decision.status, RouteStatus::Disputed);
-        assert_eq!(decision.selected_model, None);
-        assert_eq!(decision.selected_value_cents, None);
+        assert_eq!(
+            decision.selected_model,
+            Some(OperatingModel::ForwardEarningsPower)
+        );
+        assert_eq!(
+            decision.selected_value_cents,
+            decision.forward_candidate.intrinsic_value_cents
+        );
         assert!(decision
             .reasons
             .contains(&RouteReason::CandidateDisagreement));
+        assert!(decision
+            .reasons
+            .contains(&RouteReason::DisagreementResolvedToForwardEvidence));
     }
 
     #[test]

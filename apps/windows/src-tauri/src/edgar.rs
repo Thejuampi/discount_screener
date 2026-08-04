@@ -482,19 +482,21 @@ fn extract_capex(facts: &serde_json::Value) -> Vec<AnnualValue> {
     extract_recurring_development(&extract_normalized_investment_evidence(facts))
 }
 
+/// Recurring development CapEx per fiscal year: tangible plus capitalized
+/// software. Reading only the tangible component reports an issuer that invests
+/// through software as barely reinvesting at all.
 fn extract_recurring_development(
     evidence: &crate::sec_normalization::NormalizedInvestmentEvidence,
 ) -> Vec<AnnualValue> {
     evidence
-        .recurring_development_by_end
-        .values()
-        .filter_map(|fact| {
-            fact.end
-                .get(..4)
+        .development_total_by_end
+        .iter()
+        .filter_map(|(end, value_dollars)| {
+            end.get(..4)
                 .and_then(|year| year.parse::<i32>().ok())
                 .map(|year| AnnualValue {
                     year,
-                    value_dollars: fact.value_dollars,
+                    value_dollars: *value_dollars,
                 })
         })
         .collect()
@@ -547,6 +549,7 @@ fn extract_normalized_investment_evidence(
 
     let concepts = policy::DEVELOPMENT
         .iter()
+        .chain(policy::DEVELOPMENT_SOFTWARE)
         .chain(policy::PROPERTY_ACQUISITION)
         .chain(policy::BUSINESS_ACQUISITION);
     let mut raw_facts = Vec::new();
@@ -1366,6 +1369,141 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every annual investing outflow the issuer actually files, whether or not
+    /// the CapEx policy recognizes it. An issuer that invests through
+    /// capitalized software rather than plant reports nothing under
+    /// `PaymentsToAcquirePropertyPlantAndEquipment`, and the CapEx line comes
+    /// back near zero without any refusal to say so.
+    ///
+    /// Run: cargo test --lib edgar::tests::probe_investing_outflows -- --ignored --nocapture
+    #[test]
+    #[ignore = "network: raw XBRL investing-concept probe"]
+    fn probe_investing_outflows() {
+        let client = edgar_client();
+        let cik_map = fetch_cik_map(&client).expect("CIK");
+        for &symbol in &[
+            "DVN", "FIS", "AVY", "SW", "COF", "MPWR", "APH", "EME", "CHTR", "BKR", "INTU", "TER",
+            "AVGO", "EPAM", "T", "GEHC", "DAL", "WDC", "GOOGL", "HPE", "CRM", "SLB", "EXE", "OMC",
+            "PTC", "PG", "AMZN", "MSFT",
+        ] {
+            let Some(&cik) = cik_map.get(symbol) else {
+                eprintln!("{symbol}: no cik");
+                continue;
+            };
+            let url = format!(
+                "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
+                cik
+            );
+            let body: serde_json::Value = client
+                .get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+            let Some(gaap) = body.pointer("/facts/us-gaap").and_then(|v| v.as_object()) else {
+                eprintln!("{symbol}: no us-gaap facts");
+                continue;
+            };
+            // The quantity the software component actually changed, isolated from
+            // every other input: the tangible-only selection this policy used
+            // before against the summed total it uses now. A name whose two
+            // columns match cannot have moved for this reason.
+            let evidence = extract_normalized_investment_evidence(&body);
+            let mut moved = Vec::new();
+            for (end, total) in &evidence.development_total_by_end {
+                let tangible = evidence
+                    .recurring_development_by_end
+                    .get(end)
+                    .map_or(0, |fact| fact.value_dollars.abs());
+                if tangible != total.abs() {
+                    moved.push(format!(
+                        "{end}: {:.3}B->{:.3}B",
+                        tangible as f64 / 1e9,
+                        total.abs() as f64 / 1e9
+                    ));
+                }
+            }
+            eprintln!(
+                "CAPEX {symbol:<6} {}",
+                if moved.is_empty() {
+                    "unchanged".to_string()
+                } else {
+                    moved.join("  ")
+                }
+            );
+
+            let mut rows: Vec<(String, String, f64)> = Vec::new();
+            for (concept, node) in gaap {
+                // Only the recognized CapEx concepts and every software-investment
+                // concept, recognized or not — the question is whether an issuer
+                // invests through a line the policy cannot see.
+                let recognized = crate::sec_driver_normalization_policy_generated::DEVELOPMENT
+                    .contains(&concept.as_str());
+                let software = concept.contains("Software");
+                if !recognized && !software {
+                    continue;
+                }
+                let Some(arr) = node.pointer("/units/USD").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                let mut latest: HashMap<String, (String, i64)> = HashMap::new();
+                for entry in arr {
+                    let form = entry["form"].as_str().unwrap_or("");
+                    if !crate::sec_driver_normalization_policy_generated::ACCEPTED_FORMS
+                        .contains(&form)
+                    {
+                        continue;
+                    }
+                    if !has_approved_period_shape(entry, FactPeriodShape::Duration) {
+                        continue;
+                    }
+                    if entry.get("segment").is_some_and(|s| !s.is_null()) {
+                        continue;
+                    }
+                    let end = entry["end"].as_str().unwrap_or("").to_string();
+                    if end.as_str() < "2023" {
+                        continue;
+                    }
+                    let filed = entry["filed"].as_str().unwrap_or("").to_string();
+                    let value = entry["val"].as_i64().unwrap_or(0);
+                    let replace = latest.get(&end).is_none_or(|(prior, _)| *prior < filed);
+                    if replace {
+                        latest.insert(end, (filed, value));
+                    }
+                }
+                for (end, (_, value)) in latest {
+                    if value.abs() < 10_000_000 {
+                        continue;
+                    }
+                    rows.push((end, concept.clone(), value as f64 / 1e9));
+                }
+            }
+            // Only the newest fiscal end: the question is whether the current
+            // CapEx line is complete, not how it evolved.
+            let Some(newest) = rows.iter().map(|(end, _, _)| end.clone()).max() else {
+                eprintln!("{symbol:<6} no capex-class facts");
+                continue;
+            };
+            let mut current: Vec<&(String, String, f64)> =
+                rows.iter().filter(|(end, _, _)| *end == newest).collect();
+            current.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
+            let software_total: f64 = current
+                .iter()
+                .filter(|(_, concept, _)| concept.starts_with("Payments") && concept.contains("Software"))
+                .map(|(_, _, value)| value.abs())
+                .sum();
+            eprintln!(
+                "{symbol:<6} {newest}  software_payments={software_total:>7.3}B  {}",
+                current
+                    .iter()
+                    .map(|(_, concept, value)| format!("{concept}={value:.3}B"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            );
         }
     }
 

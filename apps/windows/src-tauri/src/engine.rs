@@ -2307,14 +2307,16 @@ impl ScreenerState {
             self.ingest_dcf_analysis(symbol.clone(), analysis);
         }
         self.selected_valuation_values.remove(&symbol);
-        if envelope.decision.status == crate::operating_valuation::RouteStatus::Selected {
-            if let Some(value) = envelope
-                .decision
-                .selected_value_cents
-                .filter(|value| *value > 0)
-            {
-                self.selected_valuation_values.insert(symbol.clone(), value);
-            }
+        // The router populates `selected_value_cents` only when it resolved to a
+        // lane; `Unavailable` and `NotEligible` always carry `None`. Publishing
+        // on the value rather than on `Selected` is what lets a `Disputed` route
+        // show its resolved number while keeping the disputed label.
+        if let Some(value) = envelope
+            .decision
+            .selected_value_cents
+            .filter(|value| *value > 0)
+        {
+            self.selected_valuation_values.insert(symbol.clone(), value);
         }
         self.valuation_errors.remove(&symbol);
         self.operating_valuations.insert(symbol, envelope);
@@ -2896,9 +2898,17 @@ mod valuation_routing_tests {
         assert_eq!(envelope.decision.status, RouteStatus::Disputed);
         state.ingest_operating_valuation("AMZN".into(), Some(fcff), envelope);
         assert_eq!(state.dcf_values.get("AMZN"), Some(&1_000));
-        assert_eq!(state.selected_valuation_values.get("AMZN"), None);
         let retained = state.operating_valuations.get("AMZN").expect("route");
-        assert_eq!(retained.decision.selected_model, None);
+        // The dispute resolves to the forward lane and that value is published,
+        // but the FCFF analysis stays diagnostic-only and out of scoring below.
+        assert_eq!(
+            state.selected_valuation_values.get("AMZN").copied(),
+            retained.decision.forward_candidate.intrinsic_value_cents
+        );
+        assert_eq!(
+            retained.decision.selected_model,
+            Some(crate::operating_valuation::OperatingModel::ForwardEarningsPower)
+        );
         assert!(retained
             .decision
             .forward_candidate

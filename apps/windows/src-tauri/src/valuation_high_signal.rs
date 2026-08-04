@@ -507,18 +507,26 @@ fn recompute_member(
             ));
         }
         RouteStatus::Disputed => {
-            // High-signal requires a single usable primary; disputed is not high-signal.
+            // Disputed is still not high-signal — the lanes genuinely disagree, so
+            // `point_estimate_unreliable` stays set and the name keeps failing the
+            // gate. What changed is which number is reported: the router resolves
+            // the dispute to the better-evidenced lane, and this observation now
+            // reads that resolution instead of re-deriving its own `fcff.or(fwd)`
+            // preference, which silently contradicted the router.
             let fcff = decision.fcff_candidate.intrinsic_value_cents;
             let fwd = decision.forward_candidate.intrinsic_value_cents;
-            obs.our_base_cents = fcff.or(fwd);
+            obs.our_base_cents = decision.selected_value_cents.or(fcff).or(fwd);
             obs.valuation_status = Some("disputed".into());
             obs.model = Some("disputed".into());
             obs.point_estimate_unreliable = true;
             obs.provisional_rates = true;
             obs.valuation_unavailable_reason = Some("disputed_candidates".into());
+            if decision.forward_candidate.cost_of_equity_bps > 0 {
+                obs.discount_rate_bps = Some(decision.forward_candidate.cost_of_equity_bps);
+            }
             obs.notes = Some(format!(
-                "disputed; fcff={fcff:?}; forward={fwd:?}; diff_bps={:?}",
-                decision.candidate_difference_bps
+                "disputed; resolved={:?}; fcff={fcff:?}; forward={fwd:?}; diff_bps={:?}",
+                decision.selected_model, decision.candidate_difference_bps
             ));
         }
         RouteStatus::Unavailable | RouteStatus::NotEligible => {

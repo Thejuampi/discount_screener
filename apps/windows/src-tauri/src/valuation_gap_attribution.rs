@@ -1444,6 +1444,212 @@ mod tests {
         }
     }
 
+    /// Both lanes, side by side, for the names whose card is visibly wrong.
+    /// Prints what each lane priced and the inputs it priced it from, so a
+    /// dispute can be read as "which lane is broken" rather than "the models
+    /// disagree". Reports only — never asserts a Street band.
+    ///
+    /// Run: cargo test --lib valuation_gap_attribution::tests::live_off_name_lane_audit -- --ignored --nocapture
+    #[test]
+    #[ignore = "network: Yahoo + SEC + live rates; diagnostic review only"]
+    fn live_off_name_lane_audit() {
+        let yahoo = crate::fetcher::YahooClient::new().expect("Yahoo client");
+        let edgar = crate::edgar::edgar_client();
+        let cik_map = crate::edgar::fetch_cik_map(&edgar).expect("CIK map");
+        let day = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs() / 86_400) as i64)
+            .unwrap_or(20_000);
+        let market_params = if let Some((rf_bps, as_of)) = yahoo.fetch_us_10y_yield_bps() {
+            crate::dcf_model::MarketParams::from_live_risk_free(rf_bps, as_of)
+        } else {
+            crate::dcf_model::MarketParams::default_usd()
+        };
+
+        for &symbol in &["COF", "MPWR", "FIS", "HPE"] {
+            let Ok(fetched) = yahoo.fetch_symbol(symbol) else {
+                eprintln!("{symbol}: yahoo fail");
+                continue;
+            };
+            let market = fetched.snapshot.as_ref().map(|s| s.market_price_cents);
+            let street = fetched
+                .snapshot
+                .as_ref()
+                .map(|s| s.intrinsic_value_cents)
+                .filter(|v| *v > 0);
+            let Some(mut fund) = fetched.fundamentals else {
+                eprintln!("{symbol}: no fundamentals");
+                continue;
+            };
+            let Some(&cik) = cik_map.get(symbol) else {
+                eprintln!("{symbol}: no cik");
+                continue;
+            };
+            if fund.shares_outstanding.unwrap_or(0) == 0 {
+                fund.shares_outstanding =
+                    crate::edgar::fetch_shares_outstanding(&edgar, symbol, cik).unwrap_or(None);
+            }
+            let class = crate::dcf_model::classify_business(
+                fund.sector_name.as_deref(),
+                fund.industry_name.as_deref(),
+                fund.sector_key.as_deref(),
+                fund.industry_key.as_deref(),
+                false,
+            );
+            eprintln!(
+                "\n=== {symbol} === class={class:?} sector={:?} industry={:?}\n  mkt=${:.2} street=${:.2} shares={:?} roe_bps={:?} d/e={:?} ",
+                fund.sector_name,
+                fund.industry_name,
+                market.unwrap_or(0) as f64 / 100.0,
+                street.unwrap_or(0) as f64 / 100.0,
+                fund.shares_outstanding,
+                fund.return_on_equity_bps,
+                fund.debt_to_equity_hundredths,
+            );
+
+            let history = match crate::edgar::fetch_fcf_history(&edgar, symbol, cik) {
+                Ok(Some(history)) => Some(history),
+                Ok(None) => {
+                    eprintln!("  history: none");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("  history: fetch fail {e}");
+                    None
+                }
+            };
+            if let Some(history) = history.as_ref() {
+                match crate::dcf_model::extract_normalized_fcff_level(&fund, history) {
+                    Ok(level) => {
+                        eprintln!(
+                            "  LEVEL fcff=${:.3}B fcff/sh=${:.2} owner_earnings={} base_margin_bps={} ocf_bps={} capex_bps={} maint_bps={:?} int_bps={} g0_bps={} rev=${:.3}B contaminated={:?}",
+                            level.normalized_fcff_dollars as f64 / 1e9,
+                            level.normalized_fcff_dollars as f64 / level.shares_outstanding as f64,
+                            level.owner_earnings_base,
+                            level.base_fcff_margin_bps,
+                            level.normalized_ocf_margin_bps,
+                            level.normalized_capex_intensity_bps,
+                            level.maintenance_capex_intensity_bps,
+                            level.normalized_after_tax_interest_margin_bps,
+                            level.base_growth_bps,
+                            level.latest_revenue_dollars as f64 / 1e9,
+                            level.acquisition_contaminated_growth_years,
+                        );
+                        eprintln!(
+                            "  year | revenue$B | ocf$B | capex$B | reported_fcff$B | ocf% | capex% | fcff%"
+                        );
+                        for y in &level.years {
+                            eprintln!(
+                                "  {} | {:8.2} | {:6.2} | {:7.2} | {:13.2} | {:5.1} | {:5.1} | {:5.1}",
+                                y.year,
+                                y.revenue_dollars as f64 / 1e9,
+                                y.ocf_dollars.unwrap_or(0) as f64 / 1e9,
+                                y.capex_dollars.unwrap_or(0) as f64 / 1e9,
+                                y.reported_fcff_dollars.unwrap_or(0) as f64 / 1e9,
+                                y.ocf_margin_bps as f64 / 100.0,
+                                y.capex_intensity_bps as f64 / 100.0,
+                                y.fcff_margin_bps as f64 / 100.0,
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("  LEVEL: refused {e}"),
+                }
+            }
+
+            let analysis = history.as_ref().and_then(|history| {
+                crate::dcf_model::compute_with_params(
+                    &fund,
+                    history,
+                    market,
+                    &market_params,
+                    "off_name_lane_audit",
+                    false,
+                )
+                .ok()
+            });
+            if let Some(analysis) = analysis.as_ref() {
+                eprintln!(
+                    "  FCFF base=${:.2} bear=${:.2} bull=${:.2} wacc={} g0={} g_inf={} model={:?} regime={} driver={} net_debt=${:.3}B unreliable={}",
+                    analysis.base_intrinsic_value_cents as f64 / 100.0,
+                    analysis.bear_intrinsic_value_cents as f64 / 100.0,
+                    analysis.bull_intrinsic_value_cents as f64 / 100.0,
+                    analysis.wacc_bps,
+                    analysis.base_growth_bps,
+                    analysis.stable_growth_bps,
+                    analysis.model,
+                    analysis.diagnostics.driver_regime,
+                    analysis.diagnostics.valuation_driver,
+                    analysis.net_debt_dollars as f64 / 1e9,
+                    analysis.diagnostics.point_estimate_unreliable,
+                );
+                eprintln!("  FCFF reasons={:?}", analysis.reason_codes);
+            }
+
+            let fetched_forecast = yahoo.fetch_forward_forecast(symbol, day);
+            if let Ok(evidence) = fetched_forecast.as_ref() {
+                eprintln!(
+                    "  RAW forward revG={:?} epsG={:?} analysts={:?}",
+                    evidence.revenue_growth_bps, evidence.earnings_growth_bps, evidence.analyst_count
+                );
+            }
+            let forward_evidence = fetched_forecast.map_err(|error| match error {
+                crate::fetcher::ForwardForecastFetchError::Provider(reason) => {
+                    crate::operating_valuation_runtime::ForwardSourceFailure::Provider(reason)
+                }
+                crate::fetcher::ForwardForecastFetchError::Transport(error)
+                    if crate::yahoo_session::is_rate_limit_error(&error) =>
+                {
+                    crate::operating_valuation_runtime::ForwardSourceFailure::RateLimited
+                }
+                crate::fetcher::ForwardForecastFetchError::Transport(_) => {
+                    crate::operating_valuation_runtime::ForwardSourceFailure::Transport
+                }
+            });
+            let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
+                crate::operating_valuation_runtime::RuntimeValuationInput {
+                    business_class: class,
+                    fundamentals: &fund,
+                    fcff_analysis: analysis.as_ref(),
+                    fcff_failure: None,
+                    forward_evidence,
+                    market_params: &market_params,
+                    as_of_epoch_day: day,
+                    market_price_cents: market,
+                },
+            );
+            let forward = &envelope.decision.forward_candidate;
+            eprintln!(
+                "  FWD value={:?} eps={:?} g0={} hold={} fade={} r={} g_inf={:?} quality={:?} refusals={:?}",
+                forward
+                    .intrinsic_value_cents
+                    .map(|c| format!("${:.2}", c as f64 / 100.0)),
+                forward
+                    .provenance
+                    .forecast
+                    .eps_mean_cents
+                    .map(|c| format!("${:.2}", c as f64 / 100.0)),
+                forward.provenance.forecast.near_growth_bps,
+                forward.provenance.policy.hold_years,
+                forward.provenance.policy.fade_years,
+                forward.provenance.cost_of_equity.cost_of_equity_bps,
+                forward.stable_growth_bps,
+                forward.quality,
+                forward.refusals,
+            );
+            eprintln!(
+                "  ROUTE status={:?} selected={:?} value={:?} diff_bps={:?} reasons={:?}",
+                envelope.decision.status,
+                envelope.decision.selected_model,
+                envelope
+                    .decision
+                    .selected_value_cents
+                    .map(|c| format!("${:.2}", c as f64 / 100.0)),
+                envelope.decision.candidate_difference_bps,
+                envelope.decision.reasons,
+            );
+        }
+    }
+
     fn live_one(
         symbol: &str,
         yahoo: &crate::fetcher::YahooClient,

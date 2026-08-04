@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn material_candidate_disagreement_has_no_selected_primary() {
+    fn material_candidate_disagreement_resolves_primary_to_forward_lane() {
         let analysis = fcff(1_000, 10, 1_000);
         let envelope = route_runtime_valuation(RuntimeValuationInput {
             business_class: BusinessClass::OperatingNonFinancial,
@@ -1120,7 +1120,10 @@ mod tests {
             market_price_cents: None,
         });
         assert_eq!(envelope.decision.status, RouteStatus::Disputed);
-        assert_eq!(envelope.decision.selected_value_cents, None);
+        assert_eq!(
+            envelope.decision.selected_value_cents,
+            envelope.decision.forward_candidate.intrinsic_value_cents
+        );
     }
 
     #[test]

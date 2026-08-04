@@ -135,17 +135,18 @@
         },
         "routeDecision": {
           "status": "disputed",
-          "selectedModel": null,
-          "selectedValueCents": null,
+          "selectedModel": "forward_earnings_power",
+          "selectedValueCents": 14056,
           "candidateDifferenceBps": 9505,
           "reasons": [
             "structural_distortion_present",
-            "candidate_disagreement"
+            "candidate_disagreement",
+            "disagreement_resolved_to_forward_evidence"
           ],
           "structuralDistortions": [
             "latest_capex_spike"
           ],
-          "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/5000/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"
+          "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=forwardearningspower|fcff=available/5000/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement,disagreementresolvedtoforwardevidence"
         }
       }
     }
@@ -316,17 +317,18 @@
       ],
       "expected": {
         "status": "disputed",
-        "selectedModel": null,
-        "selectedValueCents": null,
+        "selectedModel": "forward_earnings_power",
+        "selectedValueCents": 14056,
         "candidateDifferenceBps": 5001,
         "reasons": [
           "structural_distortion_present",
-          "candidate_disagreement"
+          "candidate_disagreement",
+          "disagreement_resolved_to_forward_evidence"
         ],
         "structuralDistortions": [
           "latest_capex_spike"
         ],
-        "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/8433/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"
+        "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=forwardearningspower|fcff=available/8433/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement,disagreementresolvedtoforwardevidence"
       }
     },
     {
@@ -340,18 +342,19 @@
       ],
       "expected": {
         "status": "disputed",
-        "selectedModel": null,
-        "selectedValueCents": null,
+        "selectedModel": "forward_earnings_power",
+        "selectedValueCents": 14056,
         "candidateDifferenceBps": 9505,
         "reasons": [
           "structural_distortion_present",
-          "candidate_disagreement"
+          "candidate_disagreement",
+          "disagreement_resolved_to_forward_evidence"
         ],
         "structuralDistortions": [
           "thin_normalized_fcff_margin",
           "latest_capex_spike"
         ],
-        "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=none|fcff=available/5000/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=thinnormalizedfcffmargin,latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement"
+        "fingerprint": "operating-model-router-policy/1|class=operatingnonfinancial|status=disputed|selected=forwardearningspower|fcff=available/5000/solid//9:fcff:test|forward=available/14056/solid/analystderivedmodel//7/479:operating-valuation-router/2|policy=25:forward-earnings-policy/1|expected_currency=3:USD|max_age=90|forecast_window=180/730|min_coverage=3|projection=2/4/20|macro_growth=300|rf=430|rf_buffer=100|terminal_spread=100|forecast=13:forecast:test|rate=9:rate:test|rate_bps=900|beta_source=industry_shrink|provisional=false|market_asof=1728000000|asof=20000|observed=19990|period_end=20200|currency=3:USD|eps=900/1000/1100|coverage=8|growth=600|stable=300|roic=none|terminal_payout=6667|structural=thinnormalizedfcffmargin,latestcapexspike|reasons=structuraldistortionpresent,candidatedisagreement,disagreementresolvedtoforwardevidence"
       }
     }
   ],
