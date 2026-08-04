@@ -1,0 +1,2785 @@
+{
+  "rows": {
+    "AAPL": [
+      {
+        "capex": 735000000.0,
+        "debt": null,
+        "effective_tax_bps": 3018,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 5470000000.0,
+        "revenue": 24578000000.0,
+        "year": 2007
+      },
+      {
+        "capex": 1091000000.0,
+        "debt": null,
+        "effective_tax_bps": 3161,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 9596000000.0,
+        "revenue": 37491000000.0,
+        "year": 2008
+      },
+      {
+        "capex": 1144000000.0,
+        "debt": null,
+        "effective_tax_bps": 3175,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 10159000000.0,
+        "revenue": 42905000000.0,
+        "year": 2009
+      },
+      {
+        "capex": 2005000000.0,
+        "debt": null,
+        "effective_tax_bps": 2442,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 18595000000.0,
+        "revenue": 65225000000.0,
+        "year": 2010
+      },
+      {
+        "capex": 4260000000.0,
+        "debt": null,
+        "effective_tax_bps": 2422,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 37529000000.0,
+        "revenue": 108249000000.0,
+        "year": 2011
+      },
+      {
+        "capex": 8295000000.0,
+        "debt": null,
+        "effective_tax_bps": 2516,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 50856000000.0,
+        "revenue": 156508000000.0,
+        "year": 2012
+      },
+      {
+        "capex": 8165000000.0,
+        "debt": 16960000000.0,
+        "effective_tax_bps": 2615,
+        "interest": 136000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 53666000000.0,
+        "revenue": 170910000000.0,
+        "year": 2013
+      },
+      {
+        "capex": 9571000000.0,
+        "debt": 28987000000.0,
+        "effective_tax_bps": 2613,
+        "interest": 381000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 59713000000.0,
+        "revenue": 182795000000.0,
+        "year": 2014
+      },
+      {
+        "capex": 11247000000.0,
+        "debt": 55701000000.0,
+        "effective_tax_bps": 2637,
+        "interest": 722000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 81266000000.0,
+        "revenue": 233715000000.0,
+        "year": 2015
+      },
+      {
+        "capex": 12734000000.0,
+        "debt": 78384000000.0,
+        "effective_tax_bps": 2556,
+        "interest": 1400000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 66231000000.0,
+        "revenue": 215639000000.0,
+        "year": 2016
+      },
+      {
+        "capex": 12451000000.0,
+        "debt": 104021000000.0,
+        "effective_tax_bps": 2456,
+        "interest": 2200000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 64225000000.0,
+        "revenue": 229234000000.0,
+        "year": 2017
+      },
+      {
+        "capex": 13313000000.0,
+        "debt": 104193000000.0,
+        "effective_tax_bps": 1834,
+        "interest": 3000000000.0,
+        "marginal_tax_bps": 2450,
+        "ocf": 77434000000.0,
+        "revenue": 265595000000.0,
+        "year": 2018
+      },
+      {
+        "capex": 10495000000.0,
+        "debt": 101679000000.0,
+        "effective_tax_bps": 1594,
+        "interest": 3200000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 69391000000.0,
+        "revenue": 260174000000.0,
+        "year": 2019
+      },
+      {
+        "capex": 7309000000.0,
+        "debt": 106078000000.0,
+        "effective_tax_bps": 1443,
+        "interest": 2800000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 80674000000.0,
+        "revenue": 274515000000.0,
+        "year": 2020
+      },
+      {
+        "capex": 11085000000.0,
+        "debt": 118063000000.0,
+        "effective_tax_bps": 1330,
+        "interest": 2600000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 104038000000.0,
+        "revenue": 365817000000.0,
+        "year": 2021
+      },
+      {
+        "capex": 10708000000.0,
+        "debt": 111824000000.0,
+        "effective_tax_bps": 1620,
+        "interest": 2931000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 122151000000.0,
+        "revenue": 394328000000.0,
+        "year": 2022
+      },
+      {
+        "capex": 10959000000.0,
+        "debt": 105103000000.0,
+        "effective_tax_bps": 1472,
+        "interest": 3933000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 110543000000.0,
+        "revenue": 383285000000.0,
+        "year": 2023
+      },
+      {
+        "capex": 9447000000.0,
+        "debt": 96662000000.0,
+        "effective_tax_bps": 2409,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 118254000000.0,
+        "revenue": 391035000000.0,
+        "year": 2024
+      },
+      {
+        "capex": 12715000000.0,
+        "debt": 90678000000.0,
+        "effective_tax_bps": 1561,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 111482000000.0,
+        "revenue": 416161000000.0,
+        "year": 2025
+      }
+    ],
+    "ADMA": [
+      {
+        "capex": 270.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 1602958.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -1431188.0,
+        "revenue": 761042.0,
+        "year": 2011
+      },
+      {
+        "capex": 118853.0,
+        "debt": null,
+        "effective_tax_bps": 780,
+        "interest": 30683.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -6903795.0,
+        "revenue": 1118118.0,
+        "year": 2012
+      },
+      {
+        "capex": 196635.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 618225.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -10887154.0,
+        "revenue": 3067577.0,
+        "year": 2013
+      },
+      {
+        "capex": 2323251.0,
+        "debt": null,
+        "effective_tax_bps": 318,
+        "interest": 1286215.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -14704910.0,
+        "revenue": 5915545.0,
+        "year": 2014
+      },
+      {
+        "capex": 26073.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 1842716.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -15418404.0,
+        "revenue": 7177633.0,
+        "year": 2015
+      },
+      {
+        "capex": 73410.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 2239569.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -18268973.0,
+        "revenue": 10661037.0,
+        "year": 2016
+      },
+      {
+        "capex": 2676328.0,
+        "debt": 2760000.0,
+        "effective_tax_bps": 0,
+        "interest": 3285847.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -37271774.0,
+        "revenue": 22760560.0,
+        "year": 2017
+      },
+      {
+        "capex": 2095600.0,
+        "debt": 2760000.0,
+        "effective_tax_bps": 0,
+        "interest": 5522783.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -62678682.0,
+        "revenue": 16985290.0,
+        "year": 2018
+      },
+      {
+        "capex": 3811838.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 8993379.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -76193504.0,
+        "revenue": 29349083.0,
+        "year": 2019
+      },
+      {
+        "capex": 12726680.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 11985066.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -102002958.0,
+        "revenue": 42219783.0,
+        "year": 2020
+      },
+      {
+        "capex": 13511000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 13057000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -112369000.0,
+        "revenue": 80943000.0,
+        "year": 2021
+      },
+      {
+        "capex": 13911000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 19279000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -59508000.0,
+        "revenue": 154080000.0,
+        "year": 2022
+      },
+      {
+        "capex": 4771000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 25027000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 8800000.0,
+        "revenue": 258215000.0,
+        "year": 2023
+      },
+      {
+        "capex": 8226000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 13930000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 118672000.0,
+        "revenue": 426454000.0,
+        "year": 2024
+      },
+      {
+        "capex": 22575000.0,
+        "debt": 72143000.0,
+        "effective_tax_bps": 1956,
+        "interest": 7110000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 50396000.0,
+        "revenue": 510173000.0,
+        "year": 2025
+      }
+    ],
+    "AMSC": [
+      {
+        "capex": 6532000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -2426000.0,
+        "revenue": 182755000.0,
+        "year": 2009
+      },
+      {
+        "capex": 16541000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 788000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 40680000.0,
+        "revenue": 315955000.0,
+        "year": 2010
+      },
+      {
+        "capex": 40862000.0,
+        "debt": null,
+        "effective_tax_bps": 937,
+        "interest": 830000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -22821000.0,
+        "revenue": 286603000.0,
+        "year": 2011
+      },
+      {
+        "capex": 10895000.0,
+        "debt": 20944000.0,
+        "effective_tax_bps": 101,
+        "interest": 243000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -141042000.0,
+        "revenue": 5200000.0,
+        "year": 2012
+      },
+      {
+        "capex": 1430000.0,
+        "debt": 10411000.0,
+        "effective_tax_bps": 40,
+        "interest": 14900000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -45271000.0,
+        "revenue": 3400000.0,
+        "year": 2013
+      },
+      {
+        "capex": 278000.0,
+        "debt": null,
+        "effective_tax_bps": 154,
+        "interest": 9700000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -13267000.0,
+        "revenue": 3700000.0,
+        "year": 2014
+      },
+      {
+        "capex": 737000.0,
+        "debt": null,
+        "effective_tax_bps": 38,
+        "interest": 1700000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -32676000.0,
+        "revenue": 0.0,
+        "year": 2015
+      },
+      {
+        "capex": 1201000.0,
+        "debt": null,
+        "effective_tax_bps": 1152,
+        "interest": 1000000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -4559000.0,
+        "revenue": 0.0,
+        "year": 2016
+      },
+      {
+        "capex": 656000.0,
+        "debt": null,
+        "effective_tax_bps": 435,
+        "interest": 383000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -11215000.0,
+        "revenue": 900000.0,
+        "year": 2017
+      },
+      {
+        "capex": 2534000.0,
+        "debt": null,
+        "effective_tax_bps": 49,
+        "interest": 147000.0,
+        "marginal_tax_bps": 3100,
+        "ocf": -24827000.0,
+        "revenue": 48403000.0,
+        "year": 2018
+      },
+      {
+        "capex": 952000.0,
+        "debt": null,
+        "effective_tax_bps": 1925,
+        "interest": 1117000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 42714000.0,
+        "revenue": 56207000.0,
+        "year": 2019
+      },
+      {
+        "capex": 3630000.0,
+        "debt": null,
+        "effective_tax_bps": 115,
+        "interest": 1327000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -16497000.0,
+        "revenue": 63838000.0,
+        "year": 2020
+      },
+      {
+        "capex": 1764000.0,
+        "debt": null,
+        "effective_tax_bps": 354,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -8681000.0,
+        "revenue": 87125000.0,
+        "year": 2021
+      },
+      {
+        "capex": 938000.0,
+        "debt": 162000.0,
+        "effective_tax_bps": 879,
+        "interest": 75000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -18977000.0,
+        "revenue": 108435000.0,
+        "year": 2022
+      },
+      {
+        "capex": 1236000.0,
+        "debt": 90000.0,
+        "effective_tax_bps": 62,
+        "interest": 252000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -22485000.0,
+        "revenue": 105984000.0,
+        "year": 2023
+      },
+      {
+        "capex": 934000.0,
+        "debt": 25000.0,
+        "effective_tax_bps": 286,
+        "interest": 1302000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 2138000.0,
+        "revenue": 145639000.0,
+        "year": 2024
+      },
+      {
+        "capex": 2415000.0,
+        "debt": 0.0,
+        "effective_tax_bps": 3500,
+        "interest": 3708000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 28285000.0,
+        "revenue": 222818000.0,
+        "year": 2025
+      },
+      {
+        "capex": 4888000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 6356000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 23148000.0,
+        "revenue": 299155000.0,
+        "year": 2026
+      }
+    ],
+    "AMZN": [
+      {
+        "capex": 224000000.0,
+        "debt": null,
+        "effective_tax_bps": 2788,
+        "interest": 77000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 1405000000.0,
+        "revenue": 14835000000.0,
+        "year": 2007
+      },
+      {
+        "capex": 333000000.0,
+        "debt": null,
+        "effective_tax_bps": 2741,
+        "interest": 71000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 1697000000.0,
+        "revenue": 19166000000.0,
+        "year": 2008
+      },
+      {
+        "capex": 373000000.0,
+        "debt": 109000000.0,
+        "effective_tax_bps": 2179,
+        "interest": 34000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 3293000000.0,
+        "revenue": 24509000000.0,
+        "year": 2009
+      },
+      {
+        "capex": 979000000.0,
+        "debt": 184000000.0,
+        "effective_tax_bps": 2351,
+        "interest": 39000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 3495000000.0,
+        "revenue": 34204000000.0,
+        "year": 2010
+      },
+      {
+        "capex": 1811000000.0,
+        "debt": 384000000.0,
+        "effective_tax_bps": 3116,
+        "interest": 65000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 3903000000.0,
+        "revenue": 48077000000.0,
+        "year": 2011
+      },
+      {
+        "capex": 3785000000.0,
+        "debt": 3691000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 92000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 4180000000.0,
+        "revenue": 61093000000.0,
+        "year": 2012
+      },
+      {
+        "capex": 3444000000.0,
+        "debt": 3967000000.0,
+        "effective_tax_bps": 3182,
+        "interest": 141000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 5475000000.0,
+        "revenue": 74452000000.0,
+        "year": 2013
+      },
+      {
+        "capex": 4893000000.0,
+        "debt": 9881000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 210000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 6842000000.0,
+        "revenue": 88988000000.0,
+        "year": 2014
+      },
+      {
+        "capex": 4589000000.0,
+        "debt": 8562000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 459000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 12039000000.0,
+        "revenue": 107006000000.0,
+        "year": 2015
+      },
+      {
+        "capex": 7804000000.0,
+        "debt": 8838000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 484000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 17203000000.0,
+        "revenue": 135987000000.0,
+        "year": 2016
+      },
+      {
+        "capex": 11955000000.0,
+        "debt": 24942000000.0,
+        "effective_tax_bps": 2020,
+        "interest": 848000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 18365000000.0,
+        "revenue": 177866000000.0,
+        "year": 2017
+      },
+      {
+        "capex": 13427000000.0,
+        "debt": 24965000000.0,
+        "effective_tax_bps": 1063,
+        "interest": 1417000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 30723000000.0,
+        "revenue": 232887000000.0,
+        "year": 2018
+      },
+      {
+        "capex": 16861000000.0,
+        "debt": 24820000000.0,
+        "effective_tax_bps": 1699,
+        "interest": 1600000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 38514000000.0,
+        "revenue": 280522000000.0,
+        "year": 2019
+      },
+      {
+        "capex": 40140000000.0,
+        "debt": 33174000000.0,
+        "effective_tax_bps": 1184,
+        "interest": 1647000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 66064000000.0,
+        "revenue": 386064000000.0,
+        "year": 2020
+      },
+      {
+        "capex": 61053000000.0,
+        "debt": 50553000000.0,
+        "effective_tax_bps": 1256,
+        "interest": 1809000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 46327000000.0,
+        "revenue": 469822000000.0,
+        "year": 2021
+      },
+      {
+        "capex": 63645000000.0,
+        "debt": 70542000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 2367000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 46752000000.0,
+        "revenue": 513983000000.0,
+        "year": 2022
+      },
+      {
+        "capex": 52729000000.0,
+        "debt": 67182000000.0,
+        "effective_tax_bps": 1896,
+        "interest": 3182000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 84946000000.0,
+        "revenue": 574785000000.0,
+        "year": 2023
+      },
+      {
+        "capex": 82999000000.0,
+        "debt": 58000000000.0,
+        "effective_tax_bps": 1350,
+        "interest": 2406000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 115877000000.0,
+        "revenue": 637959000000.0,
+        "year": 2024
+      },
+      {
+        "capex": 131819000000.0,
+        "debt": 68836000000.0,
+        "effective_tax_bps": 1961,
+        "interest": 2274000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 139514000000.0,
+        "revenue": 716924000000.0,
+        "year": 2025
+      }
+    ],
+    "APP": [
+      {
+        "capex": 3358000.0,
+        "debt": null,
+        "effective_tax_bps": 570,
+        "interest": 73955000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 198462000.0,
+        "revenue": 994104000.0,
+        "year": 2019
+      },
+      {
+        "capex": 3241000.0,
+        "debt": null,
+        "effective_tax_bps": 720,
+        "interest": 77873000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 222883000.0,
+        "revenue": 1451086000.0,
+        "year": 2020
+      },
+      {
+        "capex": 5457000.0,
+        "debt": 3227644000.0,
+        "effective_tax_bps": 2369,
+        "interest": 103170000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 361851000.0,
+        "revenue": 2793104000.0,
+        "year": 2021
+      },
+      {
+        "capex": 6611000.0,
+        "debt": 3211722000.0,
+        "effective_tax_bps": 596,
+        "interest": 172181000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 412773000.0,
+        "revenue": 2817058000.0,
+        "year": 2022
+      },
+      {
+        "capex": 4246000.0,
+        "debt": 3120906000.0,
+        "effective_tax_bps": 873,
+        "interest": 281712000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 1061510000.0,
+        "revenue": 1841762000.0,
+        "year": 2023
+      },
+      {
+        "capex": 4776000.0,
+        "debt": 3508983000.0,
+        "effective_tax_bps": 139,
+        "interest": 307976000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 2099011000.0,
+        "revenue": 3224058000.0,
+        "year": 2024
+      }
+    ],
+    "BWMN": [
+      {
+        "capex": 924000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 609000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 10770000.0,
+        "revenue": 122020000.0,
+        "year": 2020
+      },
+      {
+        "capex": 905000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 603000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 4717000.0,
+        "revenue": 149970000.0,
+        "year": 2021
+      },
+      {
+        "capex": 902000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 1247000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 9170000.0,
+        "revenue": 261714000.0,
+        "year": 2022
+      },
+      {
+        "capex": 2093000.0,
+        "debt": null,
+        "effective_tax_bps": 275,
+        "interest": 1464000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 11722000.0,
+        "revenue": 346256000.0,
+        "year": 2023
+      },
+      {
+        "capex": 626000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 1714000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 24301000.0,
+        "revenue": 426564000.0,
+        "year": 2024
+      },
+      {
+        "capex": 2763000.0,
+        "debt": null,
+        "effective_tax_bps": 1516,
+        "interest": 1981000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 35827000.0,
+        "revenue": 490017000.0,
+        "year": 2025
+      }
+    ],
+    "CALX": [
+      {
+        "capex": 5064000.0,
+        "debt": null,
+        "effective_tax_bps": 154,
+        "interest": 3867000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 1390000.0,
+        "revenue": 232947000.0,
+        "year": 2009
+      },
+      {
+        "capex": 5614000.0,
+        "debt": null,
+        "effective_tax_bps": 44,
+        "interest": 1188000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 9176000.0,
+        "revenue": 287043000.0,
+        "year": 2010
+      },
+      {
+        "capex": 7355000.0,
+        "debt": null,
+        "effective_tax_bps": 43,
+        "interest": 184000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 14589000.0,
+        "revenue": 344669000.0,
+        "year": 2011
+      },
+      {
+        "capex": 10179000.0,
+        "debt": null,
+        "effective_tax_bps": 56,
+        "interest": 185000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 27678000.0,
+        "revenue": 330218000.0,
+        "year": 2012
+      },
+      {
+        "capex": 6987000.0,
+        "debt": null,
+        "effective_tax_bps": 8,
+        "interest": 167000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 40818000.0,
+        "revenue": 382618000.0,
+        "year": 2013
+      },
+      {
+        "capex": 11961000.0,
+        "debt": null,
+        "effective_tax_bps": 287,
+        "interest": 806000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 38075000.0,
+        "revenue": 401227000.0,
+        "year": 2014
+      },
+      {
+        "capex": 7278000.0,
+        "debt": null,
+        "effective_tax_bps": 207,
+        "interest": 1144000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -5341000.0,
+        "revenue": 407463000.0,
+        "year": 2015
+      },
+      {
+        "capex": 9839000.0,
+        "debt": null,
+        "effective_tax_bps": 128,
+        "interest": 585000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 24419000.0,
+        "revenue": 458787000.0,
+        "year": 2016
+      },
+      {
+        "capex": 8026000.0,
+        "debt": null,
+        "effective_tax_bps": 152,
+        "interest": 313000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -62772000.0,
+        "revenue": 510367000.0,
+        "year": 2017
+      },
+      {
+        "capex": 10426000.0,
+        "debt": null,
+        "effective_tax_bps": 282,
+        "interest": 649000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 3560000.0,
+        "revenue": 441320000.0,
+        "year": 2018
+      },
+      {
+        "capex": 13353000.0,
+        "debt": null,
+        "effective_tax_bps": 703,
+        "interest": 1123000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 4654000.0,
+        "revenue": 424330000.0,
+        "year": 2019
+      },
+      {
+        "capex": 7819000.0,
+        "debt": null,
+        "effective_tax_bps": 233,
+        "interest": 1686000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 51409000.0,
+        "revenue": 541239000.0,
+        "year": 2020
+      },
+      {
+        "capex": 10463000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 402000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 56793000.0,
+        "revenue": 679394000.0,
+        "year": 2021
+      },
+      {
+        "capex": 14067000.0,
+        "debt": null,
+        "effective_tax_bps": 2411,
+        "interest": 2009000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 27183000.0,
+        "revenue": 867827000.0,
+        "year": 2022
+      },
+      {
+        "capex": 17855000.0,
+        "debt": null,
+        "effective_tax_bps": 1563,
+        "interest": 9704000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 56251000.0,
+        "revenue": 1039593000.0,
+        "year": 2023
+      },
+      {
+        "capex": 18054000.0,
+        "debt": null,
+        "effective_tax_bps": 600,
+        "interest": 12343000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 68400000.0,
+        "revenue": 831518000.0,
+        "year": 2024
+      },
+      {
+        "capex": 19435000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 13434000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 134953000.0,
+        "revenue": 1000010000.0,
+        "year": 2025
+      }
+    ],
+    "FIGS": [
+      {
+        "capex": 4761000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 460000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 6531000.0,
+        "revenue": 110494000.0,
+        "year": 2019
+      },
+      {
+        "capex": 2262000.0,
+        "debt": null,
+        "effective_tax_bps": 1432,
+        "interest": 136000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 21748000.0,
+        "revenue": 263112000.0,
+        "year": 2020
+      },
+      {
+        "capex": 2712000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 239000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 66437000.0,
+        "revenue": 419591000.0,
+        "year": 2021
+      },
+      {
+        "capex": 5348000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 1708000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -35329000.0,
+        "revenue": 505835000.0,
+        "year": 2022
+      },
+      {
+        "capex": 16348000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 6775000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 100915000.0,
+        "revenue": 545646000.0,
+        "year": 2023
+      },
+      {
+        "capex": 17021000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 11242000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 81162000.0,
+        "revenue": 555558000.0,
+        "year": 2024
+      },
+      {
+        "capex": 8168000.0,
+        "debt": null,
+        "effective_tax_bps": 2745,
+        "interest": 8748000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 61170000.0,
+        "revenue": 631098000.0,
+        "year": 2025
+      }
+    ],
+    "HURN": [
+      {
+        "capex": 19821000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 17065000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 101200000.0,
+        "revenue": 528618000.0,
+        "year": 2008
+      },
+      {
+        "capex": 12616000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 11968000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 113926000.0,
+        "revenue": 568624000.0,
+        "year": 2009
+      },
+      {
+        "capex": 8500000.0,
+        "debt": 257000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 13303000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 50051000.0,
+        "revenue": 559018000.0,
+        "year": 2010
+      },
+      {
+        "capex": 14731000.0,
+        "debt": 193500000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 109409000.0,
+        "revenue": 657894000.0,
+        "year": 2011
+      },
+      {
+        "capex": 18416000.0,
+        "debt": 192500000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 102364000.0,
+        "revenue": 681725000.0,
+        "year": 2012
+      },
+      {
+        "capex": 21797000.0,
+        "debt": 168750000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 115258000.0,
+        "revenue": 602751000.0,
+        "year": 2013
+      },
+      {
+        "capex": 25913000.0,
+        "debt": 356602000.0,
+        "effective_tax_bps": 3500,
+        "interest": 3463000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 146453000.0,
+        "revenue": 701533000.0,
+        "year": 2014
+      },
+      {
+        "capex": 19437000.0,
+        "debt": 311993000.0,
+        "effective_tax_bps": 2593,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 167855000.0,
+        "revenue": 769023000.0,
+        "year": 2015
+      },
+      {
+        "capex": 15022000.0,
+        "debt": 292065000.0,
+        "effective_tax_bps": 3326,
+        "interest": 0.0,
+        "marginal_tax_bps": 0,
+        "ocf": 129243000.0,
+        "revenue": 797984000.0,
+        "year": 2016
+      },
+      {
+        "capex": 25772000.0,
+        "debt": 343008000.0,
+        "effective_tax_bps": 2337,
+        "interest": 18613000.0,
+        "marginal_tax_bps": 0,
+        "ocf": 99795000.0,
+        "revenue": 807745000.0,
+        "year": 2017
+      },
+      {
+        "capex": 15005000.0,
+        "debt": 296985000.0,
+        "effective_tax_bps": 3500,
+        "interest": 19013000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 101658000.0,
+        "revenue": 877999000.0,
+        "year": 2018
+      },
+      {
+        "capex": 23552000.0,
+        "debt": 208853000.0,
+        "effective_tax_bps": 2003,
+        "interest": 15648000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 132220000.0,
+        "revenue": 965474000.0,
+        "year": 2019
+      },
+      {
+        "capex": 16397000.0,
+        "debt": 203279000.0,
+        "effective_tax_bps": 2998,
+        "interest": 9292000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 136738000.0,
+        "revenue": 871014000.0,
+        "year": 2020
+      },
+      {
+        "capex": 15760000.0,
+        "debt": 232780000.0,
+        "effective_tax_bps": 2130,
+        "interest": 8150000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 17987000.0,
+        "revenue": 926958000.0,
+        "year": 2021
+      },
+      {
+        "capex": 24299000.0,
+        "debt": 290000000.0,
+        "effective_tax_bps": 3042,
+        "interest": 11883000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 85400000.0,
+        "revenue": 1158961000.0,
+        "year": 2022
+      },
+      {
+        "capex": 35186000.0,
+        "debt": 324000000.0,
+        "effective_tax_bps": 2553,
+        "interest": 19573000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 135262000.0,
+        "revenue": 1398755000.0,
+        "year": 2023
+      },
+      {
+        "capex": 32583000.0,
+        "debt": 356607000.0,
+        "effective_tax_bps": 2428,
+        "interest": 25347000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 201319000.0,
+        "revenue": 1521805000.0,
+        "year": 2024
+      },
+      {
+        "capex": 31084000.0,
+        "debt": 509665000.0,
+        "effective_tax_bps": 2224,
+        "interest": 34197000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 193394000.0,
+        "revenue": 1699143000.0,
+        "year": 2025
+      }
+    ],
+    "IDCC": [
+      {
+        "capex": 2520000.0,
+        "debt": 468000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 133923000.0,
+        "revenue": 394545000.0,
+        "year": 2010
+      },
+      {
+        "capex": 3835000.0,
+        "debt": 192709000.0,
+        "effective_tax_bps": 2820,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -34338000.0,
+        "revenue": 301742000.0,
+        "year": 2011
+      },
+      {
+        "capex": 3621000.0,
+        "debt": 200391000.0,
+        "effective_tax_bps": 3348,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 177608000.0,
+        "revenue": 663063000.0,
+        "year": 2012
+      },
+      {
+        "capex": 4591000.0,
+        "debt": 208813000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 218175000.0,
+        "revenue": 325361000.0,
+        "year": 2013
+      },
+      {
+        "capex": 7095000.0,
+        "debt": 217835000.0,
+        "effective_tax_bps": 3394,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 242013000.0,
+        "revenue": 415821000.0,
+        "year": 2014
+      },
+      {
+        "capex": 3700000.0,
+        "debt": 486769000.0,
+        "effective_tax_bps": 3500,
+        "interest": 30417000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 124348000.0,
+        "revenue": 441435000.0,
+        "year": 2015
+      },
+      {
+        "capex": 5882000.0,
+        "debt": 272021000.0,
+        "effective_tax_bps": 2766,
+        "interest": 21126000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 434159000.0,
+        "revenue": 665854000.0,
+        "year": 2016
+      },
+      {
+        "capex": 2071000.0,
+        "debt": 285126000.0,
+        "effective_tax_bps": 3500,
+        "interest": 17845000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 315800000.0,
+        "revenue": 532938000.0,
+        "year": 2017
+      },
+      {
+        "capex": 2576000.0,
+        "debt": 317377000.0,
+        "effective_tax_bps": 3500,
+        "interest": 35956000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 146792000.0,
+        "revenue": 307404000.0,
+        "year": 2018
+      },
+      {
+        "capex": 4509000.0,
+        "debt": 444758000.0,
+        "effective_tax_bps": 3500,
+        "interest": 40955000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 89433000.0,
+        "revenue": 318924000.0,
+        "year": 2019
+      },
+      {
+        "capex": 11793000.0,
+        "debt": 367992000.0,
+        "effective_tax_bps": 2124,
+        "interest": 40799000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 163467000.0,
+        "revenue": 358991000.0,
+        "year": 2020
+      },
+      {
+        "capex": 2511000.0,
+        "debt": 422745000.0,
+        "effective_tax_bps": 2670,
+        "interest": 25225000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 130392000.0,
+        "revenue": 425409000.0,
+        "year": 2021
+      },
+      {
+        "capex": 3156000.0,
+        "debt": 607066000.0,
+        "effective_tax_bps": 2169,
+        "interest": 29496000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 286039000.0,
+        "revenue": 457794000.0,
+        "year": 2022
+      },
+      {
+        "capex": 4268000.0,
+        "debt": 607771000.0,
+        "effective_tax_bps": 1004,
+        "interest": 44817000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 213733000.0,
+        "revenue": 549588000.0,
+        "year": 2023
+      },
+      {
+        "capex": 5849000.0,
+        "debt": 471772000.0,
+        "effective_tax_bps": 1649,
+        "interest": 45421000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 271528000.0,
+        "revenue": 868516000.0,
+        "year": 2024
+      },
+      {
+        "capex": 15888000.0,
+        "debt": 474668000.0,
+        "effective_tax_bps": 1338,
+        "interest": 39962000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 544450000.0,
+        "revenue": 834015000.0,
+        "year": 2025
+      }
+    ],
+    "INOD": [
+      {
+        "capex": 2168000.0,
+        "debt": null,
+        "effective_tax_bps": 1168,
+        "interest": 28000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 12095000.0,
+        "revenue": 76711000.0,
+        "year": 2009
+      },
+      {
+        "capex": 1872000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 9000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 4858000.0,
+        "revenue": 61513000.0,
+        "year": 2010
+      },
+      {
+        "capex": 5886000.0,
+        "debt": 3583000.0,
+        "effective_tax_bps": 2582,
+        "interest": 86000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -2980000.0,
+        "revenue": 73942000.0,
+        "year": 2011
+      },
+      {
+        "capex": 6845000.0,
+        "debt": 4192000.0,
+        "effective_tax_bps": 1682,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 17765000.0,
+        "revenue": 86591000.0,
+        "year": 2012
+      },
+      {
+        "capex": 3780000.0,
+        "debt": 4098000.0,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 621000.0,
+        "revenue": 64249000.0,
+        "year": 2013
+      },
+      {
+        "capex": 2033000.0,
+        "debt": 7146000.0,
+        "effective_tax_bps": 2671,
+        "interest": 95000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 4613000.0,
+        "revenue": 59076000.0,
+        "year": 2014
+      },
+      {
+        "capex": 697000.0,
+        "debt": 5018000.0,
+        "effective_tax_bps": 3500,
+        "interest": 31000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 2659000.0,
+        "revenue": 58523000.0,
+        "year": 2015
+      },
+      {
+        "capex": 2740000.0,
+        "debt": 5037000.0,
+        "effective_tax_bps": 2353,
+        "interest": 63000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -2735000.0,
+        "revenue": 63074000.0,
+        "year": 2016
+      },
+      {
+        "capex": 3410000.0,
+        "debt": 6610000.0,
+        "effective_tax_bps": 562,
+        "interest": 23000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 639000.0,
+        "revenue": 60929000.0,
+        "year": 2017
+      },
+      {
+        "capex": 2033000.0,
+        "debt": 5591000.0,
+        "effective_tax_bps": 3500,
+        "interest": 33000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 3567000.0,
+        "revenue": 57418000.0,
+        "year": 2018
+      },
+      {
+        "capex": 1667000.0,
+        "debt": 5446000.0,
+        "effective_tax_bps": 3500,
+        "interest": 120000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 4280000.0,
+        "revenue": 55858000.0,
+        "year": 2019
+      },
+      {
+        "capex": 1414000.0,
+        "debt": 7994000.0,
+        "effective_tax_bps": 3500,
+        "interest": 135000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 5660000.0,
+        "revenue": 58240000.0,
+        "year": 2020
+      },
+      {
+        "capex": 4368000.0,
+        "debt": 7496000.0,
+        "effective_tax_bps": 3500,
+        "interest": 108000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 5151000.0,
+        "revenue": 69755000.0,
+        "year": 2021
+      },
+      {
+        "capex": 6526000.0,
+        "debt": null,
+        "effective_tax_bps": 1452,
+        "interest": 11000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -1216000.0,
+        "revenue": 79001000.0,
+        "year": 2022
+      },
+      {
+        "capex": 5564000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 179000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 5903000.0,
+        "revenue": 86775000.0,
+        "year": 2023
+      },
+      {
+        "capex": 7741000.0,
+        "debt": null,
+        "effective_tax_bps": 1711,
+        "interest": 149000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 34864000.0,
+        "revenue": 170461000.0,
+        "year": 2024
+      },
+      {
+        "capex": 11104000.0,
+        "debt": null,
+        "effective_tax_bps": 2232,
+        "interest": 1552000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 46752000.0,
+        "revenue": 251663000.0,
+        "year": 2025
+      }
+    ],
+    "INVA": [
+      {
+        "capex": 744000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 6052000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -58064000.0,
+        "revenue": 24374000.0,
+        "year": 2009
+      },
+      {
+        "capex": 861000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 6044000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -75144000.0,
+        "revenue": 24223000.0,
+        "year": 2010
+      },
+      {
+        "capex": 3628000.0,
+        "debt": 69000.0,
+        "effective_tax_bps": 0,
+        "interest": 6022000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -88338000.0,
+        "revenue": 24512000.0,
+        "year": 2011
+      },
+      {
+        "capex": 2590000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 6003000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -127513000.0,
+        "revenue": 5613000.0,
+        "year": 2012
+      },
+      {
+        "capex": 2734000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 9348000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -129602000.0,
+        "revenue": 4532000.0,
+        "year": 2013
+      },
+      {
+        "capex": 689000.0,
+        "debt": 725636000.0,
+        "effective_tax_bps": 0,
+        "interest": 36892000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": -130723000.0,
+        "revenue": 8433000.0,
+        "year": 2014
+      },
+      {
+        "capex": 7000.0,
+        "debt": 748271000.0,
+        "effective_tax_bps": 0,
+        "interest": 51803000.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 10131000.0,
+        "revenue": 53949000.0,
+        "year": 2015
+      },
+      {
+        "capex": 278000.0,
+        "debt": 728173000.0,
+        "effective_tax_bps": 16,
+        "interest": 52416000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 60984000.0,
+        "revenue": 133569000.0,
+        "year": 2016
+      },
+      {
+        "capex": 0.0,
+        "debt": 677234000.0,
+        "effective_tax_bps": 0,
+        "interest": 43601000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 141749000.0,
+        "revenue": 217217000.0,
+        "year": 2017
+      },
+      {
+        "capex": 0.0,
+        "debt": 447234000.0,
+        "effective_tax_bps": 3500,
+        "interest": 23954000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 223531000.0,
+        "revenue": 261004000.0,
+        "year": 2018
+      },
+      {
+        "capex": 12000.0,
+        "debt": 433484000.0,
+        "effective_tax_bps": 1799,
+        "interest": 18660000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 257458000.0,
+        "revenue": 261016000.0,
+        "year": 2019
+      },
+      {
+        "capex": 13000.0,
+        "debt": 433484000.0,
+        "effective_tax_bps": 1706,
+        "interest": 18331000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 313113000.0,
+        "revenue": 336794000.0,
+        "year": 2020
+      },
+      {
+        "capex": 0.0,
+        "debt": 433484000.0,
+        "effective_tax_bps": 1717,
+        "interest": 19070000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 363813000.0,
+        "revenue": 391866000.0,
+        "year": 2021
+      },
+      {
+        "capex": 67000.0,
+        "debt": 549704000.0,
+        "effective_tax_bps": 2324,
+        "interest": 15789000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 201726000.0,
+        "revenue": 331339000.0,
+        "year": 2022
+      },
+      {
+        "capex": 411000.0,
+        "debt": 453500000.0,
+        "effective_tax_bps": 741,
+        "interest": 19157000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 141064000.0,
+        "revenue": 310463000.0,
+        "year": 2023
+      },
+      {
+        "capex": 270000.0,
+        "debt": 453500000.0,
+        "effective_tax_bps": 3500,
+        "interest": 22209000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 188690000.0,
+        "revenue": 358711000.0,
+        "year": 2024
+      },
+      {
+        "capex": 1131000.0,
+        "debt": 257731000.0,
+        "effective_tax_bps": 1704,
+        "interest": 16698000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 196930000.0,
+        "revenue": 411328000.0,
+        "year": 2025
+      }
+    ],
+    "MH": [
+      {
+        "capex": 81953000.0,
+        "debt": null,
+        "effective_tax_bps": 1508,
+        "interest": 326438000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 236156000.0,
+        "revenue": 1960478000.0,
+        "year": 2024
+      },
+      {
+        "capex": 71062000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 293446000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 646284000.0,
+        "revenue": 2101299000.0,
+        "year": 2025
+      },
+      {
+        "capex": 84862000.0,
+        "debt": null,
+        "effective_tax_bps": 1934,
+        "interest": 207226000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 331173000.0,
+        "revenue": 2102781000.0,
+        "year": 2026
+      }
+    ],
+    "MIR": [
+      {
+        "capex": 16500000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 39200000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 0.0,
+        "revenue": 440100000.0,
+        "year": 2019
+      },
+      {
+        "capex": 19900000.0,
+        "debt": null,
+        "effective_tax_bps": 58,
+        "interest": 39200000.0,
+        "marginal_tax_bps": 2500,
+        "ocf": -945351.0,
+        "revenue": 478200000.0,
+        "year": 2020
+      },
+      {
+        "capex": 23200000.0,
+        "debt": 831800000.0,
+        "effective_tax_bps": 359,
+        "interest": 37400000.0,
+        "marginal_tax_bps": 2500,
+        "ocf": 53600000.0,
+        "revenue": 611600000.0,
+        "year": 2021
+      },
+      {
+        "capex": 34200000.0,
+        "debt": 824700000.0,
+        "effective_tax_bps": 594,
+        "interest": 37100000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 39400000.0,
+        "revenue": 717800000.0,
+        "year": 2022
+      },
+      {
+        "capex": 37100000.0,
+        "debt": 698400000.0,
+        "effective_tax_bps": 627,
+        "interest": 61900000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 95200000.0,
+        "revenue": 800900000.0,
+        "year": 2023
+      },
+      {
+        "capex": 48800000.0,
+        "debt": 697400000.0,
+        "effective_tax_bps": 796,
+        "interest": 57900000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 99100000.0,
+        "revenue": 860800000.0,
+        "year": 2024
+      },
+      {
+        "capex": 36400000.0,
+        "debt": 451600000.0,
+        "effective_tax_bps": 887,
+        "interest": 42200000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 143300000.0,
+        "revenue": 925400000.0,
+        "year": 2025
+      }
+    ],
+    "MSFT": [
+      {
+        "capex": 3182000000.0,
+        "debt": null,
+        "effective_tax_bps": 2575,
+        "interest": 106000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 21612000000.0,
+        "revenue": 60420000000.0,
+        "year": 2008
+      },
+      {
+        "capex": 3119000000.0,
+        "debt": null,
+        "effective_tax_bps": 2650,
+        "interest": 38000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 19037000000.0,
+        "revenue": 58437000000.0,
+        "year": 2009
+      },
+      {
+        "capex": 1977000000.0,
+        "debt": 5000000000.0,
+        "effective_tax_bps": 2500,
+        "interest": 151000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 24073000000.0,
+        "revenue": 62484000000.0,
+        "year": 2010
+      },
+      {
+        "capex": 2355000000.0,
+        "debt": 11900000000.0,
+        "effective_tax_bps": 1753,
+        "interest": 295000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 26994000000.0,
+        "revenue": 69943000000.0,
+        "year": 2011
+      },
+      {
+        "capex": 2305000000.0,
+        "debt": 11900000000.0,
+        "effective_tax_bps": 2375,
+        "interest": 380000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 31626000000.0,
+        "revenue": 73723000000.0,
+        "year": 2012
+      },
+      {
+        "capex": 4257000000.0,
+        "debt": 15600000000.0,
+        "effective_tax_bps": 1918,
+        "interest": 429000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 28833000000.0,
+        "revenue": 77849000000.0,
+        "year": 2013
+      },
+      {
+        "capex": 5485000000.0,
+        "debt": 20600000000.0,
+        "effective_tax_bps": 2065,
+        "interest": 597000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 32502000000.0,
+        "revenue": 86833000000.0,
+        "year": 2014
+      },
+      {
+        "capex": 5944000000.0,
+        "debt": 30300000000.0,
+        "effective_tax_bps": 3412,
+        "interest": 781000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 29668000000.0,
+        "revenue": 93580000000.0,
+        "year": 2015
+      },
+      {
+        "capex": 8343000000.0,
+        "debt": 40800000000.0,
+        "effective_tax_bps": 1989,
+        "interest": 1243000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 33325000000.0,
+        "revenue": 91154000000.0,
+        "year": 2016
+      },
+      {
+        "capex": 8129000000.0,
+        "debt": 77100000000.0,
+        "effective_tax_bps": 1476,
+        "interest": 2222000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 39507000000.0,
+        "revenue": 96571000000.0,
+        "year": 2017
+      },
+      {
+        "capex": 11632000000.0,
+        "debt": 76200000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 2733000000.0,
+        "marginal_tax_bps": 2810,
+        "ocf": 43884000000.0,
+        "revenue": 110360000000.0,
+        "year": 2018
+      },
+      {
+        "capex": 13925000000.0,
+        "debt": 72200000000.0,
+        "effective_tax_bps": 1018,
+        "interest": 2686000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 52185000000.0,
+        "revenue": 125843000000.0,
+        "year": 2019
+      },
+      {
+        "capex": 15441000000.0,
+        "debt": 63327000000.0,
+        "effective_tax_bps": 1651,
+        "interest": 2591000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 60675000000.0,
+        "revenue": 143015000000.0,
+        "year": 2020
+      },
+      {
+        "capex": 20622000000.0,
+        "debt": 58146000000.0,
+        "effective_tax_bps": 1383,
+        "interest": 2346000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 76740000000.0,
+        "revenue": 168088000000.0,
+        "year": 2021
+      },
+      {
+        "capex": 23886000000.0,
+        "debt": 49781000000.0,
+        "effective_tax_bps": 1311,
+        "interest": 2063000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 89035000000.0,
+        "revenue": 198270000000.0,
+        "year": 2022
+      },
+      {
+        "capex": 28107000000.0,
+        "debt": 47237000000.0,
+        "effective_tax_bps": 1898,
+        "interest": 1968000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 87582000000.0,
+        "revenue": 211915000000.0,
+        "year": 2023
+      },
+      {
+        "capex": 44477000000.0,
+        "debt": 44937000000.0,
+        "effective_tax_bps": 1823,
+        "interest": 2935000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 118548000000.0,
+        "revenue": 245122000000.0,
+        "year": 2024
+      },
+      {
+        "capex": 64551000000.0,
+        "debt": 43151000000.0,
+        "effective_tax_bps": 1763,
+        "interest": 2385000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 136162000000.0,
+        "revenue": 281724000000.0,
+        "year": 2025
+      },
+      {
+        "capex": 115948000000.0,
+        "debt": null,
+        "effective_tax_bps": 1940,
+        "interest": 3051000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 182935000000.0,
+        "revenue": 331839000000.0,
+        "year": 2026
+      }
+    ],
+    "ROCK": [
+      {
+        "capex": 19691000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 25687000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 107874000.0,
+        "revenue": 986840000.0,
+        "year": 2008
+      },
+      {
+        "capex": 9791000.0,
+        "debt": null,
+        "effective_tax_bps": 3199,
+        "interest": 21433000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 131119000.0,
+        "revenue": 639076000.0,
+        "year": 2009
+      },
+      {
+        "capex": 8362000.0,
+        "debt": 207197000.0,
+        "effective_tax_bps": 1834,
+        "interest": 19714000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 69369000.0,
+        "revenue": 637454000.0,
+        "year": 2010
+      },
+      {
+        "capex": 11552000.0,
+        "debt": 207163000.0,
+        "effective_tax_bps": 3500,
+        "interest": 19363000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 46695000.0,
+        "revenue": 766607000.0,
+        "year": 2011
+      },
+      {
+        "capex": 11351000.0,
+        "debt": 207803000.0,
+        "effective_tax_bps": 3500,
+        "interest": 18582000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 50081000.0,
+        "revenue": 790058000.0,
+        "year": 2012
+      },
+      {
+        "capex": 14940000.0,
+        "debt": 214007000.0,
+        "effective_tax_bps": 3500,
+        "interest": 22489000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 60295000.0,
+        "revenue": 827567000.0,
+        "year": 2013
+      },
+      {
+        "capex": 23291000.0,
+        "debt": 213600000.0,
+        "effective_tax_bps": 349,
+        "interest": 14421000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 32542000.0,
+        "revenue": 862087000.0,
+        "year": 2014
+      },
+      {
+        "capex": 12373000.0,
+        "debt": 209282000.0,
+        "effective_tax_bps": 3500,
+        "interest": 15003000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 87221000.0,
+        "revenue": 1040873000.0,
+        "year": 2015
+      },
+      {
+        "capex": 10779000.0,
+        "debt": 209637000.0,
+        "effective_tax_bps": 3254,
+        "interest": 14577000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 123987000.0,
+        "revenue": 1007981000.0,
+        "year": 2016
+      },
+      {
+        "capex": 11399000.0,
+        "debt": 210021000.0,
+        "effective_tax_bps": 1918,
+        "interest": 14032000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 70070000.0,
+        "revenue": 986918000.0,
+        "year": 2017
+      },
+      {
+        "capex": 10368000.0,
+        "debt": 210405000.0,
+        "effective_tax_bps": 1938,
+        "interest": 12064000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 97545000.0,
+        "revenue": 837097000.0,
+        "year": 2018
+      },
+      {
+        "capex": 8776000.0,
+        "debt": 0.0,
+        "effective_tax_bps": 2325,
+        "interest": 2323000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 129935000.0,
+        "revenue": 898233000.0,
+        "year": 2019
+      },
+      {
+        "capex": 13068000.0,
+        "debt": 85600000.0,
+        "effective_tax_bps": 2271,
+        "interest": 703000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 89104000.0,
+        "revenue": 1032578000.0,
+        "year": 2020
+      },
+      {
+        "capex": 17705000.0,
+        "debt": 23781000.0,
+        "effective_tax_bps": 2516,
+        "interest": 1639000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 23070000.0,
+        "revenue": 1339783000.0,
+        "year": 2021
+      },
+      {
+        "capex": 20138000.0,
+        "debt": 88762000.0,
+        "effective_tax_bps": 2609,
+        "interest": 4047000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 102691000.0,
+        "revenue": 1389966000.0,
+        "year": 2022
+      },
+      {
+        "capex": 13884000.0,
+        "debt": 0.0,
+        "effective_tax_bps": 2608,
+        "interest": 1958000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 218476000.0,
+        "revenue": 1046998000.0,
+        "year": 2023
+      },
+      {
+        "capex": 17374000.0,
+        "debt": 0.0,
+        "effective_tax_bps": 2102,
+        "interest": 6171000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 174264000.0,
+        "revenue": 1023359000.0,
+        "year": 2024
+      },
+      {
+        "capex": 46413000.0,
+        "debt": 0.0,
+        "effective_tax_bps": 2293,
+        "interest": 1747000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 167001000.0,
+        "revenue": 1135501000.0,
+        "year": 2025
+      }
+    ],
+    "T": [
+      {
+        "capex": 17717000000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 3507000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 34242000000.0,
+        "revenue": 118928000000.0,
+        "year": 2007
+      },
+      {
+        "capex": 19631000000.0,
+        "debt": null,
+        "effective_tax_bps": 0,
+        "interest": 3369000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 33610000000.0,
+        "revenue": 123443000000.0,
+        "year": 2008
+      },
+      {
+        "capex": 16554000000.0,
+        "debt": 72081000000.0,
+        "effective_tax_bps": 3289,
+        "interest": 3368000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 34405000000.0,
+        "revenue": 122513000000.0,
+        "year": 2009
+      },
+      {
+        "capex": 19530000000.0,
+        "debt": 64515000000.0,
+        "effective_tax_bps": 637,
+        "interest": 2994000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 35222000000.0,
+        "revenue": 124280000000.0,
+        "year": 2010
+      },
+      {
+        "capex": 20110000000.0,
+        "debt": 64753000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 3535000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 34743000000.0,
+        "revenue": 126723000000.0,
+        "year": 2011
+      },
+      {
+        "capex": 19465000000.0,
+        "debt": 66358000000.0,
+        "effective_tax_bps": 2778,
+        "interest": 3444000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 39176000000.0,
+        "revenue": 127434000000.0,
+        "year": 2012
+      },
+      {
+        "capex": 20944000000.0,
+        "debt": 69290000000.0,
+        "effective_tax_bps": 3325,
+        "interest": 3940000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 34796000000.0,
+        "revenue": 128752000000.0,
+        "year": 2013
+      },
+      {
+        "capex": 21199000000.0,
+        "debt": 76011000000.0,
+        "effective_tax_bps": 3495,
+        "interest": 3613000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 31338000000.0,
+        "revenue": 132447000000.0,
+        "year": 2014
+      },
+      {
+        "capex": 19218000000.0,
+        "debt": 118515000000.0,
+        "effective_tax_bps": 3385,
+        "interest": 4120000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 35880000000.0,
+        "revenue": 146801000000.0,
+        "year": 2015
+      },
+      {
+        "capex": 21516000000.0,
+        "debt": 113681000000.0,
+        "effective_tax_bps": 3270,
+        "interest": 4910000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 38442000000.0,
+        "revenue": 163786000000.0,
+        "year": 2016
+      },
+      {
+        "capex": 20647000000.0,
+        "debt": 125972000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 6300000000.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 38010000000.0,
+        "revenue": 160546000000.0,
+        "year": 2017
+      },
+      {
+        "capex": 21251000000.0,
+        "debt": 166250000000.0,
+        "effective_tax_bps": 1978,
+        "interest": 7957000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 43602000000.0,
+        "revenue": 170756000000.0,
+        "year": 2018
+      },
+      {
+        "capex": 19635000000.0,
+        "debt": 151309000000.0,
+        "effective_tax_bps": 1891,
+        "interest": 8422000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 48668000000.0,
+        "revenue": 181193000000.0,
+        "year": 2019
+      },
+      {
+        "capex": 14690000000.0,
+        "debt": 153775000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 7727000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 43130000000.0,
+        "revenue": 143050000000.0,
+        "year": 2020
+      },
+      {
+        "capex": 15545000000.0,
+        "debt": 152724000000.0,
+        "effective_tax_bps": 1849,
+        "interest": 6716000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 41957000000.0,
+        "revenue": 134038000000.0,
+        "year": 2021
+      },
+      {
+        "capex": 19626000000.0,
+        "debt": 128423000000.0,
+        "effective_tax_bps": 3500,
+        "interest": 6108000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 35812000000.0,
+        "revenue": 120741000000.0,
+        "year": 2022
+      },
+      {
+        "capex": 17853000000.0,
+        "debt": 127854000000.0,
+        "effective_tax_bps": 2129,
+        "interest": 6704000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 38314000000.0,
+        "revenue": 122428000000.0,
+        "year": 2023
+      },
+      {
+        "capex": 20263000000.0,
+        "debt": 118443000000.0,
+        "effective_tax_bps": 2662,
+        "interest": 6759000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 38771000000.0,
+        "revenue": 122336000000.0,
+        "year": 2024
+      },
+      {
+        "capex": 20842000000.0,
+        "debt": 127089000000.0,
+        "effective_tax_bps": 1341,
+        "interest": 6804000000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 40284000000.0,
+        "revenue": 125648000000.0,
+        "year": 2025
+      }
+    ],
+    "VICR": [
+      {
+        "capex": 10643000.0,
+        "debt": null,
+        "effective_tax_bps": 2497,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 24798000.0,
+        "revenue": 197959000.0,
+        "year": 2009
+      },
+      {
+        "capex": 12103000.0,
+        "debt": null,
+        "effective_tax_bps": 1323,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 16894000.0,
+        "revenue": 250733000.0,
+        "year": 2010
+      },
+      {
+        "capex": 7466000.0,
+        "debt": null,
+        "effective_tax_bps": 3366,
+        "interest": 0.0,
+        "marginal_tax_bps": 3500,
+        "ocf": 26407000.0,
+        "revenue": 252968000.0,
+        "year": 2011
+      },
+      {
+        "capex": 7396000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 17238000.0,
+        "revenue": 218507000.0,
+        "year": 2012
+      },
+      {
+        "capex": 6179000.0,
+        "debt": null,
+        "effective_tax_bps": 1485,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -4690000.0,
+        "revenue": 199160000.0,
+        "year": 2013
+      },
+      {
+        "capex": 7128000.0,
+        "debt": null,
+        "effective_tax_bps": 293,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 2191000.0,
+        "revenue": 225731000.0,
+        "year": 2014
+      },
+      {
+        "capex": 9090000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 11467000.0,
+        "revenue": 220194000.0,
+        "year": 2015
+      },
+      {
+        "capex": 8428000.0,
+        "debt": null,
+        "effective_tax_bps": 383,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": 544000.0,
+        "revenue": 200280000.0,
+        "year": 2016
+      },
+      {
+        "capex": 12545000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 0.0,
+        "marginal_tax_bps": 3400,
+        "ocf": -2464000.0,
+        "revenue": 227830000.0,
+        "year": 2017
+      },
+      {
+        "capex": 18211000.0,
+        "debt": null,
+        "effective_tax_bps": 330,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 36171000.0,
+        "revenue": 291220000.0,
+        "year": 2018
+      },
+      {
+        "capex": 12485000.0,
+        "debt": null,
+        "effective_tax_bps": 523,
+        "interest": 0.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 22211000.0,
+        "revenue": 262977000.0,
+        "year": 2019
+      },
+      {
+        "capex": 28653000.0,
+        "debt": null,
+        "effective_tax_bps": 292,
+        "interest": 95000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 34742000.0,
+        "revenue": 296576000.0,
+        "year": 2020
+      },
+      {
+        "capex": 47761000.0,
+        "debt": null,
+        "effective_tax_bps": 31,
+        "interest": 930000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 54444000.0,
+        "revenue": 359364000.0,
+        "year": 2021
+      },
+      {
+        "capex": 63966000.0,
+        "debt": null,
+        "effective_tax_bps": 1137,
+        "interest": 1313000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 22939000.0,
+        "revenue": 399079000.0,
+        "year": 2022
+      },
+      {
+        "capex": 33452000.0,
+        "debt": null,
+        "effective_tax_bps": 1103,
+        "interest": 8217000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 74528000.0,
+        "revenue": 405059000.0,
+        "year": 2023
+      },
+      {
+        "capex": 23602000.0,
+        "debt": null,
+        "effective_tax_bps": 3500,
+        "interest": 11468000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 50842000.0,
+        "revenue": 359058000.0,
+        "year": 2024
+      },
+      {
+        "capex": 20318000.0,
+        "debt": null,
+        "effective_tax_bps": 2540,
+        "interest": 12130000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 139548000.0,
+        "revenue": 407701000.0,
+        "year": 2025
+      }
+    ],
+    "VRRM": [
+      {
+        "capex": 26576000.0,
+        "debt": 869352682.0,
+        "effective_tax_bps": 2398,
+        "interest": 69600000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 49259000.0,
+        "revenue": 370146000.0,
+        "year": 2018
+      },
+      {
+        "capex": 29685000.0,
+        "debt": 866465000.0,
+        "effective_tax_bps": 3500,
+        "interest": 60700000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 133802000.0,
+        "revenue": 448737000.0,
+        "year": 2019
+      },
+      {
+        "capex": 28560000.0,
+        "debt": 842045000.0,
+        "effective_tax_bps": 3500,
+        "interest": 40900.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 46909000.0,
+        "revenue": 393593000.0,
+        "year": 2020
+      },
+      {
+        "capex": 29398000.0,
+        "debt": 1243754000.0,
+        "effective_tax_bps": 3500,
+        "interest": 44900000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 193171000.0,
+        "revenue": 550590000.0,
+        "year": 2021
+      },
+      {
+        "capex": 51586000.0,
+        "debt": 1211980000.0,
+        "effective_tax_bps": 2725,
+        "interest": 69372000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 218337000.0,
+        "revenue": 741598000.0,
+        "year": 2022
+      },
+      {
+        "capex": 56985000.0,
+        "debt": 1038132000.0,
+        "effective_tax_bps": 3446,
+        "interest": 86701000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 206101000.0,
+        "revenue": 817310000.0,
+        "year": 2023
+      },
+      {
+        "capex": 70856000.0,
+        "debt": 1034211000.0,
+        "effective_tax_bps": 3500,
+        "interest": 73902000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 223642000.0,
+        "revenue": 879207000.0,
+        "year": 2024
+      },
+      {
+        "capex": 119094000.0,
+        "debt": 1028045000.0,
+        "effective_tax_bps": 2993,
+        "interest": 64618000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 255802000.0,
+        "revenue": 979079000.0,
+        "year": 2025
+      }
+    ],
+    "VRT": [
+      {
+        "capex": 105800000.0,
+        "debt": null,
+        "effective_tax_bps": 1841,
+        "interest": 288800000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -221900000.0,
+        "revenue": 4285600000.0,
+        "year": 2018
+      },
+      {
+        "capex": 70300000.0,
+        "debt": 3467300000.0,
+        "effective_tax_bps": 3500,
+        "interest": 310400000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 57500000.0,
+        "revenue": 4431200000.0,
+        "year": 2019
+      },
+      {
+        "capex": 52700000.0,
+        "debt": 2152500000.0,
+        "effective_tax_bps": 2855,
+        "interest": 150400000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 208900000.0,
+        "revenue": 4370600000.0,
+        "year": 2020
+      },
+      {
+        "capex": 84600000.0,
+        "debt": 2972300000.0,
+        "effective_tax_bps": 2804,
+        "interest": 90600000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 210900000.0,
+        "revenue": 4998100000.0,
+        "year": 2021
+      },
+      {
+        "capex": 111000000.0,
+        "debt": 3190900000.0,
+        "effective_tax_bps": 3500,
+        "interest": 147300000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": -152800000.0,
+        "revenue": 5691500000.0,
+        "year": 2022
+      },
+      {
+        "capex": 134600000.0,
+        "debt": 2940900000.0,
+        "effective_tax_bps": 1377,
+        "interest": 180100000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 900500000.0,
+        "revenue": 6863200000.0,
+        "year": 2023
+      },
+      {
+        "capex": 184100000.0,
+        "debt": 2928200000.0,
+        "effective_tax_bps": 3500,
+        "interest": 150400000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 1319300000.0,
+        "revenue": 8011800000.0,
+        "year": 2024
+      },
+      {
+        "capex": 226400000.0,
+        "debt": 2913000000.0,
+        "effective_tax_bps": 2349,
+        "interest": 86100000.0,
+        "marginal_tax_bps": 2100,
+        "ocf": 2113800000.0,
+        "revenue": 10229900000.0,
+        "year": 2025
+      }
+    ]
+  },
+  "source": "SEC EDGAR companyfacts, full filed history, captured 2026-08-04"
+}

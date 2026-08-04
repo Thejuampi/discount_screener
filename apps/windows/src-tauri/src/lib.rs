@@ -54,6 +54,8 @@ pub mod valuation_core_adapter;
 #[cfg(test)]
 mod valuation_core_measurement;
 #[cfg(test)]
+mod valuation_fixture_capture;
+#[cfg(test)]
 mod valuation_decision_contract;
 mod valuation_divergence;
 pub mod valuation_dossier_view;

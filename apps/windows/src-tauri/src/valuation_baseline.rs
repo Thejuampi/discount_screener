@@ -96,11 +96,18 @@ pub(crate) fn load_cohort() -> CohortFile {
 }
 
 pub(crate) fn load_driver_data() -> HashMap<String, Vec<DriverAnnual>> {
-    let path = fixture_path().with_file_name(DRIVER_FIXTURE.rsplit('/').next().unwrap());
+    load_driver_fixture(DRIVER_FIXTURE)
+}
+
+/// Read any fixture in the driver schema. Named separately from
+/// `load_driver_data` because the Core measurement reads a differently captured
+/// one, and the old engine's pinned baseline must keep resolving to its own.
+pub(crate) fn load_driver_fixture(fixture: &str) -> HashMap<String, Vec<DriverAnnual>> {
+    let path = fixture_path().with_file_name(fixture.rsplit('/').next().unwrap());
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read driver fixture {}: {e}", path.display()));
-    let fixture: DriverFixture = serde_json::from_str(&raw).expect("parse driver fixture");
-    fixture.rows
+    let parsed: DriverFixture = serde_json::from_str(&raw).expect("parse driver fixture");
+    parsed.rows
 }
 
 pub(crate) fn fund_from(m: &CohortMember) -> FundamentalSnapshot {

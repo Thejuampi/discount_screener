@@ -66,6 +66,34 @@ use valuation_core::BusinessClass;
 /// opposite statements, and a variance of exactly zero would say the second.
 const READING_PRECISION: f64 = 1e-4;
 
+/// The widest implied borrowing rate that can be a borrowing rate at all.
+///
+/// `interest / debt` is only a coupon when the two terms describe the same
+/// obligation. When they do not — a year whose debt tag caught a sliver of the
+/// balance while the interest line covers all of it — the ratio is not a high
+/// rate, it is a category error, and it arrives looking like an extremely
+/// creditworthy issuer paying 5208%.
+///
+/// One such point is enough to invert a cross-sectional credit fit by itself, so
+/// this is a refusal rather than a clamp: the observation is dropped, never
+/// rewritten. 100% is deliberately far outside anything a going concern pays, so
+/// that it excludes the impossible without judging the merely distressed.
+const MAX_PLAUSIBLE_COUPON_BPS: f64 = 10_000.0;
+
+/// How many recent years a cash-flow *level* is read from.
+///
+/// Deliberately much shorter than the history the cross-sectional fits use, and
+/// for the opposite reason. Persistence and the credit curve pool across issuers
+/// and want every observation they can get. A level is a statement about *this
+/// business now*, and Amazon's 2008 free cash flow is not evidence about Amazon's
+/// 2025 level — it is evidence about a different company that shared a name.
+///
+/// Fitting one line across nineteen years of compounding also underestimates the
+/// endpoint badly, because the series is exponential and the line is not. A short
+/// window keeps the linear form honest without needing logs, which matters
+/// because free cash flow is regularly negative and has no logarithm.
+const LEVEL_WINDOW_YEARS: usize = 5;
+
 /// Fewest annual observations that make a level and a dispersion measurable.
 /// Below this the issuer has a history, not a sample.
 ///
@@ -269,6 +297,16 @@ fn fit_growth_path(
     let persistence = cross / square;
     diagnostics.growth_persistence = persistence;
 
+    // `k = -ln(rho)` is only a relaxation speed for `rho` in `(0, 1)`. A
+    // persistence at or below zero is not a very fast fade, it is the statement
+    // that this year's position tells you nothing about next year's — and one at
+    // or above one is a path that never converges. Neither has a `k`, and
+    // computing `-ln` of a non-positive number yields a NaN that would reach the
+    // Core's constructor as if it were a measurement.
+    if !(persistence > 0.0 && persistence < 1.0) {
+        diagnostics.fade_per_year = f64::NAN;
+        return None;
+    }
     let fade = -persistence.ln();
     diagnostics.fade_per_year = fade;
     GrowthPath::fitted(frame.terminal_growth_bps, fade, provenance.clone())
@@ -356,13 +394,25 @@ fn unfitted_path(frame: &MarketFrame) -> GrowthPath {
 }
 
 /// An issuer's leverage, coverage and the rate its lenders actually charge.
-struct CapitalStructure {
-    leverage: f64,
-    coverage: f64,
-    effective_rate_bps: f64,
+pub struct CapitalStructure {
+    pub leverage: f64,
+    pub coverage: f64,
+    pub effective_rate_bps: f64,
 }
 
 impl IssuerEvidence {
+    /// The structure the credit fit reads, exposed so a diagnostic reports the
+    /// same evidence the fit consumed rather than a second reading of it.
+    pub fn credit_evidence(&self) -> Option<CapitalStructure> {
+        self.capital_structure()
+    }
+
+    /// Year-over-year revenue growth in basis points, oldest first, exposed for
+    /// the same reason.
+    pub fn revenue_growth(&self) -> Vec<f64> {
+        self.annual_revenue_growth()
+    }
+
     fn provenance(&self, source: &'static str, frame: &MarketFrame) -> Provenance {
         Provenance::new(source, frame.observed_epoch_day)
     }
@@ -404,6 +454,10 @@ impl IssuerEvidence {
     /// This is a level estimator, not a smoothing preference. It does not damp
     /// growth — the fitted line is free to be steep — it damps the *noise around*
     /// growth, and its residual variance says how much noise there was.
+    ///
+    /// Only the last `LEVEL_WINDOW_YEARS` are used, even when far more history is
+    /// available. See that constant for why a level answers to a shorter window
+    /// than a cross-sectional fit does.
     fn base_cash_flow(&self, frame: &MarketFrame) -> Observation<f64> {
         let provenance = self.provenance("free_cash_flow", frame);
         let mut years: Vec<f64> = self.annuals.iter().map(|annual| f64::from(annual.year)).collect();
@@ -413,8 +467,9 @@ impl IssuerEvidence {
             return Observation::absent(AbsenceReason::InsufficientObservations, provenance);
         }
 
-        let observations: Vec<(f64, f64)> = years.iter().copied().zip(flows.iter().copied()).collect();
-        let Some(fit) = least_squares(&observations) else {
+        let full: Vec<(f64, f64)> = years.iter().copied().zip(flows.iter().copied()).collect();
+        let observations = &full[full.len().saturating_sub(LEVEL_WINDOW_YEARS)..];
+        let Some(fit) = least_squares(observations) else {
             return Observation::absent(AbsenceReason::InsufficientObservations, provenance);
         };
         let latest_year = *years.last().expect("a non-empty history");
@@ -443,14 +498,28 @@ impl IssuerEvidence {
         )
     }
 
-    /// Year-over-year revenue growth in basis points, oldest first.
+    /// Year-over-year revenue growth in basis points, oldest first, as a
+    /// continuously compounded rate.
+    ///
+    /// `ln(r1/r0)`, not `r1/r0 - 1`. The Core's path is `g(t) = g_inf + (g_0 -
+    /// g_inf)e^{-kt}` integrated against `e^{-rt}`: a continuous rate throughout.
+    /// Feeding it a simple percentage change is a unit mismatch that is invisible
+    /// at 5% and enormous at 200%, which is precisely where this cohort lives —
+    /// seventeen years of small-cap history contains first-product years whose
+    /// simple growth runs to thousands of percent.
+    ///
+    /// The mismatch was also corrupting the cross-sectional fits. A regressor
+    /// with a standard deviation of 33451 bps, almost all of it a handful of
+    /// enormous observations, produces a slope near zero whatever the truth is;
+    /// on the log scale a 30-fold year is 34000 bps rather than 290000, and it
+    /// stops drowning every other observation in the cohort.
     fn annual_revenue_growth(&self) -> Vec<f64> {
         let mut ordered: Vec<&IssuerAnnual> = self.annuals.iter().collect();
         ordered.sort_by_key(|annual| annual.year);
         ordered
             .windows(2)
-            .filter(|pair| pair[0].revenue > 0.0)
-            .map(|pair| (pair[1].revenue / pair[0].revenue - 1.0) * 10_000.0)
+            .filter(|pair| pair[0].revenue > 0.0 && pair[1].revenue > 0.0)
+            .map(|pair| (pair[1].revenue / pair[0].revenue).ln() * 10_000.0)
             .collect()
     }
 
@@ -490,16 +559,32 @@ impl IssuerEvidence {
         )
     }
 
+    /// The most recent year that reports every term the structure is built from.
+    ///
+    /// Not simply the most recent year. The latest filing is the least completely
+    /// tagged one in practice — issuers that plainly carry debt (an interest
+    /// expense in the hundreds of millions) routinely have no resolvable debt
+    /// figure for their newest fiscal year, because the tag the extractor
+    /// recognises has not appeared yet. Reading the latest year unconditionally
+    /// turns that into "this issuer has no debt", which is a fabricated
+    /// measurement, and it silently drops the issuer from the credit fit.
+    ///
+    /// Falling back one year trades a little staleness for a real reading. The
+    /// staleness is bounded and visible; the fabrication would be neither.
     fn capital_structure(&self) -> Option<CapitalStructure> {
-        let latest = self.latest()?;
-        let debt = latest.debt.filter(|debt| *debt > 0.0)?;
-        if latest.interest_expense <= 0.0 || latest.operating_cash_flow <= 0.0 {
-            return None;
-        }
-        Some(CapitalStructure {
-            leverage: debt / latest.operating_cash_flow,
-            coverage: latest.operating_cash_flow / latest.interest_expense,
-            effective_rate_bps: latest.interest_expense / debt * 10_000.0,
+        let mut years: Vec<&IssuerAnnual> = self.annuals.iter().collect();
+        years.sort_by_key(|annual| std::cmp::Reverse(annual.year));
+        years.into_iter().find_map(|annual| {
+            let debt = annual.debt.filter(|debt| *debt > 0.0)?;
+            if annual.interest_expense <= 0.0 || annual.operating_cash_flow <= 0.0 {
+                return None;
+            }
+            let effective_rate_bps = annual.interest_expense / debt * 10_000.0;
+            (effective_rate_bps <= MAX_PLAUSIBLE_COUPON_BPS).then_some(CapitalStructure {
+                leverage: debt / annual.operating_cash_flow,
+                coverage: annual.operating_cash_flow / annual.interest_expense,
+                effective_rate_bps,
+            })
         })
     }
 
@@ -845,6 +930,53 @@ mod tests {
             shocked.uncertainty().map(Uncertainty::variance)
                 > steady.uncertainty().map(Uncertainty::variance)
         );
+    }
+
+    /// Revenue growth is a continuously compounded rate, because that is the
+    /// only thing the Core's exponential path can consume.
+    #[test]
+    fn revenue_growth_is_reported_as_a_continuous_rate() {
+        let mut evidence = issuer_with_cash_flows(&[100.0, 100.0, 100.0, 100.0]);
+        for (step, annual) in evidence.annuals.iter_mut().enumerate() {
+            annual.revenue = 1_000.0 * 2.0f64.powi(step as i32);
+        }
+        // A doubling is ln(2) = 0.6931, not 1.0.
+        let growth = evidence.revenue_growth();
+        assert!(growth.iter().all(|rate| (rate - 6_931.47).abs() < 1.0));
+    }
+
+    /// The newest filing is the least completely tagged one, so the structure
+    /// falls back to the newest year that reports every term.
+    #[test]
+    fn a_latest_year_missing_its_debt_tag_falls_back_rather_than_reading_as_debt_free() {
+        let mut evidence = issuer("FB", 0.05, 2.0, 600.0);
+        evidence.annuals.last_mut().expect("a history").debt = None;
+        assert!(evidence.credit_evidence().is_some());
+    }
+
+    /// An implied coupon no lender could charge is a mis-paired reading of two
+    /// different obligations, and is refused rather than fitted.
+    #[test]
+    fn an_impossible_implied_coupon_is_not_credit_evidence() {
+        let mut evidence = issuer("BAD", 0.05, 2.0, 600.0);
+        for annual in evidence.annuals.iter_mut() {
+            annual.debt = Some(annual.interest_expense / 100.0);
+        }
+        assert!(evidence.credit_evidence().is_none());
+    }
+
+    /// A level answers to recent evidence, so history beyond the window cannot
+    /// move it.
+    #[test]
+    fn history_older_than_the_level_window_does_not_move_the_level() {
+        let recent = [100.0, 110.0, 120.0, 130.0, 140.0];
+        let mut deep = vec![5.0, 6.0, 7.0, 8.0];
+        deep.extend_from_slice(&recent);
+        let (short, long) = (
+            issuer_with_cash_flows(&recent).base_cash_flow(&frame()),
+            issuer_with_cash_flows(&deep).base_cash_flow(&frame()),
+        );
+        assert_eq!(short.value().copied(), long.value().copied());
     }
 
     #[test]

@@ -15,6 +15,19 @@
 //! and a median of 1.5x across twenty names is a statement about the model
 //! rather than about twenty markets.
 //!
+//! # The two sides do not read the same history, on purpose
+//!
+//! The old engine reads `baseline_driver_data_*`, the three-year fixture it was
+//! pinned against and the one it ships with. The Core reads
+//! `core_driver_data_deep`, every year each issuer actually filed — a median of
+//! seventeen. Re-capturing the pinned fixture would move the reference the
+//! rebuild is measured against, so it stays where it is.
+//!
+//! This makes the comparison a comparison of *systems* rather than of models
+//! alone, which is the honest unit: what ships is a model plus the evidence it
+//! is fed, and "we were reading three years" is a finding about the old system
+//! rather than an unfairness in the new one.
+//!
 //! # Read the ratios with the neutral line in mind
 //!
 //! The Core has no invested capital in evidence yet, so every issuer here is
@@ -27,7 +40,8 @@
 #![cfg(test)]
 
 use crate::dcf_model::compute;
-use crate::valuation_baseline::{load_cohort, load_driver_data, CohortMember};
+use crate::valuation_baseline::{load_cohort, load_driver_fixture, CohortMember};
+use crate::valuation_fixture_capture::DEEP_DRIVER_FIXTURE;
 use crate::valuation_core_adapter::{
     fit_cross_section, median_cents, value, widest_input, IssuerAnnual, IssuerEvidence, MarketFrame,
 };
@@ -46,7 +60,7 @@ fn frame() -> MarketFrame {
 }
 
 fn evidence(member: &CohortMember) -> IssuerEvidence {
-    let drivers = load_driver_data();
+    let drivers = load_driver_fixture(DEEP_DRIVER_FIXTURE);
     let annuals = drivers
         .get(&member.symbol)
         .into_iter()
@@ -219,26 +233,30 @@ fn what_the_credit_fit_sees_on_the_pinned_cohort() {
     );
     let mut points: Vec<(f64, f64)> = Vec::new();
     for (issuer, _) in cohort_evidence() {
-        let Some(latest) = issuer.annuals.iter().max_by_key(|annual| annual.year) else {
+        // Read through the adapter's own accessor rather than off the annuals,
+        // so this reports the evidence the fit consumed. A second reading here
+        // would quietly diverge from the first the moment either changes.
+        let Some(structure) = issuer.credit_evidence() else {
+            println!(
+                "{:<6} {:>14} {:>14} {:>12} {:>12} {:>12}",
+                issuer.symbol, "-", "-", "-", "-", "-"
+            );
             continue;
         };
-        let Some(debt) = latest.debt.filter(|debt| *debt > 0.0) else {
-            println!("{:<6} {:>14} {:>14} {:>12} {:>12} {:>12}", issuer.symbol, "-", "-", "-", "-", "-");
-            continue;
-        };
-        if latest.interest_expense <= 0.0 || latest.operating_cash_flow <= 0.0 {
-            println!("{:<6} {:>14.0} {:>14.0} {:>12} {:>12} {:>12}", issuer.symbol, debt, latest.operating_cash_flow, "-", "-", "-");
-            continue;
-        }
-        let leverage = debt / latest.operating_cash_flow;
-        let coverage = latest.operating_cash_flow / latest.interest_expense;
-        let coupon = latest.interest_expense / debt * 10_000.0;
         println!(
-            "{:<6} {:>14.0} {:>14.0} {:>12.2} {:>12.2} {:>12.0}",
-            issuer.symbol, debt, latest.operating_cash_flow, leverage, coverage, coupon
+            "{:<6} {:>14} {:>14} {:>12.2} {:>12.2} {:>12.0}",
+            issuer.symbol,
+            "",
+            "",
+            structure.leverage,
+            structure.coverage,
+            structure.effective_rate_bps
         );
-        if coupon > frame.risk_free_bps {
-            points.push((leverage, coupon - frame.risk_free_bps));
+        if structure.effective_rate_bps > frame.risk_free_bps {
+            points.push((
+                structure.leverage,
+                structure.effective_rate_bps - frame.risk_free_bps,
+            ));
         }
     }
     println!(
@@ -249,6 +267,118 @@ fn what_the_credit_fit_sees_on_the_pinned_cohort() {
     for (leverage, spread) in &points {
         println!("  {leverage:>8.2}  {spread:>8.0} bps");
     }
+}
+
+/// Whether growth converges at all, tested at horizons where annual noise has
+/// somewhere to average out.
+///
+/// The fitted path rests on a one-year AR(1) of revenue growth, and on the deep
+/// history that comes out at **-0.02 over 232 pairs** — no persistence, so no
+/// fade rate, so no valuation. Before accepting that as the answer it is worth
+/// asking whether the estimator or the phenomenon is at fault: a single year of
+/// revenue growth is mostly noise, and regressing noise on noise measures the
+/// noise. Averaging growth over `w` years before regressing gives the persistent
+/// component somewhere to survive.
+///
+/// If persistence stays at zero as `w` grows, the conclusion is the strong one —
+/// this cohort's growth genuinely does not persist, and a fitted fade rate is not
+/// available from revenue history at any horizon.
+///
+/// ```text
+/// cargo test --lib does_growth_persist_at_longer_horizons -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "diagnostic: prints a table for a person to read"]
+fn does_growth_persist_at_longer_horizons() {
+    let series: Vec<Vec<f64>> = cohort_evidence()
+        .iter()
+        .map(|(issuer, _)| issuer.revenue_growth())
+        .collect();
+
+    println!("\n{:>6} {:>8} {:>14} {:>12}", "window", "pairs", "persistence", "half-life");
+    for window in 1..=5usize {
+        let smoothed: Vec<Vec<f64>> = series
+            .iter()
+            .map(|growth| {
+                growth
+                    .windows(window)
+                    .map(|slice| slice.iter().sum::<f64>() / window as f64)
+                    .collect()
+            })
+            .collect();
+
+        // Consecutive *non-overlapping* averages, so the lag and the response
+        // never share a year. Overlapping windows share terms by construction
+        // and would manufacture persistence out of the smoothing itself.
+        let pairs: Vec<(f64, f64)> = smoothed
+            .iter()
+            .flat_map(|growth| {
+                growth
+                    .iter()
+                    .step_by(window)
+                    .zip(growth.iter().skip(window).step_by(window))
+                    .map(|(lag, next)| (*lag, *next))
+                    .collect::<Vec<(f64, f64)>>()
+            })
+            .collect();
+        if pairs.len() < 2 {
+            continue;
+        }
+
+        let pooled_mean = pairs.iter().map(|(lag, _)| lag).sum::<f64>() / pairs.len() as f64;
+        let centred: Vec<(f64, f64)> = pairs
+            .iter()
+            .map(|(lag, next)| (lag - pooled_mean, next - pooled_mean))
+            .collect();
+        let cross: f64 = centred.iter().map(|(lag, next)| lag * next).sum();
+        let square: f64 = centred.iter().map(|(lag, _)| lag * lag).sum();
+        let persistence = cross / square;
+
+        // Persistence is per `window` years, so the half-life it implies is in
+        // the same unit and has to be scaled back to years to be comparable.
+        let half_life = (persistence > 0.0 && persistence < 1.0)
+            .then(|| window as f64 * (0.5f64.ln() / persistence.ln()))
+            .map(|years| format!("{years:.2} yr"))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "{window:>6} {:>8} {persistence:>14.4} {half_life:>12}",
+            pairs.len()
+        );
+    }
+
+    // If growth deviations do not persist, every issuer's best growth forecast is
+    // the pooled level — so whether a fade rate matters at all comes down to how
+    // far that level sits from terminal. A pooled level at terminal makes the
+    // path flat and `k` irrelevant rather than merely unmeasurable.
+    let all: Vec<f64> = series.iter().flatten().copied().collect();
+    let pooled = all.iter().sum::<f64>() / all.len() as f64;
+    let spread = (all.iter().map(|g| (g - pooled).powi(2)).sum::<f64>() / (all.len() - 1) as f64).sqrt();
+    println!(
+        "\npooled annual growth {:.0} bps (sd {:.0} bps, se {:.0} bps) over {} observations",
+        pooled,
+        spread,
+        spread / (all.len() as f64).sqrt(),
+        all.len()
+    );
+    println!("terminal growth is {:.0} bps", frame().terminal_growth_bps);
+
+    // The between-firm question, asked directly: do the firms' own mean growth
+    // rates differ by more than the noise in estimating each one?
+    let firm_means: Vec<f64> = series
+        .iter()
+        .filter(|growth| !growth.is_empty())
+        .map(|growth| growth.iter().sum::<f64>() / growth.len() as f64)
+        .collect();
+    let between = firm_means.iter().sum::<f64>() / firm_means.len() as f64;
+    let between_sd = (firm_means.iter().map(|m| (m - between).powi(2)).sum::<f64>()
+        / (firm_means.len() - 1) as f64)
+        .sqrt();
+    println!(
+        "firm mean growth: {} firms, spread {:.0} bps against a within-firm sd of {:.0} bps",
+        firm_means.len(),
+        between_sd,
+        spread
+    );
 }
 
 fn old_engine_cents(member: &CohortMember) -> Option<i64> {
