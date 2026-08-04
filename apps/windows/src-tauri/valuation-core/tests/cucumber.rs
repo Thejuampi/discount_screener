@@ -14,8 +14,9 @@ use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
 use valuation_core::attribution::{Contribution, ValuationInput};
 use valuation_core::classification::{classify, BusinessClass, Instrument};
-use valuation_core::projection::{intrinsic_value, GrowthPath, Valuation};
+use valuation_core::projection::{equity_value, intrinsic_value, GrowthPath, Valuation};
 use valuation_core::publication::{publish, ValuationPosterior};
+use valuation_core::residual_income::residual_income_value;
 
 /// The reserved absence token (FR-43). `tests/schema.rs` rejects every other
 /// spelling of absence in an Examples table, so this is the only one that
@@ -45,6 +46,8 @@ struct GrowthWorld {
     instrument: Option<Instrument>,
     business_class: Option<BusinessClass>,
     valuation: Option<Valuation>,
+    book_value: Option<Observation<f64>>,
+    return_on_equity: Option<Observation<f64>>,
     net_debt: Option<Observation<f64>>,
     diluted_shares: Option<Observation<f64>>,
     posterior: Option<ValuationPosterior>,
@@ -394,12 +397,74 @@ fn given_business_class(world: &mut GrowthWorld, class: String) {
 
 #[when(expr = "the Valuation Posterior is published")]
 fn when_published(world: &mut GrowthWorld) {
-    world.posterior = Some(publish(
-        world.business_class.expect("Business Class"),
+    // Two steps, because the debt bridge belongs to the operating path and not
+    // to publication: a firm value crosses it, and a residual-income value is
+    // already an equity value and never sees it.
+    let equity = equity_value(
         world.valuation.as_ref().expect("firm value"),
         world.net_debt.as_ref().expect("net debt"),
+    );
+    world.posterior = Some(publish(
+        world.business_class.expect("Business Class"),
+        &equity,
         world.diluted_shares.as_ref().expect("diluted shares"),
     ));
+}
+
+#[given(expr = "a book value of {word} with standard deviation {word}")]
+fn given_book_value(world: &mut GrowthWorld, value: String, deviation: String) {
+    world.book_value = Some(with_deviation(&value, &deviation, "book-value"));
+}
+
+#[given(expr = "a return on equity of {word} bps")]
+fn given_return_on_equity(world: &mut GrowthWorld, value: String) {
+    world.return_on_equity = Some(observed(&value, "return-on-equity"));
+}
+
+#[given(expr = "a cost of equity of {word} bps")]
+fn given_cost_of_equity_rate(world: &mut GrowthWorld, value: String) {
+    world.discount_rate = Some(observed(&value, "cost-of-equity"));
+}
+
+#[when(expr = "the Residual Income Value is resolved")]
+fn when_residual_income(world: &mut GrowthWorld) {
+    let book = world.book_value.clone().expect("book value");
+    let return_on_equity = world.return_on_equity.clone().expect("return on equity");
+    let growth = world.growth.clone().expect("Growth Posterior");
+    let cost_of_equity = world.discount_rate.clone().expect("cost of equity");
+    let valued = match world.path.as_ref() {
+        Some(path) => residual_income_value(&book, &return_on_equity, &growth, path, &cost_of_equity),
+        None => Valuation::new(
+            Observation::absent(
+                AbsenceReason::NotReported,
+                Provenance::new("growth-path", 20_000),
+            ),
+            vec![],
+        ),
+    };
+    world.result = Some(valued.value().clone());
+    world.valuation = Some(valued);
+}
+
+#[then(expr = "the Residual Income Value is {word} within 1 cent")]
+fn then_residual_income(world: &mut GrowthWorld, expected: String) {
+    match cell(&expected) {
+        Some(expected) => {
+            let actual = world
+                .result()
+                .value()
+                .expect("expected a resolved residual income value, found absence");
+            assert!(
+                (actual - expected).abs() <= 0.01,
+                "residual income value {actual} is not within 1 cent of {expected}"
+            );
+        }
+        None => assert_eq!(
+            world.result().value(),
+            None,
+            "expected absence, found a resolved residual income value"
+        ),
+    }
 }
 
 #[then(expr = "the published percentiles are {word}, {word} and {word} cents")]

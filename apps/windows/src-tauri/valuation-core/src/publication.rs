@@ -130,27 +130,29 @@ impl ValuationPosterior {
     }
 }
 
-/// Bridge a firm value to a per-share posterior and quantize it.
+/// Divide an equity value across its shares and quantize the result.
 ///
 /// ```text
-/// per_share = (firm_value - net_debt) / diluted_shares
+/// per_share = equity_value / diluted_shares
 /// ```
 ///
-/// The bridge is arithmetic, but it is *valuation* arithmetic, so it lives here
-/// rather than in the Shell (FR-5, FR-36). It also carries uncertainty: net debt
-/// is measured and share counts are diluted estimates, and both widen the
-/// interval through the same delta method as everything upstream.
+/// The division is arithmetic, but it is *valuation* arithmetic, so it lives
+/// here rather than in the Shell (FR-5, FR-36). It also carries uncertainty: a
+/// share count is a diluted estimate, and it widens the interval through the
+/// same delta method as everything upstream.
+///
+/// Both models reach this point already holding an equity value — the operating
+/// path through [`equity_value`](crate::projection::equity_value), the financial
+/// path directly, since residual income on book has no debt to bridge.
 pub fn publish(
     class: BusinessClass,
-    firm_value: &Valuation,
-    net_debt: &Observation<f64>,
+    equity_value: &Valuation,
     diluted_shares: &Observation<f64>,
 ) -> ValuationPosterior {
     let provenance = Provenance::new(
         "valuation_posterior",
         [
-            firm_value.value().provenance(),
-            net_debt.provenance(),
+            equity_value.value().provenance(),
             diluted_shares.provenance(),
         ]
         .into_iter()
@@ -166,43 +168,40 @@ pub fn publish(
     if !class.routes_to_a_model() {
         return refuse(Refusal::Eligibility(class));
     }
-    let Some(&firm) = firm_value.value().value() else {
+    let Some(&equity) = equity_value.value().value() else {
         return refuse(Refusal::Evidence(
-            firm_value
+            equity_value
                 .value()
                 .absence_reason()
                 .unwrap_or(AbsenceReason::NotReported),
         ));
     };
-    let (Some(&debt), Some(&shares)) = (net_debt.value(), diluted_shares.value()) else {
-        return refuse(Refusal::Evidence(AbsenceReason::NotReported));
+    let Some(&shares) = diluted_shares.value() else {
+        return refuse(Refusal::Evidence(
+            diluted_shares
+                .absence_reason()
+                .unwrap_or(AbsenceReason::NotReported),
+        ));
     };
     // A share count is a divisor and a structural fact about the issuer. Zero or
     // negative is not a small number, it is a broken record.
-    if !(shares.is_finite() && shares > 0.0) || !debt.is_finite() {
+    if !(shares.is_finite() && shares > 0.0) {
         return refuse(Refusal::Evidence(AbsenceReason::OutOfPolicyRange));
     }
 
-    let equity = firm - debt;
     let per_share = equity / shares;
 
-    // per_share = (F - D)/S, so d/dF = 1/S, d/dD = -1/S, d/dS = -(F - D)/S^2.
-    // Every upstream contribution is a contribution to F, so all of them scale
-    // by the same 1/S; the bridge adds its own two.
-    let contributions: Vec<Contribution> = firm_value
+    // per_share = E/S, so d/dE = 1/S and d/dS = -E/S^2. Every upstream
+    // contribution is a contribution to E, so all of them scale by the same 1/S;
+    // the share count adds its own.
+    let contributions: Vec<Contribution> = equity_value
         .contributions()
         .iter()
         .map(|contribution| contribution.scaled_by(1.0 / shares))
-        .chain([
-            Contribution::new(
-                ValuationInput::NetDebt,
-                net_debt.propagation_variance() / (shares * shares),
-            ),
-            Contribution::new(
-                ValuationInput::DilutedShares,
-                diluted_shares.propagation_variance() * (per_share / shares).powi(2),
-            ),
-        ])
+        .chain([Contribution::new(
+            ValuationInput::DilutedShares,
+            diluted_shares.propagation_variance() * (per_share / shares).powi(2),
+        )])
         .collect();
 
     let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
@@ -281,7 +280,7 @@ mod tests {
         )
     }
 
-    fn firm(value: f64, variance: f64) -> Valuation {
+    fn equity(value: f64, variance: f64) -> Valuation {
         Valuation::new(
             known(value, variance),
             vec![Contribution::new(ValuationInput::BaseCashFlow, variance)],
@@ -303,11 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn the_median_is_the_bridged_value_in_cents() {
+    fn the_median_is_the_per_share_value_in_cents() {
         let posterior = publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &exact(8.0),
         );
         assert_eq!(published(&posterior).1, 10_000);
@@ -317,8 +315,7 @@ mod tests {
     fn percentiles_are_ordered_by_construction() {
         let (low, median, high) = published(&publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &exact(8.0),
         ));
         assert!(low < median && median < high);
@@ -331,8 +328,7 @@ mod tests {
         let width_at = |variance: f64| {
             let (low, _, high) = published(&publish(
                 BusinessClass::OperatingNonFinancial,
-                &firm(1_000.0, variance),
-                &exact(200.0),
+                &equity(800.0, variance),
                 &exact(8.0),
             ));
             high - low
@@ -344,8 +340,7 @@ mod tests {
     fn attributed_shares_sum_to_exactly_one() {
         let posterior = publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 100.0),
-            &known(200.0, 25.0),
+            &equity(800.0, 100.0),
             &known(8.0, 0.04),
         );
         let ValuationPosterior::Published { attribution, .. } = posterior else {
@@ -367,8 +362,7 @@ mod tests {
     fn a_noisy_share_count_earns_a_share_of_the_width() {
         let posterior = publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &known(8.0, 1.0),
         );
         let ValuationPosterior::Published { attribution, .. } = posterior else {
@@ -385,8 +379,7 @@ mod tests {
     fn an_ineligible_class_refuses_on_eligibility() {
         let posterior = publish(
             BusinessClass::NotEligible,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &exact(8.0),
         );
         assert_eq!(
@@ -399,8 +392,7 @@ mod tests {
     fn an_unclassified_issuer_refuses_rather_than_publishing() {
         let posterior = publish(
             BusinessClass::Unclassified,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &exact(8.0),
         );
         assert_eq!(
@@ -413,8 +405,7 @@ mod tests {
     fn an_absent_share_count_refuses_on_evidence() {
         let posterior = publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 100.0),
-            &exact(200.0),
+            &equity(800.0, 100.0),
             &Observation::absent(AbsenceReason::NotReported, provenance()),
         );
         assert_eq!(
@@ -430,8 +421,7 @@ mod tests {
     fn an_enormous_uncertainty_still_publishes() {
         let posterior = publish(
             BusinessClass::OperatingNonFinancial,
-            &firm(1_000.0, 1e12),
-            &exact(200.0),
+            &equity(800.0, 1e12),
             &exact(8.0),
         );
         assert!(posterior.is_published());

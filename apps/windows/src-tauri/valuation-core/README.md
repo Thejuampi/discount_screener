@@ -54,11 +54,14 @@ still values with the deprecated modules. Landed so far:
 - `projection` — the discounted cash-flow path in closed form, with the
   retention charge and no explicit horizon
 - `classification` — closed-world business class, matched on whole words
+- `residual_income` — book plus its spread over the cost of equity, for lenders
+- `numerics` — the fading-path series both models sum, and its conditioning bound
 - `attribution` — which input a valuation's width is charged to
-- `publication` — the equity bridge, percentiles, and the fixed-point boundary
+- `publication` — per-share percentiles and the fixed-point boundary
 
-Not yet built: residual income for financial services, and the Shell adapter
-that fits the cross-section priors and feeds the Core real evidence.
+That is the whole kernel. What remains is the Shell adapter: building the
+evidence bundle from provider data, fitting the credit curve and the fade rate
+cross-sectionally, and re-measuring the cohort.
 
 ### There is no Disputed
 
@@ -71,6 +74,21 @@ the publication threw away the estimate and the uncertainty together.
 threshold on interval width, channel disagreement or distance from any price can
 construct either. That is FR-32 enforced by the type rather than intended by a
 comment.
+
+### A bank does not get a worse cash-flow model, it gets a different one
+
+Free cash flow to the firm subtracts capital expenditure and discounts at a
+weighted average cost of capital. Neither half means anything for a lender: debt
+is the raw material its assets are made of, not the financing of them, so there
+is no enterprise value to bridge and no leverage the credit curve could read.
+Running the operating model on a bank does not produce a worse number, it
+produces a number about a different quantity.
+
+`residual_income` values those issuers as book plus the present value of what
+they earn above their cost of equity. The spread fades at the same rate book
+growth does, because a competitive advantage eroding is one event rather than
+two, and fitting it twice would invent a parameter the cross-section cannot
+estimate.
 
 ### There is no terminal value module, on purpose
 

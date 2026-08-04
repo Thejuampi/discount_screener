@@ -40,14 +40,17 @@ pub mod attribution;
 pub mod capital;
 pub mod classification;
 pub mod evidence;
+mod numerics;
 pub mod posterior;
 pub mod projection;
 pub mod publication;
+pub mod residual_income;
 
 pub use attribution::{Contribution, ValuationInput};
 pub use classification::{classify, BusinessClass, Instrument};
 pub use evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
 pub use capital::{cost_of_debt, wacc, CreditCurve};
 pub use posterior::{fuse, Fusion};
-pub use projection::{intrinsic_value, GrowthPath, Valuation};
+pub use projection::{equity_value, intrinsic_value, GrowthPath, Valuation};
 pub use publication::{publish, Refusal, ValuationPosterior};
+pub use residual_income::residual_income_value;

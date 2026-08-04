@@ -19,8 +19,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValuationInput {
     BaseCashFlow,
+    BookValue,
     Growth,
     ReturnOnCapital,
+    ReturnOnEquity,
     DiscountRate,
     NetDebt,
     DilutedShares,
@@ -30,8 +32,10 @@ impl ValuationInput {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BaseCashFlow => "base_cash_flow",
+            Self::BookValue => "book_value",
             Self::Growth => "growth",
             Self::ReturnOnCapital => "return_on_capital",
+            Self::ReturnOnEquity => "return_on_equity",
             Self::DiscountRate => "discount_rate",
             Self::NetDebt => "net_debt",
             Self::DilutedShares => "diluted_shares",

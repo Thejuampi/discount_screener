@@ -49,7 +49,10 @@
 //!
 //! with `a = w - g_inf`. The series converges absolutely for every finite `A`, so
 //! this is arithmetic rather than quadrature: no step size, no node count, and
-//! nothing that could differ between platforms beyond `exp` itself (FR-4).
+//! nothing that could differ between platforms beyond `exp` itself (FR-4). The
+//! summation itself lives in [`crate::numerics`], because residual income
+//! integrates a different economics over the same path and must sum it the same
+//! way.
 //!
 //! [`unit_value_agrees_with_direct_numeric_integration`] checks the derivation
 //! against a straightforward numerical integral of the defining integrand, so
@@ -78,28 +81,7 @@
 
 use crate::attribution::{Contribution, ValuationInput};
 use crate::evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
-
-/// Terms after which a series that has not converged is treated as unusable.
-/// Reached only if the truncation test below never fires, which cannot happen
-/// for `|A| <= MAX_PATH_AMPLITUDE`; it exists so the loop is provably finite.
-const MAX_SERIES_TERMS: usize = 512;
-
-/// Truncation point, relative to the largest term seen. Below double precision's
-/// own noise floor, so truncation is never the binding error.
-const SERIES_TRUNCATION_RATIO: f64 = 1e-16;
-
-/// Conditioning bound on `A = (g_0 - g_inf)/k`, labelled arithmetic under FR-27.
-///
-/// The series alternates, and its largest term is of order `exp(2|A|)`, so the
-/// relative rounding error of the sum is of order `exp(2|A|) * eps`. At `|A| =
-/// 12` that is about `6e-6` — six digits, far inside the one-cent tolerance the
-/// outlines assert. Beyond it the sum stops being trustworthy, so the projection
-/// refuses instead of publishing a number it cannot stand behind.
-///
-/// This is a numerical bound with a derivation, not an economic claim: `|A| = 12`
-/// is `240` points of excess growth at a three-and-a-half-year half-life, which
-/// no fitted cross-section produces.
-const MAX_PATH_AMPLITUDE: f64 = 12.0;
+use crate::numerics::{central_difference, fading_path_series};
 
 /// The market-frame half of the growth path: where growth is heading and how
 /// fast it relaxes there.
@@ -146,6 +128,10 @@ impl GrowthPath {
 
     pub fn terminal_bps(&self) -> f64 {
         self.terminal_bps
+    }
+
+    pub fn fade_per_year(&self) -> f64 {
+        self.fade_per_year
     }
 
     pub fn provenance(&self) -> &Provenance {
@@ -346,43 +332,69 @@ fn unit_value(
         return Ok(terminal_payout / gordon_denominator);
     }
 
-    let amplitude = excess / fade;
-    if amplitude.abs() > MAX_PATH_AMPLITUDE {
-        return Err(AbsenceReason::OutOfPolicyRange);
-    }
     let transient_payout = excess / return_on_capital;
-
-    let mut term = amplitude.exp();
-    let mut peak = term.abs();
-    let mut sum = 0.0;
-    let mut converged = false;
-    for index in 0..MAX_SERIES_TERMS {
-        let order = index as f64;
-        sum += term
-            * (terminal_payout / (gordon_denominator + order * fade)
-                - transient_payout / (gordon_denominator + (order + 1.0) * fade));
-        term *= -amplitude / (order + 1.0);
-        peak = peak.max(term.abs());
-        // The terms grow until `n` passes `|A|`, so decay is only meaningful
-        // past that point; testing earlier would truncate on the way up.
-        if order > amplitude.abs() && term.abs() <= SERIES_TRUNCATION_RATIO * peak {
-            converged = true;
-            break;
-        }
-    }
-    if !converged || !sum.is_finite() {
-        return Err(AbsenceReason::OutOfPolicyRange);
-    }
-    Ok(sum)
+    fading_path_series(excess / fade, |order| {
+        terminal_payout / (gordon_denominator + order * fade)
+            - transient_payout / (gordon_denominator + (order + 1.0) * fade)
+    })
 }
 
-/// Central difference of a function that may refuse, with the refusal
-/// propagating as a non-finite partial so the caller's single finiteness check
-/// catches it.
-fn central_difference(step: f64, evaluate: impl Fn(f64) -> Result<f64, AbsenceReason>) -> f64 {
-    match (evaluate(step), evaluate(-step)) {
-        (Ok(up), Ok(down)) => (up - down) / (2.0 * step),
-        _ => f64::NAN,
+/// Bridge an enterprise value to the equity claim on it.
+///
+/// ```text
+/// equity = firm_value - net_debt
+/// ```
+///
+/// Its own step rather than part of publication, because only the operating
+/// model produces an enterprise value. Residual income on book values the equity
+/// directly, and putting the debt subtraction downstream would have forced every
+/// financial issuer to assert a net debt of zero — a fabricated measurement in
+/// place of a step that simply does not apply (FR-31).
+///
+/// The partial with respect to each side is `1` and `-1`, so the upstream
+/// contributions pass through unchanged and net debt adds its own.
+pub fn equity_value(firm_value: &Valuation, net_debt: &Observation<f64>) -> Valuation {
+    let provenance = Provenance::new(
+        "equity_value",
+        [firm_value.value().provenance(), net_debt.provenance()]
+            .into_iter()
+            .map(Provenance::observed_epoch_day)
+            .max()
+            .unwrap_or_default(),
+    );
+    let refused = |reason| Valuation::new(Observation::absent(reason, provenance.clone()), vec![]);
+
+    let (Some(&firm), Some(&debt)) = (firm_value.value().value(), net_debt.value()) else {
+        let reason = firm_value
+            .value()
+            .absence_reason()
+            .or_else(|| net_debt.absence_reason())
+            .unwrap_or(AbsenceReason::NotReported);
+        return refused(reason);
+    };
+    let equity = firm - debt;
+    if !equity.is_finite() {
+        return refused(AbsenceReason::OutOfPolicyRange);
+    }
+
+    let contributions: Vec<Contribution> = firm_value
+        .contributions()
+        .iter()
+        .copied()
+        .chain([Contribution::new(
+            ValuationInput::NetDebt,
+            net_debt.propagation_variance(),
+        )])
+        .collect();
+    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let inputs = firm_value.contributions().len() as u32 + u32::from(net_debt.is_measured());
+
+    match Uncertainty::from_variance(variance, UncertaintyBasis::Propagated { inputs }) {
+        Some(uncertainty) => Valuation::new(
+            Observation::measured(equity, uncertainty, provenance),
+            contributions,
+        ),
+        None => refused(AbsenceReason::InsufficientObservations),
     }
 }
 
@@ -582,6 +594,63 @@ mod tests {
             .map(Uncertainty::variance)
             .expect("resolved");
         assert!((summed - total).abs() < 1e-9 * total);
+    }
+
+    fn firm() -> Valuation {
+        intrinsic_value(
+            &known(100.0),
+            &known(1_500.0),
+            &path(),
+            &known(2_500.0),
+            &known(800.0),
+        )
+    }
+
+    #[test]
+    fn the_equity_bridge_subtracts_net_debt() {
+        let firm = firm();
+        let enterprise = *firm.value().value().expect("resolved");
+        let equity = equity_value(&firm, &known(500.0));
+        assert!((*equity.value().value().expect("resolved") - (enterprise - 500.0)).abs() < 1e-9);
+    }
+
+    /// Net debt is measured, so it is a source of width like any other, and it
+    /// has to be visible as its own line in the attribution rather than folded
+    /// into the model's.
+    #[test]
+    fn net_debt_earns_its_own_contribution() {
+        let bridged = equity_value(&firm(), &known(500.0));
+        assert!(bridged
+            .contributions()
+            .iter()
+            .any(|contribution| contribution.input() == ValuationInput::NetDebt));
+    }
+
+    #[test]
+    fn an_absent_net_debt_refuses_the_bridge() {
+        assert_eq!(
+            equity_value(&firm(), &missing()).value().absence_reason(),
+            Some(AbsenceReason::NotReported)
+        );
+    }
+
+    /// A refused projection stays refused across the bridge, carrying the reason
+    /// it was refused for rather than being restated as a bridge failure.
+    #[test]
+    fn a_refused_firm_value_carries_its_reason_across_the_bridge() {
+        let refused = intrinsic_value(
+            &missing(),
+            &known(1_500.0),
+            &path(),
+            &known(2_500.0),
+            &known(800.0),
+        );
+        assert_eq!(
+            equity_value(&refused, &known(500.0))
+                .value()
+                .absence_reason(),
+            Some(AbsenceReason::NotReported)
+        );
     }
 
     #[test]

@@ -7,6 +7,13 @@ Feature: Valuation Posterior
   and a required input that was not measured — and nothing about being uncertain
   can reach either.
 
+  The bridge is two steps, and they are separable on purpose. Subtracting net
+  debt belongs to the operating path, which is the only one that produces an
+  enterprise value; residual income on book values the equity directly and never
+  crosses it. Folding the subtraction into publication would have forced every
+  financial issuer to assert a net debt of zero — a fabricated measurement in
+  place of a step that simply does not apply.
+
   Behaviour is added to this feature by adding a row to the table below. A new
   outline requires an entry in manifest.toml saying what no existing table
   covers (FR-44).
