@@ -53,6 +53,7 @@ use valuation_core::classification::{classify, Instrument};
 use valuation_core::evidence::{
     AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis,
 };
+use valuation_core::numerics::robust_centre;
 use valuation_core::posterior::fuse;
 use valuation_core::projection::{equity_value, intrinsic_value, GrowthPath};
 use valuation_core::publication::{publish, ValuationPosterior};
@@ -166,6 +167,14 @@ pub struct CrossSectionDiagnostics {
     pub credit_leverage_slope: f64,
     pub credit_coverage_slope: f64,
     pub growth_pairs: usize,
+    /// Pooled growth observations the cohort's own dispersion excluded. How
+    /// contaminated the cross-section was.
+    pub growth_pooled_discarded: usize,
+    /// Consecutive-year pairs that left the fit because one of their two years
+    /// was excluded. How much fit evidence that contamination cost, which is a
+    /// different number: an excluded year in the middle of a series costs two
+    /// pairs, one at either end costs one.
+    pub growth_pairs_dropped: usize,
     pub growth_persistence: f64,
     pub fade_per_year: f64,
     pub beta_standard_deviation: f64,
@@ -259,6 +268,23 @@ fn fit_credit_curve(
     CreditCurve::fitted(fit.intercept.exp(), fit.slope, 0.0, provenance.clone())
 }
 
+/// Which issuer's which year one pooled growth observation is.
+///
+/// The pooled sample is a flatten of per-issuer series, so a position in it
+/// identifies nothing on its own: the same index means a different issuer's year
+/// the moment any series changes length. The centre reports its exclusions
+/// positionally, against the vector it was given, so those positions are
+/// resolved back into keys once — here — and everything downstream speaks in
+/// keys. Carrying the bare index into the pair construction would silently kill
+/// the wrong issuer's years, which nothing that counts dropped pairs could see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrowthKey {
+    issuer: usize,
+    /// Position within that issuer's growth series, oldest first. A pair is
+    /// `(step, step + 1)`, so it exists only between consecutive steps.
+    step: usize,
+}
+
 /// Estimate how fast growth rates converge, pooled across the cohort.
 ///
 /// This is the estimator that replaces FR-16. The probe that killed the
@@ -267,6 +293,20 @@ fn fit_credit_curve(
 /// the mean removed is the cohort's, so the regression measures what it is meant
 /// to: whether a name growing faster than its peers this year is still doing so
 /// next year. Persistence `rho` becomes a relaxation speed as `k = -ln(rho)`.
+///
+/// # The centre and the pairs see the same evidence
+///
+/// The centre every pair is de-meaned by is robust, so a contaminated year is
+/// not in it. That year is then also kept out of the pairs, because a
+/// cross-section that excludes an observation from its location and then feeds
+/// the same observation to the regression that uses that location has not
+/// excluded it at all — it has only stopped counting it once.
+///
+/// A pair is a consecutive-year transition. Dropping a year therefore costs both
+/// pairs it belonged to, and **no pair is built across the hole**: a jump from
+/// the year before the exclusion to the year after it is not an annual
+/// transition, and inventing one would be a different fabrication from the one
+/// this is fixing.
 fn fit_growth_path(
     issuers: &[IssuerEvidence],
     frame: &MarketFrame,
@@ -277,18 +317,60 @@ fn fit_growth_path(
         .iter()
         .map(IssuerEvidence::annual_revenue_growth)
         .collect();
-    let pooled_mean = mean(&series.iter().flatten().copied().collect::<Vec<f64>>())?;
+    let observations: Vec<(GrowthKey, f64)> = series
+        .iter()
+        .enumerate()
+        .flat_map(|(issuer, growth)| {
+            growth
+                .iter()
+                .enumerate()
+                .map(move |(step, value)| (GrowthKey { issuer, step }, *value))
+        })
+        .collect();
+
+    // The pooled sample is this vector's values in this vector's order, so a
+    // position reported against one is a position in the other.
+    let pooled: Vec<f64> = observations.iter().map(|(_, value)| *value).collect();
+    let centre = robust_centre(&pooled).ok()?;
+    let excluded: Vec<GrowthKey> = centre
+        .outliers()
+        .iter()
+        .filter_map(|position| observations.get(*position).map(|(key, _)| *key))
+        .collect();
+    diagnostics.growth_pooled_discarded = centre.discarded();
 
     let pairs: Vec<(f64, f64)> = series
         .iter()
-        .flat_map(|growth| {
+        .enumerate()
+        .flat_map(|(issuer, growth)| {
             growth
                 .windows(2)
-                .map(|pair| (pair[0] - pooled_mean, pair[1] - pooled_mean))
+                .enumerate()
+                // The two years a transition spans. Either one excluded takes
+                // the transition with it, and the next window starts after it
+                // rather than reaching across it.
+                .filter(|(step, _)| {
+                    ![*step, step + 1].iter().any(|spanned| {
+                        excluded.contains(&GrowthKey {
+                            issuer,
+                            step: *spanned,
+                        })
+                    })
+                })
+                .map(|(_, pair)| (pair[0] - centre.centre(), pair[1] - centre.centre()))
                 .collect::<Vec<(f64, f64)>>()
         })
         .collect();
+
+    // Every transition the cohort could have contributed, against the ones that
+    // survived. The difference is what the contamination cost the fit, and it is
+    // a different quantity from the number of contaminated years.
+    let transitions: usize = series
+        .iter()
+        .map(|growth| growth.len().saturating_sub(1))
+        .sum();
     diagnostics.growth_pairs = pairs.len();
+    diagnostics.growth_pairs_dropped = transitions - pairs.len();
 
     // Through the origin, because both sides are already deviations from the
     // pooled mean and an intercept would let the fit relocate that mean.
@@ -527,23 +609,40 @@ impl IssuerEvidence {
 
     /// The trailing channel, fused with a forward channel that is not there yet.
     ///
-    /// The mean of the realized growth rates, with the standard error of that
-    /// mean as its width — the level is what the persistence probe found to be
+    /// The centre of the realized growth rates, with the standard error of that
+    /// centre as its width — the level is what the persistence probe found to be
     /// the estimable quantity, and its standard error is what says how well.
+    ///
+    /// # Why all three parts come from the centre and none from the raw series
+    ///
+    /// This channel supplies both the point estimate and the precision that
+    /// `fuse` weights by, and `fuse` weights by `1/variance` and nothing else.
+    /// So a robust centre paired with the untrimmed variance of the same series
+    /// would be strictly worse than changing nothing: the level would be clean
+    /// while the width still carried the contamination, and the weight this
+    /// channel takes against a forward channel would move for a reason that is
+    /// not evidence. The count is the retained count for the same reason —
+    /// reporting eighteen observations behind a width computed from fifteen
+    /// overstates precision in a third place.
+    ///
+    /// An issuer whose growth history has no width — a flat or nearly flat
+    /// revenue line — refuses here rather than publishing a centre of certainty.
+    /// A variance of zero is infinite precision under inverse-variance fusion,
+    /// which would let one degenerate history dominate a posterior outright.
     fn growth_posterior(&self, frame: &MarketFrame) -> Observation<f64> {
         let provenance = self.provenance("trailing_growth", frame);
         let growth = self.annual_revenue_growth();
-        let (Some(mean), Some(variance)) = (mean(&growth), sample_variance(&growth)) else {
-            return Observation::absent(AbsenceReason::InsufficientObservations, provenance);
+        let trailing = match robust_centre(&growth) {
+            Ok(centre) => measured_or_absent(
+                centre.centre(),
+                centre.variance_of_centre(),
+                UncertaintyBasis::SampleVariance {
+                    observations: centre.retained() as u32,
+                },
+                provenance,
+            ),
+            Err(reason) => Observation::absent(reason, provenance),
         };
-        let trailing = measured_or_absent(
-            mean,
-            variance / growth.len() as f64,
-            UncertaintyBasis::SampleVariance {
-                observations: growth.len() as u32,
-            },
-            provenance,
-        );
         let forward = Observation::absent(
             AbsenceReason::ProviderUnavailable,
             self.provenance("forward_growth", frame),
@@ -886,6 +985,33 @@ mod tests {
         ]
     }
 
+    /// An issuer whose revenue line is stated directly, for tests about *which
+    /// years* the growth fit uses rather than about the level.
+    ///
+    /// At most the five years [`issuer`] builds; a shorter line shortens the
+    /// history, which is how a two-transition issuer is expressed.
+    fn issuer_with_revenues(symbol: &str, revenues: &[f64]) -> IssuerEvidence {
+        let mut evidence = issuer(symbol, 0.05, 1.0, 600.0);
+        evidence.annuals.truncate(revenues.len());
+        for (annual, revenue) in evidence.annuals.iter_mut().zip(revenues) {
+            annual.revenue = *revenue;
+        }
+        evidence
+    }
+
+    /// The clean cohort with one more name whose revenue jumps a hundredfold in
+    /// a single year and stays there — one contaminated transition, in the
+    /// middle of the series, with two ordinary years on either side of it.
+    fn cohort_with(contaminated: IssuerEvidence) -> Vec<IssuerEvidence> {
+        let mut cohort = cohort();
+        cohort.push(contaminated);
+        cohort
+    }
+
+    fn growth_diagnostics(issuers: &[IssuerEvidence]) -> CrossSectionDiagnostics {
+        fit_cross_section(issuers, &frame()).diagnostics
+    }
+
     /// An issuer whose cash flows are stated directly, for tests about the level
     /// estimator rather than about the cross-section.
     fn issuer_with_cash_flows(flows: &[f64]) -> IssuerEvidence {
@@ -1098,6 +1224,167 @@ mod tests {
         let mut thin = cohort[0].clone();
         thin.annuals.truncate(2);
         assert!(!value(&thin, &frame(), &fitted).is_published());
+    }
+
+    /// A hundredfold revenue jump in the middle of a series is not a growth
+    /// year, and the cohort's own dispersion says so.
+    #[test]
+    fn a_planted_extreme_growth_year_is_excluded_from_the_pooled_centre() {
+        let contaminated =
+            issuer_with_revenues("CON", &[1_000.0, 1_050.0, 100_000.0, 105_000.0, 110_000.0]);
+        assert_eq!(
+            growth_diagnostics(&cohort_with(contaminated)).growth_pooled_discarded,
+            1
+        );
+    }
+
+    /// And the year it excluded from the centre is excluded from the fit that
+    /// uses the centre. One year in the middle of a series belongs to two
+    /// consecutive-year transitions, so both of them go.
+    #[test]
+    fn an_excluded_growth_year_takes_both_of_its_pairs_out_of_the_fit() {
+        let contaminated =
+            issuer_with_revenues("CON", &[1_000.0, 1_050.0, 100_000.0, 105_000.0, 110_000.0]);
+        assert_eq!(
+            growth_diagnostics(&cohort_with(contaminated)).growth_pairs_dropped,
+            2
+        );
+    }
+
+    /// The two losses are different quantities and the fit reports both: one
+    /// contaminated observation, two pairs of fit evidence gone with it.
+    #[test]
+    fn the_cost_in_pairs_is_reported_separately_from_the_count_of_bad_years() {
+        let contaminated =
+            issuer_with_revenues("CON", &[1_000.0, 1_050.0, 100_000.0, 105_000.0, 110_000.0]);
+        let diagnostics = growth_diagnostics(&cohort_with(contaminated));
+        assert!(
+            diagnostics.growth_pooled_discarded != diagnostics.growth_pairs_dropped,
+            "one discarded year cost two pairs, so the two counters cannot be the same number: {diagnostics:?}"
+        );
+    }
+
+    /// A year at the edge of a history belongs to one transition, not two, so
+    /// the fit loses one pair. The exclusion is applied to the years, not to a
+    /// fixed count of pairs per year.
+    #[test]
+    fn an_excluded_year_at_the_edge_of_a_series_costs_only_the_one_pair_it_touched() {
+        let contaminated = issuer_with_revenues(
+            "EDGE",
+            &[1_000.0, 100_000.0, 105_000.0, 110_000.0, 115_000.0],
+        );
+        assert_eq!(
+            growth_diagnostics(&cohort_with(contaminated)).growth_pairs_dropped,
+            1
+        );
+    }
+
+    /// An issuer whose every year is a category error contributes nothing to the
+    /// fit — and specifically not a pair bridging the hole its exclusions left,
+    /// which is what a naive "drop the bad years and re-window" would build.
+    #[test]
+    fn an_issuer_whose_whole_series_is_excluded_contributes_no_pairs() {
+        let unusable = issuer_with_revenues("BAD", &[1.0, 1_000.0, 1_000_000.0, 1.0e9, 1.0e12]);
+        assert_eq!(
+            growth_diagnostics(&cohort_with(unusable)).growth_pairs,
+            growth_diagnostics(&cohort()).growth_pairs
+        );
+    }
+
+    /// And the cohort still fits: one unusable member is a partial loss of
+    /// evidence, not a refusal for everybody.
+    #[test]
+    fn the_fit_still_resolves_when_one_issuer_is_entirely_excluded() {
+        let unusable = issuer_with_revenues("BAD", &[1.0, 1_000.0, 1_000_000.0, 1.0e9, 1.0e12]);
+        assert!(fit_cross_section(&cohort_with(unusable), &frame())
+            .growth_path()
+            .is_some());
+    }
+
+    /// An issuer with exactly two transitions, one of them contaminated. Its
+    /// surviving year has nothing to pair with, and pairing it across the gap
+    /// would invent a transition that never happened.
+    #[test]
+    fn a_broken_only_pair_is_not_bridged_across_the_gap() {
+        let short = issuer_with_revenues("TWO", &[1_000.0, 100_000.0, 105_000.0]);
+        assert_eq!(
+            growth_diagnostics(&cohort_with(short)).growth_pairs,
+            growth_diagnostics(&cohort()).growth_pairs
+        );
+    }
+
+    /// The change is confined to contaminated evidence: a cohort with nothing
+    /// out of place loses nothing.
+    #[test]
+    fn a_clean_cohort_discards_nothing() {
+        assert_eq!(growth_diagnostics(&cohort()).growth_pooled_discarded, 0);
+    }
+
+    /// And therefore fits exactly what the plain mean fitted before this
+    /// estimator replaced it. The number is the one this cohort produced under
+    /// `mean(&series.flatten())`, pinned so that a change in the trimming rule
+    /// cannot quietly move an uncontaminated fit.
+    #[test]
+    fn a_clean_cohort_fits_the_persistence_the_plain_mean_fitted() {
+        let persistence = growth_diagnostics(&cohort()).growth_persistence;
+        assert!(
+            (persistence - PERSISTENCE_BEFORE_WAVE_3).abs() < 1e-12,
+            "this cohort now fits {persistence}"
+        );
+    }
+
+    /// Measured on this cohort under `mean(&series.flatten())`, before the
+    /// pooled mean was replaced.
+    const PERSISTENCE_BEFORE_WAVE_3: f64 = 0.475_680_263_352_406_93;
+
+    /// The trailing channel's sample size is the number of years behind its
+    /// width, not the number of years the issuer filed. Four transitions, one of
+    /// them a hundredfold jump, three usable.
+    #[test]
+    fn the_trailing_channel_counts_the_years_it_kept_not_the_years_it_saw() {
+        let contaminated =
+            issuer_with_revenues("CON", &[1_000.0, 1_050.0, 1_113.0, 111_300.0, 117_000.0]);
+        assert_eq!(
+            contaminated
+                .growth_posterior(&frame())
+                .uncertainty()
+                .expect("a measured trailing channel")
+                .basis()
+                .sample_size(),
+            3
+        );
+    }
+
+    /// The width comes from the same three years the centre came from. Were the
+    /// untrimmed variance reported instead, this channel would arrive at `fuse`
+    /// about a thousand times wider than the evidence it actually rests on —
+    /// a clean level carrying a contaminated precision, which is the failure
+    /// this pairing exists to make unrepresentable.
+    #[test]
+    fn a_contaminated_growth_year_does_not_widen_the_trailing_channel() {
+        let contaminated =
+            issuer_with_revenues("CON", &[1_000.0, 1_050.0, 1_113.0, 111_300.0, 117_000.0]);
+        let growth = contaminated.revenue_growth();
+        let untrimmed = sample_variance(&growth).expect("a spread") / growth.len() as f64;
+        assert!(
+            contaminated
+                .growth_posterior(&frame())
+                .uncertainty()
+                .expect("a measured trailing channel")
+                .variance()
+                < untrimmed / 100.0,
+            "the trailing width is the untrimmed one: {untrimmed}"
+        );
+    }
+
+    /// A history with no width is not a history known with certainty. Trimming
+    /// leaves a set of identical values, a variance of zero, and inverse-variance
+    /// weighting would read that as infinite confidence — so the channel is
+    /// absent instead.
+    #[test]
+    fn a_flat_growth_history_leaves_the_trailing_channel_absent() {
+        let flat = issuer_with_revenues("FLAT", &[1_000.0, 1_000.0, 1_000.0, 1_000.0, 1_000.0]);
+        assert!(flat.growth_posterior(&frame()).value().is_none());
     }
 
     #[test]

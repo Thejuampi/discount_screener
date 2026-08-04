@@ -35,6 +35,18 @@
 //! cargo test --lib probe_return_on_capital_availability -- --ignored --nocapture
 //! ```
 
+#[cfg(test)]
+use crate::edgar::{
+    accepted_annual_entries, edgar_client, extract_driver_annual, fetch_cik_map,
+    fetch_company_facts, fetch_fcf_history, IsoDate,
+};
+#[cfg(test)]
+use crate::sec_driver_normalization_policy_generated::{
+    DriverOperator, CURRENT_DEBT, DILUTED_AVERAGE_SHARES, INTEREST_EXPENSE, MARGINAL_TAX_REFERENCE,
+    NON_CURRENT_DEBT, OPERATING_CASH_FLOW, PRETAX_INCOME, REVENUE, STOCKHOLDERS_EQUITY,
+    TAX_EXPENSE, TOTAL_DEBT,
+};
+
 /// The names the probes run over: the pinned screener cohort plus the four
 /// anchors. Broad enough to speak about the cross-section, small enough to stay
 /// polite to the providers.
@@ -44,6 +56,128 @@ const PROBE_COHORT: &[&str] = &[
     "EPAM", "T", "GEHC", "DAL", "WDC", "GOOGL", "HPE", "CRM", "SLB", "EXE", "OMC", "PTC", "PG",
     "MSFT", "AMZN",
 ];
+
+/// The sample for the point-in-time coverage probe, named rather than left to
+/// whoever runs it: the four valuation anchors, the issuers whose published
+/// number the interest-sign wave moves, and the cohort names with the longest
+/// filing histories — pre-1990 registrants, where a companyfacts entry filed
+/// before the modern XBRL discipline is likeliest to be missing a field.
+///
+/// COF, DAL, CHTR and BKR are the interest-sign wave's named issuers; MPWR is
+/// the one cohort member whose published value that wave was measured to move,
+/// so leaving it out would sample everywhere except where the effect is.
+#[cfg(test)]
+const FILING_DATE_PROBE_SAMPLE: &[&str] = &[
+    "PG", "GOOGL", "AMZN", "MSFT", "COF", "DAL", "CHTR", "BKR", "MPWR", "T", "SLB", "OMC", "AVY",
+    "DVN", "TER", "EME", "APH",
+];
+
+/// The drivers the probe walks, with the label used in its table. Every driver
+/// the valuation bridge reads from SEC facts, so a coverage hole cannot hide in
+/// the one nobody counted.
+#[cfg(test)]
+const FILING_DATE_PROBE_DRIVERS: &[(&str, DriverOperator)] = &[
+    ("ocf", OPERATING_CASH_FLOW),
+    ("revenue", REVENUE),
+    ("interest", INTEREST_EXPENSE),
+    ("debt_total", TOTAL_DEBT),
+    ("debt_current", CURRENT_DEBT),
+    ("debt_noncurr", NON_CURRENT_DEBT),
+    ("equity", STOCKHOLDERS_EQUITY),
+    ("tax", TAX_EXPENSE),
+    ("pretax", PRETAX_INCOME),
+    ("shares", DILUTED_AVERAGE_SHARES),
+    ("tax_reference", MARGINAL_TAX_REFERENCE),
+];
+
+/// One companyfacts entry that passed form, period-shape and frame admission but
+/// will never become an annual value, and the field it is missing.
+#[cfg(test)]
+struct DroppedFact {
+    driver: &'static str,
+    qname: &'static str,
+    end: String,
+    filed: String,
+    accession: String,
+    reason: &'static str,
+}
+
+/// What the fail-closed rules refuse for one issuer, and what a point-in-time
+/// read would see that a latest-only read cannot.
+#[cfg(test)]
+#[derive(Default)]
+struct FilingDateCoverage {
+    accepted: usize,
+    no_filed: usize,
+    unparseable_end: usize,
+    no_accession: usize,
+    disagreeing_vintages: usize,
+    earliest_filed: Option<String>,
+    dropped: Vec<DroppedFact>,
+}
+
+/// Count, for one issuer, every fact the fail-closed rules refuse and every
+/// period end whose vintages disagree.
+///
+/// Nothing here judges: it reports what is in the filings. Column three is the
+/// one that decides whether `as_of` can ever differ from `latest` on live data.
+#[cfg(test)]
+fn measure_filing_date_coverage(facts: &serde_json::Value) -> FilingDateCoverage {
+    use std::collections::HashMap;
+
+    let mut coverage = FilingDateCoverage::default();
+    for (label, driver) in FILING_DATE_PROBE_DRIVERS {
+        let mut values_by_period: HashMap<(&str, String), Vec<String>> = HashMap::new();
+        for (qname, entry) in accepted_annual_entries(facts, driver) {
+            coverage.accepted += 1;
+            let end = entry["end"].as_str().unwrap_or("<absent>");
+            let filed = entry["filed"].as_str();
+            let accession = entry["accn"].as_str();
+            if let Some(filed) = filed {
+                coverage.earliest_filed = Some(match coverage.earliest_filed.take() {
+                    Some(earliest) if earliest.as_str() <= filed => earliest,
+                    _ => filed.to_owned(),
+                });
+            }
+
+            let reason = if filed.is_none() {
+                coverage.no_filed += 1;
+                Some("no filed date")
+            } else if IsoDate::parse(end).is_none() {
+                coverage.unparseable_end += 1;
+                Some("end will not parse")
+            } else if accession.is_none_or(str::is_empty) {
+                coverage.no_accession += 1;
+                Some("no accession")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                coverage.dropped.push(DroppedFact {
+                    driver: label,
+                    qname,
+                    end: end.to_owned(),
+                    filed: filed.unwrap_or("<absent>").to_owned(),
+                    accession: accession.unwrap_or("<absent>").to_owned(),
+                    reason,
+                });
+                continue;
+            }
+            // Values are compared as filed text: two vintages that print the
+            // same digits are the same claim, and rounding one to f64 first
+            // could merge two claims that differ in the last dollar.
+            values_by_period
+                .entry((qname, end.to_owned()))
+                .or_default()
+                .push(entry["val"].to_string());
+        }
+        coverage.disagreeing_vintages += values_by_period
+            .into_values()
+            .filter(|values| values.iter().any(|value| *value != values[0]))
+            .count();
+    }
+    coverage
+}
 
 #[cfg(test)]
 fn median(values: &mut [f64]) -> Option<f64> {
@@ -109,13 +243,10 @@ struct CapitalYear {
 /// the rest are tail coverage. Reported per issuer because a precedence bug is
 /// invisible in the merged series — it looks like a number, just the wrong one.
 #[cfg(test)]
-fn qname_coverage(
-    facts: &serde_json::Value,
-    driver: crate::sec_driver_normalization_policy_generated::DriverOperator,
-) -> Vec<(&'static str, usize)> {
+fn qname_coverage(facts: &serde_json::Value, driver: DriverOperator) -> Vec<(&'static str, usize)> {
     (0..driver.qnames.len())
         .map(|index| {
-            let single = crate::sec_driver_normalization_policy_generated::DriverOperator {
+            let single = DriverOperator {
                 qnames: &driver.qnames[index..=index],
                 unit: driver.unit,
                 period_shape: driver.period_shape,
@@ -123,7 +254,7 @@ fn qname_coverage(
             };
             (
                 driver.qnames[index],
-                crate::edgar::extract_driver_annual(facts, single).len(),
+                extract_driver_annual(facts, single).len(),
             )
         })
         .filter(|(_, years)| *years > 0)
@@ -266,8 +397,8 @@ mod tests {
             INTEREST_EXPENSE, STOCKHOLDERS_EQUITY,
         };
 
-        let edgar = crate::edgar::edgar_client();
-        let cik_map = crate::edgar::fetch_cik_map(&edgar).expect("SEC CIK map");
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
 
         let mut issuers_with_enough = 0usize;
         let mut non_positive_capital_years = 0usize;
@@ -303,7 +434,7 @@ mod tests {
                 println!("{symbol:<7} no CIK");
                 continue;
             };
-            let Ok(Some(history)) = crate::edgar::fetch_fcf_history(&edgar, symbol, cik) else {
+            let Ok(Some(history)) = fetch_fcf_history(&edgar, symbol, cik) else {
                 println!("{symbol:<7} no history");
                 continue;
             };
@@ -312,7 +443,7 @@ mod tests {
             // fact leaking in from the statement of changes in equity, or a net
             // interest *income* line resolving as interest expense, both read as
             // a plausible number in the merged series.
-            if let Ok(facts) = crate::edgar::fetch_company_facts(&edgar, symbol, cik) {
+            if let Ok(facts) = fetch_company_facts(&edgar, symbol, cik) {
                 let describe = |coverage: Vec<(&'static str, usize)>| {
                     if coverage.is_empty() {
                         "none".to_string()
@@ -586,8 +717,8 @@ mod tests {
     #[test]
     #[ignore = "network: SEC revenue history persistence probe; diagnostic only"]
     fn probe_growth_persistence_rho1() {
-        let edgar = crate::edgar::edgar_client();
-        let cik_map = crate::edgar::fetch_cik_map(&edgar).expect("SEC CIK map");
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
 
         let mut rhos: Vec<f64> = Vec::new();
         let mut half_lives: Vec<f64> = Vec::new();
@@ -604,7 +735,7 @@ mod tests {
                 println!("{symbol:<7} no CIK");
                 continue;
             };
-            let Ok(Some(history)) = crate::edgar::fetch_fcf_history(&edgar, symbol, cik) else {
+            let Ok(Some(history)) = fetch_fcf_history(&edgar, symbol, cik) else {
                 println!("{symbol:<7} no history");
                 continue;
             };
@@ -669,6 +800,115 @@ mod tests {
              and pushes values DOWN, against the undervaluation cluster the redesign exists to fix.\n\
              A median se(rho_1) near 0.3 means per-issuer kappa is not estimable and FR-17\n\
              shrinkage will pull nearly every name to the pooled prior -- a constant in disguise."
+        );
+    }
+
+    /// Probe D. What does point-in-time evidence cost, and does it ever differ?
+    ///
+    /// Three questions, over a named sample rather than whichever issuers make
+    /// the answer comfortable:
+    ///
+    /// 1. how many accepted 10-K facts carry no filing date;
+    /// 2. how many carry a period end that will not parse;
+    /// 3. how many `(concept, period_end)` pairs were filed more than once at
+    ///    **different values**.
+    ///
+    /// Columns 1 and 2 (and the accession column, the third fail-closed field)
+    /// measure what refusing an undated fact costs. Column 3 measures whether
+    /// `as_of` can ever differ from `latest` on live filings — which is the only
+    /// reason retained vintages exist. Every refused fact is printed
+    /// individually: a count does not explain a moved anchor, a named fact does.
+    ///
+    /// Asserts nothing.
+    #[test]
+    #[ignore = "network: SEC filing-date coverage probe; diagnostic only"]
+    fn probe_facts_without_a_filing_date() {
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
+
+        let mut totals = FilingDateCoverage::default();
+        let mut all_dropped: Vec<(&str, DroppedFact)> = Vec::new();
+
+        println!("=== PROBE D: point-in-time coverage of accepted 10-K facts ===");
+        println!(
+            "{:<7} {:>9} {:>9} {:>10} {:>9} {:>11}  {}",
+            "symbol", "accepted", "no_filed", "bad_end", "no_accn", "disagreeing", "earliest_filed"
+        );
+        for &symbol in FILING_DATE_PROBE_SAMPLE {
+            let Some(&cik) = cik_map.get(symbol) else {
+                println!("{symbol:<7} no CIK");
+                continue;
+            };
+            let Ok(facts) = fetch_company_facts(&edgar, symbol, cik) else {
+                println!("{symbol:<7} no companyfacts");
+                continue;
+            };
+            let coverage = measure_filing_date_coverage(&facts);
+            println!(
+                "{:<7} {:>9} {:>9} {:>10} {:>9} {:>11}  {}",
+                symbol,
+                coverage.accepted,
+                coverage.no_filed,
+                coverage.unparseable_end,
+                coverage.no_accession,
+                coverage.disagreeing_vintages,
+                coverage.earliest_filed.as_deref().unwrap_or("none")
+            );
+            totals.accepted += coverage.accepted;
+            totals.no_filed += coverage.no_filed;
+            totals.unparseable_end += coverage.unparseable_end;
+            totals.no_accession += coverage.no_accession;
+            totals.disagreeing_vintages += coverage.disagreeing_vintages;
+            all_dropped.extend(
+                coverage
+                    .dropped
+                    .into_iter()
+                    .map(|dropped| (symbol, dropped)),
+            );
+        }
+
+        println!();
+        println!(
+            "TOTAL accepted={} no_filed={} bad_end={} no_accn={} disagreeing_period_ends={}",
+            totals.accepted,
+            totals.no_filed,
+            totals.unparseable_end,
+            totals.no_accession,
+            totals.disagreeing_vintages
+        );
+
+        println!();
+        if all_dropped.is_empty() {
+            println!(
+                "No accepted fact was refused. Fail-closed extraction costs this sample nothing."
+            );
+        } else {
+            println!("EVERY REFUSED FACT (an unexplained anchor delta must appear here):");
+            println!(
+                "{:<7} {:<14} {:<52} {:<12} {:<12} {:<22} {}",
+                "symbol", "driver", "qname", "end", "filed", "accn", "reason"
+            );
+            for (symbol, dropped) in &all_dropped {
+                println!(
+                    "{:<7} {:<14} {:<52} {:<12} {:<12} {:<22} {}",
+                    symbol,
+                    dropped.driver,
+                    dropped.qname,
+                    dropped.end,
+                    dropped.filed,
+                    dropped.accession,
+                    dropped.reason
+                );
+            }
+        }
+
+        println!();
+        println!(
+            "READ THIS AS: columns 1, 2 and 4 are what fail-closed extraction refuses; each one\n\
+             is a driver-year an issuer may lose, and every one of them is named above.\n\
+             Column 3 is why vintages are retained at all -- a zero there would mean as_of and\n\
+             latest can never disagree on this sample, and the point-in-time API is untested by\n\
+             live data rather than merely unused."
         );
     }
 }

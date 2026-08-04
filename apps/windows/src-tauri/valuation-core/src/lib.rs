@@ -50,7 +50,9 @@ pub use attribution::{Contribution, ValuationInput};
 pub use capital::{cost_of_debt, wacc, CreditCurve};
 pub use classification::{classify, BusinessClass, Instrument};
 pub use evidence::{AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis};
-pub use numerics::{robust_mean, standardize, Standardized, MAX_ABSOLUTE_Z};
+pub use numerics::{
+    robust_centre, robust_mean, standardize, RobustCentre, Standardized, MAX_ABSOLUTE_Z,
+};
 pub use posterior::{fuse, Fusion};
 pub use projection::{equity_value, intrinsic_value, GrowthPath, Valuation};
 pub use publication::{publish, Refusal, ValuationPosterior};
