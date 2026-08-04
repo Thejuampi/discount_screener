@@ -164,14 +164,21 @@ pub fn run() {
             let scalp_rx = app.state::<AppState>().scalp_ws_tx.subscribe();
             scalp_ws::spawn(app.handle().clone(), scalp_rx);
 
-            // ── Enable autostart on first launch (idempotent) ─────────────────
-            // Never enable (or touch) autostart from native e2e — that would install
-            // a login-time launch of the real product as a test side effect.
-            if !native_e2e {
-                let autostart = app.autolaunch();
-                if let Ok(false) = autostart.is_enabled() {
-                    let _ = autostart.enable();
+            // ── Autostart policy ──────────────────────────────────────────────
+            // Debug / native-e2e MUST never install a Run-key to target\debug\*.exe.
+            // That poisoned Windows login + made every rebuild/session look like
+            // "tests keep launching the real app". Heal any existing debug entry.
+            // Release may still opt-in on first launch; Settings can always toggle.
+            let autostart = app.autolaunch();
+            if native_e2e || cfg!(debug_assertions) {
+                if let Ok(true) = autostart.is_enabled() {
+                    let _ = autostart.disable();
+                    eprintln!(
+                        "discount_screener: disabled Windows autostart (debug/e2e must not register target\\\\debug)"
+                    );
                 }
+            } else if let Ok(false) = autostart.is_enabled() {
+                let _ = autostart.enable();
             }
 
             // ── Tray icon ─────────────────────────────────────────────────────

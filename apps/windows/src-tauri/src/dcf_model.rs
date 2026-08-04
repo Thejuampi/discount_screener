@@ -1661,23 +1661,26 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .filter(|point| point.revenue_growth_bps.is_some() && point.acquisition_contaminated)
         .map(|point| point.year)
         .collect();
-    let latest_growth_is_acquisition_contaminated = recent_points
-        .last()
-        .is_some_and(|point| point.revenue_growth_bps.is_some() && point.acquisition_contaminated);
     let mut recent_growths: Vec<i32> = recent_points
         .iter()
         .filter(|point| !point.acquisition_contaminated)
         .filter_map(|point| point.revenue_growth_bps)
         .collect();
-    let acquisition_growth_must_be_zero = !acquisition_contaminated_growth_years.is_empty()
-        && (latest_growth_is_acquisition_contaminated || recent_growths.len() < 2);
-    if recent_growths.len() < 2 && acquisition_contaminated_growth_years.is_empty() {
+    // An acquisition-contaminated year is an *absent* growth observation, not a
+    // zero one, and a contaminated latest year says nothing about the clean
+    // years behind it. Absence is answered by widening to every clean year on
+    // file -- the same answer already given when the window is thin for any
+    // other reason. Only when no clean pair survives that widening is the
+    // trailing growth channel genuinely absent.
+    if recent_growths.len() < 2 {
         recent_growths = driver_points
             .iter()
             .filter(|point| !point.acquisition_contaminated)
             .filter_map(|point| point.revenue_growth_bps)
             .collect();
     }
+    let acquisition_growth_must_be_zero =
+        !acquisition_contaminated_growth_years.is_empty() && recent_growths.len() < 2;
     if recent_baseline.len() < 2 || (recent_growths.len() < 2 && !acquisition_growth_must_be_zero) {
         return None;
     }
@@ -3215,9 +3218,39 @@ mod tests {
         .collect()
     }
 
+    /// A history whose revenue genuinely grows, so that zeroing growth is
+    /// distinguishable from reading it. `sample_fcf` holds revenue flat, which
+    /// makes it useless for this: it reports zero growth either way.
+    fn growing_history() -> Vec<FcfPoint> {
+        vec![
+            (2019, 100_000_000.0),
+            (2020, 110_000_000.0),
+            (2021, 121_000_000.0),
+            (2022, 133_000_000.0),
+            (2023, 146_000_000.0),
+            (2024, 161_000_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.10)
+                .with_operating_drivers(
+                    revenue * 0.20,
+                    revenue * 0.10,
+                    revenue,
+                    Some(revenue * 0.01),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(100_000_000.0), Some(2_100), None, None)
+        })
+        .collect()
+    }
+
+    /// A contaminated year is an absent growth observation, not a zero one. One
+    /// bad year must not overwrite the clean years behind it — that collapse is
+    /// what priced HPE at a permanent no-growth terminal.
     #[test]
-    fn material_acquisition_uses_zero_near_term_growth_not_a_refusal() {
-        let history = sample_fcf()
+    fn acquisition_in_latest_year_keeps_growth_from_the_clean_years() {
+        let history = growing_history()
             .into_iter()
             .map(|point| {
                 if point.year == 2024 {
@@ -3229,8 +3262,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         let analysis = compute(&operating_fund(), &history, Some(1_000), "test")
+            .expect("acquisition year must normalize, never refuse");
+        assert!(
+            analysis.base_growth_bps > 0,
+            "one contaminated year zeroed growth read from clean years: {}",
+            analysis.base_growth_bps
+        );
+    }
+
+    /// The residual genuine-absence case: contamination leaves no clean pair
+    /// anywhere on file. Growth is unmeasurable, and the engine still returns a
+    /// normalized analysis rather than refusing.
+    #[test]
+    fn acquisition_leaving_no_clean_growth_pair_normalizes_without_refusing() {
+        let history = growing_history()
+            .into_iter()
+            .map(|point| {
+                if point.year >= 2021 {
+                    point.with_acquisition_investment(Some(23_000_000.0))
+                } else {
+                    point
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let analysis = compute(&operating_fund(), &history, Some(1_000), "test")
             .expect("acquisition-normalized FCFF");
-        assert_eq!(analysis.base_growth_bps, 0);
         assert_eq!(analysis.diagnostics.driver_regime, "acquisition_normalized");
     }
 
