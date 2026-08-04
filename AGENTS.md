@@ -344,6 +344,22 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 | Quarantine is a ticket, not a trophy | Do not claim “N names green” while slots are quarantined unless acceptance **explicitly** allows reduced N |
 | Stale UI hides backend truth | After policy bumps, verify Detail does not keep a previous absurd DCF |
 
+### Aggregation — no naked averages (mandatory)
+
+**A plain `sum / n` over a real-world series is a defect in this repo, not a style preference.** It weights a 2008 observation exactly like a 2025 one, and a single contaminated point moves the result by `outlier / n` while leaving no trace in the output. This has already cost us: one issuer-year with a 5208% implied coupon — a debt tag that caught a sliver of the balance while the interest line covered all of it — inverted an entire cross-sectional credit fit by itself.
+
+| Situation | Use |
+| --- | --- |
+| Centre of an issuer's annual series (ROIC, margin, growth, coupon) | `valuation_core::robust_mean(&sample, MAX_ABSOLUTE_Z)` — standardize, discard `\|z\| > 3`, recompute |
+| "Is this observation contamination?" | `valuation_core::standardize(&sample)` then `.outliers(MAX_ABSOLUTE_Z)` — report the index, let the caller decide |
+| Cross-sectional summary across issuers | Median, and say so |
+| A genuine population total (shares, dollars summed to a balance) | A sum is correct; this rule is about *estimates*, not accounting identities |
+
+- The one implementation lives in [`valuation-core/src/numerics.rs`](apps/windows/src-tauri/valuation-core/src/numerics.rs). **Do not write a second one.** If it lacks something you need, extend it there with tests — a private `let avg = xs.iter().sum::<f64>() / n` in a caller is the thing this rule forbids.
+- **Scores are median/MAD, not mean/sd, and that is load-bearing.** With mean and standard deviation the outlier inflates the scale it is then measured against, and no score in an `n`-point sample can exceed `(n - 1) / sqrt(n)` — 2.85 at `n = 10`. Filed histories here are 10–19 years, so a 3-sigma rule built on the mean is arithmetically incapable of flagging anything on the shorter ones. Median and MAD have 50% breakdown and do not have that ceiling.
+- **`MAX_ABSOLUTE_Z = 3.0` does not move.** It is a boundary between populations, not a knob; lowering it to make an estimate come out somewhere nicer is the same failure as relaxing a test threshold.
+- Trimming must **refuse**, never silently fall back to the untrimmed mean — that would be the contaminated answer wearing a robust label. Report how many observations were discarded alongside the estimate.
+
 ### Numerical conclusions — pre-presentation checklist (mandatory)
 
 Before presenting any **dollar / share / rate** figure to Juan as a **conclusion** (not as internal working scratch), the agent must run and **show** this checklist. Verification happens on the agent side first — Juan should not be the first line of sniff tests.
@@ -453,6 +469,9 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
 | One acquisition zeroes the whole growth window | Historical M&A made BSX/ADSK/AVGO-class estimates ignore later clean growth | Contaminate only Y−1→Y; require two clean recent transitions and a clean latest transition, otherwise zero growth explicitly |
 | Analyst gap pill sits beside DCF with no source | A positive Street upside looked like it described a below-market DCF | Label the analyst relation and show DCF-vs-market independently |
+| Naked `sum / n` over an annual series | One 5208% implied coupon inverted a whole cross-sectional credit fit; a plain mean of 19 annual returns reported restructuring years as return | `valuation_core::robust_mean` / `standardize` — never a hand-rolled average. See **Aggregation — no naked averages** |
+| 3-sigma rule built on mean and standard deviation | Provably cannot fire at `n <= 10` (max score is `(n-1)/sqrt(n)`); the outlier inflates its own scale and hides | Median/MAD scores, which have 50% breakdown and no such ceiling |
+| Cash-flow tag used as an income-statement equivalent | `InterestPaidNet` (interest *paid*) sat in the interest-**expense** qname list and gap-filled an accrual series year by year; it was one issuer's only source across nine years | Equivalence classes hold one statement's concept only; an issuer that files none reads **absent**, not a substitute from another statement |
 
 ### Where longer checklists live
 

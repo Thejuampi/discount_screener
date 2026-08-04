@@ -18,6 +18,178 @@
 
 use crate::evidence::AbsenceReason;
 
+/// How far from the centre an observation may sit and still be read as one of
+/// the sample rather than as something else that got into it.
+///
+/// Three standard deviations. Under anything close to normal that is about one
+/// observation in 370, so on the ten-to-twenty-year histories this crate is fed
+/// it should fire roughly never by chance — which is what makes it informative
+/// when it does fire. It is a boundary between populations, not a tuning knob,
+/// and it must not be lowered to make an estimate come out somewhere nicer.
+pub const MAX_ABSOLUTE_Z: f64 = 3.0;
+
+/// Scales a median absolute deviation to a standard deviation.
+///
+/// `1 / Phi^-1(0.75)`. For a normal sample the MAD converges to `0.6745 sigma`,
+/// so this factor makes the robust scale read in the same units as the textbook
+/// one and `MAX_ABSOLUTE_Z` mean the same thing under both.
+const MAD_TO_DEVIATION: f64 = 1.482_602_218_505_602;
+
+/// A sample expressed in units of its own dispersion.
+///
+/// # Why this exists
+///
+/// A plain average is the wrong summary for nearly every series in this codebase
+/// and it fails silently, which is worse. It weights a small early year exactly
+/// like a large recent one, and a single contaminated observation moves it by
+/// `outlier / n` with no trace in the result. That failure mode has already cost
+/// this project: an implied coupon of 5208% — a debt tag that caught a sliver of
+/// the balance while the interest line covered all of it — inverted an entire
+/// cross-sectional credit fit by itself.
+///
+/// Standardizing first makes the question answerable. A score says how far an
+/// observation sits from the rest of its own sample in the sample's own units,
+/// so "is this an observation or a category error" stops being a judgement call
+/// and becomes a number that can be asserted on.
+///
+/// # Why not the textbook `(x - mean) / sd`
+///
+/// Because on the samples this crate is actually fed it cannot work, and the way
+/// it fails is silent. The mean and the standard deviation are both computed
+/// *from* the contaminated sample, so an outlier inflates the very scale it is
+/// then measured against. The effect has a hard arithmetic ceiling: for `n`
+/// observations no score can exceed `(n - 1) / sqrt(n)`, which is 2.85 at `n =
+/// 10` and 3.10 at `n = 12`. Filed histories here run ten to nineteen years, so
+/// a three-deviation rule built on the mean would be unable to flag anything at
+/// all on the shorter ones — including, by construction, the single worst point.
+///
+/// The median and the median absolute deviation do not have that property. Half
+/// the sample would have to be contaminated before either moved, so a bad point
+/// is measured against a scale it had no part in setting, and the 5208% coupon
+/// scores in the hundreds instead of hiding under three.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Standardized {
+    location: f64,
+    scale: f64,
+    scores: Vec<f64>,
+}
+
+impl Standardized {
+    /// The sample median the scores are measured from.
+    pub fn location(&self) -> f64 {
+        self.location
+    }
+
+    /// The sample's median absolute deviation, scaled to read as a standard
+    /// deviation, which is the unit the scores are in.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// One score per input observation, in input order.
+    pub fn scores(&self) -> &[f64] {
+        &self.scores
+    }
+
+    /// Indices of the observations further than `max_absolute_z` from the centre.
+    ///
+    /// Returned rather than removed, because whether an outlier is contamination
+    /// or the most important thing in the sample is the caller's question, not
+    /// this function's.
+    pub fn outliers(&self, max_absolute_z: f64) -> Vec<usize> {
+        self.scores
+            .iter()
+            .enumerate()
+            .filter(|(_, score)| score.abs() > max_absolute_z)
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+/// The middle of a sample. Takes `&mut` because it must order the values, and
+/// ordering a copy the caller cannot see is the more surprising contract.
+fn median_of(sample: &mut [f64]) -> Option<f64> {
+    if sample.is_empty() {
+        return None;
+    }
+    sample.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+    let middle = sample.len() / 2;
+    Some(if sample.len() % 2 == 0 {
+        (sample[middle - 1] + sample[middle]) / 2.0
+    } else {
+        sample[middle]
+    })
+}
+
+/// Express a sample in units of its own dispersion.
+///
+/// Refuses when the sample cannot support the question rather than returning a
+/// number that looks like an answer:
+///
+/// * fewer than three observations — a centre and a spread are two quantities,
+///   and two points cannot supply both and still leave anything to be measured;
+/// * zero dispersion through the middle of the sample, which happens when more
+///   than half the observations are identical. Then the bulk has no width, every
+///   score is either zero or infinite, and the honest report is that this sample
+///   has no scale rather than that everything unlike the mode is an outlier;
+/// * any non-finite input, which would otherwise poison the whole sample.
+pub fn standardize(sample: &[f64]) -> Result<Standardized, AbsenceReason> {
+    if sample.len() < 3 {
+        return Err(AbsenceReason::InsufficientObservations);
+    }
+    if sample.iter().any(|value| !value.is_finite()) {
+        return Err(AbsenceReason::NotReported);
+    }
+    let location = median_of(&mut sample.to_vec()).expect("a non-empty sample");
+    let mut deviations: Vec<f64> = sample
+        .iter()
+        .map(|value| (value - location).abs())
+        .collect();
+    let scale = median_of(&mut deviations).expect("a non-empty sample") * MAD_TO_DEVIATION;
+    if !(scale > 0.0) || !scale.is_finite() {
+        return Err(AbsenceReason::OutOfPolicyRange);
+    }
+    Ok(Standardized {
+        location,
+        scale,
+        scores: sample
+            .iter()
+            .map(|value| (value - location) / scale)
+            .collect(),
+    })
+}
+
+/// The centre of a sample, computed only from the observations that belong to it.
+///
+/// The plain mean of everything the caller happened to collect is the amateur
+/// summary this function exists to replace: it cannot tell a small year from a
+/// contaminated one, and it reports the contamination as signal. Here the sample
+/// states its own dispersion, anything beyond `max_absolute_z` of the centre is
+/// dropped as belonging to a different population, and the centre is recomputed
+/// from what is left.
+///
+/// One pass, deliberately. Iterating to a fixed point lets each removal tighten
+/// the scale enough to justify the next removal, and a sample can be trimmed to
+/// almost nothing that way — the estimate would then be a consequence of the
+/// procedure rather than of the evidence.
+///
+/// Falls back to refusing, never to the untrimmed mean: if removing the outliers
+/// leaves too little to speak with, the honest answer is that there is no
+/// measurement here, not the number that included the contamination.
+pub fn robust_mean(sample: &[f64], max_absolute_z: f64) -> Result<f64, AbsenceReason> {
+    let standardized = standardize(sample)?;
+    let kept: Vec<f64> = sample
+        .iter()
+        .zip(standardized.scores())
+        .filter(|(_, score)| score.abs() <= max_absolute_z)
+        .map(|(value, _)| *value)
+        .collect();
+    if kept.len() < 3 {
+        return Err(AbsenceReason::InsufficientObservations);
+    }
+    Ok(kept.iter().sum::<f64>() / kept.len() as f64)
+}
+
 /// Terms after which a series that has not converged is treated as unusable.
 /// Reached only if the truncation test below never fires, which cannot happen
 /// for `|A| <= MAX_PATH_AMPLITUDE`; it exists so the loop is provably finite.
@@ -107,8 +279,7 @@ mod tests {
     #[test]
     fn the_series_reproduces_a_known_exponential() {
         let (amplitude, ratio): (f64, f64) = (3.0, 0.4);
-        let summed =
-            fading_path_series(amplitude, |order| ratio.powf(order)).expect("converges");
+        let summed = fading_path_series(amplitude, |order| ratio.powf(order)).expect("converges");
         assert!((summed - (amplitude * (1.0 - ratio)).exp()).abs() < 1e-9);
     }
 
@@ -117,6 +288,101 @@ mod tests {
         assert_eq!(
             fading_path_series(MAX_PATH_AMPLITUDE + 1.0, |_| 1.0),
             Err(AbsenceReason::OutOfPolicyRange)
+        );
+    }
+
+    /// Nine ordinary years and one category error — the shape of the 5208%
+    /// implied coupon that inverted the credit fit.
+    #[cfg(test)]
+    const CONTAMINATED: [f64; 10] = [9.0, 9.0, 10.0, 10.0, 10.0, 11.0, 11.0, 12.0, 12.0, 910.0];
+
+    /// A centre and a spread are two quantities; two points cannot supply both
+    /// and still leave anything to be measured.
+    #[test]
+    fn a_sample_too_small_to_have_a_spread_refuses() {
+        assert_eq!(
+            standardize(&[1.0, 9.0]),
+            Err(AbsenceReason::InsufficientObservations)
+        );
+    }
+
+    /// No observation is further from the centre than any other, so "how far
+    /// out" is not a question this sample can answer.
+    #[test]
+    fn a_sample_with_no_dispersion_refuses_rather_than_dividing_by_zero() {
+        assert_eq!(
+            standardize(&[4.0, 4.0, 4.0, 4.0]),
+            Err(AbsenceReason::OutOfPolicyRange)
+        );
+    }
+
+    /// More than half the sample identical leaves the bulk with no width. Every
+    /// score is then zero or infinite, and the honest report is that the sample
+    /// has no scale — not that everything unlike the mode is an outlier.
+    #[test]
+    fn a_sample_whose_middle_has_no_width_refuses() {
+        assert_eq!(
+            standardize(&[7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 1_000.0]),
+            Err(AbsenceReason::OutOfPolicyRange)
+        );
+    }
+
+    /// The scores are anchored on the median, so the middle observation of an
+    /// odd sample scores exactly zero however skewed the rest of it is.
+    #[test]
+    fn the_centre_of_the_sample_scores_zero() {
+        let standardized = standardize(&[1.0, 2.0, 3.0, 4.0, 5_000.0]).expect("a spread");
+        assert_eq!(standardized.scores()[2], 0.0);
+    }
+
+    /// `[1, 2, 3, 4, 5000]`: median 3, absolute deviations `[2, 1, 0, 1, 4997]`
+    /// whose median is 1, so the scale is the MAD consistency factor itself.
+    /// Under mean and standard deviation the scale would read 2235.
+    #[test]
+    fn the_scale_is_the_middle_spread_not_the_one_the_outlier_inflates() {
+        let standardized = standardize(&[1.0, 2.0, 3.0, 4.0, 5_000.0]).expect("a spread");
+        assert!((standardized.scale() - MAD_TO_DEVIATION).abs() < 1e-12);
+    }
+
+    /// The ceiling that rules the textbook estimator out. With mean and standard
+    /// deviation no score in a ten-point sample can exceed `9/sqrt(10) = 2.85`,
+    /// so this point would hide under a three-deviation rule; measured against a
+    /// scale it had no part in setting, it scores in the hundreds.
+    #[test]
+    fn a_contaminated_observation_cannot_hide_behind_the_scale_it_inflates() {
+        let standardized = standardize(&CONTAMINATED).expect("a spread");
+        assert!(standardized.scores()[9] > 100.0);
+    }
+
+    /// The failure this module exists to prevent: one contaminated observation
+    /// carrying an estimate the rest of the sample contradicts. The clean years
+    /// centre on 10.4; the plain mean of all ten is 100.4.
+    #[test]
+    fn a_contaminated_observation_does_not_move_the_robust_centre() {
+        let centre = robust_mean(&CONTAMINATED, MAX_ABSOLUTE_Z).expect("a centre");
+        assert!((centre - 94.0 / 9.0).abs() < 1e-12);
+    }
+
+    /// An outlier is reported, not removed: whether it is contamination or the
+    /// most important fact in the sample is the caller's question.
+    #[test]
+    fn an_outlier_is_named_by_index_rather_than_silently_dropped() {
+        assert_eq!(
+            standardize(&CONTAMINATED)
+                .expect("a spread")
+                .outliers(MAX_ABSOLUTE_Z),
+            vec![9]
+        );
+    }
+
+    /// Trimming must not become a way to manufacture an estimate from a sample
+    /// that no longer has one. Refusing beats reporting the untrimmed mean,
+    /// which would be the contaminated answer wearing a robust label.
+    #[test]
+    fn trimming_below_a_usable_sample_refuses_rather_than_falling_back() {
+        assert_eq!(
+            robust_mean(&[1.0, 1.0, 1.0, f64::NAN], MAX_ABSOLUTE_Z),
+            Err(AbsenceReason::NotReported)
         );
     }
 
