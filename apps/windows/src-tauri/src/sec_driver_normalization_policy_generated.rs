@@ -1,6 +1,6 @@
 // GENERATED FROM shared/contracts/sec-driver-normalization.json. DO NOT EDIT.
 
-pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/8";
+pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/9";
 pub const REQUIRED_UNIT: &str = "USD";
 pub const MINIMUM_DURATION_DAYS: i64 = 325;
 pub const MAXIMUM_DURATION_DAYS: i64 = 380;
@@ -47,6 +47,7 @@ pub const BUSINESS_ACQUISITION: &[&str] = &[
 ];
 pub struct DriverOperator {
     pub qnames: &'static [&'static str],
+    pub qname_signs: &'static [i8],
     pub unit: &'static str,
     pub period_shape: &'static str,
     pub operation: &'static str,
@@ -57,6 +58,7 @@ pub const OPERATING_CASH_FLOW: DriverOperator = DriverOperator {
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation",
     ],
+    qname_signs: &[1, 1, 1],
     unit: "USD",
     period_shape: "duration",
     operation: "select_one_equivalent",
@@ -70,6 +72,7 @@ pub const REVENUE: DriverOperator = DriverOperator {
         "RevenueFromContractWithCustomerIncludingAssessedTax",
         "RevenuesFromExternalCustomers",
     ],
+    qname_signs: &[1, 1, 1, 1, 1, 1],
     unit: "USD",
     period_shape: "duration",
     operation: "select_one_equivalent",
@@ -86,6 +89,7 @@ pub const INTEREST_EXPENSE: DriverOperator = DriverOperator {
         "InterestIncomeExpenseNonoperatingNet",
         "FinanceLeaseInterestExpense",
     ],
+    qname_signs: &[1, 1, 1, 1, 1, 1, -1, -1, 1],
     unit: "USD",
     period_shape: "duration",
     operation: "select_one_equivalent",
@@ -97,6 +101,7 @@ pub const TOTAL_DEBT: DriverOperator = DriverOperator {
         "LongTermDebt",
         "DebtInstrumentCarryingAmount",
     ],
+    qname_signs: &[1, 1, 1, 1],
     unit: "USD",
     period_shape: "instant",
     operation: "select_one_equivalent",
@@ -108,6 +113,7 @@ pub const CURRENT_DEBT: DriverOperator = DriverOperator {
         "DebtCurrent",
         "ShortTermBorrowings",
     ],
+    qname_signs: &[1, 1, 1, 1],
     unit: "USD",
     period_shape: "instant",
     operation: "sum_disjoint_components",
@@ -117,6 +123,7 @@ pub const NON_CURRENT_DEBT: DriverOperator = DriverOperator {
         "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
         "LongTermDebtNoncurrent",
     ],
+    qname_signs: &[1, 1],
     unit: "USD",
     period_shape: "instant",
     operation: "sum_disjoint_components",
@@ -129,6 +136,7 @@ pub const STOCKHOLDERS_EQUITY: DriverOperator = DriverOperator {
         "PartnersCapital",
         "MembersEquity",
     ],
+    qname_signs: &[1, 1, 1, 1, 1],
     unit: "USD",
     period_shape: "instant",
     operation: "select_one_equivalent",
@@ -138,6 +146,7 @@ pub const TAX_EXPENSE: DriverOperator = DriverOperator {
         "IncomeTaxExpenseBenefit",
         "IncomeTaxExpenseBenefitContinuingOperations",
     ],
+    qname_signs: &[1, 1],
     unit: "USD",
     period_shape: "duration",
     operation: "derive_effective_tax",
@@ -150,6 +159,7 @@ pub const PRETAX_INCOME: DriverOperator = DriverOperator {
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
     ],
+    qname_signs: &[1, 1, 1, 1, 1],
     unit: "USD",
     period_shape: "duration",
     operation: "derive_effective_tax",
@@ -162,12 +172,14 @@ pub const MARGINAL_TAX_REFERENCE: DriverOperator = DriverOperator {
         "StatutoryFederalIncomeTaxRate",
         "StatutoryIncomeTaxRate",
     ],
+    qname_signs: &[1, 1, 1, 1, 1],
     unit: "pure",
     period_shape: "duration",
     operation: "reference_policy",
 };
 pub const DILUTED_AVERAGE_SHARES: DriverOperator = DriverOperator {
     qnames: &["WeightedAverageNumberOfDilutedSharesOutstanding"],
+    qname_signs: &[1],
     unit: "shares",
     period_shape: "duration",
     operation: "select_one_equivalent",

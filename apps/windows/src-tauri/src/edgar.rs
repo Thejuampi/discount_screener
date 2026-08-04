@@ -536,9 +536,17 @@ fn materially_restated(candidate: i64, winner: i64) -> bool {
 
 /// Every filed vintage of one concept, unresolved. Nothing is collapsed here:
 /// deciding which vintage wins is `AnnualSeries`'s job and happens once.
+///
+/// `sign` is a static property of the concept (declared on the contract, never
+/// on the filed value), so it is applied here, before the fact exists, and
+/// travels with the observation through precedence resolution, restatement
+/// comparison and vintage retention. Applying it later, to a post-merge
+/// scalar, would let a year filled from a second concept inherit the first
+/// concept's sign instead of its own.
 fn concept_observations(
     facts: &serde_json::Value,
     concept: &str,
+    sign: i8,
     shape: FactPeriodShape,
     unit: &str,
 ) -> Vec<AnnualObservation> {
@@ -552,7 +560,8 @@ fn concept_observations(
         .iter()
         .filter(|entry| is_accepted_annual_entry(entry, shape))
         .filter_map(|entry| {
-            let value_dollars = entry["val"].as_i64()?;
+            let filed_value = entry["val"].as_i64()?;
+            let value_dollars = filed_value * i64::from(sign);
             AnnualObservation::from_fact(sec_fact_from_entry(entry, concept, unit, value_dollars))
         })
         .collect()
@@ -561,16 +570,27 @@ fn concept_observations(
 /// Every filed vintage of a list of equivalent concepts, in declared precedence
 /// order. All of one concept's observations precede the next concept's, which
 /// is the ordering `AnnualSeries::resolve_by_concept` relies on.
+///
+/// `signs` is positional and parallel to `concepts`, mirroring the generated
+/// contract's `qnames`/`qname_signs` pairing; a caller whose two lists
+/// disagree in length has a broken contract, not a value worth guessing at.
 fn concept_vintages(
     facts: &serde_json::Value,
     concepts: &[&str],
+    signs: &[i8],
     shape: FactPeriodShape,
     unit: &str,
 ) -> AnnualSeries {
+    assert_eq!(
+        concepts.len(),
+        signs.len(),
+        "concept list and sign list must have equal length"
+    );
     AnnualSeries {
         observations: concepts
             .iter()
-            .flat_map(|concept| concept_observations(facts, concept, shape, unit))
+            .zip(signs.iter())
+            .flat_map(|(concept, sign)| concept_observations(facts, concept, *sign, shape, unit))
             .collect(),
     }
 }
@@ -609,7 +629,7 @@ pub fn extract_driver_vintages(
         "unsupported SEC driver operation: {}",
         driver.operation
     );
-    concept_vintages(facts, driver.qnames, shape, driver.unit)
+    concept_vintages(facts, driver.qnames, driver.qname_signs, shape, driver.unit)
 }
 
 pub fn extract_driver_annual(
@@ -1545,12 +1565,80 @@ mod tests {
     /// Production readers take a policy driver; these fixtures pin the
     /// resolution rules themselves, so they name the concepts directly rather
     /// than borrowing a driver whose qname list would then be part of the test.
+    /// No driver contract backs this path, so every concept is treated as
+    /// already-positive: an all-ones sign list the same length as `concepts`.
     fn resolved_annual(
         facts: &serde_json::Value,
         concepts: &[&str],
         shape: FactPeriodShape,
     ) -> Vec<AnnualValue> {
-        concept_vintages(facts, concepts, shape, "USD").latest()
+        let signs = vec![1i8; concepts.len()];
+        concept_vintages(facts, concepts, &signs, shape, "USD").latest()
+    }
+
+    /// A filed -63 under the concept declared negated resolves to +63, while a
+    /// filed +200 under the sibling concept in the same call is untouched —
+    /// proof the sign is a per-concept property applied at resolution, not a
+    /// blanket flip over the whole series.
+    #[test]
+    fn concept_vintages_applies_each_concept_its_own_sign() {
+        let facts = serde_json::json!({
+            "facts": {
+                "us-gaap": {
+                    "PositiveConcept": {
+                        "units": { "USD": [{
+                            "form": "10-K",
+                            "start": "2024-01-01",
+                            "end": "2024-12-31",
+                            "filed": "2025-02-20",
+                            "accn": "0000000000-25-000001",
+                            "val": 200,
+                        }] }
+                    },
+                    "NegatedConcept": {
+                        "units": { "USD": [{
+                            "form": "10-K",
+                            "start": "2023-01-01",
+                            "end": "2023-12-31",
+                            "filed": "2024-02-20",
+                            "accn": "0000000000-24-000001",
+                            "val": -63,
+                        }] }
+                    }
+                }
+            }
+        });
+
+        let series = concept_vintages(
+            &facts,
+            &["PositiveConcept", "NegatedConcept"],
+            &[1, -1],
+            FactPeriodShape::Duration,
+            "USD",
+        )
+        .latest();
+
+        let observed: Vec<(i32, i64)> = series
+            .iter()
+            .map(|value| (value.year, value.value_dollars))
+            .collect();
+        assert_eq!(observed, vec![(2023, 63), (2024, 200)]);
+    }
+
+    /// A driver whose sign list disagrees in length with its qname list has a
+    /// broken contract; pairing the two lists up by guesswork would fabricate
+    /// a convention nobody declared, so this refuses instead of resolving.
+    #[test]
+    #[should_panic(expected = "concept list and sign list must have equal length")]
+    fn concept_vintages_panics_when_signs_and_concepts_disagree_in_length() {
+        let facts = serde_json::json!({ "facts": { "us-gaap": {} } });
+        concept_vintages(
+            &facts,
+            &["OnlyConcept"],
+            &[1, -1],
+            FactPeriodShape::Duration,
+            "USD",
+        );
     }
 
     /// A filed fact for a test, complete enough to survive the fail-closed

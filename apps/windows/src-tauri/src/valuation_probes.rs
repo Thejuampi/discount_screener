@@ -248,6 +248,7 @@ fn qname_coverage(facts: &serde_json::Value, driver: DriverOperator) -> Vec<(&'s
         .map(|index| {
             let single = DriverOperator {
                 qnames: &driver.qnames[index..=index],
+                qname_signs: &driver.qname_signs[index..=index],
                 unit: driver.unit,
                 period_shape: driver.period_shape,
                 operation: driver.operation,

@@ -3,13 +3,14 @@ package com.discountscreener.core.engine
 
 internal data class GeneratedSecDriverOperator(
     val qnames: List<String>,
+    val qnameSigns: List<Int>,
     val unit: String,
     val periodShape: String,
     val operation: String,
 )
 
 internal object GeneratedSecDriverNormalizationPolicy {
-    const val fingerprint = "sec-driver-normalization/8"
+    const val fingerprint = "sec-driver-normalization/9"
     const val requiredUnit = "USD"
     const val minimumDurationDays = 325
     const val maximumDurationDays = 380
@@ -68,6 +69,11 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperationsIncludingDiscontinuedOperation",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+    ),
         unit = "USD",
         periodShape = "duration",
         operation = "select_one_equivalent",
@@ -80,6 +86,14 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "SalesRevenueGoodsNet",
         "RevenueFromContractWithCustomerIncludingAssessedTax",
         "RevenuesFromExternalCustomers",
+    ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
     ),
         unit = "USD",
         periodShape = "duration",
@@ -97,6 +111,17 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "InterestIncomeExpenseNonoperatingNet",
         "FinanceLeaseInterestExpense",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+    ),
         unit = "USD",
         periodShape = "duration",
         operation = "select_one_equivalent",
@@ -107,6 +132,12 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "LongTermDebtAndCapitalLeaseObligations",
         "LongTermDebt",
         "DebtInstrumentCarryingAmount",
+    ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
     ),
         unit = "USD",
         periodShape = "instant",
@@ -119,6 +150,12 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "DebtCurrent",
         "ShortTermBorrowings",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+    ),
         unit = "USD",
         periodShape = "instant",
         operation = "sum_disjoint_components",
@@ -127,6 +164,10 @@ internal object GeneratedSecDriverNormalizationPolicy {
         qnames = listOf(
         "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
         "LongTermDebtNoncurrent",
+    ),
+        qnameSigns = listOf(
+        1,
+        1,
     ),
         unit = "USD",
         periodShape = "instant",
@@ -140,6 +181,13 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "PartnersCapital",
         "MembersEquity",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+        1,
+    ),
         unit = "USD",
         periodShape = "instant",
         operation = "select_one_equivalent",
@@ -148,6 +196,10 @@ internal object GeneratedSecDriverNormalizationPolicy {
         qnames = listOf(
         "IncomeTaxExpenseBenefit",
         "IncomeTaxExpenseBenefitContinuingOperations",
+    ),
+        qnameSigns = listOf(
+        1,
+        1,
     ),
         unit = "USD",
         periodShape = "duration",
@@ -161,6 +213,13 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+        1,
+    ),
         unit = "USD",
         periodShape = "duration",
         operation = "derive_effective_tax",
@@ -173,6 +232,13 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "StatutoryFederalIncomeTaxRate",
         "StatutoryIncomeTaxRate",
     ),
+        qnameSigns = listOf(
+        1,
+        1,
+        1,
+        1,
+        1,
+    ),
         unit = "pure",
         periodShape = "duration",
         operation = "reference_policy",
@@ -180,6 +246,9 @@ internal object GeneratedSecDriverNormalizationPolicy {
     val dilutedAverageShares =     GeneratedSecDriverOperator(
         qnames = listOf(
         "WeightedAverageNumberOfDilutedSharesOutstanding",
+    ),
+        qnameSigns = listOf(
+        1,
     ),
         unit = "shares",
         periodShape = "duration",

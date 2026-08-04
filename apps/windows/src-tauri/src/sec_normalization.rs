@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn generated_contract_policy_is_the_category_source() {
-        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/8");
+        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/9");
         assert_eq!(
             investment_category("PaymentsToExploreAndDevelopOilAndGasProperties"),
             InvestmentCategory::Development
@@ -448,6 +448,67 @@ mod tests {
                     case["name"].as_str().unwrap()
                 );
             }
+        }
+    }
+
+    /// One driver constant per key in the contract's `drivers` object. A key
+    /// with no arm here means the generator emitted a constant this test does
+    /// not yet know to check, which is itself the failure this match should
+    /// surface rather than silently skip.
+    fn driver_by_key(key: &str) -> policy::DriverOperator {
+        match key {
+            "operatingCashFlow" => policy::OPERATING_CASH_FLOW,
+            "revenue" => policy::REVENUE,
+            "interestExpense" => policy::INTEREST_EXPENSE,
+            "totalDebt" => policy::TOTAL_DEBT,
+            "currentDebt" => policy::CURRENT_DEBT,
+            "nonCurrentDebt" => policy::NON_CURRENT_DEBT,
+            "stockholdersEquity" => policy::STOCKHOLDERS_EQUITY,
+            "taxExpense" => policy::TAX_EXPENSE,
+            "pretaxIncome" => policy::PRETAX_INCOME,
+            "marginalTaxReference" => policy::MARGINAL_TAX_REFERENCE,
+            "dilutedAverageShares" => policy::DILUTED_AVERAGE_SHARES,
+            other => panic!("no generated driver constant named {other}; add one to this match"),
+        }
+    }
+
+    /// The generated `qname_signs` must reconstruct, index by index, from the
+    /// contract's own `qnames` and `negatedQnames` alone: a qname listed in
+    /// `negatedQnames` is -1, every other qname is +1. This recomputes the
+    /// rule from the source contract on every run rather than trusting the
+    /// generator's output to prove itself; a hand-edited generated file, a
+    /// flipped sign or a transposed pair of negated indices all fail here.
+    #[test]
+    fn generated_qname_signs_reconstruct_from_contract_negated_qnames() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../shared/contracts/sec-driver-normalization.json");
+        let contract: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read SEC contract"))
+                .expect("parse SEC contract");
+        let drivers = contract["drivers"].as_object().expect("drivers object");
+        for (key, driver) in drivers {
+            let negated: Vec<&str> = driver["negatedQnames"]
+                .as_array()
+                .map(|values| values.iter().map(|v| v.as_str().unwrap()).collect())
+                .unwrap_or_default();
+            let reconstructed: Vec<i8> = driver["qnames"]
+                .as_array()
+                .expect("driver qnames")
+                .iter()
+                .map(|q| {
+                    let qname = q.as_str().unwrap();
+                    if negated.contains(&qname) {
+                        -1
+                    } else {
+                        1
+                    }
+                })
+                .collect();
+            assert_eq!(
+                driver_by_key(key).qname_signs,
+                reconstructed.as_slice(),
+                "driver {key} qname_signs disagree with contract negatedQnames"
+            );
         }
     }
 }

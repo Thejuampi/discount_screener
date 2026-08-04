@@ -1,7 +1,7 @@
 {
   "contract": "sec-driver-normalization",
   "version": "1",
-  "fingerprint": "sec-driver-normalization/8",
+  "fingerprint": "sec-driver-normalization/9",
   "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
   "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
   "investmentCategories": {
@@ -73,7 +73,9 @@
       "unit": "USD",
       "periodShape": "duration",
       "operation": "select_one_equivalent",
-      "rationale": "InterestPaidNet was removed. It is the supplemental cash-flow disclosure of interest actually paid, not the accrued income-statement expense, so it is not an equivalent of the other qnames and select_one_equivalent's gap filling was splicing cash into an accrual series year by year. It was EPAM's only source across nine years and padded years for several other issuers. An issuer that files no interest expense now reads as absent, which is the honest answer, rather than as a cash number standing in for an accrual."
+      "negatedQnames": ["InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet"],
+      "rationale": "R1: InterestPaidNet was removed. It is the supplemental cash-flow disclosure of interest actually paid, not the accrued income-statement expense, so it is not an equivalent of the other qnames and select_one_equivalent's gap filling was splicing cash into an accrual series year by year. It was EPAM's only source across nine years and padded years for several other issuers. An issuer that files no interest expense now reads as absent, which is the honest answer, rather than as a cash number standing in for an accrual. R2: InterestIncomeExpenseNet and InterestIncomeExpenseNonoperatingNet are declared in negatedQnames; see signRationale for why.",
+      "signRationale": "These two concepts report the same income-statement line as the rest of the class but under the opposite sign convention: a net EXPENSE is filed negative. LIN 2022-2025 files InterestIncomeExpenseNet at -63/-200/-256/-255M against InterestExpenseNonoperating at +63/+200/+256/+255M -- exact negations. The sign is a static property of the concept, declared here, never a predicate on the filed value and never a branch on the issuer."
     },
     "totalDebt": {
       "qnames": ["DebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt", "DebtInstrumentCarryingAmount"],

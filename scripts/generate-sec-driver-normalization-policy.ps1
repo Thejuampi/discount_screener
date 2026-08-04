@@ -6,6 +6,12 @@
 # stopped emitting `developmentSoftware` and `developmentAggregate` while the
 # committed Rust still carried them, so running the generator would have deleted
 # two constants the app compiles against. A loop cannot drift.
+#
+# Each driver also emits `qname_signs` / `qnameSigns`, one integer per qname,
+# positional and parallel to `qnames`. A qname listed in the driver's
+# `negatedQnames` gets -1; every other qname gets +1. The sign is derived from
+# the contract, never hand-authored, so a driver with no `negatedQnames` key
+# emits an all-+1 array with the same shape as every other driver.
 param(
     [switch]$Check,
     # Write somewhere other than the repo, so a regeneration can be compared
@@ -23,14 +29,24 @@ function KotlinSet($values) {
     $quoted = @($values | ForEach-Object { '        "' + $_ + '"' }) -join ",`n"
     "setOf(`n$quoted,`n    )"
 }
-function KotlinList($values) {
-    $quoted = @($values | ForEach-Object { '        "' + $_ + '"' }) -join ",`n"
+function KotlinList($values, [switch]$NoQuote) {
+    $quoted = @($values | ForEach-Object {
+        if ($NoQuote) { '        ' + $_ } else { '        "' + $_ + '"' }
+    }) -join ",`n"
     "listOf(`n$quoted,`n    )"
+}
+# A qname's sign is a static property of the concept, never of the filed
+# value: -1 when the contract lists it in `negatedQnames`, +1 otherwise.
+# Positional and parallel to `driver.qnames`.
+function QnameSigns($driver) {
+    $negated = @($driver.negatedQnames)
+    @($driver.qnames | ForEach-Object { if ($negated -contains $_) { -1 } else { 1 } })
 }
 function KotlinOperator($driver) {
     @"
     GeneratedSecDriverOperator(
         qnames = $(KotlinList $driver.qnames),
+        qnameSigns = $(KotlinList (QnameSigns $driver) -NoQuote),
         unit = "$($driver.unit)",
         periodShape = "$($driver.periodShape)",
         operation = "$($driver.operation)",
@@ -43,6 +59,7 @@ package com.discountscreener.core.engine
 
 internal data class GeneratedSecDriverOperator(
     val qnames: List<String>,
+    val qnameSigns: List<Int>,
     val unit: String,
     val periodShape: String,
     val operation: String,
@@ -71,12 +88,19 @@ $(
 )
 }
 "@
-function RustSlice($values, [int]$nestedIndent = 0) {
-    if (@($values).Count -eq 1 -or ($nestedIndent -eq 0 -and @($values).Count -le 2)) {
-        return '&[' + (@($values | ForEach-Object { '"' + $_ + '"' }) -join ', ') + ']'
+function RustSlice($values, [int]$nestedIndent = 0, [switch]$NoQuote) {
+    $items = @($values | ForEach-Object { if ($NoQuote) { "$_" } else { '"' + $_ + '"' } })
+    $oneLine = '&[' + ($items -join ', ') + ']'
+    # rustfmt collapses an array literal onto one line whenever it fits its
+    # column budget; matching that here keeps generated output a fixed point
+    # under `cargo fmt --check` without hand-editing the DO NOT EDIT output.
+    # 80 leaves headroom for the field-name prefix and const-block indent that
+    # this function does not itself see.
+    if (@($values).Count -le 1 -or (4 + $nestedIndent + $oneLine.Length) -le 80) {
+        return $oneLine
     }
     $indent = ' ' * (4 + $nestedIndent)
-    $quoted = @($values | ForEach-Object { $indent + '"' + $_ + '",' }) -join "`n"
+    $quoted = @($items | ForEach-Object { $indent + $_ + ',' }) -join "`n"
     "&[`n$quoted`n$(' ' * $nestedIndent)]"
 }
 function RustConstantName([string]$camelCase) {
@@ -90,6 +114,7 @@ function RustOperator($driver) {
 @"
 DriverOperator {
     qnames: $(RustSlice $driver.qnames 4),
+    qname_signs: $(RustSlice (QnameSigns $driver) 4 -NoQuote),
     unit: "$($driver.unit)",
     period_shape: "$($driver.periodShape)",
     operation: "$($driver.operation)",
@@ -114,6 +139,7 @@ $(
 )
 pub struct DriverOperator {
     pub qnames: &'static [&'static str],
+    pub qname_signs: &'static [i8],
     pub unit: &'static str,
     pub period_shape: &'static str,
     pub operation: &'static str,

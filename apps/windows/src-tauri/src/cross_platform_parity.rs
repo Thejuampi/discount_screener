@@ -304,6 +304,10 @@ fn export_qa_cohort_parity_snapshot_for_android() {
     rows.push(compute_t());
     rows.push(compute_amzn());
     rows.push(compute_acgl());
+    // MPWR is not a member of baseline_cohort_2026-07-30.json, so the cohort-driven
+    // loop above cannot exercise the negated interest-sign convention; see
+    // compute_mpwr's doc comment for why this row exists instead.
+    rows.push(compute_mpwr());
 
     let export = ParityExport {
         surface: "windows".into(),
@@ -453,6 +457,117 @@ fn compute_acgl() -> ParityRow {
         Ok(a) => row_from_analysis("ACGL", "checklist_acgl_ri", &a),
         Err(e) => err_row("ACGL", "checklist_acgl_ri", e),
     }
+}
+
+/// MPWR (Monolithic Power Systems, CIK 1280452) files
+/// `InterestIncomeExpenseNonoperatingNet` POSITIVE every year: it carries no
+/// debt (no `TOTAL_DEBT`/`CURRENT_DEBT`/`NON_CURRENT_DEBT` concept is filed at
+/// all) and holds substantial cash, so the line is net interest INCOME, not
+/// expense. Real filed values, USD, from SEC XBRL `companyconcept`:
+///   FY2022 +14,369,000  FY2023 +23,363,000  FY2024 +27,093,000  FY2025 +29,151,000
+/// Under the negated-sign convention added in sec-driver-normalization/9, the
+/// `interestExpense` driver correctly resolves this concept to a NEGATIVE
+/// dollar amount below (net income, not net expense) -- that is what is passed
+/// into `with_operating_drivers` here.
+///
+/// KNOWN HAZARD -- W2a is deliberately inert (J6 stays FALSE at exit):
+/// `FcfPoint::with_operating_drivers` still un-negates via `.map(f64::abs)`
+/// (dcf_model.rs:907), so even this correctly-signed negative value is
+/// silently flipped back to positive before it reaches `compute()`. This row
+/// exists to make that hazard observable in the exported parity snapshot; the
+/// direct, asserting pin for the same hazard is
+/// `mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers`
+/// below. Neither is fixed until a later wave removes dcf_model.rs's three
+/// `.abs()` sites.
+///
+/// FY2024 `IncomeTaxExpenseBenefit` is filed as -1,213,788,000 (10-K filed
+/// 2025-03-03) and restated to -1,019,146,000 (10-K filed 2026-02-27) -- both a
+/// large NEGATIVE tax expense (a tax benefit exceeding pretax income of
+/// 572,912,000), unlike every other year. Neither filing explains the swing,
+/// and using it naively would fabricate an effective tax rate that is not a
+/// defensible reading of the evidence. Rather than invent a number, FY2024's
+/// `tax_rate_bps` is left `None`; its interest and other operating drivers are
+/// still supplied so the sign hazard remains observable for that year too.
+fn compute_mpwr() -> ParityRow {
+    let fund = FundamentalSnapshot {
+        symbol: "MPWR".into(),
+        sector_name: Some("Technology".into()),
+        industry_name: Some("Semiconductors".into()),
+        market_cap_dollars: Some(65_550_022_380),
+        shares_outstanding: Some(48_309_000),
+        beta_millis: Some(1_694),
+        total_debt_dollars: Some(0),
+        total_cash_dollars: Some(1_099_302_000),
+        ..Default::default()
+    };
+    let fcf = vec![
+        FcfPoint::new(2022, 187_831_000.0)
+            .with_operating_drivers(
+                246_674_000.0,
+                -58_843_000.0,
+                1_794_148_000.0,
+                Some(-14_369_000.0),
+                Some(1_662),
+            )
+            .with_rate_resolution_inputs(Some(0.0), Some(2_100), None, None),
+        FcfPoint::new(2023, 580_635_000.0)
+            .with_operating_drivers(
+                638_213_000.0,
+                -57_578_000.0,
+                1_821_072_000.0,
+                Some(-23_363_000.0),
+                Some(1_551),
+            )
+            .with_rate_resolution_inputs(Some(0.0), Some(2_100), None, None),
+        FcfPoint::new(2024, 642_292_000.0)
+            .with_operating_drivers(
+                788_410_000.0,
+                -146_118_000.0,
+                2_207_100_000.0,
+                Some(-27_093_000.0),
+                None,
+            )
+            .with_rate_resolution_inputs(Some(0.0), Some(2_100), None, None),
+        FcfPoint::new(2025, 666_189_000.0)
+            .with_operating_drivers(
+                838_202_000.0,
+                -172_013_000.0,
+                2_790_459_000.0,
+                Some(-29_151_000.0),
+                Some(1_889),
+            )
+            .with_rate_resolution_inputs(Some(0.0), Some(2_100), None, None),
+    ];
+    match compute(&fund, &fcf, Some(133_503), "provider_timeseries") {
+        Ok(a) => row_from_analysis("MPWR", "checklist_mpwr_negated_interest_sign", &a),
+        Err(e) => err_row("MPWR", "checklist_mpwr_negated_interest_sign", e),
+    }
+}
+
+/// Direct, asserting pin for the same hazard `compute_mpwr` documents: even a
+/// correctly-signed negative (net interest income) value is silently
+/// un-negated by `FcfPoint::with_operating_drivers` before it can reach
+/// `compute()`. W2a computes the sign correctly (see `edgar.rs`'s
+/// `concept_observations`/`concept_vintages`) but deliberately leaves
+/// dcf_model.rs's `.abs()` sites standing, so this assertion is expected to
+/// keep passing until a later wave removes them.
+#[test]
+fn mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers() {
+    let point = FcfPoint::new(2025, 666_189_000.0).with_operating_drivers(
+        838_202_000.0,
+        -172_013_000.0,
+        2_790_459_000.0,
+        Some(-29_151_000.0),
+        Some(1_889),
+    );
+    assert_eq!(
+        point.interest_expense_dollars,
+        Some(29_151_000.0),
+        "known hazard (W2a is deliberately inert): dcf_model.rs:907's `.map(f64::abs)` \
+         un-negates the correctly-signed net interest INCOME back to a positive \
+         'expense' before it reaches compute(); this is not fixed until a later wave \
+         removes dcf_model.rs's three `.abs()` sites"
+    );
 }
 
 // ── Random-20 SP500 live pins (inputs from SEC+Yahoo offline fixture) ─────────
