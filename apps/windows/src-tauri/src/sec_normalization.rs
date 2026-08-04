@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn generated_contract_policy_is_the_category_source() {
-        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/6");
+        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/7");
         assert_eq!(
             investment_category("PaymentsToExploreAndDevelopOilAndGasProperties"),
             InvestmentCategory::Development

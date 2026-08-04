@@ -9,7 +9,7 @@ internal data class GeneratedSecDriverOperator(
 )
 
 internal object GeneratedSecDriverNormalizationPolicy {
-    const val fingerprint = "sec-driver-normalization/5"
+    const val fingerprint = "sec-driver-normalization/7"
     const val requiredUnit = "USD"
     const val minimumDurationDays = 325
     const val maximumDurationDays = 380
@@ -24,6 +24,13 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "PaymentsToAcquireOtherPropertyPlantAndEquipment",
         "PaymentsForCapitalImprovements",
         "PaymentsToExploreAndDevelopOilAndGasProperties",
+    )
+    val developmentSoftware = setOf(
+        "PaymentsForSoftware",
+        "PaymentsToDevelopSoftware",
+    )
+    val developmentAggregate = setOf(
+        "PaymentsToAcquireProductiveAssets",
     )
     val propertyAcquisition = setOf(
         "PaymentsToAcquireOilAndGasProperty",
@@ -125,6 +132,18 @@ internal object GeneratedSecDriverNormalizationPolicy {
         unit = "USD",
         periodShape = "instant",
         operation = "sum_disjoint_components",
+    )
+    val stockholdersEquity =     GeneratedSecDriverOperator(
+        qnames = listOf(
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "StockholdersEquity",
+        "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest",
+        "PartnersCapital",
+        "MembersEquity",
+    ),
+        unit = "USD",
+        periodShape = "instant",
+        operation = "select_one_equivalent",
     )
     val taxExpense =     GeneratedSecDriverOperator(
         qnames = listOf(

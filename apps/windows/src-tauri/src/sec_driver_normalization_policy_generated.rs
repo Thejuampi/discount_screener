@@ -1,6 +1,6 @@
 // GENERATED FROM shared/contracts/sec-driver-normalization.json. DO NOT EDIT.
 
-pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/6";
+pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/7";
 pub const REQUIRED_UNIT: &str = "USD";
 pub const MINIMUM_DURATION_DAYS: i64 = 325;
 pub const MAXIMUM_DURATION_DAYS: i64 = 380;
@@ -121,6 +121,18 @@ pub const NON_CURRENT_DEBT: DriverOperator = DriverOperator {
     unit: "USD",
     period_shape: "instant",
     operation: "sum_disjoint_components",
+};
+pub const STOCKHOLDERS_EQUITY: DriverOperator = DriverOperator {
+    qnames: &[
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "StockholdersEquity",
+        "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest",
+        "PartnersCapital",
+        "MembersEquity",
+    ],
+    unit: "USD",
+    period_shape: "instant",
+    operation: "select_one_equivalent",
 };
 pub const TAX_EXPENSE: DriverOperator = DriverOperator {
     qnames: &[

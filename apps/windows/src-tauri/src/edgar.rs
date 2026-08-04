@@ -331,7 +331,7 @@ fn extract_annual_any_with_shape(
     result
 }
 
-fn extract_driver_annual(
+pub fn extract_driver_annual(
     facts: &serde_json::Value,
     driver: crate::sec_driver_normalization_policy_generated::DriverOperator,
 ) -> Vec<AnnualValue> {
@@ -957,24 +957,35 @@ pub fn fetch_insider_activity(client: &Client, cik: u64) -> Result<Option<Inside
 }
 
 /// Fetch EDGAR annual FCF series (OCF − CapEx) for transparent multi-scenario DCF.
-pub fn fetch_fcf_history(
+/// The raw companyfacts document for one issuer.
+///
+/// Separate from `fetch_fcf_history` so a caller that needs to see which qname a
+/// driver actually resolved to can extract concept by concept, rather than only
+/// seeing the merged series the history returns.
+pub fn fetch_company_facts(
     client: &Client,
     symbol: &str,
     cik: u64,
-) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
-    let cik_padded = format!("{:010}", cik);
+) -> Result<serde_json::Value, String> {
     let url = format!(
-        "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
-        cik_padded
+        "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
+        cik
     );
-
-    let body: serde_json::Value = client
+    client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .map_err(|e| format!("FetchFailed: EDGAR {}: {}", symbol, e))?
         .json()
-        .map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))?;
+        .map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))
+}
+
+pub fn fetch_fcf_history(
+    client: &Client,
+    symbol: &str,
+    cik: u64,
+) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
+    let body = fetch_company_facts(client, symbol, cik)?;
 
     let ocf = extract_driver_annual(
         &body,
@@ -1002,6 +1013,10 @@ pub fn fetch_fcf_history(
     let tax = extract_driver_annual(
         &body,
         crate::sec_driver_normalization_policy_generated::TAX_EXPENSE,
+    );
+    let equity = extract_driver_annual(
+        &body,
+        crate::sec_driver_normalization_policy_generated::STOCKHOLDERS_EQUITY,
     );
     let debt = extract_total_debt(&body);
     let marginal_tax = extract_reference_percent(
@@ -1055,7 +1070,9 @@ pub fn fetch_fcf_history(
                 let interest_expense_dollars = by_year(&interest, v.year);
                 let total_debt_dollars = by_year(&debt, v.year);
                 let marginal_tax_bps = by_year(&marginal_tax, v.year).map(|value| value as i32);
-                let tax_rate_bps = match (by_year(&tax, v.year), by_year(&pretax, v.year)) {
+                let pretax_income_dollars = by_year(&pretax, v.year);
+                let stockholders_equity_dollars = by_year(&equity, v.year);
+                let tax_rate_bps = match (by_year(&tax, v.year), pretax_income_dollars) {
                     (Some(tax_expense), Some(pretax_income)) if pretax_income.abs() > 0.0 => Some(
                         ((tax_expense.abs() / pretax_income.abs()) * 10_000.0)
                             .round()
@@ -1081,6 +1098,10 @@ pub fn fetch_fcf_history(
                             marginal_tax_bps,
                             None,
                             None,
+                        );
+                        point = point.with_return_on_capital_inputs(
+                            pretax_income_dollars,
+                            stockholders_equity_dollars,
                         );
                         point = point.with_acquisition_investment(acquisition_investment_dollars);
                         point = point.with_diluted_average_shares(by_year(&diluted_shares, v.year));

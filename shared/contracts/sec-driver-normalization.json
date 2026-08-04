@@ -1,7 +1,7 @@
 {
   "contract": "sec-driver-normalization",
   "version": "1",
-  "fingerprint": "sec-driver-normalization/6",
+  "fingerprint": "sec-driver-normalization/7",
   "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
   "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
   "investmentCategories": {
@@ -91,6 +91,13 @@
       "unit": "USD",
       "periodShape": "instant",
       "operation": "sum_disjoint_components"
+    },
+    "stockholdersEquity": {
+      "qnames": ["StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "StockholdersEquity", "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest", "PartnersCapital", "MembersEquity"],
+      "unit": "USD",
+      "periodShape": "instant",
+      "operation": "select_one_equivalent",
+      "rationale": "The equity half of invested capital. The NCI-inclusive tag leads because the return it will be divided into is consolidated (pretax income plus interest expense, both struck before the minority's share is removed); reading equity excluding NCI against a consolidated return overstates the return of every issuer carrying a material minority. select_one_equivalent, not a composition: issuers genuinely split debt across disjoint current and non-current lines, but total equity is one reported subtotal, and the components (CommonStockValue, AdditionalPaidInCapital, RetainedEarnings) omit AOCI when summed. LiabilitiesAndStockholdersEquity is excluded because it is total assets."
     },
     "taxExpense": {
       "qnames": ["IncomeTaxExpenseBenefit", "IncomeTaxExpenseBenefitContinuingOperations"],

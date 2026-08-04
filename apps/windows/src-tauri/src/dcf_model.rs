@@ -860,6 +860,13 @@ pub struct FcfPoint {
     pub market_yield_bps: Option<i32>,
     /// Rating-derived or interest-coverage synthetic spread over risk-free.
     pub rated_or_synthetic_spread_bps: Option<i32>,
+    /// Pre-tax income for the same fiscal year. Already extracted to derive the
+    /// effective tax rate; kept here because it is also the numerator of a
+    /// return on capital, which the effective rate throws away.
+    pub pretax_income_dollars: Option<f64>,
+    /// Book equity at the same fiscal period end as `total_debt_dollars`. The
+    /// two together are the capital a return is earned on.
+    pub stockholders_equity_dollars: Option<f64>,
 }
 
 impl FcfPoint {
@@ -881,6 +888,8 @@ impl FcfPoint {
             marginal_tax_source: None,
             market_yield_bps: None,
             rated_or_synthetic_spread_bps: None,
+            pretax_income_dollars: None,
+            stockholders_equity_dollars: None,
         }
     }
 
@@ -930,6 +939,23 @@ impl FcfPoint {
         self.marginal_tax_source = marginal_tax_bps.map(|_| WaccFieldSource::JurisdictionStatutory);
         self.market_yield_bps = market_yield_bps;
         self.rated_or_synthetic_spread_bps = rated_or_synthetic_spread_bps;
+        self
+    }
+
+    /// Carry the two terms a return on capital is measured from.
+    ///
+    /// Neither is abs-ed, unlike CapEx and interest above. Those are outflows
+    /// that issuers file under either sign, so the sign carries no information
+    /// and stripping it recovers the intent. Earnings and equity are signed
+    /// quantities where the sign *is* the measurement: abs would turn a loss
+    /// into a profit and a capital deficit into capital.
+    pub fn with_return_on_capital_inputs(
+        mut self,
+        pretax_income_dollars: Option<f64>,
+        stockholders_equity_dollars: Option<f64>,
+    ) -> Self {
+        self.pretax_income_dollars = pretax_income_dollars;
+        self.stockholders_equity_dollars = stockholders_equity_dollars;
         self
     }
 
