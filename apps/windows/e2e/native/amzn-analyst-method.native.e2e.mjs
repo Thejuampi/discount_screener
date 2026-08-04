@@ -1,3 +1,9 @@
+/**
+ * OPT-IN native integration test (IT).
+ *
+ * Spawns the real debug Tauri binary. Not part of `npm test` or `cargo test`.
+ * Run only via: `npm run test:e2e:native:amzn-fem` or `npm run test:it`.
+ */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";

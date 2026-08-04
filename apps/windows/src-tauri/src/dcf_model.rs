@@ -1,3 +1,20 @@
+//! **DEPRECATED — superseded by the `valuation-core` crate.**
+//!
+//! This module still runs the shipping valuation and will keep running it until
+//! the pure core carries the same behaviour. Do not extend it. Fixes that keep
+//! the current numbers honest are welcome; new mechanism belongs in
+//! `valuation-core`, specified by a row in a `.feature` Examples table.
+//!
+//! Known structural defects, kept here so nobody rediscovers them the hard way:
+//!
+//! * `r_d = interest_t / avg_debt_t` is a trailing accounting coupon that
+//!   responds to nothing, so WACC is *strictly decreasing* in leverage. Every
+//!   net-cash name in the diagnostic cohort lands on the unit-beta cost of
+//!   equity (925 bps) while levered names are dragged below it (CHTR 493,
+//!   T 680). Fixing it needs a cross-sectional fit the per-name pipeline has
+//!   nowhere to put — see failure mode 20.
+//! * The FCFF lane observes no forecast of any kind; growth is a trailing median.
+//!
 //! Valuation model family: business-class routing, residual income for financials,
 //! FCFF+WACC for operating firms, dynamic market params + beta shrink.
 //!

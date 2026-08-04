@@ -465,3 +465,138 @@ Android `DcfAnalysisEngine.kt` mirrors the policy (`maintenanceCapexIntensityBps
   it is history-length sensitive (2025 is a spike on a 6-year AMZN window, not on 16).
 - **`investment_wave` latches on any lifetime CapEx spike**, so a spike from a decade ago
   still asserts a *current* wave. Consider scoping to the recent window.
+
+---
+## 14. Four visibly-wrong cards, diagnosed one by one (2026-08-03)
+
+User pointed at four cards whose numbers were plainly wrong: COF, MPWR, FIS, HPE.
+Diagnostic entry point: `valuation_gap_attribution::tests::live_off_name_lane_audit`
+(`--ignored --nocapture`) prints both lanes, their inputs, and the route decision
+side by side for a symbol list. Raw-source probes:
+`edgar::tests::probe_investing_outflows` (every filed CapEx-class concept, plus an
+old-vs-new CapEx column) and `fetcher::list_ready_tests::probe_forward_eps_ladder`
+(the whole `earningsTrend` ladder with period end dates).
+
+**One of the four was a data defect and is fixed. The other three are policy
+decisions, measured and left for the owner.**
+
+### 14.1 FIS — SHIPPED. CapEx policy could not see capitalized software
+
+FIS reinvests through software, not plant: FY2025 `PaymentsForSoftware` $0.835B
+against `PaymentsToAcquirePropertyPlantAndEquipment` $0.154B. The `development`
+concept list had no software concept, so the engine read CapEx as 1.17% of
+revenue. For FY2014-2021 FIS filed no tangible CapEx fact at all and those holes
+were imputed, truncating usable history to four years.
+
+Fix: `developmentSoftware` component class summed with the tangible one, dropped
+when the tangible selection is `PaymentsToAcquireProductiveAssets` (us-gaap
+defines that element as covering PP&E, **software** and other intangibles, so
+summing double counts). Contract `sec-driver-normalization/6`; FIS and INTU added
+to the frozen fixture corpus, which now pins the summed total, not only per-fact
+evidence states.
+
+| FIS FY2025 | before | after |
+|---|---|---|
+| CapEx | $0.154B (1.17% of revenue) | **$0.989B (8.07%)** |
+| FCFF | $2.757B ($5.33/sh) | **$1.922B ($3.72/sh)** |
+| OCF − CapEx | $2.46B | **$1.61B** |
+| usable driver history | 4 years | **10 years** |
+| FCFF lane value | $131.91 | **$88.19** |
+| forward lane value | $103.16 | **$90.11** |
+| lane disagreement | 2446 bps | **215 bps** |
+
+Sniff anchor and tolerance, stated explicitly: FIS's own reported adjusted free
+cash flow, ~$1.3-1.5B. The comparable engine quantity is OCF − CapEx (no interest
+add-back). Before $2.46B = 1.6-1.9x the anchor → **FAIL**. After $1.61B = 1.07-1.24x
+→ **PASS** within a ±25% band, deliberately looser than the ±5% anchor rule because
+"adjusted free cash flow" is a company-defined non-GAAP measure, not an identity.
+
+Corroboration that is not the anchor: two structurally independent lanes converged
+from 2446 bps apart to 215 bps.
+
+Blast radius, measured rather than argued — tangible-only selection vs summed total
+for all 26 cohort names plus the four anchors: **28 unchanged, only FIS and INTU
+moved.** PG / GOOGL / AMZN / MSFT byte-identical. INTU $0.084B → $0.124B (0.44% →
+0.65% of revenue) and it still passes the gate.
+
+FIS's remaining gap is *not* this: both lanes now agree at ~$89 against a $44.78
+market and a $56.55 street. Two untouched causes, both on the forbidden/closed
+list — WACC of 607 bps against $20.4B of net debt, and a forward lane capitalizing
+$6.85 of adjusted EPS against $3.72 of FCFF per share (EPS≠distributable cash, P3).
+
+### 14.2 HPE — DECISION REQUIRED. A declared refusal consumed as a growth rate
+
+`sec-driver-normalization.json` declares
+`onLatestContaminatedOrInsufficientClean: normalize_near_term_growth_to_zero`. HPE
+closed Juniper in FY2025, so 2025 is acquisition-contaminated, `base_growth_bps`
+is set to 0 — and the FCFF lane then discounts HPE as a **zero-growth perpetuity
+forever**: $2.233B of FCFF, g0 = 0, WACC 9.04%, net debt $16.0B → **$15.11**,
+against a forward lane at $52.22 and a street at $65.56. Disagreement 11023 bps →
+`Disputed`, so HPE publishes no value at all.
+
+Consensus has HPE revenue +31.1% in FY2026 and +11.3% in FY2027.
+
+This is failure mode §10 (reading a refusal sentinel as evidence) inside the FCFF
+lane itself. It was fixed for the *forward* blend last round via `own_growth_bps()`;
+the FCFF lane still consumes its own sentinel. Five of 26 cohort names sit in
+`acquisition_normalized`: APH, CRM, HPE, SW, EXE.
+
+Zero is not a measurement. The choice is between two contracts and belongs to the
+owner, not to an agent:
+- **Refuse** — FCFF `Unavailable` when growth is unmeasurable, route to the forward
+  lane (the WDC precedent). Removes the false dispute; HPE would publish ~$52.
+- **Prior** — fall back to a defensible rate (macro anchor, or the issuer's own
+  pre-acquisition trend) instead of zero. Keeps two lanes but requires choosing the
+  prior, which no test decides.
+
+### 14.3 MPWR — no defect found; it is the g0 cap plus a lane basis gap
+
+Forward EPS $34.80 was **not** contaminated (see failure mode §15): the `+1y` period
+ends 2027-12-31 and consensus revenue is $2.79B → $4.12B → $5.18B.
+
+Two real observations:
+1. Consensus growth (2578 revenue / 2704 earnings) and MPWR's **own** five-year
+   revenue median (2643) agree almost exactly, and the flat cap truncates both to
+   2000. This is the cleanest case in the cohort for the held g0 blend — the blend's
+   deviation term is ~0 here, so it would keep full consensus weight.
+2. The lanes are measured off different periods: FCFF anchors on FY2025 actuals
+   ($16.41/sh), the forward lane on FY2027 estimates. `$16.41 x 1.475 x 1.258 ≈
+   $30.5` of FY2027 FCFF per share against $34.80 of EPS — the two are consistent.
+   The $542 vs $909 gap is a horizon-basis gap, not a valuation disagreement.
+
+### 14.4 COF — DECISION REQUIRED. Residual income on a single contaminated ROE
+
+COF routes `FamilyFinancialServices` → `Unavailable`, and the card shows the raw
+residual-income figure marked "not reliable yet": **$167.68** against $217.68
+market and $256.73 street.
+
+The arithmetic is doing exactly what it is told: snapshot ROE 903 bps against a
+cost of equity of 909 bps is a ~zero excess return, so residual income collapses
+to book value per share (~$171). The input is the problem — that ROE is a trailing
+figure carrying the day-one CECL provision on the acquired Discover book. Forward
+consensus is $20.27 (FY2026) and $24.05 (FY2027) EPS, which on the same book value
+implies ~11.9% ROE, not 9.03%.
+
+The operating lane already detects and excludes acquisition-contaminated years.
+The residual-income lane consumes one un-normalized TTM point. Same class of
+defect, different lane. What the normalization should be (window, contamination
+rule, whether to prefer forward-implied ROE) is a design choice with no test to
+decide it.
+
+Unrelated but noted while reading COF: `extract_normalized_fcff_level` returns
+nonsense for COF (revenue steps $27.24B → $3.43B in 2018 on a concept change,
+FCFF margins of 811%). It is not consumed by the residual-income lane, but it *is*
+consumed by through-cycle ROIC elsewhere. Not touched this round.
+
+### 14.5 State after this round
+
+- Suite **498 passed, 3 failed, 14 ignored** — the same three intentional reds
+  (`durable_…recompute_in_normal_gate` 15.27 vs 11.0, `high_signal_…all_members_pass`,
+  `baseline_megacap_amzn_class_not_penny_intrinsic` = policy/16 backlog). No
+  threshold moved.
+- Gate **10/26**, unchanged: AVY, COF, EME, INTU, GOOGL, GOOG, CRM, SLB, EXE, PTC.
+- FIS narrowed from several structural failures to a single objection —
+  `street_disagreement_exceeds_high_signal_band` — i.e. it is now available, solid,
+  correctly classed and internally coherent, and only disagrees with street.
+- g0 blend still **held** at `legacy_capped_bps`, pending the GOOGL -7.2% decision
+  from the previous round (§3.7). MPWR above is new evidence in its favour.

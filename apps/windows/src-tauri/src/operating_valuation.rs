@@ -1,3 +1,11 @@
+//! **DEPRECATED — superseded by the `valuation-core` crate.**
+//!
+//! Still shipping; do not extend. The two-lane split this module arbitrates is
+//! itself the defect the replacement exists to remove: `valuation-core` fuses
+//! evidence channels into one posterior instead of running two engines and
+//! adjudicating between them, so it has no router, no `Disputed`, and no
+//! candidate disagreement to resolve.
+//!
 //! Pure, provider-independent operating valuation candidates and routing.
 //!
 //! Market price and analyst target are deliberately absent from every DTO in

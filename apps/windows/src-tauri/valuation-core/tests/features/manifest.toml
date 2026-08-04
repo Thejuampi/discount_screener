@@ -1,0 +1,17 @@
+# Scenario Outline manifest (FR-44).
+#
+# Adding a behaviour means adding a ROW to an existing Examples table. Creating a
+# new Scenario Outline is the exception, and costs an entry here stating what no
+# existing table covers. `tests/schema.rs` fails when an outline in a .feature
+# file has no entry, or an entry names an outline that does not exist.
+#
+# `why_new` is the point of the whole mechanism: it forces the author to go look
+# for the table that should have absorbed the case.
+
+[[outline]]
+id = "growth-posterior-fusion"
+feature = "growth-posterior.feature"
+name = "Growth Posterior from two Evidence Channels"
+covers = "Inverse-variance fusion of the Trailing and Forward Channels, including single-channel fallback, total absence, and channel disagreement"
+frs = ["FR-12", "FR-13", "FR-14", "FR-15"]
+why_new = "First outline in the Core; no existing table covers channel fusion"

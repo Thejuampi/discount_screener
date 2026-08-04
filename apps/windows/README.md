@@ -15,14 +15,26 @@ Requires Node.js, Rust toolchain, [Tauri prerequisites](https://v2.tauri.app/sta
 
 | Command | Purpose |
 | --- | --- |
-| `npm test` | Frontend unit tests |
+| `npm test` | Frontend **unit** tests only (no app window, no Tauri binary) |
+| `cargo test` (in `src-tauri`) | Rust **unit/lib** tests only (no app window, no GUI spawn) |
 | `npm run build` | Type-check + Vite production build |
 | `npm run tauri:dev` | Live Tauri app (default universe = last saved / `sp500`) |
 | **`npm run tauri:dev:qa`** | **Live Tauri with QA universe locked (≤20 symbols)** — use for agent/manual live QA |
-| `npm run test:e2e` | WebdriverIO e2e (when configured) |
-| `npm run test:e2e:native:cof` | Native hidden Tauri regression: real COF IPC → hero valuation slot |
+| `npm run test:e2e` | **Opt-in IT**: WebdriverIO browser-mode e2e (not full product binary) |
+| `npm run test:e2e:native:cof` | **Opt-in IT**: spawns debug Tauri binary (hidden) — real COF IPC → hero slot |
+| `npm run test:e2e:native:amzn-fem` | **Opt-in IT**: spawns debug Tauri binary (hidden) — AMZN analyst-method DOM |
 | **`npm run ds-ui -- <cmd>`** | **Attach CLI** to a running debug app (screenshot, invoke, open-detail) — see below |
 | `npm run live-qa:checklist` | Attach live valuation checklist (needs `tauri:dev:qa` already running) |
+
+### Test tiers (do not mix)
+
+| Tier | What runs | Opens real app? | When |
+| --- | --- | --- | --- |
+| Unit | `npm test`, `cargo test --lib …` | **No** | Default / CI / every change |
+| Integration / native e2e | `npm run test:e2e:native:*` | **Yes** (hidden process + WebView; isolated data dir) | Only when you explicitly request ITs or Detail DOM contract gates |
+| Live attach QA | `tauri:dev:qa` + `ds-ui` / `live-qa:checklist` | **Yes** (your long-lived QA process) | Manual / agent live QA |
+
+Native e2e is **not** part of `npm test` or `cargo test`. Do not run `test:e2e:native:*` unless you intend to spawn the product binary.
 
 ### Live QA (agents and humans) — ALWAYS profile `qa`
 

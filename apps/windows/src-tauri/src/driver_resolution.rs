@@ -1,3 +1,11 @@
+//! **DEPRECATED — superseded by the `valuation-core` crate.**
+//!
+//! Still shipping; do not extend. The source waterfall below is sound in shape —
+//! market yield, then rated/synthetic spread, then aligned accounting — but the
+//! first two rungs are dead in production: every call site passes `None` for
+//! both, so resolution always falls to the accounting coupon. That is the
+//! mechanism behind the strictly-decreasing WACC recorded in `dcf_model`.
+//!
 //! Explicit annual financing-driver resolution for operating-company FCFF.
 //!
 //! This module deliberately has no policy-rate defaults.  It only resolves a

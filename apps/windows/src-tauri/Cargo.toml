@@ -3,6 +3,14 @@ name = "discount-screener-windows"
 version = "0.1.0"
 edition = "2021"
 
+# `valuation-core` is the pure kernel being built to replace the valuation
+# modules of this crate. It is a workspace member so it builds and tests with the
+# app, but it is deliberately NOT yet a dependency: nothing in the Shell calls it
+# until it carries the behaviour it is replacing. See the deprecation banners on
+# `dcf_model`, `operating_valuation`, and `driver_resolution`.
+[workspace]
+members = ["valuation-core"]
+
 [lib]
 name = "discount_screener_windows_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

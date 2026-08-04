@@ -63,3 +63,7 @@ history.sqlite
 .worktrees/
 worktrees/
 
+
+# Cargo build artifacts for the windows workspace and its members
+/apps/windows/src-tauri/target/
+/apps/windows/src-tauri/*/target/

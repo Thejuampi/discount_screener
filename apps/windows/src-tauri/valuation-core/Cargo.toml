@@ -1,0 +1,22 @@
+[package]
+name = "valuation-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure valuation kernel. No I/O, no clock, no network, no Street."
+
+# FR-1 (purity) is enforced by this dependency list. Nothing here can perform
+# I/O, read a clock, or reach a network. Adding a dependency that can is the
+# single reviewable event that would break the functional core, which is why the
+# list is kept empty in normal builds.
+[dependencies]
+
+[dev-dependencies]
+cucumber = "0.21"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
+
+# The Gherkin outlines are the specification (FR-45), so they run as a real test
+# target rather than as documentation.
+[[test]]
+name = "cucumber"
+harness = false

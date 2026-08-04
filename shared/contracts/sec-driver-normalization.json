@@ -1,11 +1,13 @@
 {
   "contract": "sec-driver-normalization",
   "version": "1",
-  "fingerprint": "sec-driver-normalization/5",
+  "fingerprint": "sec-driver-normalization/6",
   "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
   "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
   "investmentCategories": {
     "development": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireOtherPropertyPlantAndEquipment", "PaymentsForCapitalImprovements", "PaymentsToExploreAndDevelopOilAndGasProperties"],
+    "developmentSoftware": ["PaymentsForSoftware", "PaymentsToDevelopSoftware"],
+    "developmentAggregate": ["PaymentsToAcquireProductiveAssets"],
     "propertyAcquisition": [
       "PaymentsToAcquireOilAndGasProperty",
       "PaymentsToAcquireOilAndGasPropertyAndEquipment",
@@ -40,6 +42,13 @@
   "rejection": { "propertyAcquisition": "RejectedAcquisition", "businessAcquisition": "RejectedAcquisition", "unknown": "NoApprovedConcept", "invalidUnit": "InvalidUnit", "misalignedPeriod": "MisalignedPeriod" },
   "precedence": ["consolidated", "10-K/A", "filed_desc", "accession_desc", "declared_qname_order"],
   "fcffConsumption": "development_only",
+  "developmentComposition": {
+    "operation": "sum_disjoint_components",
+    "components": ["development", "developmentSoftware"],
+    "rationale": "An issuer that invests through capitalized software development files nothing under the tangible CapEx concepts. Reading development alone reported FIS 2025 CapEx as $0.154B of plant while the issuer also paid $0.835B to develop software, overstating FCFF by 68%. The two are disjoint cash outflows on the same statement, not alternative tags for one line, so they are summed rather than selected between.",
+    "suppressSoftwareWhenTangibleQnameIn": "developmentAggregate",
+    "suppressionRationale": "The us-gaap definition of PaymentsToAcquireProductiveAssets is 'the cash outflow for purchases of and capital improvements on property, plant and equipment (capital expenditures), software, and other intangible assets' — software is inside the element by definition, unlike PaymentsToAcquirePropertyPlantAndEquipment, which is tangible by definition. Summing an aggregate with a component it already contains double counts, so when the selected tangible concept is an aggregate the software component is dropped."
+  },
   "valuationPolicy": {
     "materialAcquisitionRevenueBps": 1000,
     "contaminatedTransition": "exclude_current_year_revenue_growth",

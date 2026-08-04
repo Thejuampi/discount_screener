@@ -1,3 +1,9 @@
+/**
+ * OPT-IN native integration test (IT).
+ *
+ * Spawns the real debug Tauri binary. Not part of `npm test` or `cargo test`.
+ * Run only via: `npm run test:e2e:native:cof` or `npm run test:it`.
+ */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
@@ -29,6 +35,7 @@ const app = spawn(binary, ["--minimized"], {
     LOCALAPPDATA: join(runDir, "localappdata"),
     DS_UNIVERSE_PROFILE: "qa",
     DS_NATIVE_E2E: "1",
+    DS_NATIVE_E2E_DATA_DIR: join(runDir, "tauri-data"),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
       `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${debugPort}`,
   },
