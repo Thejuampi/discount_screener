@@ -41,10 +41,10 @@
 
 use crate::dcf_model::compute;
 use crate::valuation_baseline::{load_cohort, load_driver_fixture, CohortMember};
-use crate::valuation_fixture_capture::DEEP_DRIVER_FIXTURE;
 use crate::valuation_core_adapter::{
     fit_cross_section, median_cents, value, widest_input, IssuerAnnual, IssuerEvidence, MarketFrame,
 };
+use crate::valuation_fixture_capture::DEEP_DRIVER_FIXTURE;
 use valuation_core::publication::ValuationPosterior;
 
 /// The frame the pinned cohort was captured under. Fixed here rather than read
@@ -141,7 +141,11 @@ fn core_versus_current_engine_on_the_pinned_cohort() {
         diagnostics.growth_pairs,
         diagnostics.growth_persistence,
         diagnostics.fade_per_year,
-        if fitted.growth_path().is_some() { "fitted" } else { "REFUSED" }
+        if fitted.growth_path().is_some() {
+            "fitted"
+        } else {
+            "REFUSED"
+        }
     );
     println!("  beta sd:      {:.4}", diagnostics.beta_standard_deviation);
 
@@ -185,12 +189,16 @@ fn core_versus_current_engine_on_the_pinned_cohort() {
             "{:<6} {:>10} {:>12} {:>12} {:>9} {:>12} {:>12} {:>9} {:>18}",
             issuer.symbol,
             market_cents,
-            old_cents.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+            old_cents
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into()),
             old_ratio
                 .map(|r| format!("{:.2}x", r as f64 / 10_000.0))
                 .unwrap_or_else(|| "-".into()),
             "",
-            new_cents.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+            new_cents
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into()),
             new_ratio
                 .map(|r| format!("{:.2}x", r as f64 / 10_000.0))
                 .unwrap_or_else(|| "-".into()),
@@ -295,7 +303,10 @@ fn does_growth_persist_at_longer_horizons() {
         .map(|(issuer, _)| issuer.revenue_growth())
         .collect();
 
-    println!("\n{:>6} {:>8} {:>14} {:>12}", "window", "pairs", "persistence", "half-life");
+    println!(
+        "\n{:>6} {:>8} {:>14} {:>12}",
+        "window", "pairs", "persistence", "half-life"
+    );
     for window in 1..=5usize {
         let smoothed: Vec<Vec<f64>> = series
             .iter()
@@ -352,7 +363,8 @@ fn does_growth_persist_at_longer_horizons() {
     // path flat and `k` irrelevant rather than merely unmeasurable.
     let all: Vec<f64> = series.iter().flatten().copied().collect();
     let pooled = all.iter().sum::<f64>() / all.len() as f64;
-    let spread = (all.iter().map(|g| (g - pooled).powi(2)).sum::<f64>() / (all.len() - 1) as f64).sqrt();
+    let spread =
+        (all.iter().map(|g| (g - pooled).powi(2)).sum::<f64>() / (all.len() - 1) as f64).sqrt();
     println!(
         "\npooled annual growth {:.0} bps (sd {:.0} bps, se {:.0} bps) over {} observations",
         pooled,
@@ -370,7 +382,10 @@ fn does_growth_persist_at_longer_horizons() {
         .map(|growth| growth.iter().sum::<f64>() / growth.len() as f64)
         .collect();
     let between = firm_means.iter().sum::<f64>() / firm_means.len() as f64;
-    let between_sd = (firm_means.iter().map(|m| (m - between).powi(2)).sum::<f64>()
+    let between_sd = (firm_means
+        .iter()
+        .map(|m| (m - between).powi(2))
+        .sum::<f64>()
         / (firm_means.len() - 1) as f64)
         .sqrt();
     println!(

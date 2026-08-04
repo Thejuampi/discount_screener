@@ -237,15 +237,13 @@ mod tests {
 
     #[test]
     fn absent_evidence_weighs_exactly_nothing() {
-        let absent =
-            Observation::<f64>::absent(AbsenceReason::ContaminatedPeriod, provenance());
+        let absent = Observation::<f64>::absent(AbsenceReason::ContaminatedPeriod, provenance());
         assert_eq!(absent.precision(), 0.0);
     }
 
     #[test]
     fn absent_evidence_yields_no_value_rather_than_zero() {
-        let absent =
-            Observation::<f64>::absent(AbsenceReason::ContaminatedPeriod, provenance());
+        let absent = Observation::<f64>::absent(AbsenceReason::ContaminatedPeriod, provenance());
         assert_eq!(absent.value(), None);
     }
 

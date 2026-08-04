@@ -146,8 +146,11 @@ mod tests {
     fn trailing(value: f64, variance: f64) -> Observation<f64> {
         Observation::measured(
             value,
-            Uncertainty::from_variance(variance, UncertaintyBasis::SampleVariance { observations: 5 })
-                .expect("valid variance"),
+            Uncertainty::from_variance(
+                variance,
+                UncertaintyBasis::SampleVariance { observations: 5 },
+            )
+            .expect("valid variance"),
             Provenance::new("trailing", 20_000),
         )
     }

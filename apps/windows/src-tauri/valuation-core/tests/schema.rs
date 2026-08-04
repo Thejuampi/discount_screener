@@ -59,7 +59,10 @@ fn split_row(line: &str) -> Vec<String> {
         .strip_prefix('|')
         .and_then(|rest| rest.strip_suffix('|'))
         .unwrap_or(trimmed);
-    inner.split('|').map(|cell| cell.trim().to_string()).collect()
+    inner
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
 }
 
 /// Deliberately a small line-oriented reader rather than a full Gherkin parse.
@@ -201,9 +204,7 @@ fn absence_is_spelled_only_with_the_reserved_token() {
                 .flat_map(|row| {
                     row.iter()
                         .enumerate()
-                        .filter(|(_, value)| {
-                            FORBIDDEN_ABSENCE_TOKENS.contains(&value.as_str())
-                        })
+                        .filter(|(_, value)| FORBIDDEN_ABSENCE_TOKENS.contains(&value.as_str()))
                         .map(|(index, value)| {
                             format!(
                                 "{}::{} row {:?} column {:?} says {value:?}, use {ABSENT}",
@@ -231,8 +232,7 @@ fn case_identifiers_are_unique_within_a_table() {
         .filter_map(|table| {
             let ids: Vec<&String> = table.rows.iter().filter_map(|row| row.first()).collect();
             let unique: BTreeSet<&&String> = ids.iter().collect();
-            (unique.len() != ids.len())
-                .then(|| format!("{}::{}", table.feature, table.outline))
+            (unique.len() != ids.len()).then(|| format!("{}::{}", table.feature, table.outline))
         })
         .collect();
     assert!(
@@ -255,8 +255,14 @@ fn every_outline_is_justified_in_the_manifest() {
         .map(|entry| {
             format!(
                 "{}::{}",
-                entry.get("feature").and_then(toml::Value::as_str).unwrap_or(""),
-                entry.get("name").and_then(toml::Value::as_str).unwrap_or("")
+                entry
+                    .get("feature")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(""),
+                entry
+                    .get("name")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("")
             )
         })
         .collect();

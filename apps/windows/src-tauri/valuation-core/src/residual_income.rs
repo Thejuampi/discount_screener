@@ -105,7 +105,10 @@ pub fn residual_income_value(
     // absent return therefore says "we do not know whether this balance sheet
     // earns its keep", not "assume it barely does". An observed return below the
     // cost of equity is used as observed and values the issuer below book.
-    let return_on_equity = return_on_equity_bps.value().copied().unwrap_or(cost_of_equity);
+    let return_on_equity = return_on_equity_bps
+        .value()
+        .copied()
+        .unwrap_or(cost_of_equity);
 
     let evaluate = |return_on_equity: f64, growth: f64, cost_of_equity: f64| {
         unit_value(return_on_equity, growth, path, cost_of_equity)
@@ -152,10 +155,17 @@ pub fn residual_income_value(
     let contributions: Vec<Contribution> = partials
         .iter()
         .map(|(input, partial, observation)| {
-            Contribution::new(*input, observation.propagation_variance() * partial * partial)
+            Contribution::new(
+                *input,
+                observation.propagation_variance() * partial * partial,
+            )
         })
         .collect();
-    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let variance: f64 = contributions
+        .iter()
+        .copied()
+        .map(Contribution::variance)
+        .sum();
     let inputs = partials
         .iter()
         .filter(|(.., observation)| observation.is_measured())
@@ -415,9 +425,10 @@ mod tests {
     fn a_contaminated_return_year_widens_the_interval_rather_than_collapsing_value() {
         let vague = Observation::measured(
             1_200.0,
-            Uncertainty::from_variance(40_000.0, UncertaintyBasis::SampleVariance {
-                observations: 5,
-            })
+            Uncertainty::from_variance(
+                40_000.0,
+                UncertaintyBasis::SampleVariance { observations: 5 },
+            )
             .expect("valid variance"),
             provenance(),
         );

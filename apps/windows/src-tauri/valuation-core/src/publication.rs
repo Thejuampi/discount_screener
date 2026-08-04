@@ -204,21 +204,27 @@ pub fn publish(
         )])
         .collect();
 
-    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let variance: f64 = contributions
+        .iter()
+        .copied()
+        .map(Contribution::variance)
+        .sum();
     if !per_share.is_finite() || !variance.is_finite() || variance <= 0.0 {
         return refuse(Refusal::Evidence(AbsenceReason::InsufficientObservations));
     }
     let half_width = NORMAL_QUANTILE_95 * variance.sqrt();
 
-    let Some(percentiles) = quantize_all(&[
-        per_share - half_width,
-        per_share,
-        per_share + half_width,
-    ]) else {
+    let Some(percentiles) =
+        quantize_all(&[per_share - half_width, per_share, per_share + half_width])
+    else {
         return refuse(Refusal::Evidence(AbsenceReason::OutOfPolicyRange));
     };
 
-    let shares_of_variance: Vec<f64> = contributions.iter().copied().map(Contribution::variance).collect();
+    let shares_of_variance: Vec<f64> = contributions
+        .iter()
+        .copied()
+        .map(Contribution::variance)
+        .collect();
     let attribution = contributions
         .iter()
         .zip(apportion_bps(&shares_of_variance, variance))
@@ -262,8 +268,11 @@ mod tests {
     fn known(value: f64, variance: f64) -> Observation<f64> {
         Observation::measured(
             value,
-            Uncertainty::from_variance(variance, UncertaintyBasis::SampleVariance { observations: 8 })
-                .expect("valid variance"),
+            Uncertainty::from_variance(
+                variance,
+                UncertaintyBasis::SampleVariance { observations: 8 },
+            )
+            .expect("valid variance"),
             provenance(),
         )
     }

@@ -69,9 +69,8 @@ impl CreditCurve {
         coverage_slope: f64,
         provenance: Provenance,
     ) -> Option<Self> {
-        let finite = intercept_bps.is_finite()
-            && leverage_slope.is_finite()
-            && coverage_slope.is_finite();
+        let finite =
+            intercept_bps.is_finite() && leverage_slope.is_finite() && coverage_slope.is_finite();
         (finite && intercept_bps > 0.0 && leverage_slope > 0.0 && coverage_slope >= 0.0).then_some(
             Self {
                 intercept_bps,
@@ -83,8 +82,7 @@ impl CreditCurve {
     }
 
     fn spread_bps(&self, leverage: f64, coverage: f64) -> f64 {
-        self.intercept_bps
-            * (self.leverage_slope * leverage - self.coverage_slope * coverage).exp()
+        self.intercept_bps * (self.leverage_slope * leverage - self.coverage_slope * coverage).exp()
     }
 
     pub fn provenance(&self) -> &Provenance {
@@ -120,7 +118,8 @@ pub fn cost_of_debt(
     let Some(curve) = curve else {
         return Observation::absent(AbsenceReason::ProviderUnavailable, provenance);
     };
-    let (Some(&leverage_value), Some(&coverage_value)) = (leverage.value(), coverage.value()) else {
+    let (Some(&leverage_value), Some(&coverage_value)) = (leverage.value(), coverage.value())
+    else {
         return Observation::absent(AbsenceReason::NotReported, provenance);
     };
     if !leverage_value.is_finite() || !coverage_value.is_finite() || !risk_free_bps.is_finite() {
@@ -291,10 +290,7 @@ mod tests {
                     .expect("resolved wacc")
             })
             .collect();
-        let trough = sampled
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let trough = sampled.iter().copied().fold(f64::INFINITY, f64::min);
         assert!(
             sampled.last().is_some_and(|last| *last > trough),
             "wacc never recovers from its trough: {sampled:?}"

@@ -7,13 +7,13 @@
 //! actually executed must fail the build.
 
 use cucumber::{given, then, when, World};
+use valuation_core::attribution::{Contribution, ValuationInput};
+use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
+use valuation_core::classification::{classify, BusinessClass, Instrument};
 use valuation_core::evidence::{
     AbsenceReason, Observation, Provenance, Uncertainty, UncertaintyBasis,
 };
-use valuation_core::capital::{cost_of_debt, wacc, CreditCurve};
 use valuation_core::posterior::{fuse, Fusion};
-use valuation_core::attribution::{Contribution, ValuationInput};
-use valuation_core::classification::{classify, BusinessClass, Instrument};
 use valuation_core::projection::{equity_value, intrinsic_value, GrowthPath, Valuation};
 use valuation_core::publication::{publish, ValuationPosterior};
 use valuation_core::residual_income::residual_income_value;
@@ -353,7 +353,9 @@ fn with_deviation(value: &str, deviation: &str, source: &'static str) -> Observa
     let Some(value) = cell(value) else {
         return Observation::absent(AbsenceReason::NotReported, provenance);
     };
-    let variance = cell(deviation).expect("a standard deviation is always stated").powi(2);
+    let variance = cell(deviation)
+        .expect("a standard deviation is always stated")
+        .powi(2);
     let uncertainty = Uncertainty::from_variance(
         variance.max(f64::MIN_POSITIVE),
         UncertaintyBasis::SampleVariance { observations: 8 },
@@ -433,7 +435,9 @@ fn when_residual_income(world: &mut GrowthWorld) {
     let growth = world.growth.clone().expect("Growth Posterior");
     let cost_of_equity = world.discount_rate.clone().expect("cost of equity");
     let valued = match world.path.as_ref() {
-        Some(path) => residual_income_value(&book, &return_on_equity, &growth, path, &cost_of_equity),
+        Some(path) => {
+            residual_income_value(&book, &return_on_equity, &growth, path, &cost_of_equity)
+        }
         None => Valuation::new(
             Observation::absent(
                 AbsenceReason::NotReported,
@@ -469,7 +473,10 @@ fn then_residual_income(world: &mut GrowthWorld, expected: String) {
 
 #[then(expr = "the published percentiles are {word}, {word} and {word} cents")]
 fn then_percentiles(world: &mut GrowthWorld, low: String, median: String, high: String) {
-    let posterior = world.posterior.as_ref().expect("the When step must run first");
+    let posterior = world
+        .posterior
+        .as_ref()
+        .expect("the When step must run first");
     match (cell(&low), cell(&median), cell(&high)) {
         (Some(low), Some(median), Some(high)) => {
             let ValuationPosterior::Published {
@@ -495,7 +502,10 @@ fn then_percentiles(world: &mut GrowthWorld, low: String, median: String, high: 
 
 #[then(expr = "the publication outcome is {word}")]
 fn then_publication_outcome(world: &mut GrowthWorld, expected: String) {
-    let posterior = world.posterior.as_ref().expect("the When step must run first");
+    let posterior = world
+        .posterior
+        .as_ref()
+        .expect("the When step must run first");
     let actual = if posterior.is_published() {
         "published"
     } else {

@@ -1514,7 +1514,9 @@ mod tests {
             current.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
             let software_total: f64 = current
                 .iter()
-                .filter(|(_, concept, _)| concept.starts_with("Payments") && concept.contains("Software"))
+                .filter(|(_, concept, _)| {
+                    concept.starts_with("Payments") && concept.contains("Software")
+                })
                 .map(|(_, _, value)| value.abs())
                 .sum();
             eprintln!(

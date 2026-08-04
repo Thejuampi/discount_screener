@@ -64,10 +64,11 @@ fn how_deep_the_filed_history_goes() {
     }
 
     depths.sort_unstable();
-    let histogram: BTreeMap<usize, usize> = depths.iter().fold(BTreeMap::new(), |mut counts, depth| {
-        *counts.entry(*depth).or_default() += 1;
-        counts
-    });
+    let histogram: BTreeMap<usize, usize> =
+        depths.iter().fold(BTreeMap::new(), |mut counts, depth| {
+            *counts.entry(*depth).or_default() += 1;
+            counts
+        });
     println!("\nyears of history -> issuers");
     for (years, issuers) in &histogram {
         println!("{years:>4} -> {issuers}");
@@ -148,11 +149,13 @@ fn capture_the_deep_driver_fixture() {
         "source": "SEC EDGAR companyfacts, full filed history, captured 2026-08-04",
         "rows": rows,
     });
-    let path = fixture_path().with_file_name(
-        DEEP_DRIVER_FIXTURE.rsplit('/').next().expect("a file name"),
-    );
-    std::fs::write(&path, serde_json::to_string_pretty(&fixture).expect("serialize fixture"))
-        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    let path =
+        fixture_path().with_file_name(DEEP_DRIVER_FIXTURE.rsplit('/').next().expect("a file name"));
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&fixture).expect("serialize fixture"),
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 
     println!("\nwrote {} issuers to {}", rows.len(), path.display());
     if !skipped.is_empty() {

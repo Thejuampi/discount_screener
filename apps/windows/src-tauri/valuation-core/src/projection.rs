@@ -115,8 +115,7 @@ impl GrowthPath {
 
     /// Instantaneous growth at `years` from now, in basis points.
     pub fn growth_bps_at(&self, initial_bps: f64, years: f64) -> f64 {
-        self.terminal_bps
-            + (initial_bps - self.terminal_bps) * (-self.fade_per_year * years).exp()
+        self.terminal_bps + (initial_bps - self.terminal_bps) * (-self.fade_per_year * years).exp()
     }
 
     /// Years for half the gap to the terminal rate to close. Reported in
@@ -269,10 +268,17 @@ pub fn intrinsic_value(
     let contributions: Vec<Contribution> = partials
         .iter()
         .map(|(input, partial, observation)| {
-            Contribution::new(*input, observation.propagation_variance() * partial * partial)
+            Contribution::new(
+                *input,
+                observation.propagation_variance() * partial * partial,
+            )
         })
         .collect();
-    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let variance: f64 = contributions
+        .iter()
+        .copied()
+        .map(Contribution::variance)
+        .sum();
     let inputs = partials
         .iter()
         .filter(|(.., observation)| observation.is_measured())
@@ -386,7 +392,11 @@ pub fn equity_value(firm_value: &Valuation, net_debt: &Observation<f64>) -> Valu
             net_debt.propagation_variance(),
         )])
         .collect();
-    let variance: f64 = contributions.iter().copied().map(Contribution::variance).sum();
+    let variance: f64 = contributions
+        .iter()
+        .copied()
+        .map(Contribution::variance)
+        .sum();
     let inputs = firm_value.contributions().len() as u32 + u32::from(net_debt.is_measured());
 
     match Uncertainty::from_variance(variance, UncertaintyBasis::Propagated { inputs }) {
@@ -458,15 +468,15 @@ mod tests {
     /// every valuation.
     #[test]
     fn unit_value_agrees_with_direct_numeric_integration() {
-        let (growth, terminal, fade, return_on_capital, discount) =
-            (0.15, 0.03, 0.20, 0.25, 0.08);
+        let (growth, terminal, fade, return_on_capital, discount) = (0.15, 0.03, 0.20, 0.25, 0.08);
         let steps = 2_000_000;
         let horizon = 400.0;
         let width = horizon / steps as f64;
         let integrand = |years: f64| {
             let instant = terminal + (growth - terminal) * (-fade * years).exp();
-            let earnings =
-                (terminal * years + (growth - terminal) / fade * (1.0 - (-fade * years).exp())).exp();
+            let earnings = (terminal * years
+                + (growth - terminal) / fade * (1.0 - (-fade * years).exp()))
+            .exp();
             earnings * (1.0 - instant / return_on_capital) * (-discount * years).exp()
         };
         let integrated: f64 = (0..steps)
@@ -501,7 +511,10 @@ mod tests {
         let returns: Vec<f64> = (4..=60).map(|step| step as f64 * 50.0).collect();
         let violations: Vec<f64> = returns
             .windows(2)
-            .filter(|pair| value_of(1_500.0, &known(pair[1]), 800.0) <= value_of(1_500.0, &known(pair[0]), 800.0))
+            .filter(|pair| {
+                value_of(1_500.0, &known(pair[1]), 800.0)
+                    <= value_of(1_500.0, &known(pair[0]), 800.0)
+            })
             .map(|pair| pair[0])
             .collect();
         assert!(
@@ -542,7 +555,10 @@ mod tests {
                 refined > 0.2 * coarse
             })
             .collect();
-        assert!(seams.is_empty(), "value jumped at these fade rates: {seams:?}");
+        assert!(
+            seams.is_empty(),
+            "value jumped at these fade rates: {seams:?}"
+        );
     }
 
     #[test]
@@ -587,7 +603,12 @@ mod tests {
             &known(2_500.0),
             &known(800.0),
         );
-        let summed: f64 = valued.contributions().iter().copied().map(Contribution::variance).sum();
+        let summed: f64 = valued
+            .contributions()
+            .iter()
+            .copied()
+            .map(Contribution::variance)
+            .sum();
         let total = valued
             .value()
             .uncertainty()
@@ -664,7 +685,13 @@ mod tests {
             .expect("valid variance"),
             provenance(),
         );
-        let wide = intrinsic_value(&known(100.0), &vague, &path(), &known(2_500.0), &known(800.0));
+        let wide = intrinsic_value(
+            &known(100.0),
+            &vague,
+            &path(),
+            &known(2_500.0),
+            &known(800.0),
+        );
         let tight = intrinsic_value(
             &known(100.0),
             &known(1_500.0),
