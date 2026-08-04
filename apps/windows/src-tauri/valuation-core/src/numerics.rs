@@ -176,18 +176,129 @@ pub fn standardize(sample: &[f64]) -> Result<Standardized, AbsenceReason> {
 /// Falls back to refusing, never to the untrimmed mean: if removing the outliers
 /// leaves too little to speak with, the honest answer is that there is no
 /// measurement here, not the number that included the contamination.
+///
+/// This is [`robust_centre`] with everything but the point estimate dropped. It
+/// keeps a threshold parameter only until its last external caller stops passing
+/// one; a caller that wants the width, the kept count or the exclusions asks for
+/// the centre itself rather than recomputing any of them.
 pub fn robust_mean(sample: &[f64], max_absolute_z: f64) -> Result<f64, AbsenceReason> {
-    let standardized = standardize(sample)?;
+    trimmed(sample, max_absolute_z).map(|centre| centre.centre())
+}
+
+/// A centre, the width of that centre, and the observations neither of them used.
+///
+/// The parts are returned together because they are only true together. A centre
+/// computed from the observations that belong to the sample, paired with a width
+/// computed from all of them, is a clean level wearing a contaminated precision —
+/// and under inverse-variance weighting that is worse than not trimming at all,
+/// because the dirtier the sample the wider the discarded tail, the larger the
+/// width that was thrown away, and so the *tighter* the number that gets
+/// reported. A caller cannot make that mistake with this type: there is no way
+/// to obtain the centre without the width that belongs to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RobustCentre {
+    centre: f64,
+    variance_of_centre: f64,
+    retained: usize,
+    outliers: Vec<usize>,
+}
+
+impl RobustCentre {
+    /// The mean of the observations the sample's own dispersion admitted.
+    pub fn centre(&self) -> f64 {
+        self.centre
+    }
+
+    /// The squared standard error of [`centre`](Self::centre) — the width of the
+    /// *centre*, not of the sample. It is named for what it is so that no caller
+    /// reads it as a dispersion: the sample is wider than this by a factor of
+    /// the kept count.
+    ///
+    /// It is computed over the retained observations only, from the same kept
+    /// set that produced the centre. That is deliberate and it is what removes
+    /// the monotone-in-contamination bias described on the type.
+    ///
+    /// **The residual bias, and its direction.** A retained sample is narrower
+    /// than the population it was drawn from, so this is a mild *understatement*
+    /// of how uncertain the centre is. Under inverse-variance fusion an
+    /// understated variance is an overstated weight, so a channel carrying this
+    /// width pulls slightly harder on a posterior than the evidence entitles it
+    /// to. The alternative — a scale taken over the full sample — is rejected
+    /// because it would describe a different estimator than the one that
+    /// produced the point.
+    pub fn variance_of_centre(&self) -> f64 {
+        self.variance_of_centre
+    }
+
+    /// How many observations the centre and its width were computed from. This
+    /// is what a caller reports as its sample size; reporting the raw input
+    /// count for a width taken from a subset overstates precision again.
+    pub fn retained(&self) -> usize {
+        self.retained
+    }
+
+    /// How many observations the sample's own dispersion excluded.
+    pub fn discarded(&self) -> usize {
+        self.outliers.len()
+    }
+
+    /// Positions in the INPUT sample, in input order, of the observations the
+    /// centre excluded. A caller that must drop the same observations from a
+    /// downstream fit reads them here rather than deriving them a second time
+    /// from a threshold it would then own a copy of.
+    pub fn outliers(&self) -> &[usize] {
+        &self.outliers
+    }
+}
+
+/// The robust centre of a sample, at the standing threshold.
+///
+/// There is deliberately no threshold parameter. [`MAX_ABSOLUTE_Z`] is a
+/// boundary between populations rather than a tuning knob, and a call site able
+/// to pass 4.0 would be relaxing it without touching the constant — which is
+/// exactly the move the constant exists to make reviewable.
+pub fn robust_centre(sample: &[f64]) -> Result<RobustCentre, AbsenceReason> {
+    trimmed(sample, MAX_ABSOLUTE_Z)
+}
+
+/// The one place in this workspace that acts on a z-score.
+///
+/// Both public entry points are this function, so there is a single trimming
+/// rule to review and a single refusal rule to reason about. The threshold is a
+/// parameter here rather than a constant only because [`robust_mean`] still
+/// carries one in its signature; nothing else may call this with anything but
+/// [`MAX_ABSOLUTE_Z`].
+///
+/// The scores come from [`standardize`], which already refuses the three samples
+/// that cannot be trimmed at all — fewer than three observations, a non-finite
+/// value, and a middle with no width. What is left for this function to refuse
+/// is a sample that trimming empties: fewer than three survivors is no longer a
+/// measurement, and reporting the untrimmed mean instead would be the
+/// contaminated answer wearing a robust label.
+fn trimmed(sample: &[f64], max_absolute_z: f64) -> Result<RobustCentre, AbsenceReason> {
+    let outliers = standardize(sample)?.outliers(max_absolute_z);
     let kept: Vec<f64> = sample
         .iter()
-        .zip(standardized.scores())
-        .filter(|(_, score)| score.abs() <= max_absolute_z)
-        .map(|(value, _)| *value)
+        .enumerate()
+        .filter(|(index, _)| !outliers.contains(index))
+        .map(|(_, value)| *value)
         .collect();
     if kept.len() < 3 {
         return Err(AbsenceReason::InsufficientObservations);
     }
-    Ok(kept.iter().sum::<f64>() / kept.len() as f64)
+
+    let centre = kept.iter().sum::<f64>() / kept.len() as f64;
+    let dispersion = kept
+        .iter()
+        .map(|value| (value - centre).powi(2))
+        .sum::<f64>()
+        / (kept.len() - 1) as f64;
+    Ok(RobustCentre {
+        centre,
+        variance_of_centre: dispersion / kept.len() as f64,
+        retained: kept.len(),
+        outliers,
+    })
 }
 
 /// Terms after which a series that has not converged is treated as unusable.
@@ -373,6 +484,158 @@ mod tests {
                 .outliers(MAX_ABSOLUTE_Z),
             vec![9]
         );
+    }
+
+    /// [`CONTAMINATED`] with the category error taken out: the sample the centre
+    /// is supposed to describe, and the mean it is supposed to report.
+    const CLEAN: [f64; 9] = [9.0, 9.0, 10.0, 10.0, 10.0, 11.0, 11.0, 12.0, 12.0];
+
+    /// The whole claim, in one line: the centre of the contaminated sample is
+    /// the centre of the clean one. Nine values summing to 94.
+    #[test]
+    fn the_robust_centre_reports_the_centre_of_what_it_kept() {
+        assert!(
+            (robust_centre(&CONTAMINATED).expect("a centre").centre() - 94.0 / 9.0).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn the_contaminated_observation_is_counted_as_discarded() {
+        assert_eq!(
+            robust_centre(&CONTAMINATED).expect("a centre").discarded(),
+            1
+        );
+    }
+
+    /// Named by position in the input, so a caller excluding the same
+    /// observation from a downstream fit reads it here instead of owning a
+    /// second copy of the threshold.
+    #[test]
+    fn the_discarded_observation_is_named_by_its_position_in_the_input() {
+        assert_eq!(
+            robust_centre(&CONTAMINATED).expect("a centre").outliers(),
+            [9]
+        );
+    }
+
+    /// The width is the width of the KEPT sample: nine values with a variance of
+    /// `23/18`, over the nine of them. The untrimmed standard error of the same
+    /// input is about 8092 — some fifty thousand times wider — so a consumer
+    /// weighting by inverse variance is reading a different quantity entirely
+    /// depending on which of the two it gets.
+    #[test]
+    fn the_width_of_the_centre_is_the_width_of_what_the_centre_kept() {
+        assert!(
+            (robust_centre(&CONTAMINATED)
+                .expect("a centre")
+                .variance_of_centre()
+                - 23.0 / 162.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn the_retained_count_is_what_survived_rather_than_what_arrived() {
+        assert_eq!(
+            robust_centre(&CONTAMINATED).expect("a centre").retained(),
+            9
+        );
+    }
+
+    /// Trimming is not something that happens to every sample. A sample with
+    /// nothing out of place loses nothing.
+    #[test]
+    fn a_sample_with_nothing_out_of_place_discards_nothing() {
+        assert_eq!(robust_centre(&CLEAN).expect("a centre").discarded(), 0);
+    }
+
+    /// And where nothing is discarded the robust centre is the plain mean, so
+    /// this estimator only ever differs from the naive one on evidence that the
+    /// sample itself says is contaminated.
+    #[test]
+    fn a_sample_with_nothing_out_of_place_centres_where_the_plain_mean_would() {
+        assert!((robust_centre(&CLEAN).expect("a centre").centre() - 94.0 / 9.0).abs() < 1e-12);
+    }
+
+    /// One trimming implementation, asserted rather than promised: the mean is
+    /// the centre with its width dropped, at the same threshold.
+    #[test]
+    fn the_robust_mean_is_the_robust_centre_with_everything_but_the_point_dropped() {
+        assert_eq!(
+            robust_mean(&CONTAMINATED, MAX_ABSOLUTE_Z),
+            robust_centre(&CONTAMINATED).map(|centre| centre.centre())
+        );
+    }
+
+    #[test]
+    fn a_sample_too_small_to_have_a_spread_has_no_robust_centre() {
+        assert_eq!(
+            robust_centre(&[1.0, 9.0]),
+            Err(AbsenceReason::InsufficientObservations)
+        );
+    }
+
+    /// A non-finite observation is refused rather than propagated, so a NaN
+    /// cannot leave here wearing the shape of a measurement.
+    #[test]
+    fn a_non_finite_observation_refuses_rather_than_poisoning_the_centre() {
+        assert_eq!(
+            robust_centre(&[1.0, 2.0, 3.0, f64::NAN]),
+            Err(AbsenceReason::NotReported)
+        );
+    }
+
+    /// The nearly-flat case. More than half the sample identical leaves the bulk
+    /// with no width, and a centre reported from it would carry a width of zero,
+    /// which under inverse-variance weighting is infinite confidence.
+    #[test]
+    fn a_sample_whose_middle_has_no_width_has_no_robust_centre() {
+        assert_eq!(
+            robust_centre(&[7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 1_000.0]),
+            Err(AbsenceReason::OutOfPolicyRange)
+        );
+    }
+
+    /// The boundary of the refusal, from above: two of five excluded, three
+    /// retained, and that is a measurement.
+    #[test]
+    fn a_sample_trimmed_exactly_to_three_still_reports_a_centre() {
+        assert_eq!(
+            robust_centre(&[10.0, 11.0, 12.0, 500.0, 600.0])
+                .expect("a centre")
+                .retained(),
+            3
+        );
+    }
+
+    /// And from below. Three observations, one of them a category error: two
+    /// would survive, two is not a sample, so the answer is that there is no
+    /// centre here — never the untrimmed mean of 337.
+    #[test]
+    fn a_sample_trimmed_below_three_refuses_rather_than_reporting_a_pair() {
+        assert_eq!(
+            robust_centre(&[10.0, 11.0, 1_000.0]),
+            Err(AbsenceReason::InsufficientObservations)
+        );
+    }
+
+    /// A retained count of one or two is unreachable above three observations,
+    /// and this is the arithmetic reason rather than a defensive branch. The
+    /// scale is the middle deviation, so on five observations only the two
+    /// largest deviations can exceed any multiple of it — three always survive,
+    /// whatever is done to the other two.
+    #[test]
+    fn no_five_observation_sample_can_be_trimmed_below_three() {
+        let extremes = [
+            [10.0, 11.0, 12.0, 1e6, 1e9],
+            [10.0, 11.0, 12.0, -1e9, 1e9],
+            [-1e9, 10.0, 11.0, 12.0, 1e9],
+        ];
+        assert!(extremes.iter().all(|sample| robust_centre(sample)
+            .map(|centre| centre.retained())
+            .unwrap_or(0)
+            >= 3));
     }
 
     /// Trimming must not become a way to manufacture an estimate from a sample
