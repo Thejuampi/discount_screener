@@ -754,16 +754,16 @@ fn sample_variance(values: &[f64]) -> Option<f64> {
     )
 }
 
-struct LinearFit {
-    intercept: f64,
-    slope: f64,
+pub(crate) struct LinearFit {
+    pub(crate) intercept: f64,
+    pub(crate) slope: f64,
 }
 
 /// Ordinary least squares of `y` on one regressor and an intercept.
 ///
 /// Small and explicit rather than a linear-algebra dependency, because the Core
 /// has none and the Shell should not grow one for a two-parameter fit.
-fn least_squares(observations: &[(f64, f64)]) -> Option<LinearFit> {
+pub(crate) fn least_squares(observations: &[(f64, f64)]) -> Option<LinearFit> {
     // The arithmetic minimum: two parameters plus one residual, so that a caller
     // wanting a scatter can compute one at all. Callers whose fit answers to a
     // higher bar than determinacy state that bar at their own call site.
