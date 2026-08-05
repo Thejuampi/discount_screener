@@ -252,16 +252,6 @@ fn lag_one_autocorrelation(series: &[f64]) -> Option<f64> {
     Some(numerator / denominator)
 }
 
-/// The US federal statutory rate, used where an issuer filed no tax
-/// reconciliation to read one from.
-///
-/// A marginal rate is a property of a jurisdiction, not a measurement of an
-/// issuer, so requiring the issuer to have filed one is a stricter test than the
-/// quantity deserves — it cost this probe seven of twenty-eight names. The same
-/// default is already what the fixture capture writes.
-#[cfg(test)]
-const STATUTORY_MARGINAL_TAX_BPS: f64 = 2_100.0;
-
 /// One issuer-year carrying every term a return on capital is measured from.
 #[cfg(test)]
 struct CapitalYear {
@@ -664,8 +654,20 @@ mod tests {
         let mut non_positive_capital_years = 0usize;
         let mut names_with_a_capital_deficit: Vec<String> = Vec::new();
         let mut base_ratios: Vec<f64> = Vec::new();
+        // Availability per candidate: every issuer whose gap resolved, whether
+        // or not the other candidate also resolved for that issuer.
         let mut book_gaps: Vec<f64> = Vec::new();
         let mut slope_gaps: Vec<f64> = Vec::new();
+        // The comparison population: only issuers where BOTH candidates
+        // resolved, so the two medians read against the same names rather
+        // than against two differently sized samples.
+        let mut paired_gaps: Vec<(String, f64, f64)> = Vec::new();
+        // Absence never becomes a fabricated statutory rate: an issuer-year
+        // with no filed marginal rate has no NOPAT and does not enter the
+        // measurement. Tracked so the cost of that refusal is reported, not
+        // assumed.
+        let mut dropped_for_missing_marginal_tax_total = 0usize;
+        let mut dropped_for_missing_marginal_tax_by_issuer: Vec<String> = Vec::new();
 
         println!("=== PROBE C: return on capital — availability ===");
         println!("per-term year counts, so a collapse names the term that caused it");
@@ -736,26 +738,45 @@ mod tests {
                 count(|point| point.marginal_tax_bps.is_some()),
             ];
 
-            let mut years: Vec<CapitalYear> = history
-                .iter()
-                .filter_map(|point| {
-                    let pretax = point.pretax_income_dollars?;
-                    let equity = point.stockholders_equity_dollars?;
-                    let debt = point.total_debt_dollars?;
-                    let interest = point.interest_expense_dollars?;
-                    let marginal_tax = point
-                        .marginal_tax_bps
-                        .map_or(STATUTORY_MARGINAL_TAX_BPS, f64::from)
-                        / 10_000.0;
-                    Some(CapitalYear {
-                        year: point.year,
-                        nopat: (pretax + interest) * (1.0 - marginal_tax),
-                        invested_capital: equity + debt,
-                        free_cash_flow: point.value_dollars,
-                    })
-                })
-                .collect();
+            let mut years: Vec<CapitalYear> = Vec::new();
+            let mut dropped_for_missing_marginal_tax_here = 0usize;
+            for point in &history {
+                let (Some(pretax), Some(equity), Some(debt), Some(interest)) = (
+                    point.pretax_income_dollars,
+                    point.stockholders_equity_dollars,
+                    point.total_debt_dollars,
+                    point.interest_expense_dollars,
+                ) else {
+                    continue;
+                };
+                // An issuer-year with no filed marginal rate has no NOPAT and
+                // does not enter the measurement -- absence never becomes a
+                // fabricated statutory rate.
+                let Some(marginal_tax_bps) = point.marginal_tax_bps else {
+                    dropped_for_missing_marginal_tax_here += 1;
+                    continue;
+                };
+                let marginal_tax = f64::from(marginal_tax_bps) / 10_000.0;
+                years.push(CapitalYear {
+                    year: point.year,
+                    nopat: (pretax + interest) * (1.0 - marginal_tax),
+                    invested_capital: equity + debt,
+                    // The same FCFF the adapter feeds the Core: `point.value_dollars`
+                    // is already `OCF - CapEx` (edgar.rs), with the after-tax
+                    // interest add-back applied by the one function both call.
+                    free_cash_flow: crate::valuation_core_adapter::after_tax_fcff(
+                        point.value_dollars,
+                        interest,
+                        marginal_tax_bps,
+                    ),
+                });
+            }
             years.sort_by_key(|year| year.year);
+            dropped_for_missing_marginal_tax_total += dropped_for_missing_marginal_tax_here;
+            if dropped_for_missing_marginal_tax_here > 0 {
+                dropped_for_missing_marginal_tax_by_issuer
+                    .push(format!("{symbol}({dropped_for_missing_marginal_tax_here})"));
+            }
 
             let deficits = years
                 .iter()
@@ -897,6 +918,9 @@ mod tests {
             // estimated independently.
             book_gaps.extend(book_gap);
             slope_gaps.extend(slope_gap);
+            if let (Some(book_value), Some(slope_value)) = (book_gap, slope_gap) {
+                paired_gaps.push((symbol.to_string(), book_value, slope_value));
+            }
 
             let show = |value: Option<f64>| value.map_or("-".into(), |v| format!("{v:.3}"));
             estimator_rows.push(format!(
@@ -955,22 +979,60 @@ mod tests {
             names_with_a_capital_deficit.join(" ")
         );
         println!(
+            "issuer-years dropped for missing marginal tax rate: \
+             {dropped_for_missing_marginal_tax_total}  [{}]",
+            dropped_for_missing_marginal_tax_by_issuer.join(" ")
+        );
+        println!(
             "median NOPAT/FCFF = {:?}   (the size of the base change, before it lands)",
             median(&mut base_ratios.clone()).map(|v| format!("{v:.2}x"))
         );
+
+        // The two candidates are scored on the population where BOTH resolve --
+        // book resolves for `book_gaps.len()` issuers and slope for
+        // `slope_gaps.len()`, but those are not the same names, so only the
+        // paired subset is a comparison rather than two unrelated summaries.
+        let paired_symbols: Vec<&str> = paired_gaps.iter().map(|(s, _, _)| s.as_str()).collect();
+        let paired_book: Vec<f64> = paired_gaps.iter().map(|(_, book, _)| *book).collect();
+        let paired_slope: Vec<f64> = paired_gaps.iter().map(|(_, _, slope)| *slope).collect();
         println!(
-            "median |implied b - realized b|:  book {:?}   slope {:?}   (r_impl is not scored: its\n\
-             gap is identically zero by construction, since it is defined as g/b)",
-            median(&mut book_gaps.clone()).map(|v| format!("{v:.3}")),
-            median(&mut slope_gaps.clone()).map(|v| format!("{v:.3}")),
+            "candidate availability: book resolves for {} issuers, slope for {} issuers, \
+             paired (both resolve): {}",
+            book_gaps.len(),
+            slope_gaps.len(),
+            paired_gaps.len()
+        );
+
+        let report_robust_centre = |label: &str, values: &[f64]| match robust_centre(values) {
+            Ok(centre) => {
+                let trimmed: Vec<String> = centre
+                    .outliers()
+                    .iter()
+                    .map(|&index| format!("{}({:.3})", paired_symbols[index], values[index]))
+                    .collect();
+                println!(
+                    "{label} robust centre = {:.3}  (retained {} of {}, trimmed [{}])",
+                    centre.centre(),
+                    centre.retained(),
+                    values.len(),
+                    trimmed.join(" ")
+                );
+            }
+            Err(reason) => println!("{label} robust centre: refused ({reason:?})"),
+        };
+        report_robust_centre("|implied b - realized b|, book,", &paired_book);
+        report_robust_centre("|implied b - realized b|, slope,", &paired_slope);
+        println!(
+            "(r_impl is not scored: its gap is identically zero by construction, since it is\n\
+             defined as g/b)"
         );
         println!(
-            "READ THIS AS: the smaller median gap is the estimator whose retention charge is\n\
-             consistent with what these issuers actually did with their earnings. Where the two are\n\
-             close, prefer the higher r: an overstated return is bounded (1 - g/r -> 1, the charge\n\
-             merely vanishes) while an understated or negative one is unbounded (negative value, or\n\
-             refusal through the Core's r <= 0 guard). Market price is not consulted here and must\n\
-             not be used to break the tie."
+            "READ THIS AS: the smaller robust centre is the estimator whose retention charge is\n\
+             consistent with what these issuers actually did with their earnings, on the paired\n\
+             population above. Where the two are close, prefer the higher r: an overstated return\n\
+             is bounded (1 - g/r -> 1, the charge merely vanishes) while an understated or negative\n\
+             one is unbounded (negative value, or refusal through the Core's r <= 0 guard). Market\n\
+             price is not consulted here and must not be used to break the tie."
         );
     }
 

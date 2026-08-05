@@ -474,6 +474,28 @@ fn unfitted_path(frame: &MarketFrame) -> GrowthPath {
     .expect("a positive fade rate is a path")
 }
 
+/// FCFF for one fiscal year, given the base cash flow before financing
+/// (`OCF − CapEx`) and that year's interest reading and marginal tax rate.
+///
+/// Interest is added back after tax because the flow being discounted belongs
+/// to every provider of capital, and the tax shield on interest is already
+/// carried by the after-tax cost of debt inside the WACC — counting it in
+/// both places is the double count this addition avoids. Interest enters
+/// signed and stays signed: a net-interest-income filer's add-back is
+/// negative because the income is already inside the base cash flow.
+///
+/// The one place FCFF is computed from filed evidence — the probe in
+/// `valuation_probes.rs` calls this directly rather than restating the
+/// formula, so the two cannot drift apart.
+pub(crate) fn after_tax_fcff(
+    base_operating_cash_flow: f64,
+    interest_expense: f64,
+    marginal_tax_bps: i32,
+) -> f64 {
+    let after_tax = 1.0 - f64::from(marginal_tax_bps) / 10_000.0;
+    base_operating_cash_flow + interest_expense * after_tax
+}
+
 /// An issuer's leverage, coverage and the rate its lenders actually charge.
 pub struct CapitalStructure {
     pub leverage: f64,
@@ -514,9 +536,11 @@ impl IssuerEvidence {
         ordered
             .iter()
             .map(|annual| {
-                let after_tax = 1.0 - f64::from(annual.marginal_tax_bps) / 10_000.0;
-                annual.operating_cash_flow - annual.capital_expenditure
-                    + annual.interest_expense * after_tax
+                after_tax_fcff(
+                    annual.operating_cash_flow - annual.capital_expenditure,
+                    annual.interest_expense,
+                    annual.marginal_tax_bps,
+                )
             })
             .collect()
     }
