@@ -1833,6 +1833,11 @@ Recommendation unchanged from R-20: **(D)**. It wins on both criteria fixed befo
 existed, eliminates the cascade that stopped the wave, and is the only rule that reaches the LD-8
 population where that population actually reaches a published number.
 
+> **Annotated at R-33.1, not rewritten.** The clause "eliminates the cascade that stopped the wave"
+> is the criterion R-18.5 forbade in binding language ("how many issuers stay lit"). The decision
+> stands on the two criteria fixed before any number existed; that clause should not have been
+> listed among the reasons.
+
 **Nothing merges on this ruling.** `measure-guard-rules` is a throwaway; adopting (D) means
 implementing it in a real wave, without the `NetInterestPolicy` knob, with its own review.
 
@@ -2197,3 +2202,421 @@ The builder named four open items rather than leaving them implicit: **LD-2** (f
 a newly found **divestiture blind spot in `resolve_capex_abs`**, the unresolved **two competing
 definitions of invested capital**, and `variance_of_centre`'s residual bias. The divestiture finding
 is new to this run and is not in the register; it belongs there.
+
+---
+
+## R-30 — Stage 6 Sensei: `revise`. What I verified, what I refuted, and the measurement nobody had taken.
+
+Sensei returned `revise` on the shipped effort. I did not accept it and I did not dismiss it — I ran
+its checkable claims. Three resolve against it, one resolves for it and is a P0, and its broadest
+charge is correct and now measured.
+
+### R-30.1 — CONFIRMED, and it is the effort's most serious open defect: the double-count is armed
+
+`valuation_core_adapter.rs:542` — `fn base_cash_flow` builds its observation with
+`self.provenance("free_cash_flow", frame)`. **FCFF is fed into the Core's `E` slot.**
+
+The retention charge is `C(t) = E(t)(1 − g/r)`, and that identity requires `E` to be earnings
+*before* growth reinvestment — NOPAT. FCFF is already net of reinvestment. Feeding it applies the
+haircut twice.
+
+Sensei's reading of what FR-29 was actually doing is correct and sharper than the plan's: with
+`r := w`, the `(1 − g/r)` factor vanishes identically and the model was computing `E_0/w` — **a
+no-growth perpetuity on FCFF at WACC.** Internally consistent, dimensionally sound, and therefore
+plausible enough to argue about rather than obviously broken. FR-29 was not a growth bug with a
+value-neutral side effect; it was a silent model substitution.
+
+**Round 3 deleted the mask and did not fix the unit mismatch.** Today the double-count is unreachable
+because `return_on_capital` is hardcoded absent. The day an estimator supplies a real `r`, the Core
+publishes values wrong by `(1 − g/r)` — roughly a 40% understatement at `g=4%, r=10%` — and it does so
+at the single most trusted-looking moment in the roadmap.
+
+This is independently corroborated: a separate planning document in this repo reaches the same
+conclusion unprompted, stating that NOPAT alone charges reinvestment zero times, ROIC alone on an FCFF
+base charges it twice, and only both together charge it once.
+
+**Ruling: no estimator wave may land before `E`'s input is made unrepresentable as FCFF** — a distinct
+type, or at minimum a test named for the double-count that fails by default. Deleting a substitution
+that made a wrong input harmless, without making the wrong input impossible, *arms* it. Sensei's
+phrase is the right one and I am adopting it: a landmine with the pin replaced.
+
+### R-30.2 — REFUTED: the degenerate-MAD candidate
+
+Sensei predicted `robust_mean` was verified only on comfortable series, and that MAD = 0 at `n=3`–`4`
+with duplicate values would be untested. **False.** `numerics.rs:593`,
+`a_sample_whose_middle_has_no_width_has_no_robust_centre`, asserts
+`robust_centre(&[7,7,7,7,7,7,1000]) == Err(OutOfPolicyRange)`, with a doc comment naming the reason: a
+zero-width centre under inverse-variance weighting is infinite confidence. The boundary from above is
+covered too (`a_sample_trimmed_exactly_to_three_still_reports_a_centre`). The primitive is verified on
+exactly the population the prediction said it would miss.
+
+### R-30.3 — REFUTED, by direct experiment: the economics is not unfalsifiable
+
+Sensei's highest-confidence candidate for instance fourteen was that 100% of reachable behaviour is
+the refusal path, so a mutation inside the charge formula should **survive**.
+
+I ran it. `projection.rs:483`, `1.0 - instant / return_on_capital` → `1.0 + ...`:
+
+```
+test projection::tests::unit_value_agrees_with_direct_numeric_integration ... FAILED
+test result: FAILED. 104 passed; 1 failed
+```
+
+**Killed.** The Core's own unit and cucumber tests drive `intrinsic_value` with *measured* returns and
+never go through the dark adapter, so the economics is reachable and falsifiable. The prediction's
+mechanism is wrong.
+
+Its instinct is not entirely wrong, though, and I am recording the honest version: **1 kill out of 105
+tests.** A single numeric-integration test is the whole defence of the central identity. That is thin,
+and it is thin in the place that matters most.
+
+### R-30.4 — CONFIRMED, and now measured: the effort had never measured its own goal
+
+The charge: four rounds of self-versus-self deltas, and no measurement of the thing the effort exists
+to close. Correct. Round 2 measured movers in bps *relative to the previous build*. Nobody had
+computed the distance to street.
+
+I measured it. Across the 26 issuers carrying a street comparison:
+
+| | value |
+|---|---|
+| n | 26 |
+| min | 0.47× |
+| p25 | 0.78× |
+| **median** | **1.06×** |
+| p75 | 1.26× |
+| max | 3.45× |
+
+**This materially reframes the problem.** The model is not systematically below street — the median
+sits 6% above it. The defect is **dispersion, not bias**: a quarter of issuers are 26%+ above, a
+quarter 22%+ below, with tails to 3.45× and 0.47×. "The numbers don't match street" is true issuer by
+issuer and false in aggregate, and those two facts call for different work. A systematic bias would
+point at the discount rate or the base; dispersion this wide points at per-issuer evidence quality —
+which is exactly what Rounds 1 and 2 addressed, and is the first evidence the effort has that it was
+working on the right thing.
+
+**The population caveat is not a footnote.** These 26 are the high-signal cohort — issuers that pass
+the gates. It is a filtered sample, biased toward the names the model already handles confidently. It
+is not evidence about the issuers we refuse, and coverage is deliberately excluded from the veto set,
+so a wave that quietly refuses more would *improve* this table while serving users worse. This
+measurement is **report-only and must stay report-only.**
+
+**Pre-commitment, recorded now rather than after it becomes tempting:** no wave may cite gap-to-street
+reduction as acceptance evidence. Juan's constraint is that street is a diagnostic — never a clamp, an
+optimand, or an acceptance criterion. Sensei is right that the effort over-generalized that into
+*never look*, and a diagnostic never read is a disclaimer. Reading it while pre-committing not to
+optimize toward it is the reading that honours the constraint.
+
+### R-30.5 — Adopted, with its sequencing
+
+The single highest-value next move is **the published-value regression gate** (R-22, open since Round
+1 and deferred four times): every issuer, published value *or refusal reason* as a first-class golden
+value, offline fixture, one assertion. The observation audit is already most of it — it dumps and
+nothing asserts.
+
+Sensei's argument for why this outranks the estimator is the one I find decisive: it converts every
+future pre-registration from *author-selected population* to *whole cohort, author explains the diff*,
+which makes the ten-of-twelve failure mode **structurally impossible** rather than dependent on
+someone noticing. Thirteen instances is not a tally of bugs caught; it is a measurement of how often
+one careful reader was needed, and that does not survive the reader's attention moving elsewhere.
+
+Sequence, which matters: **build the gate → bless current state → then fix the fixture writer (R-19)**,
+so its effect appears as a visible diff. Fixing the fixture first destroys the observation.
+
+Two further items adopted: a gate degrades into re-bless-and-move-on within about three waves unless
+the diff justification must appear in a pre-registration *written before* the wave — so the gate
+composes with the registration discipline rather than replacing it. And R-29.2's alibi ("it cannot
+have been tuned to a result that does not exist") is **single-use**, valid for the 20bps threshold and
+generalizing to nothing.
+
+### R-30.6 — One open claim I have not verified
+
+Sensei's second-ranked candidate: Round 2's guard drops fiscal years, the cost-of-debt fit has no
+minimum `n`, and the registration measured published-value movers rather than fit sample sizes — so a
+change whose mechanism is "drop years" was verified on a population that cannot exhibit its
+characteristic harm. **Which issuers moved from `n≥2` to `n=1`?** Unanswered, concrete, answerable,
+and it belongs with the ROL minimum-observation ruling (R-23.6) rather than being carried separately.
+
+---
+
+## R-31 — Sensei's candidate (b), resolved. Refuted as stated; a worse defect found one step over.
+
+Sensei's second-ranked prediction, verbatim: *"Round 2 therefore moved issuers toward `n=1` and its
+pre-registration measured published-value movers, not fit sample sizes. A change whose known mechanism
+is 'drop years' was verified on a population that cannot exhibit the harm."*
+
+I read the fit path end to end and ran one experiment. The prediction is **wrong**, and the reason it
+is wrong is the useful part.
+
+### R-31.1 — REFUTED: the `n≥2 → n=1` harm is value-visible by construction
+
+`driver_resolution.rs:280` grades the fit by sample size, and the grade is not cosmetic:
+
+```rust
+let quality = if period_count >= 2 && !matches!(tax_source, DomicileTaxProxy) {
+    EvidenceQuality::Solid
+} else if period_count >= 1 {
+    EvidenceQuality::Provisional
+} else {
+    return Err("fcff unavailable: no common valid debt and marginal-tax period".into());
+};
+```
+
+`Provisional` propagates into `dcf_model.rs:3127`, where it adds `provisional_wacc_uplift_bps` scaled
+by debt weight and sets `wacc_clamped = true`. **An issuer crossing `n=2 → n=1` gets a higher WACC and
+therefore a lower published value.** It cannot cross that boundary silently — it lands in the
+published-value mover set by the same mechanism that makes it harmful. Round 2's registration
+*was* an instrument for this transition, by accident rather than design, but it was one.
+
+So there is a minimum-`n` instrument after all. Sensei read `!accounting_common.is_empty()` as
+"no minimum" — literally true for the hard-refusal boundary (`n=0`), and it missed that the
+graded boundary sits at `n=2` and carries a price. My R-23.6 finding still stands on its own terms
+(the 587bps issuer fits from one year), but that issuer is flagged `Provisional` and uplifted, not
+published as though it were solid. The register should record that qualification.
+
+### R-31.2 — The defect this actually found: `n=3 → n=2` is the silent transition
+
+Directly above the grade, the rate is chosen by a bare order statistic:
+
+```rust
+rates.sort_unstable();
+let rate = rates[rates.len() / 2];
+```
+
+At `len = 3` that is the median. **At `len = 2` it is the maximum.** I did not infer this — I injected
+a two-period case and ran it:
+
+```
+two_period_accounting_fit_selects_the_higher_rate_not_a_centre ... ok
+```
+
+with `cost_of_debt_bps == 545`, the higher of `{500, 545}`; a centre would be ~523. Confirmed by
+execution, not by reading.
+
+That composes badly with R-31.1 in one specific place. An issuer dropping `n=3 → n=2`:
+
+- **stays `Solid`** — no quality downgrade, no uplift, no `wacc_clamped`;
+- **switches from median-of-three to max-of-two**, a strictly upward-biased cost of debt;
+- **lowers its published value**, which Round 2's registration *would* have seen as a bps move and
+  attributed to "one fewer year of evidence" — the expected consequence, correctly reproduced, wrong
+  cause.
+
+This is the fourteenth instance of the effort's signature defect, and it is a subtler species than the
+previous thirteen: not a check that cannot fail, but a check that fires for the wrong reason and is
+therefore read as confirmation. Sensei was right that Round 2's population reasoning was unsound. It
+was wrong about which boundary carries the risk.
+
+It is also a **naked order statistic on a measured series** — the family the workspace prohibits and
+routes through `robust_mean` / `robust_centre`, which refuse below `kept < 3` precisely because two
+points have no centre. The prohibition was written for this and this call site predates it.
+
+### R-31.3 — Carried, with the reproduction already paid for
+
+The fix is not mine to make outside a wave, and the choice between them has an economic consequence,
+so it goes to the next pre-registration rather than being decided here:
+
+1. route the annual rates through `robust_centre` and let `n<3` refuse — consistent with policy,
+   and it converts today's silent bias into an honest refusal;
+2. or keep `n=2` and downgrade it to `Provisional`, making the grade match where the estimator
+   actually degrades rather than where the sample happens to hit one.
+
+Option 1 removes published values from issuers that have them today; option 2 keeps them and prices
+the uncertainty. That is a real economic fork with no test deciding it, which is Juan's category (a).
+**I am not choosing it.**
+
+The characterization test is written and verified and should land with whichever wave takes this, so
+the current behaviour fails loudly if anyone changes it silently — the same treatment Wave 5 gave the
+legacy `terminal_payout_bps` substitution:
+
+```rust
+#[test]
+fn two_period_accounting_fit_selects_the_higher_rate_not_a_centre() {
+    let history = vec![
+        point(2022, Some(100.0), Some(5.0), Some(2_000)),
+        point(2023, Some(120.0), Some(6.0), Some(1_900)),
+    ];
+    let resolved = resolve_rate_inputs(&history, Some(120), 430).unwrap().unwrap();
+    assert_eq!(resolved.cost_of_debt_bps, 545);
+}
+```
+
+I injected it, ran it green against the shipped code, and reverted; the tree is clean. Landing it
+costs a paste.
+
+---
+
+## R-32 — Stage 5 Reviewer: `revise`, upheld against me. R-29's acceptance of Wave 4 was wrong.
+
+The Reviewer read the merged tree, ran the suite itself rather than accepting the wave reports, and
+independently reproduced R-24.2's per-issuer registered predictions live (CHTR `disp:fwd`, MPWR's
+FCFF candidate at exactly `51585`, BKR passing through `forward_earnings_power` after its accounting
+refusal). It found the shipped code faithful to R-24 and R-25. Then it blocked the wave on
+documentation, and it was right.
+
+### R-32.1 — CONFIRMED by my own grep, not accepted: five carried items were absent
+
+I verified rather than took the finding. `docs/valuation-economic-contract.md §14` at `ecff9ab`
+contained LD-2…LD-11 and none of R-19, R-20.4, R-22, R-23.6, R-25.4. The Reviewer's grep hits for
+`R-19`, `ROL`, `COR` and `winning_qname_is_net_basis` are false positives on my re-run too — `FR-19`
+is a functional requirement, `COR` matches case-insensitively inside other words, and
+`winning_qname_is_net_basis` appears only inside LD-8's *closure* text. The finding survives its own
+weakest evidence.
+
+**R-29.3 recorded Q6 as `held`, and Q6 was the wrong measurement.** I asked whether the register
+*survived* Wave 4's edit — LD-8 struck, prior rows intact, file extended not replaced — and it did.
+Completeness was never checked. That is this run's signature defect committed by the run's own
+verification: a check that could not fail on the population that would falsify it, written by me,
+one level above the code it was cataloguing. Thirteen instances found in the work; this is one in the
+instrument. I am not filing it as instance fourteen, because it is a different and less flattering
+category: not a check that cannot fail, but the *verifier* choosing the property that was easy to
+confirm.
+
+R-29.3's Q6 verdict is amended from `held` to `held on survival, wrong property`.
+
+### R-32.2 — Fixed, at `e41a7ed`, and not by narrowing the requirement
+
+The tempting disposition was available and would have been defensible: W4-P05 asks for a register of
+latent defects, and the five carried items are arguably *findings* rather than *latent defects*, so
+the register could be declared complete on its own terms. That is the same move R-29.4 refused for
+M1, and refusing it twice is the point.
+
+`e41a7ed` adds **LD-12 through LD-16** with the same id / defect / why-not-now / trigger / detector
+shape as the existing rows, and the preamble now records how the omission happened. Two rows carry
+more than they were carried as:
+
+- **LD-13** states the *sequencing* as load-bearing — LD-12's gate must exist and bless current state
+  before the fixture emitter is fixed, or the correction becomes the new baseline instead of a
+  visible diff. Carried as a defect; registered as a defect with an order.
+- **LD-15** absorbs R-31 and is materially worse than R-23.6 described. It records that the graded
+  boundary is at one observation while the biased transition is at two, and that the two candidate
+  fixes are a Juan-category-(a) fork with different economic results and no test between them —
+  **stated, not settled.**
+
+Three rows say plainly that they have **no detector**, which the register's own preamble demands and
+which is the only honest entry for LD-12.
+
+### R-32.3 — Convergent, independently: the Reviewer and I found LD-15's mitigation by different routes
+
+The Reviewer's Finding 4 reports something no wave report mentions: ROL's single-observation rate does
+not reach WACC unadjusted, because `EvidenceQuality` degrades to `Provisional` below two periods and
+`dcf_model.rs` applies `provisional_wacc_uplift_bps`. I reached the same code from the opposite
+direction while refuting Sensei's candidate (b) (R-31.1), reading the fit path forward rather than the
+risk backward.
+
+Two lenses that never spoke to each other landing on the same twenty lines is the strongest signal
+this run has produced about that code. It is also the correction both of them make to *my* record:
+R-23.6 framed the single-observation fit as an unmitigated risk, and it is not.
+
+### R-32.4 — Accepted and not acted on
+
+- **Boy-scout:** `driver_resolution.rs`'s header still reads *"DEPRECATED — do not extend"* while
+  T2.7 added economically load-bearing logic to it. The Reviewer is right that the tension is
+  unstated at the point of the edit. It is a one-line doc addendum to a module the roadmap retires;
+  it goes to the next wave rather than to a docs commit that touches code files for prose.
+- **Missing R-28/R-29 headers:** an artifact of reading the rulings file while I was still appending
+  to it. Not a gap.
+- **The fixture:** the Reviewer ran the live suite, which rewrote
+  `high_signal_screener_observation_2026-08-02.json`, and reverted it. I verified independently that
+  **none of the five round commits touches that file** (`git show --stat` across `3bd20f2`,
+  `4d201cf`, `f38fe2c`, `d688fe9`, `ecff9ab` — zero hits each). Juan's constraint held.
+
+### R-32.5 — One thing I broke and repaired inside this ruling
+
+Reading the register at `round4-integration` I used `git checkout <branch> -- <path>`, which **stages**
+into the current index — and the current branch was Juan's `valuation/wave1-integration`. It added
+`docs/valuation-economic-contract.md` to his staging area, a file absent from that branch's HEAD.
+Caught immediately, `git rm --cached` plus removal of the untracked copy; index and `docs/` verified
+clean before continuing.
+
+Worth the ruling line because the standing constraint is *never `git add -A`, stage explicitly*, and
+the rule as written does not cover this: `git checkout <ref> -- <path>` stages without ever naming
+`add`. Use `git show <ref>:<path> > <scratchpad>` to read a file from another branch. That is what the
+rest of this ruling used.
+
+---
+
+## R-33 — Stage 7 retro. The curator found the third instance, and it is mine.
+
+I asked the curator for one thing above all: *"anything in the record I appear to have gotten wrong,
+been inconsistent about, or convinced myself of too easily — I have twice caught myself choosing the
+easier property to verify, look for a third."* It found one. I verified it in the text before
+accepting it.
+
+### R-33.1 — ACCEPTED: R-23's disposition cites a criterion R-18.5 had forbidden
+
+**R-18.5, line 1340, binding:**
+
+> **Explicitly NOT criteria**, and this is binding: how many issuers stay lit; the direction or size
+> of any published-value move; distance from street; and whether the result is convenient.
+
+**R-23's disposition, line 1833:**
+
+> Recommendation unchanged from R-20: **(D)**. It wins on both criteria fixed before any number
+> existed, **eliminates the cascade that stopped the wave**, and is the only rule that reaches the
+> LD-8 population where that population actually reaches a published number.
+
+"Eliminates the cascade" is *how many issuers stay lit*, restated as a virtue, three rulings after I
+bound myself against it. It is also the **headline** of R-23 — the first clause of the section title.
+Not a buried slip.
+
+**The decision stands; the justification does not.** The same sentence says (D) "wins on both criteria
+fixed before any number existed," which is the load-bearing clause and was independently verified;
+the third clause (reaching the LD-8 population where it reaches a published number) is legitimate too.
+The cascade clause is rhetorical surplus. But it is exactly the surplus R-18.5 anticipated and
+forbade, because a convenient result reads as better-justified when its convenience is listed among
+the reasons. Juan ratified (D) under protocol (a)/(c) on the legitimate grounds; nothing about the
+shipped rule changes.
+
+**What changes is the process.** Adding to the standing check: *before closing a ruling, re-read your
+own "explicitly not a criterion" list against the disposition text.* Seconds to run, and it would have
+caught this. The failure shape is the one this run has catalogued fourteen times, at a new layer —
+not "what does this instrument measure" but "does my conclusion honour the constraint I bound myself
+to." R-23 and R-18.5 are annotated in place rather than rewritten.
+
+The curator's secondary candidate — R-16.1 dispatching a wave under a ~10s fast-check budget while
+its own Done-when demanded *"a live per-issuer table, measured, not argued"* — is also right, and is
+the same shape one step earlier: a budget that forecloses the exit criterion paired with it. Caught
+then only because the builder came back short, not at dispatch.
+
+### R-33.2 — What was written to persistent memory, and what was refused
+
+Three entries updated, three created, one index duplicate removed:
+
+| entry | change |
+|---|---|
+| `verify-what-an-instrument-measures` | reframed to the sharper test — *can it fail on the population that would falsify it* — and given the **recursive clause**: apply it to your own verification. Both self-caught instances and R-33.1 recorded as worked examples |
+| `no-naked-averages` | **corrected a stale API** (`robust_mean` lost its threshold parameter in T5.11; the memory still showed the two-argument form) and extended to bare order statistics — `sorted[len/2]` is the max at `n=2` |
+| `stage-files-explicitly` | extended to `git checkout <ref> -- <path>`, which stages without saying `add` |
+| `scope-you-cannot-get-wrong` | **new.** Pre-registration works and its population is author-selected; prefer the gate that needs no correct choice. Absorbs the single-use-alibi rule |
+| `isolate-the-mutation` | **new.** A combined mutation going red proves nothing about any single assertion |
+| `check-a-role-can-do-what-you-mandate` | **new.** Verify the role's tool inventory before dispatch; when a checkpoint is unrecoverable, substitute the stronger invariant rather than reconstructing it |
+
+**Refused, on the curator's own recommendation and mine:** commit hashes, LD row contents, the (D)-
+over-(A) choice, Sensei's specific findings, and the instance tally. Git history and
+`docs/valuation-economic-contract.md` already hold those, and a memory that duplicates a repo fact
+drifts the moment the code moves. The tally in particular is a fact about this run, not a transferable
+one — the *pattern* is the durable part.
+
+The stale-API correction is the retro's quietest useful result: a memory written four days ago already
+described an interface this run had changed. Memories record what was true when written.
+
+### R-33.3 — Two tooling facts to the repo, not to memory
+
+`e6f4ee3` adds a section to `AGENTS.md` under *Preventing repeat operational errors*, whose closing
+line already asks that new operational failure modes be written there rather than left in chat:
+`cargo fmt -- <files>` is not file-scoped in this workspace, `git checkout <ref> -- <path>` stages,
+and — flagged as tool-scoped rather than repo-scoped, with an expiry condition — a harness asked for
+worktree isolation may provision from the default branch rather than the session's branch.
+
+These are facts about this repo and this toolchain. They belong where a future agent will meet them,
+not in cross-project memory.
+
+### R-33.4 — Pipeline state
+
+Stages 5, 6 and 7 are closed. The Reviewer's `revise` was upheld and its blocking finding fixed at
+`e41a7ed`; the Sensei's `revise` was adjudicated claim by claim in R-30 and R-31, two of four claims
+refuted by experiment; the retro is recorded here.
+
+`round4-integration` is now `e6f4ee3` and pushed. **The armed FCFF→`E` double-count (R-30.1) is the
+gating item for everything downstream** — no estimator wave lands before `E`'s input is made
+unrepresentable as FCFF, and LD-12's whole-cohort gate is the wave that should precede all of it.
