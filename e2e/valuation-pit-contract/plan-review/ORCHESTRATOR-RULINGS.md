@@ -1989,3 +1989,83 @@ through the network-bound `fetch_fcf_history`. The builder declined to synthesiz
 than guess at its shape, and said so. That is the right call under wave scope and the wrong state to
 leave permanently: the function that decides what "net basis" means is currently proven only by the
 downstream deltas it produces. **New carried item, alongside R-19, R-20.4, R-22, and R-23.6.**
+
+---
+
+## R-26 — Two plan statements Round 2 invalidated, corrected before Round 3 can encode them
+
+Round 2 shipping changes two things the plan says, and both would otherwise be written into Round 3
+and Round 4 as *tests* — which is the dangerous form, because a test asserting a stale fact passes.
+
+### R-26.1 — LD-8 is struck as closed by Wave 2, alongside LD-1
+
+The plan enumerates the D7 latent-defect register in five places (T5.9, Wave 5 *Done when*, Wave 4
+deliverables, W4-P05, and §6) as **LD-2 … LD-8, LD-9, LD-10, LD-11, with LD-1 struck**. R-24.1 closed
+LD-8 and the shipped code discharges its deferral text: `driver_resolution.rs` now keys on the filed
+basis, and `winning_qname_is_net_basis` reads `INTEREST_EXPENSE.qname_signs` per year. LD-8's entry
+says the correct rule "is unimplementable until `FcfPoint` carries per-field concept provenance."
+`FcfPoint` now carries it.
+
+**The register enumeration becomes: LD-2, LD-3, LD-4, LD-5, LD-6, LD-7, LD-9, LD-10, LD-11 — with
+LD-1 and LD-8 both struck as closed by Wave 2.**
+
+This is not bookkeeping. W4-P05 asserts that every enumerated id "carries an id, an owner, a trigger
+and a detector." Left uncorrected, Round 4 would write an owner, a trigger and a detector for a
+defect that no longer exists, and the test would pass — documenting a live hazard against shipped
+code that closed it. LD-8's own text says it has **no mechanical detector** because it "produces
+plausible numbers"; inventing one now to satisfy a rectangularity check would be the fourteenth
+instance of the pattern, in the register that exists to name the pattern.
+
+Wave 5's ADR (T5.9) must state LD-8 as **closed, with the commit that closed it** — not omit it.
+A register that silently drops entries cannot be audited backwards.
+
+### R-26.2 — The protected failing set is three, not four; the fourth is a worktree artifact
+
+Every wave report since Round 1 has reported "4 pre-existing failures" and named
+`cross_platform_parity::export_random20_sp500_parity_snapshot` among them. The plan's *Done when*
+says the failing set is **exactly three, by name**. Both cannot be right, and the discrepancy has
+been carried across two rounds without being reconciled.
+
+Measured, not argued. I checked out Round 1 (`3bd20f2`) into a fresh worktree and ran the test:
+
+```
+panicked at src\cross_platform_parity.rs:506:5:
+missing random20 inputs at ...\.agents/workspace/tmp/random20-inputs.json
+ -- run .agents/workspace/tmp/build_random20_inputs.py first
+```
+
+The input is **generated** and lives under `.agents/workspace/`, which `.gitignore:28` excludes. It
+exists in the main checkout (19,502 bytes, generated 2026-07-30) and in **no** worktree. So:
+
+- The failure predates Round 2 and is not caused by any wave.
+- It is not a code failure at all — it is a **missing input**, and the test fails closed rather than
+  fabricating one, which is the correct behaviour.
+- **The plan's three-name failing set is correct.** The fourth name is an artifact of running the
+  suite anywhere other than the main checkout.
+
+**Rule for Rounds 3 and 4:** the protected failing set is the three named in the plan. A worktree
+build may additionally see `export_random20_sp500_parity_snapshot` fail for missing input, and that
+is reported as **environment-missing, not as a failure** — the same standing as Gate 4's WebView2
+block. It is a measurement that did not run. It is **not** added to the protected set: growing a
+protected failing set is how a real regression eventually hides inside it.
+
+Rounds 1 and 2 are unaffected — the number was mis-described in their reports, never acted on.
+
+---
+
+## R-27 — Wave 5 pre-registration, written before the wave is dispatched
+
+Registered now so the wave cannot be graded against a target adjusted after seeing it.
+
+| # | prediction | falsified if |
+|---|---|---|
+| P1 | Anchors do not move: PG 18109, GOOGL 35679, AMZN 16185, MSFT 57139, delta **$0.00** | any anchor moves by one cent. That falsifies F1 (the Core has no production caller) and the wave STOPS |
+| P2 | T5.8's property test finds **zero** operating issuers still producing a Core value | any issuer produces one; `return_on_capital` is hardcoded absent at `valuation_core_adapter.rs:557`, so a number means a second substitution path exists that FR-29's deletion did not reach |
+| P3 | The bank test keeps a **different** reason (`provider_unavailable`) from operating issuers' `estimator_unavailable` | they converge — which would void the entire justification for adding a new variant rather than reusing `NotReported` |
+| P4 | T5.12's compile gate holds: the crate builds with `value()` behind `#[cfg(test)]` | it does not build, in which case F1 is false, Waves 3 and 5 both lose their live-QA exemption, and the wave STOPS |
+| P5 | Every one of the 34 planner-derived Examples cells matches observed behaviour without edit | any cell disagrees — the wave STOPS and reports rather than editing the cell, per T5.4 |
+| P6 | The Shell failing set stays exactly the three named in R-26.2 | a fourth appears that is not the environment-missing parity input |
+
+P5 is the one with real prior probability of falsifying: 34 cells derived by reading code, never by
+running cucumber. A disagreement there is a **finding**, not a defect in the plan — and the rule that
+the builder may not edit the cell is what makes it a finding instead of a laundered spec change.
