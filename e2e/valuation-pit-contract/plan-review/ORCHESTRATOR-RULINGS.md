@@ -3833,3 +3833,172 @@ bear, and R-47.1's fuller source says the scaled average **is** the repair for c
 hypothesis survived Round 11 on the numbers rather than on the citation, and R-46.1 already graded it
 honestly — MSFT clean, AMZN confounded, not a cohort property. Nothing built on it, because nothing was
 built. That is the sequencing working, not luck.
+
+---
+
+## R-48 — Round 12 verified. Option (i) loses twelve of twelve, option (iii) buys nothing, and the blend turns out to have been shrunk toward the wrong anchor.
+
+Shipped at `244053b` on `r10` over the verified base `21d48b3`. Suite `566 / 4 / 27`, gate green, golden
+fixture untouched, nothing pushed. Four panels raced against live filings under the R-47.6
+pre-registration, which was committed at `d654ae6` **before** the probe existed.
+
+### R-48.1 — The result the round's own summary under-states
+
+The registered outcomes were reported correctly and P7 was called *not a win*, which is right and is
+what the rule says. But P7 is a question about the top two, and it buried the finding that the round
+was actually sent to get.
+
+**`E1` — R-46.4 option (i), the robust centre over the whole filed history — loses every single
+comparison.** Twelve of twelve: three horizons × two capital definitions × two series, against `E2`.
+
+| panel | h=1 | h=2 | h=3 |
+|---|---|---|---|
+| `s2c / gross` | 0.1527 vs **0.0919** | 0.1976 vs **0.1208** | 0.2159 vs **0.1571** |
+| `s2c / oper` | 0.1880 vs **0.1189** | 0.2724 vs **0.1582** | 0.2777 vs **0.1927** |
+| `roic / gross` | 0.4573 vs **0.2621** | 0.5581 vs **0.4668** | 0.5986 vs **0.3898** |
+| `roic / oper` | 0.3927 vs **0.2152** | 0.4428 vs **0.4206** | 0.4637 vs **0.4089** |
+
+`E1` on the left, `E2` on the right, common set, primary metric, lower is better. The margin at one
+year runs **58% to 82%** worse. Not a tie, not a coin flip, and not confined to the two issuers Round
+11 flagged — it is the whole cohort, which is exactly what R-47.2 predicted from a 38%-per-year decay
+rate and is the reason that prediction was written down before this ran.
+
+**`E4` — option (iii)'s shape — buys nothing at all.** By construction it *is* `E1` wherever it does
+not refuse, so it inherits all twelve losses, and it pays 40–60% of coverage for them. That settles
+something the literature could not: the mis-weighting is not a property of a trended minority that a
+refusal rule could quarantine. Refusing the trended issuers leaves the remaining centres just as
+wrong. **Options (i) and (iii) are both out, and the data ended them rather than an argument.**
+
+### R-48.2 — P8 fired, and it fired differently for the two series, which is an economic result
+
+`phi` was fitted, never chosen, leave-one-issuer-out, through the origin on the Fama–French
+partial-adjustment specification.
+
+| series | `phi` | se | leave-one-out range | P8 |
+|---|---|---|---|---|
+| `s2c / gross` | 0.9785 | 0.0433 | 0.674 – 1.020 | within 1 SE of 1.0 — **degenerate** |
+| `s2c / oper` | 1.0121 | 0.0328 | 0.911 – 1.018 | within 1 SE of 1.0 — **degenerate** |
+| `roic / gross` | 0.3689 | 0.0849 | 0.342 – 0.431 | not degenerate |
+| `roic / oper` | 0.5609 | 0.0964 | 0.261 – 0.719 | not degenerate |
+
+Read it as economics rather than as arithmetic. **Return on capital reverts; capital intensity does
+not.** `roic`'s 0.37–0.56 brackets Fama & French's 0.62 on Compustat profitability, which is a
+published number our cohort was never fitted toward and lands beside it anyway. `s2c`'s ~1.0 is a
+random walk: how much revenue a dollar of capital carries is a fact about the business model and the
+technology, and competition does not compete it away the way it competes away a return.
+
+That split is worth more than the horse race. It also means the two series need different treatment,
+and any estimator that assumes one persistence for both is wrong for one of them.
+
+**P8 was registered with a consequence, and the consequence fires.** R-47.6 states verbatim that a
+degenerate blend hands the answer to the corresponding pure estimator. For `s2c`, under both capital
+definitions, `E3` **is** `E2` with a two-percent dash of `E1` — the 0.0911-against-0.0919 style gaps
+are that dash, not a contest. So for sales-to-capital the registered rule has already chosen, and it
+chose **the latest usable year**.
+
+### R-48.3 — Where the blend is genuinely a blend, it loses — and the reason is a defect in how I specified it
+
+For `roic`, `phi` is not degenerate, so `E3` is a real mixture. And it lands **strictly between** the
+two estimators it mixes, every time:
+
+    roic / gross,  h=1:    E1 0.4573   >   E3 0.3652   >   E2 0.2621
+    roic / oper,   h=1:    E1 0.3927   >   E3 0.3059   >   E2 0.2152
+
+Monotone interpolation. The fit did not discover a combination better than its parts; it averaged a
+good estimator with a bad one and got something in between. Across both `roic` panels `E2` beats `E3`
+at **five of six** horizons, losing only `oper/h=2` by 0.0026 — six tenths of one percent.
+
+The reason is not that blending is wrong. It is that **`E3` shrinks toward `E1`, and `E1` is the worst
+estimator in the race.** Shrinking toward a contaminated anchor cannot beat not shrinking, whatever the
+weight.
+
+And the anchor is contaminated for a reason already on the record. R-46.2 measured that `standardize`,
+run along time, can delete the present — `PG gross roic` trims 2022 through 2025, so its centre is
+anchored on 2019. Shrinking a current observation toward *that* is shrinking toward a firm that no
+longer exists.
+
+**This is a mis-specification I introduced, and it is checkable against the citation I used.** Fama &
+French estimate reversion of a firm's profitability toward the **cross-sectional** mean — toward what
+other firms earn, because the mechanism is competition. R-47.2 quoted them and then R-47.6 specified
+`E3` to revert toward the firm's **own history**, which is a different model with a different economic
+claim and no support in the source. The measurement caught it. The blend has not actually been tested
+yet; what has been tested is a mis-specified cousin of it.
+
+### R-48.4 — Round 13, and why adding an estimator now is not fishing
+
+The obvious objection: a fifth estimator proposed after seeing four results is how a post-hoc winner
+gets manufactured. It does not apply here, and the reason is checkable rather than asserted.
+
+- The correction is a **specification error against a source quoted before the numbers** — R-47.2, at
+  `d654ae6`, states the mechanism is reversion toward a mean produced by competition. Anyone can read
+  that commit and see that `E3` as built does not implement it.
+- **The criterion does not move.** Same out-of-sample forecast error, same three horizons, same common
+  set, same whole cohort, same `robust_mean`. R-41.5's failure mode is a threshold chosen to fit
+  numbers; nothing here touches the threshold or the grading.
+- It is **falsifiable in the same way**: if reverting toward the cross-section also loses to `E2`, then
+  blending is finished on this cohort and `E2` wins outright, which is a cleaner answer than the one
+  we have now.
+
+**Registered before Round 13 runs:**
+
+- **`E5`** — partial adjustment toward the **cross-sectional** centre: `E5(t) = M(t) + psi·(E2(t) − M(t))`,
+  where `M(t)` is the `robust_centre` of the quantity across **all other issuers** at year `t`, and
+  `psi` is fitted by the same through-origin least squares, leave-one-issuer-out, exactly as `phi` was.
+- **P12.** `E5` is graded on the common set against `E1`, `E2`, `E3`, `E4` at all three horizons under
+  both definitions for both series. Same win condition as P7 — all six, or it is not a win.
+- **P13.** If `psi` degenerates to 1.0 within one standard error, `E5` is `E2` and the answer is `E2`.
+  If it degenerates to 0.0, the answer is the cross-sectional centre alone, which nobody proposed and
+  which would be a finding worth stopping for.
+- **P14.** `M(t)` uses only issuers other than the one being scored and only data at or before `t`. A
+  cross-sectional anchor that peeks at the scored issuer or at the future is not a forecast.
+- **P15.** No result of Round 13 may move `MAX_ABSOLUTE_Z`, any threshold, or any refusal path, and
+  none of it settles `prod` vs `roic`.
+
+`E1` and `E4` remain in the table as losers rather than being dropped, so the comparison stays honest
+and the twelve-of-twelve result stays visible.
+
+### R-48.5 — A limitation of the criterion I registered, which I would rather state than have found for me
+
+Out-of-sample forecast error on the **ratio** is not error in the **value**, and the map between them
+is not linear. The retention charge is `1 − g/r`; as `r` approaches zero the charge diverges. An
+estimator can carry the lowest mean absolute error on `r` and still produce a catastrophic value on the
+one issuer-year where it lands near zero — `HPE`'s 0.007 against a centre of 0.045 is that case, and
+`robust_mean` of an absolute error is precisely the statistic that will not see it.
+
+So the race identifies the best **estimator of the ratio** and does not by itself certify the best
+**estimator for this model**. I am not repairing that by inventing a bound: R-44.5 already ruled that
+the bound is the arithmetic guard that exists — `r <= 0` refuses, terminal growth at or above the
+discount rate refuses — and that nothing tighter goes in without Juan registering it as policy with the
+number written first. The gap is registered as a latent defect with a trigger (the first wave that
+publishes a value from a measured `r`) and a detector (the pre-registration for that wave must predict
+the per-issuer value, so a divergent one appears by name in a failing gate rather than in a screen).
+
+### R-48.6 — Housekeeping, and one thing my own brief got wrong
+
+The brief predicted `28 ignored`; the true count is `27` — 26 pre-existing plus this round's one. One
+of the twenty-eight `#[ignore]` grep hits is a doc-comment mention rather than an attribute. The round
+flagged the discrepancy instead of quietly matching the number it was told to expect, which is the
+correct behaviour and worth recording as such.
+
+Option (iii)'s standalone coverage cost, measured rather than argued: the latest observation is trimmed
+out of the retained set in **12.7%** of windows (`s2c/gross`), 11.2% (`roic/gross`), 7.9% (`roic/oper`),
+5.1% (`s2c/oper`). One window in eight at the top end. That number stands on its own even now that
+option (iii) is out as an estimator — it is the rate at which a published centre would be describing a
+firm whose present was deleted, and R-46.2's sweep still needs it.
+
+Excluded from the primary metric by name, always for insufficient observations in the whole-history
+scale and never silently: `DAL` and `SLB` (`s2c/oper`), `SLB` (`roic/oper`).
+
+### R-48.7 — What is now settled, and what is still Juan's
+
+**Settled by measurement:** option (i) is out, twelve of twelve. Option (iii) is out as an estimator
+and survives only as a diagnostic. `s2c` is a random walk and `roic` reverts at a rate that brackets
+the published one.
+
+**One round from settled:** `E2` versus a correctly-specified blend. `E2` leads everywhere it is not
+tied, and its only losses are hairlines against a mixture that P8 shows is `E2` in disguise.
+
+**Still open, still not mine:** `prod` vs `roic` (R-45.3), untouched by design — Round 12 ran the two
+series separately precisely so it could not settle it in passing. The FCFF-in-the-NOPAT-slot base
+change (R-30.1 / R-44.3), blocking and upstream. AMZN's marginal-rate supply hole (R-46.3). The
+time-axis sweep (R-46.2). Every one of the twenty pinned issuers still refuses.
