@@ -350,14 +350,17 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 
 | Situation | Use |
 | --- | --- |
-| Centre of an issuer's annual series (ROIC, margin, growth, coupon) | `valuation_core::robust_mean(&sample, MAX_ABSOLUTE_Z)` — standardize, discard `\|z\| > 3`, recompute |
+| Centre of an issuer's annual series (ROIC, margin, growth, coupon) — point estimate only | `valuation_core::robust_mean(&sample)` — standardize, discard `\|z\| > MAX_ABSOLUTE_Z`, recompute |
+| Centre of an issuer's annual series, **and** its width/discard count/excluded indices | `valuation_core::robust_centre(&sample)` — returns `RobustCentre { centre, variance_of_centre, retained, discarded, outliers }`; the centre and its width come from the **same retained observations**, so a caller can never pair a robust point with a contaminated width |
 | "Is this observation contamination?" | `valuation_core::standardize(&sample)` then `.outliers(MAX_ABSOLUTE_Z)` — report the index, let the caller decide |
 | Cross-sectional summary across issuers | Median, and say so |
 | A genuine population total (shares, dollars summed to a balance) | A sum is correct; this rule is about *estimates*, not accounting identities |
 
-- The one implementation lives in [`valuation-core/src/numerics.rs`](apps/windows/src-tauri/valuation-core/src/numerics.rs). **Do not write a second one.** If it lacks something you need, extend it there with tests — a private `let avg = xs.iter().sum::<f64>() / n` in a caller is the thing this rule forbids.
+- The one implementation lives in [`valuation-core/src/numerics.rs`](apps/windows/src-tauri/valuation-core/src/numerics.rs). **Do not write a second one.** `robust_centre` and `robust_mean` both delegate to one private `trimmed` function — if either lacks something you need, extend `trimmed` with tests there — a private `let avg = xs.iter().sum::<f64>() / n` in a caller is the thing this rule forbids.
 - **Scores are median/MAD, not mean/sd, and that is load-bearing.** With mean and standard deviation the outlier inflates the scale it is then measured against, and no score in an `n`-point sample can exceed `(n - 1) / sqrt(n)` — 2.85 at `n = 10`. Filed histories here are 10–19 years, so a 3-sigma rule built on the mean is arithmetically incapable of flagging anything on the shorter ones. Median and MAD have 50% breakdown and do not have that ceiling.
 - **`MAX_ABSOLUTE_Z = 3.0` does not move.** It is a boundary between populations, not a knob; lowering it to make an estimate come out somewhere nicer is the same failure as relaxing a test threshold.
+- **`robust_centre` takes no threshold parameter, on purpose.** A call site able to pass `4.0` in place of `MAX_ABSOLUTE_Z` would be relaxing a threshold without touching the constant — the exact move this rule exists to close, executed somewhere no reviewer of the constant would think to look. `robust_mean` carries the same guarantee: its `max_absolute_z` parameter was removed once its one external caller could migrate (`valuation_probes.rs`, Round 3) — see `docs/valuation-aggregation-audit.md`.
+- **`variance_of_centre` is a mild, known, residual understatement of the estimator's true uncertainty** — the retained sample is narrower than the population it estimates, so under inverse-variance fusion (`posterior::fuse`, weight `= 1/variance`) a channel carrying this width is given slightly more weight than the evidence entitles it to. This is registered as **LD-5** in `docs/valuation-economic-contract.md` (trigger: the first forward channel that fuses against the trailing channel; no mechanical detector — human review). It is a residual bias, not the perverse *monotone-in-contamination* defect that existed before Wave 3 (a dirtier sample reporting a tighter width) — that component is fixed by construction, because `centre()` and `variance_of_centre()` are computed from the same kept vector and cannot be paired wrongly.
 - Trimming must **refuse**, never silently fall back to the untrimmed mean — that would be the contaminated answer wearing a robust label. Report how many observations were discarded alongside the estimate.
 
 ### Numerical conclusions — pre-presentation checklist (mandatory)
@@ -437,6 +440,19 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
    - Add a DOM-scoped native assertion for the lane plus restart/stale/refusal counterexamples.
    - Run the architecture-named Android, native E2E, and live `qa` gates before marking the slice independently closed; a plan may not silently downgrade them to optional.
 
+7. **A policy-fingerprint bump (`sec-driver-normalization/N` or equivalent contract version) is a triggering change.** Any edit to `shared/contracts/sec-driver-normalization.json` (or a future sibling contract) that bumps its fingerprint must update **all five** fingerprint sites, together, in the same change:
+   - `shared/contracts/sec-driver-normalization.json` — the source contract.
+   - `shared/contracts/sec-driver-normalization-fixtures.json` — the fixture corpus's own fingerprint line.
+   - `apps/windows/src-tauri/src/sec_driver_normalization_policy_generated.rs` — **generated Rust; never hand-edit.**
+   - `apps/windows/src-tauri/src/sec_normalization.rs` — the fingerprint assertion inside `generated_contract_policy_is_the_category_source`.
+   - `apps/android/core/.../SecDriverNormalizationPolicyGenerated.kt` — **generated Kotlin; never hand-edit.**
+
+   Regenerate the two generated sites through the generator (`scripts/generate-sec-driver-normalization-policy.ps1`), never by hand. Before the change is considered done, both of the following must pass on the regenerated output:
+   - `pwsh scripts/validate-contracts.ps1`
+   - `cargo fmt -- --check`
+
+   A repository search for the old fingerprint string must return hits only in append-only history (`_bmad-output/**/.memlog.md`), never in a live source or contract file.
+
 ### Anti-patterns that already bit us (do not repeat)
 
 | Anti-pattern | What happened | Do instead |
@@ -471,7 +487,8 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Analyst gap pill sits beside DCF with no source | A positive Street upside looked like it described a below-market DCF | Label the analyst relation and show DCF-vs-market independently |
 | Naked `sum / n` over an annual series | One 5208% implied coupon inverted a whole cross-sectional credit fit; a plain mean of 19 annual returns reported restructuring years as return | `valuation_core::robust_mean` / `standardize` — never a hand-rolled average. See **Aggregation — no naked averages** |
 | 3-sigma rule built on mean and standard deviation | Provably cannot fire at `n <= 10` (max score is `(n-1)/sqrt(n)`); the outlier inflates its own scale and hides | Median/MAD scores, which have 50% breakdown and no such ceiling |
-| Cash-flow tag used as an income-statement equivalent | `InterestPaidNet` (interest *paid*) sat in the interest-**expense** qname list and gap-filled an accrual series year by year; it was one issuer's only source across nine years | Equivalence classes hold one statement's concept only; an issuer that files none reads **absent**, not a substitute from another statement |
+| Cash-flow tag used as an income-statement equivalent (**R1**) | `InterestPaidNet` (interest *paid*) sat in the interest-**expense** qname list and gap-filled an accrual series year by year; it was one issuer's only source across nine years | Equivalence classes hold **one statement's concept only** (rule R1); an issuer that files none reads **absent**, not a substitute from another statement |
+| A netted concept admitted into an equivalence class without a declared sign convention (**R2**) | `InterestIncomeExpenseNet` is filed under the *same* qname by issuers on opposite sides of the same economic line: LIN files it **negative** every year 2022-2025 (`-63M, -200M, -256M, -255M`, an exact negation of `InterestExpenseNonoperating`'s positive figures in the same years), while BAC files it **positive**, `+60,096M` for 2025, because BAC's net position is net interest *income*, not expense. No single sign rule resolves both correctly | Equivalence classes hold **one measurement basis only** (rule R2); a netted concept enters the class only through a declared sign convention (`negatedQnames` / `qname_signs`) that maps it onto that basis — absent a declared convention it reads **absent**, not equivalent. See `docs/valuation-economic-contract.md` §13 |
 
 ### Where longer checklists live
 
@@ -496,13 +513,23 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 - [`README.md`](README.md) — product overview and commands
 - [`docs/index.md`](docs/index.md) — documentation hub
 - [`_bmad-output/project-context.md`](_bmad-output/project-context.md) — lean AI implementation rules
-- [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) — valuation ADRs
+- [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) — valuation ADRs, including **AD-VM-012** (FR-29 removal and the explicit unavailable-state behaviour); see `## Architecture Decisions` in `docs/index.md`
 - [`shared/contracts/README.md`](shared/contracts/README.md) — contract fixtures
 - [`apps/android/README.md`](apps/android/README.md) — Android module map
 - Desktop operator docs under `apps/desktop/docs/`
 - Windows regression notes under `docs/windows-dashboard-2.0-manual-regression.md`
+- [`docs/cross-platform-parity.md`](docs/cross-platform-parity.md) — default rule for user-visible parity between desktop and Android
 - Live valuation QA (**always profile `qa`**): [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md)
 - Multi-name valuation baseline: [`_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md`](_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md)
 - Quant motor handover (next agent): [`_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md`](_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md)
 - BMAD process guidance: section **BMAD Method** above; Grok quick-start rule [`.grok/rules/bmad.md`](.grok/rules/bmad.md)
 - **Preventing repeat errors:** section **Preventing repeat operational errors** above (manual procedures stay in this file)
+- Valuation PIT, economic contract & ROIC research (`valuation-pit-contract` E2E run):
+  [`docs/sec-point-in-time-provenance.md`](docs/sec-point-in-time-provenance.md),
+  [`docs/valuation-aggregation-audit.md`](docs/valuation-aggregation-audit.md),
+  [`docs/valuation-economic-contract.md`](docs/valuation-economic-contract.md),
+  [`docs/roic-research-charter.md`](docs/roic-research-charter.md),
+  [`docs/growth-research-charter.md`](docs/growth-research-charter.md),
+  [`docs/roic-target-specification.md`](docs/roic-target-specification.md),
+  [`docs/roic-preregistration.md`](docs/roic-preregistration.md) — matches `docs/index.md`'s
+  `## Valuation PIT, Economic Contract & ROIC Research` section name for name
