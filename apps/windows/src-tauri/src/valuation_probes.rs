@@ -34,6 +34,25 @@
 //!   with every interest year read as `|filed|`, which is exactly what the code
 //!   published before the three `.abs()` sites were removed, and once with the
 //!   history as this tree now reads it — and reports the published delta.
+//! * **Probe H — interest basis versus sign.** `resolve_rate_inputs` refuses the
+//!   accounting cost-of-debt channel for a whole issuer when ANY year reads a
+//!   negative interest value (LD-8's approximation: a *sign* test standing in
+//!   for a *basis* test — net income exceeding net expense versus a filed line
+//!   that is net of interest income at all). This probe reads the winning qname
+//!   behind every issuer-year the current sign convention can produce and asks,
+//!   from that provenance, whether the sign test and the basis test actually
+//!   agree: how often a negative year is *not* won by a negated concept, which
+//!   issuers the basis test would refuse that the sign test does not (the net-
+//!   *expense* filers LD-8 names as the gap), and how much narrower a basis-aware
+//!   per-year refusal would be than the issuer-wide sign refusal shipping today.
+//! * **Three-arm probe — the guard rule, measured, not argued.** `measure-guard-
+//!   rules` branch only. Runs every issuer through the real router three times
+//!   from one fetch: the legacy pre-sign-correction reading (base), the current
+//!   sign convention under `NetInterestPolicy::RefuseIssuerOnSign` (arm A,
+//!   today's shipped rule), and under `NetInterestPolicy::DropYearOnBasis` (arm
+//!   D, the basis-aware candidate Probe H's Table 2 rule (D)). All three arms
+//!   flow through the same `resolve_rate_inputs_for_source` body; the policy
+//!   parameter is measurement-only and does not ship.
 //!
 //! Run them with:
 //!
@@ -43,6 +62,8 @@
 //! cargo test --lib probe_return_on_capital_availability -- --ignored --nocapture
 //! cargo test --lib probe_facts_without_a_filing_date    -- --ignored --nocapture
 //! cargo test --lib probe_published_value_under_the_corrected_interest_sign -- --ignored --nocapture
+//! cargo test --lib probe_interest_basis_versus_sign     -- --ignored --nocapture
+//! cargo test --lib probe_published_value_under_net_interest_policies -- --ignored --nocapture
 //! ```
 
 #[cfg(test)]
@@ -53,14 +74,16 @@ use chrono::Utc;
 
 #[cfg(test)]
 use crate::dcf_model::{
-    classify_business, compute_with_params, BusinessClass, DcfAnalysis, FcfPoint, MarketParams,
+    classify_business, compute_with_params_and_net_interest_policy, BusinessClass, DcfAnalysis,
+    FcfPoint, MarketParams,
 };
 #[cfg(test)]
-use crate::driver_resolution::resolve_rate_inputs;
+use crate::driver_resolution::{resolve_rate_inputs_for_source, NetInterestPolicy};
 #[cfg(test)]
 use crate::edgar::{
-    accepted_annual_entries, edgar_client, extract_driver_annual, fetch_cik_map,
-    fetch_company_facts, fetch_fcf_history, fetch_shares_outstanding, IsoDate,
+    accepted_annual_entries, edgar_client, extract_driver_annual, extract_driver_vintages,
+    extract_total_debt, fetch_cik_map, fetch_company_facts, fetch_fcf_history,
+    fetch_shares_outstanding, IsoDate,
 };
 #[cfg(test)]
 use crate::engine::FundamentalSnapshot;
@@ -369,17 +392,23 @@ struct GateRun {
 /// callable from here and widening it for a probe would be a production edit.
 /// Only the fields this probe prints are carried over; the gate verdict, the
 /// scale annotation and the note text are not, because no column reads them.
+///
+/// `net_interest_policy` routes through `compute_with_params_and_net_interest_policy`
+/// rather than a reimplementation, so every arm this probe measures resolves a
+/// rate through the same production FCFF/WACC pipeline and can only differ
+/// where `resolve_rate_inputs_for_source` itself branches on the policy.
 #[cfg(test)]
-fn run_operating_lane(input: GateRunInput<'_>) -> GateRun {
+fn run_operating_lane(input: GateRunInput<'_>, net_interest_policy: NetInterestPolicy) -> GateRun {
     let mut fcff_failure: Option<String> = None;
     let mut analysis: Option<DcfAnalysis> = None;
-    match compute_with_params(
+    match compute_with_params_and_net_interest_policy(
         input.fundamentals,
         input.history,
         input.market_price_cents,
         input.market_params,
         PUBLISHED_VALUE_PROBE_SOURCE,
         false,
+        net_interest_policy,
     ) {
         Ok(value) => analysis = Some(value),
         Err(error) => fcff_failure = Some(format!("fcff_compute:{error}")),
@@ -477,12 +506,89 @@ fn cost_of_debt_channel(
     history: &[FcfPoint],
     fundamentals: &FundamentalSnapshot,
     rf_bps: i32,
+    net_interest_policy: NetInterestPolicy,
 ) -> String {
-    match resolve_rate_inputs(history, fundamentals.total_debt_dollars, rf_bps) {
+    match resolve_rate_inputs_for_source(
+        history,
+        fundamentals.total_debt_dollars,
+        rf_bps,
+        PUBLISHED_VALUE_PROBE_SOURCE,
+        net_interest_policy,
+    ) {
         Ok(Some(resolved)) => format!("{}bps", resolved.cost_of_debt_bps),
         Ok(None) => "n/a".to_string(),
         Err(reason) => format!("REFUSED({})", reason.replace("fcff unavailable: ", "")),
     }
+}
+
+/// One issuer-year of the interest driver's winning provenance: which qname
+/// won, whether that qname is one of the two the sign contract negates, the
+/// post-negation value, and the total debt the production path pairs it with.
+///
+/// Built once per issuer-year and reused for all four candidate refusal
+/// predicates in Probe H, so every predicate is evaluated against exactly the
+/// same read of the evidence rather than four separate re-derivations of it.
+#[cfg(test)]
+struct BasisYear {
+    symbol: &'static str,
+    year: i32,
+    winning_qname: String,
+    is_net: bool,
+    interest_dollars: i64,
+    total_debt_dollars: Option<i64>,
+}
+
+/// Every qname `INTEREST_EXPENSE` negates, read from the contract's own sign
+/// list rather than hand-copied.
+///
+/// `BasisYear::is_net` is ground truth only because it is derived the same
+/// way the extractor derives the sign itself; typing the two concept names as
+/// string literals here would let the probe and the contract drift silently
+/// if a third concept were ever negated.
+#[cfg(test)]
+fn negated_interest_qnames() -> Vec<&'static str> {
+    INTEREST_EXPENSE
+        .qnames
+        .iter()
+        .zip(INTEREST_EXPENSE.qname_signs.iter())
+        .filter_map(|(qname, sign)| (*sign == -1).then_some(*qname))
+        .collect()
+}
+
+/// One issuer's verdict under all four candidate refusal rules.
+///
+/// `fittable_d_years` is carried rather than reduced to a count so Table 4 and
+/// the P5 check can name the years rule (D) would actually fit on, not just
+/// how many survived.
+#[cfg(test)]
+struct IssuerVerdict {
+    symbol: &'static str,
+    refused_a: bool,
+    refused_b: bool,
+    refused_c: bool,
+    refused_d: bool,
+    fittable_d_years: Vec<i32>,
+}
+
+/// TP/FP/FN/TN of one per-year predicate against `is_net` as ground truth.
+#[cfg(test)]
+fn confusion_against_basis(
+    rows: &[BasisYear],
+    predicate: impl Fn(&BasisYear) -> bool,
+) -> (usize, usize, usize, usize) {
+    let mut true_positive = 0usize;
+    let mut false_positive = 0usize;
+    let mut false_negative = 0usize;
+    let mut true_negative = 0usize;
+    for row in rows {
+        match (predicate(row), row.is_net) {
+            (true, true) => true_positive += 1,
+            (true, false) => false_positive += 1,
+            (false, true) => false_negative += 1,
+            (false, false) => true_negative += 1,
+        }
+    }
+    (true_positive, false_positive, false_negative, true_negative)
 }
 
 #[cfg(test)]
@@ -1294,21 +1400,32 @@ mod tests {
                 });
 
             let run = |history: &[FcfPoint]| {
-                run_operating_lane(GateRunInput {
-                    fundamentals: &fundamentals,
-                    history,
-                    market_price_cents,
-                    market_params: &market_params,
-                    forward_evidence: forward_evidence.clone(),
-                    as_of_epoch_day,
-                })
+                run_operating_lane(
+                    GateRunInput {
+                        fundamentals: &fundamentals,
+                        history,
+                        market_price_cents,
+                        market_params: &market_params,
+                        forward_evidence: forward_evidence.clone(),
+                        as_of_epoch_day,
+                    },
+                    NetInterestPolicy::RefuseIssuerOnSign,
+                )
             };
             let before = run(&before_history);
             let after = run(&after_history);
-            let cod_before =
-                cost_of_debt_channel(&before_history, &fundamentals, market_params.rf_bps);
-            let cod_after =
-                cost_of_debt_channel(&after_history, &fundamentals, market_params.rf_bps);
+            let cod_before = cost_of_debt_channel(
+                &before_history,
+                &fundamentals,
+                market_params.rf_bps,
+                NetInterestPolicy::RefuseIssuerOnSign,
+            );
+            let cod_after = cost_of_debt_channel(
+                &after_history,
+                &fundamentals,
+                market_params.rf_bps,
+                NetInterestPolicy::RefuseIssuerOnSign,
+            );
 
             if rewritten_years > 0 && tree_preserves_the_interest_sign() {
                 rewritten_and_capable += 1;
@@ -1496,6 +1613,1062 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+        }
+    }
+
+    /// Probe H. Does a negative post-negation interest value actually imply a
+    /// net-basis series, or is the sign only an approximation of the basis?
+    ///
+    /// `resolve_rate_inputs` (`driver_resolution.rs:118-142`) refuses the
+    /// accounting cost-of-debt channel for a whole issuer when ANY year reads a
+    /// negative interest value. That is a *sign* test standing in for a *basis*
+    /// test, and the code says so at the point it makes the approximation: a
+    /// net-*expense* filer's series is equally net, but its value never goes
+    /// negative, so the sign test cannot see it (LD-8).
+    ///
+    /// This probe reads the winning qname behind every issuer-year the sign
+    /// convention can produce — via `extract_driver_vintages(...).latest()`,
+    /// which carries provenance — and evaluates four candidate refusal rules
+    /// against the same rows: (A) the sign test as implemented, (B) the sign
+    /// test narrowed to years the accounting fit would otherwise consume, (C) a
+    /// basis test using the winning qname directly, and (D) a per-year basis
+    /// drop rather than an issuer-wide refusal. Table 3 asks whether (A) and
+    /// (C) actually agree; Table 4 asks whether the year that trips (A) is ever
+    /// a year the fit would have used anyway.
+    ///
+    /// Asserts nothing. Five predictions are checked against the four tables at
+    /// the end and each is reported SURVIVED, FALSIFIED or — when the measured
+    /// universe cannot contain the evidence a prediction needs — UNMEASURED,
+    /// against the number that decided it.
+    #[test]
+    #[ignore = "network: SEC interest-basis-versus-sign probe; diagnostic only"]
+    fn probe_interest_basis_versus_sign() {
+        use std::collections::HashMap;
+
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
+
+        // Universe = union of the three named populations, deduplicated.
+        // INTEREST_SIGN_AFFECTED_COHORT is the population Tables 3 and 4 are
+        // about; PROBE_COHORT supplies DAL/CHTR/BKR/COF, the suspected
+        // net-EXPENSE filers P3 turns on; VALUATION_ANCHORS keeps anchor
+        // behaviour visible.
+        let mut universe: Vec<&'static str> = Vec::new();
+        for &symbol in VALUATION_ANCHORS
+            .iter()
+            .chain(INTEREST_SIGN_AFFECTED_COHORT)
+            .chain(PROBE_COHORT)
+        {
+            if !universe.contains(&symbol) {
+                universe.push(symbol);
+            }
+        }
+
+        println!("=== PROBE H: interest basis versus sign ===");
+        println!(
+            "universe = union(VALUATION_ANCHORS[{}], INTEREST_SIGN_AFFECTED_COHORT[{}], \
+             PROBE_COHORT[{}]) = {} distinct symbols",
+            VALUATION_ANCHORS.len(),
+            INTEREST_SIGN_AFFECTED_COHORT.len(),
+            PROBE_COHORT.len(),
+            universe.len()
+        );
+        println!(
+            "VALUATION_ANCHORS:             {}",
+            VALUATION_ANCHORS.join(" ")
+        );
+        println!(
+            "INTEREST_SIGN_AFFECTED_COHORT: {}",
+            INTEREST_SIGN_AFFECTED_COHORT.join(" ")
+        );
+        println!("PROBE_COHORT:                  {}", PROBE_COHORT.join(" "));
+        println!("union:                         {}", universe.join(" "));
+        let named_net_expense_suspects = ["DAL", "CHTR", "BKR", "COF"];
+        println!(
+            "DAL/CHTR/BKR/COF (the P3 net-EXPENSE suspects) are already members of PROBE_COHORT, \
+             not added separately -- {}",
+            named_net_expense_suspects
+                .iter()
+                .map(|symbol| format!(
+                    "{symbol}={}",
+                    if PROBE_COHORT.contains(symbol) {
+                        "present"
+                    } else {
+                        "ABSENT"
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let negated_qnames = negated_interest_qnames();
+        println!(
+            "negated qnames (Table 1/3's basis ground truth, read from \
+             INTEREST_EXPENSE.qname_signs): {}",
+            negated_qnames.join(" ")
+        );
+
+        let mut rows: Vec<BasisYear> = Vec::new();
+        let mut fetched_ok: Vec<&str> = Vec::new();
+        let mut fetch_failed: Vec<String> = Vec::new();
+
+        println!();
+        println!("=== TABLE 1: per issuer-year basis facts ===");
+        println!(
+            "total_debt_dollars path: crate::edgar::extract_total_debt() -- the exact function \
+             fetch_fcf_history calls to fill FcfPoint.total_debt_dollars (CURRENT_DEBT + \
+             NON_CURRENT_DEBT, superseded per year by a reported TOTAL_DEBT when filed). Called \
+             directly, not reimplemented, so this table cannot drift from what resolve_rate_inputs \
+             actually sees."
+        );
+        println!(
+            "{:<7} {:>6} {:<40} {:>7} {:>18} {:>16} {:>6}",
+            "symbol", "year", "winning_qname", "is_net", "interest_$", "total_debt_$", "n_src"
+        );
+        for &symbol in &universe {
+            let Some(&cik) = cik_map.get(symbol) else {
+                fetch_failed.push(format!("{symbol}(no CIK)"));
+                println!("{symbol:<7} no CIK");
+                continue;
+            };
+            let Ok(facts) = fetch_company_facts(&edgar, symbol, cik) else {
+                fetch_failed.push(format!("{symbol}(companyfacts)"));
+                println!("{symbol:<7} companyfacts fetch failed");
+                continue;
+            };
+            fetched_ok.push(symbol);
+
+            let interest_years = extract_driver_vintages(&facts, INTEREST_EXPENSE).latest();
+            let debt_by_year: HashMap<i32, i64> = extract_total_debt(&facts)
+                .into_iter()
+                .map(|value| (value.year, value.value_dollars))
+                .collect();
+
+            if interest_years.is_empty() {
+                println!("{symbol:<7} no interest-expense years extracted");
+                continue;
+            }
+
+            for value in &interest_years {
+                let n_sources = value.provenance.sources.len();
+                if n_sources != 1 {
+                    println!(
+                        "*** UNEXPECTED: {symbol} {} has n_sources={n_sources} \
+                         (select_one_equivalent should resolve to exactly 1 -- contradicts \
+                         structural fact 3): {:?}",
+                        value.year,
+                        value
+                            .provenance
+                            .sources
+                            .iter()
+                            .map(|source| source.qname.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                }
+                let Some(winning) = value.provenance.sources.first() else {
+                    println!(
+                        "*** UNEXPECTED: {symbol} {} has an AnnualValue with no source at all",
+                        value.year
+                    );
+                    continue;
+                };
+                let winning_qname = winning.qname.clone();
+                let is_net = negated_qnames.contains(&winning_qname.as_str());
+                let total_debt_dollars = debt_by_year.get(&value.year).copied();
+                println!(
+                    "{:<7} {:>6} {:<40} {:>7} {:>18} {:>16} {:>6}",
+                    symbol,
+                    value.year,
+                    winning_qname,
+                    is_net,
+                    value.value_dollars,
+                    total_debt_dollars.map_or_else(|| "n/a".to_string(), |debt| debt.to_string()),
+                    n_sources
+                );
+                rows.push(BasisYear {
+                    symbol,
+                    year: value.year,
+                    winning_qname,
+                    is_net,
+                    interest_dollars: value.value_dollars,
+                    total_debt_dollars,
+                });
+            }
+        }
+
+        println!();
+        println!(
+            "fetched: {}/{}  failed: [{}]",
+            fetched_ok.len(),
+            universe.len(),
+            fetch_failed.join(" ")
+        );
+
+        // ---- Table 2: the four candidate refusal sets --------------------
+        println!();
+        println!(
+            "=== TABLE 2: four candidate refusal sets (predicates over Table 1 rows only) ==="
+        );
+        println!(
+            "(A) as implemented [driver_resolution.rs net_interest_years]: refuse issuer if ANY \
+             year has interest_value < 0"
+        );
+        println!(
+            "(B) narrower window: refuse issuer if any year with total_debt > 0 has \
+             interest_value < 0"
+        );
+        println!("(C) basis, issuer-wide: refuse issuer if ANY year has is_net == true");
+        println!(
+            "(D) basis, per-year: drop every year with is_net == true; refuse the issuer only if \
+             the surviving fittable set (debt > 0 && interest > 0) is EMPTY"
+        );
+        println!();
+        println!(
+            "HONESTY CAVEAT: production additionally intersects the accounting-fit years with \
+             `tax_years` (driver_resolution.rs:184-191, `accounting_common`) before a rate is \
+             actually resolved. Neither (B) nor (D) below computes that intersection -- this probe \
+             only carries the interest and debt series, not the marginal-tax series. Direction of \
+             the error: a year (B)/(D) counts as usable can still be dropped downstream for lacking \
+             an aligned marginal-tax year, but a year (B)/(D) already excludes was never going to be \
+             used either way. So (B) and (D) can only be AS PERMISSIVE OR MORE PERMISSIVE than the \
+             real production fit, never stricter: their refused-counts are a LOWER BOUND on what \
+             production actually refuses, and an issuer they show as surviving may still be refused \
+             in the real pipeline for a reason this probe does not measure."
+        );
+
+        let mut verdicts: Vec<IssuerVerdict> = Vec::new();
+        for &symbol in &fetched_ok {
+            let issuer_rows: Vec<&BasisYear> =
+                rows.iter().filter(|row| row.symbol == symbol).collect();
+            if issuer_rows.is_empty() {
+                continue;
+            }
+            let refused_a = issuer_rows.iter().any(|row| row.interest_dollars < 0);
+            let refused_b = issuer_rows.iter().any(|row| {
+                row.total_debt_dollars.is_some_and(|debt| debt > 0) && row.interest_dollars < 0
+            });
+            let refused_c = issuer_rows.iter().any(|row| row.is_net);
+            let fittable_d_years: Vec<i32> = issuer_rows
+                .iter()
+                .filter(|row| {
+                    !row.is_net
+                        && row.total_debt_dollars.is_some_and(|debt| debt > 0)
+                        && row.interest_dollars > 0
+                })
+                .map(|row| row.year)
+                .collect();
+            let refused_d = fittable_d_years.is_empty();
+            verdicts.push(IssuerVerdict {
+                symbol,
+                refused_a,
+                refused_b,
+                refused_c,
+                refused_d,
+                fittable_d_years,
+            });
+        }
+
+        let refused_by = |predicate: fn(&IssuerVerdict) -> bool| -> Vec<&'static str> {
+            verdicts
+                .iter()
+                .filter(|verdict| predicate(verdict))
+                .map(|verdict| verdict.symbol)
+                .collect()
+        };
+        let a_refused = refused_by(|v| v.refused_a);
+        let b_refused = refused_by(|v| v.refused_b);
+        let c_refused = refused_by(|v| v.refused_c);
+        let d_refused = refused_by(|v| v.refused_d);
+
+        println!();
+        println!("(A) refused ({}): {}", a_refused.len(), a_refused.join(" "));
+        println!("(B) refused ({}): {}", b_refused.len(), b_refused.join(" "));
+        println!("(C) refused ({}): {}", c_refused.len(), c_refused.join(" "));
+        println!("(D) refused ({}): {}", d_refused.len(), d_refused.join(" "));
+        for verdict in verdicts.iter().filter(|v| !v.fittable_d_years.is_empty()) {
+            println!(
+                "    (D) surviving fittable years for {}: {:?}",
+                verdict.symbol, verdict.fittable_d_years
+            );
+        }
+
+        // ---- Table 3: confusion matrix -------------------------------------
+        println!();
+        println!("=== TABLE 3: confusion matrix, ground truth = is_net (rule C) ===");
+        let (tp_a, fp_a, fn_a, tn_a) =
+            confusion_against_basis(&rows, |row| row.interest_dollars < 0);
+        let (tp_b, fp_b, fn_b, tn_b) = confusion_against_basis(&rows, |row| {
+            row.total_debt_dollars.is_some_and(|debt| debt > 0) && row.interest_dollars < 0
+        });
+        println!("per issuer-year, (A) vs (C): TP={tp_a} FP={fp_a} FN={fn_a} TN={tn_a}");
+        println!("per issuer-year, (B) vs (C): TP={tp_b} FP={fp_b} FN={fn_b} TN={tn_b}");
+
+        let c_not_a: Vec<&str> = c_refused
+            .iter()
+            .filter(|symbol| !a_refused.contains(symbol))
+            .copied()
+            .collect();
+        let a_not_c: Vec<&str> = a_refused
+            .iter()
+            .filter(|symbol| !c_refused.contains(symbol))
+            .copied()
+            .collect();
+        println!(
+            "per issuer, refused by (C) but not (A) [net-EXPENSE filers, the LD-8 population] \
+             ({}): {}",
+            c_not_a.len(),
+            c_not_a.join(" ")
+        );
+        println!(
+            "per issuer, refused by (A) but not (C) [would falsify 'negative implies net'] ({}): \
+             {}",
+            a_not_c.len(),
+            a_not_c.join(" ")
+        );
+
+        // ---- Table 4: trigger-year audit -----------------------------------
+        // Scoped to INTEREST_SIGN_AFFECTED_COHORT only, per the coordinator's
+        // correction: that is the only population this table is about, and
+        // reporting it over the wider union would imply coverage this probe
+        // does not have.
+        println!();
+        println!(
+            "=== TABLE 4: trigger-year audit (population: INTEREST_SIGN_AFFECTED_COHORT only, \
+             {} names) ===",
+            INTEREST_SIGN_AFFECTED_COHORT.len()
+        );
+        println!(
+            "{:<7} {:>6} {:<40} {:>16} {:<9}",
+            "symbol", "year", "winning_qname", "total_debt_$", "fittable?"
+        );
+        for &symbol in INTEREST_SIGN_AFFECTED_COHORT {
+            if fetch_failed
+                .iter()
+                .any(|failure| failure.starts_with(symbol))
+            {
+                println!("{symbol:<7} FETCH FAILED -- no trigger-year data");
+                continue;
+            }
+            if !a_refused.contains(&symbol) {
+                println!("{symbol:<7} not refused by (A) in this run");
+                continue;
+            }
+            let mut negative_years: Vec<&BasisYear> = rows
+                .iter()
+                .filter(|row| row.symbol == symbol && row.interest_dollars < 0)
+                .collect();
+            negative_years.sort_by_key(|row| row.year);
+            let Some(trigger) = negative_years.first() else {
+                println!("{symbol:<7} refused by (A) but no negative row found -- inconsistent");
+                continue;
+            };
+            let fittable = trigger.total_debt_dollars.is_some_and(|debt| debt > 0)
+                && trigger.interest_dollars > 0;
+            println!(
+                "{:<7} {:>6} {:<40} {:>16} {:<9}",
+                symbol,
+                trigger.year,
+                trigger.winning_qname,
+                trigger
+                    .total_debt_dollars
+                    .map_or_else(|| "n/a".to_string(), |debt| debt.to_string()),
+                if fittable { "yes" } else { "no" }
+            );
+        }
+        println!();
+        println!("named checks (earliest year that trips rule A, expected per the brief):");
+        for (symbol, expected_year) in [("ABBV", 2011), ("COR", 2008), ("TYL", 2009), ("YUM", 2007)]
+        {
+            let earliest = rows
+                .iter()
+                .filter(|row| row.symbol == symbol && row.interest_dollars < 0)
+                .map(|row| row.year)
+                .min();
+            match earliest {
+                Some(year) if year == expected_year => {
+                    println!("{symbol}: MATCH -- earliest trigger year {year}")
+                }
+                Some(year) => println!(
+                    "{symbol}: MISMATCH -- earliest trigger year measured is {year}, expected \
+                     {expected_year}"
+                ),
+                None => println!(
+                    "{symbol}: no negative year found in this run -- cannot confirm \
+                     {expected_year} (fetch_failed={})",
+                    fetch_failed
+                        .iter()
+                        .any(|failure| failure.starts_with(symbol))
+                ),
+            }
+        }
+
+        // ---- P1-P5: which predictions survived ------------------------------
+        println!();
+        println!("=== WHAT THIS FALSIFIES: P1-P5 against the measured tables ===");
+
+        let p1_survived = a_not_c.is_empty();
+        println!(
+            "P1 (every (A)-refused issuer has >=1 net year): {} -- {}",
+            if p1_survived { "SURVIVED" } else { "FALSIFIED" },
+            if p1_survived {
+                "a_not_c is empty".to_string()
+            } else {
+                format!("a_not_c = [{}]", a_not_c.join(" "))
+            }
+        );
+
+        let p2_survived = fp_a == 0;
+        println!(
+            "P2 (FP(A) against basis = 0): {} -- measured FP(A) = {fp_a}",
+            if p2_survived { "SURVIVED" } else { "FALSIFIED" }
+        );
+
+        let p3_strict_subset = a_not_c.is_empty() && c_refused.len() > a_refused.len();
+        let p3_named_evidence: Vec<&str> = c_not_a
+            .iter()
+            .filter(|symbol| named_net_expense_suspects.contains(*symbol))
+            .copied()
+            .collect();
+        let p3_any_suspect_fetched = named_net_expense_suspects
+            .iter()
+            .any(|symbol| fetched_ok.contains(symbol));
+        let p3_verdict = if !p3_any_suspect_fetched {
+            "UNMEASURED"
+        } else if p3_strict_subset && !p3_named_evidence.is_empty() {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "P3 ((A) strict subset of (C), specifically via DAL/CHTR/BKR/COF): {p3_verdict} -- \
+             |A|={} |C|={} strict_subset={p3_strict_subset} named_evidence=[{}] \
+             any_suspect_fetched={p3_any_suspect_fetched}",
+            a_refused.len(),
+            c_refused.len(),
+            p3_named_evidence.join(" ")
+        );
+        if p3_verdict == "FALSIFIED" && p3_strict_subset {
+            println!(
+                "    NOTE: the strict-subset half of P3 held, but none of DAL/CHTR/BKR/COF \
+                 supplied the extra refusal -- the 'specifically' half of the claim is what \
+                 falsified it."
+            );
+        }
+
+        let p4_survived = d_refused.len() <= 6 && d_refused.len() < a_refused.len();
+        println!(
+            "P4 (|D| << |A|, point estimate |D| <= 6): {} -- measured |A|={} (brief's reference \
+             point estimate: 24) |D|={}",
+            if p4_survived { "SURVIVED" } else { "FALSIFIED" },
+            a_refused.len(),
+            d_refused.len()
+        );
+
+        let p5_names = ["YUM", "COR", "TYL", "ABBV"];
+        let p5_blacklisted: Vec<&str> = p5_names
+            .iter()
+            .filter(|symbol| d_refused.contains(*symbol))
+            .copied()
+            .collect();
+        let p5_measured = p5_names.iter().all(|symbol| fetched_ok.contains(symbol));
+        let p5_verdict = if !p5_measured {
+            "UNMEASURED"
+        } else if p5_blacklisted.is_empty() {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "P5 (YUM/COR/TYL/ABBV not blacklisted under (D) by their trigger years): {p5_verdict} \
+             -- blacklisted under (D) = [{}] all_four_fetched={p5_measured}",
+            p5_blacklisted.join(" ")
+        );
+    }
+
+    /// One issuer's published value, cost-of-debt read and routed lane under
+    /// all three arms, from one fetch.
+    #[cfg(test)]
+    struct ThreeArmRow {
+        symbol: &'static str,
+        a_cents: Option<i64>,
+        d_cents: Option<i64>,
+        delta_a_cents: Option<i64>,
+        delta_d_cents: Option<i64>,
+        delta_a_bps: Option<f64>,
+        delta_d_bps: Option<f64>,
+        fcff_a_cents: Option<i64>,
+        fcff_d_cents: Option<i64>,
+        cod_base: String,
+        cod_a: String,
+        cod_d: String,
+        flip_a: bool,
+        flip_d: bool,
+    }
+
+    /// Probe (three-arm measurement of R-21.3). Runs every issuer through the
+    /// real router three times from ONE fetch of that issuer's data: the
+    /// legacy pre-sign-correction reading (base, via
+    /// `history_as_published_before_the_sign_correction` -- reused verbatim,
+    /// not reinvented), the current sign convention under
+    /// `NetInterestPolicy::RefuseIssuerOnSign` (arm A, today's shipped rule),
+    /// and the current sign convention under
+    /// `NetInterestPolicy::DropYearOnBasis` (arm D, the basis-aware candidate).
+    ///
+    /// All three arms flow through `resolve_rate_inputs_for_source`'s single
+    /// body (`run_operating_lane` -> `compute_with_params_and_net_interest_policy`
+    /// -> ... -> `derive_wacc` -> `resolve_rate_inputs_for_source`): there is no
+    /// second implementation of the guard rule anywhere in this probe.
+    ///
+    /// Asserts nothing. Q1-Q9 are checked against the measured tables at the
+    /// end and each is reported SURVIVED or FALSIFIED against the number that
+    /// decided it, never adjusted toward the prediction.
+    #[test]
+    #[ignore = "network: SEC + Yahoo three-arm net-interest-policy probe; diagnostic only"]
+    fn probe_published_value_under_net_interest_policies() {
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
+        let yahoo = YahooClient::new().expect("Yahoo client");
+
+        // Universe = union of the three named populations, deduplicated -- the
+        // same union Probe H used, so this run's population is comparable to
+        // Probe H's basis table.
+        let mut universe: Vec<&'static str> = Vec::new();
+        for &symbol in VALUATION_ANCHORS
+            .iter()
+            .chain(INTEREST_SIGN_AFFECTED_COHORT)
+            .chain(PROBE_COHORT)
+        {
+            if !universe.contains(&symbol) {
+                universe.push(symbol);
+            }
+        }
+
+        println!(
+            "=== THREE-ARM PROBE: published value under RefuseIssuerOnSign vs DropYearOnBasis ==="
+        );
+        println!("retrieved {}", Utc::now().to_rfc3339());
+        println!(
+            "universe = {} distinct symbols: {}",
+            universe.len(),
+            universe.join(" ")
+        );
+
+        let market_params = yahoo.fetch_us_10y_yield_bps().map_or_else(
+            || {
+                println!("live risk-free UNAVAILABLE -- market params are provisional defaults");
+                MarketParams::default_usd()
+            },
+            |(risk_free_bps, as_of)| {
+                println!("live risk-free {risk_free_bps} bps as of {as_of}");
+                MarketParams::from_live_risk_free(risk_free_bps, as_of)
+            },
+        );
+        let as_of_epoch_day = Utc::now().timestamp() / 86_400;
+
+        println!();
+        println!(
+            "{:<7} {:>4} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:<24} {:<24} {:<24} {:<10} {:<10} {:<10} {:<5}",
+            "symbol", "yrs", "base c", "A c", "D c", "dA c", "dD c", "dA bps", "dD bps",
+            "cod base", "cod A", "cod D", "lane b", "lane A", "lane D", "flip",
+        );
+
+        let mut rows: Vec<ThreeArmRow> = Vec::new();
+        let mut unmeasurable: Vec<String> = Vec::new();
+        let mut not_operating: Vec<String> = Vec::new();
+        let mut rol_arm_d_detail: Option<(i32, usize, Vec<i32>)> = None;
+
+        for &symbol in &universe {
+            let Some(&cik) = cik_map.get(symbol) else {
+                unmeasurable.push(format!("{symbol}(no CIK)"));
+                continue;
+            };
+            let Ok(fetched) = yahoo.fetch_symbol(symbol) else {
+                unmeasurable.push(format!("{symbol}(yahoo)"));
+                continue;
+            };
+            let market_price_cents = fetched
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.market_price_cents);
+            let Some(mut fundamentals) = fetched.fundamentals else {
+                unmeasurable.push(format!("{symbol}(no fundamentals)"));
+                continue;
+            };
+            if fundamentals.shares_outstanding.unwrap_or(0) == 0 {
+                fundamentals.shares_outstanding =
+                    fetch_shares_outstanding(&edgar, symbol, cik).unwrap_or(None);
+            }
+            let class = classify_business(
+                fundamentals.sector_name.as_deref(),
+                fundamentals.industry_name.as_deref(),
+                fundamentals.sector_key.as_deref(),
+                fundamentals.industry_key.as_deref(),
+                false,
+            );
+            if class != BusinessClass::OperatingNonFinancial {
+                not_operating.push(format!("{symbol}({class:?})"));
+                continue;
+            }
+            // The ONE fetch every arm below is derived from. `after_history`
+            // already carries `interest_is_net_basis` from production
+            // `fetch_fcf_history`, so arm D reads the same provenance
+            // production would.
+            let Ok(Some(after_history)) = fetch_fcf_history(&edgar, symbol, cik) else {
+                unmeasurable.push(format!("{symbol}(no history)"));
+                continue;
+            };
+            let before_history = history_as_published_before_the_sign_correction(&after_history);
+            let rewritten_years = before_history
+                .iter()
+                .zip(&after_history)
+                .filter(|(before, after)| {
+                    before.interest_expense_dollars != after.interest_expense_dollars
+                })
+                .count();
+
+            let forward_evidence = yahoo
+                .fetch_forward_forecast(symbol, as_of_epoch_day)
+                .map_err(|error| match error {
+                    ForwardForecastFetchError::Provider(reason) => {
+                        ForwardSourceFailure::Provider(reason)
+                    }
+                    ForwardForecastFetchError::Transport(error) if is_rate_limit_error(&error) => {
+                        ForwardSourceFailure::RateLimited
+                    }
+                    ForwardForecastFetchError::Transport(_) => ForwardSourceFailure::Transport,
+                });
+
+            let run = |history: &[FcfPoint], policy: NetInterestPolicy| {
+                run_operating_lane(
+                    GateRunInput {
+                        fundamentals: &fundamentals,
+                        history,
+                        market_price_cents,
+                        market_params: &market_params,
+                        forward_evidence: forward_evidence.clone(),
+                        as_of_epoch_day,
+                    },
+                    policy,
+                )
+            };
+            let base = run(&before_history, NetInterestPolicy::RefuseIssuerOnSign);
+            let arm_a = run(&after_history, NetInterestPolicy::RefuseIssuerOnSign);
+            let arm_d = run(&after_history, NetInterestPolicy::DropYearOnBasis);
+
+            let cod_base = cost_of_debt_channel(
+                &before_history,
+                &fundamentals,
+                market_params.rf_bps,
+                NetInterestPolicy::RefuseIssuerOnSign,
+            );
+            let cod_a = cost_of_debt_channel(
+                &after_history,
+                &fundamentals,
+                market_params.rf_bps,
+                NetInterestPolicy::RefuseIssuerOnSign,
+            );
+            let cod_d = cost_of_debt_channel(
+                &after_history,
+                &fundamentals,
+                market_params.rf_bps,
+                NetInterestPolicy::DropYearOnBasis,
+            );
+
+            if symbol == "ROL" {
+                if let Ok(Some(resolved)) = resolve_rate_inputs_for_source(
+                    &after_history,
+                    fundamentals.total_debt_dollars,
+                    market_params.rf_bps,
+                    PUBLISHED_VALUE_PROBE_SOURCE,
+                    NetInterestPolicy::DropYearOnBasis,
+                ) {
+                    rol_arm_d_detail = Some((
+                        resolved.cost_of_debt_bps,
+                        resolved.valid_debt_periods.len(),
+                        resolved.valid_debt_periods.clone(),
+                    ));
+                }
+            }
+
+            let delta = |arm: &GateRun| {
+                base.published_base_cents
+                    .zip(arm.published_base_cents)
+                    .map(|(before, after)| after - before)
+            };
+            let delta_bps = |delta_cents: Option<i64>| {
+                base.published_base_cents
+                    .filter(|before| *before > 0)
+                    .zip(delta_cents)
+                    .map(|(before, delta)| delta as f64 / before as f64 * 10_000.0)
+            };
+            let delta_a_cents = delta(&arm_a);
+            let delta_d_cents = delta(&arm_d);
+            let delta_a_bps = delta_bps(delta_a_cents);
+            let delta_d_bps = delta_bps(delta_d_cents);
+            let flip_a = arm_a.lane != base.lane;
+            let flip_d = arm_d.lane != base.lane;
+
+            let cents = |value: Option<i64>| {
+                value.map_or_else(|| "absent".to_string(), |value: i64| value.to_string())
+            };
+            let signed_cents = |value: Option<i64>| {
+                value.map_or_else(|| "-".to_string(), |value| format!("{value:+}"))
+            };
+            let signed_bps = |value: Option<f64>| {
+                value.map_or_else(|| "-".to_string(), |value| format!("{value:+.0}"))
+            };
+            let flip_marker = match (flip_a, flip_d) {
+                (false, false) => "-",
+                (true, false) => "A",
+                (false, true) => "D",
+                (true, true) => "AD",
+            };
+            println!(
+                "{:<7} {:>4} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:<24} {:<24} {:<24} {:<10} {:<10} {:<10} {:<5}",
+                symbol,
+                rewritten_years,
+                cents(base.published_base_cents),
+                cents(arm_a.published_base_cents),
+                cents(arm_d.published_base_cents),
+                signed_cents(delta_a_cents),
+                signed_cents(delta_d_cents),
+                signed_bps(delta_a_bps),
+                signed_bps(delta_d_bps),
+                cod_base,
+                cod_a,
+                cod_d,
+                base.lane,
+                arm_a.lane,
+                arm_d.lane,
+                flip_marker,
+            );
+
+            rows.push(ThreeArmRow {
+                symbol,
+                a_cents: arm_a.published_base_cents,
+                d_cents: arm_d.published_base_cents,
+                delta_a_cents,
+                delta_d_cents,
+                delta_a_bps,
+                delta_d_bps,
+                fcff_a_cents: arm_a.fcff_candidate_cents,
+                fcff_d_cents: arm_d.fcff_candidate_cents,
+                cod_base,
+                cod_a,
+                cod_d,
+                flip_a,
+                flip_d,
+            });
+        }
+
+        println!();
+        println!(
+            "fetched: {}/{}  not_operating: [{}]  unmeasurable: [{}]",
+            rows.len(),
+            universe.len(),
+            not_operating.join(" "),
+            unmeasurable.join(" ")
+        );
+
+        // ---- per-arm summaries ----------------------------------------------
+        println!();
+        println!("=== SUMMARIES ===");
+        let movers_a: Vec<&ThreeArmRow> = rows
+            .iter()
+            .filter(|row| row.delta_a_cents.is_some_and(|delta| delta != 0))
+            .collect();
+        let movers_d: Vec<&ThreeArmRow> = rows
+            .iter()
+            .filter(|row| row.delta_d_cents.is_some_and(|delta| delta != 0))
+            .collect();
+        println!(
+            "movers under A: {} [{}]",
+            movers_a.len(),
+            movers_a
+                .iter()
+                .map(|row| format!("{}({:+}c)", row.symbol, row.delta_a_cents.unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        println!(
+            "movers under D: {} [{}]",
+            movers_d.len(),
+            movers_d
+                .iter()
+                .map(|row| format!("{}({:+}c)", row.symbol, row.delta_d_cents.unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let flips_a: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.flip_a)
+            .map(|row| row.symbol)
+            .collect();
+        let flips_d: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.flip_d)
+            .map(|row| row.symbol)
+            .collect();
+        println!(
+            "lane flips under A: {} [{}]",
+            flips_a.len(),
+            flips_a.join(" ")
+        );
+        println!(
+            "lane flips under D: {} [{}]",
+            flips_d.len(),
+            flips_d.join(" ")
+        );
+
+        let print_distribution =
+            |label: &str, movers: &[&ThreeArmRow], read: fn(&ThreeArmRow) -> Option<f64>| {
+                let mut deltas: Vec<f64> = movers.iter().filter_map(|row| read(row)).collect();
+                if deltas.is_empty() {
+                    println!("{label}: no mover has a measurable bps delta (n=0)");
+                    return;
+                }
+                let mut sorted = deltas.clone();
+                sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+                println!(
+                    "{label}: n={} min={:.0} median={:.0} max={:.0}",
+                    sorted.len(),
+                    sorted[0],
+                    median(&mut deltas).unwrap_or_default(),
+                    sorted[sorted.len() - 1]
+                );
+            };
+        print_distribution("delta distribution under A (bps)", &movers_a, |row| {
+            row.delta_a_bps
+        });
+        print_distribution("delta distribution under D (bps)", &movers_d, |row| {
+            row.delta_d_bps
+        });
+
+        let anchors_moved: Vec<String> = rows
+            .iter()
+            .filter(|row| VALUATION_ANCHORS.contains(&row.symbol))
+            .filter(|row| {
+                row.delta_a_cents.is_some_and(|delta| delta != 0)
+                    || row.delta_d_cents.is_some_and(|delta| delta != 0)
+            })
+            .map(|row| {
+                format!(
+                    "{}(A{:+}c/D{:+}c)",
+                    row.symbol,
+                    row.delta_a_cents.unwrap_or(0),
+                    row.delta_d_cents.unwrap_or(0)
+                )
+            })
+            .collect();
+
+        let non_positive_fcff: Vec<String> = rows
+            .iter()
+            .filter(|row| {
+                row.fcff_a_cents.is_some_and(|value| value <= 0)
+                    || row.fcff_d_cents.is_some_and(|value| value <= 0)
+            })
+            .map(|row| {
+                format!(
+                    "{}(fcff_a={:?}c fcff_d={:?}c)",
+                    row.symbol, row.fcff_a_cents, row.fcff_d_cents
+                )
+            })
+            .collect();
+        println!(
+            "issuers with non-positive FCFF candidate in A or D: {} [{}]",
+            non_positive_fcff.len(),
+            non_positive_fcff.join(" ")
+        );
+
+        // ---- Q1-Q9 -------------------------------------------------------
+        println!();
+        println!("=== Q1-Q9 ===");
+
+        let q1_survived = anchors_moved.is_empty();
+        println!(
+            "Q1 (anchors PG/GOOGL/AMZN/MSFT move $0.00 in BOTH arms): {} -- moved=[{}]",
+            if q1_survived {
+                "SURVIVED"
+            } else {
+                "*** STOP: FALSIFIED ***"
+            },
+            anchors_moved.join(" ")
+        );
+
+        let chtr_dal_bit_identical_in_a = rows
+            .iter()
+            .filter(|row| row.symbol == "CHTR" || row.symbol == "DAL")
+            .all(|row| row.delta_a_cents == Some(0));
+        let chtr_dal_move_in_d = rows
+            .iter()
+            .filter(|row| row.symbol == "CHTR" || row.symbol == "DAL")
+            .all(|row| row.delta_d_cents.is_some_and(|delta| delta != 0));
+        let chtr_dal_measured = rows.iter().any(|row| row.symbol == "CHTR")
+            && rows.iter().any(|row| row.symbol == "DAL");
+        let q2_verdict = if !chtr_dal_measured {
+            "UNMEASURED"
+        } else if chtr_dal_move_in_d && chtr_dal_bit_identical_in_a {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "Q2 (CHTR/DAL move in D, bit-identical in A): {q2_verdict} -- {}",
+            rows.iter()
+                .filter(|row| row.symbol == "CHTR" || row.symbol == "DAL")
+                .map(|row| format!(
+                    "{}(dA={:?}c dD={:?}c)",
+                    row.symbol, row.delta_a_cents, row.delta_d_cents
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let chtr_dal_down_in_d = rows
+            .iter()
+            .filter(|row| row.symbol == "CHTR" || row.symbol == "DAL")
+            .all(|row| row.delta_d_cents.is_some_and(|delta| delta < 0));
+        let q3_verdict = if !chtr_dal_measured {
+            "UNMEASURED"
+        } else if chtr_dal_down_in_d {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!("Q3 (CHTR/DAL move DOWN under D): {q3_verdict}");
+
+        let q4_survived = movers_d.len() < 18 && movers_d.len() >= 10;
+        println!(
+            "Q4 (arm D movers < arm A's 18; point estimate 14-20; two-sided >=18 or <10 falsifies): \
+             {} -- measured movers_a={} movers_d={}",
+            if q4_survived { "SURVIVED" } else { "FALSIFIED" },
+            movers_a.len(),
+            movers_d.len()
+        );
+
+        let q5_survived = flips_d.len() < 9 && flips_d.len() <= 5;
+        println!(
+            "Q5 (arm D lane flips < arm A's 9; point estimate <=5): {} -- measured flips_a={} \
+             flips_d={}",
+            if q5_survived { "SURVIVED" } else { "FALSIFIED" },
+            flips_a.len(),
+            flips_d.len()
+        );
+
+        let q6_names = ["YUM", "TYL", "ABBV"];
+        let q6_measured = q6_names
+            .iter()
+            .all(|symbol| rows.iter().any(|row| &row.symbol == symbol));
+        let q6_fitted = rows
+            .iter()
+            .filter(|row| q6_names.contains(&row.symbol))
+            .all(|row| !row.cod_d.starts_with("REFUSED") && row.cod_d != "n/a");
+        let q6_verdict = if !q6_measured {
+            "UNMEASURED"
+        } else if q6_fitted {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "Q6 (YUM/TYL/ABBV read a fitted rate under D): {q6_verdict} -- {}",
+            rows.iter()
+                .filter(|row| q6_names.contains(&row.symbol))
+                .map(|row| format!("{}={}", row.symbol, row.cod_d))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let q7_names = ["COR", "BKR"];
+        let q7_measured = q7_names
+            .iter()
+            .all(|symbol| rows.iter().any(|row| &row.symbol == symbol));
+        let q7_refused = rows
+            .iter()
+            .filter(|row| q7_names.contains(&row.symbol))
+            .all(|row| row.cod_d.starts_with("REFUSED"));
+        let q7_verdict = if !q7_measured {
+            "UNMEASURED"
+        } else if q7_refused {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "Q7 (COR/BKR are REFUSED under D): {q7_verdict} -- {}",
+            rows.iter()
+                .filter(|row| q7_names.contains(&row.symbol))
+                .map(|row| format!("{}={}", row.symbol, row.cod_d))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let q8_names = ["MPWR", "TTD", "DDOG"];
+        let q8_measured = q8_names
+            .iter()
+            .all(|symbol| rows.iter().any(|row| &row.symbol == symbol));
+        let q8_identical = rows
+            .iter()
+            .filter(|row| q8_names.contains(&row.symbol))
+            .all(|row| row.a_cents == row.d_cents && row.cod_a == row.cod_d);
+        let q8_verdict = if !q8_measured {
+            "UNMEASURED"
+        } else if q8_identical {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
+        println!(
+            "Q8 (MPWR/TTD/DDOG bit-identical between A and D, no filed debt): {q8_verdict} -- {}",
+            rows.iter()
+                .filter(|row| q8_names.contains(&row.symbol))
+                .map(|row| format!(
+                    "{}(A={:?}c/{} D={:?}c/{})",
+                    row.symbol, row.a_cents, row.cod_a, row.d_cents, row.cod_d
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let cohort_lost_rate_under_a: Vec<&str> = rows
+            .iter()
+            .filter(|row| INTEREST_SIGN_AFFECTED_COHORT.contains(&row.symbol))
+            .filter(|row| row.cod_base.ends_with("bps") && row.cod_a.starts_with("REFUSED"))
+            .map(|row| row.symbol)
+            .collect();
+        let mpwr_lost_rate = cohort_lost_rate_under_a.contains(&"MPWR");
+        println!(
+            "Q9 (24-vs-25 reconciliation): {} of {} INTEREST_SIGN_AFFECTED_COHORT members lose a \
+             fitted accounting rate under A vs base -- [{}] -- this matches {} (measured value is \
+             the number of names whose cod_base carried a fitted rate and cod_a is REFUSED, not the \
+             count of names that merely trip rule A's predicate) -- MPWR is {} this set",
+            cohort_lost_rate_under_a.len(),
+            INTEREST_SIGN_AFFECTED_COHORT.len(),
+            cohort_lost_rate_under_a.join(" "),
+            if cohort_lost_rate_under_a.len() == 24 {
+                "the W2b '24-of-25' figure"
+            } else if cohort_lost_rate_under_a.len() == 25 {
+                "Probe H's '25-of-25 firing the predicate' figure"
+            } else {
+                "neither the W2b 24 nor the Probe H 25 reference figure"
+            },
+            if mpwr_lost_rate { "IN" } else { "NOT in" }
+        );
+
+        // ---- ROL registered-in-advance finding -------------------------------
+        println!();
+        println!("=== ROL: registered-in-advance minimum-observation finding ===");
+        match rol_arm_d_detail {
+            Some((rate_bps, count, periods)) => println!(
+                "ROL arm-D rate = {rate_bps}bps fitted from {count} observation(s), fiscal years \
+                 {periods:?}. No minimum-observation threshold exists in resolve_rate_inputs; this \
+                 is reported, not fixed, per the brief.",
+            ),
+            None => println!(
+                "ROL not fetched, or arm D did not resolve an accounting rate for it in this run \
+                 (see its row above for the reason)."
+            ),
         }
     }
 }

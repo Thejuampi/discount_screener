@@ -20,6 +20,29 @@ pub enum EvidenceQuality {
     Provisional,
 }
 
+/// **Measurement-only. This parameter exists to compare two candidate guard
+/// rules side by side on the throwaway `measure-guard-rules` branch. The
+/// shipped implementation will carry exactly ONE rule and no parameter;
+/// leaving this knob in shipped code is a defect.**
+///
+/// Both variants flow through the same accounting-candidate resolution below
+/// — they differ only in which years are admitted into it — so the two arms
+/// cannot drift from each other or from production the way two independent
+/// implementations could.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetInterestPolicy {
+    /// Rule (A), byte-for-byte the behaviour shipping today: any year whose
+    /// interest reads negative refuses the accounting channel for the whole
+    /// issuer. See the comment at its use below for why the year-level
+    /// alternative is selection on the dependent variable.
+    RefuseIssuerOnSign,
+    /// Rule (D): drop every year whose `FcfPoint::interest_is_net_basis` is
+    /// `Some(true)` from the accounting candidate set; refuse the issuer only
+    /// if the surviving fittable set is empty. Market-yield and rated-spread
+    /// lanes are untouched by this rule.
+    DropYearOnBasis,
+}
+
 impl EvidenceQuality {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -59,16 +82,27 @@ pub fn resolve_rate_inputs(
     reported_total_debt_dollars: Option<i64>,
     rf_bps: i32,
 ) -> Result<Option<ResolvedRateInputs>, String> {
-    resolve_rate_inputs_for_source(history, reported_total_debt_dollars, rf_bps, "")
+    resolve_rate_inputs_for_source(
+        history,
+        reported_total_debt_dollars,
+        rf_bps,
+        "",
+        NetInterestPolicy::RefuseIssuerOnSign,
+    )
 }
 
 /// Same resolution with provider provenance available to distinguish the SEC
 /// accounting fallback from a Yahoo same-period fallback.
+///
+/// `policy` selects the net-interest guard rule; see `NetInterestPolicy`'s doc
+/// comment — every production call site passes `RefuseIssuerOnSign`, today's
+/// shipped behaviour.
 pub fn resolve_rate_inputs_for_source(
     history: &[FcfPoint],
     reported_total_debt_dollars: Option<i64>,
     rf_bps: i32,
     provider_source: &str,
+    policy: NetInterestPolicy,
 ) -> Result<Option<ResolvedRateInputs>, String> {
     let Some(total_debt) = reported_total_debt_dollars else {
         return Err("fcff unavailable: total debt is missing; missing debt is not zero".into());
@@ -123,37 +157,39 @@ pub fn resolve_rate_inputs_for_source(
     // fitting on the survivors is selection on the dependent variable: it keeps
     // exactly the years where expense ran high relative to income and discards
     // the ones where it ran low, biasing the fitted rate upward. So the
-    // accounting channel is refused for the whole issuer.
+    // accounting channel is refused for the whole issuer under
+    // `NetInterestPolicy::RefuseIssuerOnSign`.
     //
     // This keys on the sign, which is an approximation of the rule that matters.
     // A net-*expense* filer's series is equally net -- income has already been
     // subtracted from it -- and is fitted here as though it were gross, with the
     // cost of debt understated and nothing to detect it. Keying on the *basis*
     // of the series rather than the sign of its value needs per-field concept
-    // provenance on `FcfPoint`, which does not exist yet. Recorded as LD-8.
-    let net_interest_years: Vec<i32> = history
-        .iter()
-        .filter(|point| {
-            point
-                .interest_expense_dollars
-                .is_some_and(|interest| interest.is_finite() && interest < 0.0)
-        })
-        .map(|point| point.year)
-        .collect();
-    let accounting: Vec<(i32, f64, f64)> = if net_interest_years.is_empty() {
-        history
+    // provenance on `FcfPoint`, which `NetInterestPolicy::DropYearOnBasis` reads
+    // via `interest_is_net_basis` below (LD-8; measured on `measure-guard-rules`,
+    // not yet shipped).
+    let net_interest_years: Vec<i32> = match policy {
+        NetInterestPolicy::RefuseIssuerOnSign => history
             .iter()
-            .filter_map(|point| {
-                let debt = point.total_debt_dollars?;
-                let interest = point.interest_expense_dollars?;
-                if !debt.is_finite() || !interest.is_finite() || debt < 0.0 {
-                    return None;
-                }
-                (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
+            .filter(|point| {
+                point
+                    .interest_expense_dollars
+                    .is_some_and(|interest| interest.is_finite() && interest < 0.0)
             })
-            .collect()
-    } else {
-        Vec::new()
+            .map(|point| point.year)
+            .collect(),
+        // This policy refuses per year, never the whole issuer on a sign
+        // reading, so it never populates the issuer-wide refusal list below.
+        NetInterestPolicy::DropYearOnBasis => Vec::new(),
+    };
+    let accounting: Vec<(i32, f64, f64)> = match policy {
+        NetInterestPolicy::RefuseIssuerOnSign if net_interest_years.is_empty() => {
+            fittable_accounting_candidates(history, |_| true)
+        }
+        NetInterestPolicy::RefuseIssuerOnSign => Vec::new(),
+        NetInterestPolicy::DropYearOnBasis => fittable_accounting_candidates(history, |point| {
+            point.interest_is_net_basis != Some(true)
+        }),
     };
 
     let mut marginal_tax: Vec<(i32, i32, WaccFieldSource)> = history
@@ -352,6 +388,28 @@ pub fn resolve_rate_inputs_for_source(
         average_debt_dollars,
         reasons,
     }))
+}
+
+/// The debt/interest pairs both `NetInterestPolicy` arms fit on, differing
+/// only in which years `admit` lets through — one filter, one candidate
+/// builder, shared by both arms so they cannot resolve a rate through two
+/// separately-written paths.
+fn fittable_accounting_candidates(
+    history: &[FcfPoint],
+    admit: impl Fn(&FcfPoint) -> bool,
+) -> Vec<(i32, f64, f64)> {
+    history
+        .iter()
+        .filter(|point| admit(point))
+        .filter_map(|point| {
+            let debt = point.total_debt_dollars?;
+            let interest = point.interest_expense_dollars?;
+            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 {
+                return None;
+            }
+            (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
+        })
+        .collect()
 }
 
 fn join_years(years: &[i32]) -> String {

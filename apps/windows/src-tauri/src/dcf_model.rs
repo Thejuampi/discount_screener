@@ -624,6 +624,7 @@ pub fn resolve_attribution_wacc(
         market_price_cents,
         market_params,
         "gap_attr_wacc",
+        crate::driver_resolution::NetInterestPolicy::RefuseIssuerOnSign,
     )?;
     let coe = if unit_beta_coe {
         market_params
@@ -880,6 +881,19 @@ pub struct FcfPoint {
     /// Book equity at the same fiscal period end as `total_debt_dollars`. The
     /// two together are the capital a return is earned on.
     pub stockholders_equity_dollars: Option<f64>,
+    /// Whether the winning `interest_expense_dollars` concept for this year is
+    /// declared net-of-interest-income (`negatedQnames`), read from
+    /// `AnnualProvenance.sources` and the driver's `qname_signs` — never
+    /// inferred from the value's sign, which is a different axis (LD-8).
+    ///
+    /// `Option<bool>`, not `bool`: a year with no interest reading has no basis
+    /// either, and defaulting to `false` would assert "gross basis" about a
+    /// year nothing was filed for. Measurement-only field for the
+    /// `NetInterestPolicy::DropYearOnBasis` guard rule probe on this branch;
+    /// not read anywhere in the shipping engine and excluded from
+    /// `driver_input_fingerprint` so it cannot invalidate cached DCFs computed
+    /// before it existed.
+    pub interest_is_net_basis: Option<bool>,
 }
 
 impl FcfPoint {
@@ -903,6 +917,7 @@ impl FcfPoint {
             rated_or_synthetic_spread_bps: None,
             pretax_income_dollars: None,
             stockholders_equity_dollars: None,
+            interest_is_net_basis: None,
         }
     }
 
@@ -983,6 +998,12 @@ impl FcfPoint {
         if self.marginal_tax_bps.is_some() {
             self.marginal_tax_source = Some(source);
         }
+        self
+    }
+
+    /// Measurement-only: see `interest_is_net_basis` doc comment.
+    pub fn with_interest_basis(mut self, interest_is_net_basis: Option<bool>) -> Self {
+        self.interest_is_net_basis = interest_is_net_basis;
         self
     }
 }
@@ -1268,6 +1289,39 @@ pub fn compute_with_params(
     source: &str,
     asset_not_equity: bool,
 ) -> Result<DcfAnalysis, String> {
+    compute_with_params_and_net_interest_policy(
+        fundamentals,
+        fcf_history,
+        market_price_cents,
+        market_params,
+        source,
+        asset_not_equity,
+        crate::driver_resolution::NetInterestPolicy::RefuseIssuerOnSign,
+    )
+}
+
+/// Same computation as `compute_with_params`, with the net-interest guard rule
+/// exposed as a parameter.
+///
+/// **Measurement-only entry point.** It exists so the `measure-guard-rules`
+/// probe can run the FULL FCFF/WACC pipeline under
+/// `NetInterestPolicy::DropYearOnBasis` through the exact production code
+/// path — not a probe-local reimplementation of it — and compare the
+/// published value against the same pipeline under `RefuseIssuerOnSign`.
+/// `compute_with_params` is the shipping surface, always passes
+/// `RefuseIssuerOnSign`, and is the only non-test caller. It cannot be
+/// `#[cfg(test)]`-gated itself (it delegates to this function in every
+/// build), so this function is reachable outside tests too; nothing in the
+/// production tree calls it with any other policy.
+pub fn compute_with_params_and_net_interest_policy(
+    fundamentals: &FundamentalSnapshot,
+    fcf_history: &[FcfPoint],
+    market_price_cents: Option<i64>,
+    market_params: &MarketParams,
+    source: &str,
+    asset_not_equity: bool,
+    net_interest_policy: crate::driver_resolution::NetInterestPolicy,
+) -> Result<DcfAnalysis, String> {
     let class = classify_business(
         fundamentals.sector_name.as_deref(),
         fundamentals.industry_name.as_deref(),
@@ -1290,6 +1344,7 @@ pub fn compute_with_params(
             market_price_cents,
             market_params,
             source,
+            net_interest_policy,
         ),
     }
 }
@@ -2375,6 +2430,7 @@ fn fcff_wacc(
     market_price_cents: Option<i64>,
     market_params: &MarketParams,
     source: &str,
+    net_interest_policy: crate::driver_resolution::NetInterestPolicy,
 ) -> Result<DcfAnalysis, String> {
     if fcf_history.len() < 3 {
         return Err("need at least 3 annual free cash flow points".into());
@@ -2391,6 +2447,7 @@ fn fcff_wacc(
         market_price_cents,
         market_params,
         source,
+        net_interest_policy,
     )?;
     let total_debt = fundamentals
         .total_debt_dollars
@@ -3078,12 +3135,14 @@ fn derive_wacc(
     market_price_cents: Option<i64>,
     market_params: &MarketParams,
     source: &str,
+    net_interest_policy: crate::driver_resolution::NetInterestPolicy,
 ) -> Result<ResolvedWacc, String> {
     let resolved_rates = crate::driver_resolution::resolve_rate_inputs_for_source(
         fcf_history,
         fundamentals.total_debt_dollars,
         market_params.rf_bps,
         source,
+        net_interest_policy,
     )?;
     let (market_cap, market_cap_source) = resolve_market_cap(fundamentals, market_price_cents)
         .ok_or_else(|| "market cap is missing".to_string())?;

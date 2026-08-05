@@ -680,7 +680,33 @@ pub(crate) fn accepted_annual_entries<'a>(
         .collect()
 }
 
-fn extract_total_debt(facts: &serde_json::Value) -> Vec<AnnualValue> {
+/// Whether the fact that won a fiscal year for a driver was declared net-of-
+/// income (`negatedQnames`) — read from the driver's `qname_signs`, never from
+/// a hand-typed concept name, so this cannot drift from the normalization
+/// contract that assigns the signs.
+///
+/// `None` when the year has no source at all: an issuer-year nothing was filed
+/// for has no basis to report either, and inventing `Some(false)` would assert
+/// "gross basis" about a year this driver never saw.
+fn winning_qname_is_net_basis(
+    resolved: &[AnnualValue],
+    driver: policy::DriverOperator,
+    year: i32,
+) -> Option<bool> {
+    let value = resolved.iter().find(|value| value.year == year)?;
+    let source = value.provenance.sources.first()?;
+    let index = driver
+        .qnames
+        .iter()
+        .position(|qname| *qname == source.qname)?;
+    Some(driver.qname_signs[index] < 0)
+}
+
+/// `pub(crate)` rather than private so `valuation_probes.rs` can read total
+/// debt through the exact composition `fetch_fcf_history` feeds `FcfPoint`,
+/// instead of a probe-local reimplementation that could silently drift from
+/// it. Visibility only; the composition itself is untouched.
+pub(crate) fn extract_total_debt(facts: &serde_json::Value) -> Vec<AnnualValue> {
     let current = extract_driver_annual(facts, policy::CURRENT_DEBT);
     let noncurrent = extract_driver_annual(facts, policy::NON_CURRENT_DEBT);
     let reported_total = extract_driver_annual(facts, policy::TOTAL_DEBT);
@@ -1426,6 +1452,8 @@ pub fn fetch_fcf_history(
                 let revenue_dollars = by_year(&revenue, v.year);
                 let acquisition_investment_dollars = by_year(&acquisition_investments, v.year);
                 let interest_expense_dollars = by_year(&interest, v.year);
+                let interest_is_net_basis =
+                    winning_qname_is_net_basis(&interest, policy::INTEREST_EXPENSE, v.year);
                 let total_debt_dollars = by_year(&debt, v.year);
                 let marginal_tax_bps = by_year(&marginal_tax, v.year).map(|value| value as i32);
                 let pretax_income_dollars = by_year(&pretax, v.year);
@@ -1451,6 +1479,7 @@ pub fn fetch_fcf_history(
                             interest_expense_dollars,
                             tax_rate_bps,
                         );
+                        point = point.with_interest_basis(interest_is_net_basis);
                         point = point.with_rate_resolution_inputs(
                             total_debt_dollars,
                             marginal_tax_bps,
