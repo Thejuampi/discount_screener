@@ -1,0 +1,360 @@
+warning: unused variable: `half`
+   --> src\valuation_gap_attribution.rs:408:9
+    |
+408 |     let half = denom / 2;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_half`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS` is never used
+  --> src\dcf_model.rs:79:7
+   |
+79 | const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tax_defaulted` is never read
+    --> src\dcf_model.rs:1579:5
+     |
+1558 | struct DriverModelInputs {
+     |        ----------------- field in this struct
+...
+1579 |     tax_defaulted: bool,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `DriverModelInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `recent_fcf_growth_bps` is never used
+    --> src\dcf_model.rs:2696:4
+     |
+2696 | fn recent_fcf_growth_bps(history: &[FcfPoint]) -> Option<i32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discounted_fcff_fade` is never used
+    --> src\dcf_model.rs:2714:4
+     |
+2714 | fn discounted_fcff_fade(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rate_quality` is never read
+    --> src\dcf_model.rs:2757:5
+     |
+2748 | struct ResolvedWacc {
+     |        ------------ field in this struct
+...
+2757 |     rate_quality: crate::driver_resolution::EvidenceQuality,
+     |     ^^^^^^^^^^^^
+
+warning: fields `valid_tax_periods` and `average_debt_dollars` are never read
+  --> src\driver_resolution.rs:40:9
+   |
+33 | pub struct ResolvedRateInputs {
+   |            ------------------ fields in this struct
+...
+40 |     pub valid_tax_periods: Vec<i32>,
+   |         ^^^^^^^^^^^^^^^^^
+41 |     pub average_debt_dollars: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ResolvedRateInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `DCF_DISCOUNT_RATE` is never used
+  --> src\edgar.rs:27:7
+   |
+27 | const DCF_DISCOUNT_RATE: f64 = 0.10;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_TERMINAL_GROWTH` is never used
+  --> src\edgar.rs:28:7
+   |
+28 | const DCF_TERMINAL_GROWTH: f64 = 0.03;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_PROJECTION_YEARS` is never used
+  --> src\edgar.rs:29:7
+   |
+29 | const DCF_PROJECTION_YEARS: usize = 5;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_GROWTH` is never used
+  --> src\edgar.rs:30:7
+   |
+30 | const DCF_MIN_GROWTH: f64 = -0.05;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MAX_GROWTH` is never used
+  --> src\edgar.rs:31:7
+   |
+31 | const DCF_MAX_GROWTH: f64 = 0.25;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_YEARS_HISTORY` is never used
+  --> src\edgar.rs:32:7
+   |
+32 | const DCF_MIN_YEARS_HISTORY: usize = 2; // need at least 2 data points for a growth rate
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DcfResult` is never constructed
+    --> src\edgar.rs:1080:12
+     |
+1080 | pub struct DcfResult {
+     |            ^^^^^^^^^
+
+warning: function `compute_dcf` is never used
+    --> src\edgar.rs:1091:4
+     |
+1091 | fn compute_dcf(fcf_by_year: &[(i32, i64)], shares_outstanding: u64) -> Option<DcfResult> {
+     |    ^^^^^^^^^^^
+
+warning: function `fetch_dcf` is never used
+    --> src\edgar.rs:1551:8
+     |
+1551 | pub fn fetch_dcf(
+     |        ^^^^^^^^^
+
+warning: method `ingest_dcf` is never used
+    --> src\engine.rs:2266:12
+     |
+2068 | impl ScreenerState {
+     | ------------------ method in this implementation
+...
+2266 |     pub fn ingest_dcf(&mut self, symbol: String, value_cents: i64) {
+     |            ^^^^^^^^^^
+
+warning: `discount-screener-windows` (lib test) generated 17 warnings (run `cargo fix --lib -p discount-screener-windows --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running unittests src\lib.rs (target\debug\deps\discount_screener_windows_lib-11cf8efa1419a5b7.exe)
+
+running 1 test
+=== PROBE C: return on capital — availability ===
+per-term year counts, so a collapse names the term that caused it
+symbol   yrs  ptax equit  debt  intr  mtax  cap IC<=0    NOPAT $B       IC $B  ROIC bps NOPAT/FCFF
+DVN       14    14    14    12    14    10   10     0        3.13       23.92      1309      1.35x
+FIS       15    10    10    10    10    10   10     0        1.24       22.97       539     -0.17x
+AVY       15    15    15    13    15     7    7     0        0.84        5.45      1537      0.82x
+SW         4     4     4     2     4     4    2     0        1.57       32.13       490      1.05x
+COF       19    18    18    16    18    18   16     0      -32.07      164.62     -1948      0.28x
+MPWR      17    17    16     0    12    16    0     0           -           -         -          -
+APH       19    19    19    16    19    18   16     0        4.72       28.07      1680      1.03x
+EME       18    18    18    12    18     2    2     0        0.32        2.04      1584      0.93x
+CHTR      16    16    16    14    16    16   14     0        9.88      115.28       857      0.87x
+BKR       11    11    11    10    11     1    1     0        2.45       24.41      1003      0.90x
+INTU      18    18    18    11    18     1    1     0        0.72        3.62      1981      0.85x
+TER       18    18    18     5    17    17    5     0        0.52        3.00      1723      0.78x
+AVGO      10    10    10     8    10     5    5     0       20.49      143.28      1430      0.61x
+EPAM      16    16    16     9     0     2    0     0           -           -         -          -
+T         19    17    19    17    19    13   13     0       26.71      253.58      1053      0.77x
+GEHC       5     5     5     3     5     1    1     0        2.53       20.39      1243      1.37x
+DAL       14    14    14    14    14     3    3     0        1.12       17.37       644      0.68x
+WDC       18    18    18    16    12    17   12     0        1.17       10.02      1172      0.57x
+GOOGL     13    13    13    12    13    13   12     0      126.05      464.35      2715      1.10x
+HPE       13    13    11    11    13    13   11     0        0.25       42.51        58      1.16x
+CRM       16    16    16    12    16     6    6     0        7.78       73.58      1057      0.43x
+SLB       19    18    19    17    19    14   14     0        3.83       37.03      1034      0.35x
+EXE        6     6     6     6     6     5    5     0        1.99       23.59       843      1.38x
+OMC       19    19    19    17    19    18   17     0        0.39       21.97       175      0.78x
+PTC       18    18    18    10    18    17   10     0        0.79        5.00      1576      0.59x
+PG        19    17    18    16    19    19   14     0       16.65       82.66      2014      0.68x
+MSFT      19    19    17    16    19    19   16     0       99.55      386.63      2575      0.94x
+AMZN      19    19    19    17    19     9    8     0       78.67      479.90      1639      1.91x
+
+=== driver resolution: which qname each series actually came from ===
+DVN     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:19 StockholdersEquity:17
+DVN     interest InterestExpenseDebt:18 InterestAndDebtExpense:12 InterestExpense:6 InterestIncomeExpenseNonoperatingNet:11 FinanceLeaseInterestExpense:7
+DVN     sbc      ShareBasedCompensation:12 AllocatedShareBasedCompensationExpense:18
+DVN     cashtax  IncomeTaxesPaidNet:18
+FIS     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:20 StockholdersEquity:18
+FIS     interest InterestExpenseNonoperating:4 InterestExpense:17 InterestIncomeExpenseNet:6
+FIS     sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:5
+FIS     cashtax  IncomeTaxesPaidNet:19
+AVY     equity   StockholdersEquity:15
+AVY     interest InterestExpenseNonoperating:4 InterestExpense:13
+AVY     sbc      ShareBasedCompensation:15 AllocatedShareBasedCompensationExpense:5
+AVY     cashtax  IncomeTaxesPaidNet:14
+SW      equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:4 StockholdersEquity:2
+SW      interest InterestExpenseNonoperating:4 InterestIncomeExpenseNonoperatingNet:4 FinanceLeaseInterestExpense:4
+SW      sbc      ShareBasedCompensation:4 AllocatedShareBasedCompensationExpense:4
+SW      cashtax  IncomeTaxesPaidNet:4
+COF     equity   StockholdersEquity:19
+COF     interest InterestExpense:17 InterestExpenseOtherLongTermDebt:5 InterestIncomeExpenseNet:19
+COF     sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:17
+COF     cashtax  IncomeTaxesPaidNet:3 IncomeTaxesPaid:17
+MPWR    equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:1 StockholdersEquity:16
+MPWR    interest InterestIncomeExpenseNonoperatingNet:12
+MPWR    sbc      ShareBasedCompensation:17 AllocatedShareBasedCompensationExpense:16
+MPWR    cashtax  IncomeTaxesPaidNet:15
+APH     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:19 StockholdersEquity:17
+APH     interest InterestExpenseNonoperating:4 InterestExpense:17
+APH     sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:17
+APH     cashtax  IncomeTaxesPaidNet:19
+EME     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:18 StockholdersEquity:16
+EME     interest InterestExpense:18 FinanceLeaseInterestExpense:7
+EME     sbc      AllocatedShareBasedCompensationExpense:3
+EME     cashtax  IncomeTaxesPaidNet:3 IncomeTaxesPaid:16
+CHTR    equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:16 StockholdersEquity:13
+CHTR    interest InterestExpense:4 InterestIncomeExpenseNet:12 InterestIncomeExpenseNonoperatingNet:4 FinanceLeaseInterestExpense:1
+CHTR    sbc      ShareBasedCompensation:15 AllocatedShareBasedCompensationExpense:16
+CHTR    cashtax  IncomeTaxesPaidNet:3 IncomeTaxesPaid:11
+BKR     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:11 StockholdersEquity:10
+BKR     interest InterestIncomeExpenseNet:11
+BKR     sbc      ShareBasedCompensation:6
+BKR     cashtax  IncomeTaxesPaidNet:11
+INTU    equity   StockholdersEquity:18
+INTU    interest InterestExpenseDebt:18
+INTU    sbc      ShareBasedCompensation:18 AllocatedShareBasedCompensationExpense:3
+INTU    cashtax  IncomeTaxesPaid:18
+TER     equity   StockholdersEquity:18
+TER     interest InterestExpenseDebt:13 InterestExpense:17
+TER     sbc      ShareBasedCompensation:18 AllocatedShareBasedCompensationExpense:13
+TER     cashtax  IncomeTaxesPaidNet:16 IncomeTaxesPaid:4
+AVGO    equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:10 StockholdersEquity:2
+AVGO    interest InterestExpenseNonoperating:3 InterestExpense:9
+AVGO    sbc      ShareBasedCompensation:10 AllocatedShareBasedCompensationExpense:10
+AVGO    cashtax  IncomeTaxesPaidNet:10
+EPAM    equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:14 StockholdersEquity:16
+EPAM    interest none
+EPAM    sbc      ShareBasedCompensation:16 AllocatedShareBasedCompensationExpense:12
+EPAM    cashtax  IncomeTaxesPaidNet:9 IncomeTaxesPaid:9
+T       equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:19
+T       interest InterestExpenseNonoperating:4 InterestExpense:17 FinanceLeaseInterestExpense:7
+T       sbc      AllocatedShareBasedCompensationExpense:16
+T       cashtax  IncomeTaxesPaidNet:18 IncomeTaxesPaid:5
+GEHC    equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:5 StockholdersEquity:3
+GEHC    interest InterestAndDebtExpense:5
+GEHC    sbc      ShareBasedCompensation:5 AllocatedShareBasedCompensationExpense:3
+GEHC    cashtax  IncomeTaxesPaidNet:5
+DAL     equity   StockholdersEquity:18
+DAL     interest InterestExpense:9 InterestIncomeExpenseNet:15 InterestIncomeExpenseNonoperatingNet:4 FinanceLeaseInterestExpense:8
+DAL     sbc      ShareBasedCompensation:12 AllocatedShareBasedCompensationExpense:11
+DAL     cashtax  none
+WDC     equity   StockholdersEquity:18
+WDC     interest InterestExpenseNonoperating:4 InterestExpense:10
+WDC     sbc      ShareBasedCompensation:18 AllocatedShareBasedCompensationExpense:15
+WDC     cashtax  IncomeTaxesPaidNet:9 IncomeTaxesPaid:11
+GOOGL   equity   StockholdersEquity:14
+GOOGL   interest InterestExpenseNonoperating:4 InterestExpense:11 FinanceLeaseInterestExpense:4
+GOOGL   sbc      ShareBasedCompensation:13 AllocatedShareBasedCompensationExpense:13
+GOOGL   cashtax  IncomeTaxesPaidNet:12 IncomeTaxesPaid:3
+HPE     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:11 StockholdersEquity:11
+HPE     interest InterestExpenseDebt:13 InterestAndDebtExpense:5 InterestExpense:13
+HPE     sbc      ShareBasedCompensation:13 AllocatedShareBasedCompensationExpense:13
+HPE     cashtax  IncomeTaxesPaidNet:13
+CRM     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:5 StockholdersEquity:17
+CRM     interest InterestExpenseDebt:15 InterestExpense:12 FinanceLeaseInterestExpense:7
+CRM     sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:2
+CRM     cashtax  IncomeTaxesPaidNet:19
+SLB     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:19 StockholdersEquity:17
+SLB     interest InterestExpense:19
+SLB     sbc      ShareBasedCompensation:19
+SLB     cashtax  IncomeTaxesPaidNet:11 IncomeTaxesPaid:9
+EXE     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:15 StockholdersEquity:17
+EXE     interest InterestExpenseNonoperating:4 InterestExpenseDebt:9 InterestExpense:16 FinanceLeaseInterestExpense:3
+EXE     sbc      ShareBasedCompensation:18 AllocatedShareBasedCompensationExpense:14
+EXE     cashtax  IncomeTaxesPaidNet:18
+OMC     equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:19 StockholdersEquity:17
+OMC     interest InterestExpenseDebt:12 InterestExpense:19 FinanceLeaseInterestExpense:7
+OMC     sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:18
+OMC     cashtax  IncomeTaxesPaidNet:3 IncomeTaxesPaid:17
+PTC     equity   StockholdersEquity:18
+PTC     interest InterestExpenseDebt:8 InterestExpense:18
+PTC     sbc      ShareBasedCompensation:18
+PTC     cashtax  IncomeTaxesPaidNet:17
+PG      equity   StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest:18
+PG      interest InterestExpenseNonoperating:5 InterestExpense:16
+PG      sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:5
+PG      cashtax  IncomeTaxesPaidNet:3 IncomeTaxesPaid:18
+MSFT    equity   StockholdersEquity:17
+MSFT    interest InterestExpenseNonoperating:4 InterestExpense:17 FinanceLeaseInterestExpense:11
+MSFT    sbc      ShareBasedCompensation:12 AllocatedShareBasedCompensationExpense:19
+MSFT    cashtax  IncomeTaxesPaidNet:19
+AMZN    equity   StockholdersEquity:19
+AMZN    interest InterestExpenseNonoperating:4 InterestExpense:17 FinanceLeaseInterestExpense:7
+AMZN    sbc      ShareBasedCompensation:19 AllocatedShareBasedCompensationExpense:12
+AMZN    cashtax  IncomeTaxesPaidNet:18 IncomeTaxesPaid:4
+
+=== PROBE C: which estimator reproduces realized reinvestment ===
+b = (NOPAT - FCFF)/NOPAT, retention from the flow statements.
+b_cap = dIC/NOPAT, the contaminated reading, shown so the difference is visible.
+out = annual returns discarded as |z| > 3 before the book centre was taken.
+symbol     n        g        b    b_cap    r_book  out   r_slope    r_impl   |db|bk   |db|sl
+DVN       10    0.002    0.262   -0.342     0.132    1     0.093     0.006    0.249    0.244
+FIS       10    0.048    6.944   -0.625     0.035    1    -0.024     0.007    5.569        -
+AVY        7    0.108   -0.225    1.113     0.137    0     0.153    -0.479    1.013    0.930
+COF       16        -   -2.632    1.901     0.075    2    -0.297         -        -        -
+APH       16    0.155    0.025    1.124     0.146    0     0.175     6.290    1.042    0.866
+CHTR      14    0.221   -0.153    1.465     0.052    0     0.064    -1.439    4.433    3.618
+TER        5    0.042   -0.279    1.345     0.129    0     0.159    -0.152    0.607    0.544
+AVGO       5    0.275   -0.649    1.255     0.145    0     0.074    -0.423    2.540    4.346
+T         13    0.044   -0.302    0.352     0.068    1     0.064    -0.146    0.950    0.993
+DAL        3   -0.082   -0.461    1.817     0.105    0     0.056     0.179    0.324    1.007
+WDC       12   -0.000   -0.742   -0.134     0.049    0    -0.018     0.000    0.741        -
+GOOGL     12    0.219    0.092    0.624     0.180    0     0.348     2.389    1.126    0.538
+HPE       11   -0.163    0.139   -0.480     0.036    0     0.038    -1.174    4.667    4.444
+CRM        6    0.404   -1.317    3.101     0.057    0     0.105    -0.306    8.380    5.168
+SLB       14   -0.016   -1.824   -0.328     0.083    2     0.136     0.009    1.626    1.703
+EXE        5    0.891    0.275    1.393     0.102    0    -0.125     3.241    8.500        -
+OMC       17   -0.054   -0.275    0.775     0.173    3    -0.034     0.195    0.035        -
+PTC       10        -   -0.682    1.309     0.068    0     0.179         -        -        -
+PG        14    0.068   -0.470   -0.006     0.067    4    -0.158    -0.145    1.494        -
+MSFT      16    0.120   -0.062    0.532     0.224    0     0.297    -1.956    0.600    0.466
+AMZN       8    0.289    0.476    2.788     0.110    0     0.160     0.606    2.153    1.327
+
+issuers with >=3 complete years: 21/28
+issuer-years with IC <= 0: 0  []
+issuer-years dropped for missing marginal tax rate: 76  [DVN(2) AVY(6) EME(10) BKR(9) INTU(10) AVGO(3) T(4) GEHC(2) DAL(11) CRM(6) SLB(3) EXE(1) AMZN(9)]
+median NOPAT/FCFF = Some("0.83x")   (the size of the base change, before it lands)
+candidate availability: book resolves for 19 issuers, slope for 14 issuers, paired (both resolve): 14
+|implied b - realized b|, book, robust centre = 1.112  (retained 11 of 14, trimmed [CHTR(4.433) HPE(4.667) CRM(8.380)])
+|implied b - realized b|, slope, robust centre = 0.862  (retained 10 of 14, trimmed [CHTR(3.618) AVGO(4.346) HPE(4.444) CRM(5.168)])
+(r_impl is not scored: its gap is identically zero by construction, since it is
+defined as g/b)
+READ THIS AS: the smaller robust centre is the estimator whose retention charge is
+consistent with what these issuers actually did with their earnings, on the paired
+population above. Where the two are close, prefer the higher r: an overstated return
+is bounded (1 - g/r -> 1, the charge merely vanishes) while an understated or negative
+one is unbounded (negative value, or refusal through the Core's r <= 0 guard). Market
+price is not consulted here and must not be used to break the tie.
+
+=== PROBE C: what still sits between NOPAT and FCFF ===
+sbc = after-tax SBC add-back / NOPAT, summed over the years SBC resolved (never 0-filled).
+dtax = (marginal_tax*pretax - cash_taxes_paid) / NOPAT, summed over the years cash tax resolved.
+resid = b + sbc + dtax -- what b would read with both effects removed.
+symbol     n        b   sbc/NOP  yrs    sbc $B  dtax/NOP  yrs   dtax $B    resid
+DVN       10    0.262     0.041   10     0.880     0.202   10     4.315    0.505
+FIS       10    6.944    -0.369   10     1.603     1.499   10    -6.509    8.074
+AVY        7   -0.225     0.059    7     0.151     0.030    7     0.077   -0.136
+COF       16   -2.632     0.069   16     3.518     0.127   16     6.416   -2.435
+APH       16    0.025     0.034   16     0.755     0.037   16     0.829    0.096
+CHTR      14   -0.153     0.051   14     3.533     0.059   12     4.091   -0.044
+TER        5   -0.279     0.110    5     0.141     0.250    5     0.319    0.081
+AVGO       5   -0.649     0.236    5    14.786     0.077    5     4.849   -0.336
+T         13   -0.302     0.022   13     4.731     0.211   13    46.154   -0.070
+DAL        3   -0.461     0.032    3     0.146         -    0         -        -
+WDC       12   -0.742     0.270   12     2.546    -0.153   12    -1.437   -0.624
+GOOGL     12    0.092     0.218   12   124.590     0.058   12    33.345    0.368
+HPE       11    0.139     0.230   11     3.452    -0.009   11    -0.137    0.360
+CRM        6   -1.317     0.533    6    10.560     0.024    6     0.467   -0.761
+SLB       14   -1.824     0.152   14     3.397    -0.259   14    -5.774   -1.930
+EXE        5    0.275     0.019    5     0.134     0.173    5     1.208    0.467
+OMC       17   -0.275     0.045   17     1.011     0.011   17     0.248   -0.219
+PTC       10   -0.682     0.425   10     1.103     0.000   10     0.001   -0.257
+PG        14   -0.470     0.036   14     4.291    -0.095   14   -11.184   -0.528
+MSFT      16   -0.062     0.095   16    59.758     0.060   16    37.920    0.093
+AMZN       8    0.476     0.317    8    53.884     0.071    8    12.137    0.864
+
+term resolution: sbc resolves for 21 issuers, dtax for 20 issuers, paired (b, sbc AND dtax all resolve, so resid resolves): 20
+b, on the paired (resid-resolving) population, robust centre = -0.317  (retained 18 of 20, trimmed [FIS(6.944) COF(-2.632)])
+sbc/NOPAT, robust centre = 0.101  (retained 17 of 21, trimmed [FIS(-0.369) CRM(0.533) PTC(0.425) AMZN(0.317)])
+dtax/NOPAT, robust centre = 0.063  (retained 18 of 20, trimmed [FIS(1.499) SLB(-0.259)])
+resid, robust centre = -0.008  (retained 17 of 20, trimmed [FIS(8.074) COF(-2.435) SLB(-1.930)])
+
+issuers with positive realized growth and b < 0 (this run): 8
+issuers with positive realized growth and resid < 0 (this run): 6  -- this is the number the wave exists to move, next to the 8 named in the brief
+READ THIS AS: numbers only. Whether sbc, dtax, both or neither account for the gap
+between NOPAT and FCFF is not decided here -- no estimator, driver or contract
+changes on this measurement, and market price was never consulted.
+test valuation_probes::tests::probe_return_on_capital_availability ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 594 filtered out; finished in 19.04s
+

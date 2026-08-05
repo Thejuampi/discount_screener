@@ -3125,3 +3125,89 @@ That is not a failure to report reluctantly. It is the answer that the constrain
 estimator to keep the Core publishing numbers"* was written to protect: every round so far that
 produced a publishable-looking answer produced a **different** one, and each time the difference came
 from the instrument rather than from the issuers.
+
+---
+
+## R-42 — Round 9 verified. The instrument is clean now, and the cohort's reinvestment is genuinely zero.
+
+Shipped at `9d4ebc0`. Suite `566 / 4 / 25`, gate green, probe re-run by me and reproduced to the
+digit. Scope is one file, `valuation_probes.rs`, plus the fixture the network-bound test rewrites on
+every run.
+
+### R-42.1 — Both mechanisms are real, and together they are not enough
+
+| | robust centre |
+|---|---|
+| realized reinvestment `b`, paired population (n=20) | **−0.317** |
+| after-tax SBC / NOPAT | **+0.101** |
+| (marginal − cash effective) × pretax / NOPAT | **+0.063** |
+| **residual** — what `b` reads with both removed | **−0.008** |
+
+Both corrections are real, sizeable and in the predicted direction. The centre moves essentially to
+zero. And the count this wave existed to move barely moves: issuers with positive growth and negative
+reinvestment go from **8 to 6**.
+
+Per issuer the picture is not uniform, which is the honest part. `CHTR` goes `−0.153 → −0.044`,
+nearly fully explained. `MSFT` goes `−0.062 → +0.093`, overcorrected. `SLB` goes `−1.824 → −1.930`,
+**worse**, because it pays more cash tax than its marginal reference implies and the correction has
+the opposite sign for it. `COF −2.435`, `WDC −0.624` and `CRM −0.761` remain large and negative.
+Neither candidate is *the* explanation, and the probe says so in numbers rather than in prose.
+
+### R-42.2 — What the zero means, now that the instrument is no longer suspect
+
+Three rounds have been spent removing defects from this measurement: a levered cash flow subtracted
+from an unlevered earnings figure, a fabricated statutory tax rate, two estimators scored on
+different populations, a bare median as the summary, and now two unmodelled non-cash effects. After
+all of it, **net reinvestment for this cohort centres at zero.**
+
+That is no longer a broken instrument. It is a statement about the cohort. Capital expenditure sits
+at about depreciation, and the growth is funded through charges the income statement **expenses**
+rather than capitalises — research and development, share-based compensation, customer acquisition.
+Book invested capital therefore does not move while earnings do.
+
+The retention identity `g = b · r` needs reinvestment to divide by. **This cohort does not supply
+any**, so the identity returns no finite return for the median issuer, and the estimator question as
+posed has no answer on this evidence. That is the fourth and final firing of R-38.3's third row, and
+it is now a finding about the world rather than about the code.
+
+### R-42.3 — This is a Juan-category-(a) fork and I am not settling it
+
+Two designs follow, they produce **different economic results**, and no test in this repository
+decides between them. Juan's standing protocol reserves exactly this to him.
+
+**(A) Capitalise the intangible investment.** Treat R&D — and arguably a share of SBC — as capital
+rather than expense: add it back to earnings, accumulate it into invested capital with an
+amortisation life, and re-measure. Book capital then tracks economic capital, `b` becomes positive
+for the growing names, and the identity has something to divide by. This is the standard academic
+correction and it is what makes ROIC meaningful for asset-light issuers. It is also a **large**
+change: a new driver, a fingerprint bump, two platforms regenerated, an amortisation life that is a
+policy choice with no filed value, and a new class of judgement about which expenses are investment.
+
+**(B) Price growth without the retention identity.** Drop `C(t) = E(t)·(1 − g(t)/r)` as the mechanism
+and credit growth through something measurable on this evidence — a fade to the terminal rate with no
+retention charge, with the growth path itself already fitted and carrying its own uncertainty. This
+is much smaller and it removes FR-28's dependence on a quantity the evidence does not contain. It
+also gives up the discipline the retention charge exists to impose: growth stops costing anything, so
+a high-growth issuer is credited its growth for free, which is the failure mode FR-28 was written
+against.
+
+**My recommendation is (A)**, and the reason is the asymmetry rather than elegance. (B) removes the
+only mechanism that makes growth cost something, and this effort's whole complaint is that the model
+does not price growth honestly — trading an unmeasurable charge for no charge at all moves the error
+from "growth credited nothing" to "growth credited free", which is the direction that flatters and
+therefore the direction to distrust. (A) is expensive and introduces a policy choice (the
+amortisation life) that must be registered as a policy choice rather than smuggled in as a
+measurement — but it makes the quantity the model already depends on actually measurable.
+
+Registered here, not decided.
+
+### R-42.4 — What is true regardless of which branch is chosen
+
+R-30.1 still stands and still gates both: the adapter feeds FCFF into the slot the retention charge
+requires NOPAT for, and the double count is armed rather than harmless. Under (A) it fires the day
+the estimator lands. Under (B) the retention charge disappears and the slot's contract changes
+entirely, which is a *different* reason to touch the same code but not a reason to leave it as it is.
+
+And the gate holds either way. Every one of the twenty pinned issuers currently refuses, so any wave
+that starts publishing values will move them **visibly, by name, in a failing test** — which is
+precisely why LD-12 was sequenced first, four rounds ago, against the argument that it could wait.
