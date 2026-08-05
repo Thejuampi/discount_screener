@@ -3349,3 +3349,105 @@ usable positive capital **level** at all. If the levels are as ill-conditioned a
 (D) dies too, and it dies cheaply.
 
 Registered, not decided. Juan chooses.
+
+---
+
+## R-44 — Branch (D) chosen. And on inspection it is far smaller than R-43 said, because it collapses into an identity.
+
+Juan chose the sales-to-capital route. Round 10's probe is running under the R-43.7 pre-registration,
+extended once — before any number existed — with a cash-netted capital definition and a turnover ×
+margin decomposition. This ruling records four consequences that follow from the research and the
+choice, none of which needed the probe to see.
+
+### R-44.1 — (D) is not a new formula. It is the same integrand with the other unknown supplied.
+
+FR-28's retention charge is `C(t) = E(t)·(1 − g(t)/r)`. Write the reinvestment rate as `b(t)`. The
+identity the whole effort rests on is `g = b · r`, so `g/r = b`, and therefore
+
+    C(t) = E(t)·(1 − b(t))
+
+**The same expression.** `{b, r}` is a pair in which measuring either one determines the other given
+`g`. Rounds 7–9 tried to measure `r` and validate it against realized `b`. Branch (D) measures the
+reinvestment side and lets `r` be implied. The Core's integrand does not change at all.
+
+It goes one step further. Damodaran, on what the route assumes:
+
+> If you leave margins unchanged and set the company's sales to capital ratio at its current level,
+> you are essentially assuming that the company's **current return on capital will continue** for the
+> long term
+
+Which is the DuPont identity, exact year by year:
+
+    NOPAT / Capital  ≡  (Sales / Capital) × (NOPAT / Sales)
+
+So (D), applied with an issuer's own ratio and its own margin, **is book return on capital**, arrived
+at from the other side. The estimator was never the disputed thing. What (D) actually abandons is the
+**validation step** — the demand, registered in R-38.3's third row and fired four times, that a
+candidate `r` reproduce the realized `b`. R-41.4 established that this reference is unusable on this
+cohort: `b` is negative for 14 of 21 issuers, so it implies a negative return that the Core already
+refuses. **A test whose reference is not identified is not a test**, and continuing to gate on it is
+how three rounds produced three different answers.
+
+That is worth stating without softening. Branch (A) was scoped as a large change — a new driver, a
+fingerprint bump, two platforms regenerated, an amortisation life with no filed value. (D) is: net
+cash out of the capital base, take the centre, and drop a validation gate that cannot fail correctly.
+The cost difference between the branches is roughly an order of magnitude, and the research is what
+revealed it.
+
+### R-44.2 — Two forms of the same estimator remain genuinely distinct, and the probe will say whether it matters
+
+The identity holds **per year**. It stops holding the moment a robust centre is taken, because
+`robust_centre(Sales/Capital) × robust_centre(NOPAT/Sales)` is not `robust_centre(NOPAT/Capital)` —
+each factor is trimmed against its own dispersion, so the two forms keep different years.
+
+Round 10 reports both with the difference and the retained counts, and adopts neither. Registered
+before the numbers: any material gap between them is a statement about **which years each form
+trimmed**, not about the economics. If the gap is negligible everywhere, that is a finding too, and it
+means the choice does not matter.
+
+### R-44.3 — R-30.1 moves from latent to blocking, and it is now the critical path
+
+The adapter feeds FCFF into the slot `E(t)` where FR-28 requires NOPAT — earnings **before** growth
+reinvestment. Today that is armed rather than firing, because with `r` absent every issuer refuses.
+
+Under (D) it fires the day the estimator lands, and it fires **definitely** rather than latently:
+`C(t) = E(t)·(1 − b(t))` subtracts reinvestment explicitly, and FCFF has already subtracted it once.
+Reinvestment charged twice. The sequencing recorded in the original plan — *"ROIC alone (base still
+FCFF) → charged twice → the understatement worsens"* — is precisely the failure mode.
+
+So the base change and the estimator land **together or not at all**, and the base change is now
+upstream of everything else in this branch. This was written down before the fork existed and it did
+not need re-deriving; it needed re-reading.
+
+### R-44.4 — Round 9's decomposition shipped a column whose framing is now known to be wrong
+
+R-43.3 established, on the record, that share-based compensation is an in-kind expense rather than
+investment, and is not added back. Round 9's probe prints `sbc/NOP` as a **correction term to
+realized `b`**, which is the one treatment the source names as wrong, and it is committed at `9d4ebc0`
+where a future reader will find it.
+
+The measurement is not wrong — the ratio is what it is, centre +0.101. The **framing** is. A
+diagnostic that invites a reader to apply a correction the literature rejects is a latent defect of
+the same species this effort has been cataloguing, and it is cheap to fix: relabel the column as a
+descriptive magnitude and state in the probe's own output why it is not a correction. Registered as
+work, not done here.
+
+### R-44.5 — The bounds check has no number in the literature, and I am not inventing one
+
+The discipline (D) substitutes for the failed validation is Damodaran's:
+
+> keep track of the imputed return on capital ... to ensure that it stays within **reasonable bounds**
+
+He does not say what the bounds are. The nearest thing found is a doctrine rather than a threshold —
+*"For most companies, ROC should equal the cost of capital unless there is a lasting competitive
+advantage"* — and turning that into a numeric gate would be a modelling choice with an author-chosen
+constant, which is the exact class of quantity six rounds have been spent removing.
+
+**So the bound is the guard that already exists.** The Core refuses `r <= 0` and refuses a terminal
+growth at or above the discount rate. Those are arithmetic, not economics, and they are already
+contract. Nothing tighter goes in without Juan choosing it as a policy, registered as a policy, with
+the number written down before any issuer is scored against it.
+
+The ROC-toward-cost-of-capital doctrine is registered here as a **separate, later** question. It is a
+real idea with real support and it belongs to whoever decides terminal-regime policy — not to this
+branch, and not smuggled in as a measurement.
