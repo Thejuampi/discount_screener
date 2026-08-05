@@ -5162,3 +5162,90 @@ to him rather than answering it:
 Whether that single shared property is the disqualifying one is a policy judgement about what the
 economic contract means, not a measurement. It goes to him with Round 16's counts, so he decides
 with the coverage number in hand rather than ahead of it.
+
+---
+
+## R-54 — Every estimator hypothesis is measured on a population that shares three members with the one the gate protects
+
+### R-54.1 — The overlap is 3 of 20, and I computed it rather than assuming it
+
+Advisor handed off *"the exact 28-member `PROBE_COHORT` overlap"* as unverifiable from documentation.
+I resolved it against source and the fixture:
+
+| set | n | members |
+|---|---|---|
+| `PROBE_COHORT` (`valuation_probes.rs:167`) | 28 | DVN FIS AVY SW COF MPWR APH EME CHTR BKR INTU TER AVGO EPAM T GEHC DAL WDC GOOGL HPE CRM SLB EXE OMC PTC PG MSFT AMZN |
+| pinned cohort (`baseline_cohort_2026-07-30.json`) | 20 | AAPL ADMA AMSC AMZN APP BWMN CALX FIGS HURN IDCC INOD INVA MH MIR MSFT ROCK T VICR VRRM VRT |
+| **overlap** | **3** | **AMZN, MSFT, T** |
+| probe-only | 25 | the rest of the large caps |
+| pinned-only | **17** | ADMA AMSC APP BWMN CALX FIGS HURN IDCC INOD INVA MH MIR ROCK VICR VRRM VRT AAPL |
+
+**Seventeen of the twenty issuers whose published values must not regress have never appeared in a
+single probe table in this effort.**
+
+### R-54.2 — And it is the estimator work specifically that sits on the wrong population
+
+Which probe walks which population, from source:
+
+- `valuation_probes.rs:1959, 2766, 2914, 3500, 3933` — the **E1–E5 window race, the `gross`/`oper`
+  capital panels, the sales-to-capital conditioning, the return-on-capital availability and the
+  revenue-persistence probes** all iterate `PROBE_COHORT`.
+- `valuation_probes.rs:4812` — **only** Round 14's tax audit reads `DEEP_DRIVER_FIXTURE`, the pinned
+  twenty's corpus.
+
+So every hypothesis W6 is blocked on — H1 `prod` vs `roic`, H2, H4 the capital definition, H5 `r`'s
+fade — has been measured on 28 large caps, while the gate that decides whether any of it ships pins
+20 issuers that are mostly small and mid cap. **The one instrument ever pointed at the gate's own
+population is the one that found seventy-six rows of fabrication.** That is not a coincidence worth
+passing over.
+
+### R-54.3 — The disjointness is defensible. The silence about it is not.
+
+I am not claiming the two sets should be equal. Choosing an estimator on the same twenty issuers it
+will be graded against is **overfitting to the gate**, and a general estimator deserves a broad
+population. The design is defensible and I would likely choose it again.
+
+**What is not defensible is that nothing measures the transfer.** Every H1–H5 answer is an
+**out-of-sample claim** about the pinned twenty, and the plan treats it as in-sample. Concretely,
+plan.v1's W6 requires a pre-registration predicting, issuer by issuer, how the pinned twenty move
+when the estimator lands — and it would be written from evidence gathered on **three** of them.
+Seventeen predictions would be extrapolation wearing a pre-registration's clothes, which is worse
+than no pre-registration because R-34 established the whole-cohort gate precisely to stop
+author-selected populations.
+
+The small-cap direction makes it concrete rather than theoretical: the pinned twenty include issuers
+with **1, 1, 2 and 3 traceable tax years** (VRT, ADMA, VRRM, FIGS — R-51). `PROBE_COHORT` is 28
+megacaps with long, clean XBRL histories. **The estimator will be chosen where data is abundant and
+applied where it is scarce**, and the scarce end is exactly where P22's trim floor and the `n < 3`
+refusal decide everything.
+
+### R-54.4 — What this changes, registered before Round 15's numbers arrive
+
+1. **W6's pre-registration cannot be written from `PROBE_COHORT` evidence alone.** Either a probe
+   runs the chosen estimator over the **pinned twenty** before the pre-registration is authored, or
+   the pre-registration is explicitly labelled out-of-sample for 17 of 20 and its predictive claim is
+   dropped to a refusal-count claim.
+2. **Round 15's P22 is now the most load-bearing probe in the effort**, not the housekeeping item it
+   looked like. The trim floor and the zero-MAD case are not edge conditions for this cohort — with
+   issuers at 1, 2 and 3 usable years, they are the **modal** case for the gate's population.
+3. **P23's intersection must be reported twice**: once on `PROBE_COHORT` where the estimator is
+   chosen, once on whatever the pinned twenty support. If the two disagree, the disagreement is the
+   result.
+4. This is registered **now**, ahead of Round 15 returning, so it cannot be read as a rationalisation
+   of whatever it reports.
+
+### R-54.5 — The lesson
+
+`feedback_scope_you_cannot_get_wrong` warned that a pre-registration's population is author-selected
+and that a whole-cohort gate is the fix. We built the whole-cohort gate — **and then measured the
+hypotheses on a different cohort**, so the gate protects a population the evidence never described.
+The guard was real; it was pointed at the output while the input was never checked.
+
+The cheap check that would have caught it on day one is a set intersection over two constants in the
+same repository, and nobody ran it for fourteen rounds — including me, and including every review
+that read both names without ever comparing them. **Two named populations in one effort must have
+their overlap stated the first time both are cited**, not the fifteenth.
+
+A small corroboration that the code was already reaching this way: the Round 15 agent, before it
+stalled, had added `load_cohort` to `valuation_probes.rs`'s imports — the pinned cohort loader,
+which no probe in the file had previously needed.
