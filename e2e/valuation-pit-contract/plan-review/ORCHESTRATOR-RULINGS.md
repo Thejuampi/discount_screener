@@ -2069,3 +2069,131 @@ Registered now so the wave cannot be graded against a target adjusted after seei
 P5 is the one with real prior probability of falsifying: 34 cells derived by reading code, never by
 running cucumber. A disagreement there is a **finding**, not a defect in the plan — and the rule that
 the builder may not edit the cell is what makes it a finding instead of a laundered spec change.
+
+---
+
+## R-28 — Wave 5 verified; Round 3 merged as `d688fe9`. Wave 4 pre-registration.
+
+### R-28.1 — All six of R-27's predictions confirmed, two of them by me rather than by the builder
+
+The builder correctly declined to run the full Shell suite (out of a builder's scope, and it rewrites
+a checked-in fixture as a side effect) and left P1 and P6 to me. I ran both.
+
+- **P6 exact.** `cargo test --lib` → **563 passed, 3 failed, 24 ignored**, and the three are exactly
+  the protected names. **This also confirms R-26.2 empirically**: with the generated input seeded into
+  the worktree, `cross_platform_parity::export_random20_sp500_parity_snapshot` **passes**. It was
+  never a code failure, and it is now off the reported failing set for good.
+- **P1 exact.** PG 18109, GOOGL 35679, AMZN 16185, MSFT 57139 — bit-identical to Round 2, delta $0.00.
+  CHTR −2289 and BKR +3035 also unchanged, so Round 3 moved nothing published, which is what F1
+  predicts and what the compile gate (P4) independently proves.
+- **P5 held, and it was the one with real prior probability of falsifying.** Thirty-four Examples
+  cells derived by *reading* code, confirmed against 95/95 cucumber scenarios with **no cell edited**.
+  The escalation path existed and was not needed.
+
+### R-28.2 — Two builder course corrections, both reported rather than buried, both correct
+
+**T5.8's cohort.** The builder first put the property test against the real 20-name pinned cohort and
+it failed: MH and BWMN refuse `not_reported`, not `estimator_unavailable`, for a pre-existing evidence
+gap unrelated to return on capital. Rather than weaken the assertion it re-read T5.8, found "the
+adapter's pinned test cohort" means the adapter's own synthetic fixture, and moved the test there —
+**then kept the real-cohort measurement as a second test** with an explicit two-name exception list,
+corroborated against `valuation-aggregation-audit.md §7`'s pre-Wave-5 measurement of the same two
+names under the same reason. That is the correct handling of a failing check: neither relaxed nor
+discarded.
+
+**T5.9's location.** It intended to embed the register in the ADR; re-reading D7 showed D7 is
+unconditional and binding. It created `docs/valuation-economic-contract.md` instead. **Wave 4 must
+extend that file, never replace it** — the register with LD-8 closed at `f38fe2c` already lives there.
+
+### R-28.3 — A tooling defect worth carrying: `cargo fmt -- <files>` is not file-scoped
+
+In this workspace `cargo fmt -- <file list>` reformats the **entire crate** and ignores the trailing
+paths. It pulled three out-of-scope files into the diff as pure formatting noise; the builder caught
+and reverted all three. Plain `rustfmt --check <files>` does respect the list.
+
+I checked whether an earlier wave shipped this contamination: `f38fe2c` and `4d201cf` touch none of
+`fetcher.rs`, `lib.rs`, or `valuation_gap_attribution.rs`. **No committed wave is affected.** Any
+future wave claiming a scoped format check must use `rustfmt`, not `cargo fmt`.
+
+### R-28.4 — Wave 4 pre-registration
+
+| # | prediction | falsified if |
+|---|---|---|
+| Q1 | `cargo test --lib` is **unchanged**: 563 / 3 / 24, same three names | any number moves — a documentation wave that changes behaviour has escaped its scope |
+| Q2 | `docs/index.md` and `AGENTS.md`'s Documentation Map agree **name for name** | they diverge (M1) |
+| Q3 | The pre-registration names **exactly one** primary endpoint, quoted verbatim from the brief | more than one, or a paraphrase — the document's entire value is that it did not drift |
+| Q4 | The materiality threshold is a **number in the endpoint's units** with a written propagation derivation | an adjective, or a number with the derivation skipped |
+| Q5 | **No document claims a measured result** | any does — these are charters and a pre-registration; a measurement in one is a category error |
+| Q6 | The register in `valuation-economic-contract.md` still shows **LD-1 and LD-8 struck**, LD-8 at `f38fe2c` | Wave 4 overwrites Wave 5's file and loses it |
+
+Q6 is the one with a real failure mode: Wave 4 owns the file Wave 5 just created, and the natural
+builder instinct on "write `docs/valuation-economic-contract.md`" is to write it, not extend it.
+
+---
+
+## R-29 — Wave 4 verified. The checkpoint that could not run, and why the thing it protected survives anyway.
+
+### R-29.1 — T4.8's checkpoints did not happen, and the fault is mine
+
+I instructed the builder to `SendMessage` me and wait at three points. **The builder role has no
+SendMessage tool** — Read/Write/Edit/Grep/Glob/Bash only. I mandated something impossible.
+
+The builder did the right thing: it produced the checkpoint content at the correct points, self-verified
+it against the same criteria, and **reported the gap as a blocking orchestration defect** rather than
+quietly claiming compliance. That is the behaviour this run has been trying to select for, and it
+appeared without being asked for.
+
+**T4.8 existed to make one property auditable: that T4.4's skeleton preceded its prose.** I tried to
+recover it post-hoc from the agent transcript. The transcript file is **zero bytes**. There is no
+audit trail. **The ordering claim is self-certified and I cannot verify it.** I am not going to
+describe it as verified.
+
+### R-29.2 — The stronger guarantee, which does hold, and which ordering was only a proxy for
+
+Ordering matters for exactly one reason: a materiality threshold written *after* seeing a candidate
+result is tuned, not pre-registered. So I checked the thing itself rather than its proxy.
+
+- `probe_return_on_capital_availability` **exists** in the tree (`valuation_probes.rs:655`) — it
+  belongs to a different, later plan and computes three candidate return estimators.
+- It has **never been run in this effort.** No recorded output exists anywhere in `build/`.
+- No candidate estimator has been evaluated against the primary endpoint, by anyone, ever.
+
+**The threshold cannot have been tuned to a result that does not exist.** That is a stronger
+statement than "the skeleton came first," and it is checkable, which the ordering claim is not.
+
+The irony is worth recording rather than smoothing over: T4.4 element 11 requires the pre-registration
+to confess **in its own text** that its freeze attestation is self-certified, written by an agent that
+will not run the harness, with no external party attesting it. The process that produced the document
+turns out to have precisely that property. The document is honest about its own weakness; this ruling
+is the same honesty applied one level up.
+
+### R-29.3 — Q1 through Q6, verified by me
+
+| # | verdict |
+|---|---|
+| Q1 | **exact** — `cargo test --lib` → 563 / 3 / 24, the same three names. A documentation wave moved nothing |
+| Q2 | **held after a one-line fix I made myself** — see R-29.4 |
+| Q3 | **held** — one primary endpoint, quoted verbatim at line 17, `MdAE` defined on first use |
+| Q4 | **held, and I checked the algebra.** `d(FCFF)/FCFF = [b/(r(1−b))]·dr` follows correctly from `FCFF = NOPAT(1−b)`; at `b=1/3, r=0.09` the factor is 5.56; `0.01 = 5.56·dr → dr ≈ 18bps`, rounded **up** to 20 — the stricter direction. The judgement step is labelled as judgement, and the ±5% anchor trigger is explicitly *not* reused as though derived |
+| Q5 | **held** — the grep hits are the adjective ("mis-measured `r`", "already-measured convention"), never a claimed result |
+| Q6 | **held** — the register survived; LD-8 struck and marked `CLOSED, at commit f38fe2c`, with no invented detector. The file was extended, not replaced |
+
+`Dropping abstained cells from the primary endpoint is a prohibited analysis` appears verbatim.
+The cluster bootstrap resamples **issuers**, 10,000 replicates fixed in advance.
+
+### R-29.4 — One M1 gap I closed rather than narrowed
+
+All seven new documents appear in both `docs/index.md` and `AGENTS.md`'s Documentation Map. But M1
+says *the two lists agree*, and `cross-platform-parity.md` was in the index and not in the map — a
+**pre-existing** asymmetry, not one this wave introduced.
+
+The tempting move is to declare M1 satisfied on the seven new documents, which is the narrower reading
+and would have been defensible. T4.7 says the map matches `docs/index.md` **exactly**. I added the one
+missing line. Closing a gap costs less than the precedent of narrowing an invariant to fit the work.
+
+### R-29.5 — Carried forward from this wave
+
+The builder named four open items rather than leaving them implicit: **LD-2** (fabricated-zero capex),
+a newly found **divestiture blind spot in `resolve_capex_abs`**, the unresolved **two competing
+definitions of invested capital**, and `variance_of_centre`'s residual bias. The divestiture finding
+is new to this run and is not in the register; it belongs there.
