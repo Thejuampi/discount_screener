@@ -498,6 +498,24 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 
 **If a new operational failure mode appears, add a row to the anti-pattern table and a step to the manual procedures in this file** — do not leave it only in chat.
 
+### Tooling that does not do what its arguments suggest
+
+Two commands in this workspace silently ignore or exceed the scope you give them.
+Both were caught mid-wave, after they had already widened a diff.
+
+| Command | What it actually does | Use instead |
+| --- | --- | --- |
+| `cargo fmt -- <files>` | **Not file-scoped here.** Reformats the whole crate and ignores the trailing paths; it pulled `fetcher.rs`, `lib.rs` and `valuation_gap_attribution.rs` into a wave that touched none of them. | `rustfmt --check <files>` to detect, `rustfmt <files>` to apply |
+| `git checkout <ref> -- <path>` | Writes the working tree **and stages the result**, without ever invoking `add`. It added a file to a branch index where that path did not exist at HEAD. | `git show <ref>:<path> > <scratchpad-file>` to read a file from another ref without touching the index |
+
+Related, and tool-scoped rather than repo-scoped: an agent harness asked for
+worktree isolation may provision from the repository's **default** branch rather
+than the session's current branch. That is deterministic, not flaky, and it means
+a dispatched wave can silently build on the wrong base. Provision manually with
+`git worktree add -b <name> <path> <exact-commit>` and verify the commit and one
+key file before dispatching expensive work — a 30-second pre-flight check
+substituted for a 27-minute rediscovery of the same fact.
+
 ## Conventions (general)
 
 - Fixed-point money: `*_cents`, `*_bps`, `*_hundredths`, `*_millis` stay integers unless strongly justified.
