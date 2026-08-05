@@ -4002,3 +4002,154 @@ tied, and its only losses are hairlines against a mixture that P8 shows is `E2` 
 series separately precisely so it could not settle it in passing. The FCFF-in-the-NOPAT-slot base
 change (R-30.1 / R-44.3), blocking and upstream. AMZN's marginal-rate supply hole (R-46.3). The
 time-axis sweep (R-46.2). Every one of the twenty pinned issuers still refuses.
+
+---
+
+## R-49 — Both reviews in. They contradict each other on a fact, one of them is right, and between them they surfaced two defects larger than the window question.
+
+Sensei returned `revise` with four P0s. Advisor returned `approve` with no blocking findings and three
+P1s. That is not a disagreement about quality — Advisor can read the repository and Sensei cannot, by
+design, and the split falls exactly along that line. I checked the two claims neither of them could
+settle alone.
+
+### R-49.1 — Where they contradict, the one holding the code wins, and the plan is wrong
+
+Sensei's P0-B rests on the premise that the trimming defect is **already shipping**: that
+`growth_posterior` runs a robust centre along time and feeds `g0` to every published value today.
+It took that from plan.v0, which asserts it in two places.
+
+Advisor grepped it. `growth_posterior` is called from **one** site inside `valuation_core_adapter.rs`
+and from its own unit tests. Nothing outside the adapter calls it. That is the same population the
+plan itself established two sections earlier — *"the Core has no production consumer at all"* — and
+verified independently by the same grep. **The plan contradicts itself, and the section Advisor
+verified is the correct one.**
+
+This matters beyond a wording fix. The R-46.2 finding was measured on `probe_sales_to_capital_conditioning`,
+an `#[ignore]`d diagnostic. Re-attaching it to a differently-named function with a similar code shape,
+without checking whether the two share a caller, is R-40.1's failure exactly: a mechanism asserted from
+reading. It has now happened inside a document whose own earlier paragraph disproved it, which is worth
+recording as the cheapest possible instance of the lesson.
+
+**Sensei's structural point survives the correction, and I am keeping it.** Nothing publishes through
+this centre *today*; the wave that wires the Core to production is the wave that arms it. So the defect
+is not live — it is **scheduled**, and it is scheduled for the same wave that mints the first golden
+values. That is a better statement of the risk than the one Sensei was given, and it makes the
+"sweep and report, fix nothing" disposition *more* clearly right rather than less.
+
+### R-49.2 — The 179 fabricated tax rates are not 179, and the real number is worse than a count suggests
+
+Sensei's P0-A asked how many of the fixture's 179 `marginal_tax_bps == 2100` rows land on rows the
+NOPAT base would consume for the twenty pinned issuers, and said the answer decides whether the wave
+can proceed as scoped. I measured it.
+
+**All of them.** The deep fixture holds 274 issuer-years and every one belongs to a pinned issuer, so
+the question of overlap does not arise — the fixture *is* the gate cohort.
+
+But the count 179 is the wrong instrument, and splitting it by year says something the count hides:
+
+| | count |
+|---|---|
+| `2100` in **2018 or later**, when the US federal statutory rate **is** 21% | **146** |
+| `2100` in **2017 or earlier**, when the US federal statutory rate was **35%** | **33** |
+
+And the control is already in the file. The fixture carries `3500` **59 times** and `3400` **29 times**,
+all pre-2018. So the pipeline demonstrably reads the older rate when it is there. **21% in 2009 is not
+a house convention; it is a value that disagrees with the rate that existed.**
+
+That reframes the defect in both directions and neither is the framing plan.v0 used. The 146 are
+plausibly correct and were being treated as a hazard. The 33 are the ones that cannot be what they
+claim, they are spread across **twelve of the twenty pinned issuers including AAPL, AMZN and T**, and
+they were being protected by a technique chosen to avoid disturbing them.
+
+Round 13 audits all 33 against the filings, with a ten-row control drawn from the `3500` population so
+the instrument has to prove it can distinguish the case that would falsify it. Three permitted
+classifications, and the count of *"the fixture holds a number where the source has nothing"* is the
+number that decides whether the base wave proceeds. **No rate is substituted, repaired or fabricated
+under any classification.**
+
+### R-49.3 — The Core asserts a permanent excess return, and our own measurement now contradicts it
+
+Sensei's P0-C asked whether the terminal segment uses the same implied `r`, unfaded. I read
+`unit_value`:
+
+```rust
+let terminal_payout = 1.0 - terminal / return_on_capital;
+```
+
+`return_on_capital` is a single scalar. Growth fades from `g0` to `terminal` along the path; **`r` does
+not fade at all.** Whatever return is measured is asserted for every year to infinity, and it lands in
+the terminal payout ratio, which is where a no-horizon integrand puts most of the value.
+
+The arithmetic is not subtle. At `g_inf = 300 bps`, a measured `r = 8150 bps` gives a terminal payout of
+**0.963**; the same issuer at a return reverted to a 800 bps cost of capital gives **0.625**. A 54%
+difference in the terminal payout, and it runs **one way only** — the higher the measured return, the
+larger the overstatement. That is a first-principles objection with no reference to any market price,
+so it survives the constraint that killed every other objection of its size.
+
+**And this is no longer a theoretical worry, because Round 12 measured the rebuttal on our own cohort.**
+R-48.2: `roic` reverts with a fitted `phi` of **0.37 to 0.56**, bracketing Fama & French's 0.62 on
+Compustat. Our own data says the return on capital reverts. The Core holds it constant forever. Two
+independent instruments — a published study and our own leave-one-issuer-out fit — agree against the
+model as written.
+
+**The two open decisions compound, and nobody had noticed they interact.** R-48 shows the estimator
+race pointing at `E2`, the latest usable year, which for a high-return issuer reads the **peak** of a
+declining series. Feed that peak into a charge that never fades and the model asserts an issuer's best
+year, forever. MSFT's `oper` return reads 1.137 at the start of its series and 0.341 now; whichever end
+we pick, holding it to infinity is the assertion, not the estimate.
+
+**I am not fixing this here and I am not choosing a fade.** A fade rate for `r` is a policy constant,
+it has no filed value, and R-44.5 already ruled that nothing tighter than the existing arithmetic
+guards goes in without Juan registering it as policy with the number written down first. What I am
+doing is moving it from unregistered to registered, and stating that it is **upstream of the window
+decision** — the window picks a point on a series; this decides whether that point is asserted for one
+year or for all of them, and the second question is worth more than the first.
+
+### R-49.4 — What goes into plan.v1, and what does not
+
+**Absorbed, from Advisor:** the `growth_posterior` correction (R-49.1) as a wording fix that changes no
+wave's scope; the fixture-enrichment proof moved from a hand-run Python script into the `#[ignore]`d
+Rust test itself, because a proof a human pastes into a terminal once is indistinguishable six months
+later from a claim nobody checked, and this repo's own idiom is to encode the invariant where the
+harness re-runs it; and an explicit fail-closed rule on that enrichment, so a transient fetch error
+aborts the run rather than writing a `null` that is indistinguishable from a genuine absence.
+
+**Absorbed, from Sensei:** splitting W1, whose six tasks share no exit criterion and half of which have
+no dependents; resolving W5's self-contradictory dependency on W1 — either the coverage measurement
+selects the concept set, in which case the "not a contract proposal" disclaimer is false and the set is
+a policy that must be registered first, or it does not, in which case W5 is an independent root; the
+cash-composition overlap lattice, because "aggregate supersedes parts" is undefined without a declared
+containment relation on every pair and double-counted cash moves value **one way only, upward**; and
+`r`'s domain rows, which is R-49.3's registration made testable.
+
+**Absorbed with its premise corrected:** the pinned-versus-provisional split of the golden file. Not
+because values are being minted from something already shipping wrong — they are not — but because the
+wave that mints is the wave that arms, and a value minted under a named open defect should say so in
+the file rather than becoming indistinguishable from a validated one the moment it is written.
+
+**Rejected, with the reason:** Sensei's unit vocabulary across the Core's public surface (`Money`,
+`Rate`, `Ratio`, so `g/r` cannot silently become `r/g`) is a better type investment than the `E`
+newtype and the argument for it is correct. It is also a rewrite of a public boundary in the middle of
+a branch that has not yet published a single value, and it protects against a transposition that no
+test has ever caught happening. It goes in the register as work with a stated trigger — the first
+addition of a fifth rate-shaped input — not into this plan.
+
+**Also rejected:** Sensei's proposal to use the four sign-identified realized-reinvestment issuers as an
+independent oracle for W6's pre-registration. The idea is right in shape and I want it, but R-41.4
+established that realized `b` is negative for 14 of 21 issuers on this cohort, and a reference that is
+not sign-identified on three quarters of the population is not made sound by restricting it to the
+quarter where it happens to behave — that is `feedback_scope_you_cannot_get_wrong` with the sign
+flipped. If the four are to be an oracle, the case has to be made on why those four are a legitimate
+population rather than the ones that survived.
+
+### R-49.5 — Still open
+
+1. **`r`'s fade** — R-49.3. New, unregistered until now, and upstream of the window. Juan's.
+2. **The window** — Round 13 closes the estimator race or reports that it does not.
+3. **`prod` vs `roic`** — R-45.3, untouched by design.
+4. **The 33 rates** — Round 13, and the count of "nothing filed" gates the base wave.
+5. **R-30.1 / R-44.3** — FCFF in the NOPAT slot. Blocking, upstream.
+6. **R-46.2's sweep**, now correctly scoped as scheduled rather than live.
+7. **AMZN's marginal-rate hole** — R-46.3, to be solved by supply.
+
+Every one of the twenty pinned issuers still refuses.
