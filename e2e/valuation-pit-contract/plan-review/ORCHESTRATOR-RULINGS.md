@@ -2907,3 +2907,221 @@ Registering the revision rather than quietly resequencing, because R-38.4 said *
 charges reinvestment twice, which is the failure mode most likely to be misread as the estimator was
 wrong"* — and inserting a wave in front of both is a change to that commitment even though it moves
 in the same direction.
+
+---
+
+## R-40 — R-39.4 is wrong, and the correct defect is smaller, provable, and already fixable.
+
+R-39 is annotated rather than rewritten, following the R-23 precedent: the finding stands, the
+mechanism it named does not.
+
+### R-40.1 — What R-39.4 claimed, and why it is false
+
+R-39.4 said the probe's realized reinvestment rate is contaminated because `NOPAT − FCFF` is
+*"net reinvestment plus depreciation and amortization"*, and concluded that the contract's missing
+D&A driver is the root cause. I checked the algebra after writing it, and it does not hold:
+
+```
+OCF   ≈ NI + D&A − ΔWC
+FCFF   = OCF − capex + interest·(1 − t)
+NOPAT  = EBIT·(1 − t)
+
+NOPAT − FCFF = capex + ΔWC − D&A        ← D&A cancels through OCF
+```
+
+The depreciation add-back is already inside operating cash flow, so it cancels. **A D&A driver would
+not have fixed the column.** Round 8 was one ruling away from adding a contract driver, bumping the
+fingerprint and regenerating two platforms' policy files on a diagnosis that was wrong.
+
+Recorded plainly because this run has repeatedly held others to proving a mechanism by execution
+rather than by reading, and this was a mechanism I asserted from reading. The correction came from
+opening `fcf_history_detailed` and `probe_return_on_capital_availability` and checking what they
+actually compute, which is what I should have done before writing R-39.4 rather than after.
+
+### R-40.2 — The real defect: an unlevered numerator against a levered cash flow
+
+The probe sets `free_cash_flow: point.value_dollars` (`valuation_probes.rs:754`), and
+`value_dollars` is `OCF − capex` (`edgar.rs:1065`, via `fcf_history_detailed`). **There is no
+after-tax interest add-back.** So the probe measures
+
+```
+NOPAT − FCF = capex + ΔWC − D&A + interest·(1 − t)
+```
+
+`NOPAT` is a firm-level, unlevered quantity; `OCF − capex` is what is left for equity, *after* cash
+interest. Subtracting one from the other leaves a full after-tax interest charge sitting inside a
+term labelled "what the issuer reinvested."
+
+That is why the column explodes exactly where it does. The contamination is `interest·(1−t) / NOPAT`,
+so it is largest for levered issuers with small NOPAT — `HPE` reads NOPAT `$0.25B` against invested
+capital `$42.51B` (ROIC 58bps), and `BKR`, `FIS`, `EXE` and `CRM` are the same shape. Those are
+precisely the rows carrying `b` of `5.650`, `6.282`, `9.684` and `−1.542`.
+
+The adapter already computes this correctly. `valuation_core_adapter.rs:517-520` adds interest back
+after tax, with a doc comment explaining that the tax shield is carried by the WACC and counting it
+in both places is a double count. **The probe and the adapter disagree about what FCFF is, and the
+probe is the one that is wrong.** R-39.2's scored answer was computed against the wrong series, so
+it is withdrawn along with the mechanism — but R-39.3's conclusion is not: no estimator is adopted,
+now because the comparison has not yet been run on a defensible reference at all.
+
+### R-40.3 — A second defect in the same instrument, and it is one this run already named
+
+`valuation_probes.rs:748`:
+
+```rust
+let marginal_tax = point.marginal_tax_bps
+    .map_or(STATUTORY_MARGINAL_TAX_BPS, f64::from) / 10_000.0;   // 2_100.0
+```
+
+That is **LD-13's fabrication, at a read site, inside the instrument chosen to decide the
+estimator.** Round 6 removed the identical `unwrap_or(2_100)` from the emitter and made
+`DriverAnnual`'s fields `Option<i32>` so the compiler would find every consumer — and it did find
+every consumer *of that struct*. This site reads `FcfPoint` directly and was never in the compiler's
+path, so the type change could not reach it.
+
+The lesson generalizes and is worth stating as a rule: **making one carrier of a quantity honest does
+not make the quantity honest.** The grep that would have caught this is for the *constant*, not for
+the type.
+
+`NOPAT = (pretax + interest)·(1 − t)` — so a fabricated `t` scales the entire numerator of every
+candidate return, on every issuer-year with no filed marginal rate. Round 6 measured that population
+at 179 of 274 in the committed corpus; the probe fetches live, so its own share is unmeasured.
+
+### R-40.4 — Round 8, pre-registered
+
+Base `dc61f20`. Scope is the instrument, not the contract. No driver is added, no fingerprint moves,
+no generated policy file is regenerated, and no valued path is touched.
+
+| # | prediction |
+|---|---|
+| **S1** | The probe computes FCFF with the after-tax interest add-back, matching `valuation_core_adapter.rs:517-520` rather than `point.value_dollars`. The two definitions of FCFF in this workspace agree afterwards, and that agreement is asserted by a test rather than by a comment. |
+| **S2** | The statutory-rate fallback at `:748` is **removed**. An issuer-year with no filed marginal rate is **dropped**, exactly as Round 6 dropped it at `valuation_core_measurement.rs`, and the probe **reports how many years and which issuers it lost** so the cost of honesty is measured rather than assumed. |
+| **S3** | The probe reports book and slope gaps on the **same population**, and says the population size. R-39.5 found it scoring 21 issuers against 17 with 16 in common; a comparison of two estimators on two populations is not a comparison. |
+| **S4** | The summary statistic is `robust_centre`, not a bare median of the gaps. R-39.5 measured the difference at `0.980 → 1.190` for book and `1.113 → 1.465` for the slope; the conclusion survived, the reported numbers did not. |
+| **S5** | `published_value_regression_gate` green, all 20 issuers unchanged, and the suite at `566 passed / 4 failed / 25 ignored` with the same four names. A probe is `#[ignore]`d and diagnostic; if this wave moves a published value, something outside its scope was touched. |
+| **S6** | The re-run is **read against R-38.3's rule unchanged.** The rule was fixed before any number existed and it does not get to move now that a number exists. If the gaps stay wider than the quantity, no estimator is adopted and that is the finding. |
+
+### R-40.5 — What is *not* being fixed, and why that is deliberate
+
+The residual after S1 is `capex + ΔWC − D&A`, and neither `ΔWC` nor `D&A` is in the driver set. That
+is genuinely fine: the identity `g = b·r` wants net reinvestment, and `NOPAT − FCFF` **is** net
+reinvestment once both sides are on the same capital scope. No new driver is needed to measure it.
+
+What is not fine, and is registered here rather than discovered later: `b` is a ratio whose
+denominator is `total_nopat`, which is small and can change sign. `HPE` at `$0.25B` of NOPAT against
+`$42.51B` of capital will produce an unstable `b` no matter how clean the numerator gets. If, after
+S1 and S2, the gaps are still dominated by low-NOPAT issuers, **the finding is that this identity
+cannot be evaluated on issuers whose earnings are near zero**, and the honest response is a
+refusal-to-decide on that subpopulation — not a wider trim, and not a threshold invented after seeing
+which issuers are inconvenient.
+
+---
+
+## R-41 — Round 8 verified. The repair flipped the answer, and the answer is still that no estimator is adopted.
+
+Shipped from `dc61f20`. I ran the suite, the gate, and the probe myself; the probe's summary block
+reproduces to the digit.
+
+### R-41.1 — S1 through S6, all held
+
+`566 passed / 4 failed / 25 ignored`, same four names. `published_value_regression_gate` green. The
+FCFF formula is now **one function** — `after_tax_fcff` in `valuation_core_adapter.rs`, called by both
+the adapter and the probe — rather than two statements of it and a comment asking them to agree. The
+statutory fallback is gone, the constant with it. The comparison is paired and summarized by
+`robust_centre` with its trimmed observations named.
+
+### R-41.2 — The repair reversed the ranking, which is the strongest evidence that R-39.2 was worthless
+
+| | book ROIC | regression slope |
+|---|---|---|
+| R-39.2, on the contaminated series (paired n=16) | 1.190 | 1.465 |
+| **R-41, on the repaired series (paired n=14)** | **1.112** | **0.862** |
+
+Book was closer before; the slope is closer now. Nothing about either estimator changed — only the
+reference they were scored against. R-40.2 withdrew the earlier scoring on the grounds that it was
+computed against the wrong series; this is that withdrawal confirmed by execution rather than by
+argument, and it is worth stating plainly that had Round 7's number been acted on, the effort would
+have adopted the losing candidate for a reason that had nothing to do with either candidate.
+
+### R-41.3 — The cost of removing the fabrication, measured rather than assumed
+
+**76 issuer-years dropped** for a missing filed marginal rate — `DAL(11) EME(10) INTU(10) BKR(9)
+AMZN(9) AVY(6) CRM(6) T(4) AVGO(3) SLB(3) DVN(2) GEHC(2) EXE(1)`. Four issuers fell below three
+usable years and left the estimator table entirely (`EME`, `BKR`, `INTU`, `GEHC`); the paired
+population went from 16 to 14.
+
+The constant that was deleted carried an argument in its own doc comment, and it deserves an answer
+rather than a deletion: *"A marginal rate is a property of a jurisdiction, not a measurement of an
+issuer, so requiring the issuer to have filed one is a stricter test than the quantity deserves."*
+That is a real argument. The answer is that **the jurisdiction is not known either** without the
+filing, and Round 6 measured what the substitution costs: 179 of 274 committed issuer-years read
+`2100`, where the guess and a genuinely filed 21% are byte-identical and no reader can separate them.
+A default that is usually right is worse than an absence precisely because it is usually right.
+
+### R-41.4 — No estimator is adopted, and this time without inventing a threshold
+
+The identity the whole test rests on is `g = b · r`. On the repaired series:
+
+- **14 of 21** issuers have a **negative** realized reinvestment rate.
+- Of the **14** issuers with positive realized growth, **8** have `b < 0` — `AVY CHTR TER AVGO T CRM
+  PG MSFT`. For those, `g = b · r` with `g > 0` and `b < 0` implies **`r < 0`**, which the Core's own
+  `r <= 0` guard refuses. Only **6** — `DVN FIS APH GOOGL EXE AMZN` — are consistent with a positive
+  return at all.
+
+A reference that contradicts the model's identity for a majority of the growing cohort cannot rank
+candidates against it. **Round 8 adopts no estimator.** That is R-38.3's third row, fired for the
+second time and now for a reason that needs no threshold.
+
+### R-41.5 — My own registration was under-specified, and I am not using the patch I wrote for it
+
+R-38.3's third row said *"every candidate sits far from realized `b`"* and **never defined far**.
+R-39.3 then supplied one — *"greater than 1.0, the width of the quantity"* — **after** the first
+numbers existed. That is a threshold invented to fit a measurement, which is the move this run
+forbids in binding language and has enforced against others repeatedly.
+
+So it is not used here. The conclusion in R-41.4 rests only on sign: positive growth with negative
+reinvestment implies a negative return, and the Core refuses those already. Had the argument needed
+`0.862` to be compared against some number, the honest report would have been *"my registration
+cannot decide this and I will not repair it after the fact."*
+
+Recorded in the same register as R-35.4's self-contradictory P6: **a pre-registration that omits the
+criterion for one of its own branches has not pre-registered that branch.**
+
+### R-41.6 — Round 9, pre-registered: decompose the residual before touching anything
+
+After the levered/unlevered repair, `NOPAT − FCFF` should be `capex + ΔWC − D&A`. It is negative for
+two thirds of the cohort, which is not what a cohort of large caps reinvesting through a capex boom
+should read. Something still sits between the two sides.
+
+Two candidates are nameable and **both are measurable without a contract change**, because the probe
+already calls `fetch_company_facts` for its qname-coverage block:
+
+1. **Non-cash charges beyond depreciation, share-based compensation above all.** Operating cash flow
+   adds SBC back; `pretax_income` has it deducted. So `OCF − capex` overstates cash relative to
+   NOPAT by roughly after-tax SBC, on exactly the names where `b` is most negative — `CRM`, `MSFT`,
+   `AVGO`, `CHTR`.
+2. **A tax-basis mismatch.** NOPAT is struck at the *marginal* rate while operating cash flow carries
+   *cash taxes paid*. Where the two differ materially the difference lands entirely in `b`.
+
+**Round 9 measures both and adopts neither.** Per issuer: realized `b`, `SBC / NOPAT`, and
+`(marginal − cash effective) × pretax / NOPAT`, with a residual column so that what is *not*
+explained is visible rather than absorbed. No driver is added, no fingerprint moves, no valued path
+is touched, and no estimator is chosen.
+
+That sequencing is not caution for its own sake. **R-40.1 asserted a mechanism from reading and was
+wrong**, one ruling away from adding a contract driver and regenerating two platforms' policy files
+on a diagnosis that did not survive its own algebra. The rule that earns is: **a mechanism gets
+measured before it gets built against**, and the diagnostic that can measure it without touching the
+contract is the cheapest place to find out.
+
+### R-41.7 — What this means for the effort's actual question
+
+Juan's goal is a model coherent with street without clamping to street. Three rounds have now been
+spent on one question — what return the retention charge should use — and the honest status is that
+**the reinvestment rate is not yet measurable from this evidence set.** Growth cannot be priced until
+it is.
+
+That is not a failure to report reluctantly. It is the answer that the constraint *"do not select an
+estimator to keep the Core publishing numbers"* was written to protect: every round so far that
+produced a publishable-looking answer produced a **different** one, and each time the difference came
+from the instrument rather than from the issuers.
