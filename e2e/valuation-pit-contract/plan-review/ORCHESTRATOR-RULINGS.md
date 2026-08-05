@@ -2620,3 +2620,290 @@ refuted by experiment; the retro is recorded here.
 `round4-integration` is now `e6f4ee3` and pushed. **The armed FCFF→`E` double-count (R-30.1) is the
 gating item for everything downstream** — no estimator wave lands before `E`'s input is made
 unrepresentable as FCFF, and LD-12's whole-cohort gate is the wave that should precede all of it.
+
+---
+
+## R-37 — Round 6 verified. Six of six predictions held; the wave's own correction was unfalsifiable until I mutated it.
+
+Base `56b0c09`. Verified by reading the diff line by line and by running the mutation myself, not by
+accepting the wave report.
+
+### R-37.1 — Q1, Q5: exact, and proven structurally rather than by transcription
+
+`published_value_regression_gate` green. Better than a value comparison: the golden fixture
+`published_value_regression_gate_cohort.json` **does not appear in `git status`** — it is
+byte-identical to `56b0c09`. A green gate against an unmodified golden file is the whole of Q1 and Q5
+at once, and it cannot be satisfied by a transcription error the way reading twenty numbers back can.
+
+### R-37.2 — Q2, Q3, Q6: exact
+
+`565 passed / 4 failed / 25 ignored` — the registered `563` baseline plus exactly the two new
+non-ignored tests, with the same four failure names (three protected plus the `cross_platform_parity`
+worktree artifact R-26.2 settled). `grep -n "unwrap_or" valuation_fixture_capture.rs` returns no hit
+on either tax field; the four surviving hits are a print-only year label, a sort key, an
+error-to-panic, and two doc-comment references to the removed fabrication. LD-13 is struck **for the
+emitter and the types only** and LD-17 records the corpus half in the register's five-column shape.
+
+### R-37.3 — Q4, and the trap it was written against
+
+R-36.4 named the failure mode: *an `Option<i32>` whose every consumer immediately calls
+`.unwrap_or(2_100)` is the same defect with more ceremony*. It did not happen. I read every consumer
+myself:
+
+| site | what absence does |
+|---|---|
+| `valuation_baseline.rs:149,153` | passes `Option` through unchanged |
+| `dcf_model.rs:548` | `let Some(tax_bps) = … else { continue }` — the year drops |
+| `dcf_model.rs:1630` | `.zip(point.tax_rate_bps)` — the bridge is not produced |
+| `dcf_model.rs:972,1005` | `marginal_tax_source` is only set when a rate exists |
+| `valuation_core_measurement.rs:79` | `row.marginal_tax_bps?` inside `filter_map` — the year drops |
+
+No default anywhere. `valuation_core_adapter.rs:955,1030` are inside `mod tests`, constructing
+synthetic `IssuerEvidence`; test fixtures are not production defaults.
+
+### R-37.4 — What the wave shipped that no test could fail on
+
+I flipped `row.marginal_tax_bps?` back to `.unwrap_or(2_100)` — **the exact defect this wave
+exists to remove** — and ran the full suite. `565 passed / 4 failed / 25 ignored`: **identical.**
+Nothing went red. Reverted.
+
+So the honest drop was correct and **unfalsifiable**. The corpus carries zero nulls (that is LD-17),
+so the branch has no reachable population, and a later edit could quietly restore the fabrication
+inside the very function written to end it. This is the run's signature defect wearing its most
+flattering disguise: not a check that cannot fail, but a *fix* that cannot fail. Fourteen instances
+catalogued, one committed by the verification process itself in Stage 6, and now one committed by a
+wave whose entire subject is fabricated evidence.
+
+It was cheap to close, and the wave had already shown how: the emitter half was made falsifiable by
+extracting `deep_driver_year_row` into a named function and unit-testing it. The same move on the
+reader side — `issuer_annual(&DriverAnnual) -> Option<IssuerAnnual>` plus one test on a `None` row —
+makes the drop measurable without touching the corpus. Sent back to the same builder thread, and
+**I re-ran the mutation myself after it reported**: `565 passed / 5 failed`, the fifth being
+`issuer_annual_drops_a_year_with_no_marginal_tax_rate`, naming itself. Reverted: `566 / 4 / 25`.
+
+Shipped at `dc61f20`.
+
+**The rule this earns:** a wave that replaces a fabrication with an honest absence must leave behind
+a test that fails when the fabrication returns. Removing the defect and detecting its return are two
+deliverables, and only the first is visible in a diff.
+
+### R-37.5 — What Round 6 deliberately did not do
+
+The 179-of-274 unauditable `marginal_tax_bps` rows and the 24 unauditable `effective_tax_bps` rows
+stay exactly as they are. Correcting them needs a network re-capture of
+`core_driver_data_deep.json`, which is a separate gated event. R-36.2 registered that as out of scope
+*before* the wave precisely so it could not be quietly claimed afterwards, and it was not claimed.
+
+LD-17 also records the thing that makes the deferral safe today and unsafe tomorrow: every pinned
+issuer's Core outcome is a refusal raised upstream of `free_cash_flow`'s marginal-tax read, so the
+fabricated rates are not load-bearing for any currently pinned value. The day an estimator is
+promoted and the Core starts publishing off this fixture, `valuation_core_adapter.rs:517` becomes
+load-bearing and the re-capture must be **pair-measured** against the gate rather than re-blessed.
+That is the second roadmap item now gated on evidence rather than on intent — the first being
+R-30.1's armed FCFF→E double-count.
+
+---
+
+## R-38 — Round 7 pre-registration: read the return-on-capital probe, and pre-commit to what each answer means.
+
+Base `dc61f20`. **Written before the probe is run**, which is the only ordering under which a
+measurement can decide anything.
+
+### R-38.1 — Why this is the next round, and why it is a measurement rather than a wave
+
+The effort's stated goal is a model coherent with street *without clamping to street*. Every issuer
+the Core sees refuses, and the reason is always the same: `return_on_capital` is hardcoded absent at
+`valuation_core_adapter.rs:657`, so `intrinsic_value` refuses with `EstimatorUnavailable` before any
+growth is priced. Growth is credited nothing, for everyone. That is the largest remaining gap and
+nothing downstream of it can be judged until it closes.
+
+The evidence to close it **already landed** and I verified that rather than assuming it: the contract
+carries `stockholdersEquity` at fingerprint `sec-driver-normalization/9`, and `FcfPoint` carries
+`pretax_income_dollars` / `stockholders_equity_dollars` through `with_return_on_capital_inputs`
+(`dcf_model.rs:879,882,994`). What is missing is not evidence. It is the **decision about which
+return** the retention charge should use — and Juan's binding constraint forbids selecting an
+estimator to keep the Core publishing numbers.
+
+So the next round selects nothing. It runs `probe_return_on_capital_availability`, which asserts
+nothing, writes nothing, and exists precisely to answer this by measurement.
+
+### R-38.2 — The two things that could make this round produce no answer at all
+
+Registered so that a null result is reportable as a null result rather than quietly reinterpreted:
+
+1. **The probe is network-bound** (`#[ignore = "network: …"]`). If EDGAR is unavailable or the
+   fetch fails for most of the cohort, the round returns *"not measured"*, not a fallback choice.
+2. **The equity driver may not resolve to a plausible total.** The probe reports which qname won per
+   issuer. If `StockholdersEquity` reads two orders of magnitude below market cap and debt, that is
+   dimensional facts leaking in from the statement of changes in equity, and **the fix is the driver
+   precedence, never the ratio.** Round 8 becomes a driver-precedence repair, not an estimator.
+
+### R-38.3 — The decision rule, committed before the numbers
+
+Three candidates: average book ROIC, the least-squares slope of NOPAT on invested capital, and the
+return implied by realized reinvestment. The model already rests on the identity `g = b · r`, so each
+candidate implies a reinvestment rate `b = g / r`, and the issuer filed what it actually reinvested.
+
+**The candidate whose implied `b` sits closest to the realized `b`, across the cohort, is the one
+Round 9 adopts.** Closest is measured by a robust centre of the per-issuer gaps
+(`robust_mean` / `robust_centre`, no threshold argument), not by a mean of them, and not by counting
+per-issuer wins — a naked average of gaps and a naked win-count are both order statistics this run
+has already ruled against.
+
+Committed consequences, so the result cannot be argued into either direction afterwards:
+
+| outcome | what Round 9 does |
+|---|---|
+| one candidate is clearly closest | it is adopted; the other two are recorded as measured-and-rejected with their gaps |
+| two candidates are indistinguishable | the **asymmetry** breaks the tie: an overstated `r` merely makes the charge vanish (`1 − g/r → 1`), while an understated or negative `r` produces negative value or a refusal. The less catastrophic estimator wins, and the tie is recorded as a tie rather than dressed up as a finding |
+| every candidate sits far from realized `b` | **no estimator is adopted.** The Core keeps refusing, and the finding is that book capital does not measure this cohort's economic capital. That is a legitimate outcome of this round and it is registered as one *before* the numbers, because it is the outcome most likely to be rationalized away |
+
+### R-38.4 — What the probe cannot decide, and the ordering it does not get to skip
+
+R-30.1 stands: the adapter feeds FCFF into the slot FR-28's retention charge requires NOPAT for, and
+that double-count is **armed** — harmless today only because `return_on_capital` is absent and the
+integral never applies the charge. The probe measuring a good estimator does not disarm it. It makes
+it fire.
+
+So the ordering is forced and this ruling fixes it:
+
+1. **Round 7** — measure. No code changes to any valued path.
+2. **Round 8** — R-30.1: carry the return-on-capital terms into `IssuerAnnual`, replace the FCFF base
+   with NOPAT, and make FCFF **unrepresentable** in that slot rather than merely unused. This is the
+   Round 6 move applied to economics instead of evidence: the compiler, not a review, finds the
+   consumers.
+3. **Round 9** — the estimator R-38.3 selected, landing on a base that is already correct.
+
+Reversing 8 and 9 charges reinvestment twice and would show up as a *worse* fit to street, which is
+the failure mode most likely to be misread as "the estimator was wrong."
+
+### R-38.5 — The gate's role in Round 8, stated now rather than when it is inconvenient
+
+Round 8 changes the base input for every issuer. `intrinsic_value` refuses on an absent base with
+`NotReported` **before** it reaches the `EstimatorUnavailable` check, so an adapter that supplies no
+NOPAT would flip eighteen pinned refusal reasons and turn `published_value_regression_gate` red.
+
+That is the gate working, not the gate being in the way. Round 8's acceptance is that all twenty
+issuers keep the reason they have today, which is only achievable by supplying a real NOPAT rather
+than by emptying the slot. **Re-blessing the golden fixture to absorb a reason change is forbidden**
+unless the change is pre-registered per issuer, with the reason, in the ruling that precedes it.
+
+---
+
+## R-39 — Round 7 read: no estimator is adopted, and the reason is that the yardstick is not a yardstick.
+
+Probe run at `dc61f20`, 28 issuers requested, 25 with three or more complete years. Scored against
+R-38.3's rule, which was written before the numbers existed.
+
+### R-39.1 — R-38.2's two null conditions did not fire
+
+The network answered and the equity driver resolves to a plausible total, which is the thing R-38.2
+said to check first and to fix at the driver rather than at the ratio. MSFT reads NOPAT `$99.55B` on
+invested capital `$386.63B`, GOOGL `$126.05B` on `$464.35B`, AMZN `$78.67B` on `$479.90B` — the right
+order of magnitude against market capitalization and debt, not the two-orders-smaller signature of
+dimensional facts leaking in from the statement of changes in equity. **`IC <= 0` on zero
+issuer-years**, which refutes outright the buyback-driven capital-deficit failure the plan expected
+to have to handle.
+
+So the round measured what it set out to measure. What it found is that the measurement cannot
+decide.
+
+### R-39.2 — The scored answer, under the rule as written
+
+R-38.3 committed to a **robust centre** of the per-issuer gaps — not a mean, and explicitly not a
+per-issuer win count.
+
+| population | book ROIC | regression slope |
+|---|---|---|
+| probe's printed median | 0.980 | 1.113 |
+| `robust_centre`, as printed (n=21 / n=17) | **1.040** | **1.153** |
+| `robust_centre`, paired (n=16) | **1.190** | **1.465** |
+
+Book ROIC is closer on every reading. The win count says the opposite — the slope is closer on 12 of
+16 paired issuers — and **that is exactly why R-38.3 excluded win counts in advance.** Had the rule
+not been fixed beforehand I would have had two defensible summaries pointing opposite ways and a free
+choice between them, which is not a measurement.
+
+It does not matter, because of the next paragraph.
+
+### R-39.3 — Both candidates miss by more than the width of the quantity
+
+`b` is a reinvestment rate. It lives in roughly `[0, 1]`. **Every centre above is greater than 1.0**:
+the implied reinvestment rate misses the realized one by more than the entire plausible range of the
+thing being compared.
+
+That is R-38.3's third row, fired: *every candidate sits far from realized `b`, so no estimator is
+adopted.* I flagged that row when I wrote it as the outcome most likely to be rationalized away.
+I am not rationalizing it away. **Round 7 adopts no estimator. The Core keeps refusing.**
+
+### R-39.4 — Why the yardstick is broken, which is the round's real finding
+
+The realized `b` column contains `9.684`, `6.282`, `5.650`, `−3.081`, `−1.542`. Those are not
+reinvestment rates, and a decision procedure whose reference term is not a measurement of the
+quantity it names cannot decide anything — no matter how carefully the candidates are scored against
+it.
+
+The cause is arithmetic, not noise. The probe computes `b = (NOPAT − FCFF) / NOPAT`, and
+
+```
+FCFF  = OCF − capex + after-tax interest      (OCF already carries the D&A add-back)
+NOPAT = (pretax + interest) × (1 − t)          (no D&A add-back)
+```
+
+so `NOPAT − FCFF` is not net reinvestment; it is net reinvestment **plus depreciation and
+amortization**. For any mature issuer where `D&A > capex`, `FCFF > NOPAT` and `b` goes negative —
+which is precisely the shape of the column, and it is also why the median `NOPAT/FCFF` reads
+**`0.85×`** rather than the below-one-because-of-reinvestment figure one would expect.
+
+Economic reinvestment is `(capex − D&A) + ΔWC`. **The contract has no depreciation or amortization
+driver at all** — verified against `sec-driver-normalization.json` at fingerprint
+`sec-driver-normalization/9`, whose eleven drivers are `operatingCashFlow`, `revenue`,
+`interestExpense`, `totalDebt`, `currentDebt`, `nonCurrentDebt`, `stockholdersEquity`, `taxExpense`,
+`pretaxIncome`, `marginalTaxReference`, `dilutedAverageShares`. The term the whole retention identity
+turns on is not in evidence.
+
+This is the same defect family the run has been cataloguing, in a new position: not a check that
+cannot fail on the population that would falsify it, but an **instrument that cannot succeed**,
+because the quantity it compares against was never measured. The probe was asked which estimator
+reproduces realized reinvestment, and the honest answer is that this evidence set does not know what
+these issuers reinvested.
+
+### R-39.5 — Three method findings about the probe itself
+
+Recorded because the probe is now a decision instrument, and an instrument that decides gets audited.
+
+1. **It scores two estimators on two different populations.** Book ROIC is present for 21 issuers,
+   the slope for 17, and only 16 have both. The printed medians `0.980` and `1.113` are therefore not
+   comparable quantities. Paired, both move and the gap between them widens.
+2. **It summarizes with a bare median of the gaps** — the naked order statistic this workspace rules
+   against, in the same family as LD-15's `rates[len / 2]`. `robust_centre` shifts book from `0.980`
+   to `1.190` and the slope from `1.113` to `1.465` on the paired set, trimming `42.138` and three
+   others. The conclusion survives; the reported numbers did not.
+3. **Credit where it is due, and it generalizes.** The probe refuses to score `r_impl` at all,
+   stating that its gap is identically zero by construction. That is an author applying the
+   unfalsifiability test to their own instrument, unprompted, and it is the discipline the rest of
+   this ruling is asking for.
+
+### R-39.6 — R-38.4's ordering is revised, by evidence rather than by preference
+
+R-38.4 fixed Round 8 as R-30.1: replace the FCFF base with NOPAT and make FCFF unrepresentable in
+that slot. That ordering is now wrong, and the probe is what makes it wrong rather than a change of
+mind.
+
+R-30.1's whole content is that the retention charge needs earnings *before* reinvestment. Landing a
+NOPAT base while reinvestment itself is unmeasurable would move the base by a median `0.85×` on a
+quantity nobody can yet check, and any subsequent misfit would be read as the estimator's fault. The
+revised order:
+
+1. **Round 8** — add the depreciation-and-amortization driver, at contract fingerprint `/10`, and
+   re-run this probe. This is an evidence wave, inert to every valued path, and the gate proves the
+   inertness rather than a pair-measurement by hand.
+2. **Round 9** — R-30.1, on a base whose reinvestment term is measurable.
+3. **Round 10** — the estimator, if and only if a re-run of R-38.3's rule finds one. If the gaps stay
+   above the width of `b` with D&A in evidence, the finding is that book capital does not measure
+   this cohort's economic capital, and it is reported as that rather than resolved by choosing.
+
+Registering the revision rather than quietly resequencing, because R-38.4 said *"reversing 8 and 9
+charges reinvestment twice, which is the failure mode most likely to be misread as the estimator was
+wrong"* — and inserting a wave in front of both is a change to that commitment even though it moves
+in the same direction.
