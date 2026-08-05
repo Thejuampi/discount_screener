@@ -3671,3 +3671,165 @@ That is checkable in the history, which is the only reason it is worth asserting
 
 Every one of the twenty pinned issuers still refuses, so the gate remains armed: the first wave that
 publishes moves them by name, in a failing test.
+
+---
+
+## R-47 — The window read in the literature. No source prescribes one, both prescriptions are conditional on a property we can measure, and the measured decay says neither registered option is right.
+
+Juan declined to choose between R-46.4's three options and asked for research, with an explicit
+instruction for the case where research does not settle it: *"si no hay info conclusiva entonces hay
+que experimentar con todos y elegir la mejor opción o un blend de opciones."* This ruling reports the
+read and registers the experiment — its estimators, its grading criterion and its stopping rule —
+**before a single number is measured.** That ordering is the whole point (R-41.5).
+
+### R-47.1 — Damodaran's own caveat covers the case, and it says our estimator is already his fix
+
+The prescription quoted in R-44.1 — the ratio *"at its current level"* — is one sentence in a slide
+deck. The considered treatment is `normearn.htm`, and it names **two** procedures with a condition
+attached to the first:
+
+> **Average the firm's dollar earnings over prior periods** ... If it is applied to a firm that has
+> become larger or smaller (in terms of the number of units it sells or total revenues) over time, it
+> will result in a normalized estimate that is **incorrect**.
+
+> **Average the firm's return on investment or profit margins over prior periods** ... it allows the
+> normalized earnings estimate to reflect the **current size** of the firm.
+
+So the failure he warns about is averaging **dollars** through a change of scale, and the remedy is to
+average the **scaled** measure instead. Our estimator already averages the scaled measure — a ratio,
+not a dollar amount. Read literally, R-46.4 option (i) **is** his repair, not the thing he is warning
+against, and my R-45.4 hypothesis leaned on a sentence that does not carry the weight I put on it.
+
+That is worth saying plainly rather than quietly dropping. But the read does not end there, because
+**neither procedure covers MSFT.** Averaging a scaled measure is valid when the scaled measure is
+stable and only the size moved. MSFT's *ratio itself* fell 4.3–6.8 to 0.965 essentially monotonically
+across sixteen years. The quantity that is supposed to be the stable one is the quantity that moved.
+The source's remedy assumes away exactly our case, and it assumes it away **detectably** — the
+condition is a property of the series, not a matter of taste.
+
+### R-47.2 — The decay rate is measured, published, and it disqualifies an equal weight
+
+Fama & French, *Forecasting Profitability and Earnings* (J. Business 73(2), 2000), on Compustat
+1964–1996:
+
+> in a simple partial adjustment model, the estimated rate of mean reversion is about **38% per year**
+> ... mean reversion is **faster when profitability is below its mean and when it is further from its
+> mean in either direction**
+
+Take that at face value and apply it to our estimator. A year's information about next year's level
+decays by a factor of `0.62` annually. The tenth year back retains `0.62^10 ≈ 0.008` — under one
+percent. `robust_centre` over a filed history gives that year **the same vote as last year**.
+
+This is not an argument from elegance and it is not a threshold I chose. It is a published decay
+constant, and an equal-weighted centre is inconsistent with it for every issuer in the cohort, not
+only the two R-46.1 flagged. Option (i) is not merely fragile where economics moved — it is
+mis-weighted everywhere, and the eighteen issuers whose `latest/centre` sits near 1.0 are issuers
+where the mis-weighting happens not to bite, which is a different statement from correct.
+
+### R-47.3 — And the same literature disqualifies a zero weight on history
+
+Reversion is real but **incomplete**, and the primary evidence is consistent across three sources.
+McKinsey: a cohort starting at 17% ROIC still reads **13% after five years and 12.5% after ten**.
+Mauboussin, on 1,000 non-financial firms 1997–2006: **41%** of top-ROIC-quintile firms were still in
+the top quintile after nine years and **64%** in the top two; serial correlation in the extreme
+quintiles exceeds **80%**. Fewer than 4% held the top quintile in every single year, so the individual
+years are noisy while the level persists.
+
+That is the exact profile that makes a single year the wrong estimator too: high year-to-year
+correlation says the latest year carries the most signal of any one year; sub-4% run persistence says
+it also carries real noise. `HPE`'s 0.007 against a centre of 0.045 is what that noise looks like when
+one filing becomes the whole estimate.
+
+**So the literature is not inconclusive — it is conclusive against both registered options.** Option
+(i) weights a 99%-decayed year equally with the present. Option (ii) discards the persistent component
+that three independent studies measure. Neither is the estimator the evidence describes.
+
+### R-47.4 — What the evidence does describe is Juan's third alternative, and it needs no chosen constant
+
+He offered *"un blend de opciones"* and the research lands there without being steered: an estimate
+between the current level and a centre, weighted by **how persistent the quantity actually is**.
+
+The objection to a blend is obvious and it is the one that killed every trailing-N: a weight is a
+constant, and a constant chosen after seeing that it flatters MSFT and AMZN is R-41.5 wearing a new
+hat. **That objection does not apply when the weight is estimated rather than chosen.** Fama & French
+did not select 38%; they regressed for it. This repo already owns that idiom — `probe_growth_persistence_rho1`
+measures an AR(1) coefficient instead of assuming one, and `least_squares` is already in the probe
+module. A persistence coefficient fitted on the whole cohort by a procedure written down in advance is
+a **measurement**, and it is falsifiable: if the fitted coefficient comes back at 1.0 the blend
+degenerates to option (i) and the data has chosen it; at 0.0 it degenerates to option (ii).
+
+A fourth option also surfaced, and it comes from R-47.1 rather than from me: both prescriptions are
+conditional on the scaled measure being **stable**, so the condition itself can be the selector.
+Per issuer, test the series for trend; where there is none, the centre is valid; where there is one,
+the centre is not describing the issuer. That is not an author-chosen window either — it is a
+measurable property, and it predicts R-46.1's split exactly, MSFT monotone against eighteen issuers
+sitting flat between 0.568 and 1.440.
+
+### R-47.5 — "Elegir la mejor opción" needs a criterion, and the obvious one is forbidden
+
+This is the part of the instruction that cannot be executed as written without deciding something
+first, so I am deciding it here and in the open.
+
+Running all four estimators and picking the best requires a definition of best. The criterion sitting
+right there — *whichever lands closest to street* — is the one thing this entire effort is not allowed
+to use. It is forbidden as a clamp, as an optimand and **as an acceptance criterion**, and selecting an
+estimator by it is the third of those. It would also be self-defeating: an estimator chosen to match
+street cannot afterwards be evidence about street.
+
+**The criterion is out-of-sample forecast error, and it is registered now.** Form each estimator from
+data through year `t` only. Compare it to the ratio the issuer actually realized at `t+1`, `t+2`,
+`t+3`. Aggregate the error across every issuer-year the cohort supplies. Lowest error wins.
+
+It qualifies on every count this effort has learned to demand. It never reads a price. It grades the
+estimator on the job the model actually gives it — `r` enters `C(t) = E(t)(1 − g(t)/r)` as a claim
+about the **future**, so forward accuracy is the property, not backward fit. It runs on the **whole
+cohort** rather than an author-selected population, which is `feedback_scope_you_cannot_get_wrong`.
+It can fail: if the estimators tie, that is a finding and the choice reverts to Juan on other grounds.
+And it is the same experiment Fama & French ran, so the method is not novel and the result is
+comparable to a published one.
+
+### R-47.6 — Round 12, pre-registered in full, before any number exists
+
+**Estimators, all four, none preferred:**
+
+| id | estimator |
+|---|---|
+| `E1` | `robust_centre` over the whole history through `t` — R-46.4 (i) |
+| `E2` | the latest usable year at `t` — R-46.4 (ii) |
+| `E3` | blend: `w·E2 + (1−w)·E1`, `w` fitted on the cohort by pre-registered regression, never chosen |
+| `E4` | `E1`, but refuse where the series through `t` carries a significant trend — R-47.4's conditional |
+
+R-46.4 (iii) — refuse when the present was trimmed out — is a **refusal rule that composes with any of
+the four** rather than a fifth competitor, so it is measured as a coverage cost against each, not
+raced against them.
+
+**Grading.** Mean absolute error of the estimate at `t` against the realized ratio at `t+1`, `t+2` and
+`t+3`, pooled over every issuer-year with enough history to form the estimate and enough future to
+score it. Reported per horizon and per capital definition (`gross`, `oper`), and reported **with its
+coverage**: an estimator that refuses is not thereby accurate, and a comparison that silently scores
+different populations is the R-8.2 error a fourth time. Errors are aggregated with `robust_mean`.
+
+**Registered in advance, so it cannot be reinterpreted afterwards:**
+
+- **P7.** If one estimator's error is lowest at all three horizons under both capital definitions, it
+  wins and I will say so. Anything short of that is not a win and will be reported as not a win.
+- **P8.** If `E3`'s fitted `w` lands within noise of 1.0 or 0.0, the blend has degenerated and the
+  corresponding pure estimator is the answer. The regression's standard error decides this, not me.
+- **P9.** If the estimators are indistinguishable, that is the finding — the window does not matter on
+  this cohort, and the choice goes back to Juan on coverage grounds alone.
+- **P10.** `E4`'s trend test must **not** be tuned. One significance level, stated before running, and
+  it is the conventional one rather than a bespoke number.
+- **P11.** No result of this round may be used to move `MAX_ABSOLUTE_Z`, any threshold, or any refusal
+  path. It selects an estimator and nothing else.
+
+**Choosing nothing else.** The round measures and reports. `prod` vs `roic` (R-45.3) is not settled by
+it and stays open. No value is published, the gate stays armed, and all twenty pinned issuers still
+refuse when it ends.
+
+### R-47.7 — What I got wrong, since it is cheaper to say than to have found later
+
+R-45.4's hypothesis rested on *"at its current level"* carrying more weight than a lecture slide can
+bear, and R-47.1's fuller source says the scaled average **is** the repair for changing scale. The
+hypothesis survived Round 11 on the numbers rather than on the citation, and R-46.1 already graded it
+honestly — MSFT clean, AMZN confounded, not a cohort property. Nothing built on it, because nothing was
+built. That is the sequencing working, not luck.
