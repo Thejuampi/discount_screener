@@ -3451,3 +3451,113 @@ the number written down before any issuer is scored against it.
 The ROC-toward-cost-of-capital doctrine is registered here as a **separate, later** question. It is a
 real idea with real support and it belongs to whoever decides terminal-regime policy — not to this
 branch, and not smuggled in as a measurement.
+
+---
+
+## R-45 — Round 10 verified. The pre-registration passes on the deciding definition, and the probe found the next problem on its way past.
+
+Shipped at `9919449` on `r10`, over the verified base `9d4ebc0`. Suite `566 / 4 / 26` — the extra ignored
+is this probe. `published_value_regression_gate` green, golden fixture unmodified, the network-rewritten
+high-signal fixture left unstaged. One file staged by path.
+
+### R-45.1 — P1 and P2 resolved, and P2 resolved decisively
+
+| | `gross` | `oper` (deciding) |
+|---|---|---|
+| **P1** qualifying issuers, floor 14 | 21 of 28 | **20 of 28** |
+| **P2** positive `Sales/Capital` centre | 21 of 21, 0 refused | **18 of 20, 2 refused** |
+| **P2** positive realized `b` centre, same years | 3 of 21 | **4 of 20** |
+
+The route is not dead by supply. And the property realized `b` lacked is present: **no issuer under
+either capital definition produced a resolved non-positive `Sales/Capital` centre.** The two refusals
+under `oper` are `DAL` and `SLB`, both `InsufficientObservations` after trimming a three-year series —
+a supply refusal, not a sign. Against 18 of 20, realized `b` is positive for 4.
+
+That is the whole argument for the branch, and it needs no threshold to state: the quantity (D) divides
+by has an identified sign on this cohort, and the quantity Rounds 7–9 divided by does not.
+
+**P3 lands the same way and also needs no threshold.** Within-issuer relative dispersion is smaller for
+`Sales/Capital` than for realized `b` for **all 20** `oper` issuers and **20 of 21** `gross` (COF the
+lone exception). A unanimous ordering is a statement; a cutoff would have added nothing to it and would
+have been mine rather than the data's. The probe declares no winner and neither does this ruling —
+but 20 of 20 in one direction is reportable exactly as it stands.
+
+### R-45.2 — The cost of netting cash, counted rather than assumed
+
+`COF` leaves entirely: a bank, filing neither cash concept, 16 of 16 years dropped. Four more shorten —
+`SLB` 14→3, `OMC` 17→12, `PG` 14→10, `MSFT` 16→15, `DVN` 10→9 — and `MSFT` loses one further year to
+capital going non-positive after netting. That is the price of measuring operating capital instead of
+gross capital, and it is printed per issuer rather than inferred.
+
+**A contract-shape limitation surfaced and is registered rather than worked around.** The cash concept
+resolved to plain cash for 24 of 28 issuers; only `APH`, `GOOGL`, `MSFT` and `AMZN` filed
+`CashCashEquivalentsAndShortTermInvestments`. So `oper` in practice nets *less* than the definition
+asks. The builder did not paper over it: `select_one_equivalent` **selects** rather than sums, so
+adding a marketable-securities qname would have **replaced** cash in every year both were filed rather
+than adding to it. The direction of the residual error is stated and it is the safe one — under-netting
+leaves capital higher and the ratio lower, so it errs toward `gross` and never past the operating
+definition.
+
+The fix, when the driver lands for real, is a **composition** in the mould of `extract_total_debt`
+rather than a `select_one_equivalent`. That is a wave decision, not a probe decision, and it is written
+here so it is not rediscovered.
+
+### R-45.3 — P5 is not negligible, and it is not negligible on the anchors
+
+`gap = prod − roic` centres at **−0.0032** (`gross`) and **−0.0050** (`oper`). Third decimal for most
+issuers. But it reaches **0.202 (AMZN, `oper`)**, **0.091 (MSFT, `oper`)**, 0.070 (COF), 0.061 (PG) and
+0.057 (AMZN) — material against return levels of 0.1–0.3, and landing on three of the four anchors.
+
+As registered before the numbers, the two forms are equal year by year, so the gap is a **trimming**
+difference: which years each centre kept. The kept counts show it directly — `gross` PG keeps 11 years
+for turnover, 14 for margin and 10 for the one-ratio form.
+
+So the choice between `prod` and `roic` is a live one with different economic results on the names that
+matter, and **nothing in this probe decides it.** Registered as open.
+
+### R-45.4 — The probe found something it was not looking for, and it outranks everything above
+
+`MSFT` reads turnover **3.305** under `oper` against **0.808** gross, and a one-ratio return of
+**0.815** against **0.224**. `AMZN` goes 3.923 → 9.741. Those two also carry the highest `disp s2c` in
+the entire `oper` set — 0.384 and 0.414, against 0.05–0.22 for every other issuer.
+
+An 0.815 return is the pathology the original plan named in its own words before any of this began:
+*"AAPL is the counterexample: ~700B of buybacks have shrunk book equity to ~57B, so its book ROIC reads
+~75% and growth gets credited nearly free."* At `r = 0.815` the retention charge keeps 88% of earnings;
+at a plausible 0.33 it keeps 70%. Not free, but a several-fold error in the one quantity FR-28 divides
+by.
+
+**I have a hypothesis and I am not recording it as a finding.** The series run to nineteen years, and an
+issuer whose net-of-cash capital was small a decade ago and large now would have its centre dominated by
+years that no longer describe it. Damodaran's prescription is the ratio *"at its **current** level"*,
+and a centre over nineteen years is not that. If it holds, it is not repairable by choosing a different
+estimator — it is a **window** question and it sits upstream of the entire branch.
+
+Round 11 measures it and chooses nothing: the full annual series per issuer under both definitions,
+plus `latest`, `centre`, `latest/centre`, and the first and last year each series spans. **No window is
+computed, proposed or hinted at** — not a trailing-N, not a recency weight, not a "last five years"
+column. Any N chosen now would be chosen *after* seeing that `MSFT` and `AMZN` are the issuers it would
+help, which is R-41.5's post-hoc threshold with a new name.
+
+That sequencing is not caution. R-40.1 asserted a mechanism from reading, was wrong on its own algebra,
+and came one ruling from adding a contract driver and regenerating two platforms' policy files. The rule
+that earned it is **measure the mechanism before building against it**, and it applies to the
+Orchestrator's hypotheses first.
+
+### R-45.5 — What is decided, what is open
+
+**Decided by measurement:** the sales-to-capital quantity is supplied (20 ≥ 14) and sign-identified
+(18 of 20 resolved, zero resolved non-positive) where realized reinvestment is neither. The branch
+survives its own killing condition.
+
+**Open, and none of it is mine to settle:**
+
+1. The **window** — Round 11 measures, nobody has chosen.
+2. `prod` **vs** `roic` — R-45.3, different results on three anchors.
+3. The **cash driver's operator** — composition, not selection (R-45.2).
+4. **R-30.1 / R-44.3** — the FCFF base feeds the slot FR-28 requires NOPAT for. Under (D) the retention
+   charge subtracts reinvestment explicitly and FCFF has already subtracted it once. **Blocking**, and
+   upstream of the estimator: base and estimator land together or not at all.
+
+Nothing above is a reason to publish a value yet, and the gate still holds either way: all twenty pinned
+issuers refuse today, so the first wave that publishes moves them visibly, by name, in a failing test.
