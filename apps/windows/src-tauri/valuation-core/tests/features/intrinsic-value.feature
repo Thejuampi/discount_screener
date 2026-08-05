@@ -20,27 +20,28 @@ Feature: Intrinsic Value
     When the Intrinsic Value is resolved
     Then the Intrinsic Value is <value> within 1 cent
     And the outcome is <outcome>
+    And the absence reason is <reason>
 
     Examples: integrating the path
-      | case                        | base   | g0     | g_inf | fade   | roc    | wacc   | value    | outcome  |
-      | flat-path                   | 100.00 |    300 |   300 |   0.20 |   1200 |    800 |  1500.00 | resolved |
-      | high-return-compounder      | 100.00 |   1500 |   300 |   0.20 |   2500 |    800 |  2624.13 | resolved |
-      | average-return-grower       | 100.00 |   1500 |   300 |   0.20 |   1200 |    800 |  1923.59 | resolved |
-      | value-neutral-return        | 100.00 |   1500 |   300 |   0.20 |    800 |    800 |  1250.00 | resolved |
-      | low-return-grower           | 100.00 |   1500 |   300 |   0.20 |    600 |    800 |   576.41 | resolved |
-      | return-below-terminal       | 100.00 |    300 |   300 |   0.20 |    200 |    800 | -1000.00 | resolved |
-      | return-absent               | 100.00 |   1500 |   300 |   0.20 | ABSENT |    800 |  1250.00 | resolved |
-      | fast-fade                   | 100.00 |   1500 |   300 |   1.00 |   2500 |    800 |  1924.90 | resolved |
-      | slow-fade                   | 100.00 |   1500 |   300 |   0.10 |   2500 |    800 |  3609.74 | resolved |
-      | shrinking-issuer            | 100.00 |   -500 |   300 |   0.20 |   1200 |    800 |  1320.33 | resolved |
-      | base-cash-flow-absent       | ABSENT |   1500 |   300 |   0.20 |   2500 |    800 |   ABSENT | refused  |
-      | growth-absent               | 100.00 | ABSENT |   300 |   0.20 |   2500 |    800 |   ABSENT | refused  |
-      | discount-rate-absent        | 100.00 |   1500 |   300 |   0.20 |   2500 | ABSENT |   ABSENT | refused  |
-      | non-fading-path             | 100.00 |   1500 |   300 |   0.00 |   2500 |    800 |   ABSENT | refused  |
-      | terminal-growth-at-discount | 100.00 |   1500 |   800 |   0.20 |   2500 |    800 |   ABSENT | refused  |
-      | terminal-growth-above-rate  | 100.00 |   1500 |   900 |   0.20 |   2500 |    800 |   ABSENT | refused  |
-      | return-on-capital-zero      | 100.00 |   1500 |   300 |   0.20 |      0 |    800 |   ABSENT | refused  |
-      | growth-outruns-the-fade     | 100.00 |  15000 |   300 |   0.01 |   2500 |    800 |   ABSENT | refused  |
+      | case                        | base   | g0     | g_inf | fade   | roc    | wacc   | value    | outcome  | reason                |
+      | flat-path                   | 100.00 |    300 |   300 |   0.20 |   1200 |    800 |  1500.00 | resolved | ABSENT                |
+      | high-return-compounder      | 100.00 |   1500 |   300 |   0.20 |   2500 |    800 |  2624.13 | resolved | ABSENT                |
+      | average-return-grower       | 100.00 |   1500 |   300 |   0.20 |   1200 |    800 |  1923.59 | resolved | ABSENT                |
+      | value-neutral-return        | 100.00 |   1500 |   300 |   0.20 |    800 |    800 |  1250.00 | resolved | ABSENT                |
+      | low-return-grower           | 100.00 |   1500 |   300 |   0.20 |    600 |    800 |   576.41 | resolved | ABSENT                |
+      | return-below-terminal       | 100.00 |    300 |   300 |   0.20 |    200 |    800 | -1000.00 | resolved | ABSENT                |
+      | return-absent               | 100.00 |   1500 |   300 |   0.20 | ABSENT |    800 |   ABSENT | refused  | estimator_unavailable |
+      | fast-fade                   | 100.00 |   1500 |   300 |   1.00 |   2500 |    800 |  1924.90 | resolved | ABSENT                |
+      | slow-fade                   | 100.00 |   1500 |   300 |   0.10 |   2500 |    800 |  3609.74 | resolved | ABSENT                |
+      | shrinking-issuer            | 100.00 |   -500 |   300 |   0.20 |   1200 |    800 |  1320.33 | resolved | ABSENT                |
+      | base-cash-flow-absent       | ABSENT |   1500 |   300 |   0.20 |   2500 |    800 |   ABSENT | refused  | not_reported           |
+      | growth-absent               | 100.00 | ABSENT |   300 |   0.20 |   2500 |    800 |   ABSENT | refused  | not_reported           |
+      | discount-rate-absent        | 100.00 |   1500 |   300 |   0.20 |   2500 | ABSENT |   ABSENT | refused  | not_reported           |
+      | non-fading-path             | 100.00 |   1500 |   300 |   0.00 |   2500 |    800 |   ABSENT | refused  | not_reported           |
+      | terminal-growth-at-discount | 100.00 |   1500 |   800 |   0.20 |   2500 |    800 |   ABSENT | refused  | out_of_policy_range    |
+      | terminal-growth-above-rate  | 100.00 |   1500 |   900 |   0.20 |   2500 |    800 |   ABSENT | refused  | out_of_policy_range    |
+      | return-on-capital-zero      | 100.00 |   1500 |   300 |   0.20 |      0 |    800 |   ABSENT | refused  | out_of_policy_range    |
+      | growth-outruns-the-fade     | 100.00 |  15000 |   300 |   0.01 |   2500 |    800 |   ABSENT | refused  | out_of_policy_range    |
 
   # Rows worth reading as a set:
   #
@@ -57,12 +58,17 @@ Feature: Intrinsic Value
   #                                 cohort at a median 1.5x market with the error
   #                                 rising as return on capital fell.
   #   value-neutral-return          At a return equal to the discount rate the
-  #   return-absent                 retention charge exactly cancels the compounding,
+  #                                 retention charge exactly cancels the compounding,
   #                                 so value is earnings over the discount rate and
-  #                                 the growth path stops mattering. FR-29 gives an
-  #                                 absent return that same value -- and a different
-  #                                 provenance, because "we do not know" is not the
-  #                                 same statement as "we measured break-even".
+  #                                 the growth path stops mattering. That is a real
+  #                                 return an issuer can earn.
+  #   return-absent                 FR-29: an absent return is not the same fact as a
+  #                                 measured return equal to the discount rate, so it
+  #                                 does not get that (or any other) value. It refuses,
+  #                                 named `estimator_unavailable` -- distinct from
+  #                                 `not_reported` because nothing is missing from the
+  #                                 filing here; the gap is in this Core's own
+  #                                 evidence chain.
   #   return-below-terminal         An observed return below terminal growth is used
   #                                 as observed and goes negative. Flooring it at the
   #                                 cost of capital is what erased every distinction

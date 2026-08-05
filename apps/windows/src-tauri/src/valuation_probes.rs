@@ -15,10 +15,10 @@
 //!   and FR-12 has nothing to weight with.
 //! * **Probe C — return on capital.** The retention charge `C = E(1 - g/r)` is
 //!   the only place growth is priced, and `r` is hardcoded absent today, so the
-//!   Core substitutes `r := w` and credits growth nothing for every issuer. This
-//!   probe answers whether `r` is measurable at all from filed evidence, and —
-//!   given three defensible estimators — which one the issuers' own realized
-//!   reinvestment says is telling the truth.
+//!   Core refuses rather than valuing growth at any line for every operating
+//!   issuer (FR-29). This probe answers whether `r` is measurable at all from
+//!   filed evidence, and — given three defensible estimators — which one the
+//!   issuers' own realized reinvestment says is telling the truth.
 //! * **Probe B — growth persistence.** The projection is an
 //!   Ornstein-Uhlenbeck fade with `kappa = -ln(rho_1)`. If `rho_1` is small or
 //!   noisy on real revenue series, the implied half-lives are short, the fade
@@ -50,6 +50,9 @@ use std::cmp::Ordering;
 
 #[cfg(test)]
 use chrono::Utc;
+
+#[cfg(test)]
+use valuation_core::{robust_centre, RobustCentre};
 
 #[cfg(test)]
 use crate::dcf_model::{
@@ -850,9 +853,14 @@ mod tests {
                 .iter()
                 .map(|year| year.nopat / year.invested_capital)
                 .collect();
-            let book = valuation_core::robust_mean(&annual_returns, valuation_core::MAX_ABSOLUTE_Z);
-            let discarded = valuation_core::standardize(&annual_returns)
-                .map(|standardized| standardized.outliers(valuation_core::MAX_ABSOLUTE_Z).len())
+            let centre = robust_centre(&annual_returns);
+            let book = centre
+                .as_ref()
+                .map(RobustCentre::centre)
+                .map_err(|reason| *reason);
+            let discarded = centre
+                .as_ref()
+                .map(RobustCentre::discarded)
                 .unwrap_or_default();
             let pairs: Vec<(f64, f64)> = usable
                 .iter()

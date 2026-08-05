@@ -28,18 +28,19 @@
 //! is fed, and "we were reading three years" is a finding about the old system
 //! rather than an unfairness in the new one.
 //!
-//! # Read the ratios with the neutral line in mind
+//! # The Core refuses every issuer here, for now
 //!
-//! The Core has no invested capital in evidence yet, so every issuer here is
-//! valued at FR-29's value-neutral line: growth exactly earns its cost of
-//! capital. Names that genuinely earn above their cost of capital are therefore
-//! understated by this run and names that earn below it are overstated. The
-//! spread of the ratios is informative now; their level will move once return on
-//! capital arrives.
+//! The Core has no invested capital in evidence yet, so FR-29 makes every
+//! operating issuer refuse rather than publish: an absent return on capital is
+//! not the same fact as a measured one earning exactly its cost of capital, so
+//! it gets no line, not the value-neutral one or any other. `new/mkt` reads `-`
+//! for every row until an estimator for return on capital is promoted (Probe C,
+//! above).
 
 #![cfg(test)]
 
 use crate::dcf_model::compute;
+use crate::operating_valuation::terminal_payout_bps;
 use crate::valuation_baseline::{load_cohort, load_driver_fixture, CohortMember};
 use crate::valuation_core_adapter::{
     fit_cross_section, median_cents, value, widest_input, IssuerAnnual, IssuerEvidence, MarketFrame,
@@ -393,6 +394,72 @@ fn does_growth_persist_at_longer_horizons() {
         firm_means.len(),
         between_sd,
         spread
+    );
+}
+
+/// P2, measured on the real pinned market cohort rather than only on the
+/// adapter's synthetic six: no issuer here still produces a Core value. Two
+/// names -- MH and BWMN -- already refused before this wave, for an evidence
+/// gap unrelated to return on capital (`docs/valuation-aggregation-audit.md`
+/// §7 records the same two names and the same reason, measured before FR-29's
+/// removal); every other issuer's refusal reason is `estimator_unavailable`,
+/// the one this wave adds.
+///
+/// When an estimator for return on capital is promoted, DELETE this test — do
+/// not weaken it. A test that starts filtering out the issuers an estimator
+/// makes measurable is a test rewritten to keep passing, not one that still
+/// protects the population claim it was written to pin.
+#[test]
+fn every_issuer_in_the_pinned_cohort_refuses_and_only_two_predate_this_wave() {
+    const PRE_EXISTING_NOT_REPORTED: [&str; 2] = ["MH", "BWMN"];
+    let cohort = cohort_evidence();
+    let issuers: Vec<IssuerEvidence> = cohort.iter().map(|(issuer, _)| issuer.clone()).collect();
+    let fitted = fit_cross_section(&issuers, &frame());
+    let unexpected: Vec<String> = issuers
+        .iter()
+        .filter_map(|issuer| {
+            let posterior = value(issuer, &frame(), &fitted);
+            let expected_reason = if PRE_EXISTING_NOT_REPORTED.contains(&issuer.symbol.as_str()) {
+                "not_reported"
+            } else {
+                "estimator_unavailable"
+            };
+            match posterior
+                .refusal()
+                .map(|refusal| (refusal.kind(), refusal.detail()))
+            {
+                Some(("evidence", reason)) if reason == expected_reason => None,
+                _ => Some(format!(
+                    "{}: expected evidence/{expected_reason}, found {posterior:?}",
+                    issuer.symbol
+                )),
+            }
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected refusal reasons: {unexpected:?}"
+    );
+}
+
+/// A characterization test, pinning what the *legacy* engine does today rather
+/// than what the new Core should do. `operating_valuation::terminal_payout_bps`
+/// is untouched by FR-29's Wave 5 correction (L7) — it still substitutes the
+/// cost of equity for an absent return on capital, and this cohort's new Core
+/// posteriors are compared against that unchanged legacy number. If this test
+/// ever fails, the legacy engine changed underneath the comparison this file
+/// exists to make, not the new Core.
+#[test]
+fn the_legacy_engine_still_substitutes_the_cost_of_equity_for_an_absent_return() {
+    let cost_of_equity_bps = 800;
+    let stable_growth_bps = 300;
+    assert_eq!(
+        terminal_payout_bps(None, cost_of_equity_bps, stable_growth_bps),
+        terminal_payout_bps(
+            Some(cost_of_equity_bps),
+            cost_of_equity_bps,
+            stable_growth_bps
+        )
     );
 }
 

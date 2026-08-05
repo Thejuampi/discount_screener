@@ -99,16 +99,16 @@ pub fn residual_income_value(
         return refused(AbsenceReason::OutOfPolicyRange);
     }
 
-    // The FR-29 identity in its residual-income form. At `roe = r` the spread is
+    // The FR-29 identity in its residual-income form: at `roe = r` the spread is
     // zero, every future year adds nothing, and the firm is worth exactly its
-    // book — for *any* growth path. Substituting the cost of equity for an
-    // absent return therefore says "we do not know whether this balance sheet
-    // earns its keep", not "assume it barely does". An observed return below the
-    // cost of equity is used as observed and values the issuer below book.
-    let return_on_equity = return_on_equity_bps
-        .value()
-        .copied()
-        .unwrap_or(cost_of_equity);
+    // book — for *any* growth path. That is a real return a balance sheet can
+    // earn, not a substitute for a return this Core failed to measure. An absent
+    // return on equity therefore refuses rather than being valued at book. An
+    // observed return below the cost of equity is used as observed and values
+    // the issuer below book.
+    let Some(&return_on_equity) = return_on_equity_bps.value() else {
+        return refused(AbsenceReason::EstimatorUnavailable);
+    };
 
     let evaluate = |return_on_equity: f64, growth: f64, cost_of_equity: f64| {
         unit_value(return_on_equity, growth, path, cost_of_equity)
@@ -312,8 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_return_on_equity_values_the_issuer_at_book() {
-        assert!((value_of(&missing(), 600.0) - 1_000.0).abs() < 1e-9);
+    fn an_absent_return_on_equity_refuses_rather_than_being_valued_at_book() {
+        let refused = residual_income_value(
+            &known(1_000.0),
+            &missing(),
+            &known(600.0),
+            &path(),
+            &known(800.0),
+        );
+        assert_eq!(
+            refused.value().absence_reason(),
+            Some(AbsenceReason::EstimatorUnavailable)
+        );
     }
 
     /// Not floored at book. An issuer destroying equity capital is worth less

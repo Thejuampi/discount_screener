@@ -590,6 +590,19 @@ fn then_outcome(world: &mut GrowthWorld, expected: String) {
     assert_eq!(actual, expected);
 }
 
+/// The reason a refused row was refused, or `ABSENT` for a resolved one — the
+/// same reserved token the tables use for a missing input, reused here for a
+/// missing reason because a resolved row has no absence to name.
+#[then(expr = "the absence reason is {word}")]
+fn then_absence_reason(world: &mut GrowthWorld, expected: String) {
+    let actual = world.result().absence_reason().map(AbsenceReason::as_str);
+    if expected == ABSENT {
+        assert_eq!(actual, None, "expected no absence reason, found {actual:?}");
+    } else {
+        assert_eq!(actual, Some(expected.as_str()));
+    }
+}
+
 #[tokio::main]
 async fn main() {
     GrowthWorld::cucumber()

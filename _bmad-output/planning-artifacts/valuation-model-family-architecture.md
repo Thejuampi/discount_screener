@@ -487,6 +487,100 @@ as one evidence family. The Detail `(i)` trail exposes provider state, forecast
 period, refusal/reason codes, policy versions, fingerprints, and stable owning
 function locators (never volatile line numbers).
 
+---
+
+### AD-VM-012: An Absent Return on Capital Refuses Rather Than Valuing at the Neutral Line (FR-29)
+
+**Context.** `valuation-core`'s FCFF and residual-income forms both express the
+same identity: the retention charge `C(t) = E(t)(1 − g/r)` collapses to
+`E_0 / w` — earnings capitalized at the discount rate, with no growth term at
+all — exactly when the return on capital `r` equals the discount rate `w`.
+That value is **both** value-neutral (growth adds nothing) **and**
+growth-independent (the fade path stops mattering) at the same point. FR-29
+originally substituted `r := w` whenever the return arrived absent, so every
+issuer with no measured return was valued as though it had *measured* that
+exact break-even economics.
+
+Value-neutrality is not neutrality of *belief*. "This issuer earns exactly its
+cost of capital" is a measurement claim, and a screener's job is to
+distinguish issuers that make it from issuers that do not. Substituting the
+discount rate for an absent return does not withhold a claim — it manufactures
+one, and manufactures the specific claim that happens to make growth
+arithmetically disappear rather than admitting growth could not be priced.
+
+**Decision.** The substitution is removed from both forms
+(`projection.rs::intrinsic_value`, `residual_income.rs::residual_income_value`).
+An absent return on capital or return on equity now refuses, carrying a new
+`AbsenceReason::EstimatorUnavailable`, rather than reusing `NotReported`.
+
+The new variant exists rather than reusing `NotReported` for a load-bearing
+reason: a `FinancialServices` issuer already refuses for an absent book value
+with reason `provider_unavailable`, an honest statement about the *provider*.
+Reusing `NotReported` for an absent return on capital would have made that
+bank's refusal and an operating issuer's refusal indistinguishable by reason,
+voiding the exhaustive population test
+(`every_operating_issuer_in_the_pinned_cohort_refuses_for_an_absent_return_on_capital`,
+`valuation_core_adapter.rs`) that exists specifically to prove the two are
+different facts. `EstimatorUnavailable` is also a true statement distinct from
+`NotReported`: the provider is not at fault and nothing is missing from the
+filing — the gap is in this Core's own evidence chain.
+
+**Consequences.** The new Core now refuses every operating issuer it is asked
+about, because `valuation_core_adapter::return_on_capital` is hard-coded
+absent — invested capital is not yet in the evidence the Shell assembles.
+This is intended, not a regression: `valuation_core_adapter::value()` has no
+production caller (F1, proved by compiling it behind `#[cfg(test)]`), so
+nothing published moves. Measured on the pinned 20-name market cohort, all 20
+issuers refuse post-removal; 18 do so with the new `estimator_unavailable`
+reason and 2 (MH, BWMN) with a pre-existing, unrelated `not_reported` gap that
+predates this decision.
+
+**The equivalent substitution remains live in the production path, and this
+run does not fix it.** Stated verbatim, per this decision's own completion
+requirement: *"FR-29 removed from `valuation-core`; the equivalent
+substitution remains live in the production path
+(`operating_valuation.rs:223`, `terminal_payout_bps`) and is unaddressed by
+this run."* A characterization test,
+`the_legacy_engine_still_substitutes_the_cost_of_equity_for_an_absent_return`
+(`valuation_core_measurement.rs`), pins that live substitution so a silent
+change to it fails loudly rather than passing unnoticed. This is item **LD-3**
+of the latent-defect register below.
+
+**Alternatives considered.**
+
+- *Keep the substitution.* Rejected — it is the defect this decision exists to
+  remove: a fabricated measurement dressed as an absence.
+- *Reuse `AbsenceReason::NotReported` for the absent return.* Rejected — see
+  Decision, above; it destroys the audit trail and the bank/operating
+  discrimination.
+- *Propagate the input observation's own absence reason
+  (`ProviderUnavailable`) through to the refusal.* Rejected —
+  `intrinsic_value` and `residual_income_value` refuse with
+  `EstimatorUnavailable` regardless of the input's own reason, because the
+  Core's statement is about its own inability to value without a return
+  estimate, which is true whatever the provider said.
+
+**Status:** Accepted and implemented (Wave 5 of the valuation PIT & contract
+run, `valuation/wave1-integration`). FR-29 keeps its PRD identifier with
+inverted, retitled content, so the record reads as a changed contract rather
+than a new one.
+
+**Latent-defect register.** This decision closes no defect it did not
+introduce, and it inherits the standing register of defects this run
+knowingly defers. The full register — id, defect, why not now, trigger and
+detector for each — lives in `docs/valuation-economic-contract.md`, not here,
+because it is a *living* document whose ownership extends past this run and
+keeps growing; embedding it in a point-in-time decision record would force
+every future entry to edit this file. In summary: eleven items are tracked
+(LD-1 through LD-11); **LD-1 and LD-8 are both closed** — LD-1 by Wave 2's
+removal of the blanket `.abs()` on interest expense, LD-8 by commit `f38fe2c`
+("fix(cost-of-debt): a netted interest year is not a measurement of gross
+interest"), which implemented the per-field concept provenance LD-8's original
+entry named as its precondition for a fix. The remaining nine — LD-2, LD-3,
+LD-4, LD-5, LD-6, LD-7, LD-9, LD-10, LD-11 — are open, each with a named owner
+(the valuation quant workstream) and either a mechanical detector or an
+explicit human-review checkpoint.
+
 ## End-to-End Data Flow
 
 ```text

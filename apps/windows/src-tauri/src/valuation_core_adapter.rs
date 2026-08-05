@@ -22,12 +22,13 @@
 //! # What is not here yet
 //!
 //! **Return on capital.** Invested capital is not in the evidence the Shell
-//! currently assembles, so the return arrives absent and FR-29 makes growth
-//! value-neutral: the issuer is valued as though its growth exactly earns its
-//! cost of capital. That is a statement of ignorance and it is deliberately not
-//! a floor — the moment invested capital is available, an issuer earning below
-//! its cost of capital will value below this, and one earning above will value
-//! above. Every number this module produces today sits at that neutral line.
+//! currently assembles, so the return arrives absent, and FR-29 refuses rather
+//! than valuing growth at any line — including the value-neutral one an issuer
+//! earning exactly its cost of capital would sit at. "We do not know whether
+//! this growth creates value" is not the same claim as "we measured break-even",
+//! so it does not get that number. Every operating issuer this module is asked
+//! about today therefore refuses, on `estimator_unavailable`, until invested
+//! capital is assembled.
 //!
 //! **The forward channel.** Analyst growth estimates are not in the offline
 //! evidence, so the growth posterior currently rests on the trailing channel
@@ -1168,42 +1169,42 @@ mod tests {
         assert!(fitted.growth_path().is_some());
     }
 
-    /// The whole pipeline, end to end, on evidence with no gaps in it.
+    /// The whole pipeline, end to end, on evidence with no gaps in it -- except
+    /// the one this module does not assemble yet. Every input this fixture can
+    /// supply resolves, and the posterior still refuses, because return on
+    /// capital is not among the inputs it can supply (FR-29).
     #[test]
-    fn a_complete_issuer_publishes_a_posterior() {
+    fn a_complete_issuer_still_refuses_for_an_absent_return_on_capital() {
         let cohort = cohort();
         let fitted = fit_cross_section(&cohort, &frame());
-        assert!(value(&cohort[0], &frame(), &fitted).is_published());
+        let posterior = value(&cohort[0], &frame(), &fitted);
+        assert_eq!(
+            posterior.refusal().map(|r| (r.kind(), r.detail())),
+            Some(("evidence", "estimator_unavailable"))
+        );
     }
 
     /// FR-29's consequence, made visible: with no invested capital in evidence
-    /// the return is absent and the valuation sits at the value-neutral line,
-    /// `cash flow / wacc`, whatever the growth posterior says.
+    /// the return on capital is absent, and an absent return refuses rather than
+    /// being valued at the value-neutral line, `cash flow / wacc`, or any other
+    /// line -- whatever the growth posterior says.
     #[test]
-    fn an_absent_return_on_capital_values_at_the_neutral_line() {
+    fn an_absent_return_on_capital_refuses_rather_than_being_valued_at_the_neutral_line() {
         let cohort = cohort();
         let fitted = fit_cross_section(&cohort, &frame());
         let issuer = &cohort[0];
-        let discount = *issuer
-            .discount_rate(&frame(), &fitted)
-            .value()
-            .expect("resolved wacc")
-            / 10_000.0;
-        let cash_flow = *issuer
-            .base_cash_flow(&frame())
-            .value()
-            .expect("resolved cash flow");
-        let shares = issuer.shares_outstanding.expect("shares") as f64;
-        let expected = (cash_flow / discount - (issuer.total_debt - issuer.total_cash)) / shares;
-        let published = median_cents(&value(issuer, &frame(), &fitted)).expect("published");
+        let published = value(issuer, &frame(), &fitted);
         assert!(
-            (published as f64 / 100.0 - expected).abs() < 0.02,
-            "published {published} cents is not the neutral line {expected}"
+            !published.is_published(),
+            "expected a refusal at the (now removed) neutral line, found {published:?}"
         );
     }
 
     /// A financial issuer classifies correctly and then refuses for the input it
     /// lacks, rather than being valued by the model that does not describe it.
+    /// The reason is distinct from an operating issuer's -- a bank refuses
+    /// because book value is not yet assembled (`provider_unavailable`), not
+    /// because a return on capital could not be estimated.
     #[test]
     fn a_bank_refuses_on_evidence_rather_than_being_valued_on_cash_flow() {
         let cohort = cohort();
@@ -1212,8 +1213,46 @@ mod tests {
         bank.sector = "Financial Services".to_string();
         bank.industry = "Banks - Diversified".to_string();
         assert_eq!(
-            value(&bank, &frame(), &fitted).refusal().map(|r| r.kind()),
-            Some("evidence")
+            value(&bank, &frame(), &fitted)
+                .refusal()
+                .map(|r| (r.kind(), r.detail())),
+            Some(("evidence", "provider_unavailable"))
+        );
+    }
+
+    /// FR-29 as a population-level fact rather than a single row: every operating
+    /// issuer this adapter can build produces no value, and every one of them
+    /// refuses for the same named reason, because `return_on_capital` is
+    /// hard-coded absent for all of them.
+    ///
+    /// When an estimator for return on capital is promoted, DELETE this test —
+    /// do not weaken it. A test that starts filtering out the issuers an
+    /// estimator makes measurable is a test rewritten to keep passing, not one
+    /// that still protects the population claim it was written to pin.
+    #[test]
+    fn every_operating_issuer_in_the_pinned_cohort_refuses_for_an_absent_return_on_capital() {
+        let cohort = cohort();
+        let fitted = fit_cross_section(&cohort, &frame());
+        let unexpected: Vec<String> = cohort
+            .iter()
+            .filter(|issuer| {
+                classify(&issuer.sector, &issuer.industry, Instrument::CommonEquity)
+                    == BusinessClass::OperatingNonFinancial
+            })
+            .filter_map(|issuer| {
+                let posterior = value(issuer, &frame(), &fitted);
+                match posterior
+                    .refusal()
+                    .map(|refusal| (refusal.kind(), refusal.detail()))
+                {
+                    Some(("evidence", "estimator_unavailable")) => None,
+                    _ => Some(format!("{}: {posterior:?}", issuer.symbol)),
+                }
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "expected every operating issuer to refuse on evidence/estimator_unavailable, found: {unexpected:?}"
         );
     }
 

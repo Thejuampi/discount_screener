@@ -214,13 +214,16 @@ pub fn intrinsic_value(
         return refused(AbsenceReason::OutOfPolicyRange);
     }
 
-    // FR-29. An absent return on capital makes growth value-neutral, and value
-    // neutrality is the identity `r = w`: at that return the retention charge
-    // cancels the compounding exactly and the integral collapses to `E_0 / w`
-    // for *any* growth path. Substituting the discount rate is therefore the
-    // statement "we do not know whether this growth creates value", not a floor
-    // on an observed return. An observed low return is used as observed.
-    let return_on_capital = return_on_capital_bps.value().copied().unwrap_or(discount);
+    // FR-29. Value neutrality — the identity `r = w`, at which the retention
+    // charge cancels the compounding exactly and the integral collapses to
+    // `E_0 / w` for *any* growth path — is a real return an issuer can earn. It
+    // is not a substitute for a return this Core failed to measure. An absent
+    // return on capital therefore refuses rather than being valued at that (or
+    // any other) line: growth is credited to a measured return or not at all.
+    // An observed low return is still used as observed.
+    let Some(&return_on_capital) = return_on_capital_bps.value() else {
+        return refused(AbsenceReason::EstimatorUnavailable);
+    };
 
     let evaluate = |growth: f64, return_on_capital: f64, discount: f64| {
         unit_value(growth, path, return_on_capital, discount)
@@ -499,8 +502,18 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_return_on_capital_is_value_neutral_rather_than_floored() {
-        assert!((value_of(1_500.0, &missing(), 800.0) - 1_250.0).abs() < 1e-6);
+    fn an_absent_return_on_capital_refuses_rather_than_being_valued_at_the_neutral_line() {
+        let refused = intrinsic_value(
+            &known(100.0),
+            &known(1_500.0),
+            &path(),
+            &missing(),
+            &known(800.0),
+        );
+        assert_eq!(
+            refused.value().absence_reason(),
+            Some(AbsenceReason::EstimatorUnavailable)
+        );
     }
 
     /// The retention charge, as the ordering it exists to produce. Identical

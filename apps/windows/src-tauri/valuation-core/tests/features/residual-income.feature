@@ -23,25 +23,26 @@ Feature: Residual Income Value
     When the Residual Income Value is resolved
     Then the Residual Income Value is <value> within 1 cent
     And the outcome is <outcome>
+    And the absence reason is <reason>
 
     Examples: earning the cost of equity, or not
-      | case                          | book     | roe    | g0     | g_inf | fade | coe    | value   | outcome  |
-      | flat-book-earning-its-spread  |  1000.00 |   1600 |    300 |   300 | 0.20 |    800 | 1320.00 | resolved |
-      | value-neutral-return          |  1000.00 |    800 |    300 |   300 | 0.20 |    800 | 1000.00 | resolved |
-      | return-absent                 |  1000.00 | ABSENT |    300 |   300 | 0.20 |    800 | 1000.00 | resolved |
-      | below-the-cost-of-equity      |  1000.00 |    400 |    300 |   300 | 0.20 |    800 |  840.00 | resolved |
-      | growing-franchise             |  1000.00 |   1600 |   1000 |   300 | 0.20 |    800 | 1375.61 | resolved |
-      | fast-fade                     |  1000.00 |   1600 |   1000 |   300 | 1.00 |    800 | 1078.85 | resolved |
-      | slow-fade                     |  1000.00 |   1600 |   1000 |   300 | 0.10 |    800 | 1717.84 | resolved |
-      | shrinking-book                |  1000.00 |   1600 |   -200 |   300 | 0.20 |    800 | 1287.03 | resolved |
-      | book-absent                   |   ABSENT |   1600 |    300 |   300 | 0.20 |    800 |  ABSENT | refused  |
-      | growth-absent                 |  1000.00 |   1600 | ABSENT |   300 | 0.20 |    800 |  ABSENT | refused  |
-      | cost-of-equity-absent         |  1000.00 |   1600 |    300 |   300 | 0.20 | ABSENT |  ABSENT | refused  |
-      | insolvent-book                | -1000.00 |   1600 |    300 |   300 | 0.20 |    800 |  ABSENT | refused  |
-      | book-outgrows-its-return      |  1000.00 |    600 |    900 |   300 | 0.20 |    800 |  ABSENT | refused  |
-      | non-fading-path               |  1000.00 |   1600 |    300 |   300 | 0.00 |    800 |  ABSENT | refused  |
-      | terminal-growth-at-the-cost   |  1000.00 |   1600 |    300 |   800 | 0.20 |    800 |  ABSENT | refused  |
-      | growth-outruns-the-fade       |  1000.00 |  20000 |  15000 |   300 | 0.01 |    800 |  ABSENT | refused  |
+      | case                          | book     | roe    | g0     | g_inf | fade | coe    | value   | outcome  | reason                |
+      | flat-book-earning-its-spread  |  1000.00 |   1600 |    300 |   300 | 0.20 |    800 | 1320.00 | resolved | ABSENT                |
+      | value-neutral-return          |  1000.00 |    800 |    300 |   300 | 0.20 |    800 | 1000.00 | resolved | ABSENT                |
+      | return-absent                 |  1000.00 | ABSENT |    300 |   300 | 0.20 |    800 |  ABSENT | refused  | estimator_unavailable |
+      | below-the-cost-of-equity      |  1000.00 |    400 |    300 |   300 | 0.20 |    800 |  840.00 | resolved | ABSENT                |
+      | growing-franchise             |  1000.00 |   1600 |   1000 |   300 | 0.20 |    800 | 1375.61 | resolved | ABSENT                |
+      | fast-fade                     |  1000.00 |   1600 |   1000 |   300 | 1.00 |    800 | 1078.85 | resolved | ABSENT                |
+      | slow-fade                     |  1000.00 |   1600 |   1000 |   300 | 0.10 |    800 | 1717.84 | resolved | ABSENT                |
+      | shrinking-book                |  1000.00 |   1600 |   -200 |   300 | 0.20 |    800 | 1287.03 | resolved | ABSENT                |
+      | book-absent                   |   ABSENT |   1600 |    300 |   300 | 0.20 |    800 |  ABSENT | refused  | not_reported           |
+      | growth-absent                 |  1000.00 |   1600 | ABSENT |   300 | 0.20 |    800 |  ABSENT | refused  | not_reported           |
+      | cost-of-equity-absent         |  1000.00 |   1600 |    300 |   300 | 0.20 | ABSENT |  ABSENT | refused  | not_reported           |
+      | insolvent-book                | -1000.00 |   1600 |    300 |   300 | 0.20 |    800 |  ABSENT | refused  | out_of_policy_range    |
+      | book-outgrows-its-return      |  1000.00 |    600 |    900 |   300 | 0.20 |    800 |  ABSENT | refused  | out_of_policy_range    |
+      | non-fading-path               |  1000.00 |   1600 |    300 |   300 | 0.00 |    800 |  ABSENT | refused  | not_reported           |
+      | terminal-growth-at-the-cost   |  1000.00 |   1600 |    300 |   800 | 0.20 |    800 |  ABSENT | refused  | out_of_policy_range    |
+      | growth-outruns-the-fade       |  1000.00 |  20000 |  15000 |   300 | 0.01 |    800 |  ABSENT | refused  | out_of_policy_range    |
 
   # Rows worth reading as a set:
   #
@@ -52,12 +53,14 @@ Feature: Residual Income Value
   #                                 1 + 0.08 * 4 = 1.32, and book of 1000 is 1320.00
   #                                 exactly.
   #   value-neutral-return          Earning exactly the cost of equity adds nothing
-  #   return-absent                 to book, whatever growth does -- the FR-29
-  #                                 identity in its residual-income form. An absent
-  #                                 return gets that same value and a different
-  #                                 provenance, because "we do not know whether this
-  #                                 balance sheet earns its keep" is not the same
-  #                                 statement as "we measured break-even".
+  #                                 to book, whatever growth does -- the FR-29
+  #                                 identity in its residual-income form. That is a
+  #                                 real return a balance sheet can earn.
+  #   return-absent                 An absent return does not get that (or any other)
+  #                                 value -- "we do not know whether this balance
+  #                                 sheet earns its keep" is not the same statement as
+  #                                 "we measured break-even". It refuses, named
+  #                                 `estimator_unavailable`.
   #   below-the-cost-of-equity      Not floored at book. A bank destroying equity
   #                                 capital is worth less than the capital, and the
   #                                 spread is what says so.

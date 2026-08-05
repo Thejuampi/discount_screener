@@ -105,7 +105,7 @@ The defining property of $s(\cdot)$ is $\partial r_d/\partial(D/E) > 0$ (FR-20),
 
 $$V_T = \frac{E_T\left(1 - g_\infty/\mathrm{ROIC}\right)(1+g_\infty)}{r - g_\infty}$$
 
-Carried over unchanged from the current forward lane. Absent ROIC ⇒ retention charge of zero ⇒ $V_T = E_T/r$ (FR-29). An *observed* ROIC is used as observed, never floored at the cost of capital — flooring is what collapsed SW (1.5%), OMC (2.9%) and CHTR (5.0%) onto one payout and erased the differentiation the charge exists to create.
+Carried over unchanged from the current forward lane, for a *measured* ROIC. Absent ROIC is a Refusal (`EstimatorUnavailable`, FR-29), not a retention charge of zero — $V_T = E_T/r$ is the value an issuer earning exactly its cost of capital is measured at, and an absent ROIC has not measured that. An *observed* ROIC is used as observed, never floored at the cost of capital — flooring is what collapsed SW (1.5%), OMC (2.9%) and CHTR (5.0%) onto one payout and erased the differentiation the charge exists to create. (The legacy forward lane, `operating_valuation::terminal_payout_bps`, still substitutes the cost of equity for an absent ROIC and is unaddressed by FR-29's correction — see the latent-defect register, `docs/valuation-economic-contract.md`, LD-3.)
 
 ---
 

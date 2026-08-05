@@ -29,6 +29,11 @@ pub enum AbsenceReason {
     ProviderUnavailable,
     /// The value arrived but fell outside the range the policy admits.
     OutOfPolicyRange,
+    /// A required estimate exists as a quantity, but no validated estimator can
+    /// supply it for this issuer. Distinct from `NotReported`: the provider is
+    /// not at fault and nothing is missing from the filing — the gap is in this
+    /// Core's own evidence chain.
+    EstimatorUnavailable,
 }
 
 impl AbsenceReason {
@@ -39,6 +44,7 @@ impl AbsenceReason {
             Self::InsufficientObservations => "insufficient_observations",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::OutOfPolicyRange => "out_of_policy_range",
+            Self::EstimatorUnavailable => "estimator_unavailable",
         }
     }
 }
@@ -273,5 +279,22 @@ mod tests {
         let uncertainty = Uncertainty::from_variance(4_000.0, basis()).expect("valid variance");
         let observed = Observation::measured(1_200.0, uncertainty, provenance());
         assert_eq!(observed.provenance().source(), "test");
+    }
+
+    #[test]
+    fn estimator_unavailable_round_trips_through_its_string_spelling() {
+        assert_eq!(
+            AbsenceReason::EstimatorUnavailable.as_str(),
+            "estimator_unavailable"
+        );
+    }
+
+    #[test]
+    fn an_estimator_unavailable_observation_carries_its_reason_through_absence() {
+        let absent = Observation::<f64>::absent(AbsenceReason::EstimatorUnavailable, provenance());
+        assert_eq!(
+            absent.absence_reason(),
+            Some(AbsenceReason::EstimatorUnavailable)
+        );
     }
 }

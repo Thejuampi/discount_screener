@@ -36,7 +36,7 @@ why_new = "Separate from the cost-of-debt table because it takes component costs
 id = "intrinsic-value-from-fading-path"
 feature = "intrinsic-value.feature"
 name = "Intrinsic Value from a continuously fading growth path"
-covers = "Integrating the discounted cash-flow path with the retention charge, the ordering in return on capital, value-neutral and absent returns, the fade rate as the only horizon quantity, and the arithmetic guards on convergence and division"
+covers = "Integrating the discounted cash-flow path with the retention charge, the ordering in return on capital, the value-neutral identity for a measured return and the refusal of an absent one, the fade rate as the only horizon quantity, and the arithmetic guards on convergence and division"
 frs = ["FR-18", "FR-19", "FR-27", "FR-28", "FR-29"]
 why_new = "The wacc table resolves a rate from component rates; this integrates a cash-flow path over time and shares no column with it. The retention-charge rows were considered as an extension of that table and rejected because a terminal value is not a weighted average of anything"
 
@@ -52,8 +52,8 @@ why_new = "Every other table takes numbers and returns a number within a chosen 
 id = "residual-income-on-book"
 feature = "residual-income.feature"
 name = "Residual Income on book for a financial issuer"
-covers = "Valuing a financial issuer as book plus the present value of its spread over the cost of equity, the value-neutral and absent-return identities, the single fade rate governing both book growth and spread erosion, and the clean-surplus and convergence guards"
-frs = ["FR-30", "FR-31", "FR-32"]
+covers = "Valuing a financial issuer as book plus the present value of its spread over the cost of equity, the value-neutral identity for a measured return and the refusal of an absent one, the single fade rate governing both book growth and spread erosion, and the clean-surplus and convergence guards"
+frs = ["FR-29", "FR-30", "FR-31", "FR-32"]
 why_new = "Considered as rows of the intrinsic-value table and rejected: that table's columns are a cash flow, a return on capital and a retention charge, and none of the three exists here. Residual income starts from a stock rather than a flow, so every shared-looking column means a different quantity"
 
 [[outline]]

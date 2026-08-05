@@ -164,9 +164,9 @@ pub fn standardize(sample: &[f64]) -> Result<Standardized, AbsenceReason> {
 /// The plain mean of everything the caller happened to collect is the amateur
 /// summary this function exists to replace: it cannot tell a small year from a
 /// contaminated one, and it reports the contamination as signal. Here the sample
-/// states its own dispersion, anything beyond `max_absolute_z` of the centre is
-/// dropped as belonging to a different population, and the centre is recomputed
-/// from what is left.
+/// states its own dispersion, anything beyond [`MAX_ABSOLUTE_Z`] of the centre
+/// is dropped as belonging to a different population, and the centre is
+/// recomputed from what is left.
 ///
 /// One pass, deliberately. Iterating to a fixed point lets each removal tighten
 /// the scale enough to justify the next removal, and a sample can be trimmed to
@@ -177,12 +177,11 @@ pub fn standardize(sample: &[f64]) -> Result<Standardized, AbsenceReason> {
 /// leaves too little to speak with, the honest answer is that there is no
 /// measurement here, not the number that included the contamination.
 ///
-/// This is [`robust_centre`] with everything but the point estimate dropped. It
-/// keeps a threshold parameter only until its last external caller stops passing
-/// one; a caller that wants the width, the kept count or the exclusions asks for
-/// the centre itself rather than recomputing any of them.
-pub fn robust_mean(sample: &[f64], max_absolute_z: f64) -> Result<f64, AbsenceReason> {
-    trimmed(sample, max_absolute_z).map(|centre| centre.centre())
+/// This is [`robust_centre`] with everything but the point estimate dropped. A
+/// caller that wants the width, the kept count or the exclusions asks for the
+/// centre itself rather than recomputing any of them.
+pub fn robust_mean(sample: &[f64]) -> Result<f64, AbsenceReason> {
+    robust_centre(sample).map(|centre| centre.centre())
 }
 
 /// A centre, the width of that centre, and the observations neither of them used.
@@ -258,16 +257,17 @@ impl RobustCentre {
 /// to pass 4.0 would be relaxing it without touching the constant — which is
 /// exactly the move the constant exists to make reviewable.
 pub fn robust_centre(sample: &[f64]) -> Result<RobustCentre, AbsenceReason> {
-    trimmed(sample, MAX_ABSOLUTE_Z)
+    trimmed(sample)
 }
 
 /// The one place in this workspace that acts on a z-score.
 ///
-/// Both public entry points are this function, so there is a single trimming
-/// rule to review and a single refusal rule to reason about. The threshold is a
-/// parameter here rather than a constant only because [`robust_mean`] still
-/// carries one in its signature; nothing else may call this with anything but
-/// [`MAX_ABSOLUTE_Z`].
+/// Both public entry points reach this function, so there is a single trimming
+/// rule to review and a single refusal rule to reason about. It takes no
+/// threshold parameter: [`MAX_ABSOLUTE_Z`] is a boundary between populations
+/// rather than a tuning knob, and a caller able to pass a different value would
+/// be relaxing it without touching the constant that exists to make that move
+/// reviewable.
 ///
 /// The scores come from [`standardize`], which already refuses the three samples
 /// that cannot be trimmed at all — fewer than three observations, a non-finite
@@ -275,8 +275,8 @@ pub fn robust_centre(sample: &[f64]) -> Result<RobustCentre, AbsenceReason> {
 /// is a sample that trimming empties: fewer than three survivors is no longer a
 /// measurement, and reporting the untrimmed mean instead would be the
 /// contaminated answer wearing a robust label.
-fn trimmed(sample: &[f64], max_absolute_z: f64) -> Result<RobustCentre, AbsenceReason> {
-    let outliers = standardize(sample)?.outliers(max_absolute_z);
+fn trimmed(sample: &[f64]) -> Result<RobustCentre, AbsenceReason> {
+    let outliers = standardize(sample)?.outliers(MAX_ABSOLUTE_Z);
     let kept: Vec<f64> = sample
         .iter()
         .enumerate()
@@ -470,7 +470,7 @@ mod tests {
     /// centre on 10.4; the plain mean of all ten is 100.4.
     #[test]
     fn a_contaminated_observation_does_not_move_the_robust_centre() {
-        let centre = robust_mean(&CONTAMINATED, MAX_ABSOLUTE_Z).expect("a centre");
+        let centre = robust_mean(&CONTAMINATED).expect("a centre");
         assert!((centre - 94.0 / 9.0).abs() < 1e-12);
     }
 
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn the_robust_mean_is_the_robust_centre_with_everything_but_the_point_dropped() {
         assert_eq!(
-            robust_mean(&CONTAMINATED, MAX_ABSOLUTE_Z),
+            robust_mean(&CONTAMINATED),
             robust_centre(&CONTAMINATED).map(|centre| centre.centre())
         );
     }
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn trimming_below_a_usable_sample_refuses_rather_than_falling_back() {
         assert_eq!(
-            robust_mean(&[1.0, 1.0, 1.0, f64::NAN], MAX_ABSOLUTE_Z),
+            robust_mean(&[1.0, 1.0, 1.0, f64::NAN]),
             Err(AbsenceReason::NotReported)
         );
     }

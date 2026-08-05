@@ -401,14 +401,15 @@ Terminal value applies the retention charge derived from return on capital and T
 - Two Issuers with identical earnings and growth but different returns on capital produce different terminal values, monotonically ordered.
 - The charge approaches zero as return on capital approaches Terminal Growth, bounded by the FR-27 guard.
 
-#### FR-29: Missing return evidence is value-neutral, not floored
+#### FR-29: An absent return on capital refuses rather than valuing at the neutral line
 
-An Absent return on capital makes perpetual growth value-neutral rather than being replaced with the cost of capital.
+An Absent return on capital produces a Refusal, named `EstimatorUnavailable`, rather than being substituted with the cost of capital. Earning exactly the cost of capital is a measurement an Issuer can make; it is not the default value for an Issuer this Core failed to measure.
 
 **Consequences (testable):**
-- Absent return on capital collapses terminal value to earnings over the discount rate.
+- Absent return on capital is a Refusal (`kind() == "evidence"`, `detail() == "estimator_unavailable"`), never a value.
+- An *observed* return equal to the discount rate still collapses terminal value to earnings over the discount rate — that identity is unchanged, and it remains a real measurement rather than a default.
 - An *observed* low return is used as observed and is never floored at the cost of capital — flooring observed returns is what erased differentiation between sub-cost-of-capital issuers.
-- Absent and observed-equal-to-cost-of-capital produce the same value but different Provenance.
+- The residual-income form (FR-31) refuses on the same rule: an absent return on equity refuses rather than valuing the Issuer at book.
 
 ---
 
@@ -434,6 +435,7 @@ Every Issuer resolves to exactly one Business Class, with unknown input failing 
 **Consequences (testable):**
 - The operating cash-flow model never runs for a `FinancialServices` Issuer.
 - Return on equity enters as an Observation with measured Uncertainty, so a single contaminated year (COF's day-one CECL provision) widens the interval rather than collapsing value to book.
+- An absent return on equity refuses (`EstimatorUnavailable`) rather than valuing the Issuer at book — the same rule FR-29 states for return on capital, applied to its residual-income form.
 - `[ASSUMPTION: normalizing return on equity through a provision event is in scope for v1. This is the open COF decision; if deferred, COF remains wrong and FR-31 reduces to a port of current behaviour.]`
 
 #### FR-32: Two refusal kinds only
