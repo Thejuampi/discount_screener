@@ -1,0 +1,39 @@
+diff --git a/apps/windows/src-tauri/src/dcf_model.rs b/apps/windows/src-tauri/src/dcf_model.rs
+index a4df7d7..793252f 100644
+--- a/apps/windows/src-tauri/src/dcf_model.rs
++++ b/apps/windows/src-tauri/src/dcf_model.rs
+@@ -548,7 +548,10 @@ pub fn extract_normalized_fcff_level(
+         let Some(tax_bps) = point.tax_rate_bps else {
+             continue;
+         };
+-        let interest = interest.abs();
++        // T2.0/R-10 COUNTERFACTUAL -- MUST NOT MERGE. LD-1 abs site 1 of 3,
++        // removed so `probe_published_value_under_corrected_sign` can measure
++        // the published effect of the interest sign convention. Original line:
++        //     let interest = interest.abs();
+         let tax = tax_bps.clamp(0, 5_000) as f64 / 10_000.0;
+         let fcff = ocf + interest * (1.0 - tax) - capex;
+         years.push(FcffDriverYearAudit {
+@@ -904,7 +907,10 @@ impl FcfPoint {
+         self.operating_cash_flow_dollars = Some(operating_cash_flow_dollars);
+         self.capital_expenditure_dollars = Some(capital_expenditure_dollars.abs());
+         self.revenue_dollars = Some(revenue_dollars);
+-        self.interest_expense_dollars = interest_expense_dollars.map(f64::abs);
++        // T2.0/R-10 COUNTERFACTUAL -- MUST NOT MERGE. LD-1 abs site 2 of 3.
++        // Original line:
++        //     self.interest_expense_dollars = interest_expense_dollars.map(f64::abs);
++        self.interest_expense_dollars = interest_expense_dollars;
+         self.tax_rate_bps = tax_rate_bps;
+         self
+     }
+@@ -1587,7 +1593,9 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
+             .filter(|value| value.is_finite())
+             .zip(point.tax_rate_bps)
+             .map(|(interest, tax_bps)| {
+-                let interest = interest.abs();
++                // T2.0/R-10 COUNTERFACTUAL -- MUST NOT MERGE. LD-1 abs site 3 of 3.
++                // Original line:
++                //     let interest = interest.abs();
+                 let after_tax = interest * (1.0 - tax_bps.clamp(0, 5_000) as f64 / 10_000.0);
+                 (ocf + after_tax - capex, after_tax)
+             })

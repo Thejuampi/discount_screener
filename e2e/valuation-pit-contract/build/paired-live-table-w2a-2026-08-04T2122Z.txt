@@ -1,0 +1,787 @@
+warning: unused variable: `half`
+   --> src\valuation_gap_attribution.rs:408:9
+    |
+408 |     let half = denom / 2;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_half`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS` is never used
+  --> src\dcf_model.rs:79:7
+   |
+79 | const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tax_defaulted` is never read
+    --> src\dcf_model.rs:1537:5
+     |
+1516 | struct DriverModelInputs {
+     |        ----------------- field in this struct
+...
+1537 |     tax_defaulted: bool,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `DriverModelInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `recent_fcf_growth_bps` is never used
+    --> src\dcf_model.rs:2652:4
+     |
+2652 | fn recent_fcf_growth_bps(history: &[FcfPoint]) -> Option<i32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discounted_fcff_fade` is never used
+    --> src\dcf_model.rs:2670:4
+     |
+2670 | fn discounted_fcff_fade(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rate_quality` is never read
+    --> src\dcf_model.rs:2713:5
+     |
+2704 | struct ResolvedWacc {
+     |        ------------ field in this struct
+...
+2713 |     rate_quality: crate::driver_resolution::EvidenceQuality,
+     |     ^^^^^^^^^^^^
+
+warning: fields `valid_tax_periods` and `average_debt_dollars` are never read
+  --> src\driver_resolution.rs:40:9
+   |
+33 | pub struct ResolvedRateInputs {
+   |            ------------------ fields in this struct
+...
+40 |     pub valid_tax_periods: Vec<i32>,
+   |         ^^^^^^^^^^^^^^^^^
+41 |     pub average_debt_dollars: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ResolvedRateInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `DCF_DISCOUNT_RATE` is never used
+  --> src\edgar.rs:26:7
+   |
+26 | const DCF_DISCOUNT_RATE: f64 = 0.10;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_TERMINAL_GROWTH` is never used
+  --> src\edgar.rs:27:7
+   |
+27 | const DCF_TERMINAL_GROWTH: f64 = 0.03;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_PROJECTION_YEARS` is never used
+  --> src\edgar.rs:28:7
+   |
+28 | const DCF_PROJECTION_YEARS: usize = 5;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_GROWTH` is never used
+  --> src\edgar.rs:29:7
+   |
+29 | const DCF_MIN_GROWTH: f64 = -0.05;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MAX_GROWTH` is never used
+  --> src\edgar.rs:30:7
+   |
+30 | const DCF_MAX_GROWTH: f64 = 0.25;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_YEARS_HISTORY` is never used
+  --> src\edgar.rs:31:7
+   |
+31 | const DCF_MIN_YEARS_HISTORY: usize = 2; // need at least 2 data points for a growth rate
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DcfResult` is never constructed
+    --> src\edgar.rs:1057:12
+     |
+1057 | pub struct DcfResult {
+     |            ^^^^^^^^^
+
+warning: function `compute_dcf` is never used
+    --> src\edgar.rs:1068:4
+     |
+1068 | fn compute_dcf(fcf_by_year: &[(i32, i64)], shares_outstanding: u64) -> Option<DcfResult> {
+     |    ^^^^^^^^^^^
+
+warning: function `fetch_dcf` is never used
+    --> src\edgar.rs:1526:8
+     |
+1526 | pub fn fetch_dcf(
+     |        ^^^^^^^^^
+
+warning: method `ingest_dcf` is never used
+    --> src\engine.rs:2266:12
+     |
+2068 | impl ScreenerState {
+     | ------------------ method in this implementation
+...
+2266 |     pub fn ingest_dcf(&mut self, symbol: String, value_cents: i64) {
+     |            ^^^^^^^^^^
+
+warning: `discount-screener-windows` (lib test) generated 17 warnings (run `cargo fix --lib -p discount-screener-windows --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running unittests src\lib.rs (target\debug\deps\discount_screener_windows_lib-11cf8efa1419a5b7.exe)
+
+running 577 tests
+test analyst_forecasts::tests::cache_and_observation_freshness_boundaries ... ok
+test analyst_forecasts::tests::opt_in_live_contract_covers_five_distinct_symbols ... ignored, requires TIPRANKS_API_KEY
+test analyst_forecasts::tests::provider_month_is_utc_calendar_month ... ok
+test analyst_forecasts::tests::parse_provider_date_accepts_live_tipranks_formats ... ok
+test analyst_forecasts::tests::drops_invalid_rows_and_keeps_the_latest_target_per_identity ... ok
+test analyst_forecasts::tests::normalizes_fixed_point_fields_and_assumes_a_twelve_month_horizon ... ok
+test analyst_forecasts::tests::computes_integer_statistics_and_histogram_bins ... ok
+test analyst_forecasts::tests::star_weight_formula_clamps_between_0_70_and_1_30 ... ok
+test analyst_forecasts::tests::parses_live_mcp_text_content_array_with_mm_dd_yyyy_dates ... ok
+test analyst_forecasts::tests::parses_tipranks_payload_shapes ... ok
+test analyst_forecasts::tests::parses_live_mcp_structured_result_string_envelope ... ok
+test analyst_forecasts::tests::uses_an_explicit_provider_horizon_when_present ... ok
+test analyst_forecasts::tests::unwraps_double_encoded_tool_result_envelope ... ok
+test analyst_forecasts::tests::uses_converted_price_target_when_native_target_missing ... ok
+test analyst_forecasts::tests::weighted_consensus_requires_three_identities ... ok
+test analyst_method_import::tests::decision_instant_is_part_of_semantic_fingerprint ... ok
+test analyst_method_import::tests::derives_fem_from_observations_not_duplicate_fields ... ok
+test analyst_method_import::tests::impossible_calendar_date_refuses ... ok
+test analyst_method_import::tests::economic_period_start_after_end_refuses ... ok
+test analyst_method_import::tests::lineage_mismatch_refuses ... ok
+test analyst_method_import::tests::eps_value_change_without_observation_update_impossible ... ok
+test analyst_method_import::tests::control_envelope_does_not_admit_quality_or_replay_semantics ... ok
+test analyst_method_import::tests::canonical_command_digest_ignores_json_formatting_but_covers_accepted_fields ... ok
+test analyst_method_import::tests::missing_eps_observation_refuses ... ok
+test analyst_method_import::tests::non_eps_money_observation_refuses ... ok
+test analyst_method_import::tests::period_mismatch_refuses ... ok
+test analyst_method_import::tests::non_positive_decision_instant_refuses ... ok
+test analyst_method_import::tests::non_forward_pe_multiple_refuses ... ok
+test analyst_method_import::tests::pit_operational_look_ahead_refuses ... ok
+test analyst_method_import::tests::storage_prohibited_refuses_on_admit ... ok
+test analyst_method_import::tests::target_as_of_after_forecast_period_end_refuses ... ok
+test analyst_method_import::tests::unverified_with_reported_gaap_refuses ... ok
+test analyst_method_import::tests::shared_pointer_refusals_execute_in_exact_contract_order ... ok
+test analyst_forecasts::tests::uncached_open_issues_zero_provider_calls_and_exposes_load_action ... ok
+test analyst_forecasts::tests::credential_status_serialization_never_contains_the_secret ... ok
+test analyst_forecasts::tests::stale_cache_stays_visible_with_refresh_cost_confirmation ... ok
+test analyst_method_service::tests::malformed_semantic_fields_do_not_prevent_trusted_refusal_invalidation ... ok
+test analyst_method_service::tests::deterministic_lifecycle_conflict_is_atomically_refused_and_invalidated ... ok
+test analyst_forecasts::tests::rate_limit_blocks_before_an_eleventh_call_in_one_minute ... ok
+test analyst_forecasts::tests::fresh_and_aging_cache_reopen_never_calls_provider ... ok
+test analyst_forecasts::tests::previous_month_cache_is_never_presented ... ok
+test commands::feed_coordinator_tests::chart_only_refresh_is_visible_and_preserves_existing_enrichment ... ok
+test commands::feed_coordinator_tests::chart_only_stock_without_fundamentals_still_needs_retry ... ok
+test commands::feed_coordinator_tests::clear_universe_preserves_scoring_model ... ok
+test commands::feed_coordinator_tests::cof_stale_detail_demand_refresh_replaces_unavailable_with_residual_income ... ok
+test commands::feed_coordinator_tests::financial_detail_refreshes_when_retention_is_missing ... ok
+test commands::feed_coordinator_tests::generation_is_current_detects_stale_workers ... ok
+test commands::feed_coordinator_tests::incomplete_retry_status_is_short_for_status_bar ... ok
+test commands::feed_coordinator_tests::initial_pass_completion_is_generation_bound_and_resettable ... ok
+test commands::feed_coordinator_tests::price_only_refetch_does_not_requeue_when_state_already_enriched ... ok
+test analyst_forecasts::tests::settings_status_propagates_budget_database_failures ... ok
+test commands::feed_coordinator_tests::regime_row_status_distinguishes_all_four_states_and_keeps_zero_included ... ok
+test commands::feed_coordinator_tests::shared_yahoo_cooldown_is_applied_once_to_the_retry_batch ... ok
+test commands::feed_coordinator_tests::terminal_incomplete_status_lists_few_tickers ... ok
+test analyst_method_service::tests::exact_retry_is_idempotent_noop ... ok
+test analyst_method_service::tests::foreign_envelope_does_not_invalidate ... ok
+test analyst_forecasts::tests::missing_key_and_exhausted_budget_never_call_the_provider ... ok
+test analyst_method_service::tests::end_to_end_fixture_import_commits_three_sixty_four ... ok
+test cross_platform_parity::export_random20_sp500_parity_snapshot ... FAILED
+test cross_platform_parity::mpwr_negative_interest_income_is_still_unnegated_by_with_operating_drivers ... ok
+test cross_platform_parity::export_qa_cohort_parity_snapshot_for_android ... ok
+test analyst_forecasts::tests::external_usage_reconciliation_uses_stricter_remaining ... ok
+test analyst_forecasts::tests::explicit_load_issues_one_counted_call_and_caches_result ... ok
+test analyst_forecasts::tests::failed_refresh_keeps_prior_cache_and_error_banner ... ok
+test analyst_forecasts::tests::warning_threshold_fires_at_25_of_50 ... ok
+test analyst_forecasts::tests::overlapping_load_requests_share_one_provider_call ... ok
+test analyst_method_service::tests::decision_only_mutation_conflicts_same_run_identity ... ok
+test analyst_method_service::tests::accepted_field_mutation_conflicts_even_when_fem_result_is_unchanged ... ok
+test analyst_method_service::tests::new_run_without_supersedes_cannot_overwrite_projection ... ok
+test analyst_method_service::tests::semantic_refusal_on_trusted_supersede_invalidates ... ok
+test analyst_method_service::tests::role_binding_mutation_conflicts_idempotency ... ok
+test analyst_method_service::tests::wrong_bundle_for_import_refuses ... ok
+test analyst_method_service::tests::split_basis_mismatch_on_trusted_supersede_invalidates_stale_current ... ok
+test analyst_method_service::tests::unseeded_identity_refuses_end_to_end ... ok
+test analyst_method_service::tests::superseding_import_invalidates_prior_projection ... ok
+test db::fmp_tests::fmp_attempts_propagates_sqlite_failures_but_missing_rows_are_zero ... ok
+test commands::qa_universe_apply_tests::locked_profile_rejects_switch_without_mutation ... ok
+test db::fmp_tests::fmp_budget_discards_previous_provider_days ... ok
+test db::fmp_tests::fmp_budget_reservation_never_exceeds_the_limit ... ok
+test commands::qa_universe_apply_tests::qa_membership_never_exceeds_hard_cap ... ok
+test commands::qa_universe_apply_tests::reapply_same_symbol_set_is_idempotent ... ok
+test db::foundation_0b_tests::atomic_commit_typed_observation_recomputes_set_and_membership ... ok
+test db::foundation_0b_tests::authority_race_preserves_new_current_and_writes_no_refusal ... ok
+test db::fmp_tests::late_previous_day_budget_write_cannot_prune_the_new_day ... ok
+test db::fmp_tests::reading_a_new_provider_day_prunes_licensed_rows_without_a_fetch ... ok
+test db::foundation_0b_tests::future_user_version_refuses_open ... ok
+test db::fmp_tests::late_previous_day_cache_write_cannot_prune_the_new_day ... ok
+test db::fmp_tests::fmp_cache_is_replaceable_and_scoped_to_the_provider_day ... ok
+test db::foundation_0b_tests::certified_backfill_cannot_update_projection ... ok
+test db::foundation_0b_tests::certified_backfill_without_projection_commits ... ok
+test db::foundation_0b_tests::empty_identity_fingerprint_refuses ... ok
+test db::foundation_0b_tests::duplicate_observation_content_is_noop_for_obs_table ... ok
+test db::foundation_0b_tests::invalid_observation_refuses_before_write ... ok
+test db::foundation_0b_tests::fresh_db_reaches_schema_version_8 ... ok
+test db::foundation_0b_tests::identity_seed_is_idempotent_but_same_key_different_content_refuses ... ok
+test db::foundation_0b_tests::mid_transaction_failure_rolls_back_invalidation_run_roles_and_command ... ok
+test dcf_model::tests::acgl_uses_residual_income_not_fcff ... ok
+test dcf_model::tests::acquisition_in_latest_year_keeps_growth_from_the_clean_years ... ok
+test dcf_model::tests::acquisition_leaving_no_clean_growth_pair_normalizes_without_refusing ... ok
+test dcf_model::tests::amzn_capex_trough_keeps_normalized_scenarios_ordered ... ok
+test dcf_model::tests::amzn_driver_fcff_uses_operating_bridge_and_revenue_growth ... ok
+test dcf_model::tests::capex_imputed_years_surface_in_diagnostics ... ok
+test dcf_model::tests::ci_like_managed_care_uses_residual_income_not_fcff ... ok
+test dcf_model::tests::classifier_acgl_is_financial ... ok
+test dcf_model::tests::classifier_cigna_healthcare_plans_is_financial ... ok
+test dcf_model::tests::classifier_etf_not_eligible ... ok
+test dcf_model::tests::classifier_missing_sector_industry_is_unclassified_not_fcff_default ... ok
+test dcf_model::tests::classifier_operating_sectors_covered ... ok
+test dcf_model::tests::classifier_operating_tech ... ok
+test db::foundation_0b_tests::populated_legacy_db_migrates_without_snapshot_loss ... ok
+test dcf_model::tests::classifier_real_estate_services_is_operating_but_reit_is_not_eligible ... ok
+test dcf_model::tests::classifier_unknown_sector_is_unclassified ... ok
+test dcf_model::tests::compounding_capex_wave_still_earns_the_owner_earnings_base ... ok
+test dcf_model::tests::cost_of_equity_extremes_refuse_instead_of_saturating ... ok
+test dcf_model::tests::driver_regime_uses_persistence_before_dispersion ... ok
+test dcf_model::tests::dvn_class_coe_not_bond_like_from_low_trailing_beta_alone ... ok
+test dcf_model::tests::fcf_run_rate_blends_toward_latest_on_recovery_step_up ... ok
+test dcf_model::tests::explicit_rate_resolution_has_no_debt_weight_uplift ... ok
+test dcf_model::tests::fcf_run_rate_uses_latest_contiguous_positive_suffix ... ok
+test dcf_model::tests::fcf_run_rate_uses_recent_window_average ... ok
+test dcf_model::tests::fcff_does_not_clamp_intrinsic_to_price_or_street ... ok
+test dcf_model::tests::financials_without_book_fail_not_fcff_fallback ... ok
+test dcf_model::tests::financials_without_retention_fail_not_fcff_fallback ... ok
+test dcf_model::tests::financials_without_roe_fail_not_fcff_fallback ... ok
+test dcf_model::tests::flat_growth_high_capex_network_is_not_an_investment_wave ... ok
+test dcf_model::tests::flat_growth_high_capex_network_keeps_the_reported_fcff_base ... ok
+test dcf_model::tests::higher_rf_lowers_operating_value ... ok
+test dcf_model::tests::historical_acquisition_excludes_only_its_growth_transition ... ok
+test dcf_model::tests::industry_beta_policy_golden_cases_exact_fixed_point ... ok
+test dcf_model::tests::industry_beta_policy_version_is_embedded_and_matches_constant ... ok
+test dcf_model::tests::levered_provisional_wacc_applies_full_debt_scaled_uplift ... ok
+test dcf_model::tests::mu_cycle_uses_median_aligned_fcff_margin_and_retains_negative_year ... ok
+test dcf_model::tests::net_debt_can_produce_visible_zero_equity_scenario_without_refusing_model ... ok
+test dcf_model::tests::operating_fcff_ordered_scenarios ... ok
+test dcf_model::tests::poc_real_data_driver_wacc_resolution_solid_quality ... ok
+test dcf_model::tests::provisional_wacc_stress_is_asymmetric_and_reaches_market_like_bear ... ok
+test dcf_model::tests::reporting_basis_break_normalizes_only_the_surviving_issuer ... ok
+test dcf_model::tests::reporting_basis_break_refuses_rather_than_pooling_two_issuers ... ok
+test dcf_model::tests::software_control_industry_prior_stable_within_policy ... ok
+test dcf_model::tests::solid_rates_use_symmetric_wacc_band ... ok
+test dcf_model::tests::sustaining_capex_holds_full_intensity_when_revenue_is_flat ... ok
+test dcf_model::tests::sustaining_capex_releases_the_growth_share_when_revenue_compounds ... ok
+test dcf_model::tests::shared_t_contract_executes_against_windows_engine ... ok
+test dcf_model::tests::t_class_base_moves_toward_weighted_analyst_without_clamp ... ok
+test dcf_model::tests::unclassified_compute_fails_without_absurd_fcff ... ok
+test driver_resolution::tests::aligned_accounting_evidence_is_provisional_or_solid ... ok
+test dcf_model::tests::wacc_stress_widens_scenario_band_vs_growth_only_shape ... ok
+test driver_resolution::tests::debt_and_tax_must_share_fiscal_periods ... ok
+test driver_resolution::tests::explicit_zero_debt_is_not_applicable ... ok
+test driver_resolution::tests::market_yield_precedes_aligned_accounting ... ok
+test driver_resolution::tests::missing_debt_is_not_zero ... ok
+test driver_resolution::tests::no_tax_does_not_get_a_default ... ok
+test driver_resolution::tests::rated_spread_precedes_aligned_accounting ... ok
+test driver_resolution::tests::positive_interest_with_zero_debt_is_inconsistent ... ok
+test driver_resolution::tests::tax_reconciliation_precedes_jurisdiction_proxy_and_is_provisional_when_sparse ... ok
+test driver_resolution::tests::unlabelled_marginal_tax_is_not_used ... ok
+test edgar::tests::a_fact_whose_end_will_not_parse_produces_no_annual_value_despite_fy ... ok
+test edgar::tests::a_fact_without_a_filing_date_produces_no_annual_value ... ok
+test edgar::tests::a_fact_without_an_accession_produces_no_annual_value ... ok
+test edgar::tests::a_february_fiscal_close_belongs_to_the_calendar_year_of_its_end ... ok
+test edgar::tests::a_fiscal_year_end_change_keeps_the_later_period_end ... ok
+test edgar::tests::an_interpolated_capex_year_is_knowable_only_from_its_later_neighbour ... ok
+test edgar::tests::an_issuer_with_no_facts_for_a_driver_yields_an_empty_series ... ok
+test edgar::tests::annual_extraction_accepts_later_ten_k_amendment ... ok
+test edgar::tests::annual_extraction_keeps_comparatives_with_current_filing_fy ... ok
+test edgar::tests::annual_extraction_prefers_consolidated_annual_over_segment_and_quarter ... ok
+test edgar::tests::as_of_admits_only_the_filing_strictly_before_the_cutoff ... ok
+test edgar::tests::as_of_excludes_an_observation_filed_exactly_on_the_cutoff ... ok
+test edgar::tests::att_2020_capex_matches_public_mda_order_of_magnitude ... ok
+test edgar::tests::att_2018_2020_uses_reported_productive_assets_not_interpolation ... ok
+test edgar::tests::concept_vintages_applies_each_concept_its_own_sign ... ok
+test edgar::tests::concept_vintages_panics_when_signs_and_concepts_disagree_in_length - should panic ... ok
+test edgar::tests::crgy_property_acquisition_is_not_merged_into_development_capex ... ok
+test edgar::tests::current_shares_prefers_latest_filed_dei_observation ... ok
+test edgar::tests::development_total_takes_its_fiscal_year_from_the_period_end ... ok
+test edgar::tests::discontinued_operation_marks_revenue_restated_but_not_cash_flow ... ok
+test edgar::tests::equivalent_xbrl_concepts_merge_history_without_overwriting_precedence ... ok
+test edgar::tests::fcf_subtracts_capex_not_ocf_alone ... ok
+test edgar::tests::free_cash_flow_is_knowable_from_the_later_of_its_two_inputs ... ok
+test edgar::tests::iso_date_refuses_anything_that_is_not_a_calendar_day ... ok
+test edgar::tests::merge_capex_prefers_larger_abs_per_year ... ok
+test edgar::tests::leaf_observation_is_knowable_from_its_filing_date_and_names_its_accession ... ok
+test edgar::tests::missing_capex_year_zeros_not_panics ... ok
+test edgar::tests::ppe_productive_overlap_prefers_equal_max_not_sum ... ok
+test edgar::tests::probe_driver_coverage ... ignored, network: driver year-coverage probe
+test edgar::tests::probe_investing_outflows ... ignored, network: raw XBRL investing-concept probe
+test edgar::tests::probe_restated_facts ... ignored, network: raw XBRL restatement probe
+test edgar::tests::percent_fact_records_its_fiscal_year_and_the_filed_unit ... ok
+test edgar::tests::resolve_capex_carries_outside_span ... ok
+test edgar::tests::rejected_acquisition_observation_carries_the_ledger_facts_identity ... ok
+test edgar::tests::restatement_keeps_the_latest_filed_value ... ok
+test edgar::tests::total_debt_names_both_of_the_components_it_summed ... ok
+test edgar::tests::true_taxonomy_hole_interpolates_as_last_resort ... ok
+test engine::gap_tests::discount_to_fair_value_positive ... ok
+test edgar::tests::two_cutoffs_over_one_restated_year_return_two_different_values ... ok
+test engine::gap_tests::missing_fair_value_is_none ... ok
+test engine::gap_tests::premium_to_fair_value_negative ... ok
+test engine::progressive_merge_tests::partial_price_refresh_preserves_known_snapshot_enrichment ... ok
+test engine::progressive_merge_tests::sparse_signal_refresh_preserves_known_analyst_fields ... ok
+test engine::progressive_merge_tests::sparse_fundamentals_refresh_preserves_known_fields ... ok
+test engine::valuation_routing_tests::ingest_rejects_new_fcff_for_financials ... ok
+test engine::valuation_routing_tests::ensure_model_routed_replaces_stale_fcff_for_acgl ... ok
+test engine::valuation_routing_tests::operating_route_is_atomic_and_keeps_fcff_provenance_separate ... ok
+test engine::valuation_routing_tests::provider_failure_selected_fcff_projects_through_detail ... ok
+test engine::valuation_routing_tests::reconciliation_drops_operating_analysis_from_stale_policy ... ok
+test engine::valuation_routing_tests::selected_forward_is_not_projected_as_independent_dcf_ranking_evidence ... ok
+test engine::valuation_routing_tests::route_currentness_tracks_fundamentals_age_and_provider_failures ... ok
+test engine::valuation_routing_tests::successful_forward_currentness_enforces_every_age_horizon_and_version_boundary ... ok
+test db::foundation_0b_tests::refused_attempt_and_invalidation_survive_reopen_atomically ... ok
+test engine::valuation_routing_tests::valuation_unavailable_reason_surfaces_unclassified ... ok
+test evidence_sotp::tests::classifier_is_closed_world_and_family_specific ... ok
+test evidence_sotp::tests::complete_sotp_bridges_once_and_publishes_price ... ok
+test evidence_sotp::tests::equal_rank_conflicting_money_observations_refuse ... ok
+test evidence_sotp::tests::equal_rank_identical_money_selects_last_revision ... ok
+test evidence_sotp::tests::financial_services_never_uses_fcff ... ok
+test evidence_sotp::tests::missing_overhead_evidence_cannot_publish_even_when_immaterial ... ok
+test evidence_sotp::tests::net_debt_exceeding_ev_is_zero_equity_not_refusal ... ok
+test evidence_sotp::tests::point_in_time_replay_excludes_later_revision ... ok
+test engine::valuation_routing_tests::total_refusal_clears_selected_value_and_serializes_client_contract ... ok
+test evidence_sotp::tests::terminal_growth_requires_roic_and_reinvestment_link ... ok
+test evidence_sotp::tests::resource_and_contract_families_require_physical_or_contract_evidence ... ok
+test evidence_sotp::tests::unresolved_material_component_only_allows_covered_ev ... ok
+test evidence_sotp::tests::validation_never_uses_current_membership_as_historical_proxy ... ok
+test evidence_sotp_contract::shared_sotp_fixtures_execute_on_windows_and_one_cent_mutation_fails ... ok
+test evidence_sotp_contract::shared_routing_fixtures_execute_on_windows ... ok
+test evidence_sotp_contract::shared_point_in_time_fixtures_execute_on_windows ... ok
+test fetcher::list_ready_tests::asset_override_creates_crypto_sector_when_fundamentals_missing ... ok
+test fetcher::list_ready_tests::crypto_price_only_is_list_ready ... ok
+test fetcher::list_ready_tests::five_live_reported_names_have_normalizable_forward_evidence ... ignored, live demand-only Yahoo forward forecast audit
+test fetcher::list_ready_tests::five_live_stocks_have_progressive_rows_and_enrichment ... ignored, live Yahoo verification
+test fetcher::list_ready_tests::probe_forward_eps_ladder ... ignored, network: raw Yahoo earningsTrend probe
+test fetcher::list_ready_tests::stock_price_only_is_list_ready_but_still_needs_enrichment ... ok
+test fetcher::list_ready_tests::stock_with_fundamentals_is_list_ready ... ok
+test forward_earnings_multiple::tests::extreme_i64_max_times_one_hundred_uses_wide_intermediate ... ok
+test forward_earnings_multiple::tests::extreme_overflow_result_refuses ... ok
+test forward_earnings_multiple::tests::fixture_transcription_thirteen_times_twenty_eight_is_three_sixty_four ... ok
+test forward_earnings_multiple::tests::half_up_rounding_example ... ok
+test forward_earnings_multiple::tests::market_price_and_stated_target_do_not_affect_result ... ok
+test forward_earnings_multiple::tests::missing_horizon_fields_refuse ... ok
+test forward_earnings_multiple::tests::missing_metric_refuses ... ok
+test forward_earnings_multiple::tests::non_positive_multiple_refuses ... ok
+test forward_earnings_multiple::tests::peer_policy_with_zero_peers_refuses ... ok
+test forward_earnings_multiple::tests::synthetic_issuer_same_arithmetic ... ok
+test forward_earnings_multiple::tests::zero_eps_refuses ... ok
+test forward_earnings_multiple_contract::shared_available_fixtures_execute ... ok
+test forward_earnings_multiple_contract::shared_mutation_invariants_execute ... ok
+test forward_earnings_multiple_contract::shared_refusal_fixtures_execute ... ok
+test index_estimates::tests::index_estimates_weights_by_market_cap ... ok
+test issuer_identity::tests::blank_cik_refuses ... ok
+test issuer_identity::tests::blank_issuer_id_refuses ... ok
+test issuer_identity::tests::identity_fingerprint_stable ... ok
+test issuer_identity::tests::resolve_amzn_shaped_by_ticker ... ok
+test issuer_identity::tests::resolve_synthetic_by_issuer_id ... ok
+test issuer_identity::tests::ticker_effective_from_is_part_of_identity_vintage ... ok
+test issuer_identity::tests::two_issuers_have_distinct_identity_fingerprints ... ok
+test launch_profile::tests::alias_test_canonicalizes_to_qa ... ok
+test launch_profile::tests::cli_wins_over_env ... ok
+test launch_profile::tests::duplicate_cli_errors ... ok
+test launch_profile::tests::empty_env_is_unset ... ok
+test launch_profile::tests::env_only ... ok
+test launch_profile::tests::invalid_cli_fails_closed ... ok
+test launch_profile::tests::invalid_env_fails_closed ... ok
+test launch_profile::tests::missing_cli_value_errors ... ok
+test launch_profile::tests::profile_equals_form ... ok
+test launch_profile::tests::profile_space_form ... ok
+test launch_profile::tests::universe_preferred_forms ... ok
+test operating_valuation::tests::all_non_operating_families_fail_closed ... ok
+test feed_log::tests::log_pending_retry_writes_full_sorted_ticker_list ... ok
+test feed_log::tests::log_terminal_incomplete_writes_sticky_set ... ok
+test operating_valuation::tests::forward_candidate_uses_fixed_point_recurrence ... ok
+test operating_valuation::tests::gordon_headroom_is_part_of_effective_stable_growth ... ok
+test operating_valuation::tests::headless_fixed_point_operating_core_poc ... ignored, frozen Yahoo/SEC capture; headless fixed-point cohort PoC
+test operating_valuation::tests::every_cohort_row_resolves_return_on_capital_explicitly ... ok
+test operating_valuation::tests::invalid_economics_refuse_instead_of_clamping ... ok
+test operating_valuation::tests::policy_provenance_window_and_structural_work_limits_fail_closed ... ok
+test operating_valuation::tests::refusal_and_route_reasons_are_canonical ... ok
+test operating_valuation::tests::representative_trailing_cash_retains_fcff_primary ... ok
+test operating_valuation::tests::router_rejects_contradictory_candidates_and_fingerprints_material_inputs ... ok
+test operating_valuation::tests::stale_forward_cannot_displace_usable_fcff ... ok
+test operating_valuation::tests::durable_reported_and_holdout_cohorts_recompute_in_normal_gate ... FAILED
+test operating_valuation::tests::structural_distortion_selects_forward_and_exposes_disagreement ... ok
+test operating_valuation_runtime::tests::acquisition_normalized_growth_is_absent_evidence_not_a_zero_trend ... ok
+test operating_valuation_runtime::tests::consensus_far_from_trend_decays_to_the_through_cycle_weight ... ok
+test operating_valuation_runtime::tests::consensus_on_its_own_trend_keeps_the_company_weight ... ok
+test operating_valuation_runtime::tests::continuous_issuer_does_not_force_forward_from_calendar_age ... ok
+test operating_valuation::tests::shared_contract_matches_exactly_and_keeps_validation_anchors_external ... ok
+test operating_valuation_runtime::tests::deviation_compares_revenue_against_revenue_not_the_mixed_consensus ... ok
+test operating_valuation_runtime::tests::forward_provider_failure_preserves_a_usable_fcff_primary ... ok
+test operating_valuation_runtime::tests::material_candidate_disagreement_resolves_primary_to_forward_lane ... ok
+test operating_valuation::tests::validation_anchor_mutation_is_bit_identical ... ok
+test operating_valuation_runtime::tests::production_normalization_derives_growth_hold_and_complete_provenance ... ok
+test operating_valuation_runtime::tests::normalization_failure_is_typed_and_never_fabricates_a_period ... ok
+test operating_valuation_runtime::tests::production_still_reads_the_flat_cap_until_the_blend_clears_its_anchors ... ok
+test operating_valuation_runtime::tests::saturated_deviation_pulls_the_rate_toward_the_companys_own_history ... ok
+test operating_valuation_runtime::tests::sndk_class_emits_source_discontinuity_via_continuity_gate ... ok
+test operating_valuation_runtime::tests::thin_fcff_and_durable_returns_are_structural_evidence ... ok
+test opportunity_v3::tests::composite_coverage_bonus_three_buckets ... ok
+test opportunity_v3::tests::decision_cutoffs_continuous ... ok
+test opportunity_v3::tests::forecast_score_ignores_quant_engine_while_ranking_flag_is_off ... ok
+test opportunity_v3::tests::four_bucket_coverage_bonus_and_parity ... ok
+test opportunity_v3::tests::high_beta_haircuts_composite ... ok
+test opportunity_v3::tests::high_beta_raises_short_composite_vs_low_beta ... ok
+test opportunity_v3::tests::invert_bucket_negates_and_preserves_none ... ok
+test opportunity_v3::tests::invert_composite_is_pure_negation ... ok
+test opportunity_v3::tests::missing_beta_not_penalized ... ok
+test opportunity_v3::tests::rsi_level_ramp_mid_zone_positive ... ok
+test opportunity_v3::tests::scoring_model_parse_and_as_str_round_trip ... ok
+test operating_valuation_runtime::tests::reported_provider_fixture_crosses_parser_normalization_and_runtime_router ... ok
+test opportunity_v3::tests::setup_from_v3_equals_composite ... ok
+test opportunity_v3::tests::setup_labels_follow_short_composite ... ok
+test opportunity_v3::tests::short_decision_uses_same_cutoffs_on_inverted_composite ... ok
+test opportunity_v3::tests::short_extended_composite_has_exact_classic_parity_without_context ... ok
+test opportunity_v3::tests::short_extended_composite_preserves_inverse_v3_semantics ... ok
+test price_path::tests::compact_limits_motive_codes ... ok
+test price_path::tests::long_zone_below_price_when_extended ... ok
+test price_path::tests::in_zone_has_high_touch_probability ... ok
+test price_path::tests::zero_price_returns_unavailable ... ok
+test price_path::tests::motives_capped_at_three ... ok
+test price_path::tests::short_zone_above_price ... ok
+test profiles::tests::compose_dow_is_profile_only ... ok
+test profiles::tests::compose_qa_is_rejected ... ok
+test price_path::tests::zone_width_clamped_to_atr_bounds ... ok
+test profiles::tests::exposes_expected_canonical_profile_names ... ok
+test profiles::tests::fill_priority_no_dups_and_cap ... ok
+test profiles::tests::rank_stable_tie_break_and_null_free ... ok
+test profiles::tests::compose_sp500_includes_etf_and_crypto ... ok
+test profiles::tests::rank_stale_flag_does_not_exclude ... ok
+test profiles::tests::rank_uses_latest_semantics_via_prefiltered_rows ... ok
+test profiles::tests::resolve_returns_canonical_ids ... ok
+test profiles::tests::resolves_named_profiles_and_aliases ... ok
+test profiles::tests::symbol_set_ignores_order_for_identity ... ok
+test profiles::tests::unknown_profile_returns_none ... ok
+test quant_lens::tests::aligned_solid_model_can_be_primary ... ok
+test quant_lens::tests::analyst_only_when_no_model ... ok
+test quant_lens::tests::diagnostic_sections_do_not_rewrite_primary_status ... ok
+test quant_lens::tests::extreme_provider_values_do_not_overflow_disagreement_or_upside_math ... ok
+test quant_lens::tests::forward_and_yahoo_target_are_one_correlated_family_without_agreement_bonus ... ok
+test quant_lens::tests::gap_alone_does_not_double_count_as_two_families ... ok
+test quant_lens::tests::operating_candidate_dispute_has_no_single_expected_value ... ok
+test quant_lens::tests::residual_income_label_when_aligned ... ok
+test quant_lens::tests::tsla_junk_fcff_is_disputed_not_strong_ev ... ok
+test quote_summary::tests::aapl_fixture_is_list_ready_with_sector_and_target ... ok
+test quote_summary::tests::chart_only_priced_stock_is_list_ready_for_progressive_hydration ... ok
+test quote_summary::tests::cof_reads_reported_payout_from_summary_detail_for_residual_income ... ok
+test quote_summary::tests::derives_shares_when_yahoo_omits_share_count_but_reports_market_cap ... ok
+test quote_summary::tests::dollars_to_cents_floors_sub_cent_crypto_so_list_ready_can_complete ... ok
+test quote_summary::tests::financial_fixtures_resolve_summary_detail_payout_for_residual_income ... ok
+test quote_summary::tests::forward_consensus_remains_demand_only ... ok
+test quote_summary::tests::forward_parser_has_typed_missing_period_and_currency_failures ... ok
+test quote_summary::tests::missing_payout_in_both_modules_yields_no_retention_and_ri_unavailable ... ok
+test quote_summary::tests::parse_aapl_fixture_has_price_and_targets ... ok
+test db::foundation_0b_tests::revision_predecessor_must_exist_and_lineage_survives_reopen ... ok
+test quote_summary::tests::parse_brk_b_fixture_uses_display_symbol ... ok
+test quote_summary::tests::parses_five_real_forward_forecasts_without_target_or_price_inputs ... ok
+test quote_summary::tests::parse_all_live_fixtures ... ok
+test quote_summary::tests::payout_prefers_financial_data_over_summary_detail ... ok
+test quote_summary::tests::successful_sparse_stock_response_does_not_retry_forever ... ok
+test quote_summary::tests::target_and_market_price_mutations_do_not_change_forward_evidence ... ok
+test quote_summary::tests::stock_with_target_analysts_and_sector_is_enrichment_complete ... ok
+test quote_summary::tests::yahoo_request_symbol_keeps_exchange_suffix ... ok
+test quote_summary::tests::yahoo_request_symbol_maps_share_class_dot_to_hyphen ... ok
+test quote_summary::tests::thin_refresh_preserves_book_roe_and_retention_for_financials ... ok
+test regime::cnn_fng::tests::parse_alt_me_sample ... ok
+test regime::cnn_fng::tests::parse_live_sample_structure ... ok
+test regime::cnn_fng::tests::parse_five_zone_fixtures ... ok
+test regime::cnn_fng::tests::reject_garbage ... ok
+test regime::composite::tests::extreme_fear_crisis_is_blood_in_streets ... ok
+test regime::composite::tests::extreme_greed_on_risk_on_is_euphoria ... ok
+test regime::composite::tests::fear_does_not_raise_ceiling_alone ... ok
+test regime::composite::tests::late_bull_on_greed_and_narrow_breadth ... ok
+test regime::composite::tests::risk_on_neutral_is_trend_deploy ... ok
+test regime::composite::tests::stance_matrix_all_cells_nonempty ... ok
+test regime::interpret::tests::radar_vol_inverted ... ok
+test regime::interpret::tests::sentiment_extreme_fear_is_opportunity_tone ... ok
+test regime::interpret::tests::reading_mentions_ceiling_and_stance ... ok
+test regime::interpret::tests::signal_fng_hint_present ... ok
+test regime::interpret::tests::vol_high_stress_bearish_tone ... ok
+test regime::math::tests::fng_contrarian_extremes ... ok
+test regime::math::tests::fng_zones ... ok
+test regime::math::tests::hysteresis_deadband ... ok
+test regime::math::tests::logistic_exposure_bounds ... ok
+test regime::math::tests::percentile_basic ... ok
+test db::foundation_0b_tests::migration_v5_quarantines_unreconstructible_legacy_current_projection ... ok
+test regime::pillars::tests::breadth_bullish_universe ... ok
+test regime::pillars::tests::fng_fear_positive_sentiment ... ok
+test regime::pillars::tests::trend_above_ma200_positive ... ok
+test regime::regime_fit::tests::causes_sorted_by_abs_contribution_and_capped_at_three ... ok
+test regime::regime_fit::tests::extended_negative_in_euphoria ... ok
+test regime::regime_fit::tests::insufficient_coverage_marks_unavailable_reason ... ok
+test regime::regime_fit::tests::junk_oversold_not_rewarded_like_quality ... ok
+test regime::regime_fit::tests::long_extension_risk_short_extension_support_in_euphoria ... ok
+test regime::regime_fit::tests::quality_beats_junk_in_blood_in_streets ... ok
+test regime::regime_fit::tests::short_likes_extension_in_euphoria ... ok
+test regime::scoring_policy::tests::blood_in_streets_heavy_quality ... ok
+test regime::scoring_policy::tests::euphoria_anti_chase ... ok
+test regime::scoring_policy::tests::low_confidence_yields_none ... ok
+test regime::tests::compose_degraded_when_empty_conf ... ok
+test regime::tests::contrarian_extreme_greed_negative ... ok
+test regime::tests::regime_cache_ttl_safely_exceeds_banner_poll_interval ... ok
+test regime::tests::regime_cache_serves_stale_after_ttl ... ok
+test regime::tests::matrix_euphoria_cell ... ok
+test regime::tests::usable_regime_requires_policy_grade_confidence ... ok
+test sec_normalization::tests::amended_filing_wins_equivalent_overlap_without_summing ... ok
+test regime::tests::summary_from_closes_builds_emas ... ok
+test sec_normalization::tests::crgy_development_is_selected_and_property_acquisition_is_rejected ... ok
+test sec_normalization::tests::generated_contract_policy_is_the_category_source ... ok
+test sec_normalization::tests::instant_or_quarter_like_investment_fact_is_not_recurring_capex ... ok
+test sec_normalization::tests::invalid_units_do_not_become_capex ... ok
+test sec_normalization::tests::frozen_real_sec_fixture_corpus_executes_at_the_normalization_boundary ... ok
+test sec_normalization::tests::generated_qname_signs_reconstruct_from_contract_negated_qnames ... ok
+test sec_normalization::tests::software_development_alone_still_reports_capex ... ok
+test sec_normalization::tests::software_development_is_summed_with_plant_not_selected_against_it ... ok
+test sec_normalization::tests::software_inside_an_aggregate_capex_line_is_not_added_twice ... ok
+test sec_normalization::tests::summed_development_preserves_the_filed_sign ... ok
+test source_continuity::tests::calendar_lag_without_scale_mismatch_is_not_discontinuous ... ok
+test source_continuity::tests::continuous_control_does_not_force_discontinuity_from_calendar_alone ... ok
+test source_continuity::tests::entity_cik_mismatch_is_discontinuous ... ok
+test source_continuity::tests::absent_sec_series_is_insufficient_evidence ... ok
+test source_continuity::tests::fingerprint_includes_policy_version_and_is_deterministic ... ok
+test source_continuity::tests::missing_yahoo_cash_is_insufficient_evidence_not_invented_continuity ... ok
+test source_continuity::tests::scale_thresholds_are_policy_versioned_not_ticker_lists ... ok
+test source_continuity::tests::sndk_class_is_discontinuous_with_scale_reasons ... ok
+test ticker_search::tests::company_name_exact_match_is_high_confidence ... ok
+test ticker_search::tests::apple_inc_with_punctuation_is_exact_name_match ... ok
+test ticker_search::tests::dedup_prefers_local_profile_row_over_remote_duplicate ... ok
+test ticker_search::tests::exact_ticker_beats_company_name_match ... ok
+test ticker_search::tests::is_usable_company_name_rejects_null_string ... ok
+test ticker_search::tests::lowercase_mercado_with_multiple_suggestions_does_not_direct_open ... ok
+test ticker_search::tests::local_universe_prefix_ms_finds_msft ... ok
+test ticker_search::tests::meli_exact_remote_ranks_above_fuzzy_remote_matches ... ok
+test ticker_search::tests::mercado_libre_spaced_matches_mercadolibre_inc ... ok
+test ticker_search::tests::parse_mercado_fixture_returns_meli ... ok
+test ticker_search::tests::remote_search_variants_collapse_mercado_libre ... ok
+test ticker_search::tests::remote_search_variants_single_token_unchanged ... ok
+test ticker_search::tests::parse_microsoft_corporation_fixture_returns_msft ... ok
+test ticker_search::tests::resolve_submit_opens_uppercase_ticker ... ok
+test ticker_search::tests::resolve_submit_pick_match_for_ambiguous_name ... ok
+test ticker_search::tests::should_not_trigger_remote_for_single_character_query ... ok
+test ticker_search::tests::should_not_trigger_remote_when_local_has_prefix_matches ... ok
+test ticker_search::tests::should_trigger_remote_for_whitespace_name_query ... ok
+test ticker_search::tests::ticker_token_detection_allows_dots_and_hyphens ... ok
+test ticker_search::tests::parse_live_fixtures_have_tradable_quotes ... ok
+test ticker_search::tests::uppercase_meli_with_multiple_suggestions_direct_opens_exact_symbol ... ok
+test ticker_search::tests::uppercase_meli_without_suggestions_direct_opens ... ok
+test valuation_baseline::baseline_ci_managed_care_not_fcff_primary ... ok
+test valuation_baseline::baseline_cohort_fixture_exists_and_has_twenty_selection_slots ... ok
+test valuation_baseline::baseline_financials_safety_acgl_not_fcff_primary ... ok
+test db::foundation_0b_tests::tipranks_prune_does_not_delete_evidence ... ok
+test valuation_baseline::baseline_megacap_amzn_class_not_penny_intrinsic ... FAILED
+test valuation_baseline::baseline_mu_class_order_of_magnitude_is_detected ... ok
+test db::foundation_0b_tests::unseeded_identity_refuses_commit ... ok
+test valuation_baseline::live_headless_current_engine_poc ... ignored, live Yahoo/SEC headless valuation PoC
+test valuation_baseline::baseline_quarantine_entries_are_explicit_not_green ... ok
+test valuation_baseline::qa_2026_07_31_corpus_is_complete_and_never_promotes_validation_anchors_to_inputs ... ok
+test valuation_core_adapter::tests::a_broken_only_pair_is_not_bridged_across_the_gap ... ok
+test valuation_core_adapter::tests::a_bank_refuses_on_evidence_rather_than_being_valued_on_cash_flow ... ok
+test valuation_core_adapter::tests::a_clean_cohort_discards_nothing ... ok
+test valuation_core_adapter::tests::a_clean_cohort_fits_the_persistence_the_plain_mean_fitted ... ok
+test valuation_core_adapter::tests::a_cohort_whose_spreads_fall_with_leverage_yields_no_curve ... ok
+test valuation_core_adapter::tests::a_contaminated_growth_year_does_not_widen_the_trailing_channel ... ok
+test valuation_core_adapter::tests::a_complete_issuer_publishes_a_posterior ... ok
+test valuation_core_adapter::tests::a_final_year_windfall_moves_the_level_by_less_than_the_windfall ... ok
+test valuation_core_adapter::tests::a_flat_growth_history_leaves_the_trailing_channel_absent ... ok
+test valuation_core_adapter::tests::a_history_on_a_straight_line_reads_its_level_at_the_latest_year ... ok
+test valuation_core_adapter::tests::a_latest_year_missing_its_debt_tag_falls_back_rather_than_reading_as_debt_free ... ok
+test db::foundation_0b_tests::seed_two_identities_and_resolve_tickers ... ok
+test valuation_core_adapter::tests::a_planted_extreme_growth_year_is_excluded_from_the_pooled_centre ... ok
+test valuation_core_adapter::tests::an_absent_return_on_capital_values_at_the_neutral_line ... ok
+test valuation_core_adapter::tests::an_excluded_growth_year_takes_both_of_its_pairs_out_of_the_fit ... ok
+test valuation_core_adapter::tests::an_impossible_implied_coupon_is_not_credit_evidence ... ok
+test valuation_core_adapter::tests::an_excluded_year_at_the_edge_of_a_series_costs_only_the_one_pair_it_touched ... ok
+test valuation_core_adapter::tests::an_issuer_whose_whole_series_is_excluded_contributes_no_pairs ... ok
+test valuation_baseline::baseline_cohort_sanity_and_no_silent_quarantine_skips ... ok
+test valuation_core_adapter::tests::history_older_than_the_level_window_does_not_move_the_level ... ok
+test valuation_core_adapter::tests::least_squares_recovers_the_coefficients_it_was_given ... ok
+test valuation_core_adapter::tests::an_issuer_with_too_little_history_refuses_rather_than_extrapolating ... ok
+test valuation_core_adapter::tests::leverage_coverage_and_the_observed_rate_multiply_to_one ... ok
+test valuation_core_adapter::tests::revenue_growth_is_reported_as_a_continuous_rate ... ok
+test valuation_core_adapter::tests::scatter_about_the_trend_widens_the_level ... ok
+test valuation_core_adapter::tests::the_cost_in_pairs_is_reported_separately_from_the_count_of_bad_years ... ok
+test valuation_core_adapter::tests::the_credit_curve_is_fitted_from_the_spreads_the_cohort_actually_pays ... ok
+test valuation_baseline::baseline_cohort_determinism_double_run ... ok
+test valuation_core_adapter::tests::the_fit_still_resolves_when_one_issuer_is_entirely_excluded ... ok
+test valuation_core_adapter::tests::the_growth_path_is_fitted_across_the_cohort_not_per_issuer ... ok
+test valuation_core_measurement::core_versus_current_engine_on_the_pinned_cohort ... ignored, diagnostic: prints a table for a person to read
+test valuation_core_measurement::does_growth_persist_at_longer_horizons ... ignored, diagnostic: prints a table for a person to read
+test valuation_core_adapter::tests::the_trailing_channel_counts_the_years_it_kept_not_the_years_it_saw ... ok
+test valuation_core_measurement::what_the_credit_fit_sees_on_the_pinned_cohort ... ignored, diagnostic: prints a table for a person to read
+test valuation_divergence::tests::excludes_missing_anchors_from_comparable_top_twenty ... ok
+test valuation_divergence::tests::classifies_generic_driver_and_capex_evidence_without_symbol_rules ... ok
+test valuation_decision_contract::shared_tipranks_forecast_goldens_execute_on_windows ... ok
+test valuation_divergence::tests::keeps_zero_equity_value_floor_visible_as_explicit_unavailable ... ok
+test valuation_decision_contract::valuation_decision_policy_goldens_execute_on_windows ... ok
+test valuation_dossier_view::tests::command_shell_failure_helper_is_sanitized ... ok
+test valuation_divergence::tests::ranks_symmetric_relative_disagreement_and_caps_output ... ok
+test valuation_dossier_view::tests::dossier_unavailable_section_is_diagnostic_only ... ok
+test valuation_baseline::baseline_isolation_t_class_stress_with_cohort ... ok
+test valuation_dossier_view::tests::full_i64_money_is_json_exact_and_summary_uses_declared_currency ... ok
+test db::foundation_0b_tests::wrong_identity_fingerprint_refuses ... ok
+test db::qa_latest_snapshot_tests::latest_per_symbol_ignores_older_qualifying_rows ... ok
+test db::qa_latest_snapshot_tests::latest_picks_higher_captured_at ... ok
+test valuation_evidence::tests::baseline_transcription_claim_is_persistable ... ok
+test valuation_evidence::tests::certified_backfill_with_vintage_admits_not_live ... ok
+test valuation_evidence::tests::certified_without_vintage_refuses ... ok
+test valuation_evidence::tests::clock_order_ingestion_before_source_refuses ... ok
+test valuation_evidence::tests::evidence_set_fingerprint_order_independent_and_membership_sensitive ... ok
+test valuation_evidence::tests::fingerprint_stable_and_mutation_sensitive ... ok
+test valuation_evidence::tests::invalid_quality_refuses_persist ... ok
+test valuation_evidence::tests::lineage_component_count_counts_unique_groups ... ok
+test valuation_evidence::tests::null_security_differs_from_empty_security ... ok
+test valuation_evidence::tests::operational_ingested_after_decision_refuses ... ok
+test valuation_evidence::tests::parse_replay_mode_rejects_free_text ... ok
+test valuation_evidence::tests::partition_key_differs_by_metric_basis ... ok
+test valuation_evidence::tests::partition_key_same_when_only_provider_differs ... ok
+test db::tipranks_tests::tipranks_budget_discards_previous_provider_months ... ok
+test valuation_evidence::tests::reported_gaap_partition_differs_from_transcription_claim ... ok
+test valuation_evidence::tests::storage_prohibited_refuses_persist ... ok
+test valuation_evidence::tests::unit_value_slot_mismatch_refuses_persist ... ok
+test valuation_evidence::tests::validate_rejects_blank_lineage ... ok
+test valuation_evidence_contract::contract_schema_and_scheme_match_module ... ok
+test valuation_evidence_contract::shared_canonical_fingerprint_fixtures_execute ... ok
+test valuation_evidence_contract::shared_evidence_set_fingerprint_fixtures_execute ... ok
+test valuation_evidence_contract::shared_lineage_fixtures_execute ... ok
+test valuation_evidence_contract::shared_partition_fixtures_execute ... ok
+test valuation_fixture_capture::capture_the_deep_driver_fixture ... ignored, reaches the SEC network and rewrites a fixture
+test valuation_fixture_capture::how_deep_the_filed_history_goes ... ignored, reaches the SEC network
+test valuation_evidence_contract::shared_replay_admission_fixtures_execute ... ok
+test valuation_gap_attribution::tests::contract_declares_shapley_and_policy_own_baseline ... ok
+test valuation_gap_attribution::tests::diagnostic_cohort_symbols_are_pinned ... ok
+test valuation_gap_attribution::tests::equity_from_fcff_rejects_stable_g_at_or_above_wacc ... ok
+test valuation_gap_attribution::tests::gap_share_bps_sum_to_10000_when_street_present ... ok
+test valuation_gap_attribution::tests::live_attribution_diagnostic_cohort ... ignored, network: Yahoo + live rates + SEC; diagnostic review only
+test valuation_gap_attribution::tests::horizon_attr_zero_when_settings_match_baseline ... ok
+test valuation_gap_attribution::tests::live_fcff_driver_audit_cohort ... ignored, network: SEC driver audit only
+test valuation_gap_attribution::tests::live_off_name_lane_audit ... ignored, network: Yahoo + SEC + live rates; diagnostic review only
+test valuation_gap_attribution::tests::naive_fcff_uses_wacc_and_subtracts_net_debt ... ok
+test valuation_gap_attribution::tests::path_growth_capitalization_is_isolated ... ok
+test valuation_gap_attribution::tests::rates_factor_alone_moves_value_when_only_coe_differs ... ok
+test valuation_gap_attribution::tests::shapley_attrs_sum_to_policy_delta_within_rounding ... ok
+test valuation_gap_attribution::tests::shapley_is_order_independent_by_construction ... ok
+test valuation_gap_attribution::tests::street_is_diagnostic_only_never_enters_factor_baselines ... ok
+test valuation_high_signal::durable_cohort_return_on_capital_capture ... ignored, network: Yahoo fundamentals capture for contract maintenance
+test valuation_high_signal::forward_lane_retention_decomposition_audit ... ignored, network: Yahoo + SEC + live rates; diagnostic review only
+test valuation_high_signal::high_signal_contract_cohort_is_exactly_twenty_six_pinned_symbols ... ok
+test valuation_high_signal::high_signal_criteria_accept_solid_synthetic ... ok
+test valuation_high_signal::high_signal_criteria_reject_soft_and_oom ... ok
+test db::tipranks_tests::tipranks_budget_reservation_never_exceeds_the_limit ... ok
+test valuation_probes::tests::autocorrelation_of_a_flat_series_is_undefined_rather_than_zero ... ok
+test valuation_probes::tests::autocorrelation_of_a_persistent_series_is_positive ... ok
+test valuation_probes::tests::autocorrelation_of_an_alternating_series_is_negative ... ok
+test valuation_probes::tests::probe_analyst_dispersion_availability ... ignored, network: Yahoo forward forecast dispersion probe; diagnostic only
+test valuation_probes::tests::probe_facts_without_a_filing_date ... ignored, network: SEC filing-date coverage probe; diagnostic only
+test valuation_probes::tests::probe_growth_persistence_rho1 ... ignored, network: SEC revenue history persistence probe; diagnostic only
+test valuation_probes::tests::probe_return_on_capital_availability ... ignored, network: SEC return-on-capital availability probe; diagnostic only
+test yahoo_session::tests::first_rate_limit_cooldown_is_ninety_seconds ... ok
+test yahoo_session::tests::mark_rate_limited_sets_cooldown ... ok
+test yahoo_session::tests::rate_limit_remaining_zero_by_default ... ok
+test yahoo_session::tests::repeated_rate_limits_escalate_until_a_request_succeeds ... ok
+test db::tipranks_tests::tipranks_cache_is_replaceable_and_scoped_to_the_provider_month ... ok
+test db::tipranks_tests::tipranks_usage_snapshot_is_replaceable_per_month ... ok
+test db::foundation_0b_tests::two_independent_connections_contend_and_only_one_cas_transition_survives_reopen ... ok
+test profiles::tests::resolve_qa_from_db_respects_cap ... ok
+test profiles::tests::resolve_qa_thin_db_priority_fill ... ok
+test valuation_gap_attribution::tests::street_diagnostic_only_enforcement_scan ... ok
+test valuation_dossier_view::tests::dossier_absent_after_projection_invalidation ... ok
+test valuation_dossier_view::tests::dossier_absent_when_ticker_unknown ... ok
+test valuation_dossier_view::tests::dossier_projects_eligible_fixture_as_diagnostic_three_sixty_four ... ok
+test valuation_dossier_view::tests::second_share_basis_refuses_stale_pre_split_candidate ... ok
+test valuation_dossier_view::tests::corrupt_persisted_result_is_explicit_unavailable_after_restart ... ok
+test valuation_dossier_view::tests::second_ticker_vintage_refuses_instead_of_selecting_limit_one ... ok
+test valuation_dossier_view::tests::file_backed_publication_survives_restart_without_legacy_snapshot_write ... ok
+test valuation_dossier_view::tests::projection_invalidation_remains_absent_after_file_backed_restart ... ok
+test db::foundation_0b_tests::deep_ancestor_cycle_partition_and_intent_corruption_fail_closed_after_reopen ... ok
+test db::foundation_0b_tests::revision_edge_delete_update_and_extra_fail_closed_after_reopen ... ok
+test db::foundation_0b_tests::eligible_projection_reconstructs_every_component_and_fails_closed_on_corruption ... ok
+test commands::qa_universe_apply_tests::ensure_symbol_loaded_does_not_grow_active_symbols ... ok
+test valuation_high_signal::high_signal_screener_cohort_all_members_pass ... FAILED
+
+failures:
+
+---- cross_platform_parity::export_random20_sp500_parity_snapshot stdout ----
+
+thread 'cross_platform_parity::export_random20_sp500_parity_snapshot' (27856) panicked at src\cross_platform_parity.rs:621:5:
+missing random20 inputs at G:\dev\repos\discount_screener-wt-w2a\.agents/workspace/tmp/random20-inputs.json — run .agents/workspace/tmp/build_random20_inputs.py first
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- operating_valuation::tests::durable_reported_and_holdout_cohorts_recompute_in_normal_gate stdout ----
+
+thread 'operating_valuation::tests::durable_reported_and_holdout_cohorts_recompute_in_normal_gate' (32188) panicked at src\operating_valuation.rs:1443:9:
+assertion failed: reported_errors.iter().sum::<f64>() / 15.0 < 11.0
+
+---- valuation_baseline::baseline_megacap_amzn_class_not_penny_intrinsic stdout ----
+amzn_baseline base_cents=8840 run_rate=49252678800 wacc=1016 growth=1183
+
+thread 'valuation_baseline::baseline_megacap_amzn_class_not_penny_intrinsic' (41056) panicked at src\valuation_baseline.rs:681:5:
+AMZN-class owner-earnings base must stay clear of the all-CapEx-is-maintenance collapse (~$50), base_cents=8840
+
+---- valuation_high_signal::high_signal_screener_cohort_all_members_pass stdout ----
+high_signal_market_params live_rf_bps=463 as_of=1785869994
+wrote high-signal observation audit → G:\dev\repos\discount_screener-wt-w2a\apps\windows\src-tauri\tests/fixtures/valuation/high_signal_screener_observation_2026-08-02.json
+HIGH_SIGNAL_FAIL DVN: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_FAIL FIS: street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_OK AVY base=Some(21380) street=Some(20180) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.23; vs_street×1.06")
+HIGH_SIGNAL_FAIL SW: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_OK COF base=Some(16786) street=Some(25695) model=Some("residual_income_equity") notes=Some("residual_income_equity; financial_services; solid_rates; r=9.03%; vs_mkt×0.76; vs_street×0.65")
+HIGH_SIGNAL_FAIL MPWR: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_FAIL APH: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_OK EME base=Some(81197) street=Some(104414) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×0.99; vs_street×0.78")
+HIGH_SIGNAL_FAIL CHTR: oom_base_above_market_multiple,street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_FAIL BKR: point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_OK INTU base=Some(57166) street=Some(45465) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.77; vs_street×1.26")
+HIGH_SIGNAL_FAIL TER: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_FAIL AVGO: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_FAIL EPAM: street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_FAIL T: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_FAIL GEHC: point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_FAIL DAL: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_FAIL WDC: street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_OK GOOGL base=Some(35679) street=Some(42804) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×0.94; vs_street×0.83")
+HIGH_SIGNAL_OK GOOG base=Some(35665) street=Some(42179) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×0.95; vs_street×0.85")
+HIGH_SIGNAL_FAIL HPE: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_OK CRM base=Some(25645) street=Some(24172) model=Some("fcff_wacc") notes=Some("fcff_wacc; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.34; vs_street×1.06")
+HIGH_SIGNAL_OK SLB base=Some(7581) street=Some(6203) model=Some("fcff_wacc") notes=Some("fcff_wacc; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.49; vs_street×1.22")
+HIGH_SIGNAL_FAIL EXE: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates
+HIGH_SIGNAL_FAIL OMC: street_disagreement_exceeds_high_signal_band
+HIGH_SIGNAL_OK PTC base=Some(16480) street=Some(17335) model=Some("forward_earnings_power") notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.16; vs_street×0.95")
+high_signal_cohort pass=9/26 criteria=high-signal-criteria/1 rf_bps=463 provisional=false
+
+thread 'valuation_high_signal::high_signal_screener_cohort_all_members_pass' (41416) panicked at src\valuation_high_signal.rs:752:5:
+High-signal screener cohort NOT met (9/26). Goal: solid quality, scale-coherent, correct class, Street disagreement ≤ 3500 bps. Do not clamp to price/Street. Failures:
+DVN: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(6494) mkt=Some(4405) street=Some(5938) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(15749); forward=Some(6494); diff_bps=Some(8322); vs_mkt×1.47; vs_street×1.09")
+FIS: street_disagreement_exceeds_high_signal_band | model=Some("forward_earnings_power") class=Some("operating_non_financial") base=Some(9112) mkt=Some(4426) street=Some(5655) unreliable=false provisional=false notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×2.06; vs_street×1.61")
+SW: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(6431) mkt=Some(4852) street=Some(5603) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(3664); forward=Some(6431); diff_bps=Some(5482); vs_mkt×1.33; vs_street×1.15")
+MPWR: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band | model=Some("disputed") class=Some("operating_non_financial") base=Some(91657) mkt=Some(133503) street=Some(182954) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(54630); forward=Some(91657); diff_bps=Some(5062); vs_mkt×0.69; vs_street×0.50")
+APH: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(13107) mkt=Some(17133) street=Some(19806) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(3951); forward=Some(13107); diff_bps=Some(10735); vs_mkt×0.77; vs_street×0.66")
+CHTR: oom_base_above_market_multiple,street_disagreement_exceeds_high_signal_band | model=Some("forward_earnings_power") class=Some("operating_non_financial") base=Some(65952) mkt=Some(15307) street=Some(18441) unreliable=false provisional=false notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×4.31; vs_street×3.58")
+BKR: point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band | model=Some("fcff_wacc") class=Some("operating_non_financial") base=Some(3847) mkt=Some(6173) street=Some(7145) unreliable=true provisional=true notes=Some("fcff_wacc; operating_non_financial; soft_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×0.62; vs_street×0.54")
+TER: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band | model=Some("disputed") class=Some("operating_non_financial") base=Some(28869) mkt=Some(40356) street=Some(44980) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(4972); forward=Some(28869); diff_bps=Some(14123); vs_mkt×0.72; vs_street×0.64")
+AVGO: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(56334) mkt=Some(41816) street=Some(52788) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(10668); forward=Some(56334); diff_bps=Some(13631); vs_mkt×1.35; vs_street×1.07")
+EPAM: street_disagreement_exceeds_high_signal_band | model=Some("forward_earnings_power") class=Some("operating_non_financial") base=Some(18549) mkt=Some(11206) street=Some(13394) unreliable=false provisional=false notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.66; vs_street×1.38")
+T: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates,street_disagreement_exceeds_high_signal_band | model=Some("disputed") class=Some("operating_non_financial") base=Some(4950) mkt=Some(2338) street=Some(2871) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(10222); forward=Some(4950); diff_bps=Some(6950); vs_mkt×2.12; vs_street×1.72")
+GEHC: point_estimate_unreliable,provisional_rates | model=Some("fcff_wacc") class=Some("operating_non_financial") base=Some(7180) mkt=Some(7026) street=Some(8250) unreliable=true provisional=true notes=Some("fcff_wacc; operating_non_financial; soft_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.02; vs_street×0.87")
+DAL: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(13451) mkt=Some(9277) street=Some(10552) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(6224); forward=Some(13451); diff_bps=Some(7346); vs_mkt×1.45; vs_street×1.27")
+WDC: street_disagreement_exceeds_high_signal_band | model=Some("forward_earnings_power") class=Some("operating_non_financial") base=Some(30649) mkt=Some(54856) street=Some(65550) unreliable=false provisional=false notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×0.56; vs_street×0.47")
+HPE: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(5242) mkt=Some(5239) street=Some(6556) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(1649); forward=Some(5242); diff_bps=Some(10428); vs_mkt×1.00; vs_street×0.80")
+EXE: unavailable_or_non_positive_base,point_estimate_unreliable,provisional_rates | model=Some("disputed") class=Some("operating_non_financial") base=Some(8994) mkt=Some(9307) street=Some(12604) unreliable=true provisional=true notes=Some("disputed; resolved=Some(ForwardEarningsPower); fcff=Some(566); forward=Some(8994); diff_bps=Some(17632); vs_mkt×0.97; vs_street×0.71")
+OMC: street_disagreement_exceeds_high_signal_band | model=Some("forward_earnings_power") class=Some("operating_non_financial") base=Some(16186) mkt=Some(8181) street=Some(10208) unreliable=false provisional=false notes=Some("forward_earnings_power; operating_non_financial; solid_rates; router=operating-valuation-runtime/6-through-cycle-roic; vs_mkt×1.98; vs_street×1.59")
+
+
+failures:
+    cross_platform_parity::export_random20_sp500_parity_snapshot
+    operating_valuation::tests::durable_reported_and_holdout_cohorts_recompute_in_normal_gate
+    valuation_baseline::baseline_megacap_amzn_class_not_penny_intrinsic
+    valuation_high_signal::high_signal_screener_cohort_all_members_pass
+
+test result: FAILED. 550 passed; 4 failed; 23 ignored; 0 measured; 0 filtered out; finished in 11.39s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,193 @@
+T2.0 FOLLOW-UP -- VERBATIM PROBE CAPTURE
+Worktree: G:/dev/repos/discount_screener/.claude/worktrees/agent-a19c1b1e4036e2768
+Crate:    apps/windows/src-tauri
+Cargo build warnings (all pre-existing, none from valuation_probes.rs) are elided;
+everything from the probe banner onward is verbatim.
+
+
+==============================================================================
+(1) WIDE SCAN
+==============================================================================
+=== PROBE E: how common is the affected archetype? ===
+retrieved 2026-08-04T20:06:08.379493500+00:00
+universe = fetcher::DEFAULT_LIVE_SYMBOLS (501) + PROBE_COHORT + control, deduped = 501
+a HIT is an issuer with at least one fiscal year whose winning interest concept is one
+the convention negates AND whose filed value is POSITIVE — net interest *income*, the
+only shape the convention changes.
+... 25/501 scanned, 2 hits so far
+... 50/501 scanned, 4 hits so far
+... 75/501 scanned, 7 hits so far
+test valuation_probes::tests::probe_filed_interest_sign_wide has been running for over 60 seconds
+... 100/501 scanned, 9 hits so far
+... 125/501 scanned, 11 hits so far
+... 150/501 scanned, 12 hits so far
+... 175/501 scanned, 12 hits so far
+... 200/501 scanned, 14 hits so far
+... 225/501 scanned, 15 hits so far
+... 250/501 scanned, 16 hits so far
+... 275/501 scanned, 19 hits so far
+... 300/501 scanned, 19 hits so far
+... 325/501 scanned, 22 hits so far
+... 350/501 scanned, 27 hits so far
+... 375/501 scanned, 28 hits so far
+... 400/501 scanned, 34 hits so far
+... 425/501 scanned, 36 hits so far
+... 450/501 scanned, 41 hits so far
+... 475/501 scanned, 43 hits so far
+
+=== pass one: the sign question, SEC only ===
+issuers in universe          501
+issuers scanned              496
+no CIK (not an SEC filer)    5 [AEP BF.B BK BRK.B SATS]
+companyfacts unreadable      0 []
+file a net-basis concept     107 (21.6% of scanned)
+of those, file it POSITIVE   48 (9.7% of scanned)
+
+=== pass two: class and published effect, hits only ===
+symbol  class                   inc  exp  guard   max|dFCFF|$M  max|dmgn|
+ABBV    OperatingNonFinancial     1    0      0           37.4         22
+ADSK    OperatingNonFinancial     6    9      1           37.0        170
+AXON    OperatingNonFinancial    10    2      0           11.0        209
+AXP     FinancialServices         2    0      2        27271.9       6603
+BAC     FinancialServices         2    0      0            0.0  no bridge
+C       FinancialServices         2    0      1        87176.7      10229
+CARR    OperatingNonFinancial     2    0      0           53.3         29
+CFG     FinancialServices         2    0      0            0.0          0
+COF     FinancialServices         2    0      2        78501.0      97372
+COR     OperatingNonFinancial     1   17      0           83.8         12
+CPRT    OperatingNonFinancial     3    2      1          105.0        271
+DDOG    OperatingNonFinancial     1    0      0            1.7         88
+FDS     FinancialServices         2    1      1            2.7         26
+FITB    FinancialServices         2    0      0            0.0          0
+HOOD    FinancialServices         7    0      0         2704.9       9813
+IBKR    FinancialServices         2    0      0            0.0  no bridge
+JKHY    OperatingNonFinancial     2    0      1           26.9        114
+JPM     FinancialServices         2    0      0            0.0  no bridge
+KEY     FinancialServices         2    0      2         7356.4      42061
+MPWR    OperatingNonFinancial    12    0      0           47.3        224
+MS      FinancialServices         2    0      0            0.0  no bridge
+MTB     FinancialServices         2    0      0            0.0          0
+NKE     OperatingNonFinancial     6   12      4          273.9         53
+NWS     OperatingNonFinancial     7    7      3          100.1        112
+NWSA    OperatingNonFinancial     7    7      3          100.1        112
+OTIS    OperatingNonFinancial     1    0      0           18.2         14
+PAYX    OperatingNonFinancial     2    0      0            8.6         38
+PNC     FinancialServices         2    0      0            0.0  no bridge
+RF      FinancialServices         2    0      0            0.0  no bridge
+RJF     FinancialServices         5    0      0         3340.7       2207
+RMD     OperatingNonFinancial     1    3      1            6.9         14
+ROL     OperatingNonFinancial     6    7      0            0.3          2
+ROST    OperatingNonFinancial     3    4      3          260.2        123
+SCHW    no history
+STT     FinancialServices         2    0      0         4672.7       3560
+SYF     FinancialServices         2    0      0            0.0  no bridge
+TFC     FinancialServices         2    0      0            0.0  no bridge
+TPR     OperatingNonFinancial     3    0      3           10.3         29
+TROW    FinancialServices         5    0      0            3.8         18
+TTD     OperatingNonFinancial     2    1      0            8.8        133
+TYL     OperatingNonFinancial     1    6      0            0.2          7
+ULTA    OperatingNonFinancial    10    3      0           26.8         24
+USB     FinancialServices         2    0      0            0.0  no bridge
+WFC     FinancialServices         2    0      0            0.0  no bridge
+WSM     OperatingNonFinancial     4    6      0           84.1        109
+XYZ     OperatingNonFinancial     1    1      0            1.1          7
+YUM     OperatingNonFinancial     1    0      0            0.0          0
+ZBRA    OperatingNonFinancial     1    3      1           39.2         67
+
+=== THE ANSWER ===
+issuers scanned: 496
+OperatingNonFinancial with >=1 net-interest year filed POSITIVE: 25 of 496 (5.0%)
+the list: [ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA]
+hits that reach no published FCFF value (class is not operating, or unreadable): [AXP(FinancialServices) BAC(FinancialServices) C(FinancialServices) CFG(FinancialServices) COF(FinancialServices) FDS(FinancialServices) FITB(FinancialServices) HOOD(FinancialServices) IBKR(FinancialServices) JPM(FinancialServices) KEY(FinancialServices) MS(FinancialServices) MTB(FinancialServices) PNC(FinancialServices) RF(FinancialServices) RJF(FinancialServices) STT(FinancialServices) SYF(FinancialServices) TFC(FinancialServices) TROW(FinancialServices) USB(FinancialServices) WFC(FinancialServices)]
+operating hits whose FCFF bridge produces no margin for any year (absent tax, revenue
+or cash-flow driver — absence, not a zero shift): []
+
+=== distribution of max |dmgn bps| over the operating hits ===
+n=25 min=0 median=53 max=271
+full sorted series: [0 2 7 7 12 14 14 22 24 29 29 38 53 67 88 109 112 112 114 123 133 170 209 224 271]
+  [   0,    1) bps: 1
+  [   1,   10) bps: 3
+  [  10,   50) bps: 8
+  [  50,  100) bps: 3
+  [ 100,  500) bps: 10
+  [ 500,  inf) bps: 0
+READ THIS AS: if the operating-hit count is a handful, the affected set is a cohort-local
+finding and must be described as one. If it is a broad slice of the universe, the
+archetype is common and the finding generalizes. The count is the answer either way.
+test valuation_probes::tests::probe_filed_interest_sign_wide ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 545 filtered out; finished in 285.73s
+
+
+==============================================================================
+(2) GATE COUNTERFACTUAL
+==============================================================================
+=== PROBE F: does the interest sign move MPWR across its gate? ===
+retrieved 2026-08-04T20:06:14.319054400+00:00
+criteria from the contract: base/market in [0.10, 3.00] above 500c, street band 3500 bps
+live risk-free 463 bps as of 1785869994
+
+=== the counterfactual applied to MPWR's own filed history ===
+  2014 interest 1.1M -> -1.1M
+  2015 interest 1.6M -> -1.6M
+  2016 interest 2.5M -> -2.5M
+  2017 interest 5.4M -> -5.4M
+  2018 interest 6.3M -> -6.3M
+  2019 interest 7.3M -> -7.3M
+  2020 interest 9.3M -> -9.3M
+  2021 interest 11.6M -> -11.6M
+  2022 interest 14.4M -> -14.4M
+  2023 interest 23.4M -> -23.4M
+  2024 interest 27.1M -> -27.1M
+  2025 interest 29.2M -> -29.2M
+
+--- BASELINE (as published today) ---
+router          status=Disputed selected=Some(ForwardEarningsPower) diff_bps=Some(5062) (disputed above 5000)
+candidates      fcff=Some(54630) (Available, Solid)  forward=Some(91657) (Available, Solid)
+interest inside the model: after-tax add-back margin = Some(85) bps of revenue
+distortions     [ThinNormalizedFcffMargin]
+reasons         [StructuralDistortionPresent, CandidateDisagreement, DisagreementResolvedToForwardEvidence]
+PUBLISHED       base=Some(91657)c model=Some("disputed") status=Some("disputed") reason=Some("disputed_candidates")
+                unreliable=true provisional=true market=Some(133503)c street=Some(182954)c
+margin vs oom   base/market = 0.687x, band [0.10, 3.00]
+margin vs band  street disagreement = 4990 bps, limit 3500 bps
+GATE            high_signal=false failures=["unavailable_or_non_positive_base", "point_estimate_unreliable", "provisional_rates", "street_disagreement_exceeds_high_signal_band"]
+
+--- COUNTERFACTUAL (proposed sign) ---
+router          status=Disputed selected=Some(ForwardEarningsPower) diff_bps=Some(5062) (disputed above 5000)
+candidates      fcff=Some(54630) (Available, Solid)  forward=Some(91657) (Available, Solid)
+interest inside the model: after-tax add-back margin = Some(85) bps of revenue
+distortions     [ThinNormalizedFcffMargin]
+reasons         [StructuralDistortionPresent, CandidateDisagreement, DisagreementResolvedToForwardEvidence]
+PUBLISHED       base=Some(91657)c model=Some("disputed") status=Some("disputed") reason=Some("disputed_candidates")
+                unreliable=true provisional=true market=Some(133503)c street=Some(182954)c
+margin vs oom   base/market = 0.687x, band [0.10, 3.00]
+margin vs band  street disagreement = 4990 bps, limit 3500 bps
+GATE            high_signal=false failures=["unavailable_or_non_positive_base", "point_estimate_unreliable", "provisional_rates", "street_disagreement_exceeds_high_signal_band"]
+
+=== THE ANSWER ===
+published base    Some(91657)c -> Some(91657)c
+published model   Some("disputed") -> Some("disputed")
+gate verdict      high_signal=false -> high_signal=false
+verdict changes side: NO
+failures before   ["unavailable_or_non_positive_base", "point_estimate_unreliable", "provisional_rates", "street_disagreement_exceeds_high_signal_band"]
+failures after    ["unavailable_or_non_positive_base", "point_estimate_unreliable", "provisional_rates", "street_disagreement_exceeds_high_signal_band"]
+fcff candidate    Some(54630)c -> Some(54630)c
+forward candidate Some(91657)c -> Some(91657)c
+candidate gap     Some(5062) -> Some(5062) bps
+interest add-back Some(85) -> Some(85) bps of revenue
+SCOPE OF THIS MEASUREMENT: 12 years were rewritten in the history and the model's own
+after-tax interest add-back did not move, so the rewrite never reached the valuation.
+Writing `FcfPoint::interest_expense_dollars` bypasses only the setter's abs()
+(dcf_model.rs:907); the two READ sites (:551 and :1590) re-apply abs() to whatever the
+field holds. What is measured above is therefore the sign convention ON ITS OWN --
+the contract change with LD-1's read-site removals absent -- and the measured answer
+is that on its own it moves nothing. The full three-site counterfactual cannot be run
+from a test: it requires deleting those two abs() calls, which is a production edit.
+READ THIS AS: the published base is whatever the router resolved to. If it resolved to the
+forward lane, an FCFF shift changes a candidate and not a published number, and the gate
+cannot move on it. Compare the two failure lists, not the two FCFF candidates.
+test valuation_probes::tests::probe_interest_sign_gate_effect ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 545 filtered out; finished in 2.01s
+

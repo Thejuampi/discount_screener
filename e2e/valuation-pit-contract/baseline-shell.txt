@@ -1,0 +1,4 @@
+    operating_valuation::tests::durable_reported_and_holdout_cohorts_recompute_in_normal_gate
+    valuation_baseline::baseline_megacap_amzn_class_not_penny_intrinsic
+    valuation_high_signal::high_signal_screener_cohort_all_members_pass
+test result: FAILED. 518 passed; 3 failed; 22 ignored; 0 measured; 0 filtered out; finished in 19.79s

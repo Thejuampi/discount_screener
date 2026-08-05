@@ -1,0 +1,1020 @@
+warning: unused variable: `half`
+   --> src\valuation_gap_attribution.rs:408:9
+    |
+408 |     let half = denom / 2;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_half`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS` is never used
+  --> src\dcf_model.rs:79:7
+   |
+79 | const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tax_defaulted` is never read
+    --> src\dcf_model.rs:1557:5
+     |
+1536 | struct DriverModelInputs {
+     |        ----------------- field in this struct
+...
+1557 |     tax_defaulted: bool,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `DriverModelInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `recent_fcf_growth_bps` is never used
+    --> src\dcf_model.rs:2674:4
+     |
+2674 | fn recent_fcf_growth_bps(history: &[FcfPoint]) -> Option<i32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discounted_fcff_fade` is never used
+    --> src\dcf_model.rs:2692:4
+     |
+2692 | fn discounted_fcff_fade(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rate_quality` is never read
+    --> src\dcf_model.rs:2735:5
+     |
+2726 | struct ResolvedWacc {
+     |        ------------ field in this struct
+...
+2735 |     rate_quality: crate::driver_resolution::EvidenceQuality,
+     |     ^^^^^^^^^^^^
+
+warning: fields `valid_tax_periods` and `average_debt_dollars` are never read
+  --> src\driver_resolution.rs:40:9
+   |
+33 | pub struct ResolvedRateInputs {
+   |            ------------------ fields in this struct
+...
+40 |     pub valid_tax_periods: Vec<i32>,
+   |         ^^^^^^^^^^^^^^^^^
+41 |     pub average_debt_dollars: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ResolvedRateInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `DCF_DISCOUNT_RATE` is never used
+  --> src\edgar.rs:27:7
+   |
+27 | const DCF_DISCOUNT_RATE: f64 = 0.10;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_TERMINAL_GROWTH` is never used
+  --> src\edgar.rs:28:7
+   |
+28 | const DCF_TERMINAL_GROWTH: f64 = 0.03;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_PROJECTION_YEARS` is never used
+  --> src\edgar.rs:29:7
+   |
+29 | const DCF_PROJECTION_YEARS: usize = 5;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_GROWTH` is never used
+  --> src\edgar.rs:30:7
+   |
+30 | const DCF_MIN_GROWTH: f64 = -0.05;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MAX_GROWTH` is never used
+  --> src\edgar.rs:31:7
+   |
+31 | const DCF_MAX_GROWTH: f64 = 0.25;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_YEARS_HISTORY` is never used
+  --> src\edgar.rs:32:7
+   |
+32 | const DCF_MIN_YEARS_HISTORY: usize = 2; // need at least 2 data points for a growth rate
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DcfResult` is never constructed
+    --> src\edgar.rs:1062:12
+     |
+1062 | pub struct DcfResult {
+     |            ^^^^^^^^^
+
+warning: function `compute_dcf` is never used
+    --> src\edgar.rs:1073:4
+     |
+1073 | fn compute_dcf(fcf_by_year: &[(i32, i64)], shares_outstanding: u64) -> Option<DcfResult> {
+     |    ^^^^^^^^^^^
+
+warning: function `fetch_dcf` is never used
+    --> src\edgar.rs:1530:8
+     |
+1530 | pub fn fetch_dcf(
+     |        ^^^^^^^^^
+
+warning: method `ingest_dcf` is never used
+    --> src\engine.rs:2266:12
+     |
+2068 | impl ScreenerState {
+     | ------------------ method in this implementation
+...
+2266 |     pub fn ingest_dcf(&mut self, symbol: String, value_cents: i64) {
+     |            ^^^^^^^^^^
+
+warning: `discount-screener-windows` (lib test) generated 17 warnings (run `cargo fix --lib -p discount-screener-windows --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running unittests src\lib.rs (target\debug\deps\discount_screener_windows_lib-11cf8efa1419a5b7.exe)
+
+running 1 test
+=== PROBE H: interest basis versus sign ===
+universe = union(VALUATION_ANCHORS[4], INTEREST_SIGN_AFFECTED_COHORT[25], PROBE_COHORT[28]) = 52 distinct symbols
+VALUATION_ANCHORS:             PG GOOGL AMZN MSFT
+INTEREST_SIGN_AFFECTED_COHORT: ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA
+PROBE_COHORT:                  DVN FIS AVY SW COF MPWR APH EME CHTR BKR INTU TER AVGO EPAM T GEHC DAL WDC GOOGL HPE CRM SLB EXE OMC PTC PG MSFT AMZN
+union:                         PG GOOGL AMZN MSFT ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA DVN FIS AVY SW COF APH EME CHTR BKR INTU TER AVGO EPAM T GEHC DAL WDC HPE CRM SLB EXE OMC PTC
+DAL/CHTR/BKR/COF (the P3 net-EXPENSE suspects) are already members of PROBE_COHORT, not added separately -- DAL=present CHTR=present BKR=present COF=present
+negated qnames (Table 1/3's basis ground truth, read from INTEREST_EXPENSE.qname_signs): InterestIncomeExpenseNet InterestIncomeExpenseNonoperatingNet
+
+=== TABLE 1: per issuer-year basis facts ===
+total_debt_dollars path: crate::edgar::extract_total_debt() -- the exact function fetch_fcf_history calls to fill FcfPoint.total_debt_dollars (CURRENT_DEBT + NON_CURRENT_DEBT, superseded per year by a reported TOTAL_DEBT when filed). Called directly, not reimplemented, so this table cannot drift from what resolve_rate_inputs actually sees.
+symbol    year winning_qname                             is_net         interest_$     total_debt_$  n_src
+PG        2008 InterestExpense                            false         1467000000              n/a      1
+PG        2009 InterestExpense                            false         1358000000              n/a      1
+PG        2010 InterestExpense                            false          946000000      21924000000      1
+PG        2011 InterestExpense                            false          831000000      25027000000      1
+PG        2012 InterestExpense                            false          769000000      25163000000      1
+PG        2013 InterestExpense                            false          667000000      23617000000      1
+PG        2014 InterestExpense                            false          709000000      26429000000      1
+PG        2015 InterestExpense                            false          626000000      23129000000      1
+PG        2016 InterestExpense                            false          579000000      21705000000      1
+PG        2017 InterestExpense                            false          465000000      19714000000      1
+PG        2018 InterestExpense                            false          506000000      22635000000      1
+PG        2019 InterestExpense                            false          509000000      23783000000      1
+PG        2020 InterestExpense                            false          465000000      26045000000      1
+PG        2021 InterestExpense                            false          502000000      26719000000      1
+PG        2022 InterestExpenseNonoperating                false          439000000      26495000000      1
+PG        2023 InterestExpenseNonoperating                false          756000000      28329000000      1
+PG        2024 InterestExpenseNonoperating                false          925000000      29107000000      1
+PG        2025 InterestExpenseNonoperating                false          907000000      30372000000      1
+PG        2026 InterestExpenseNonoperating                false          877000000              n/a      1
+GOOGL     2013 InterestExpense                            false           81000000              n/a      1
+GOOGL     2014 InterestExpense                            false          101000000       3228000000      1
+GOOGL     2015 InterestExpense                            false          104000000       1995000000      1
+GOOGL     2016 InterestExpense                            false          124000000       3935000000      1
+GOOGL     2017 InterestExpense                            false          109000000       3969000000      1
+GOOGL     2018 InterestExpense                            false          114000000       4012000000      1
+GOOGL     2019 InterestExpense                            false          100000000       4554000000      1
+GOOGL     2020 InterestExpense                            false          135000000      13932000000      1
+GOOGL     2021 InterestExpense                            false          346000000      14817000000      1
+GOOGL     2022 InterestExpenseNonoperating                false          357000000      14701000000      1
+GOOGL     2023 InterestExpenseNonoperating                false          308000000      13253000000      1
+GOOGL     2024 InterestExpenseNonoperating                false          268000000      10883000000      1
+GOOGL     2025 InterestExpenseNonoperating                false          736000000      49085000000      1
+AMZN      2007 InterestExpense                            false           77000000              n/a      1
+AMZN      2008 InterestExpense                            false           71000000              n/a      1
+AMZN      2009 InterestExpense                            false           34000000        109000000      1
+AMZN      2010 InterestExpense                            false           39000000        184000000      1
+AMZN      2011 InterestExpense                            false           65000000        384000000      1
+AMZN      2012 InterestExpense                            false           92000000       3691000000      1
+AMZN      2013 InterestExpense                            false          141000000       3967000000      1
+AMZN      2014 InterestExpense                            false          210000000       9881000000      1
+AMZN      2015 InterestExpense                            false          459000000       8562000000      1
+AMZN      2016 InterestExpense                            false          484000000       8838000000      1
+AMZN      2017 InterestExpense                            false          848000000      24942000000      1
+AMZN      2018 InterestExpense                            false         1417000000      24965000000      1
+AMZN      2019 InterestExpense                            false         1600000000      24820000000      1
+AMZN      2020 InterestExpense                            false         1647000000      33174000000      1
+AMZN      2021 InterestExpense                            false         1809000000      50553000000      1
+AMZN      2022 InterestExpenseNonoperating                false         2367000000      70542000000      1
+AMZN      2023 InterestExpenseNonoperating                false         3182000000      67182000000      1
+AMZN      2024 InterestExpenseNonoperating                false         2406000000      58000000000      1
+AMZN      2025 InterestExpenseNonoperating                false         2274000000      68836000000      1
+MSFT      2008 InterestExpense                            false          106000000              n/a      1
+MSFT      2009 InterestExpense                            false           38000000              n/a      1
+MSFT      2010 InterestExpense                            false          151000000       5000000000      1
+MSFT      2011 InterestExpense                            false          295000000      11900000000      1
+MSFT      2012 InterestExpense                            false          380000000      11900000000      1
+MSFT      2013 InterestExpense                            false          429000000      15600000000      1
+MSFT      2014 InterestExpense                            false          597000000      20600000000      1
+MSFT      2015 InterestExpense                            false          781000000      30300000000      1
+MSFT      2016 InterestExpense                            false         1243000000      40800000000      1
+MSFT      2017 InterestExpense                            false         2222000000      77100000000      1
+MSFT      2018 InterestExpense                            false         2733000000      76200000000      1
+MSFT      2019 InterestExpense                            false         2686000000      72200000000      1
+MSFT      2020 InterestExpense                            false         2591000000      63327000000      1
+MSFT      2021 InterestExpense                            false         2346000000      58146000000      1
+MSFT      2022 InterestExpense                            false         2063000000      49781000000      1
+MSFT      2023 InterestExpenseNonoperating                false         1968000000      47237000000      1
+MSFT      2024 InterestExpenseNonoperating                false         2935000000      44937000000      1
+MSFT      2025 InterestExpenseNonoperating                false         2385000000      43151000000      1
+MSFT      2026 InterestExpenseNonoperating                false         3051000000              n/a      1
+ABBV      2011 InterestIncomeExpenseNonoperatingNet        true          -20000000              n/a      1
+ABBV      2012 InterestExpense                            false          104000000              n/a      1
+ABBV      2013 InterestExpense                            false          299000000      14310000000      1
+ABBV      2014 InterestExpense                            false          429000000      14586000000      1
+ABBV      2015 InterestExpense                            false          719000000      31265000000      1
+ABBV      2016 InterestExpense                            false         1047000000      36465000000      1
+ABBV      2017 InterestExpense                            false         1150000000      36968000000      1
+ABBV      2018 InterestExpense                            false         1348000000      36611000000      1
+ABBV      2019 InterestExpense                            false         1784000000      66728000000      1
+ABBV      2020 InterestExpense                            false         2454000000      86022000000      1
+ABBV      2021 InterestExpense                            false         2423000000      76670000000      1
+ABBV      2022 InterestExpense                            false         2230000000      63270000000      1
+ABBV      2023 InterestExpense                            false         2224000000      59385000000      1
+ABBV      2024 InterestExpense                            false         2808000000      67144000000      1
+ABBV      2025 InterestExpense                            false         2893000000      58941000000      1
+ADSK      2008 InterestIncomeExpenseNet                    true          -24400000              n/a      1
+ADSK      2009 InterestIncomeExpenseNet                    true           -8000000              n/a      1
+ADSK      2010 InterestIncomeExpenseNet                    true          -19100000              n/a      1
+ADSK      2011 InterestIncomeExpenseNet                    true            -600000              n/a      1
+ADSK      2012 InterestIncomeExpenseNet                    true           -7300000              n/a      1
+ADSK      2013 InterestIncomeExpenseNet                    true           -4100000        745600000      1
+ADSK      2014 InterestIncomeExpenseNet                    true            4900000        746400000      1
+ADSK      2015 InterestIncomeExpenseNet                    true           37700000        747200000      1
+ADSK      2016 InterestIncomeExpenseNet                    true           21600000       1487700000      1
+ADSK      2017 InterestIncomeExpenseNet                    true           24200000       1092000000      1
+ADSK      2018 InterestIncomeExpenseNet                    true           48200000       1586000000      1
+ADSK      2019 InterestIncomeExpenseNet                    true           17700000              n/a      1
+ADSK      2020 InterestIncomeExpenseNet                    true           48200000              n/a      1
+ADSK      2021 InterestIncomeExpenseNet                    true           82000000              n/a      1
+ADSK      2022 InterestIncomeExpenseNet                    true           53000000              n/a      1
+ADSK      2023 InterestExpense                            false           83000000              n/a      1
+ADSK      2024 InterestExpense                            false           71000000              n/a      1
+ADSK      2025 InterestExpense                            false           71000000              n/a      1
+ADSK      2026 InterestExpense                            false           80000000              n/a      1
+AXON      2011 InterestIncomeExpenseNonoperatingNet        true           -1287000              n/a      1
+AXON      2012 InterestIncomeExpenseNonoperatingNet        true             -83000              n/a      1
+AXON      2013 InterestIncomeExpenseNonoperatingNet        true             -86000              n/a      1
+AXON      2014 InterestIncomeExpenseNonoperatingNet        true             194000              n/a      1
+AXON      2015 InterestIncomeExpenseNonoperatingNet        true             -26000              n/a      1
+AXON      2016 InterestIncomeExpenseNonoperatingNet        true             354000              n/a      1
+AXON      2017 InterestIncomeExpenseNonoperatingNet        true           -2738000              n/a      1
+AXON      2018 InterestIncomeExpenseNonoperatingNet        true           -3263000              n/a      1
+AXON      2019 InterestIncomeExpenseNonoperatingNet        true           -8464000              n/a      1
+AXON      2020 InterestIncomeExpenseNonoperatingNet        true           -7859000              n/a      1
+AXON      2021 InterestIncomeExpenseNonoperatingNet        true           -1483000              n/a      1
+AXON      2022 InterestIncomeExpenseNonoperatingNet        true           -4294000              n/a      1
+AXON      2023 InterestExpenseNonoperating                false            6995000              n/a      1
+AXON      2024 InterestExpenseNonoperating                false            7098000        680289000      1
+AXON      2025 InterestExpenseNonoperating                false           94238000       1810722000      1
+CARR      2018 InterestIncomeExpenseNonoperatingNet        true          -37000000              n/a      1
+CARR      2019 InterestIncomeExpenseNonoperatingNet        true          -27000000              n/a      1
+CARR      2020 InterestExpenseDebt                        false          298000000      10308000000      1
+CARR      2021 InterestExpenseDebt                        false          319000000       9513000000      1
+CARR      2022 InterestExpenseDebt                        false          238000000       8842000000      1
+CARR      2023 InterestExpenseDebt                        false          306000000      14293000000      1
+CARR      2024 InterestExpenseDebt                        false          580000000      12278000000      1
+CARR      2025 InterestExpenseDebt                        false          458000000      11473000000      1
+COR       2008 InterestIncomeExpenseNet                    true          -64496000              n/a      1
+COR       2009 InterestIncomeExpenseNet                    true           58307000       1178001000      1
+COR       2010 InterestIncomeExpenseNet                    true           72393000       1343580000      1
+COR       2011 InterestIncomeExpenseNet                    true           76148000       1364952000      1
+COR       2012 InterestIncomeExpenseNet                    true           92569000       1446770000      1
+COR       2013 InterestIncomeExpenseNet                    true           73897000       1396606000      1
+COR       2014 InterestIncomeExpenseNet                    true           76862000       1995632000      1
+COR       2015 InterestIncomeExpenseNonoperatingNet        true          109036000       3493048000      1
+COR       2016 InterestIncomeExpenseNonoperatingNet        true          139912000       4205402000      1
+COR       2017 InterestIncomeExpenseNonoperatingNet        true          145185000       3442055000      1
+COR       2018 InterestIncomeExpenseNonoperatingNet        true          174699000        400000000      1
+COR       2019 InterestIncomeExpenseNonoperatingNet        true          157769000       4172892000      1
+COR       2020 InterestIncomeExpenseNonoperatingNet        true          137883000       4119520000      1
+COR       2021 InterestIncomeExpenseNonoperatingNet        true          174074000       6683924000      1
+COR       2022 InterestIncomeExpenseNonoperatingNet        true          210673000       5702833000      1
+COR       2023 InterestIncomeExpenseNonoperatingNet        true          228931000       4787457000      1
+COR       2024 InterestIncomeExpenseNonoperatingNet        true          156991000       4388076000      1
+COR       2025 InterestIncomeExpenseNonoperatingNet        true          291548000       7660773000      1
+CPRT      2009 InterestExpense                            false             274000              n/a      1
+CPRT      2010 InterestExpenseDebt                        false             216000              n/a      1
+CPRT      2011 InterestExpenseDebt                        false            4078000        375756000      1
+CPRT      2012 InterestExpenseDebt                        false           11341000        368950000      1
+CPRT      2013 InterestExpenseDebt                        false           10267000        296410000      1
+CPRT      2014 InterestExpense                            false            8768000        223227000      1
+CPRT      2015 InterestExpense                            false           18121000        592135000      1
+CPRT      2016 InterestExpense                            false           23606000        564341000      1
+CPRT      2017 InterestExpense                            false           23779000        550883000      1
+CPRT      2018 InterestExpense                            false           20368000        398747000      1
+CPRT      2019 InterestExpense                            false           19810000        400091000      1
+CPRT      2020 InterestExpense                            false           20230000        397036000      1
+CPRT      2021 InterestIncomeExpenseNet                    true           20247000        397636000      1
+CPRT      2022 InterestIncomeExpenseNet                    true           16688000          1996000      1
+CPRT      2023 InterestIncomeExpenseNet                    true          -65928000         10903000      1
+CPRT      2024 InterestIncomeExpenseNonoperatingNet        true         -145673000              n/a      1
+CPRT      2025 InterestIncomeExpenseNonoperatingNet        true         -178909000              n/a      1
+DDOG      2018 InterestIncomeExpenseNonoperatingNet        true            -913000              n/a      1
+DDOG      2019 InterestExpense                            false              32000              n/a      1
+DDOG      2020 InterestExpense                            false           30434000              n/a      1
+DDOG      2021 InterestExpense                            false           21052000              n/a      1
+DDOG      2022 InterestExpenseNonoperating                false           16535000              n/a      1
+DDOG      2023 InterestExpenseNonoperating                false            6302000              n/a      1
+DDOG      2024 InterestExpenseNonoperating                false            7068000              n/a      1
+DDOG      2025 InterestExpenseNonoperating                false           11059000              n/a      1
+JKHY      2009 InterestExpense                            false            1357000              n/a      1
+JKHY      2010 InterestExpense                            false            1618000              n/a      1
+JKHY      2011 InterestExpense                            false            8930000        154031000      1
+JKHY      2012 InterestExpense                            false            5743000        106166000      1
+JKHY      2013 InterestExpense                            false            6337000          7366000      1
+JKHY      2014 InterestExpense                            false            1105000          3729000      1
+JKHY      2015 InterestExpense                            false            1594000         50102000      1
+JKHY      2016 InterestExpense                            false            1430000                0      1
+JKHY      2017 InterestExpense                            false             996000         50000000      1
+JKHY      2018 InterestExpense                            false            1920000              n/a      1
+JKHY      2019 InterestExpense                            false             926000              n/a      1
+JKHY      2020 InterestExpense                            false             688000           208000      1
+JKHY      2021 InterestExpense                            false            1144000        100083000      1
+JKHY      2022 InterestExpense                            false            2384000        115000000      1
+JKHY      2023 InterestExpense                            false           15073000        275000000      1
+JKHY      2024 InterestIncomeExpenseNet                    true           -8628000         60000000      1
+JKHY      2025 InterestIncomeExpenseNet                    true          -17321000                0      1
+MPWR      2014 InterestIncomeExpenseNonoperatingNet        true           -1112000              n/a      1
+MPWR      2015 InterestIncomeExpenseNonoperatingNet        true           -1608000              n/a      1
+MPWR      2016 InterestIncomeExpenseNonoperatingNet        true           -2488000              n/a      1
+MPWR      2017 InterestIncomeExpenseNonoperatingNet        true           -5353000              n/a      1
+MPWR      2018 InterestIncomeExpenseNonoperatingNet        true           -6321000              n/a      1
+MPWR      2019 InterestIncomeExpenseNonoperatingNet        true           -7305000              n/a      1
+MPWR      2020 InterestIncomeExpenseNonoperatingNet        true           -9327000              n/a      1
+MPWR      2021 InterestIncomeExpenseNonoperatingNet        true          -11637000              n/a      1
+MPWR      2022 InterestIncomeExpenseNonoperatingNet        true          -14369000              n/a      1
+MPWR      2023 InterestIncomeExpenseNonoperatingNet        true          -23363000              n/a      1
+MPWR      2024 InterestIncomeExpenseNonoperatingNet        true          -27093000              n/a      1
+MPWR      2025 InterestIncomeExpenseNonoperatingNet        true          -29151000              n/a      1
+NKE       2009 InterestIncomeExpenseNonoperatingNet        true          -10000000              n/a      1
+NKE       2010 InterestIncomeExpenseNonoperatingNet        true            6000000        453200000      1
+NKE       2011 InterestIncomeExpenseNonoperatingNet        true            4000000        476000000      1
+NKE       2012 InterestIncomeExpenseNonoperatingNet        true            4000000        277000000      1
+NKE       2013 InterestIncomeExpenseNonoperatingNet        true           -3000000       1267000000      1
+NKE       2014 InterestIncomeExpenseNonoperatingNet        true           33000000       1206000000      1
+NKE       2015 InterestIncomeExpenseNonoperatingNet        true           28000000       1186000000      1
+NKE       2016 InterestIncomeExpenseNonoperatingNet        true           19000000       2054000000      1
+NKE       2017 InterestIncomeExpenseNonoperatingNet        true           59000000       3477000000      1
+NKE       2018 InterestIncomeExpenseNonoperatingNet        true           54000000       3474000000      1
+NKE       2019 InterestIncomeExpenseNonoperatingNet        true           49000000       3470000000      1
+NKE       2020 InterestIncomeExpenseNonoperatingNet        true           89000000       9409000000      1
+NKE       2021 InterestIncomeExpenseNonoperatingNet        true          262000000       9413000000      1
+NKE       2022 InterestIncomeExpenseNonoperatingNet        true          205000000       9420000000      1
+NKE       2023 InterestIncomeExpenseNonoperatingNet        true           -6000000       8927000000      1
+NKE       2024 InterestIncomeExpenseNonoperatingNet        true         -161000000       8903000000      1
+NKE       2025 InterestIncomeExpenseNonoperatingNet        true         -107000000       7961000000      1
+NKE       2026 InterestIncomeExpenseNonoperatingNet        true          -50000000              n/a      1
+NWS       2012 InterestIncomeExpenseNet                    true          -56000000              n/a      1
+NWS       2013 InterestIncomeExpenseNet                    true          -77000000              n/a      1
+NWS       2014 InterestIncomeExpenseNet                    true          -68000000              n/a      1
+NWS       2015 InterestIncomeExpenseNonoperatingNet        true          -56000000              n/a      1
+NWS       2016 InterestIncomeExpenseNonoperatingNet        true          -43000000        372000000      1
+NWS       2017 InterestIncomeExpenseNonoperatingNet        true          -39000000        379000000      1
+NWS       2018 InterestIncomeExpenseNonoperatingNet        true            7000000       1952000000      1
+NWS       2019 InterestIncomeExpenseNonoperatingNet        true           59000000       1453000000      1
+NWS       2020 InterestIncomeExpenseNonoperatingNet        true           25000000       1259000000      1
+NWS       2021 InterestIncomeExpenseNonoperatingNet        true           53000000       2313000000      1
+NWS       2022 InterestIncomeExpenseNonoperatingNet        true           99000000       3069000000      1
+NWS       2023 InterestIncomeExpenseNonoperatingNet        true           49000000       2967000000      1
+NWS       2024 InterestIncomeExpenseNonoperatingNet        true           18000000       2909000000      1
+NWS       2025 InterestIncomeExpenseNonoperatingNet        true           -3000000       1962000000      1
+NWSA      2012 InterestIncomeExpenseNet                    true          -56000000              n/a      1
+NWSA      2013 InterestIncomeExpenseNet                    true          -77000000              n/a      1
+NWSA      2014 InterestIncomeExpenseNet                    true          -68000000              n/a      1
+NWSA      2015 InterestIncomeExpenseNonoperatingNet        true          -56000000              n/a      1
+NWSA      2016 InterestIncomeExpenseNonoperatingNet        true          -43000000        372000000      1
+NWSA      2017 InterestIncomeExpenseNonoperatingNet        true          -39000000        379000000      1
+NWSA      2018 InterestIncomeExpenseNonoperatingNet        true            7000000       1952000000      1
+NWSA      2019 InterestIncomeExpenseNonoperatingNet        true           59000000       1453000000      1
+NWSA      2020 InterestIncomeExpenseNonoperatingNet        true           25000000       1259000000      1
+NWSA      2021 InterestIncomeExpenseNonoperatingNet        true           53000000       2313000000      1
+NWSA      2022 InterestIncomeExpenseNonoperatingNet        true           99000000       3069000000      1
+NWSA      2023 InterestIncomeExpenseNonoperatingNet        true           49000000       2967000000      1
+NWSA      2024 InterestIncomeExpenseNonoperatingNet        true           18000000       2909000000      1
+NWSA      2025 InterestIncomeExpenseNonoperatingNet        true           -3000000       1962000000      1
+OTIS      2018 InterestIncomeExpenseNet                    true          -14000000              n/a      1
+OTIS      2019 InterestExpenseDebt                        false                  0              n/a      1
+OTIS      2020 InterestExpenseDebt                        false          124000000       5262000000      1
+OTIS      2021 InterestExpenseDebt                        false          136000000       7249000000      1
+OTIS      2022 InterestExpenseDebt                        false          140000000       6629000000      1
+OTIS      2023 InterestExpenseDebt                        false          155000000       6910000000      1
+OTIS      2024 InterestExpenseDebt                        false          183000000       8322000000      1
+OTIS      2025 InterestExpenseDebt                        false          217000000       7741000000      1
+PAYX      2012 InterestIncomeExpenseNonoperatingNet        true           -6400000              n/a      1
+PAYX      2013 InterestIncomeExpenseNonoperatingNet        true           -6600000              n/a      1
+PAYX      2014 InterestExpense                            false            1100000              n/a      1
+PAYX      2015 InterestExpense                            false             700000              n/a      1
+PAYX      2016 InterestExpense                            false            1100000              n/a      1
+PAYX      2017 InterestExpense                            false            2500000              n/a      1
+PAYX      2018 InterestExpense                            false            3900000              n/a      1
+PAYX      2019 InterestExpense                            false           17600000        796400000      1
+PAYX      2020 InterestExpense                            false           38800000        796800000      1
+PAYX      2021 InterestExpense                            false           35800000        797300000      1
+PAYX      2022 InterestExpense                            false           36600000        797700000      1
+PAYX      2023 InterestExpenseNonoperating                false           36700000        798200000      1
+PAYX      2024 InterestExpenseNonoperating                false           37300000        798600000      1
+PAYX      2025 InterestExpenseNonoperating                false          105400000       4948200000      1
+PAYX      2026 InterestExpenseNonoperating                false          269500000              n/a      1
+RMD       2010 InterestExpense                            false            2667000              n/a      1
+RMD       2011 InterestExpense                            false            1758000        100163000      1
+RMD       2012 InterestExpense                            false            4786000        250835000      1
+RMD       2013 InterestExpense                            false            6387000        300786000      1
+RMD       2014 InterestExpense                            false            6129000        300788000      1
+RMD       2015 InterestExpense                            false            5778000        300594000      1
+RMD       2016 InterestExpense                            false           11206000       1175000000      1
+RMD       2017 InterestExpense                            false           28236000       1080000000      1
+RMD       2018 InterestExpense                            false           28355000        269988000      1
+RMD       2019 InterestExpense                            false           36156000       1258861000      1
+RMD       2020 InterestExpense                            false           40377000       1164133000      1
+RMD       2021 InterestExpense                            false           23989000        643351000      1
+RMD       2022 InterestIncomeExpenseNet                    true           22312000        765325000      1
+RMD       2023 InterestIncomeExpenseNet                    true           47379000       1431234000      1
+RMD       2024 InterestIncomeExpenseNonoperatingNet        true           45708000        697313000      1
+RMD       2025 InterestIncomeExpenseNonoperatingNet        true           -4114000        658392000      1
+ROL       2009 InterestIncomeExpenseNet                    true             964000              n/a      1
+ROL       2010 InterestIncomeExpenseNet                    true             437000              n/a      1
+ROL       2011 InterestIncomeExpenseNet                    true             508000              n/a      1
+ROL       2012 InterestIncomeExpenseNet                    true              14000              n/a      1
+ROL       2013 InterestIncomeExpenseNet                    true            -385000              n/a      1
+ROL       2014 InterestIncomeExpenseNet                    true            -254000              n/a      1
+ROL       2015 InterestIncomeExpenseNet                    true            -160000              n/a      1
+ROL       2016 InterestIncomeExpenseNet                    true            -160000              n/a      1
+ROL       2017 InterestIncomeExpenseNet                    true            -259000              n/a      1
+ROL       2018 InterestIncomeExpenseNet                    true            -220000              n/a      1
+ROL       2019 InterestIncomeExpenseNet                    true            6917000        291500000      1
+ROL       2020 InterestIncomeExpenseNet                    true            5082000              n/a      1
+ROL       2021 InterestIncomeExpenseNet                    true             830000              n/a      1
+ROL       2022 InterestExpenseNonoperating                false            2638000              n/a      1
+ROL       2023 InterestExpenseNonoperating                false           19055000              n/a      1
+ROL       2024 InterestExpenseNonoperating                false           27677000              n/a      1
+ROL       2025 InterestExpenseNonoperating                false           28558000        486147000      1
+ROST      2012 InterestIncomeExpenseNet                    true           10322000        150000000      1
+ROST      2013 InterestExpenseDebt                        false            9721000        150000000      1
+ROST      2014 InterestExpenseDebt                        false            9721000        150000000      1
+ROST      2015 InterestExpenseDebt                        false           12990000        398375000      1
+ROST      2016 InterestExpenseDebt                        false           18568000        396025000      1
+ROST      2017 InterestExpenseDebt                        false           18573000        396493000      1
+ROST      2018 InterestExpenseDebt                        false           18578000        396967000      1
+ROST      2019 InterestExpenseDebt                        false           17900000        312440000      1
+ROST      2020 InterestExpenseDebt                        false           13139000        312891000      1
+ROST      2021 InterestIncomeExpenseNet                    true           83413000       2513085000      1
+ROST      2022 InterestIncomeExpenseNet                    true           74328000       2452325000      1
+ROST      2023 InterestIncomeExpenseNet                    true            2842000       2456510000      1
+ROST      2024 InterestIncomeExpenseNet                    true         -164118000       2460730000      1
+ROST      2025 InterestIncomeExpenseNet                    true         -171568000       2214811000      1
+ROST      2026 InterestIncomeExpenseNet                    true         -134800000       1517606000      1
+TPR       2010 InterestIncomeExpenseNet                    true           -7961000         24901000      1
+TPR       2011 InterestIncomeExpenseNet                    true           -1031000         24155000      1
+TPR       2012 InterestIncomeExpenseNet                    true            -720000         23360000      1
+TPR       2013 InterestExpenseDebt                        false            1400000           985000      1
+TPR       2014 InterestExpenseDebt                        false            1700000        140485000      1
+TPR       2015 InterestExpenseDebt                        false           11900000        879100000      1
+TPR       2016 InterestExpenseDebt                        false           32900000        861200000      1
+TPR       2017 InterestExpenseDebt                        false           26800000       1579500000      1
+TPR       2018 InterestExpenseDebt                        false           86300000       1599900000      1
+TPR       2019 InterestExpenseDebt                        false           66900000       1601900000      1
+TPR       2020 InterestExpenseDebt                        false           71500000       1587900000      1
+TPR       2021 InterestExpenseDebt                        false           73500000       1590700000      1
+TPR       2022 InterestExpenseDebt                        false           68800000       1659200000      1
+TPR       2023 InterestExpenseDebt                        false           72800000       1635800000      1
+TPR       2024 InterestExpenseDebt                        false          369600000       6937200000      1
+TPR       2025 InterestExpenseDebt                        false          271200000       2377900000      1
+TTD       2014 InterestExpense                            false             843000              n/a      1
+TTD       2015 InterestExpense                            false            1141000              n/a      1
+TTD       2016 InterestExpense                            false            3075000              n/a      1
+TTD       2017 InterestExpense                            false            1791000              n/a      1
+TTD       2018 InterestExpense                            false            1550000              n/a      1
+TTD       2019 InterestIncomeExpenseNet                    true           -4719000              n/a      1
+TTD       2020 InterestIncomeExpenseNet                    true            -656000              n/a      1
+TTD       2021 InterestIncomeExpenseNet                    true            1030000              n/a      1
+TTD       2022 InterestExpenseNonoperating                false            4014000              n/a      1
+TTD       2023 InterestExpenseNonoperating                false            1656000              n/a      1
+TTD       2024 InterestExpenseNonoperating                false            1514000              n/a      1
+TTD       2025 InterestExpenseNonoperating                false            1790000              n/a      1
+TYL       2009 InterestIncomeExpenseNonoperatingNet        true            -146000              n/a      1
+TYL       2010 InterestIncomeExpenseNonoperatingNet        true            1742000              n/a      1
+TYL       2011 InterestIncomeExpenseNonoperatingNet        true            2404000              n/a      1
+TYL       2012 InterestIncomeExpenseNonoperatingNet        true            2709000              n/a      1
+TYL       2013 InterestIncomeExpenseNonoperatingNet        true            1309000              n/a      1
+TYL       2014 InterestIncomeExpenseNonoperatingNet        true             355000              n/a      1
+TYL       2019 InterestIncomeExpenseNet                    true            2027000              n/a      1
+TYL       2020 InterestAndDebtExpense                     false            1013000              n/a      1
+TYL       2021 InterestAndDebtExpense                     false           23298000        748511000      1
+TYL       2022 InterestExpenseNonoperating                false           28379000        987389000      1
+TYL       2023 InterestExpenseNonoperating                false           23629000        646007000      1
+TYL       2024 InterestExpenseNonoperating                false            5931000        597934000      1
+TYL       2025 InterestExpenseNonoperating                false            4995000        600000000      1
+ULTA      2010 InterestExpense                            false            2202000              n/a      1
+ULTA      2011 InterestExpense                            false             755000              n/a      1
+ULTA      2012 InterestExpense                            false             587000              n/a      1
+ULTA      2013 InterestExpense                            false             185000              n/a      1
+ULTA      2014 InterestIncomeExpenseNet                    true            -118000              n/a      1
+ULTA      2015 InterestIncomeExpenseNet                    true            -894000              n/a      1
+ULTA      2016 InterestIncomeExpenseNet                    true           -1143000              n/a      1
+ULTA      2017 InterestIncomeExpenseNet                    true            -890000              n/a      1
+ULTA      2018 InterestIncomeExpenseNet                    true           -1568000              n/a      1
+ULTA      2019 InterestIncomeExpenseNonoperatingNet        true           -5061000              n/a      1
+ULTA      2020 InterestIncomeExpenseNonoperatingNet        true           -5056000              n/a      1
+ULTA      2021 InterestIncomeExpenseNonoperatingNet        true            5735000              n/a      1
+ULTA      2022 InterestIncomeExpenseNonoperatingNet        true            1663000              n/a      1
+ULTA      2023 InterestIncomeExpenseNonoperatingNet        true           -4934000              n/a      1
+ULTA      2024 InterestIncomeExpenseNonoperatingNet        true          -17622000              n/a      1
+ULTA      2025 InterestIncomeExpenseNonoperatingNet        true          -15094000              n/a      1
+ULTA      2026 InterestIncomeExpenseNonoperatingNet        true            1787000         62287000      1
+WSM       2015 InterestIncomeExpenseNonoperatingNet        true              62000                0      1
+WSM       2016 InterestIncomeExpenseNonoperatingNet        true             627000              n/a      1
+WSM       2017 InterestIncomeExpenseNonoperatingNet        true             688000              n/a      1
+WSM       2020 InterestIncomeExpenseNonoperatingNet        true            8853000        299818000      1
+WSM       2021 InterestIncomeExpenseNonoperatingNet        true           16231000        299350000      1
+WSM       2022 InterestIncomeExpenseNonoperatingNet        true            1865000              n/a      1
+WSM       2023 InterestIncomeExpenseNonoperatingNet        true           -2260000              n/a      1
+WSM       2024 InterestIncomeExpenseNonoperatingNet        true          -29162000              n/a      1
+WSM       2025 InterestIncomeExpenseNonoperatingNet        true          -55548000              n/a      1
+WSM       2026 InterestIncomeExpenseNonoperatingNet        true          -36838000              n/a      1
+XYZ       2016 InterestIncomeExpenseNet                    true            -533000                0      1
+XYZ       2017 InterestIncomeExpenseNet                    true           10053000        358572000      1
+XYZ       2018 InterestExpense                            false           37800000        899695000      1
+XYZ       2019 InterestExpense                            false           44900000        938832000      1
+XYZ       2020 InterestExpense                            false           75200000       2586924000      1
+XYZ       2021 InterestExpense                            false           58100000       4559663000      1
+XYZ       2022 InterestExpenseDebt                        false                  0              n/a      1
+XYZ       2023 InterestExpenseDebt                        false                  0              n/a      1
+XYZ       2024 InterestExpenseDebt                        false          165500000              n/a      1
+XYZ       2025 InterestExpenseDebt                        false          256400000              n/a      1
+YUM       2007 InterestIncomeExpenseNet                    true         -166000000              n/a      1
+YUM       2008 InterestExpenseDebt                        false          253000000              n/a      1
+YUM       2009 InterestExpenseDebt                        false          212000000       3207000000      1
+YUM       2010 InterestExpenseDebt                        false          195000000       2915000000      1
+YUM       2011 InterestExpenseDebt                        false          184000000       2997000000      1
+YUM       2012 InterestExpenseDebt                        false          169000000       2932000000      1
+YUM       2013 InterestExpenseDebt                        false          270000000       2918000000      1
+YUM       2014 InterestExpenseDebt                        false          151000000       3077000000      1
+YUM       2015 InterestExpenseDebt                        false          153000000       3054000000      1
+YUM       2016 InterestExpenseDebt                        false          331000000       9061000000      1
+YUM       2017 InterestExpenseDebt                        false          473000000       9429000000      1
+YUM       2018 InterestExpenseDebt                        false          496000000       9751000000      1
+YUM       2019 InterestExpenseDebt                        false          519000000      10131000000      1
+YUM       2020 InterestExpenseDebt                        false          558000000      10272000000      1
+YUM       2021 InterestExpenseDebt                        false          551000000      11178000000      1
+YUM       2022 InterestExpenseDebt                        false          558000000      11453000000      1
+YUM       2023 InterestExpenseDebt                        false          602000000      11142000000      1
+YUM       2024 InterestExpenseDebt                        false          542000000      11306000000      1
+YUM       2025 InterestExpenseDebt                        false          544000000      11872000000      1
+ZBRA      2012 InterestExpense                            false             207000              n/a      1
+ZBRA      2013 InterestExpense                            false                  0              n/a      1
+ZBRA      2014 InterestExpense                            false           62000000       3160000000      1
+ZBRA      2015 InterestExpense                            false          193000000       3012000000      1
+ZBRA      2016 InterestExpense                            false          193000000       2703000000      1
+ZBRA      2017 InterestExpense                            false          227000000       2249000000      1
+ZBRA      2018 InterestExpense                            false           91000000       1600000000      1
+ZBRA      2019 InterestExpense                            false           89000000       1286000000      1
+ZBRA      2020 InterestExpense                            false           76000000       1252000000      1
+ZBRA      2021 InterestExpense                            false            5000000        996000000      1
+ZBRA      2022 InterestIncomeExpenseNonoperatingNet        true          -23000000       2032000000      1
+ZBRA      2023 InterestIncomeExpenseNonoperatingNet        true          133000000       2226000000      1
+ZBRA      2024 InterestIncomeExpenseNonoperatingNet        true           98000000       2183000000      1
+ZBRA      2025 InterestIncomeExpenseNonoperatingNet        true          108000000       2511000000      1
+DVN       2007 InterestAndDebtExpense                     false          430000000              n/a      1
+DVN       2008 InterestExpenseDebt                        false          426000000              n/a      1
+DVN       2009 InterestExpenseDebt                        false          437000000       7279000000      1
+DVN       2010 InterestExpenseDebt                        false          408000000       5630000000      1
+DVN       2011 InterestExpenseDebt                        false          414000000       9780000000      1
+DVN       2012 InterestExpenseDebt                        false          440000000      11644000000      1
+DVN       2013 InterestExpenseDebt                        false          466000000      12022000000      1
+DVN       2014 InterestExpenseDebt                        false          532000000      11262000000      1
+DVN       2015 InterestExpenseDebt                        false          565000000      13113000000      1
+DVN       2016 InterestExpenseDebt                        false          488000000      10154000000      1
+DVN       2017 InterestExpenseDebt                        false          337000000      10406000000      1
+DVN       2018 InterestExpenseDebt                        false          287000000       5947000000      1
+DVN       2019 InterestExpenseDebt                        false          260000000       4294000000      1
+DVN       2020 InterestExpenseDebt                        false          259000000       4298000000      1
+DVN       2021 InterestExpenseDebt                        false          388000000       6482000000      1
+DVN       2022 InterestExpenseDebt                        false          370000000       6440000000      1
+DVN       2023 InterestExpenseDebt                        false          369000000       6155000000      1
+DVN       2024 InterestExpenseDebt                        false          401000000       8883000000      1
+DVN       2025 InterestExpenseDebt                        false          497000000       8389000000      1
+FIS       2007 InterestExpense                            false          190200000              n/a      1
+FIS       2008 InterestExpense                            false          163400000       2514500000      1
+FIS       2009 InterestExpense                            false          134000000       3253300000      1
+FIS       2010 InterestExpense                            false          179800000       5192100000      1
+FIS       2011 InterestExpense                            false          264800000       4809800000      1
+FIS       2012 InterestExpense                            false          231300000              n/a      1
+FIS       2013 InterestExpense                            false          198600000       4468600000      1
+FIS       2014 InterestExpense                            false          173000000       5067700000      1
+FIS       2015 InterestExpense                            false          199000000      11513100000      1
+FIS       2016 InterestExpense                            false          403000000      10478000000      1
+FIS       2017 InterestExpense                            false          359000000       8763000000      1
+FIS       2018 InterestExpense                            false          314000000       8670000000      1
+FIS       2019 InterestExpense                            false          389000000      17229000000      1
+FIS       2020 InterestExpense                            false          339000000      15951000000      1
+FIS       2021 InterestExpense                            false          214000000      14825000000      1
+FIS       2022 InterestExpenseNonoperating                false          298000000      14207000000      1
+FIS       2023 InterestExpenseNonoperating                false          713000000      12970000000      1
+FIS       2024 InterestExpenseNonoperating                false          351000000       9686000000      1
+FIS       2025 InterestExpenseNonoperating                false          391000000       9069000000      1
+AVY       2008 InterestExpense                            false          115900000              n/a      1
+AVY       2010 InterestExpense                            false           84900000              n/a      1
+AVY       2011 InterestExpense                            false           71100000        954200000      1
+AVY       2012 InterestExpense                            false           72900000        702200000      1
+AVY       2013 InterestExpense                            false           60900000        950600000      1
+AVY       2015 InterestExpense                            false           63300000        945300000      1
+AVY       2016 InterestExpense                            false           59900000        713400000      1
+AVY       2017 InterestExpense                            false           63000000       1316300000      1
+AVY       2018 InterestExpense                            false           58500000       1771600000      1
+AVY       2019 InterestExpense                            false           75800000       1499300000      1
+AVY       2021 InterestExpense                            false           70000000       2052100000      1
+AVY       2022 InterestExpenseNonoperating                false           84100000       2503500000      1
+AVY       2023 InterestExpenseNonoperating                false          119000000       2622100000      1
+AVY       2024 InterestExpenseNonoperating                false          117000000       2559900000      1
+AVY       2025 InterestExpenseNonoperating                false          135400000       3210000000      1
+SW        2022 InterestExpenseNonoperating                false          148000000              n/a      1
+SW        2023 InterestExpenseNonoperating                false          170000000              n/a      1
+SW        2024 InterestExpenseNonoperating                false          525000000      13595000000      1
+SW        2025 InterestExpenseNonoperating                false          840000000      13773000000      1
+COF       2007 InterestExpense                            false         4548311000              n/a      1
+COF       2008 InterestExpense                            false         3963000000              n/a      1
+COF       2009 InterestExpense                            false         2967000000              n/a      1
+COF       2010 InterestExpense                            false         2896000000      41796000000      1
+COF       2011 InterestExpense                            false         2246000000      39561000000      1
+COF       2012 InterestExpense                            false         2375000000      49910000000      1
+COF       2013 InterestExpense                            false         1792000000      40654000000      1
+COF       2014 InterestExpense                            false         1579000000      31377000000      1
+COF       2015 InterestExpense                            false         1625000000      59115000000      1
+COF       2016 InterestExpense                            false         2018000000      60460000000      1
+COF       2017 InterestExpense                            false         2762000000      60281000000      1
+COF       2018 InterestExpense                            false         4301000000      58905000000      1
+COF       2019 InterestExpense                            false         5173000000      55697000000      1
+COF       2020 InterestExpense                            false         3120000000      40539000000      1
+COF       2021 InterestExpense                            false         1598000000      43086000000      1
+COF       2022 InterestExpense                            false         4123000000      48715000000      1
+COF       2023 InterestExpense                            false        12697000000      49856000000      1
+COF       2024 InterestIncomeExpenseNet                    true       -31208000000      45551000000      1
+COF       2025 InterestIncomeExpenseNet                    true       -42878000000      51000000000      1
+APH       2007 InterestExpense                            false           36876000              n/a      1
+APH       2008 InterestExpense                            false           39627000              n/a      1
+APH       2009 InterestExpense                            false           36586000              n/a      1
+APH       2010 InterestExpense                            false           40741000        799992000      1
+APH       2011 InterestExpense                            false           43029000       1377129000      1
+APH       2012 InterestExpense                            false           59600000       1706497000      1
+APH       2013 InterestExpense                            false           63600000       2132874000      1
+APH       2014 InterestExpense                            false           80400000       2673900000      1
+APH       2015 InterestExpense                            false           68300000       2813500000      1
+APH       2016 InterestExpense                            false           72600000       3010700000      1
+APH       2017 InterestExpense                            false           92300000       3542600000      1
+APH       2018 InterestExpense                            false          101700000       2806400000      1
+APH       2019 InterestExpense                            false          117600000       3203400000      1
+APH       2020 InterestExpense                            false          115400000       3636200000      1
+APH       2021 InterestExpense                            false          115500000       4795900000      1
+APH       2022 InterestExpenseNonoperating                false          128400000       4575000000      1
+APH       2023 InterestExpenseNonoperating                false          139500000       3983500000      1
+APH       2024 InterestExpenseNonoperating                false          217000000       6484400000      1
+APH       2025 InterestExpenseNonoperating                false          367800000      14564800000      1
+EME       2008 InterestExpense                            false           11764000              n/a      1
+EME       2009 InterestExpense                            false            7872000              n/a      1
+EME       2010 InterestExpense                            false           12153000              n/a      1
+EME       2011 InterestExpense                            false           11261000        154857000      1
+EME       2012 InterestExpense                            false            7275000        155899000      1
+EME       2013 InterestExpense                            false            8769000        354663000      1
+EME       2014 InterestExpense                            false            9075000        335440000      1
+EME       2015 InterestExpense                            false            8932000        318913000      1
+EME       2016 InterestExpense                            false           12627000        423326000      1
+EME       2017 InterestExpense                            false           12770000        310150000      1
+EME       2018 InterestExpense                            false           13544000        295777000      1
+EME       2019 InterestExpense                            false           13821000        312231000      1
+EME       2020 InterestExpense                            false            9009000        276529000      1
+EME       2021 InterestExpense                            false            6071000        261685000      1
+EME       2022 InterestExpense                            false           13199000        247192000      1
+EME       2023 InterestExpense                            false           17199000              n/a      1
+EME       2024 InterestExpense                            false            3779000              n/a      1
+EME       2025 InterestExpense                            false           12020000              n/a      1
+CHTR      2010 InterestExpense                            false          877000000              n/a      1
+CHTR      2011 InterestExpense                            false          963000000              n/a      1
+CHTR      2012 InterestExpense                            false          907000000      12808000000      1
+CHTR      2013 InterestExpense                            false          846000000      14181000000      1
+CHTR      2014 InterestIncomeExpenseNet                    true          911000000      21023000000      1
+CHTR      2015 InterestIncomeExpenseNet                    true         1306000000      35723000000      1
+CHTR      2016 InterestIncomeExpenseNet                    true         2499000000      61747000000      1
+CHTR      2017 InterestIncomeExpenseNet                    true         3090000000      70231000000      1
+CHTR      2018 InterestIncomeExpenseNet                    true         3540000000      72827000000      1
+CHTR      2019 InterestIncomeExpenseNet                    true         3797000000      79078000000      1
+CHTR      2020 InterestIncomeExpenseNet                    true         3848000000      82752000000      1
+CHTR      2021 InterestIncomeExpenseNet                    true         4037000000      91561000000      1
+CHTR      2022 InterestIncomeExpenseNet                    true         4556000000      97603000000      1
+CHTR      2023 InterestIncomeExpenseNet                    true         5188000000      97777000000      1
+CHTR      2024 InterestIncomeExpenseNonoperatingNet        true         5229000000      93933000000      1
+CHTR      2025 InterestIncomeExpenseNonoperatingNet        true         5042000000      94756000000      1
+BKR       2015 InterestIncomeExpenseNet                    true          120000000              n/a      1
+BKR       2016 InterestIncomeExpenseNet                    true          102000000         38000000      1
+BKR       2017 InterestIncomeExpenseNet                    true          131000000       6312000000      1
+BKR       2018 InterestIncomeExpenseNet                    true          223000000       6285000000      1
+BKR       2019 InterestIncomeExpenseNet                    true          237000000       6301000000      1
+BKR       2020 InterestIncomeExpenseNet                    true          264000000       6744000000      1
+BKR       2021 InterestIncomeExpenseNet                    true          299000000       6687000000      1
+BKR       2022 InterestIncomeExpenseNet                    true          252000000       5980000000      1
+BKR       2023 InterestIncomeExpenseNet                    true          216000000       5872000000      1
+BKR       2024 InterestIncomeExpenseNet                    true          198000000       5970000000      1
+BKR       2025 InterestIncomeExpenseNet                    true          222000000       5398000000      1
+INTU      2008 InterestExpenseDebt                        false           52000000              n/a      1
+INTU      2009 InterestExpenseDebt                        false           51000000              n/a      1
+INTU      2010 InterestExpenseDebt                        false           61000000              n/a      1
+INTU      2011 InterestExpenseDebt                        false           60000000        999000000      1
+INTU      2012 InterestExpenseDebt                        false           50000000              n/a      1
+INTU      2013 InterestExpenseDebt                        false           30000000              n/a      1
+INTU      2014 InterestExpenseDebt                        false           31000000              n/a      1
+INTU      2015 InterestExpenseDebt                        false           27000000              n/a      1
+INTU      2016 InterestExpenseDebt                        false           35000000        488000000      1
+INTU      2017 InterestExpenseDebt                        false           31000000        438000000      1
+INTU      2018 InterestExpenseDebt                        false           20000000        388000000      1
+INTU      2019 InterestExpenseDebt                        false           15000000        386000000      1
+INTU      2020 InterestExpenseDebt                        false           14000000       2048000000      1
+INTU      2021 InterestExpenseDebt                        false           29000000       2048000000      1
+INTU      2022 InterestExpenseDebt                        false           81000000       6914000000      1
+INTU      2023 InterestExpenseDebt                        false          248000000       6120000000      1
+INTU      2024 InterestExpenseDebt                        false          242000000       6038000000      1
+INTU      2025 InterestExpenseDebt                        false          247000000       5973000000      1
+TER       2009 InterestExpense                            false           22447000              n/a      1
+TER       2010 InterestExpense                            false           24451000        152632000      1
+TER       2011 InterestExpense                            false           23694000        162529000      1
+TER       2012 InterestExpenseDebt                        false           23162000        173387000      1
+TER       2013 InterestExpenseDebt                        false           25178000        186663000      1
+TER       2014 InterestExpenseDebt                        false            6250000              n/a      1
+TER       2015 InterestExpense                            false            1876000              n/a      1
+TER       2016 InterestExpenseDebt                        false             991000              n/a      1
+TER       2017 InterestExpenseDebt                        false           19052000              n/a      1
+TER       2018 InterestExpenseDebt                        false           19745000              n/a      1
+TER       2019 InterestExpenseDebt                        false           20456000              n/a      1
+TER       2020 InterestExpenseDebt                        false           21204000              n/a      1
+TER       2021 InterestExpenseDebt                        false           14028000              n/a      1
+TER       2022 InterestExpenseDebt                        false             941000              n/a      1
+TER       2023 InterestExpenseDebt                        false             425000              n/a      1
+TER       2024 InterestExpenseDebt                        false                  0              n/a      1
+TER       2025 InterestExpenseDebt                        false                  0        200000000      1
+AVGO      2016 InterestExpense                            false          585000000              n/a      1
+AVGO      2017 InterestExpense                            false          454000000              n/a      1
+AVGO      2018 InterestExpense                            false          628000000      17493000000      1
+AVGO      2019 InterestExpense                            false         1444000000      32798000000      1
+AVGO      2020 InterestExpense                            false         1777000000      41062000000      1
+AVGO      2021 InterestExpense                            false         1885000000      39665000000      1
+AVGO      2022 InterestExpense                            false         1737000000      39075000000      1
+AVGO      2023 InterestExpenseNonoperating                false         1622000000      37621000000      1
+AVGO      2024 InterestExpenseNonoperating                false         3953000000      66295000000      1
+AVGO      2025 InterestExpenseNonoperating                false         3210000000      61984000000      1
+EPAM    no interest-expense years extracted
+T         2007 InterestExpense                            false         3507000000              n/a      1
+T         2008 InterestExpense                            false         3369000000              n/a      1
+T         2009 InterestExpense                            false         3368000000      72081000000      1
+T         2010 InterestExpense                            false         2994000000      64515000000      1
+T         2011 InterestExpense                            false         3535000000      64753000000      1
+T         2012 InterestExpense                            false         3444000000      66358000000      1
+T         2013 InterestExpense                            false         3940000000      69290000000      1
+T         2014 InterestExpense                            false         3613000000      76011000000      1
+T         2015 InterestExpense                            false         4120000000     118515000000      1
+T         2016 InterestExpense                            false         4910000000     113681000000      1
+T         2017 InterestExpense                            false         6300000000     125972000000      1
+T         2018 InterestExpense                            false         7957000000     166250000000      1
+T         2019 InterestExpense                            false         8422000000     151309000000      1
+T         2020 InterestExpense                            false         7727000000     153775000000      1
+T         2021 InterestExpense                            false         6716000000     152724000000      1
+T         2022 InterestExpenseNonoperating                false         6108000000     128423000000      1
+T         2023 InterestExpenseNonoperating                false         6704000000     127854000000      1
+T         2024 InterestExpenseNonoperating                false         6759000000     118443000000      1
+T         2025 InterestExpenseNonoperating                false         6804000000     127089000000      1
+GEHC      2021 InterestAndDebtExpense                     false           40000000              n/a      1
+GEHC      2022 InterestAndDebtExpense                     false           77000000              n/a      1
+GEHC      2023 InterestAndDebtExpense                     false          542000000       9442000000      1
+GEHC      2024 InterestAndDebtExpense                     false          504000000       8951000000      1
+GEHC      2025 InterestAndDebtExpense                     false          440000000      10003000000      1
+DAL       2008 InterestExpense                            false          685000000              n/a      1
+DAL       2009 InterestExpense                            false          908000000              n/a      1
+DAL       2010 InterestExpense                            false         1004000000      13179000000      1
+DAL       2011 InterestIncomeExpenseNet                    true          901000000      11847000000      1
+DAL       2012 InterestExpense                            false         1005000000      11082000000      1
+DAL       2013 InterestExpense                            false          852000000       9795000000      1
+DAL       2014 InterestExpense                            false          650000000       8561000000      1
+DAL       2015 InterestExpense                            false          481000000       6766000000      1
+DAL       2016 InterestExpense                            false          388000000       6201000000      1
+DAL       2017 InterestExpense                            false          396000000       6592000000      1
+DAL       2018 InterestIncomeExpenseNet                    true          311000000       8253000000      1
+DAL       2019 InterestIncomeExpenseNet                    true          301000000       8873000000      1
+DAL       2020 InterestIncomeExpenseNet                    true          929000000      27425000000      1
+DAL       2021 InterestIncomeExpenseNet                    true         1279000000      25138000000      1
+DAL       2022 InterestIncomeExpenseNet                    true         1029000000      20671000000      1
+DAL       2023 InterestIncomeExpenseNet                    true          834000000      17071000000      1
+DAL       2024 InterestIncomeExpenseNonoperatingNet        true          747000000      14019000000      1
+DAL       2025 InterestIncomeExpenseNonoperatingNet        true          679000000      12507000000      1
+WDC       2014 InterestExpense                            false           56000000       2438000000      1
+WDC       2015 InterestExpense                            false           49000000       2301000000      1
+WDC       2016 InterestExpense                            false          266000000      16994000000      1
+WDC       2017 InterestExpense                            false          847000000      13151000000      1
+WDC       2018 InterestExpense                            false          676000000      11172000000      1
+WDC       2019 InterestExpense                            false          469000000      10522000000      1
+WDC       2020 InterestExpense                            false          413000000       9575000000      1
+WDC       2021 InterestExpense                            false          326000000       8725000000      1
+WDC       2022 InterestExpenseNonoperating                false          304000000       7022000000      1
+WDC       2023 InterestExpenseNonoperating                false          310000000       7070000000      1
+WDC       2024 InterestExpenseNonoperating                false          414000000       7434000000      1
+WDC       2025 InterestExpenseNonoperating                false          357000000       4711000000      1
+HPE       2013 InterestExpenseDebt                        false           57000000              n/a      1
+HPE       2014 InterestExpenseDebt                        false           45000000              n/a      1
+HPE       2015 InterestExpenseDebt                        false            9000000      15800000000      1
+HPE       2016 InterestExpenseDebt                        false          298000000      16100000000      1
+HPE       2017 InterestExpenseDebt                        false          334000000      14000000000      1
+HPE       2018 InterestExpenseDebt                        false          353000000      12100000000      1
+HPE       2019 InterestExpenseDebt                        false          311000000      13800000000      1
+HPE       2020 InterestExpenseDebt                        false          332000000      15900000000      1
+HPE       2021 InterestExpenseDebt                        false          289000000      13400000000      1
+HPE       2022 InterestExpenseDebt                        false          260000000      12500000000      1
+HPE       2023 InterestExpenseDebt                        false          326000000      12400000000      1
+HPE       2024 InterestExpenseDebt                        false          282000000      18200000000      1
+HPE       2025 InterestExpenseDebt                        false          598000000      17756000000      1
+CRM       2008 InterestExpense                            false              46000              n/a      1
+CRM       2009 InterestExpense                            false             107000              n/a      1
+CRM       2010 InterestExpense                            false            2000000        575000000      1
+CRM       2011 InterestExpense                            false           24909000        575000000      1
+CRM       2012 InterestExpenseDebt                        false           29356000        574890000      1
+CRM       2013 InterestExpenseDebt                        false           30768000              n/a      1
+CRM       2014 InterestExpenseDebt                        false           61607000        285000000      1
+CRM       2015 InterestExpenseDebt                        false           51421000              n/a      1
+CRM       2016 InterestExpenseDebt                        false           40488000              n/a      1
+CRM       2017 InterestExpenseDebt                        false           50000000              n/a      1
+CRM       2018 InterestExpenseDebt                        false           54000000       1719498000      1
+CRM       2019 InterestExpenseDebt                        false          126000000       3176000000      1
+CRM       2020 InterestExpenseDebt                        false          110000000       2677000000      1
+CRM       2021 InterestExpenseDebt                        false          110000000       2690000000      1
+CRM       2022 InterestExpenseDebt                        false          216000000      10596000000      1
+CRM       2023 InterestExpenseDebt                        false          300000000      10601000000      1
+CRM       2024 InterestExpenseDebt                        false          283000000       9426000000      1
+CRM       2025 InterestExpenseDebt                        false          272000000       8433000000      1
+CRM       2026 InterestExpenseDebt                        false          324000000      14439000000      1
+SLB       2007 InterestExpense                            false          275000000              n/a      1
+SLB       2008 InterestExpense                            false          247000000              n/a      1
+SLB       2009 InterestExpense                            false          221000000        444000000      1
+SLB       2010 InterestExpense                            false          207000000       5504000000      1
+SLB       2011 InterestExpense                            false          298000000       8548000000      1
+SLB       2012 InterestExpense                            false          340000000       9509000000      1
+SLB       2013 InterestExpense                            false          391000000      10393000000      1
+SLB       2014 InterestExpense                            false          369000000      11809000000      1
+SLB       2015 InterestExpense                            false          346000000      17453000000      1
+SLB       2016 InterestExpense                            false          570000000      16463000000      1
+SLB       2017 InterestExpense                            false          566000000       1100000000      1
+SLB       2018 InterestExpense                            false          575000000      14644000000      1
+SLB       2019 InterestExpense                            false          609000000      14770000000      1
+SLB       2020 InterestExpense                            false          563000000        500000000      1
+SLB       2021 InterestExpense                            false          539000000      13286000000      1
+SLB       2022 InterestExpense                            false          490000000      10594000000      1
+SLB       2023 InterestExpense                            false          503000000      10842000000      1
+SLB       2024 InterestExpense                            false          512000000      11023000000      1
+SLB       2025 InterestExpense                            false          558000000       9742000000      1
+EXE       2007 InterestExpense                            false          401000000              n/a      1
+EXE       2008 InterestExpenseDebt                        false          637000000              n/a      1
+EXE       2009 InterestExpenseDebt                        false          765000000      12295000000      1
+EXE       2010 InterestExpenseDebt                        false          718000000      12640000000      1
+EXE       2011 InterestExpenseDebt                        false          653000000      10626000000      1
+EXE       2012 InterestExpenseDebt                        false          732000000      12620000000      1
+EXE       2013 InterestExpenseDebt                        false          740000000      13230000000      1
+EXE       2014 InterestExpenseDebt                        false          704000000      11535000000      1
+EXE       2015 InterestExpenseDebt                        false          682000000      10735000000      1
+EXE       2016 InterestExpenseDebt                        false          588000000      10441000000      1
+EXE       2017 InterestExpense                            false          601000000       9973000000      1
+EXE       2018 InterestExpense                            false          633000000       7722000000      1
+EXE       2019 InterestExpense                            false          651000000       9458000000      1
+EXE       2020 InterestExpense                            false          331000000       9095000000      1
+EXE       2022 InterestExpenseNonoperating                false          160000000       3093000000      1
+EXE       2023 InterestExpenseNonoperating                false          104000000       1950000000      1
+EXE       2024 InterestExpenseNonoperating                false          123000000       5680000000      1
+EXE       2025 InterestExpenseNonoperating                false          235000000       5009000000      1
+OMC       2007 InterestExpense                            false          106900000              n/a      1
+OMC       2008 InterestExpense                            false          124600000              n/a      1
+OMC       2009 InterestExpense                            false          122200000         17800000      1
+OMC       2010 InterestExpense                            false          134700000       2501500000      1
+OMC       2011 InterestExpense                            false          158100000       2501300000      1
+OMC       2012 InterestExpense                            false          179700000       3750400000      1
+OMC       2013 InterestExpense                            false          197200000       3750500000      1
+OMC       2014 InterestExpenseDebt                        false          192700000       4500500000      1
+OMC       2015 InterestExpenseDebt                        false          210200000       4500300000      1
+OMC       2016 InterestExpenseDebt                        false          205500000       4900100000      1
+OMC       2017 InterestExpenseDebt                        false          201600000       4900000000      1
+OMC       2018 InterestExpenseDebt                        false          201600000       4900000000      1
+OMC       2019 InterestExpenseDebt                        false          185700000       5122800000      1
+OMC       2020 InterestExpenseDebt                        false          178600000       5823000000      1
+OMC       2021 InterestExpenseDebt                        false          167300000       5727000000      1
+OMC       2022 InterestExpenseDebt                        false          164700000       5611800000      1
+OMC       2023 InterestExpenseDebt                        false          165100000       5669900000      1
+OMC       2024 InterestExpenseDebt                        false          194900000       6073000000      1
+OMC       2025 InterestExpenseDebt                        false          209600000       9272900000      1
+PTC       2008 InterestExpense                            false            7823000              n/a      1
+PTC       2009 InterestExpense                            false            3197000              n/a      1
+PTC       2010 InterestExpense                            false            1526000              n/a      1
+PTC       2011 InterestExpense                            false            3310000              n/a      1
+PTC       2012 InterestExpense                            false            4746000              n/a      1
+PTC       2013 InterestExpense                            false            6976000              n/a      1
+PTC       2014 InterestExpense                            false            8155000              n/a      1
+PTC       2015 InterestExpense                            false           14742000              n/a      1
+PTC       2016 InterestExpense                            false           29882000        758125000      1
+PTC       2017 InterestExpense                            false           42400000        718125000      1
+PTC       2018 InterestExpenseDebt                        false           41700000        648125000      1
+PTC       2019 InterestExpenseDebt                        false           43000000        669134000      1
+PTC       2020 InterestExpenseDebt                        false           76400000       1005314000      1
+PTC       2021 InterestExpenseDebt                        false           50500000       1439471000      1
+PTC       2022 InterestExpenseDebt                        false           54300000       1350628000      1
+PTC       2023 InterestExpenseDebt                        false          129400000       1686410000      1
+PTC       2024 InterestExpenseDebt                        false          119700000       1227105000      1
+PTC       2025 InterestExpenseDebt                        false           77000000       1172434000      1
+
+fetched: 52/52  failed: []
+
+=== TABLE 2: four candidate refusal sets (predicates over Table 1 rows only) ===
+(A) as implemented [driver_resolution.rs net_interest_years]: refuse issuer if ANY year has interest_value < 0
+(B) narrower window: refuse issuer if any year with total_debt > 0 has interest_value < 0
+(C) basis, issuer-wide: refuse issuer if ANY year has is_net == true
+(D) basis, per-year: drop every year with is_net == true; refuse the issuer only if the surviving fittable set (debt > 0 && interest > 0) is EMPTY
+
+HONESTY CAVEAT: production additionally intersects the accounting-fit years with `tax_years` (driver_resolution.rs:184-191, `accounting_common`) before a rate is actually resolved. Neither (B) nor (D) below computes that intersection -- this probe only carries the interest and debt series, not the marginal-tax series. Direction of the error: a year (B)/(D) counts as usable can still be dropped downstream for lacking an aligned marginal-tax year, but a year (B)/(D) already excludes was never going to be used either way. So (B) and (D) can only be AS PERMISSIVE OR MORE PERMISSIVE than the real production fit, never stricter: their refused-counts are a LOWER BOUND on what production actually refuses, and an issuer they show as surviving may still be refused in the real pipeline for a reason this probe does not measure.
+
+(A) refused (26): ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA COF
+(B) refused (11): ADSK CPRT JKHY NKE NWS NWSA RMD ROST TPR ZBRA COF
+(C) refused (29): ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA COF CHTR BKR DAL
+(D) refused (11): ADSK COR DDOG MPWR NKE NWS NWSA TTD ULTA WSM BKR
+    (D) surviving fittable years for PG: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for GOOGL: [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for AMZN: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for MSFT: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for ABBV: [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for AXON: [2024, 2025]
+    (D) surviving fittable years for CARR: [2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for CPRT: [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
+    (D) surviving fittable years for JKHY: [2011, 2012, 2013, 2014, 2015, 2017, 2020, 2021, 2022, 2023]
+    (D) surviving fittable years for OTIS: [2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for PAYX: [2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for RMD: [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021]
+    (D) surviving fittable years for ROL: [2025]
+    (D) surviving fittable years for ROST: [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
+    (D) surviving fittable years for TPR: [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for TYL: [2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for XYZ: [2018, 2019, 2020, 2021]
+    (D) surviving fittable years for YUM: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for ZBRA: [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021]
+    (D) surviving fittable years for DVN: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for FIS: [2008, 2009, 2010, 2011, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for AVY: [2011, 2012, 2013, 2015, 2016, 2017, 2018, 2019, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for SW: [2024, 2025]
+    (D) surviving fittable years for COF: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
+    (D) surviving fittable years for APH: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for EME: [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
+    (D) surviving fittable years for CHTR: [2012, 2013]
+    (D) surviving fittable years for INTU: [2011, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for TER: [2010, 2011, 2012, 2013]
+    (D) surviving fittable years for AVGO: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for T: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for GEHC: [2023, 2024, 2025]
+    (D) surviving fittable years for DAL: [2010, 2012, 2013, 2014, 2015, 2016, 2017]
+    (D) surviving fittable years for WDC: [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for HPE: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for CRM: [2010, 2011, 2012, 2014, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    (D) surviving fittable years for SLB: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for EXE: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for OMC: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+    (D) surviving fittable years for PTC: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+
+=== TABLE 3: confusion matrix, ground truth = is_net (rule C) ===
+per issuer-year, (A) vs (C): TP=96 FP=0 FN=122 TN=554
+per issuer-year, (B) vs (C): TP=23 FP=0 FN=195 TN=554
+per issuer, refused by (C) but not (A) [net-EXPENSE filers, the LD-8 population] (3): CHTR BKR DAL
+per issuer, refused by (A) but not (C) [would falsify 'negative implies net'] (0): 
+
+=== TABLE 4: trigger-year audit (population: INTEREST_SIGN_AFFECTED_COHORT only, 25 names) ===
+symbol    year winning_qname                                total_debt_$ fittable?
+ABBV      2011 InterestIncomeExpenseNonoperatingNet                  n/a no       
+ADSK      2008 InterestIncomeExpenseNet                              n/a no       
+AXON      2011 InterestIncomeExpenseNonoperatingNet                  n/a no       
+CARR      2018 InterestIncomeExpenseNonoperatingNet                  n/a no       
+COR       2008 InterestIncomeExpenseNet                              n/a no       
+CPRT      2023 InterestIncomeExpenseNet                         10903000 no       
+DDOG      2018 InterestIncomeExpenseNonoperatingNet                  n/a no       
+JKHY      2024 InterestIncomeExpenseNet                         60000000 no       
+MPWR      2014 InterestIncomeExpenseNonoperatingNet                  n/a no       
+NKE       2009 InterestIncomeExpenseNonoperatingNet                  n/a no       
+NWS       2012 InterestIncomeExpenseNet                              n/a no       
+NWSA      2012 InterestIncomeExpenseNet                              n/a no       
+OTIS      2018 InterestIncomeExpenseNet                              n/a no       
+PAYX      2012 InterestIncomeExpenseNonoperatingNet                  n/a no       
+RMD       2025 InterestIncomeExpenseNonoperatingNet            658392000 no       
+ROL       2013 InterestIncomeExpenseNet                              n/a no       
+ROST      2024 InterestIncomeExpenseNet                       2460730000 no       
+TPR       2010 InterestIncomeExpenseNet                         24901000 no       
+TTD       2019 InterestIncomeExpenseNet                              n/a no       
+TYL       2009 InterestIncomeExpenseNonoperatingNet                  n/a no       
+ULTA      2014 InterestIncomeExpenseNet                              n/a no       
+WSM       2023 InterestIncomeExpenseNonoperatingNet                  n/a no       
+XYZ       2016 InterestIncomeExpenseNet                                0 no       
+YUM       2007 InterestIncomeExpenseNet                              n/a no       
+ZBRA      2022 InterestIncomeExpenseNonoperatingNet           2032000000 no       
+
+named checks (earliest year that trips rule A, expected per the brief):
+ABBV: MATCH -- earliest trigger year 2011
+COR: MATCH -- earliest trigger year 2008
+TYL: MATCH -- earliest trigger year 2009
+YUM: MATCH -- earliest trigger year 2007
+
+=== WHAT THIS FALSIFIES: P1-P5 against the measured tables ===
+P1 (every (A)-refused issuer has >=1 net year): SURVIVED -- a_not_c is empty
+P2 (FP(A) against basis = 0): SURVIVED -- measured FP(A) = 0
+P3 ((A) strict subset of (C), specifically via DAL/CHTR/BKR/COF): SURVIVED -- |A|=26 |C|=29 strict_subset=true named_evidence=[CHTR BKR DAL] any_suspect_fetched=true
+P4 (|D| << |A|, point estimate |D| <= 6): FALSIFIED -- measured |A|=26 (brief's reference point estimate: 24) |D|=11
+P5 (YUM/COR/TYL/ABBV not blacklisted under (D) by their trigger years): FALSIFIED -- blacklisted under (D) = [COR] all_four_fetched=true
+test valuation_probes::tests::probe_interest_basis_versus_sign ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 585 filtered out; finished in 14.62s
+

@@ -1,0 +1,77 @@
+T2.0 / R-10 -- VERBATIM CAPTURE, PUBLISHED-VALUE COUNTERFACTUAL
+Worktree: G:/dev/repos/discount_screener/.claude/worktrees/agent-a19c1b1e4036e2768
+Crate:    apps/windows/src-tauri
+This run REQUIRES the three-site counterfactual in dcf_model.rs (see r10-counterfactual.diff).
+That worktree edit MUST NOT BE MERGED.
+Cargo build warnings (all pre-existing) are elided; everything below is verbatim.
+
+==============================================================================
+=== PROBE G: the published intrinsic value under the corrected sign ===
+retrieved 2026-08-04T20:23:49.467152800+00:00
+BEFORE = every interest year read as |filed|, which is what production stores and
+         re-reads today at all three LD-1 sites.
+AFTER  = -filed for a concept the convention negates, filed otherwise.
+Both histories are written explicitly, so the only difference between the two runs is
+the interest reading.
+yrs   = fiscal years whose interest value differs between the two histories.
+addbk = the model's own normalized after-tax interest add-back, bps of revenue. It is a
+         robust statistic over the whole series, so a couple of flipped years in a long
+         history can leave it — and the value — unmoved. That is absorption, not a
+         blocked rewrite; the tree check above is what tells the two apart.
+lane  = router status : selected candidate.
+TREE CHECK: R-10 counterfactual (LD-1 abs sites removed) present = YES — the AFTER run can differ
+live risk-free 463 bps as of 1785869994
+
+symbol   yrs   before c    after c   delta c delta bps   fcff b c   fcff a c   addbk b/a lane before lane after flip 
+PG         0      18109      18109         0         0      18109      18109       80/80 sel:fcff   sel:fcff   -    
+GOOGL      0      35679      35679         0         0      50810      50810       10/10 sel:fwd    sel:fwd    -    
+AMZN       0      16185      16185         0         0      11099      11099       34/34 sel:fwd    sel:fwd    -    
+MSFT       0      57139      57139         0         0      50567      50567       90/90 sel:fwd    sel:fwd    -    
+ABBV       1      41346      41346         0         0      46133      46133     338/338 sel:fwd    sel:fwd    -    
+ADSK       6      30174      30174         0         0      28710      28710     103/103 sel:fwd    sel:fwd    -    
+AXON      10      19362      19362         0         0      19340      19340       34/34 sel:fwd    sel:fwd    -    
+CARR       2       4511       4511         0         0     absent     absent         -/- sel:fwd    sel:fwd    -    
+COR        1      54161      54161         0         0      61303      61303         6/6 sel:fwd    sel:fwd    -    
+CPRT       1       2271       2248       -23      -101       2271       2248      105/80 sel:fcff   sel:fcff   -    
+DDOG       1       3965       3965         0         0     absent     absent         -/- sel:fwd    sel:fwd    -    
+JKHY       2      16460      16325      -135       -82      16460      16325        30/5 sel:fcff   sel:fcff   -    
+MPWR      12      91657      91300      -357       -39      54630      51585      85/-85 disp:fwd   disp:fwd   -    
+NKE        6       5492       5480       -12       -22       5492       5480       19/-9 sel:fcff   sel:fcff   -    
+NWS        7       2054       2054         0         0     absent     absent         -/- sel:fwd    sel:fwd    -    
+NWSA       7       2054       2054         0         0     absent     absent         -/- sel:fwd    sel:fwd    -    
+OTIS       1       7955       7955         0         0       7955       7955       80/80 sel:fcff   sel:fcff   -    
+PAYX       2      12102      12102         0         0      12102      12102       61/61 sel:fcff   sel:fcff   -    
+RMD        1      16670      16670         0         0      16670      16670       51/51 sel:fcff   sel:fcff   -    
+ROL        3       3421       3421         0         0       3283       3283       46/46 sel:fwd    sel:fwd    -    
+ROST       3      17767      17488      -279      -157      12678      10785      45/-45 sel:fwd    sel:fwd    -    
+TPR        3      10707      10707         0         0       9014       9014     119/119 sel:fwd    sel:fwd    -    
+TTD        2       4339       4339         0         0     absent     absent         -/- sel:fwd    sel:fwd    -    
+TYL        1      23336      23336         0         0      23336      23336     101/101 sel:fcff   sel:fcff   -    
+ULTA      10      68134      68010      -124       -18      51068      49642        4/-4 sel:fwd    sel:fwd    -    
+WSM        4      15941      15941         0         0      11509      11509      28/-28 sel:fwd    sel:fwd    -    
+XYZ        1       5979       5979         0         0       4059       4059       51/51 sel:fwd    sel:fwd    -    
+YUM        1      19998      19998         0         0      19998      19998     650/650 sel:fcff   sel:fcff   -    
+ZBRA       1      24069      24069         0         0      24069      24069     150/150 sel:fcff   sel:fcff   -    
+
+=== ANCHORS ===
+all four anchors move $0.00: [PG GOOGL AMZN MSFT] — trigger (b) does not fire
+
+=== THE ANSWER ===
+issuers with a live rewrite (>=1 year changed, and the tree can carry it): 25
+issuers whose FCFF CANDIDATE moves: 6 [CPRT JKHY MPWR NKE ROST ULTA]
+issuers whose PUBLISHED value moves: 6 [CPRT(-23c) JKHY(-135c) MPWR(-357c) NKE(-12c) ROST(-279c) ULTA(-124c)]
+the difference between those two lines is absorption: a rewrite that reached the model
+and was swallowed either by the robust normalization over the whole series or by the
+router publishing the forward lane instead
+router selection flips: 0 [] — a flip is a qualitatively different effect from a
+magnitude, because the published number changes lane rather than value
+corrected FCFF candidate non-positive (a refusal path, not a magnitude): 0 []
+reclassified away from OperatingNonFinancial since the scan: []
+not measurable: []
+
+=== distribution of published-value delta, in bps of the before value ===
+n=6 min=-157 median=-60 max=-18
+full sorted series: [-157 -101 -82 -39 -22 -18]
+test valuation_probes::tests::probe_published_value_under_corrected_sign ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 19.87s

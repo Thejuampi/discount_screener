@@ -1,0 +1,215 @@
+warning: unused variable: `half`
+   --> src\valuation_gap_attribution.rs:408:9
+    |
+408 |     let half = denom / 2;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_half`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS` is never used
+  --> src\dcf_model.rs:79:7
+   |
+79 | const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tax_defaulted` is never read
+    --> src\dcf_model.rs:1612:5
+     |
+1591 | struct DriverModelInputs {
+     |        ----------------- field in this struct
+...
+1612 |     tax_defaulted: bool,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `DriverModelInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `recent_fcf_growth_bps` is never used
+    --> src\dcf_model.rs:2731:4
+     |
+2731 | fn recent_fcf_growth_bps(history: &[FcfPoint]) -> Option<i32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discounted_fcff_fade` is never used
+    --> src\dcf_model.rs:2749:4
+     |
+2749 | fn discounted_fcff_fade(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rate_quality` is never read
+    --> src\dcf_model.rs:2792:5
+     |
+2783 | struct ResolvedWacc {
+     |        ------------ field in this struct
+...
+2792 |     rate_quality: crate::driver_resolution::EvidenceQuality,
+     |     ^^^^^^^^^^^^
+
+warning: fields `valid_tax_periods` and `average_debt_dollars` are never read
+  --> src\driver_resolution.rs:63:9
+   |
+56 | pub struct ResolvedRateInputs {
+   |            ------------------ fields in this struct
+...
+63 |     pub valid_tax_periods: Vec<i32>,
+   |         ^^^^^^^^^^^^^^^^^
+64 |     pub average_debt_dollars: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ResolvedRateInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `DCF_DISCOUNT_RATE` is never used
+  --> src\edgar.rs:27:7
+   |
+27 | const DCF_DISCOUNT_RATE: f64 = 0.10;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_TERMINAL_GROWTH` is never used
+  --> src\edgar.rs:28:7
+   |
+28 | const DCF_TERMINAL_GROWTH: f64 = 0.03;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_PROJECTION_YEARS` is never used
+  --> src\edgar.rs:29:7
+   |
+29 | const DCF_PROJECTION_YEARS: usize = 5;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_GROWTH` is never used
+  --> src\edgar.rs:30:7
+   |
+30 | const DCF_MIN_GROWTH: f64 = -0.05;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MAX_GROWTH` is never used
+  --> src\edgar.rs:31:7
+   |
+31 | const DCF_MAX_GROWTH: f64 = 0.25;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_YEARS_HISTORY` is never used
+  --> src\edgar.rs:32:7
+   |
+32 | const DCF_MIN_YEARS_HISTORY: usize = 2; // need at least 2 data points for a growth rate
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DcfResult` is never constructed
+    --> src\edgar.rs:1084:12
+     |
+1084 | pub struct DcfResult {
+     |            ^^^^^^^^^
+
+warning: function `compute_dcf` is never used
+    --> src\edgar.rs:1095:4
+     |
+1095 | fn compute_dcf(fcf_by_year: &[(i32, i64)], shares_outstanding: u64) -> Option<DcfResult> {
+     |    ^^^^^^^^^^^
+
+warning: function `fetch_dcf` is never used
+    --> src\edgar.rs:1555:8
+     |
+1555 | pub fn fetch_dcf(
+     |        ^^^^^^^^^
+
+warning: method `ingest_dcf` is never used
+    --> src\engine.rs:2266:12
+     |
+2068 | impl ScreenerState {
+     | ------------------ method in this implementation
+...
+2266 |     pub fn ingest_dcf(&mut self, symbol: String, value_cents: i64) {
+     |            ^^^^^^^^^^
+
+warning: `discount-screener-windows` (lib test) generated 17 warnings (run `cargo fix --lib -p discount-screener-windows --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running unittests src\lib.rs (target\debug\deps\discount_screener_windows_lib-11cf8efa1419a5b7.exe)
+
+running 1 test
+=== THREE-ARM PROBE: published value under RefuseIssuerOnSign vs DropYearOnBasis ===
+retrieved 2026-08-05T00:27:24.699679600+00:00
+universe = 52 distinct symbols: PG GOOGL AMZN MSFT ABBV ADSK AXON CARR COR CPRT DDOG JKHY MPWR NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TTD TYL ULTA WSM XYZ YUM ZBRA DVN FIS AVY SW COF APH EME CHTR BKR INTU TER AVGO EPAM T GEHC DAL WDC HPE CRM SLB EXE OMC PTC
+live risk-free 463 bps as of 1785869994
+
+symbol   yrs    base c       A c       D c     dA c     dD c   dA bps   dD bps cod base                 cod A                    cod D                    lane b     lane A     lane D     flip 
+PG         0     18109     18109     18109       +0       +0       +0       +0 273bps                   273bps                   273bps                   sel:fcff   sel:fcff   sel:fcff   -    
+GOOGL      0     35679     35679     35679       +0       +0       +0       +0 245bps                   245bps                   245bps                   sel:fwd    sel:fwd    sel:fwd    -    
+AMZN       0     16185     16185     16185       +0       +0       +0       +0 894bps                   894bps                   894bps                   sel:fwd    sel:fwd    sel:fwd    -    
+MSFT       0     57139     57139     57139       +0       +0       +0       +0 362bps                   362bps                   362bps                   sel:fwd    sel:fwd    sel:fwd    -    
+ABBV       1     41346     41346     41346       +0       +0       +0       +0 319bps                   REFUSED(filed interest is net of interest income in 2011, so gross interest expense is not measurable for this issuer) 319bps                   sel:fwd    sel:fwd    sel:fwd    -    
+ADSK       6     30174     29739     29739     -435     -435     -144     -144 304bps                   REFUSED(filed interest is net of interest income in 2008,2009,2010,2011,2012,2013, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+AXON      10     19362     18519     19362     -843       +0     -435       +0 520bps                   REFUSED(filed interest is net of interest income in 2011,2012,2013,2015,2017,2018,2019,2020,2021,2022, so gross interest expense is not measurable for this issuer) 520bps                   sel:fwd    sel:fwd    sel:fwd    -    
+CARR       2      4511      4511      4511       +0       +0       +0       +0 322bps                   REFUSED(filed interest is net of interest income in 2018,2019, so gross interest expense is not measurable for this issuer) 322bps                   sel:fwd    sel:fwd    sel:fwd    -    
+COR        1     54161     55434     55434    +1273    +1273     +235     +235 453bps                   REFUSED(filed interest is net of interest income in 2008, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+CPRT       1      2271      2969      2248     +698      -23    +3074     -101 408bps                   REFUSED(filed interest is net of interest income in 2023, so gross interest expense is not measurable for this issuer) 309bps                   sel:fcff   sel:fwd    sel:fcff   A    
+DDOG       1      3965      3965      3965       +0       +0       +0       +0 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(filed interest is net of interest income in 2018, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+JKHY       2     16460     14968     16325    -1492     -135     -906      -82 515bps                   REFUSED(filed interest is net of interest income in 2024,2025, so gross interest expense is not measurable for this issuer) 274bps                   sel:fcff   sel:fwd    sel:fcff   A    
+MPWR      12     91657     91300     91300     -357     -357      -39      -39 n/a                      n/a                      n/a                      disp:fwd   disp:fwd   disp:fwd   -    
+NKE        6      5492      5198      5198     -294     -294     -535     -535 141bps                   REFUSED(filed interest is net of interest income in 2009,2013,2023,2024,2025,2026, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fcff   sel:fwd    sel:fwd    AD   
+NWS        7      2054      2054      2054       +0       +0       +0       +0 297bps                   REFUSED(filed interest is net of interest income in 2012,2013,2014,2015,2016,2017,2025, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+NWSA       7      2054      2054      2054       +0       +0       +0       +0 297bps                   REFUSED(filed interest is net of interest income in 2012,2013,2014,2015,2016,2017,2025, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+OTIS       1      7955      8017      7955      +62       +0      +78       +0 236bps                   REFUSED(filed interest is net of interest income in 2018, so gross interest expense is not measurable for this issuer) 236bps                   sel:fcff   sel:fwd    sel:fcff   A    
+PAYX       2     12102      8596     12102    -3506       +0    -2897       +0 459bps                   REFUSED(filed interest is net of interest income in 2012,2013, so gross interest expense is not measurable for this issuer) 459bps                   sel:fcff   sel:fwd    sel:fcff   A    
+RMD        1     16670     24985     16670    +8315       +0    +4988       +0 250bps                   REFUSED(filed interest is net of interest income in 2025, so gross interest expense is not measurable for this issuer) 250bps                   sel:fcff   sel:fwd    sel:fcff   A    
+ROL        3      3421      3421      3421       +0       +0       +0       +0 587bps                   REFUSED(filed interest is net of interest income in 2016,2017,2018, so gross interest expense is not measurable for this issuer) 587bps                   sel:fwd    sel:fwd    sel:fwd    -    
+ROST       3     17767     18237     17488     +470     -279     +265     -157 505bps                   REFUSED(filed interest is net of interest income in 2024,2025,2026, so gross interest expense is not measurable for this issuer) 474bps                   sel:fwd    sel:fwd    sel:fwd    -    
+TPR        3     10707      9863     10707     -844       +0     -788       +0 462bps                   REFUSED(filed interest is net of interest income in 2010,2011,2012, so gross interest expense is not measurable for this issuer) 462bps                   sel:fwd    sel:fwd    sel:fwd    -    
+TTD        2      4339      4339      4339       +0       +0       +0       +0 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(filed interest is net of interest income in 2019,2020, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+TYL        1     23336     29676     23336    +6340       +0    +2717       +0 83bps                    REFUSED(filed interest is net of interest income in 2009, so gross interest expense is not measurable for this issuer) 83bps                    sel:fcff   sel:fwd    sel:fcff   A    
+ULTA      10     68134     68788     68788     +654     +654      +96      +96 287bps                   REFUSED(filed interest is net of interest income in 2014,2015,2016,2017,2018,2019,2020,2023,2024,2025, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+WSM        4     15941     15928     15928      -13      -13       -8       -8 542bps                   REFUSED(filed interest is net of interest income in 2023,2024,2025,2026, so gross interest expense is not measurable for this issuer) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+XYZ        1      5979      5512      5979     -467       +0     -781       +0 427bps                   REFUSED(filed interest is net of interest income in 2016, so gross interest expense is not measurable for this issuer) 427bps                   sel:fwd    sel:fwd    sel:fwd    -    
+YUM        1     19998     14241     19998    -5757       +0    -2879       +0 517bps                   REFUSED(filed interest is net of interest income in 2007, so gross interest expense is not measurable for this issuer) 517bps                   sel:fcff   sel:fwd    sel:fcff   A    
+ZBRA       1     24069     25423     23987    +1354      -82     +563      -34 599bps                   REFUSED(filed interest is net of interest income in 2022, so gross interest expense is not measurable for this issuer) 617bps                   sel:fcff   sel:fwd    sel:fcff   A    
+DVN        0      6766      6766      6766       +0       +0       +0       +0 573bps                   573bps                   573bps                   disp:fwd   disp:fwd   disp:fwd   -    
+FIS        0      9112      9112      9112       +0       +0       +0       +0 360bps                   360bps                   360bps                   sel:fwd    sel:fwd    sel:fwd    -    
+AVY        0     21380     21380     21380       +0       +0       +0       +0 722bps                   722bps                   722bps                   sel:fwd    sel:fwd    sel:fwd    -    
+SW         0      6431      6431      6431       +0       +0       +0       +0 614bps                   614bps                   614bps                   disp:fwd   disp:fwd   disp:fwd   -    
+APH        0     13107     13107     13107       +0       +0       +0       +0 335bps                   335bps                   335bps                   disp:fwd   disp:fwd   disp:fwd   -    
+EME        0     81197     81197     81197       +0       +0       +0       +0 447bps                   447bps                   447bps                   sel:fwd    sel:fwd    sel:fwd    -    
+CHTR       0     65952     65952     63663       +0    -2289       +0     -347 513bps                   513bps                   708bps                   sel:fwd    sel:fwd    disp:fwd   D    
+BKR        0      3847      3847      6882       +0    +3035       +0    +7889 411bps                   411bps                   REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fcff   sel:fcff   sel:fwd    D    
+INTU       0     57166     57166     57166       +0       +0       +0       +0 601bps                   601bps                   601bps                   sel:fwd    sel:fwd    sel:fwd    -    
+TER        0     28869     28869     28869       +0       +0       +0       +0 1504bps                  1504bps                  1504bps                  disp:fwd   disp:fwd   disp:fwd   -    
+AVGO       0     56334     56334     56334       +0       +0       +0       +0 475bps                   475bps                   475bps                   disp:fwd   disp:fwd   disp:fwd   -    
+EPAM       0     18549     18549     18549       +0       +0       +0       +0 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    sel:fwd    -    
+T          0      4950      4950      4950       +0       +0       +0       +0 526bps                   526bps                   526bps                   disp:fwd   disp:fwd   disp:fwd   -    
+GEHC       0      7180      7180      7180       +0       +0       +0       +0 440bps                   440bps                   440bps                   sel:fcff   sel:fcff   sel:fcff   -    
+DAL        0     13451     13451     13451       +0       +0       +0       +0 816bps                   816bps                   816bps                   disp:fwd   disp:fwd   disp:fwd   -    
+WDC        0     30649     30649     30649       +0       +0       +0       +0 432bps                   432bps                   432bps                   sel:fwd    sel:fwd    sel:fwd    -    
+HPE        0      5242      5242      5242       +0       +0       +0       +0 222bps                   222bps                   222bps                   disp:fwd   disp:fwd   disp:fwd   -    
+CRM        0     25645     25645     25645       +0       +0       +0       +0 376bps                   376bps                   376bps                   sel:fcff   sel:fcff   sel:fcff   -    
+SLB        0      7581      7581      7581       +0       +0       +0       +0 468bps                   468bps                   468bps                   sel:fcff   sel:fcff   sel:fcff   -    
+EXE        0      8994      8994      8994       +0       +0       +0       +0 412bps                   412bps                   412bps                   disp:fwd   disp:fwd   disp:fwd   -    
+OMC        0     16186     16186     16186       +0       +0       +0       +0 REFUSED(aligned interest/debt implies invalid cost of debt) REFUSED(aligned interest/debt implies invalid cost of debt) REFUSED(aligned interest/debt implies invalid cost of debt) sel:fwd    sel:fwd    sel:fwd    -    
+PTC        0     16480     16480     16480       +0       +0       +0       +0 642bps                   642bps                   642bps                   sel:fwd    sel:fwd    sel:fwd    -    
+
+fetched: 51/52  not_operating: [COF(FinancialServices)]  unmeasurable: []
+
+=== SUMMARIES ===
+movers under A: 18 [ADSK(-435c) AXON(-843c) COR(+1273c) CPRT(+698c) JKHY(-1492c) MPWR(-357c) NKE(-294c) OTIS(+62c) PAYX(-3506c) RMD(+8315c) ROST(+470c) TPR(-844c) TYL(+6340c) ULTA(+654c) WSM(-13c) XYZ(-467c) YUM(-5757c) ZBRA(+1354c)]
+movers under D: 12 [ADSK(-435c) COR(+1273c) CPRT(-23c) JKHY(-135c) MPWR(-357c) NKE(-294c) ROST(-279c) ULTA(+654c) WSM(-13c) ZBRA(-82c) CHTR(-2289c) BKR(+3035c)]
+lane flips under A: 9 [CPRT JKHY NKE OTIS PAYX RMD TYL YUM ZBRA]
+lane flips under D: 3 [NKE CHTR BKR]
+delta distribution under A (bps): n=18 min=-2897 median=-24 max=4988
+delta distribution under D (bps): n=12 min=-535 median=-60 max=7889
+issuers with non-positive FCFF candidate in A or D: 0 []
+
+=== Q1-Q9 ===
+Q1 (anchors PG/GOOGL/AMZN/MSFT move $0.00 in BOTH arms): SURVIVED -- moved=[]
+Q2 (CHTR/DAL move in D, bit-identical in A): FALSIFIED -- CHTR(dA=Some(0)c dD=Some(-2289)c) DAL(dA=Some(0)c dD=Some(0)c)
+Q3 (CHTR/DAL move DOWN under D): FALSIFIED
+Q4 (arm D movers < arm A's 18; point estimate 14-20; two-sided >=18 or <10 falsifies): SURVIVED -- measured movers_a=18 movers_d=12
+Q5 (arm D lane flips < arm A's 9; point estimate <=5): SURVIVED -- measured flips_a=9 flips_d=3
+Q6 (YUM/TYL/ABBV read a fitted rate under D): SURVIVED -- ABBV=319bps TYL=83bps YUM=517bps
+Q7 (COR/BKR are REFUSED under D): SURVIVED -- COR=REFUSED(no aligned market yield, spread, or SEC interest/debt periods) BKR=REFUSED(no aligned market yield, spread, or SEC interest/debt periods)
+Q8 (MPWR/TTD/DDOG bit-identical between A and D, no filed debt): FALSIFIED -- DDOG(A=Some(3965)c/REFUSED(filed interest is net of interest income in 2018, so gross interest expense is not measurable for this issuer) D=Some(3965)c/REFUSED(no aligned market yield, spread, or SEC interest/debt periods)) MPWR(A=Some(91300)c/n/a D=Some(91300)c/n/a) TTD(A=Some(4339)c/REFUSED(filed interest is net of interest income in 2019,2020, so gross interest expense is not measurable for this issuer) D=Some(4339)c/REFUSED(no aligned market yield, spread, or SEC interest/debt periods))
+Q9 (24-vs-25 reconciliation): 22 of 25 INTEREST_SIGN_AFFECTED_COHORT members lose a fitted accounting rate under A vs base -- [ABBV ADSK AXON CARR COR CPRT JKHY NKE NWS NWSA OTIS PAYX RMD ROL ROST TPR TYL ULTA WSM XYZ YUM ZBRA] -- this matches neither the W2b 24 nor the Probe H 25 reference figure (measured value is the number of names whose cod_base carried a fitted rate and cod_a is REFUSED, not the count of names that merely trip rule A's predicate) -- MPWR is NOT in this set
+
+=== ROL: registered-in-advance minimum-observation finding ===
+ROL arm-D rate = 587bps fitted from 1 observation(s), fiscal years [2025]. No minimum-observation threshold exists in resolve_rate_inputs; this is reported, not fixed, per the brief.
+test valuation_probes::tests::probe_published_value_under_net_interest_policies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 586 filtered out; finished in 49.13s
+
