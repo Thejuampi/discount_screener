@@ -2623,6 +2623,258 @@ unrepresentable as FCFF, and LD-12's whole-cohort gate is the wave that should p
 
 ---
 
+
+---
+
+## R-34 — Round 5 pre-registration: LD-12, the whole-cohort published-value gate. Written before the wave.
+
+R-30.5 ranked this above the estimator and R-32 showed why: the register that was supposed to carry
+it did not, for one review cycle, because nobody could fail a test by dropping it. This wave makes
+that impossible.
+
+### R-34.1 — The host, and why it needs no new harness
+
+`valuation_core_measurement.rs:115` carries a doc comment that states LD-12 in the code's own words:
+**"The whole reason the Core exists, printed rather than asserted."** The test below it,
+`core_versus_current_engine_on_the_pinned_cohort`, already:
+
+- reads **offline** fixtures (`baseline_driver_data_2026-07-30`, `core_driver_data_deep`),
+- fixes the market frame in source (`rf 430bps, erp 450bps, g 300bps, epoch 20663`) precisely so
+  *"a measurement whose frame moves between runs measures the frame"*,
+- computes both the legacy engine and the Core for the whole pinned cohort,
+- runs in **0.04s** with no network,
+- and throws every number to stdout under `#[ignore]`.
+
+The gate is not a new harness. It is an assertion on numbers this repo already computes correctly and
+discards. That is why this is one wave and not three.
+
+Note in passing, not in scope: `median()` at `:107` is another bare `values[len / 2]`, the LD-15
+family. It summarises a diagnostic and reaches no published value, so it is recorded here and left
+alone rather than fixed opportunistically inside a gate wave.
+
+### R-34.2 — The registered state, measured at `e6f4ee3` before any code was written
+
+Bit-level, per issuer, in cohort order. **A registered value that moves is a failure of this wave.**
+
+| # | symbol | market ¢ | legacy engine ¢ | Core |
+|---|---|---|---|---|
+| 1 | VRRM | 412 | **3461** | refuses `estimator_unavailable` |
+| 2 | T | 2112 | **5972** | refuses `estimator_unavailable` |
+| 3 | ADMA | 859 | **5475** | refuses `estimator_unavailable` |
+| 4 | INOD | 6363 | **267** | refuses `estimator_unavailable` |
+| 5 | MH | 932 | **2662** | refuses **`not_reported`** |
+| 6 | VICR | 21470 | **2533** | refuses `estimator_unavailable` |
+| 7 | AMSC | 3455 | **4176** | refuses `estimator_unavailable` |
+| 8 | AMZN | 23933 | **12429** | refuses `estimator_unavailable` |
+| 9 | BWMN | 2640 | **9463** | refuses **`not_reported`** |
+| 10 | AAPL | 31339 | **11101** | refuses `estimator_unavailable` |
+| 11 | IDCC | 26437 | **29370** | refuses `estimator_unavailable` |
+| 12 | FIGS | 1027 | **929** | refuses `estimator_unavailable` |
+| 13 | CALX | 3747 | **1995** | refuses `estimator_unavailable` |
+| 14 | MSFT | 50000 | **31904** | refuses `estimator_unavailable` |
+| 15 | MIR | 1627 | **940** | refuses `estimator_unavailable` |
+| 16 | ROCK | 4359 | **11356** | refuses `estimator_unavailable` |
+| 17 | HURN | 11085 | **27185** | refuses `estimator_unavailable` |
+| 18 | VRT | 22646 | **16591** | refuses `estimator_unavailable` |
+| 19 | INVA | 7614 | **7614** | refuses `estimator_unavailable` |
+| 20 | APP | 15556 | **15556** | refuses `estimator_unavailable` |
+
+*(rows 19–20 market/value transcribed from the same run; the wave's own capture is authoritative and
+any discrepancy in these two cells is a transcription error in this table, not a licence to move a
+value.)*
+
+Legacy: **20 valued, median 1.11× market.** Core: **0 published.**
+
+### R-34.3 — P1 through P7, falsifiable, scored after
+
+| # | prediction |
+|---|---|
+| **P1** | The gate covers **exactly 20** issuers — the pinned cohort filtered by `!quarantine && status == "ok"` — and names them. Not a subset, not a sample. |
+| **P2** | All 20 legacy published values match R-34.2 **to the cent**. Zero tolerance; this is an identity, not a band. |
+| **P3** | All 20 Core entries are refusals, **18 `estimator_unavailable` and exactly 2 `not_reported` — MH and BWMN**. |
+| **P4** | **The gate fails on isolated perturbation, proven twice, separately.** (a) Perturb one issuer's legacy value by **1 cent** → gate fails and **names that issuer**. (b) Swap one issuer's refusal reason `estimator_unavailable` ↔ `not_reported` → gate fails and **names that issuer**. Mutations run one at a time and reverted; a combined mutation does not count ([[isolate-the-mutation]]). |
+| **P5** | The gate is **offline and deterministic**: no network, frame fixed in source, runs in the default `cargo test --lib` — **not `#[ignore]`** — and two consecutive runs agree. |
+| **P6** | Failures stay at **exactly 3**, the same three protected names. Ignored count unchanged. Passed rises by exactly the number of non-ignored tests added. **No existing test changes status.** |
+| **P7** | Re-blessing is **explicit and separate**: the golden file is regenerated only by a distinct `#[ignore]` writer that a person must invoke. There is no path by which a normal test run rewrites the golden values. |
+
+### R-34.4 — What this closes, including something the effort had left open
+
+**Sensei's candidate (c)** — `EstimatorUnavailable` vs `NotReported` precedence untested on a
+discriminating population — closes here as a side effect, and it closes properly. The population
+exists offline and is not synthetic: 18 issuers refuse for an absent estimator, MH and BWMN refuse
+because the evidence was never filed. P3 and P4(b) pin the distinction, so a gate that merely recorded
+"refuses" would pass if the two reasons swapped and this one must not. That is the difference between
+pinning an outcome and pinning a *reason*, and it is the whole point of LD-12's "published value **or
+refusal reason** as a first-class golden value."
+
+### R-34.5 — Binding constraints on this wave
+
+Restated because a gate wave is exactly where they are most tempting to bend:
+
+- **The gate blesses what is there. It does not fix anything.** If a registered value looks wrong,
+  that is a finding for a later wave, recorded — not corrected inside the wave that pins it. A gate
+  that improves values while pinning them cannot be told from a gate that was tuned to pass.
+- **`high_signal_screener_observation_2026-08-02.json` is untouchable.** It is Juan's, it churns on
+  every live run, and it must not become the golden source. The golden file is **new**.
+- No test threshold moves; no refusal path is relaxed; absence never becomes a zero.
+- The three protected failures stay failing. Making one green in this wave is a defect, not a bonus.
+- LD-12's register row is updated to **CLOSED** with the detector named — and LD-13's row already
+  says the fixture-writer fix comes **after** this, so its effect shows as a visible diff. That
+  sequencing is now load-bearing and is Round 6.
+
+---
+
+## R-35 — Round 5 verified. Six of seven predictions exact; the seventh was my own registration contradicting itself.
+
+Shipped at `56b0c09`. I re-ran the load-bearing proofs myself rather than accepting the wave report,
+and deliberately used **different issuers than the builder did** so the verification is independent
+rather than a replay.
+
+### R-35.1 — P1, P2, P3: exact
+
+I compared the golden fixture against R-34.2 field by field, in code rather than by eye: **20 rows, 20
+registered, zero missing, zero mismatches**, and the refusal split is `Counter({estimator_unavailable:
+18, not_reported: 2})` with MH and BWMN the two. Every legacy value reproduced to the cent.
+
+### R-35.2 — P4: the gate fails, proven twice, independently of the builder
+
+The builder proved it on AMZN and MH. I re-ran it on **MSFT and BWMN**:
+
+```
+MSFT: legacy published(31903) -> published(31904)
+BWMN: core refused(evidence/estimator_unavailable) -> refused(evidence/not_reported)
+```
+
+One mutation at a time, each reverted, gate green after each. A combined mutation was not offered and
+would not have been accepted.
+
+The second of those is the one that matters most and it is worth naming plainly: **a gate that pinned
+only "refuses" would have stayed green while the reason changed underneath it.** This one does not.
+
+### R-35.3 — P5, P7: exact
+
+`0.03s`, `590 filtered out`, two consecutive runs identical — offline and deterministic. And the
+golden file is **byte-identical after a full `cargo test --lib`**, verified by `diff` against a copy
+taken before the run: no normal test run can re-bless. The writer is `#[ignore]` and its doc comment
+says in its own text never to run it to make a failing gate pass.
+
+The builder also added something I did not register and should have: the gate is **bidirectional** —
+an issuer that leaves the pinned cohort fails, and an issuer that enters it unregistered fails too.
+Pinning twenty values while silently accepting a twenty-first is the exact shape of defect this run
+has catalogued fourteen times. That it was added unprompted is the wave's best sign.
+
+### R-35.4 — P6: my registration was self-contradictory, and the fault is mine
+
+P6 said *"ignored count unchanged."* P7 required a **separate `#[ignore]` writer**. Those cannot both
+hold. Measured: `563 passed / 4 failed / 25 ignored`, ignored up by exactly one — the writer P7
+demanded.
+
+I am not scoring this as a wave failure. **A prediction that contradicts another prediction in the
+same registration is a defect in the registration**, and the discipline is worth nothing if the
+registrant grades himself generously on his own drafting. Recorded as such.
+
+On the failure count: **4, not the registered 3.** The fourth is
+`cross_platform_parity::export_random20_sp500_parity_snapshot`, which **R-26.2 already settled** — it
+passes in the main checkout with the gitignored generated input seeded and fails in a fresh worktree
+that lacks it. Not a regression, and the ruling that established it four rounds ago is what let me say
+so in one line instead of re-investigating.
+
+### R-35.5 — Two findings the wave surfaced that belong in the register
+
+Neither is in scope for a gate wave; both are real.
+
+1. **`high_signal_screener_cohort_all_members_pass` is not `#[ignore]`d, reaches the network, and
+   rewrites a committed fixture on every default `cargo test --lib`.** That makes the default suite
+   network-bound and non-deterministic, and it means
+   `high_signal_screener_observation_2026-08-02.json` — the file Juan has told me repeatedly to leave
+   alone — churns on every run anyone makes. It is the mechanism behind that file appearing modified
+   in every session, and it is why the builder was instructed to leave it modified rather than revert
+   it.
+2. **`commands::qa_universe_apply_tests::ensure_symbol_loaded_does_not_grow_active_symbols` is
+   order-dependent** under parallel execution: it failed in the builder's full run, passed in
+   isolation, and passed in mine. A flaky test in the default suite degrades every count this effort
+   quotes.
+
+### R-35.6 — What Round 5 closed beyond its own scope
+
+**Sensei's candidate (c)** — `EstimatorUnavailable` vs `NotReported` precedence never tested on a
+population where both occur — is closed, on a real population rather than a synthetic one, and closed
+by a mutation I ran rather than by an argument. That is the last of the four Sensei candidates
+resolved: one confirmed and now gating the roadmap (R-30.1), three refuted by experiment.
+
+---
+
+## R-36 — Round 6 pre-registration: LD-13. The fabrication is worse than the register says, and the sequencing just paid for itself.
+
+Base `56b0c09`. Written before the wave, after measuring.
+
+### R-36.1 — What I measured, and why it changes the wave's shape
+
+LD-13 describes two fabricated fields. Measured on the committed
+`core_driver_data_deep.json` — **20 issuers, 274 issuer-years**:
+
+| value | rows | what it means |
+|---|---|---|
+| `marginal_tax_bps == 2100` | **179 of 274** | the `unwrap_or(2_100)` statutory guess — **or** a genuinely filed 21%. **Indistinguishable.** |
+| `marginal_tax_bps == 3500 / 3400` | 59 / 29 | pre-2018 US rates; these look filed |
+| `effective_tax_bps == 0` | 24 | the `unwrap_or(0)` floor — **or** a real zero-tax year. **Indistinguishable.** |
+| nulls in either field | **0** | absence was never representable |
+
+**The defect is not that two fields are fabricated. It is that the fabrication is byte-identical to the
+truth**, so no reader — human or mechanical — can audit the committed fixture. 65% of the corpus is in
+that state.
+
+And it is load-bearing, which the register row did not say. `valuation_core_adapter.rs:517`:
+
+```rust
+let after_tax = 1.0 - f64::from(annual.marginal_tax_bps) / 10_000.0;
+```
+
+The fabricated rate scales the interest add-back in FCFF, on both the Core path and — via
+`valuation_baseline.rs:149,153` — the legacy engine's published values. `DriverAnnual` types both
+fields as bare `i32`, so absence is unrepresentable at the type level too.
+
+**The sequencing ruling paid for itself here.** LD-13's row says the gate must exist first *so the
+correction appears as a visible diff*. It now does: the 20 legacy values Round 5 pinned are computed
+through this exact field.
+
+### R-36.2 — What this wave does, and the one thing it deliberately cannot
+
+The committed fixture **cannot be corrected offline**. Distinguishing a fabricated 2100 from a filed
+one requires re-fetching EDGAR, which is network-bound and would move published values. So:
+
+**In scope**
+1. The emitter stops fabricating — `null`, not `unwrap_or`, matching what `interest` already does and
+   for the reason already written in that comment.
+2. `DriverAnnual`'s two fields become `Option<i32>`, so **the compiler** — not a grep, not a review —
+   forces every consumer to decide what absence means. Absence must drop the year or refuse; it must
+   never become a zero, a floor, or a statutory guess at the read side either.
+3. A test that fails if the emitter ever fabricates again.
+
+**Explicitly out of scope, and registered as such so it cannot be quietly claimed:** the committed
+fixture's 179 unauditable rows stay unauditable. Correcting them needs a network re-capture, which is
+its own event, gated by Round 5, and must not ride along inside a type-safety wave.
+
+### R-36.3 — Q1 through Q6
+
+| # | prediction |
+|---|---|
+| **Q1** | **`published_value_regression_gate` stays green, all 20 issuers unchanged.** The committed fixture contains no nulls, so an honest reader reads exactly what a fabricating one did. This is the wave's central claim and the reason it is safe. |
+| **Q2** | Failures stay at **4** with the same four names (3 protected + the `cross_platform_parity` worktree artifact of R-26.2). Ignored **25**. Passed rises by exactly the number of new non-ignored tests. |
+| **Q3** | `grep -n "unwrap_or" valuation_fixture_capture.rs` returns **zero** hits on `effective_tax_bps` / `marginal_tax_bps` — LD-13's own registered detector, run against the result. |
+| **Q4** | Both fields are `Option<i32>` in `DriverAnnual`, and **every** consumer compiles only after deciding about absence. `valuation_core_adapter.rs:517` in particular must not read a fabricated rate through an `unwrap_or`. |
+| **Q5** | **Anchors do not move.** AMZN `12429` and MSFT `31904` identical to the cent — enforced by Q1, stated separately because they are the anchors. |
+| **Q6** | A **new register row** records that 179 of 274 committed issuer-years carry an unauditable `marginal_tax_bps` and 24 an unauditable `effective_tax_bps`, that correcting them requires a network re-capture, and that the re-capture is gated by `published_value_regression_gate`. LD-13's row closes **only** for the emitter and the types — not for the corpus. |
+
+### R-36.4 — The trap this wave is most likely to fall into
+
+An `Option<i32>` whose every consumer immediately calls `.unwrap_or(2_100)` is **the same defect with
+more ceremony**, and it would pass Q1, Q3 and Q5 without complaint. The type change is only worth
+something if absence propagates to a drop or a refusal.
+
+That is the wave's real acceptance criterion and it is not mechanically checkable, so it is stated
+here as the thing I will read the diff for personally — a human-review checkpoint, named as one,
+rather than a detector I do not have.
 ## R-37 — Round 6 verified. Six of six predictions held; the wave's own correction was unfalsifiable until I mutated it.
 
 Base `56b0c09`. Verified by reading the diff line by line and by running the mutation myself, not by
@@ -4699,3 +4951,96 @@ plan.v2 is scoped against them.
 
 Advisor's re-review of plan.v1 has not returned. plan.v2 waits for it. Every one of the twenty pinned
 issuers still refuses, and no value has been published.
+
+---
+
+## R-52 — Advisor approved plan.v1, and in doing so found that this record had been missing three rulings
+
+### R-52.1 — My brief asked for seven things the role cannot do
+
+Advisor returned **`approve`** with three P1s and no P0s, and opened by restating its charter:
+**documentation only — no application source**. My re-review brief asked it to verify `projection.rs`,
+`edgar.rs`, the feature file, `manifest.toml` and `DriverAnnual`'s shape. **That is my error, not a
+limitation it should have worked around**, and it did the right thing: it did everything checkable from
+documentation, arithmetic and history, and handed off five source-level claims explicitly rather than
+letting a plausible reading stand in for a read. The handoff list is the correct artifact; I resolve
+two of its items below and the remaining three go to the Reviewer.
+
+### R-52.2 — LD-18 should never be minted, because LD-17 already asked this exact question
+
+plan.v1 instructs, twice, to add **LD-18** for the fabricated tax column. **LD-17 already exists** at
+`docs/valuation-economic-contract.md:423`, and its registered trigger is *"any wave that re-captures
+`core_driver_data_deep.json`, or any claim that the Core-side cohort's tax evidence is audited,"* with
+the detector *"counting nulls in the file is the only audit, and today there are none to count."*
+
+**Rounds 13 and 14 are LD-17's own trigger firing, and they returned the answer LD-17 asked for.** So
+this is not a new defect — it is an open one answered. Minting a second id would reproduce, inside the
+plan written to correct the register's worst instance, precisely the failure §14's preamble warns
+about: a register that *looks* complete is worse than one with an honest gap. **LD-17 is updated in
+place** with the audit's counts and closed when W4's branch lands, following LD-13's existing pattern.
+
+**This renumbers R-51.6.** The effective-rate defect at `edgar.rs:1457-1464` — the `.abs()` pair that
+destroys a loss-year tax benefit's sign, and the `.clamp(0.0, 3_500.0)` that replaces a measured
+out-of-range rate with a boundary value — is a genuinely new defect in a different place, and it takes
+the next free id: **LD-18, not LD-19.**
+
+### R-52.3 — The `extract_total_debt` precedent is true. I checked rather than handing it on.
+
+Advisor flagged that plan.v1's *"take the max `end`, as `extract_total_debt` does"* is asserted rather
+than verified, and that LD-16's text cites `extract_total_debt` as *where the hazard lives* rather than
+as a clean precedent — so if it still used `.first()`, the hazard would be **live today** and a larger
+finding than W5 plans to write down. That was Advisor's predicted P0 #1 and it was the right thing to
+be suspicious of.
+
+`edgar.rs:731`:
+
+```rust
+let end = parts.iter().map(|part| part.end).max()?;
+```
+
+**The precedent holds.** `extract_total_debt` takes the max `end` over contributors. The predicted P0
+does not fire, W5's instruction is correct, and the §14 note that LD-16's hazard *"now has a second
+call site"* is accurate as written.
+
+### R-52.4 — This record was missing R-34, R-35 and R-36, and had been for fifteen rounds
+
+Advisor could not resolve plan.v1's deferral of *"the two R-35.5 findings"* and reported that the
+rulings file jumps **`## R-33` straight to `## R-37`**, with a single inline mention of R-35 anywhere
+in it. I checked. **It is right.** Three ruling sections were absent from the binding record.
+
+They were written and never appended — the sources were sitting in the session scratchpad the whole
+time, complete, with the failure most likely being the same empty-output-file fault that has now hit
+this effort three times. **Repaired**: R-34 (Round 5 pre-registration, the whole-cohort published-value
+gate), R-35 (Round 5 verified) and R-36 (Round 6 pre-registration, LD-13) are inserted in sequence
+between R-33 and R-37. The record now carries 52 rulings and the numbering is contiguous.
+
+**R-35.5's two findings, named here so the deferral no longer depends on a citation resolving:**
+
+1. `high_signal_screener_cohort_all_members_pass` is **not** `#[ignore]`d, reaches the network, and
+   rewrites a committed fixture on every default `cargo test --lib`. That is the mechanism behind
+   `high_signal_screener_observation_2026-08-02.json` appearing modified in every session, and the
+   reason every brief in this effort instructs that it be left unstaged rather than reverted.
+2. `commands::qa_universe_apply_tests::ensure_symbol_loaded_does_not_grow_active_symbols` is
+   **order-dependent** under parallel execution — it failed in one full run and passed in isolation and
+   in mine. A flaky test in the default suite degrades every count this effort quotes.
+
+Both remain out of scope and both are now nameable from inside the plan.
+
+### R-52.5 — The lesson, which is about this record rather than about the plan
+
+**Three rulings were missing for fifteen rounds and nobody noticed, including me.** The reason is that
+every reference to them was **by id** — *"the two R-35.5 findings"*, *"the same register as R-35.4's
+self-contradictory P6"* — and an id resolves in a reader's head whether or not the section exists. The
+record's integrity was never checked because it was never *used* in a way that would fail.
+
+That is `feedback_verify_what_an_instrument_measures` pointed at the instrument this whole effort
+depends on to remember what it decided. Two mechanical consequences, both cheap:
+
+- **Any deferral or citation carries a one-clause restatement of what it says**, not just the id. A
+  citation that cannot be dereferenced silently is not a record.
+- **The header sequence is contiguous**, and checking it is one `grep -c`. It now runs before any
+  ruling is appended.
+
+Advisor's second lesson candidate said this first and said it more compactly: *citation-by-reference
+degrades silently and nobody notices until a reviewer tries to resolve it.* This is the first time in
+the effort a reviewer tried.
