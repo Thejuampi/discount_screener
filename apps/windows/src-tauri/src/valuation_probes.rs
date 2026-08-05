@@ -263,7 +263,55 @@ struct CapitalYear {
     invested_capital: f64,
     /// What the adapter feeds the Core today, for the same year.
     free_cash_flow: f64,
+    /// Filed pretax income for this year — carried separately from `nopat`
+    /// because the tax-basis decomposition needs the pretax base itself, not
+    /// only the after-tax return derived from it.
+    pretax: f64,
+    /// The marginal rate `nopat` was struck at for this year, as a fraction
+    /// (not bps). Carried so the SBC and tax-basis decomposition can restate
+    /// a filed dollar amount on the same after-tax footing `nopat` uses.
+    marginal_tax: f64,
 }
+
+/// Ad hoc drivers for the return-on-capital decomposition probe only.
+///
+/// These are deliberately **not** additions to `sec-driver-normalization.json`:
+/// nothing in production reads them, `extract_driver_annual` accepts any
+/// `DriverOperator` value and reads straight off the qname string, and no
+/// contract fingerprint or generated file changes because of them. Building
+/// this measurement from the real driver-resolution mechanism, instead of a
+/// bespoke JSON walk, is what lets `probe_return_on_capital_availability`
+/// report per-qname year coverage for these two exactly the way its existing
+/// driver-resolution block already does for equity and interest.
+///
+/// SBC's cash-flow concept (`ShareBasedCompensation`, the non-cash add-back)
+/// leads; the income-statement concept (`AllocatedShareBasedCompensationExpense`)
+/// only fills years the cash-flow concept never filed, matching how every
+/// other `select_one_equivalent` driver in this file treats a secondary
+/// concept as gap-fill rather than a peer.
+#[cfg(test)]
+const SHARE_BASED_COMPENSATION: DriverOperator = DriverOperator {
+    qnames: &[
+        "ShareBasedCompensation",
+        "AllocatedShareBasedCompensationExpense",
+    ],
+    qname_signs: &[1, 1],
+    unit: "USD",
+    period_shape: "duration",
+    operation: "select_one_equivalent",
+};
+
+/// Cash taxes actually paid, for the tax-basis decomposition. `IncomeTaxesPaidNet`
+/// leads because it is the concept issuers file most often for the aggregate cash
+/// tax outflow; `IncomeTaxesPaid` fills the years it did not file.
+#[cfg(test)]
+const CASH_TAXES_PAID: DriverOperator = DriverOperator {
+    qnames: &["IncomeTaxesPaidNet", "IncomeTaxesPaid"],
+    qname_signs: &[1, 1],
+    unit: "USD",
+    period_shape: "duration",
+    operation: "select_one_equivalent",
+};
 
 /// How many years each qname in a driver independently accounts for.
 ///
@@ -646,6 +694,7 @@ mod tests {
         use crate::sec_driver_normalization_policy_generated::{
             INTEREST_EXPENSE, STOCKHOLDERS_EQUITY,
         };
+        use std::collections::HashMap;
 
         let edgar = edgar_client();
         let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
@@ -668,6 +717,21 @@ mod tests {
         // assumed.
         let mut dropped_for_missing_marginal_tax_total = 0usize;
         let mut dropped_for_missing_marginal_tax_by_issuer: Vec<String> = Vec::new();
+
+        // The decomposition question: what still sits between NOPAT and FCFF
+        // after `b` was repaired to a same-scope reinvestment rate. Two
+        // candidate terms, each scored only over the issuers where its own
+        // evidence resolved -- never defaulted to zero for the rest.
+        let mut sbc_terms: Vec<(String, f64)> = Vec::new();
+        let mut dtax_terms: Vec<(String, f64)> = Vec::new();
+        // The paired population: every issuer where `b`, the SBC term AND the
+        // tax-basis term all resolved, so `resid` and `b` are read against the
+        // same names rather than two differently sized samples.
+        let mut resid_terms: Vec<(String, f64)> = Vec::new();
+        let mut paired_b_terms: Vec<(String, f64)> = Vec::new();
+        let mut decomposition_rows: Vec<String> = Vec::new();
+        let mut negative_b_positive_growth = 0usize;
+        let mut negative_resid_positive_growth = 0usize;
 
         println!("=== PROBE C: return on capital — availability ===");
         println!("per-term year counts, so a collapse names the term that caused it");
@@ -704,8 +768,11 @@ mod tests {
             // Which qname each new driver actually resolved to. A dimensional
             // fact leaking in from the statement of changes in equity, or a net
             // interest *income* line resolving as interest expense, both read as
-            // a plausible number in the merged series.
-            if let Ok(facts) = fetch_company_facts(&edgar, symbol, cik) {
+            // a plausible number in the merged series. Kept bound past this
+            // block: the SBC/cash-tax decomposition below reads the same
+            // `facts` value rather than a second fetch.
+            let facts = fetch_company_facts(&edgar, symbol, cik).ok();
+            if let Some(facts) = &facts {
                 let describe = |coverage: Vec<(&'static str, usize)>| {
                     if coverage.is_empty() {
                         "none".to_string()
@@ -719,11 +786,19 @@ mod tests {
                 };
                 resolution_rows.push(format!(
                     "{symbol:<7} equity   {}",
-                    describe(qname_coverage(&facts, STOCKHOLDERS_EQUITY))
+                    describe(qname_coverage(facts, STOCKHOLDERS_EQUITY))
                 ));
                 resolution_rows.push(format!(
                     "{symbol:<7} interest {}",
-                    describe(qname_coverage(&facts, INTEREST_EXPENSE))
+                    describe(qname_coverage(facts, INTEREST_EXPENSE))
+                ));
+                resolution_rows.push(format!(
+                    "{symbol:<7} sbc      {}",
+                    describe(qname_coverage(facts, SHARE_BASED_COMPENSATION))
+                ));
+                resolution_rows.push(format!(
+                    "{symbol:<7} cashtax  {}",
+                    describe(qname_coverage(facts, CASH_TAXES_PAID))
                 ));
             }
 
@@ -769,6 +844,8 @@ mod tests {
                         interest,
                         marginal_tax_bps,
                     ),
+                    pretax,
+                    marginal_tax,
                 });
             }
             years.sort_by_key(|year| year.year);
@@ -865,6 +942,105 @@ mod tests {
             // than being quietly replaced.
             let capital_formation = (total_nopat.abs() > 0.0)
                 .then(|| (last.invested_capital - first.invested_capital) / total_nopat);
+
+            // --- the decomposition question ----------------------------------
+            // Two nameable candidates for what still sits between NOPAT and
+            // FCFF, read straight from the same `facts` the resolution block
+            // above already fetched. Both are summed dollar-for-dollar over the
+            // usable years before being turned into a ratio, the same way `b`
+            // itself is a ratio of two sums rather than an average of yearly
+            // ratios -- and both are scored only over the years their own
+            // evidence actually covers, never zero-filled for a year an issuer
+            // did not file.
+            //
+            // SBC: operating cash flow adds the non-cash charge back at its
+            // full filed (pretax) amount; NOPAT never removed it in the first
+            // place, so FCFF sits above NOPAT by roughly that amount restated
+            // onto NOPAT's after-tax footing. Adding it back to `b` undoes the
+            // inflation of FCFF, which is why the sign is `+`.
+            //
+            // Tax basis: NOPAT is struck at the marginal rate; the cash flow
+            // statement's own earnings starting point carries whatever tax was
+            // actually paid. `marginal_tax * pretax - cash_taxes_paid`, summed
+            // over the years both resolved, is the dollar amount by which NOPAT
+            // over-deducted tax relative to what left the business in cash --
+            // positive when the marginal rate overstates the cash burden, which
+            // again understates NOPAT relative to FCFF and is added back for
+            // the same reason.
+            let mut sbc_after_tax_covered = 0.0;
+            let mut sbc_years_covered = 0usize;
+            let mut marginal_tax_dollars_covered = 0.0;
+            let mut cash_taxes_paid_covered = 0.0;
+            let mut dtax_years_covered = 0usize;
+            if let Some(facts) = &facts {
+                let sbc_by_year: HashMap<i32, i64> =
+                    extract_driver_annual(facts, SHARE_BASED_COMPENSATION)
+                        .into_iter()
+                        .map(|value| (value.year, value.value_dollars))
+                        .collect();
+                let cash_taxes_by_year: HashMap<i32, i64> =
+                    extract_driver_annual(facts, CASH_TAXES_PAID)
+                        .into_iter()
+                        .map(|value| (value.year, value.value_dollars))
+                        .collect();
+                for year in &usable {
+                    if let Some(&sbc_dollars) = sbc_by_year.get(&year.year) {
+                        sbc_after_tax_covered += sbc_dollars as f64 * (1.0 - year.marginal_tax);
+                        sbc_years_covered += 1;
+                    }
+                    if let Some(&cash_taxes_dollars) = cash_taxes_by_year.get(&year.year) {
+                        marginal_tax_dollars_covered += year.marginal_tax * year.pretax;
+                        cash_taxes_paid_covered += cash_taxes_dollars as f64;
+                        dtax_years_covered += 1;
+                    }
+                }
+            }
+            let sbc_over_nopat = (sbc_years_covered > 0 && total_nopat.abs() > 0.0)
+                .then(|| sbc_after_tax_covered / total_nopat);
+            let dtax_dollars_covered = marginal_tax_dollars_covered - cash_taxes_paid_covered;
+            let dtax_over_nopat = (dtax_years_covered > 0 && total_nopat.abs() > 0.0)
+                .then(|| dtax_dollars_covered / total_nopat);
+            // `resid` needs all three terms: an issuer whose SBC or tax-basis
+            // evidence never resolved has no basis to claim the residual is
+            // fully explained, so it is refused rather than partially computed.
+            let resid = match (realized_reinvestment, sbc_over_nopat, dtax_over_nopat) {
+                (Some(b), Some(sbc), Some(dtax)) => Some(b + sbc + dtax),
+                _ => None,
+            };
+            if let Some(sbc) = sbc_over_nopat {
+                sbc_terms.push((symbol.to_string(), sbc));
+            }
+            if let Some(dtax) = dtax_over_nopat {
+                dtax_terms.push((symbol.to_string(), dtax));
+            }
+            if let (Some(b), Some(resid_value)) = (realized_reinvestment, resid) {
+                paired_b_terms.push((symbol.to_string(), b));
+                resid_terms.push((symbol.to_string(), resid_value));
+            }
+            if let (Some(growth), Some(b)) = (realized_growth, realized_reinvestment) {
+                if growth > 0.0 && b < 0.0 {
+                    negative_b_positive_growth += 1;
+                }
+                if growth > 0.0 && resid.is_some_and(|resid| resid < 0.0) {
+                    negative_resid_positive_growth += 1;
+                }
+            }
+            let show_or_dash =
+                |value: Option<f64>| value.map_or("-".into(), |v: f64| format!("{v:.3}"));
+            let sbc_dollars_b = (sbc_years_covered > 0).then_some(sbc_after_tax_covered / 1e9);
+            let dtax_dollars_b = (dtax_years_covered > 0).then_some(dtax_dollars_covered / 1e9);
+            decomposition_rows.push(format!(
+                "{symbol:<7} {:>4} {:>8} {:>9} {:>4} {:>9} {:>9} {:>4} {:>9} {:>8}",
+                usable.len(),
+                show_or_dash(realized_reinvestment),
+                show_or_dash(sbc_over_nopat),
+                sbc_years_covered,
+                show_or_dash(sbc_dollars_b),
+                show_or_dash(dtax_over_nopat),
+                dtax_years_covered,
+                show_or_dash(dtax_dollars_b),
+                show_or_dash(resid),
+            ));
 
             // The book candidate is the centre of the annual returns, not their
             // plain average. A nineteen-year history contains restructuring
@@ -1033,6 +1209,79 @@ mod tests {
              is bounded (1 - g/r -> 1, the charge merely vanishes) while an understated or negative\n\
              one is unbounded (negative value, or refusal through the Core's r <= 0 guard). Market\n\
              price is not consulted here and must not be used to break the tie."
+        );
+
+        println!();
+        println!("=== PROBE C: what still sits between NOPAT and FCFF ===");
+        println!(
+            "sbc = after-tax SBC add-back / NOPAT, summed over the years SBC resolved (never 0-filled)."
+        );
+        println!(
+            "dtax = (marginal_tax*pretax - cash_taxes_paid) / NOPAT, summed over the years cash tax resolved."
+        );
+        println!("resid = b + sbc + dtax -- what b would read with both effects removed.");
+        println!(
+            "{:<7} {:>4} {:>8} {:>9} {:>4} {:>9} {:>9} {:>4} {:>9} {:>8}",
+            "symbol", "n", "b", "sbc/NOP", "yrs", "sbc $B", "dtax/NOP", "yrs", "dtax $B", "resid"
+        );
+        for row in &decomposition_rows {
+            println!("{row}");
+        }
+
+        println!();
+        let (sbc_names, sbc_values): (Vec<String>, Vec<f64>) = sbc_terms.into_iter().unzip();
+        let (dtax_names, dtax_values): (Vec<String>, Vec<f64>) = dtax_terms.into_iter().unzip();
+        let (resid_names, resid_values): (Vec<String>, Vec<f64>) = resid_terms.into_iter().unzip();
+        let (paired_b_names, paired_b_values): (Vec<String>, Vec<f64>) =
+            paired_b_terms.into_iter().unzip();
+        println!(
+            "term resolution: sbc resolves for {} issuers, dtax for {} issuers, \
+             paired (b, sbc AND dtax all resolve, so resid resolves): {}",
+            sbc_values.len(),
+            dtax_values.len(),
+            resid_values.len()
+        );
+
+        let report_robust_centre_named =
+            |label: &str, names: &[String], values: &[f64]| match robust_centre(values) {
+                Ok(centre) => {
+                    let trimmed: Vec<String> = centre
+                        .outliers()
+                        .iter()
+                        .map(|&index| format!("{}({:.3})", names[index], values[index]))
+                        .collect();
+                    println!(
+                        "{label} robust centre = {:.3}  (retained {} of {}, trimmed [{}])",
+                        centre.centre(),
+                        centre.retained(),
+                        values.len(),
+                        trimmed.join(" ")
+                    );
+                }
+                Err(reason) => println!("{label} robust centre: refused ({reason:?})"),
+            };
+        report_robust_centre_named(
+            "b, on the paired (resid-resolving) population,",
+            &paired_b_names,
+            &paired_b_values,
+        );
+        report_robust_centre_named("sbc/NOPAT,", &sbc_names, &sbc_values);
+        report_robust_centre_named("dtax/NOPAT,", &dtax_names, &dtax_values);
+        report_robust_centre_named("resid,", &resid_names, &resid_values);
+
+        println!();
+        println!(
+            "issuers with positive realized growth and b < 0 (this run): {negative_b_positive_growth}"
+        );
+        println!(
+            "issuers with positive realized growth and resid < 0 (this run): \
+             {negative_resid_positive_growth}  -- this is the number the wave exists to move, \
+             next to the 8 named in the brief"
+        );
+        println!(
+            "READ THIS AS: numbers only. Whether sbc, dtax, both or neither account for the gap\n\
+             between NOPAT and FCFF is not decided here -- no estimator, driver or contract\n\
+             changes on this measurement, and market price was never consulted."
         );
     }
 
