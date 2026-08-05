@@ -70,9 +70,9 @@ pub(crate) struct DriverAnnual {
     pub(crate) capex: f64,
     pub(crate) revenue: f64,
     pub(crate) interest: f64,
-    pub(crate) effective_tax_bps: i32,
+    pub(crate) effective_tax_bps: Option<i32>,
     pub(crate) debt: Option<f64>,
-    pub(crate) marginal_tax_bps: i32,
+    pub(crate) marginal_tax_bps: Option<i32>,
     #[serde(default)]
     pub(crate) marginal_tax_source: Option<String>,
 }
@@ -146,14 +146,9 @@ pub(crate) fn fcf_from(m: &CohortMember) -> Vec<FcfPoint> {
                     driver.capex,
                     driver.revenue,
                     Some(driver.interest),
-                    Some(driver.effective_tax_bps),
+                    driver.effective_tax_bps,
                 )
-                .with_rate_resolution_inputs(
-                    driver.debt,
-                    Some(driver.marginal_tax_bps),
-                    None,
-                    None,
-                );
+                .with_rate_resolution_inputs(driver.debt, driver.marginal_tax_bps, None, None);
             match driver
                 .marginal_tax_source
                 .as_deref()

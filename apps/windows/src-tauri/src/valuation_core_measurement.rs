@@ -41,7 +41,7 @@
 
 use crate::dcf_model::compute;
 use crate::operating_valuation::terminal_payout_bps;
-use crate::valuation_baseline::{load_cohort, load_driver_fixture, CohortMember};
+use crate::valuation_baseline::{load_cohort, load_driver_fixture, CohortMember, DriverAnnual};
 use crate::valuation_core_adapter::{
     fit_cross_section, median_cents, value, widest_input, IssuerAnnual, IssuerEvidence, MarketFrame,
 };
@@ -63,21 +63,36 @@ fn frame() -> MarketFrame {
     }
 }
 
+/// One issuer-year, or `None` when the year has no filed marginal tax rate.
+///
+/// `IssuerAnnual.marginal_tax_bps` after-taxes that year's interest add-back
+/// per year (see `free_cash_flow`), so a year with no filed marginal rate has
+/// no basis for that year's FCFF term. Same rule the fixture capture already
+/// applies to OCF/CapEx/revenue: a year missing a required driver is dropped,
+/// not filled.
+///
+/// Named and unit-tested apart from `evidence()` below so the drop-on-absence
+/// rule is checked by a fast test rather than only exercised through a fixture
+/// that, today, has no year for it to fire on (LD-17).
+fn issuer_annual(row: &DriverAnnual) -> Option<IssuerAnnual> {
+    Some(IssuerAnnual {
+        year: row.year,
+        operating_cash_flow: row.ocf,
+        capital_expenditure: row.capex,
+        revenue: row.revenue,
+        interest_expense: row.interest,
+        debt: row.debt,
+        marginal_tax_bps: row.marginal_tax_bps?,
+    })
+}
+
 fn evidence(member: &CohortMember) -> IssuerEvidence {
     let drivers = load_driver_fixture(DEEP_DRIVER_FIXTURE);
     let annuals = drivers
         .get(&member.symbol)
         .into_iter()
         .flatten()
-        .map(|row| IssuerAnnual {
-            year: row.year,
-            operating_cash_flow: row.ocf,
-            capital_expenditure: row.capex,
-            revenue: row.revenue,
-            interest_expense: row.interest,
-            debt: row.debt,
-            marginal_tax_bps: row.marginal_tax_bps,
-        })
+        .filter_map(issuer_annual)
         .collect();
     IssuerEvidence {
         symbol: member.symbol.clone(),
@@ -649,4 +664,26 @@ fn bless_published_value_regression_gate_cohort() {
     let path = golden_path();
     std::fs::write(&path, body).expect("write golden cohort");
     println!("wrote {}", path.display());
+}
+
+/// A driver row with no filed marginal tax rate must be dropped, never
+/// defaulted (LD-13). The committed `core_driver_data_deep.json` currently
+/// has no such row (LD-17), so without this test the drop-on-absence branch
+/// in `issuer_annual` is unreachable through any fixture-backed run and a
+/// regression to `.unwrap_or(2_100)` would go unnoticed.
+#[test]
+fn issuer_annual_drops_a_year_with_no_marginal_tax_rate() {
+    let row = DriverAnnual {
+        year: 2024,
+        ocf: 900.0,
+        capex: 100.0,
+        revenue: 5_000.0,
+        interest: 50.0,
+        effective_tax_bps: None,
+        debt: None,
+        marginal_tax_bps: None,
+        marginal_tax_source: None,
+    };
+
+    assert!(issuer_annual(&row).is_none());
 }
