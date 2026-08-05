@@ -4410,3 +4410,292 @@ numbers, so the network path is stable and the earlier figures were not a one-of
    over by the very fill this audit found, so the hole is larger than R-46.3 measured.
 
 Every one of the twenty pinned issuers still refuses.
+
+---
+
+## R-51 — The registered gate fires four times, not once. And Sensei found a defect in my own reading of Round 13.
+
+Round 14 shipped at `ec4b278` on `r10` over the verified base `66ff5e7`. Suite `566 / 4 / 30`, gate green,
+golden untouched, fixture unstaged, nothing pushed. One file changed, `valuation_probes.rs`, `525`
+insertions. The control was re-run unmodified and came back **10/10** before any audited row was read,
+so the instrument earned the right to be believed a second time.
+
+### R-51.1 — Every fabricated row in the fixture is a `2100` row, and two thirds of them are post-2018
+
+The whole corpus, 274 issuer-years, audited against live filings:
+
+| | genuine | filed at something else | **nothing filed** | not measured |
+|---|---|---|---|---|
+| `marginal_tax_bps`, all 274 | 191 | 7 | **76** | 0 |
+| of which: `2100`, pre-2018 (n=33) | **0** | 7 | **26** | 0 |
+| of which: `2100`, post-2018 (n=146) | 96 | 0 | **50** | 0 |
+| every other claimed value — `0`, `2450`, `2500`, `2810`, `3100`, `3400`, `3500` (n=95) | **95** | 0 | **0** | 0 |
+
+Read the last row first. **Ninety-five for ninety-five.** Every value the fixture carries other than
+`2100` is genuinely filed. So the 76 fabricated rows are *all* `2100` rows, and `2100` is not a value
+the pipeline sometimes reads and sometimes invents — **it is the fill.**
+
+### R-51.2 — My own pre-registered wording for P16 is right as a proportion and wrong as a conclusion
+
+P16 was registered to key on whether post-2018 rows come back *predominantly* genuine. They do: 96 of
+146 is 65.8%, and the probe reported the registered reading — *"the fabrication is confined to
+pre-2018."* The agent applied my rule exactly as written and was right to.
+
+**The rule's wording was the defect.** Two thirds of the fabricated rows — **50 of 76** — are
+post-2018. The fabrication is not confined to pre-2018; it is *proportionally thinner* there and
+*absolutely larger*. A proportion answered the question I asked and the count answers the question
+that matters, because a wave consumes rows, not percentages. Recorded as a wording failure of mine,
+not of the round.
+
+### R-51.3 — R-49.2 was wrong by fifty rows, and R-50.7 is why we know
+
+R-49.2 called the 146 post-2018 rows *"plausibly correct"* and treated only the 33 as the hazard. That
+was wrong: **50 of them have nothing behind them.** R-50.7 then withheld judgement and said the 146
+were *unproven*, on the grounds that a column in which absence is unrepresentable cannot clear itself.
+That was right, and it is the whole return on `feedback_verify_what_an_instrument_measures`: auditing
+only the population where the check *can* fail would have certified fifty fabricated rows.
+
+**P17 closes cleanly and in the good direction.** The two rows the fixture carries at `0bps` are HURN
+2016 and HURN 2017, and both are **genuinely filed at 0%**. Neither is a fabricated zero.
+
+### R-51.4 — P19 fires my registered rule, and it fires four times
+
+plan.v1's W4 registered this, before the number arrived:
+
+> if branch (a) leaves **every one of the 18 falsifiable issuers with ≥3 usable years**, take (a) … If
+> it does not, **stop and return to Juan** with the per-issuer cost.
+
+Traceable years per issuer, under faithful absence:
+
+| issuer | total | traceable | | issuer | total | traceable |
+|---|---|---|---|---|---|---|
+| MSFT | 19 | 19 | | INVA | 17 | 12 |
+| AAPL | 19 | 18 | | AMZN | 19 | **9** |
+| AMSC | 18 | 17 | | MIR | 7 | 6 |
+| ROCK | 18 | 17 | | **FIGS** | 7 | **3** |
+| CALX | 17 | 16 | | **VRRM** | 8 | **2** |
+| HURN | 18 | 16 | | **ADMA** | 15 | **1** |
+| IDCC | 16 | 14 | | **VRT** | 8 | **1** |
+| T | 19 | 13 | | **APP** | 6 | **0** |
+| INOD | 17 | 13 | | *(MH 3/3, BWMN 6/6 — vacuous)* | | |
+| VICR | 17 | 12 | | | | |
+
+The round reported **one** issuer losing the rate *entirely* — APP — because that is what P19 asked.
+**My decision rule asks a different question, and against it four issuers fall: APP 0, VRT 1, ADMA 1,
+VRRM 2.** FIGS lands at exactly 3, which is `MIN_ANNUAL_OBSERVATIONS` with zero slack. And traceable
+years are an **upper bound** on usable years — a usable year also needs pretax, which W1a has not
+measured — so **four is a floor on the damage, not the damage.**
+
+**The rule fires. W4 stops and the cost goes to Juan.** The falsifiable population drops from 18 to at
+most 14, and the pinned cohort keeps twenty rows of which six would be vacuous.
+
+**The rule's stated rationale is void, and I am recording that rather than quietly relying on it.** I
+wrote that the stop was needed because *"the choice is then between a narrower cohort and a heavier
+fixture."* It is not: branch (b) refuses on an untraceable rate exactly where (a) erases it, so **(b)
+does not recover a single one of the four.** The branch question is settled by measurement — **(a)**,
+strictly simpler, identically faithful. What the stop is actually for is the question underneath,
+which is larger than the branch and is Juan's.
+
+### R-51.5 — The option set at the stop, registered before Juan sees it
+
+Sensei's P0-3 makes the point that a coverage shortfall put to a self-declared non-expert as an open
+plea is exactly where *"21% is the statutory rate anyway, just keep the post-2018 rows"* comes back and
+wins — the one argument this audit disproved. So the options are enumerated first:
+
+1. **Accept the narrower cohort.** Four issuers go dark, the falsifiable population is ≤14, and every
+   downstream count in plan.v1 that says 18 says 14.
+2. **Compute NOPAT at the effective rate instead of the marginal rate.** Coverage is dramatically
+   better — 13 untraceable rows against 76, **no issuer lost entirely**. It is a real economic
+   position with a literature behind it, and it is **not** free; see R-51.6.
+3. **Widen the pinned cohort** with issuers that do file the rate. A cohort change, and it needs
+   registering before the replacements are chosen, or it is selection.
+
+**Not among the options, and it is registered as excluded:** restoring a statutory default, in any
+year, under any name. That is the fallback R-41.3 deleted, and it is what the audit measured as
+seventy-six rows of fabrication.
+
+### R-51.6 — The effective rate is not a free alternative, and I checked the code rather than the summary
+
+`edgar.rs:1457-1464`:
+
+```rust
+let tax_rate_bps = match (by_year(&tax, v.year), pretax_income_dollars) {
+    (Some(tax_expense), Some(pretax_income)) if pretax_income.abs() > 0.0 => Some(
+        ((tax_expense.abs() / pretax_income.abs()) * 10_000.0)
+            .round()
+            .clamp(0.0, 3_500.0) as i32,
+    ),
+    _ => None,
+};
+```
+
+There is **no filed reference tag for `effective_tax_bps` at all** — production computes it. Two
+defects in four lines, both in the production path:
+
+- **`.abs()` on both terms destroys the sign.** A loss year with a tax benefit — negative pretax,
+  negative tax — reads as a *positive* effective rate of the same magnitude. This is the same class as
+  LD-1 / R-7.3, which cost this effort a round when it was `interest` being abs-ed.
+- **`.clamp(0.0, 3_500.0)` replaces a measurement with a boundary value.** A genuinely-measured rate
+  outside `[0%, 35%]` is silently rewritten to `0` or `3500`. That is an **output clamp on a measured
+  quantity**, which is on the forbidden list by name, and it is the reason 261 of 274 rows "reproduce":
+  a clamp reproduces well because it discards the cases that would not.
+
+So option 2 trades a fabrication problem for a clamp-and-sign problem. **I am not recommending it and I
+am not ruling it out** — it is a genuine second design with a different economic result and no test
+that decides between them, which is category (a). Registered as **LD-19** either way, because the clamp
+and the `.abs()` are wrong regardless of which option Juan takes.
+
+### R-51.7 — Sensei returned `revise` with six P0s. Four land, one is a false dilemma with a good fix, one needs measuring before I absorb it.
+
+**P0-4 lands, and it is the most valuable finding in the review.** After branch (a) the tax columns are
+the resolver's own output frozen to disk, so the fixture certifies nothing about the resolver — a
+tautology gate. The audit bought external truth at real cost and regenerating without pinning it throws
+that away. Sensei believed the external truth was 43 rows; **Round 14 makes it 274**, which makes the
+fix both stronger and cheaper. And *"an `#[ignore]`d test is documentation, not a gate"* is simply
+correct: plan.v1 put the diff proof inside the ignored writer, which is right for the writer and wrong
+for the invariant. Both absorbed. So is the atomic-rename point — a fail-closed abort that has already
+begun writing is itself the corruption.
+
+**P0-5 lands.** W5 commits a cash-netting convention, and whether cash is netted off capital *is* the
+`gross`/`oper` axis, which is H4 and unresolved. A scheduled wave would silently decide a registered
+decision, and H4 would then arrive as a choice between the thing already built and rework. Absorbed in
+Sensei's own preferred form: **W5 produces a cash quantity per issuer-year and wires it into nothing**,
+with whether and how it enters capital registered as H4's. The "total versus excess cash" question
+hiding inside it is a second convention with the same upward direction and is registered too.
+
+**P0-3 lands in four of its five parts.** *"Usable"* is undefined and must be enumerated before the
+predicate is scored — that is real, and a threshold registered over an undefined predicate is not
+registered. Branch (b) had no trigger and therefore was not a branch; R-51.4 deletes it on measurement
+instead. The option-set point is absorbed as R-51.5. And **W4-R02's erasure-only invariant is unbounded
+above** — "no value changes from one number to another" is trivially satisfied by erasing everything —
+so it gains its companion: **the erased set must equal the resolver's refusal set exactly, not be a
+superset.**
+
+The fifth part I contest. Sensei reads the 18 as *"author-selected"* and says the plan does not name
+which two were removed or why. **plan.v1 §1.1(c) names them and gives the mechanism**: MH and BWMN
+refuse `not_reported` *upstream* of the return check — MH has 3 annuals, so 2 growth transitions, and
+`standardize` refuses below 3 — so they cannot be moved by a base change and their green rows are
+vacuous. That is measured, not chosen. But the *consequence* Sensei draws is right and costs nothing:
+**state the rule over all 20.** Both have full coverage (MH 3/3, BWMN 6/6), so nothing hid there this
+time, and that is luck rather than design.
+
+**P0-1 is a false dilemma with a fix worth taking anyway.** Sensei argues the value-neutrality proof —
+gate green plus golden absent from `git status` — is either green-by-construction (if the Core is not
+in the published path) or else the trimming defect is live. **Neither.** The gate is bidirectional: it
+pins the legacy engine's published cents *and* the Core's refusal reasons. A Core change cannot move
+the first — correct, and that is the point — but it can absolutely move the second, and W4 changing the
+base is precisely a change that could flip a reason. So the instrument *can* go red on the population
+that would falsify it. What has never been *shown* is that it does, and that is the part of Sensei's
+objection that survives, applied to my own proof. **The calibration is absorbed**: before a wave relies
+on the gate, apply a known reason-moving mutation, record the gate going red, revert. Plus the one-line
+statement of what the gate covers — twenty pinned issuers — and which two anchors it cannot see.
+
+**P0-2 is the right question with arithmetic that does not transfer, so it gets measured before it gets
+absorbed.** Sensei's floor — `max|z| = (n−1)/√n`, so `MAX_ABSOLUTE_Z = 3.0` cannot fire below n≈10 — is
+derived for a **mean/SD** standardization. Ours is **median location, MAD × MAD_TO_DEVIATION scale**,
+and MAD does not bound z the way SD does: on `{1, 2, 3, 4, 1000}` the median is 3, the MAD is 1, and
+the outlier's z is roughly **672** at n=5. So the floor may not exist at all in the form stated.
+
+But the *worry* is real and Sensei named its true shape in a parenthesis: **small-n MAD can be exactly
+zero**, and on `{0, 0, 1000}` it is. What `standardize` does at a zero scale is unmeasured, and the
+answer decides whether W3's sweep can return a meaningful null, whether "≥3 usable years" is a floor on
+anything, and whether H2's *"they differ only in which years each centre trimmed"* is even a live
+mechanism. **Round 15 measures it.** Deriving a floor by reading, from a formula for a different
+estimator, and then re-scoping three waves against it, is R-40.1 exactly — and R-49.1 already cost this
+effort one instance of a mechanism asserted from reading inside a document whose own earlier paragraph
+disproved it.
+
+### R-51.8 — P0-6 is right, and it is a defect in my own R-50.2
+
+This is the finding I would least like to be true and it is the one I am most confident about.
+
+R-50.2 concluded that the estimator split is *"entirely by capital definition"* by comparing `E5`'s
+`roic/oper` h1 of **0.1787** against its `roic/gross` h1 of **0.3417**. The five-way common set makes
+estimators comparable **within** a panel. **It does nothing across panels** — `gross` coverage is
+154/132/111 and `oper` is 119/100/81, a 23–27% smaller sample self-selected to the issuer-years where
+operating capital is computable. So the comparison is confounded: a lower error under `oper` is equally
+consistent with the `oper`-computable subset simply being easier to forecast.
+
+**I built a common set precisely to defeat this class of error, and then made it one axis over.** The
+per-panel results stand; the cross-panel conclusion does not. R-50.2's *finding* — that the window
+question collapsed into the capital definition — survives, because it rests on `E5` sweeping six of six
+*within* `oper` and `E2` taking the largest margins *within* `gross`, both of which are within-panel.
+What does not survive is any claim that `oper` is the better definition. **H4 is not decidable from
+that table**, and Round 15 re-races it on the intersection.
+
+Sensei's coherence point stands alongside it: `E5` wins on `oper` while its own `psi` replicates Fama &
+French only on `gross` (0.5959 against 0.62, 0.35 SE — versus 0.8769 on `oper`, 6.3 SE away). Adopting
+`oper` means adopting an estimator whose speed parameter contradicts the only external anchor
+available, on the panel chosen for its accuracy. The benign explanation — `oper` capital is a smoother
+denominator, so the ratio is more autocorrelated, so partial adjustment fits better *mechanically*
+while measuring less economics — is testable and untested.
+
+**And the largest one: `g = b·r` may not describe this cohort.** R-41.4 measured realized
+`b = ΔIC / ΣNOPAT` **negative for 14 of 21 issuers**. I used that to reject Sensei's four-issuer oracle,
+correctly, and then filed it. Sensei is right that the anomaly is the more valuable object: the
+retention identity is what the entire model is built on, and if two thirds of the cohort has negative
+realized reinvestment then either the accounting IC series is dominated by buybacks, impairments and
+lease-standard changes rather than by reinvestment, or **the identity does not hold here** — in which
+case W6 would estimate `r` for a relation that does not describe the firms, and that is a live
+candidate root cause of *"los numeros no dan acorde al street."* **No numeric policy constant should be
+registered while the model's core identity is measured to fail on two thirds of the cohort.** Round 15
+decomposes it.
+
+### R-51.9 — I was wrong that the `r == wacc` row admits no isolating check
+
+plan.v1's §4 hole 3 recorded, honestly, that `reverted-return-flat-path` sits at `r == wacc` where no
+arithmetic branch is unique to it, so no *code mutation* turns only that row red. Sensei accepted the
+honesty and then produced the check by a route I did not look down: an **analytic invariant** rather
+than a mutation.
+
+    V = base·(1 − g/r)/(w − g)     at r = w:     base·((w − g)/w)/(w − g)  =  base/w
+
+**At `r == wacc`, value is `base/wacc` — independent of `g`, and independent of any fade path.** So
+`1250.00` is `100/0.08`, a closed form rather than a recorded number, and **a second row at `r == wacc`
+with a different `g0` must produce the identical value.** That row is uniquely sensitive: only the
+terminal-payout or fade arithmetic can break g-invariance at `r == wacc`. The isolation hole closes,
+and the same row is the perfect **H5 sentinel** — whatever fade is eventually chosen, this row must not
+move, by identity rather than by preference. Absorbed, along with asserting the **span** (1926.38 /
+1250.00 = 1.541) as a fact beside the two values, so a mutation scaling both leaves the ratio failing.
+
+The habit of writing *"I could not"* rather than manufacturing a green cell is what made this
+correction reachable, and it stays.
+
+### R-51.10 — Round 15, pre-registered before dispatch
+
+Three of Sensei's P0s rest on mechanisms nobody has measured on this cohort. They get measured before
+plan.v2 is scoped against them.
+
+- **P22 — the trim floor, under the estimator we actually use.** For the real `standardize`: the
+  smallest n at which `|z| > MAX_ABSOLUTE_Z` is attainable, and what happens when MAD is exactly zero
+  — refuse, divide, or silently keep everything. Then the **n distribution per series** across both
+  cohorts, so W3 can report *not measured* rather than *clean* wherever the instrument cannot fire.
+  **No threshold moves whatever this returns.**
+- **P23 — `gross` versus `oper` on the intersection.** `E2` and `E5`, three horizons, both series,
+  restricted to issuer-years where **both** capital definitions are computable. Registered before the
+  numbers: if the intersection cannot separate them at any horizon, **that is the answer** — H4 is not
+  evidence-decidable and goes to Juan as an economic choice, stated as such, and no panel comparison
+  may be used to break the tie afterwards.
+- **P24 — the retention identity.** Decompose `ΔIC` for the 14 negative-`b` issuers into its
+  components. Registered before the numbers: if buybacks, impairments and standard changes account for
+  the sign, `b` measured from accounting IC is not realized reinvestment and must never be used as an
+  oracle; if they do not, **`g = b·r` does not describe this cohort** and that outranks every open
+  decision including H4.
+- **P25 — the effective-rate defects.** Confirm on the cohort how many rows the `.clamp(0, 3500)`
+  actually binds on and how many have a sign the `.abs()` pair destroys. LD-19's size, measured.
+- **P26.** No result of Round 15 may move `MAX_ABSOLUTE_Z`, any threshold, or any refusal path; may
+  select an estimator, a capital definition, or a fade; or may read a market price.
+
+### R-51.11 — Still open
+
+1. **The tax base** — R-51.4's stop. Juan's, with the option set registered at R-51.5.
+2. **H4, the capital definition** — and R-51.8 means it is *less* decided than R-50.2 claimed, not more.
+3. **H5, `r`'s fade** — R-49.3, upstream of H4, and now with an identity-based sentinel.
+4. **H2, `prod` vs `roic`** — R-45.3, untouched.
+5. **The retention identity itself** — R-51.8, and it may outrank all four above.
+6. **R-30.1 / R-44.3**, FCFF in the NOPAT slot. Blocking, upstream.
+7. **LD-19**, the effective rate's clamp and sign loss — new, and wrong regardless of which option wins.
+8. **AMZN**, now 9 traceable years of 19.
+
+Advisor's re-review of plan.v1 has not returned. plan.v2 waits for it. Every one of the twenty pinned
+issuers still refuses, and no value has been published.
