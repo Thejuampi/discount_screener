@@ -4153,3 +4153,260 @@ population rather than the ones that survived.
 7. **AMZN's marginal-rate hole** — R-46.3, to be solved by supply.
 
 Every one of the twenty pinned issuers still refuses.
+
+---
+
+## R-50 — Round 13 verified, both tasks re-measured by me. The window question has collapsed into a different question, and the tax audit came back worse than the count suggests.
+
+Shipped at `66ff5e7` on `r10` over the verified base `244053b`. One file, `valuation_probes.rs`.
+Suite `566 / 4 / 29`, gate untouched, golden fixture absent from `git status`, nothing pushed.
+I re-ran `probe_window_estimator_race_e5` myself rather than reading the round's summary of it, and
+I verified Task B's instrument by reading `classify_marginal_tax_row` before reading its answer.
+
+### R-50.1 — `E5` is not a win, it is not close to a win, and the pattern is not the one anyone expected
+
+P12 is registered and it fires: **not a win, for either series.** That is the ruling, and nothing
+below softens it. But the five-way common set says *why*, and the why is a structural result rather
+than a horse-race result.
+
+Five-way common set, primary metric, lower is better, winner in bold:
+
+| panel | n (h1/h2/h3) | `E1` | `E2` | `E3` | `E5` |
+|---|---|---|---|---|---|
+| `s2c / gross` h1 | 60 | 0.1527 | 0.0919 | 0.0911 | **0.0907** |
+| `s2c / gross` h2 | 50 | 0.1976 | 0.1208 | **0.1204** | 0.1251 |
+| `s2c / gross` h3 | 42 | 0.2159 | 0.1571 | 0.1677 | **0.1362** |
+| `s2c / oper` h1 | 50 | 0.1880 | 0.1189 | 0.1115 | **0.0940** |
+| `s2c / oper` h2 | 39 | 0.2724 | 0.1582 | 0.1566 | **0.1553** |
+| `s2c / oper` h3 | 29 | 0.2777 | 0.1927 | 0.1919 | **0.1756** |
+| `roic / gross` h1 | 87 | 0.4573 | **0.2621** | 0.3652 | 0.3417 |
+| `roic / gross` h2 | 74 | 0.5581 | 0.4668 | 0.4772 | **0.4519** |
+| `roic / gross` h3 | 63 | 0.5986 | **0.3898** | 0.4556 | 0.4634 |
+| `roic / oper` h1 | 63 | 0.3927 | 0.2152 | 0.3059 | **0.1787** |
+| `roic / oper` h2 | 54 | 0.4428 | 0.4206 | 0.4180 | **0.2915** |
+| `roic / oper` h3 | 44 | 0.4637 | 0.4089 | 0.4278 | **0.3415** |
+
+**The split is by capital definition, and it is clean.** Under `oper`, `E5` is strictly lowest at all
+three horizons for **both** series — six of six, and not by hairlines: `roic/oper` h2 improves on `E2`
+by **31%** (0.2915 against 0.4206) and h1 by 17%. Under `gross`, `E5` takes three of six and `E2`
+takes the two largest margins.
+
+`E4` remains identical to `E1` on every row, as it must be, and both remain last or joint-last
+everywhere. Round 12's twelve-of-twelve stands unchanged.
+
+### R-50.2 — Neither registered stopping rule covers the outcome, and the tiebreak they point to is empty
+
+R-47.5's **P9** registered the case where the estimators are indistinguishable: *"the window does not
+matter on this cohort, and the choice goes back to Juan on coverage grounds alone."* They are not
+indistinguishable. **P7** and **P12** registered the case where one wins everywhere. None does. The
+measured outcome is a third thing neither anticipated: **two estimators, each winning cleanly on one
+capital definition.**
+
+And P9's fallback is exhausted before it can be used. `E2` and `E5` have **identical coverage** on
+every panel and every horizon — 154/132/111 on `gross`, 119/100/81 on `oper` — because `E5` is built
+from `E2` and refuses exactly where it does. There is no coverage argument between them. The
+registered tiebreak has nothing to break.
+
+**So the window decision has collapsed into the capital-definition decision.** That is the finding.
+`gross` versus `oper` was never raced — R-45.1 named `oper` the deciding definition at `9919449`,
+three rounds before any of these numbers existed, and every round since has reported both without
+choosing. It is now upstream of the window rather than a presentation detail, and it sits beside
+`prod` vs `roic` (R-45.3) rather than being settled by it.
+
+**I am not resolving it by invoking R-45.1.** P12's win condition requires both capital definitions,
+I wrote that condition knowing `oper` had already been named deciding, and narrowing to the panel
+where the answer is clean — after seeing which panel that is — is `feedback_scope_you_cannot_get_wrong`
+with a citation attached. What R-45.1 does license is stating that the definition is a live decision
+with a documented prior, not a coin flip discovered today.
+
+### R-50.3 — `psi` replicates Fama & French where the capital definition matches theirs, and only there
+
+| panel | `psi` | se | distance from FF's 0.62 | LOO range |
+|---|---|---|---|---|
+| `s2c / gross` | 0.9124 | 0.0214 | — | 0.9003 – 0.9217 |
+| `s2c / oper` | 0.9379 | 0.0177 | — | 0.9320 – 0.9645 |
+| `roic / gross` | **0.5959** | 0.0696 | **0.35 SE** | 0.5427 – 0.7093 |
+| `roic / oper` | 0.8769 | 0.0405 | 6.3 SE | 0.7442 – 0.9121 |
+
+`roic/gross` fits a cross-sectional adjustment speed of **40.4% per year** against Fama & French's
+**38%**, on a specification written to match their mechanism and a coefficient this cohort was never
+fitted toward. That is a replication, and it is the first one this branch has produced on the
+*correctly* specified estimator — R-48.2's "brackets 0.62" was the own-history `phi`, which R-48.3
+established was reverting toward the wrong anchor.
+
+It replicates under `gross` and not under `oper`, and the plausible reason is that Fama & French ran
+Compustat book capital, which is the `gross` definition, not capital net of cash. **That is a story,
+not a measurement**, and R-40.1 says a mechanism read off a coincidence is a hypothesis. It is
+registered as one, and it is the same hypothesis that would explain R-50.1's split: a cross-sectional
+anchor formed over issuers holding very different cash piles is anchoring to a mixture, and netting
+the cash out makes the cross-section comparable. If that is right, `oper` should be the better anchor
+and `gross` should track the published coefficient — which is exactly the pattern observed. Not
+adopted on that basis.
+
+**P13 fires nowhere:** `psi` is more than one standard error from both 0.0 and 1.0 on all four panels.
+`E5` is a real estimator, distinct from `E2` and from the bare cross-sectional centre.
+
+Note against P8: for `s2c` the own-history `phi` was degenerate at ~1.0 and P8 handed those panels to
+`E2`, while the cross-sectional `psi` is 0.91–0.94 and is **not** degenerate — 1.0 sits 3 to 4 standard
+errors away. Both readings are true of the same series and they do not conflict: a random walk in its
+own history can still carry a weak pull toward what everyone else earns. P8 eliminated `E3` for `s2c`;
+it says nothing about `E5`.
+
+### R-50.4 — The fit rests on MSFT, which is the issuer whose economics moved
+
+Leave-one-issuer-out on `roic/oper`: `phi` all-issuer 0.5609, LOO range **0.2608 – 0.7192**, spread
+0.4584 — and the 0.2608 is **MSFT**, alone, the next lowest being OMC at 0.5470. `psi` on the same
+panel: 0.8769 all-issuer, MSFT alone at 0.7442 against a 0.8650–0.9121 body. On `roic/gross`, SLB at
+0.7093 is the corresponding outlier against a 0.5427–0.6059 body.
+
+So the persistence coefficients this branch has been reading as cohort properties are, on the
+`oper` return panels, substantially one issuer's coefficient. That does not invalidate them —
+leave-one-out is exactly the instrument that exposes it, and it was pre-registered — but it is a
+fragility that has to be carried with the number rather than discovered later. **MSFT is also the
+single issuer R-46.1 graded as cleanly supporting the window hypothesis**, and the issuer R-45.4
+flagged for an 0.815 return. It keeps being the observation that moves things, which is worth
+recording as a standing caution rather than as a finding about MSFT.
+
+One more caveat on `M(t)` itself: the cross-sectional centre for `roic/oper` runs **0.0444 in 2019 and
+0.2375 in 2022**, a five-fold move in three years. An anchor that unstable is not obviously an
+improvement on no anchor, whatever the forecast error says, and P19-style stability of the anchor was
+never registered as a property. Registered now as a gap in the criterion, in the same spirit as
+R-48.5.
+
+### R-50.5 — Task B: the instrument was checkable before its answer, and it checks out within issuer
+
+`classify_marginal_tax_row` classifies from SEC's raw facts and reports the pipeline's resolution
+**alongside** rather than from it, so a resolution bug cannot manufacture a "nothing filed". `NotMeasured`
+is a separate verdict from `NothingFiled`, so an unreachable EDGAR cannot be read as an absent filing —
+*"a partial audit is not an audit"*, in the probe's own words. The control-failure branch is written
+into the probe and prints instead of the counts if it fires.
+
+And the control sample turns out to have a property stronger than the one I asked for. Eight of the
+twelve audited issuers appear in the control **at a different year**:
+
+| issuer | audited years — fixture says 2100 | control year — fixture says 3500 |
+|---|---|---|
+| AAPL | 2007 | 2008 |
+| AMZN | 2007, 2014, 2015, 2016, 2017 | 2010 |
+| HURN | 2008, 2009 | 2012 |
+| IDCC | 2010, 2011 | 2015 |
+| INVA | 2009 | 2017 |
+| ROCK | 2008 | 2014 |
+| T | 2007, 2008, 2009 | 2016 |
+| VICR | 2009, 2012, 2013 | 2011 |
+
+Every control row came back **genuinely filed at 35%**, ten of ten. So for eight of the twelve
+issuers, the same issuer files the fact in one year and the audit finds nothing in another — and the
+fixture carries 2100 for the second. *"This issuer does not file it"* is dead as an explanation, and
+it is dead within issuer rather than by an appeal to the cohort. I did not specify that overlap; the
+round's sample happens to have it, and it is worth more than the ten-of-ten headline.
+
+### R-50.6 — The answer is 26, the number under it is 0, and the fixture disagrees with the pipeline on every audited row
+
+| classification | audited (n=33) | control (n=10) |
+|---|---|---|
+| genuinely filed at the fixture's rate | **0** | **10** |
+| filed at something else | 7 | 0 |
+| nothing filed at all | **26** | 0 |
+| not measured | 0 | 0 |
+
+**Not one of the thirty-three is filed at 21%.** The seven "something else" are filed at **−0.34** — a
+negative thirty-four percent, a loss-year reconciliation line — which `reference_rate_bps` correctly
+refuses because it accepts only `0.0..=MAXIMUM_REFERENCE_RATE_BPS`. So production resolves `<none>`
+on all thirty-three, and the fixture says 2100 on all thirty-three. **The fixture and the pipeline
+disagree on every audited row.**
+
+The seven deserve their own line, because they are the good news in this ruling: a negative filed rate
+reaches the resolver and is refused rather than taken. The guard works. What did not work is whatever
+wrote 2100 into the fixture afterwards.
+
+### R-50.7 — The measurement I ran myself, which needs no network and is worse than the audit
+
+Every one of the deep fixture's **274 rows carries a non-null `marginal_tax_bps`**. The key is never
+absent; the value is never null. `effective_tax_bps` likewise, 274 of 274.
+
+Production resolves nothing on at least thirty-three of them. So **absence is not representable in
+this column at all.** That is not a data error on thirty-three rows — it is a column with no way to
+be right about a missing filing, which puts every value in it under the same suspicion, including the
+146 post-2018 rows that R-49.2 called *"plausibly correct"* because 21% is the statutory rate then.
+
+R-46.3 already wrote the argument this triggers, and it was written about the opposite decision:
+
+> a default which is usually right is worse than an absence precisely because it is usually right
+
+The 146 are the half where the default is right by construction, so it cannot be caught. The 33 are
+the half where it is falsifiable. It failed **thirty-three out of thirty-three**. Concluding the 146
+are fine because they look fine is `feedback_verify_what_an_instrument_measures` — the check that
+would clear them cannot fail on the population that would falsify it.
+
+### R-50.8 — What the registered rule forces, and what it explicitly does not
+
+R-49.2 registered, before the audit ran, that the count of *"the fixture holds a number where the
+source has nothing"* decides whether the base wave proceeds. It is **26**. **The NOPAT-base wave does
+not proceed as scoped.**
+
+What that does not decide is what the base wave becomes. Two repairs are available and **substituting
+a rate is neither of them**:
+
+**(a) Regenerate the tax column from the pipeline, letting absence be absence.** Requires the fixture
+to carry an optional rate, and drops every unfiled row out of NOPAT. Same shape as R-46.3's *supply,
+not fabrication*. Makes the fixture faithful, which is a precondition for every wave that reads it,
+not only this one.
+*Costs* coverage, on the gate cohort, and the cost is measurable rather than arguable.
+
+**(b) Keep the fixture and refuse on any row whose rate cannot be traced to a filed fact.** Requires
+per-row provenance the fixture does not carry, so it is (a) plus a column.
+
+**I am not choosing between them before the cost is measured**, and the cost is one probe away.
+
+### R-50.9 — Round 14, pre-registered in full, before it runs
+
+**Whole fixture. All 274 rows. No sample, no era split chosen by me, both tax columns.** Same
+instrument as Task B — classify from raw SEC facts, report the pipeline's resolution alongside but
+never from it, reuse Task B's control-failure branch rather than rewriting it.
+
+- **P16.** If the 146 post-2018 `2100` rows come back predominantly *genuinely filed*, the fabrication
+  is confined to pre-2018 and the column is repairable by making 33 rows absent. If they come back
+  predominantly *nothing filed*, the entire `2100` population is a fill and the column is not data.
+  Either answer is reported as the answer; neither is narrated as the one that was hoped for.
+- **P17.** The two rows carrying `0` are classified by the same instrument. A `0` where nothing is
+  filed is a **fabricated zero** and is named as one — that is the standing constraint's exact
+  prohibition, and it would be the second mechanism in the same column.
+- **P18.** No rate is substituted, repaired, defaulted, back-filled or written. The fixture is not
+  modified by this round. The probe prints a table and asserts nothing.
+- **P19.** Report the coverage cost of faithful absence: how many of the 274 rows, and how many of the
+  20 pinned issuers, lose NOPAT entirely if every unfiled row drops. **That number is what decides
+  between (a) and (b), and it is measured before either is chosen.**
+- **P20.** `effective_tax_bps` is audited by the same instrument in the same run. If the effective
+  column is faithful while the marginal one is not, that is diagnostic about which fill happened and
+  when; if both are filled, the finding is about the fixture rather than about a rate.
+- **P21.** Nothing in this round moves `MAX_ABSOLUTE_Z`, any threshold, or any refusal path, and it
+  settles neither the window, nor the capital definition, nor `prod` vs `roic`, nor `r`'s fade.
+
+### R-50.10 — Two corrections, one mine and one the round made against me
+
+**Mine.** My brief for Round 13 stated that the five-way common set *"will shrink"* relative to the
+four-way set, because it requires all five estimators. It did not shrink — it is identical on all four
+panels, 60/50/42, 50/39/29, 87/74/63, 63/54/44 — because `E5` covers exactly what `E2` covers, which
+is at least as broad as `E4` everywhere. The round measured it and corrected me rather than reporting
+around it. That is the second consecutive round to correct a number I predicted in its own brief
+(R-48.6 was the first), and both times the correction was volunteered.
+
+**Not a correction, a confirmation:** option (iii)'s standalone coverage cost reproduces R-48.6
+exactly — 12.7% / 11.2% / 7.9% / 5.1% — on an independent run of the same probe. Two runs, same
+numbers, so the network path is stable and the earlier figures were not a one-off read.
+
+### R-50.11 — Still open
+
+1. **The capital definition, `gross` vs `oper`** — R-50.2. **New as a blocking decision**, though the
+   prior is three rounds old. The window now sits downstream of it.
+2. **`r`'s fade** — R-49.3, upstream of everything above. Juan's.
+3. **The window** — no longer answerable on its own terms; see (1).
+4. **`prod` vs `roic`** — R-45.3, still untouched by design.
+5. **The tax column** — Round 14, and P19's number decides the base wave's shape.
+6. **R-30.1 / R-44.3** — FCFF in the NOPAT slot. Blocking, upstream.
+7. **R-46.2's sweep** — scheduled, not live.
+8. **AMZN's marginal-rate hole** — R-46.3, and R-50.6 shows five of AMZN's rows were being papered
+   over by the very fill this audit found, so the hole is larger than R-46.3 measured.
+
+Every one of the twenty pinned issuers still refuses.
