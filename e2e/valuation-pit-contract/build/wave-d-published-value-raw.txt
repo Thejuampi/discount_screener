@@ -1,0 +1,196 @@
+   Compiling discount-screener-windows v0.1.0 (G:\dev\repos\discount_screener-wt-w2b\apps\windows\src-tauri)
+warning: unused variable: `half`
+   --> src\valuation_gap_attribution.rs:408:9
+    |
+408 |     let half = denom / 2;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_half`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS` is never used
+  --> src\dcf_model.rs:79:7
+   |
+79 | const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tax_defaulted` is never read
+    --> src\dcf_model.rs:1579:5
+     |
+1558 | struct DriverModelInputs {
+     |        ----------------- field in this struct
+...
+1579 |     tax_defaulted: bool,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `DriverModelInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `recent_fcf_growth_bps` is never used
+    --> src\dcf_model.rs:2696:4
+     |
+2696 | fn recent_fcf_growth_bps(history: &[FcfPoint]) -> Option<i32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discounted_fcff_fade` is never used
+    --> src\dcf_model.rs:2714:4
+     |
+2714 | fn discounted_fcff_fade(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rate_quality` is never read
+    --> src\dcf_model.rs:2757:5
+     |
+2748 | struct ResolvedWacc {
+     |        ------------ field in this struct
+...
+2757 |     rate_quality: crate::driver_resolution::EvidenceQuality,
+     |     ^^^^^^^^^^^^
+
+warning: fields `valid_tax_periods` and `average_debt_dollars` are never read
+  --> src\driver_resolution.rs:40:9
+   |
+33 | pub struct ResolvedRateInputs {
+   |            ------------------ fields in this struct
+...
+40 |     pub valid_tax_periods: Vec<i32>,
+   |         ^^^^^^^^^^^^^^^^^
+41 |     pub average_debt_dollars: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ResolvedRateInputs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `DCF_DISCOUNT_RATE` is never used
+  --> src\edgar.rs:27:7
+   |
+27 | const DCF_DISCOUNT_RATE: f64 = 0.10;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_TERMINAL_GROWTH` is never used
+  --> src\edgar.rs:28:7
+   |
+28 | const DCF_TERMINAL_GROWTH: f64 = 0.03;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_PROJECTION_YEARS` is never used
+  --> src\edgar.rs:29:7
+   |
+29 | const DCF_PROJECTION_YEARS: usize = 5;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_GROWTH` is never used
+  --> src\edgar.rs:30:7
+   |
+30 | const DCF_MIN_GROWTH: f64 = -0.05;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MAX_GROWTH` is never used
+  --> src\edgar.rs:31:7
+   |
+31 | const DCF_MAX_GROWTH: f64 = 0.25;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `DCF_MIN_YEARS_HISTORY` is never used
+  --> src\edgar.rs:32:7
+   |
+32 | const DCF_MIN_YEARS_HISTORY: usize = 2; // need at least 2 data points for a growth rate
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DcfResult` is never constructed
+    --> src\edgar.rs:1080:12
+     |
+1080 | pub struct DcfResult {
+     |            ^^^^^^^^^
+
+warning: function `compute_dcf` is never used
+    --> src\edgar.rs:1091:4
+     |
+1091 | fn compute_dcf(fcf_by_year: &[(i32, i64)], shares_outstanding: u64) -> Option<DcfResult> {
+     |    ^^^^^^^^^^^
+
+warning: function `fetch_dcf` is never used
+    --> src\edgar.rs:1551:8
+     |
+1551 | pub fn fetch_dcf(
+     |        ^^^^^^^^^
+
+warning: method `ingest_dcf` is never used
+    --> src\engine.rs:2266:12
+     |
+2068 | impl ScreenerState {
+     | ------------------ method in this implementation
+...
+2266 |     pub fn ingest_dcf(&mut self, symbol: String, value_cents: i64) {
+     |            ^^^^^^^^^^
+
+warning: `discount-screener-windows` (lib test) generated 17 warnings (run `cargo fix --lib -p discount-screener-windows --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.94s
+     Running unittests src\lib.rs (target\debug\deps\discount_screener_windows_lib-11cf8efa1419a5b7.exe)
+
+running 1 test
+=== PROBE G: the published value under the corrected interest sign ===
+retrieved 2026-08-05T01:56:33.485928900+00:00
+TREE CHECK: the interest sign survives FcfPoint::with_operating_drivers = YES -- the after column can differ
+live risk-free 463 bps as of 1785869994
+
+symbol   yrs   before c    after c   delta c delta bps   fcff b c   fcff a c   addbk b/a cod before             cod after              lane b     lane a     flip 
+PG         0      18109      18109         0         0      18109      18109       80/80 273bps                 273bps                 sel:fcff   sel:fcff   -    
+GOOGL      0      35679      35679         0         0      50810      50810       10/10 245bps                 245bps                 sel:fwd    sel:fwd    -    
+AMZN       0      16185      16185         0         0      11099      11099       34/34 894bps                 894bps                 sel:fwd    sel:fwd    -    
+MSFT       0      57139      57139         0         0      50567      50567       90/90 362bps                 362bps                 sel:fwd    sel:fwd    -    
+ABBV       1      41346      41346         0         0      46133      46133     338/338 319bps                 319bps                 sel:fwd    sel:fwd    -    
+ADSK       6      30174      29739      -435      -144      28710     absent       103/- 304bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+AXON      10      19362      19362         0         0      19340      19340       34/34 520bps                 520bps                 sel:fwd    sel:fwd    -    
+CARR       2       4517       4517         0         0     absent     absent         -/- 322bps                 322bps                 sel:fwd    sel:fwd    -    
+COR        1      54161      55434      1273       235      61303     absent         6/- 453bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+CPRT       1       2271       2248       -23      -101       2271       2248      105/80 408bps                 309bps                 sel:fcff   sel:fcff   -    
+DDOG       1       3965       3965         0         0     absent     absent         -/- REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+JKHY       2      16460      16325      -135       -82      16460      16325        30/5 515bps                 274bps                 sel:fcff   sel:fcff   -    
+MPWR      12      91657      91300      -357       -39      54630      51585      85/-85 n/a                    n/a                    disp:fwd   disp:fwd   -    
+NKE        6       5492       5198      -294      -535       5492     absent        19/- 141bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fcff   sel:fwd    FLIP 
+NWS        7       2054       2054         0         0     absent     absent         -/- 297bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+NWSA       7       2054       2054         0         0     absent     absent         -/- 297bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+OTIS       1       7955       7955         0         0       7955       7955       80/80 236bps                 236bps                 sel:fcff   sel:fcff   -    
+PAYX       2      12102      12102         0         0      12102      12102       61/61 459bps                 459bps                 sel:fcff   sel:fcff   -    
+RMD        1      16670      16670         0         0      16670      16670       51/51 250bps                 250bps                 sel:fcff   sel:fcff   -    
+ROL        3       3421       3421         0         0       3283       3283       46/46 587bps                 587bps                 sel:fwd    sel:fwd    -    
+ROST       3      17767      17488      -279      -157      12678      10785      45/-45 505bps                 474bps                 sel:fwd    sel:fwd    -    
+TPR        3      10707      10707         0         0       9014       9014     119/119 462bps                 462bps                 sel:fwd    sel:fwd    -    
+TTD        2       4339       4339         0         0     absent     absent         -/- REFUSED(no aligned market yield, spread, or SEC interest/debt periods) REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+TYL        1      23336      23336         0         0      23336      23336     101/101 83bps                  83bps                  sel:fcff   sel:fcff   -    
+ULTA      10      68134      68788       654        96      51068     absent         4/- 287bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+WSM        4      15941      15928       -13        -8      11509     absent        28/- 542bps                 REFUSED(no aligned market yield, spread, or SEC interest/debt periods) sel:fwd    sel:fwd    -    
+XYZ        1       5979       5979         0         0       4059       4059       51/51 427bps                 427bps                 sel:fwd    sel:fwd    -    
+YUM        1      19998      19998         0         0      19998      19998     650/650 517bps                 517bps                 sel:fcff   sel:fcff   -    
+ZBRA       1      24069      23987       -82       -34      24069      23987     150/150 599bps                 617bps                 sel:fcff   sel:fcff   -    
+
+=== ANCHORS ===
+all four anchors move $0.00: [PG GOOGL AMZN MSFT] -- triggers (a)/(a') do not fire
+
+=== THE ANSWER ===
+issuers with a live rewrite (>=1 year changed, and the tree can carry it): 25
+issuers whose FCFF CANDIDATE moves: 10 [ADSK COR CPRT JKHY MPWR NKE ROST ULTA WSM ZBRA]
+issuers whose PUBLISHED value moves: 10 [ADSK(-435c) COR(+1273c) CPRT(-23c) JKHY(-135c) MPWR(-357c) NKE(-294c) ROST(-279c) ULTA(+654c) WSM(-13c) ZBRA(-82c)]
+the difference between those two lines is absorption: a rewrite that reached the model
+and was swallowed either by the robust normalization over the whole series or by the
+router publishing the forward lane instead
+router selection flips: 1 [NKE sel:fcff -> sel:fwd] -- a flip is qualitatively different from a magnitude,
+because the published number changes lane rather than value
+accounting cost-of-debt channel changes (T2.7): 11 [ADSK 304bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) COR 453bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) CPRT 408bps -> 309bps JKHY 515bps -> 274bps NKE 141bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) NWS 297bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) NWSA 297bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) ROST 505bps -> 474bps ULTA 287bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) WSM 542bps -> REFUSED(no aligned market yield, spread, or SEC interest/debt periods) ZBRA 599bps -> 617bps]
+corrected FCFF candidate non-positive (a refusal path, not a magnitude): 0 []
+reclassified away from OperatingNonFinancial since the scan: []
+not measurable: []
+
+=== against the pre-registration (R-13.1) ===
+registered: [ROST(-279c) MPWR(-357c) JKHY(-135c) ULTA(-124c) CPRT(-23c) NKE(-12c)]
+observed:   [ADSK(-435c) COR(+1273c) CPRT(-23c) JKHY(-135c) MPWR(-357c) NKE(-294c) ROST(-279c) ULTA(+654c) WSM(-13c) ZBRA(-82c)]
+registered and did NOT move: []
+moved and NOT registered (each one is a stop under trigger (c.2)): [ADSK(-435c) COR(+1273c) WSM(-13c) ZBRA(-82c)]
+
+=== distribution of published-value delta, in bps of the before value ===
+n=10 min=-535 median=-60 max=235
+full sorted series: [-535 -157 -144 -101 -82 -39 -34 -8 96 235]
+test valuation_probes::tests::probe_published_value_under_the_corrected_interest_sign ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 586 filtered out; finished in 16.94s
+

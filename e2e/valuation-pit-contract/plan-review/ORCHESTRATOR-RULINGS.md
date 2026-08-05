@@ -1929,3 +1929,63 @@ rather than being re-planned.
 Carried forward, none of them blocking this wave: **ROL minimum observations** (R-23.6),
 **COR's permanent evidence gap** (R-20.4), **the fixture reader/writer defect** (R-19), and **the
 absent published-value regression gate** (R-22), which remains the most durable finding of the run.
+
+---
+
+## R-25 — Wave (D) verification: accepted on mechanism, held on population
+
+The wave implementing R-24 is complete and I verified it directly rather than on its report.
+
+### R-25.1 — What I checked myself, and what it showed
+
+| claim | how I checked it | result |
+|---|---|---|
+| the guard keys on basis, not sign | read `driver_resolution.rs:137-148` | one `.filter(\|point\| point.interest_is_net_basis != Some(true))`, one code path, no enum, no policy parameter |
+| no sign-keying survives | `grep` for `net_interest_years`, `interest < 0.0`, `is_net_basis` | the only remaining `interest < 0.0` is inside a doc comment describing the *retired* path |
+| the detector never hardcodes a concept | read `edgar.rs:651-663` | reads `driver.qname_signs[index] < 0` by position in `driver.qnames`; tracks the contract automatically |
+| `.first()` on `sources` is the winning fact | read `AnnualProvenance` at `edgar.rs:187-195` | "every fact that contributed, in combination order"; `INTEREST_EXPENSE` is `select_one_equivalent`, so a year's value comes from one concept and its sources are single-qname. Sound — but note this would be **wrong for a composed driver** like `extract_total_debt`, where `.first()` picks one of several qnames. The function is correct for its one caller and quietly unsafe for a second. Recorded, not fixed. |
+| LD-8's deferral text is gone | read the replacement comment | discharged as R-24.3 condition 4 requires; the replacement states the rule and names the BKR counterexample |
+
+Mutation testing was real: three distinct mutations of the guard line, each producing **named** failures, each reverted to 14/14 green. Mutation 2 (delete the filter) is the one that matters — it failed only 2 tests, and the builder said why: the first rewritten test's dropped year is also negative, so the pre-existing `interest > 0.0` predicate excludes it independent of basis. That is the builder finding a weakness in its own test and reporting it rather than counting the kill. It is the correct reading.
+
+### R-25.2 — The population gap is the finding, and it is not cosmetic
+
+The builder reported 10/12 movers and 1/3 flips reproduced, attributing the shortfall to
+`INTEREST_SIGN_AFFECTED_COHORT` being pinned to R-13.1. It was right to refuse to mutate that
+constant. Its conclusion — accept the mechanism-identity argument — is what I am not accepting.
+
+**The ten confirmed movers are all sign-detected names: exactly the population where (A) and (D)
+agree.** CHTR and BKR are the only registered names (D) reaches that (A) cannot — BKR is net in
+every filed year and never once negative, which is the counterexample the shipped code comment
+itself cites as the reason the rule exists.
+
+So the tree had demonstrated (D) **nowhere that (D) differs from the rule it replaced.** The
+verification covered the agreement set and missed the discriminating set entirely.
+
+This is **instance thirteen** of the pattern: a check that cannot fail on the population that would
+falsify it. It is the same shape as R-18.7's probe-cohort defect, and it arrived through a different
+door — not a brief naming the wrong universe, but a correct refusal to widen a pinned one, with no
+second universe put in its place. Refusing to corrupt an instrument and leaving the measurement
+unmade are not the same act, and the report treated them as one.
+
+"The mechanism is symbol-agnostic" is an argument. R-24.2 says any deviation is a defect **until
+proven otherwise**, and arguments do not discharge that.
+
+### R-25.3 — Disposition
+
+Wave held, not rejected. The fix is additive and touches no pinned constant: a separate
+`BASIS_ONLY_COHORT` of the two names, chained into the probe universe, and a live re-run reporting
+CHTR and BKR in cents and bps against R-24.2 — plus confirmation that the ten verified names and the
+four anchors are **unchanged** by the widening, since a universe change that moves an already-measured
+name is itself a finding.
+
+R-24.4 licenses re-deriving the reference branch's probes "on their merits." Adding a constant is
+that. Mutating R-13.1's population would not have been.
+
+### R-25.4 — Carried, with one new entry
+
+`winning_qname_is_net_basis` is production logic with **no fast-test coverage** — reachable only
+through the network-bound `fetch_fcf_history`. The builder declined to synthesize a fixture rather
+than guess at its shape, and said so. That is the right call under wave scope and the wrong state to
+leave permanently: the function that decides what "net basis" means is currently proven only by the
+downstream deltas it produces. **New carried item, alongside R-19, R-20.4, R-22, and R-23.6.**
