@@ -5044,3 +5044,121 @@ depends on to remember what it decided. Two mechanical consequences, both cheap:
 Advisor's second lesson candidate said this first and said it more compactly: *citation-by-reference
 degrades silently and nobody notices until a reviewer tries to resolve it.* This is the first time in
 the effort a reviewer tried.
+
+---
+
+## R-53 — The tax source researched, and the finding is not about the seventy-six missing rows
+
+### R-53.1 — Round 15 stalled on transport, and the output file was empty for the fourth time
+
+Round 15's agent stopped with *"no progress for 600s (stream watchdog did not recover)"* and its
+captured output file was **zero bytes** — the same fault named in R-52.4, now on its fourth
+occurrence in this effort. The visible tail was a single line: *"Now insert the P24 ad hoc drivers
+after this block."*
+
+**I did not trust that line.** I measured the worktree instead: base `ec4b278` (R14, correct),
+`valuation_probes.rs` at +80/-12, and `cargo test --lib --no-run` **finished clean** — only
+unused-constant warnings for the four new drivers and the two new `CapitalYear` fields. So the
+stall was transport, not logic, and what had landed was coherent: `equity`/`debt` split onto
+`CapitalYear` so P24 can read the two sides of `ΔIC` separately, four ad hoc drivers
+(`NET_INCOME_LOSS`, `COMMON_STOCK_DIVIDENDS`, `SHARE_REPURCHASES`, `IMPAIRMENT_CHARGES`), and
+`cash_and_marketable_by_year` hoisted out of `assemble_window_race_panels`.
+
+The agent's own last line was **already false when it was written** — the drivers were in at lines
+514–557. Resumed with the verified checkpoint stated as fact, and with an explicit instruction to
+read before editing so the block is not inserted twice. **A stalled agent's final line is a
+statement of intent, not of state**, and the two diverge exactly when the stall is what interrupted
+the write.
+
+### R-53.2 — The contiguity check I registered one ruling ago is the wrong predicate
+
+R-52.5 registered: *"the header sequence is contiguous, and checking it is one `grep -c`."* This is
+its first run. It reported **three gaps** — `4 → 6`, `6 → 5`, `5 → 7`.
+
+**The record is complete.** 52 distinct ids, 52 headers, max 52, nothing missing, nothing
+duplicated. R-5 and R-6 are merely **transposed in the file**: R-6 sits at line 146 and R-5 at line
+197. Adjacency-of-successive-headers is not the property that matters; **set completeness is**. A
+check that reports three failures on a sound record is worse than no check, because the next reader
+learns to scroll past it — which is the same silent degradation R-52.5 was written to stop.
+
+**The registered check is replaced** by: every id in `1..max` present exactly once, duplicates
+reported separately, ordering reported as informational only. The transposition stays as it is —
+moving fifty lines of settled prose mid-effort is churn, and the id is how every citation resolves.
+
+This is `feedback_verify_what_an_instrument_measures` firing on an instrument I built **to enforce
+that same lesson**, one ruling after writing it. The failure mode is not carelessness; it is that
+the cheap version of a check is cheap precisely because it measures something adjacent to what you
+meant.
+
+### R-53.3 — What is actually available, having gone and looked
+
+Juan's instruction was **"encontrá una fuente de datos confiable online"** — supplanting all three
+options R-51.5 registered, none of which was *go get the data*. Four sources examined:
+
+| source | grain | verdict |
+|---|---|---|
+| Damodaran, marginal tax rates by country | **country**, single Jan-2026 snapshot | **unusable** — no time series, no issuer |
+| Graham (Duke), simulated marginal rates | **firm-year**, 349,722 obs, 1927–2024, 27,471 firms | authoritative, **not droppable in** |
+| US statutory schedule | public law, by year **and taxable-income bracket** | derivable, but see R-53.4 |
+| SEC XBRL frames / untried tags | issuer-year, with provenance | **not yet asked** — see R-53.5 |
+
+Graham's is the academic gold standard, validated against real return data. It fails on four
+independent counts, any one of which is disqualifying on its own:
+
+1. Keyed to **`gvkey`** (Compustat). Our corpus is ticker/CIK. The crosswalk needs a licensed source.
+2. The rates are **after-financing** — they already embed the interest deduction. Our construction
+   is `(pretax + interest) × (1 − t)`: we add interest back *then* tax it. Composing those
+   **double-counts the deduction**. This is a modelling incompatibility, not an access problem, and
+   it would have survived every licensing fix.
+3. 11 GB, ending 2024; our corpus reaches 2025.
+4. Terms of use unstated; the author asks to be contacted.
+
+Item 2 is the one worth carrying: **the right-looking number from the right-looking source is still
+wrong if it is defined against a different formula than ours.**
+
+### R-53.4 — The tag is the federal statutory rate. That is a bigger finding than the missing rows.
+
+Production reads `EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate`. By its own
+name that is the **statutory federal** rate — not the issuer's marginal rate. Damodaran measures the
+US marginal rate at **25–27% once state and local are included**, against the tag's 21%.
+
+**So the 191 genuinely-filed rows may be measuring the wrong quantity too.** A 21% rate where 25–27%
+is economically true **overstates NOPAT for every issuer**, whether or not the row was filed. The
+defect is not 76 rows of coverage; it is a candidate 274-row definitional error, and the 76 are a
+subset symptom.
+
+Corroboration that the tag is not a bare public constant: the fixture carries **3400 in 29 rows and
+3500 in 59**, both pre-2018. That is not noise — the pre-TCJA schedule was **graduated 15%–35%**, so
+34% is a legitimate bracket determined by the issuer's taxable income. The rate is public law *given
+the bracket*, and the bracket is issuer-dependent.
+
+This reframes W4 entirely and it is **not mine to settle**. R-51.5's exclusion stands verbatim.
+
+### R-53.5 — Round 16: ask SEC the question we never asked it
+
+Round 14 measured **only the qnames in our own `marginalTaxReference` policy list**. That is an
+instrument that can only ever report on the tags we already chose. The cheapest, most authoritative,
+licence-free, provenance-carrying source is the one already in the pipeline, under tags never
+requested: state tax reconciliation, total effective rate reconciliation, foreign-jurisdiction
+lines.
+
+Queued as **Round 16**, after Round 15 lands — same file, and adding scope to a running agent is how
+briefs get muddied. It answers two things at once: how many of the 76 are filed under another tag,
+and whether **any** tag delivers an all-in marginal rate rather than the federal statutory one.
+
+This is *supply, not fabrication* in the form R-46.3 already registered.
+
+### R-53.6 — What stays Juan's
+
+R-51.5's option set is unchanged and its exclusion holds: **no statutory default, in any year, under
+any name.** R-53.4 adds a question that did not exist when that set was written, and I am putting it
+to him rather than answering it:
+
+> Is a **year-aware, bracket-aware, externally-sourced, provenance-carrying** statutory schedule the
+> same thing as the fallback R-41.3 deleted? It differs in every property that made that one bad —
+> year-blind, provenance-free, a hardcoded constant. It shares exactly one: **the number does not
+> come from the issuer's own filing.**
+
+Whether that single shared property is the disqualifying one is a policy judgement about what the
+economic contract means, not a measurement. It goes to him with Round 16's counts, so he decides
+with the coverage number in hand rather than ahead of it.
