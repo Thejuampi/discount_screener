@@ -247,6 +247,8 @@ pub fn normalize_investments(
 mod tests {
     use super::*;
 
+    use crate::edgar::extract_driver_annual;
+
     fn fact(qname: &str, value_dollars: i64) -> SecFact {
         SecFact {
             qname: qname.into(),
@@ -449,6 +451,67 @@ mod tests {
                 );
             }
         }
+
+        // The interest cases resolve through the interest-expense driver rather
+        // than through `normalize_investments`: the sign convention is applied
+        // when a filed value becomes an observation, so `extract_driver_annual`
+        // is where this corpus meets it. Comparing the whole year map at once
+        // also catches a year the class drops, which a per-year lookup would
+        // read as absent and pass over.
+        let interest_cases = fixture["interestFixtures"]
+            .as_array()
+            .expect("interest fixture cases");
+        assert!(
+            interest_cases.len() >= 2,
+            "the sign convention needs a net-expense filer and a net-income filer to be pinned in \
+             both directions"
+        );
+        for case in interest_cases {
+            let resolved: BTreeMap<i32, i64> =
+                extract_driver_annual(&companyfacts_payload(case), policy::INTEREST_EXPENSE)
+                    .into_iter()
+                    .map(|value| (value.year, value.value_dollars))
+                    .collect();
+            let expected: BTreeMap<i32, i64> = case["expectedAnnualDollars"]
+                .as_object()
+                .expect("expected annual dollars")
+                .iter()
+                .map(|(year, dollars)| {
+                    (
+                        year.parse().expect("fiscal year"),
+                        dollars.as_i64().expect("expected dollars"),
+                    )
+                })
+                .collect();
+            assert_eq!(resolved, expected, "{}", case["name"].as_str().unwrap());
+        }
+    }
+
+    /// One fixture case as the companyfacts payload EDGAR would have served.
+    ///
+    /// The driver readers take the raw payload, so a case that pre-built
+    /// `SecFact`s would bypass concept lookup, form and period-shape admission
+    /// and vintage resolution — everything the sign travels through.
+    fn companyfacts_payload(case: &serde_json::Value) -> serde_json::Value {
+        let mut concepts = serde_json::Map::new();
+        for fact in case["facts"].as_array().expect("fixture facts") {
+            let qname = fact["qname"].as_str().expect("fixture qname");
+            let unit = fact["unit"].as_str().expect("fixture unit");
+            concepts
+                .entry(qname.to_owned())
+                .or_insert_with(|| serde_json::json!({ "units": { unit: [] } }))["units"][unit]
+                .as_array_mut()
+                .expect("unit entries")
+                .push(serde_json::json!({
+                    "start": fact["start"],
+                    "end": fact["end"],
+                    "val": fact["valueDollars"],
+                    "form": fact["form"],
+                    "accn": fact["accession"],
+                    "filed": fact["filed"],
+                }));
+        }
+        serde_json::json!({ "facts": { "us-gaap": concepts } })
     }
 
     /// One driver constant per key in the contract's `drivers` object. A key

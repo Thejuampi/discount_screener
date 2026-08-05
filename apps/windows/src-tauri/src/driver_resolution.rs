@@ -49,6 +49,11 @@ pub struct ResolvedRateInputs {
 /// current public input surface carries the latter and the optional market
 /// fields; no source is silently substituted.  Debt and interest are paired by
 /// fiscal year, never by array position or latest as-of date.
+///
+/// A fiscal year whose winning interest concept is declared net-of-income
+/// (`negatedQnames`) is dropped from the accounting fit rather than the whole
+/// issuer being refused; see the comment at the accounting fit for the
+/// contract this drops years under, and why it keys on basis rather than sign.
 pub fn resolve_rate_inputs(
     history: &[FcfPoint],
     reported_total_debt_dollars: Option<i64>,
@@ -110,15 +115,32 @@ pub fn resolve_rate_inputs_for_source(
         .collect();
     rated_spreads.sort_by_key(|(year, _)| *year);
 
+    // A fiscal year whose winning `interestExpense` concept was declared
+    // net-of-income (`negatedQnames`, `INTEREST_EXPENSE.qname_signs`) reports a
+    // *net* figure: interest income has already been subtracted from interest
+    // expense. Gross interest expense is therefore not measurable for that
+    // year, and the year is not a fittable observation for this accounting
+    // channel -- it is dropped. The issuer loses the channel only when
+    // dropping those years empties the fittable set below, which is the
+    // pre-existing `accounting_common` intersection with `tax_years`, not a
+    // separate rule.
+    //
+    // This reads the *basis* of the series -- which concept won, carried on
+    // `FcfPoint::interest_is_net_basis` -- never the *sign* of the value. A
+    // net-*expense* filer's series is equally net while staying positive in
+    // every filed year (BKR: net in every filed year, never once negative),
+    // and a sign test alone can never see it. That gap was LD-8; this rule
+    // closes it wherever the basis reaches a published number -- an issuer
+    // whose cost of debt resolves from a higher-priority lane (market yield or
+    // rated spread) before reaching this fit is unaffected by its own basis,
+    // because those lanes never consult it.
     let accounting: Vec<(i32, f64, f64)> = history
         .iter()
+        .filter(|point| point.interest_is_net_basis != Some(true))
         .filter_map(|point| {
             let debt = point.total_debt_dollars?;
             let interest = point.interest_expense_dollars?;
-            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 || interest < 0.0 {
-                return None;
-            }
-            if debt == 0.0 && interest > 0.0 {
+            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 {
                 return None;
             }
             (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
@@ -233,6 +255,17 @@ pub fn resolve_rate_inputs_for_source(
                 average_debt,
             )
         } else {
+            // Refusing here terminates the FCFF path for this issuer rather than
+            // degrading to a lower rung: `edgar.rs` supplies `None` for both the
+            // market yield and the rated/synthetic spread, and no producer for
+            // either exists anywhere in the tree. This is the one terminal
+            // message for every way the fit can come up empty -- no accounting
+            // years at all, or every accounting year dropped for net basis --
+            // because the caller cannot act on the two differently: either way
+            // there is no gross interest-expense evidence left to fit. Channel
+            // refusal is issuer blackout, and that is the honest outcome -- the
+            // alternative is to synthesise a spread from an assumption, which is
+            // choosing an estimator to keep a number publishing.
             return Err(
                 "fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods"
                     .into(),
@@ -327,6 +360,27 @@ mod tests {
         FcfPoint::new(year, 100.0)
             .with_operating_drivers(120.0, 20.0, 1_000.0, interest, Some(2_100))
             .with_rate_resolution_inputs(debt, tax, None, None)
+    }
+
+    /// A year whose interest is written straight into the field instead of
+    /// through `with_operating_drivers`.
+    ///
+    /// Every other test in this file builds its input through `point`, and that
+    /// setter carried a blanket `.map(f64::abs)` until this wave removed it — so
+    /// the `interest < 0.0` path below had never executed anywhere, in
+    /// production or in a test. Writing the field directly keeps this test
+    /// exercising the branch on its own terms: if a future change re-installs an
+    /// absolute value on the way into `FcfPoint`, this test still feeds
+    /// `resolve_rate_inputs` a negative and still measures what it claims to.
+    ///
+    /// Carries no basis (`interest_is_net_basis` stays `None`); tests below that
+    /// need a net-basis year chain `.with_interest_basis(Some(true))` onto the
+    /// result explicitly, so the concept declaration is visible at the call site
+    /// rather than folded into this helper's default.
+    fn point_with_net_interest(year: i32, debt: f64, interest: f64) -> FcfPoint {
+        let mut point = point(year, Some(debt), None, Some(2_100));
+        point.interest_expense_dollars = Some(interest);
+        point
     }
 
     #[test]
@@ -477,5 +531,128 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "marginal_tax_source=tax_reconciliation"));
+    }
+
+    // ── T2.7: the accounting channel drops a year on basis (R-24) ───────────
+    //
+    // The two tests immediately below are rewrites, not new coverage: they
+    // used to pin rule (A) -- an issuer-wide refusal keyed on the *sign* of a
+    // negative interest year. R-20/R-23's measurement falsified (A) as an
+    // approximation (`FN = 122` issuer-years / 3 issuers it could never see,
+    // e.g. BKR, net every filed year and never once negative) and Juan ruled
+    // rule (D) -- a per-year drop keyed on the *basis* of the winning concept
+    // -- the T2.7 contract in `ORCHESTRATOR-RULINGS.md` R-24. Per R-24.3 this
+    // is the one case where changing a test is not weakening it: the coverage
+    // count does not fall (both tests below still exist, asserting the new
+    // contract over the same fixtures they used before), and each assertion
+    // below is strictly more specific than the outcome-only string match it
+    // replaces -- it names the dropped year, states which concept it stands
+    // in for, and checks the surviving fit directly rather than an error
+    // string. Two further tests below them are new: direct boundary coverage
+    // for "an issuer whose fittable set empties" and "a net year that was
+    // never fittable anyway," the two boundary conditions the two rewrites
+    // above do not themselves exercise.
+
+    /// Rewritten from `a_net_interest_year_refuses_the_accounting_channel_for_the_whole_issuer`.
+    ///
+    /// Same fixture, same three years. 2023 is written negative here on
+    /// purpose, even though sign plays no part in the (D) contract, to make
+    /// the point R-24.1 states explicitly -- *"the sign of the filed value is
+    /// NOT part of the contract"* -- unmissable: dropping 2023 is driven
+    /// entirely by `.with_interest_basis(Some(true))` below, standing in for a
+    /// year whose winning concept was `InterestIncomeExpenseNet`, and 2021/2022
+    /// remain fittable on their own gross years exactly as
+    /// `aligned_accounting_evidence_is_provisional_or_solid` fits a rate from
+    /// the same shape.
+    #[test]
+    fn a_net_basis_year_is_dropped_and_the_issuer_still_fits_on_its_remaining_years() {
+        let history = vec![
+            point_with_net_interest(2021, 100.0, 5.0),
+            point_with_net_interest(2022, 110.0, 5.5),
+            point_with_net_interest(2023, 120.0, -6.0).with_interest_basis(Some(true)),
+        ];
+        let resolved = resolve_rate_inputs(&history, Some(120), 430)
+            .unwrap()
+            .expect("2021 and 2022 remain fittable once 2023 is dropped for basis");
+        assert_eq!(
+            resolved.valid_debt_periods,
+            vec![2021, 2022],
+            "2023 (InterestIncomeExpenseNet) must be dropped from the fit; the issuer itself \
+             must not be refused"
+        );
+    }
+
+    /// Rewritten from `a_refused_channel_is_an_error_rather_than_an_absent_rate`.
+    ///
+    /// Same single-fiscal-year shape, but the interest value is now POSITIVE --
+    /// the opposite of what the retired rule (A) needed to fire -- so a reader
+    /// cannot mistake this for the sign rule reappearing under a new name. Only
+    /// `.with_interest_basis(Some(true))` drives the refusal, standing in for a
+    /// year whose winning concept is one of `INTEREST_EXPENSE`'s two negated
+    /// qnames. `resolve_rate_inputs` returning `Err` rather than `Ok(None)` is
+    /// still what makes the FCFF path go dark instead of quietly continuing on
+    /// a weaker source; `Ok(None)` would be indistinguishable from the
+    /// debt-free case.
+    #[test]
+    fn a_solely_net_basis_year_still_refuses_as_an_error_not_an_absent_rate() {
+        let history =
+            vec![point_with_net_interest(2024, 100.0, 1.0).with_interest_basis(Some(true))];
+        let error = resolve_rate_inputs(&history, Some(100), 430).unwrap_err();
+        assert!(
+            error.contains("no aligned market yield, spread, or SEC interest/debt periods"),
+            "a solitary net-basis year (2024, filed positive) must empty the fittable set and \
+             refuse as a terminal error, not degrade to Ok(None): got {error}"
+        );
+    }
+
+    /// New boundary test: an issuer that files a net concept in EVERY year that
+    /// has debt has no gross year to fall back on, so dropping the net years
+    /// empties the fittable set and the issuer loses the channel -- the rule
+    /// R-24.1 says already exists (`accounting_common`), not a new one. Mirrors
+    /// COR's real filing history (net 18/18 years, R-20.4) and BKR's (net in
+    /// every filed year, R-23.3), both measured REFUSED under (D).
+    #[test]
+    fn an_issuer_net_basis_in_every_year_empties_the_fittable_set_and_is_refused() {
+        let history = vec![
+            point_with_net_interest(2021, 100.0, 5.0).with_interest_basis(Some(true)),
+            point_with_net_interest(2022, 110.0, 5.5).with_interest_basis(Some(true)),
+        ];
+        let error = resolve_rate_inputs(&history, Some(110), 430).unwrap_err();
+        assert!(
+            error.contains("no aligned market yield, spread, or SEC interest/debt periods"),
+            "every fittable year is net-basis, so the accounting channel must refuse the whole \
+             issuer rather than fit a rate on years that never measured gross expense: got {error}"
+        );
+    }
+
+    /// New boundary test: a net-basis year that carries no filed debt was never
+    /// a fit candidate in the first place -- the pre-existing
+    /// `point.total_debt_dollars?` guard already excludes it -- so dropping it
+    /// for basis changes nothing observable. Mirrors the real pattern Probe H
+    /// measured for ABBV 2011, COR 2008, TYL 2009 and YUM 2007
+    /// (`ORCHESTRATOR-RULINGS.md` R-20.2 Table 4): every one of those trigger
+    /// years reads `debt = n/a`.
+    #[test]
+    fn a_net_basis_year_with_no_filed_debt_was_never_fittable_and_changes_nothing() {
+        let with_net_year = vec![
+            point_with_net_interest(2011, 100.0, 5.0),
+            point_with_net_interest(2012, 110.0, 5.5),
+            point(2013, None, Some(-20.0), Some(2_100)).with_interest_basis(Some(true)),
+        ];
+        let without_net_year = vec![
+            point_with_net_interest(2011, 100.0, 5.0),
+            point_with_net_interest(2012, 110.0, 5.5),
+        ];
+        let with_resolved = resolve_rate_inputs(&with_net_year, Some(110), 430)
+            .unwrap()
+            .expect("2011 and 2012 remain fittable");
+        let without_resolved = resolve_rate_inputs(&without_net_year, Some(110), 430)
+            .unwrap()
+            .expect("identical fit with the undebted net year simply absent");
+        assert_eq!(
+            with_resolved.cost_of_debt_bps, without_resolved.cost_of_debt_bps,
+            "a net-basis year with no filed debt (2013) was never a fit candidate either way; \
+             including or omitting it must resolve to the same rate"
+        );
     }
 }

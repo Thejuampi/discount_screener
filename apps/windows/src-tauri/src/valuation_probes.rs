@@ -26,6 +26,14 @@
 //!   *down* — the opposite of what the undervaluation cluster needs. If it is
 //!   too noisy to estimate at all, FR-16 must be replaced by a pooled prior,
 //!   which is a constant wearing a hat.
+//! * **Probe G — the published value under the corrected interest sign.** Wave 2b
+//!   moves live published numbers on purpose, against a pre-registered set of six
+//!   issuers. A wave that moves published numbers has to *measure* which ones and
+//!   by how much; arguing it from the mechanism has been wrong three times on this
+//!   one change. This probe runs each issuer twice through the real router — once
+//!   with every interest year read as `|filed|`, which is exactly what the code
+//!   published before the three `.abs()` sites were removed, and once with the
+//!   history as this tree now reads it — and reports the published delta.
 //!
 //! Run them with:
 //!
@@ -33,19 +41,47 @@
 //! cargo test --lib probe_analyst_dispersion_availability -- --ignored --nocapture
 //! cargo test --lib probe_growth_persistence_rho1        -- --ignored --nocapture
 //! cargo test --lib probe_return_on_capital_availability -- --ignored --nocapture
+//! cargo test --lib probe_facts_without_a_filing_date    -- --ignored --nocapture
+//! cargo test --lib probe_published_value_under_the_corrected_interest_sign -- --ignored --nocapture
 //! ```
 
 #[cfg(test)]
+use std::cmp::Ordering;
+
+#[cfg(test)]
+use chrono::Utc;
+
+#[cfg(test)]
+use crate::dcf_model::{
+    classify_business, compute_with_params, BusinessClass, DcfAnalysis, FcfPoint, MarketParams,
+};
+#[cfg(test)]
+use crate::driver_resolution::resolve_rate_inputs;
+#[cfg(test)]
 use crate::edgar::{
     accepted_annual_entries, edgar_client, extract_driver_annual, fetch_cik_map,
-    fetch_company_facts, fetch_fcf_history, IsoDate,
+    fetch_company_facts, fetch_fcf_history, fetch_shares_outstanding, IsoDate,
 };
+#[cfg(test)]
+use crate::engine::FundamentalSnapshot;
+#[cfg(test)]
+use crate::fetcher::{ForwardForecastFetchError, YahooClient};
+#[cfg(test)]
+use crate::operating_valuation::{OperatingModel, RouteStatus};
+#[cfg(test)]
+use crate::operating_valuation_runtime::{
+    route_runtime_valuation, ForwardSourceFailure, RuntimeValuationInput,
+};
+#[cfg(test)]
+use crate::quote_summary::ForwardForecastEvidence;
 #[cfg(test)]
 use crate::sec_driver_normalization_policy_generated::{
     DriverOperator, CURRENT_DEBT, DILUTED_AVERAGE_SHARES, INTEREST_EXPENSE, MARGINAL_TAX_REFERENCE,
     NON_CURRENT_DEBT, OPERATING_CASH_FLOW, PRETAX_INCOME, REVENUE, STOCKHOLDERS_EQUITY,
     TAX_EXPENSE, TOTAL_DEBT,
 };
+#[cfg(test)]
+use crate::yahoo_session::is_rate_limit_error;
 
 /// The names the probes run over: the pinned screener cohort plus the four
 /// anchors. Broad enough to speak about the cross-section, small enough to stay
@@ -262,6 +298,226 @@ fn qname_coverage(facts: &serde_json::Value, driver: DriverOperator) -> Vec<(&'s
         .collect()
 }
 
+/// The four names whose published value must not move at all.
+///
+/// They are the reference points every other number in the table is read
+/// against, so a move here is not a magnitude to be reported — it is a stop
+/// condition (`plan.v6.md` pause trigger (a)/(a′)).
+#[cfg(test)]
+const VALUATION_ANCHORS: &[&str] = &["PG", "GOOGL", "AMZN", "MSFT"];
+
+/// The issuers whose *interest series* the sign convention rewrites: every
+/// `OperatingNonFinancial` S&P 500 name with at least one fiscal year whose
+/// winning interest concept is one the contract negates.
+///
+/// Pinned as the measured result of the wide scan (`ORCHESTRATOR-RULINGS.md`
+/// R-10) rather than re-derived here, so the published-effect measurement runs
+/// over exactly the population the pre-registration was taken on. Re-deriving it
+/// would answer a different question on a different set and silently lose the
+/// comparison. NWS and NWSA are two share classes of one CIK and are both kept,
+/// because both are published separately.
+///
+/// This is not a ticker special case: nothing in production reads it, every step
+/// the probe takes is symbol-agnostic, and the probe asserts nothing about any
+/// name on it.
+#[cfg(test)]
+const INTEREST_SIGN_AFFECTED_COHORT: &[&str] = &[
+    "ABBV", "ADSK", "AXON", "CARR", "COR", "CPRT", "DDOG", "JKHY", "MPWR", "NKE", "NWS", "NWSA",
+    "OTIS", "PAYX", "RMD", "ROL", "ROST", "TPR", "TTD", "TYL", "ULTA", "WSM", "XYZ", "YUM", "ZBRA",
+];
+
+/// The issuers whose interest series is net-basis while never negative -- the
+/// population `INTEREST_SIGN_AFFECTED_COHORT` cannot reach, because that cohort
+/// is a sign-detected scan (R-10) and these two never trip a sign test at all.
+/// CHTR and BKR are R-24's own counterexample to keying this rule on sign rather
+/// than basis: BKR is net in every filed year and never once negative.
+///
+/// This is a separate, additive cohort, not a widening of
+/// `INTEREST_SIGN_AFFECTED_COHORT` -- that constant stays byte-identical because
+/// R-13.1's numbers are measured against exactly that population. Chaining this
+/// cohort in alongside it (`ORCHESTRATOR-RULINGS.md` R-24.2, R-24.4) is what puts
+/// at least one observation on the ground rule (D) was written to change and
+/// rule (A) could never reach -- without that, this probe can only ever exercise
+/// the population where (A) and (D) agree, and would never be able to falsify a
+/// regression specific to the basis-only branch.
+///
+/// Pinned by R-24.2: CHTR −2289c (513→708bps, a lane flip), BKR +3035c
+/// (+7889bps, a lane flip to refused).
+///
+/// Not a ticker special case: nothing in production reads it, every step the
+/// probe takes over it is symbol-agnostic, and the probe asserts nothing about
+/// either name -- it is printed beside the registration exactly like every
+/// other symbol in the loop.
+#[cfg(test)]
+const BASIS_ONLY_COHORT: &[&str] = &["CHTR", "BKR"];
+
+/// Everything one operating-lane run needs.
+///
+/// The forward evidence and the market parameters are fetched once per issuer
+/// and shared between the two runs, so the *only* thing that differs between the
+/// before and after run is the interest reading. Two runs in one process also
+/// means no market price moves between them, which a paired run across two trees
+/// cannot promise.
+#[cfg(test)]
+struct GateRunInput<'a> {
+    fundamentals: &'a FundamentalSnapshot,
+    history: &'a [FcfPoint],
+    market_price_cents: Option<i64>,
+    market_params: &'a MarketParams,
+    forward_evidence: Result<ForwardForecastEvidence, ForwardSourceFailure>,
+    as_of_epoch_day: i64,
+}
+
+/// What the router decided, and what the screener would publish from it.
+#[cfg(test)]
+struct GateRun {
+    /// The number the product publishes, derived by the same three-branch rule
+    /// as `valuation_high_signal::recompute_member` (`:474-541`): the selected
+    /// value, or on a disputed route the resolved lane falling back to whichever
+    /// candidate exists, or nothing at all.
+    published_base_cents: Option<i64>,
+    fcff_candidate_cents: Option<i64>,
+    lane: String,
+    /// The after-tax interest add-back the FCFF model actually used, in bps of
+    /// revenue. Carried because it is the one place the interest series is
+    /// visible *inside* the model: if a rewritten history leaves this unchanged,
+    /// the rewrite never reached the valuation, and saying so is a measurement
+    /// rather than an inference from two equal published values.
+    interest_add_back_margin_bps: Option<i32>,
+}
+
+/// Run one issuer through the real operating lane: FCFF model, then the runtime
+/// router, then the value the screener would publish from it.
+///
+/// This reproduces the `OperatingNonFinancial` branch of the private
+/// `valuation_high_signal::recompute_member` because that function is not
+/// callable from here and widening it for a probe would be a production edit.
+/// Only the fields this probe prints are carried over; the gate verdict, the
+/// scale annotation and the note text are not, because no column reads them.
+#[cfg(test)]
+fn run_operating_lane(input: GateRunInput<'_>) -> GateRun {
+    let mut fcff_failure: Option<String> = None;
+    let mut analysis: Option<DcfAnalysis> = None;
+    match compute_with_params(
+        input.fundamentals,
+        input.history,
+        input.market_price_cents,
+        input.market_params,
+        PUBLISHED_VALUE_PROBE_SOURCE,
+        false,
+    ) {
+        Ok(value) => analysis = Some(value),
+        Err(error) => fcff_failure = Some(format!("fcff_compute:{error}")),
+    }
+
+    let envelope = route_runtime_valuation(RuntimeValuationInput {
+        business_class: BusinessClass::OperatingNonFinancial,
+        fundamentals: input.fundamentals,
+        fcff_analysis: analysis.as_ref(),
+        fcff_failure: fcff_failure.as_deref(),
+        forward_evidence: input.forward_evidence,
+        market_params: input.market_params,
+        as_of_epoch_day: input.as_of_epoch_day,
+        market_price_cents: input.market_price_cents,
+    });
+    let decision = envelope.decision;
+
+    let fcff_candidate_cents = decision.fcff_candidate.intrinsic_value_cents;
+    let published_base_cents = match decision.status {
+        RouteStatus::Selected => decision.selected_value_cents,
+        RouteStatus::Disputed => decision
+            .selected_value_cents
+            .or(fcff_candidate_cents)
+            .or(decision.forward_candidate.intrinsic_value_cents),
+        RouteStatus::Unavailable | RouteStatus::NotEligible => None,
+    };
+    let status = match decision.status {
+        RouteStatus::Selected => "sel",
+        RouteStatus::Disputed => "disp",
+        RouteStatus::Unavailable => "unav",
+        RouteStatus::NotEligible => "ineligible",
+    };
+    let selected = match decision.selected_model {
+        Some(OperatingModel::FcffWacc) => "fcff",
+        Some(OperatingModel::ForwardEarningsPower) => "fwd",
+        None => "none",
+    };
+
+    GateRun {
+        published_base_cents,
+        fcff_candidate_cents,
+        lane: format!("{status}:{selected}"),
+        interest_add_back_margin_bps: analysis.and_then(|analysis| {
+            analysis
+                .diagnostics
+                .normalized_after_tax_interest_margin_bps
+        }),
+    }
+}
+
+/// The provenance string the probe's own model runs carry, so a run of this
+/// diagnostic can never be mistaken for a screener recompute in a log.
+#[cfg(test)]
+const PUBLISHED_VALUE_PROBE_SOURCE: &str = "published_value_sign_probe";
+
+/// Whether this tree still un-negates the interest sign on the way into
+/// `FcfPoint` — LD-1's setter site.
+///
+/// Asked of the setter directly, with a value only an `.abs()` could change, so
+/// the answer is a fact about the code rather than an inference from a table of
+/// zeroes. It settles the one question a per-issuer "did anything move" check
+/// cannot: an unchanged published number means "absorbed" only if the change was
+/// capable of arriving in the first place.
+#[cfg(test)]
+fn tree_preserves_the_interest_sign() -> bool {
+    const PROBE_INTEREST_DOLLARS: f64 = -1.0;
+    FcfPoint::new(2000, 0.0)
+        .with_operating_drivers(0.0, 0.0, 1.0, Some(PROBE_INTEREST_DOLLARS), Some(0))
+        .interest_expense_dollars
+        == Some(PROBE_INTEREST_DOLLARS)
+}
+
+/// The history as the code read it *before* LD-1's three `.abs()` sites were
+/// removed: every interest year as `|filed|`.
+///
+/// The pre-wave pipeline stored `|filed|` in the setter and both read sites
+/// re-applied `.abs()` on top, so mapping the field through `f64::abs` here
+/// reproduces the old published number exactly rather than approximating it.
+#[cfg(test)]
+fn history_as_published_before_the_sign_correction(history: &[FcfPoint]) -> Vec<FcfPoint> {
+    history
+        .iter()
+        .cloned()
+        .map(|mut point| {
+            point.interest_expense_dollars = point.interest_expense_dollars.map(f64::abs);
+            // `interest_is_net_basis` postdates this pre-wave reading entirely --
+            // the legacy pipeline reconstructed here had no per-year basis
+            // awareness, only the (now-abs'd) sign. Clearing it keeps this
+            // "before" reconstruction faithful to what the accounting fit could
+            // see at the time: under (D) the field, not the sign, drives
+            // dropping, so leaving it populated would silently run today's rule
+            // against a history meant to represent code that predates it.
+            point.interest_is_net_basis = None;
+            point
+        })
+        .collect()
+}
+
+/// How the accounting cost-of-debt channel resolves for one history: a fitted
+/// rate, "not applicable" for a debt-free issuer, or a refusal with its reason.
+#[cfg(test)]
+fn cost_of_debt_channel(
+    history: &[FcfPoint],
+    fundamentals: &FundamentalSnapshot,
+    rf_bps: i32,
+) -> String {
+    match resolve_rate_inputs(history, fundamentals.total_debt_dollars, rf_bps) {
+        Ok(Some(resolved)) => format!("{}bps", resolved.cost_of_debt_bps),
+        Ok(None) => "n/a".to_string(),
+        Err(reason) => format!("REFUSED({})", reason.replace("fcff unavailable: ", "")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,7 +722,7 @@ mod tests {
                 ));
             }
 
-            let count = |present: fn(&crate::dcf_model::FcfPoint) -> bool| {
+            let count = |present: fn(&FcfPoint) -> bool| {
                 history.iter().filter(|point| present(point)).count()
             };
             let terms = [
@@ -911,5 +1167,369 @@ mod tests {
              latest can never disagree on this sample, and the point-in-time API is untested by\n\
              live data rather than merely unused."
         );
+    }
+
+    /// Probe G. Which published numbers does the corrected interest sign move,
+    /// in which direction, and by how much?
+    ///
+    /// Each issuer is valued twice in one process through the real FCFF model
+    /// and the real runtime router. The two runs share one market price, one
+    /// risk-free rate and one forward forecast, so the only difference between
+    /// them is how the interest series is read:
+    ///
+    /// * **before** — every interest year as `|filed|`. That is what the code
+    ///   published while LD-1's three `.abs()` sites stood: the setter stored
+    ///   the absolute value and both read sites re-applied `.abs()` on top.
+    /// * **after** — the history exactly as this tree reads it.
+    ///
+    /// On a tree that still carries the `.abs()` sites the two are identical by
+    /// construction and every delta is zero; the TREE CHECK line says which tree
+    /// this is, so a table of zeroes can be read as *absorbed* or as *incapable
+    /// of arriving* without guessing. That distinction is the whole difficulty
+    /// of the measurement: 19 of the 25 issuers whose interest series is
+    /// rewritten publish the same number afterwards, and reporting that as "the
+    /// change did not work" would invert the conclusion.
+    ///
+    /// Asserts nothing. The pre-registered set is printed beside the observed
+    /// one so a disagreement is visible, never so a number can be adjusted
+    /// toward it.
+    #[test]
+    #[ignore = "network: SEC + Yahoo published-value probe; diagnostic only"]
+    fn probe_published_value_under_the_corrected_interest_sign() {
+        /// The six issuers the isolated counterfactual measured as moving a
+        /// published number, with the move it measured, in cents. Printed for
+        /// comparison only (`ORCHESTRATOR-RULINGS.md` R-13.1).
+        const PRE_REGISTERED_MOVERS: &[(&str, i64)] = &[
+            ("ROST", -279),
+            ("MPWR", -357),
+            ("JKHY", -135),
+            ("ULTA", -124),
+            ("CPRT", -23),
+            ("NKE", -12),
+        ];
+
+        let edgar = edgar_client();
+        let cik_map = fetch_cik_map(&edgar).expect("SEC CIK map");
+        let yahoo = YahooClient::new().expect("Yahoo client");
+
+        println!("=== PROBE G: the published value under the corrected interest sign ===");
+        println!("retrieved {}", Utc::now().to_rfc3339());
+        println!(
+            "TREE CHECK: the interest sign survives FcfPoint::with_operating_drivers = {}",
+            if tree_preserves_the_interest_sign() {
+                "YES -- the after column can differ"
+            } else {
+                "NO -- every delta below is forced to zero by the surviving abs(); \
+                 this run measures the instrument, not the change"
+            }
+        );
+
+        let market_params = yahoo.fetch_us_10y_yield_bps().map_or_else(
+            || {
+                println!("live risk-free UNAVAILABLE -- market params are provisional defaults");
+                MarketParams::default_usd()
+            },
+            |(risk_free_bps, as_of)| {
+                println!("live risk-free {risk_free_bps} bps as of {as_of}");
+                MarketParams::from_live_risk_free(risk_free_bps, as_of)
+            },
+        );
+        let as_of_epoch_day = Utc::now().timestamp() / 86_400;
+
+        println!();
+        println!(
+            "{:<7} {:>4} {:>10} {:>10} {:>9} {:>9} {:>10} {:>10} {:>11} {:<22} {:<22} {:<10} {:<10} {:<5}",
+            "symbol",
+            "yrs",
+            "before c",
+            "after c",
+            "delta c",
+            "delta bps",
+            "fcff b c",
+            "fcff a c",
+            "addbk b/a",
+            "cod before",
+            "cod after",
+            "lane b",
+            "lane a",
+            "flip"
+        );
+
+        let mut deltas_bps: Vec<f64> = Vec::new();
+        let mut movers: Vec<String> = Vec::new();
+        let mut selection_flips: Vec<String> = Vec::new();
+        let mut anchors_that_moved: Vec<String> = Vec::new();
+        let mut non_positive_after: Vec<String> = Vec::new();
+        let mut new_channel_refusals: Vec<String> = Vec::new();
+        let mut not_operating: Vec<String> = Vec::new();
+        let mut unmeasurable: Vec<String> = Vec::new();
+        let mut fcff_candidate_moved: Vec<&str> = Vec::new();
+        let mut rewritten_and_capable = 0_usize;
+
+        for &symbol in VALUATION_ANCHORS
+            .iter()
+            .chain(INTEREST_SIGN_AFFECTED_COHORT)
+            .chain(BASIS_ONLY_COHORT)
+        {
+            let Some(&cik) = cik_map.get(symbol) else {
+                unmeasurable.push(format!("{symbol}(no CIK)"));
+                continue;
+            };
+            let Ok(fetched) = yahoo.fetch_symbol(symbol) else {
+                unmeasurable.push(format!("{symbol}(yahoo)"));
+                continue;
+            };
+            let market_price_cents = fetched
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.market_price_cents);
+            let Some(mut fundamentals) = fetched.fundamentals else {
+                unmeasurable.push(format!("{symbol}(no fundamentals)"));
+                continue;
+            };
+            if fundamentals.shares_outstanding.unwrap_or(0) == 0 {
+                fundamentals.shares_outstanding =
+                    fetch_shares_outstanding(&edgar, symbol, cik).unwrap_or(None);
+            }
+            let class = classify_business(
+                fundamentals.sector_name.as_deref(),
+                fundamentals.industry_name.as_deref(),
+                fundamentals.sector_key.as_deref(),
+                fundamentals.industry_key.as_deref(),
+                false,
+            );
+            if class != BusinessClass::OperatingNonFinancial {
+                not_operating.push(format!("{symbol}({class:?})"));
+                continue;
+            }
+            let Ok(Some(after_history)) = fetch_fcf_history(&edgar, symbol, cik) else {
+                unmeasurable.push(format!("{symbol}(no history)"));
+                continue;
+            };
+            let before_history = history_as_published_before_the_sign_correction(&after_history);
+            let rewritten_years = before_history
+                .iter()
+                .zip(&after_history)
+                .filter(|(before, after)| {
+                    before.interest_expense_dollars != after.interest_expense_dollars
+                })
+                .count();
+
+            let forward_evidence = yahoo
+                .fetch_forward_forecast(symbol, as_of_epoch_day)
+                .map_err(|error| match error {
+                    ForwardForecastFetchError::Provider(reason) => {
+                        ForwardSourceFailure::Provider(reason)
+                    }
+                    ForwardForecastFetchError::Transport(error) if is_rate_limit_error(&error) => {
+                        ForwardSourceFailure::RateLimited
+                    }
+                    ForwardForecastFetchError::Transport(_) => ForwardSourceFailure::Transport,
+                });
+
+            let run = |history: &[FcfPoint]| {
+                run_operating_lane(GateRunInput {
+                    fundamentals: &fundamentals,
+                    history,
+                    market_price_cents,
+                    market_params: &market_params,
+                    forward_evidence: forward_evidence.clone(),
+                    as_of_epoch_day,
+                })
+            };
+            let before = run(&before_history);
+            let after = run(&after_history);
+            let cod_before =
+                cost_of_debt_channel(&before_history, &fundamentals, market_params.rf_bps);
+            let cod_after =
+                cost_of_debt_channel(&after_history, &fundamentals, market_params.rf_bps);
+
+            if rewritten_years > 0 && tree_preserves_the_interest_sign() {
+                rewritten_and_capable += 1;
+            }
+            let delta_cents = before
+                .published_base_cents
+                .zip(after.published_base_cents)
+                .map(|(before, after)| after - before);
+            let delta_bps = before
+                .published_base_cents
+                .filter(|before| *before > 0)
+                .zip(delta_cents)
+                .map(|(before, delta)| delta as f64 / before as f64 * 10_000.0);
+            let flipped = before.lane != after.lane;
+
+            let cents = |value: Option<i64>| {
+                value.map_or_else(|| "absent".to_string(), |value: i64| value.to_string())
+            };
+            let bps = |value: Option<i32>| {
+                value.map_or_else(|| "-".to_string(), |value: i32| value.to_string())
+            };
+            println!(
+                "{symbol:<7} {rewritten_years:>4} {:>10} {:>10} {:>9} {:>9} {:>10} {:>10} {:>11} {:<22} {:<22} {:<10} {:<10} {:<5}",
+                cents(before.published_base_cents),
+                cents(after.published_base_cents),
+                delta_cents.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                delta_bps.map_or_else(|| "-".to_string(), |value| format!("{value:.0}")),
+                cents(before.fcff_candidate_cents),
+                cents(after.fcff_candidate_cents),
+                format!(
+                    "{}/{}",
+                    bps(before.interest_add_back_margin_bps),
+                    bps(after.interest_add_back_margin_bps)
+                ),
+                cod_before,
+                cod_after,
+                before.lane,
+                after.lane,
+                if flipped { "FLIP" } else { "-" },
+            );
+
+            if before.fcff_candidate_cents != after.fcff_candidate_cents {
+                fcff_candidate_moved.push(symbol);
+            }
+            if flipped {
+                selection_flips.push(format!("{symbol} {} -> {}", before.lane, after.lane));
+            }
+            if cod_before != cod_after {
+                new_channel_refusals.push(format!("{symbol} {cod_before} -> {cod_after}"));
+            }
+            if after
+                .fcff_candidate_cents
+                .is_some_and(|candidate| candidate <= 0)
+            {
+                non_positive_after.push(format!("{symbol} fcff={:?}c", after.fcff_candidate_cents));
+            }
+            match delta_cents {
+                Some(delta) if delta != 0 => {
+                    movers.push(format!("{symbol}({delta:+}c)"));
+                    if VALUATION_ANCHORS.contains(&symbol) {
+                        anchors_that_moved.push(format!("{symbol}({delta:+}c)"));
+                    }
+                    if let Some(bps) = delta_bps {
+                        deltas_bps.push(bps);
+                    }
+                }
+                Some(_) => {}
+                None => unmeasurable.push(format!("{symbol}(no published base on one side)")),
+            }
+        }
+
+        println!();
+        println!("=== ANCHORS ===");
+        if anchors_that_moved.is_empty() {
+            println!(
+                "all four anchors move $0.00: [{}] -- triggers (a)/(a') do not fire",
+                VALUATION_ANCHORS.join(" ")
+            );
+        } else {
+            println!(
+                "*** STOP: AN ANCHOR MOVED *** [{}]",
+                anchors_that_moved.join(" ")
+            );
+        }
+
+        println!();
+        println!("=== THE ANSWER ===");
+        println!(
+            "issuers with a live rewrite (>=1 year changed, and the tree can carry it): \
+             {rewritten_and_capable}"
+        );
+        println!(
+            "issuers whose FCFF CANDIDATE moves: {} [{}]",
+            fcff_candidate_moved.len(),
+            fcff_candidate_moved.join(" ")
+        );
+        println!(
+            "issuers whose PUBLISHED value moves: {} [{}]",
+            movers.len(),
+            movers.join(" ")
+        );
+        println!(
+            "the difference between those two lines is absorption: a rewrite that reached the \
+             model\nand was swallowed either by the robust normalization over the whole series \
+             or by the\nrouter publishing the forward lane instead"
+        );
+        println!(
+            "router selection flips: {} [{}] -- a flip is qualitatively different from a \
+             magnitude,\nbecause the published number changes lane rather than value",
+            selection_flips.len(),
+            selection_flips.join(" ")
+        );
+        println!(
+            "accounting cost-of-debt channel changes (T2.7): {} [{}]",
+            new_channel_refusals.len(),
+            new_channel_refusals.join(" ")
+        );
+        println!(
+            "corrected FCFF candidate non-positive (a refusal path, not a magnitude): {} [{}]",
+            non_positive_after.len(),
+            non_positive_after.join(" ")
+        );
+        println!(
+            "reclassified away from OperatingNonFinancial since the scan: [{}]",
+            not_operating.join(" ")
+        );
+        println!("not measurable: [{}]", unmeasurable.join(" "));
+
+        println!();
+        println!("=== against the pre-registration (R-13.1) ===");
+        println!(
+            "registered: [{}]",
+            PRE_REGISTERED_MOVERS
+                .iter()
+                .map(|(symbol, cents)| format!("{symbol}({cents:+}c)"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        println!("observed:   [{}]", movers.join(" "));
+        let registered_but_still: Vec<&str> = PRE_REGISTERED_MOVERS
+            .iter()
+            .map(|(symbol, _)| *symbol)
+            .filter(|symbol| !movers.iter().any(|mover| mover.starts_with(*symbol)))
+            .collect();
+        let moved_but_unregistered: Vec<&String> = movers
+            .iter()
+            .filter(|mover| {
+                !PRE_REGISTERED_MOVERS
+                    .iter()
+                    .any(|(symbol, _)| mover.starts_with(symbol))
+            })
+            .collect();
+        println!(
+            "registered and did NOT move: [{}]",
+            registered_but_still.join(" ")
+        );
+        println!(
+            "moved and NOT registered (each one is a stop under trigger (c.2)): [{}]",
+            moved_but_unregistered
+                .iter()
+                .map(|mover| mover.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        println!();
+        println!("=== distribution of published-value delta, in bps of the before value ===");
+        if deltas_bps.is_empty() {
+            println!("no issuer's published value moved");
+        } else {
+            let mut sorted = deltas_bps.clone();
+            sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+            println!(
+                "n={} min={:.0} median={:.0} max={:.0}",
+                sorted.len(),
+                sorted[0],
+                median(&mut deltas_bps).unwrap_or_default(),
+                sorted[sorted.len() - 1]
+            );
+            println!(
+                "full sorted series: [{}]",
+                sorted
+                    .iter()
+                    .map(|value| format!("{value:.0}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
     }
 }

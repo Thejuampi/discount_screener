@@ -17,6 +17,7 @@ use std::fmt;
 use std::iter::once;
 use std::time::Duration;
 
+use crate::dcf_model::{FcfPoint, WaccFieldSource};
 use crate::sec_driver_normalization_policy_generated as policy;
 use crate::sec_normalization::{
     normalize_investments, EvidenceState, NormalizedInvestmentEvidence, SecFact,
@@ -637,6 +638,28 @@ pub fn extract_driver_annual(
     driver: policy::DriverOperator,
 ) -> Vec<AnnualValue> {
     extract_driver_vintages(facts, driver).latest()
+}
+
+/// Whether the fact that won a fiscal year for a driver was declared net-of-
+/// income (`negatedQnames`) — read from the driver's `qname_signs`, never from
+/// a hand-typed concept name, so this cannot drift from the normalization
+/// contract that assigns the signs.
+///
+/// `None` when the year has no source at all: an issuer-year nothing was filed
+/// for has no basis to report either, and inventing `Some(false)` would assert
+/// "gross basis" about a year this driver never saw.
+fn winning_qname_is_net_basis(
+    resolved: &[AnnualValue],
+    driver: policy::DriverOperator,
+    year: i32,
+) -> Option<bool> {
+    let value = resolved.iter().find(|value| value.year == year)?;
+    let source = value.provenance.sources.first()?;
+    let index = driver
+        .qnames
+        .iter()
+        .position(|qname| *qname == source.qname)?;
+    Some(driver.qname_signs[index] < 0)
 }
 
 fn period_shape(driver: &policy::DriverOperator) -> FactPeriodShape {
@@ -1371,7 +1394,7 @@ pub fn fetch_fcf_history(
     client: &Client,
     symbol: &str,
     cik: u64,
-) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
+) -> Result<Option<Vec<FcfPoint>>, String> {
     let body = fetch_company_facts(client, symbol, cik)?;
 
     let ocf = extract_driver_annual(&body, policy::OPERATING_CASH_FLOW);
@@ -1425,6 +1448,8 @@ pub fn fetch_fcf_history(
                 let revenue_dollars = by_year(&revenue, v.year);
                 let acquisition_investment_dollars = by_year(&acquisition_investments, v.year);
                 let interest_expense_dollars = by_year(&interest, v.year);
+                let interest_is_net_basis =
+                    winning_qname_is_net_basis(&interest, policy::INTEREST_EXPENSE, v.year);
                 let total_debt_dollars = by_year(&debt, v.year);
                 let marginal_tax_bps = by_year(&marginal_tax, v.year).map(|value| value as i32);
                 let pretax_income_dollars = by_year(&pretax, v.year);
@@ -1437,7 +1462,7 @@ pub fn fetch_fcf_history(
                     ),
                     _ => None,
                 };
-                let mut point = crate::dcf_model::FcfPoint::new(v.year, v.value_dollars as f64);
+                let mut point = FcfPoint::new(v.year, v.value_dollars as f64);
                 point.capex_imputed = v.capex_imputed;
                 if !capex.is_empty() {
                     if let (Some(capital_expenditure), Some(revenue_dollars)) =
@@ -1450,6 +1475,7 @@ pub fn fetch_fcf_history(
                             interest_expense_dollars,
                             tax_rate_bps,
                         );
+                        point = point.with_interest_basis(interest_is_net_basis);
                         point = point.with_rate_resolution_inputs(
                             total_debt_dollars,
                             marginal_tax_bps,
@@ -1467,9 +1493,8 @@ pub fn fetch_fcf_history(
                                 && !restated_ocf_years.contains(&v.year),
                         );
                         if marginal_tax_bps.is_some() {
-                            point = point.with_marginal_tax_source(
-                                crate::dcf_model::WaccFieldSource::TaxReconciliation,
-                            );
+                            point =
+                                point.with_marginal_tax_source(WaccFieldSource::TaxReconciliation);
                         }
                     }
                 }
