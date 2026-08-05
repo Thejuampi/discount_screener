@@ -46,6 +46,9 @@ use crate::valuation_core_adapter::{
     fit_cross_section, median_cents, value, widest_input, IssuerAnnual, IssuerEvidence, MarketFrame,
 };
 use crate::valuation_fixture_capture::DEEP_DRIVER_FIXTURE;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::path::PathBuf;
 use valuation_core::publication::ValuationPosterior;
 
 /// The frame the pinned cohort was captured under. Fixed here rather than read
@@ -472,4 +475,178 @@ fn old_engine_cents(member: &CohortMember) -> Option<i64> {
     )
     .ok()?;
     Some(analysis.base_intrinsic_value_cents)
+}
+
+// -- LD-12: the whole-cohort published-value regression gate --------------
+//
+// `core_versus_current_engine_on_the_pinned_cohort` above already computes
+// both engines' outcome for every pinned issuer and only ever prints it.
+// Everything below reads that same computation and pins it, so a value that
+// moves — or a refusal reason that changes — fails a normal `cargo test`
+// run and names the issuer, instead of waiting for a person to eyeball two
+// tables.
+
+const PUBLISHED_VALUE_REGRESSION_GOLDEN: &str =
+    "tests/fixtures/valuation/published_value_regression_gate_cohort.json";
+
+/// One engine's outcome for one issuer: a published value, or a named
+/// refusal. The refusal is not a placeholder for a missing number — it is
+/// the golden value LD-12 exists to pin, exactly as load-bearing as a cents
+/// figure and compared the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum GoldenOutcome {
+    Published { cents: i64 },
+    Refused { kind: String, detail: String },
+}
+
+impl fmt::Display for GoldenOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Published { cents } => write!(f, "published({cents})"),
+            Self::Refused { kind, detail } => write!(f, "refused({kind}/{detail})"),
+        }
+    }
+}
+
+/// One pinned issuer's registered outcome on both engines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoldenMember {
+    symbol: String,
+    legacy: GoldenOutcome,
+    core: GoldenOutcome,
+}
+
+fn golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PUBLISHED_VALUE_REGRESSION_GOLDEN)
+}
+
+fn load_golden() -> Vec<GoldenMember> {
+    let path = golden_path();
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read golden cohort {}: {e}", path.display()));
+    serde_json::from_str(&raw).expect("parse golden cohort")
+}
+
+/// What this run measures for every pinned cohort member, in the golden
+/// fixture's own shape, straight off the same `value()` / `old_engine_cents`
+/// calls the diagnostic prints — no second reading of either engine.
+fn measured_cohort() -> Vec<GoldenMember> {
+    let cohort = cohort_evidence();
+    let issuers: Vec<IssuerEvidence> = cohort.iter().map(|(issuer, _)| issuer.clone()).collect();
+    let fitted = fit_cross_section(&issuers, &frame());
+    let members = load_cohort().members;
+
+    cohort
+        .iter()
+        .map(|(issuer, _market_cents)| {
+            let member = members
+                .iter()
+                .find(|candidate| candidate.symbol == issuer.symbol)
+                .expect("the member the evidence came from");
+            let legacy = match old_engine_cents(member) {
+                Some(cents) => GoldenOutcome::Published { cents },
+                None => GoldenOutcome::Refused {
+                    kind: "legacy".to_string(),
+                    detail: "compute_failed".to_string(),
+                },
+            };
+            let posterior = value(issuer, &frame(), &fitted);
+            let core = match &posterior {
+                ValuationPosterior::Published { median_cents, .. } => GoldenOutcome::Published {
+                    cents: *median_cents,
+                },
+                ValuationPosterior::Refused { refusal, .. } => GoldenOutcome::Refused {
+                    kind: refusal.kind().to_string(),
+                    detail: refusal.detail().to_string(),
+                },
+            };
+            GoldenMember {
+                symbol: issuer.symbol.clone(),
+                legacy,
+                core,
+            }
+        })
+        .collect()
+}
+
+/// **LD-12's detector.** Fails the moment either engine's published value —
+/// or refusal reason — moves for any pinned cohort member, and names which
+/// one. A collected-failures-then-one-assert pattern, so a run that
+/// diverges on several issuers reports all of them rather than stopping at
+/// the first.
+///
+/// Re-bless only with `bless_published_value_regression_gate_cohort` below
+/// (`#[ignore]`, run explicitly by a person). A normal `cargo test` run
+/// never rewrites the golden file.
+#[test]
+fn published_value_regression_gate() {
+    let golden = load_golden();
+    let measured = measured_cohort();
+
+    let mut failures: Vec<String> = Vec::new();
+    for expected in &golden {
+        match measured.iter().find(|m| m.symbol == expected.symbol) {
+            None => failures.push(format!(
+                "{}: dropped from the pinned cohort",
+                expected.symbol
+            )),
+            Some(actual) => {
+                if actual.legacy != expected.legacy {
+                    failures.push(format!(
+                        "{}: legacy {} -> {}",
+                        expected.symbol, expected.legacy, actual.legacy
+                    ));
+                }
+                if actual.core != expected.core {
+                    failures.push(format!(
+                        "{}: core {} -> {}",
+                        expected.symbol, expected.core, actual.core
+                    ));
+                }
+            }
+        }
+    }
+    for actual in &measured {
+        if !golden
+            .iter()
+            .any(|expected| expected.symbol == actual.symbol)
+        {
+            failures.push(format!(
+                "{}: entered the pinned cohort unregistered",
+                actual.symbol
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "published-value regression gate (LD-12): {} of {} pinned issuers diverged from \
+         tests/fixtures/valuation/published_value_regression_gate_cohort.json:\n{}",
+        failures.len(),
+        golden.len(),
+        failures.join("\n")
+    );
+}
+
+/// Regenerates `published_value_regression_gate_cohort.json` from what this
+/// run currently measures.
+///
+/// **Never run this to make a failing gate pass.** A value the gate names as
+/// moved is the regression this file exists to catch; overwriting the
+/// golden file with the new number hides it instead of fixing it. Run this
+/// only after a person has read every issuer `published_value_regression_gate`
+/// named and decided the new numbers are the intended baseline.
+///
+/// ```text
+/// cargo test --lib bless_published_value_regression_gate_cohort -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "writer: rewrites the golden fixture, run explicitly by a person"]
+fn bless_published_value_regression_gate_cohort() {
+    let measured = measured_cohort();
+    let body = serde_json::to_string_pretty(&measured).expect("serialize golden cohort");
+    let path = golden_path();
+    std::fs::write(&path, body).expect("write golden cohort");
+    println!("wrote {}", path.display());
 }

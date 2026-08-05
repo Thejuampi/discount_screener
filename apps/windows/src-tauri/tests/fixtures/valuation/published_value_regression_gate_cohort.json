@@ -1,0 +1,242 @@
+[
+  {
+    "symbol": "VRRM",
+    "legacy": {
+      "status": "published",
+      "cents": 3461
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "T",
+    "legacy": {
+      "status": "published",
+      "cents": 5972
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "ADMA",
+    "legacy": {
+      "status": "published",
+      "cents": 5475
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "INOD",
+    "legacy": {
+      "status": "published",
+      "cents": 267
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "MH",
+    "legacy": {
+      "status": "published",
+      "cents": 2662
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "not_reported"
+    }
+  },
+  {
+    "symbol": "VICR",
+    "legacy": {
+      "status": "published",
+      "cents": 2533
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "AMSC",
+    "legacy": {
+      "status": "published",
+      "cents": 4176
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "AMZN",
+    "legacy": {
+      "status": "published",
+      "cents": 12429
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "BWMN",
+    "legacy": {
+      "status": "published",
+      "cents": 9463
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "not_reported"
+    }
+  },
+  {
+    "symbol": "AAPL",
+    "legacy": {
+      "status": "published",
+      "cents": 11101
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "IDCC",
+    "legacy": {
+      "status": "published",
+      "cents": 29370
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "FIGS",
+    "legacy": {
+      "status": "published",
+      "cents": 929
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "CALX",
+    "legacy": {
+      "status": "published",
+      "cents": 1995
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "MSFT",
+    "legacy": {
+      "status": "published",
+      "cents": 31904
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "MIR",
+    "legacy": {
+      "status": "published",
+      "cents": 940
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "ROCK",
+    "legacy": {
+      "status": "published",
+      "cents": 11356
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "HURN",
+    "legacy": {
+      "status": "published",
+      "cents": 27185
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "VRT",
+    "legacy": {
+      "status": "published",
+      "cents": 16591
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "INVA",
+    "legacy": {
+      "status": "published",
+      "cents": 7614
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  },
+  {
+    "symbol": "APP",
+    "legacy": {
+      "status": "published",
+      "cents": 15556
+    },
+    "core": {
+      "status": "refused",
+      "kind": "evidence",
+      "detail": "estimator_unavailable"
+    }
+  }
+]
