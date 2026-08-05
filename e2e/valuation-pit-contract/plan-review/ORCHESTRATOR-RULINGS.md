@@ -3211,3 +3211,141 @@ entirely, which is a *different* reason to touch the same code but not a reason 
 And the gate holds either way. Every one of the twenty pinned issuers currently refuses, so any wave
 that starts publishing values will move them **visibly, by name, in a failing test** — which is
 precisely why LD-12 was sequenced first, four rounds ago, against the argument that it could wait.
+
+---
+
+## R-43 — The literature read. R-42's finding is the textbook signature, the fork had a third branch I missed, and half of branch (A) is contradicted on the record.
+
+Juan asked for research rather than a choice. This is the read. Nothing is built and no branch is adopted.
+
+### R-43.1 — What we measured has a name, and it is not an instrument defect
+
+McKinsey, on business units whose capital base is small:
+
+> the ROIC is usually extremely large (whether positive or negative), very sensitive to small changes
+> in capital, and highly volatile and thus often inappropriate as a tool for comparing the performance
+> of business units or companies
+
+Their worked example is two units differing by **2% of revenue** in invested capital, reading **−700%
+and +700%** ROIC. That is R-42 exactly: when the quantity you divide by centres at zero, the ratio is
+not merely noisy, its **sign** is not identified. Round 8's ranking flip and Round 9's residual of
+−0.008 are what that pathology looks like from inside.
+
+This is worth stating plainly because it cuts both ways. Three rounds of instrument repair were **not**
+wasted — the levered/unlevered mismatch and the fabricated statutory rate were real defects and both
+moved the number. But the conclusion at the end of them was available in the literature from the
+start, and I did not look. **Measure the mechanism before building against it** has a companion:
+*read whether the mechanism is already named before spending three rounds measuring it.*
+
+### R-43.2 — The remedy the literature offers for this exact case is neither (A) nor (B)
+
+Damodaran's answer, when reinvestment cannot be recovered from the capital account, is to **estimate
+reinvestment from revenue** and demote the return to a sanity check:
+
+> Reinvestment_t = Change in revenues_t / (Sales/Capital)
+
+chosen because the ratio *"can be estimated using the company's data (and it will be more stable than
+the net capital expenditure or working capital numbers)"* — which is precisely the instability R-42
+measured. And the discipline that replaces the measured return:
+
+> keep track of the imputed return on capital (based on our forecasts of operating income and capital
+> invested) to ensure that it stays within reasonable bounds
+
+That inverts our current dependency. Today `r` must be **measured** or the Core refuses. Under this
+route the reinvestment is measured and `r` is **implied**, then bounds-checked. Growth still costs
+something, so it does not carry (B)'s flattering direction.
+
+**This branch needs no new driver.** Revenue and invested capital are both already carried through
+`IssuerAnnual`. It is the cheapest of the three by a wide margin, and it is the only one whose central
+quantity we have not yet measured.
+
+### R-43.3 — Branch (A)'s SBC half is contradicted, on the record, by the same source
+
+R-42.3 wrote *"R&D — and arguably a share of SBC — as capital rather than expense."* The *arguably* was
+doing more work than I knew. Damodaran:
+
+> stock-based compensation is not comparable [to depreciation] ... it is more of an in-kind expense,
+> where you give away shares of equity in the company instead of paying cash
+
+He does not add it back and does not treat it as investment; adding it back assumes either that *"you
+can stop paying employees in the future (and still hold on to them) or that you can keep giving away
+equity stakes in your company with no consequences for value per share."*
+
+Round 9's `sbc/NOPAT` column, centre **+0.101**, is therefore not a correction waiting to be applied.
+It is a **real economic cost, correctly expensed**, and the probe added it back into the reinvestment
+numerator — the one move this source names as wrong.
+
+The honest qualification: Mauboussin and Callahan **do** capitalise a share of SG&A into *invested
+capital*. That is a different question from whether to add SBC back to *cash flow*, and both positions
+can hold at once. But nothing in what I read supports the specific thing Round 9 did.
+
+### R-43.4 — Branch (A)'s R&D half has no filed life, and the practitioners disagree about the number
+
+Damodaran does not publish an authoritative table. The life is *"determined by the nature of the
+research expenses, and the estimated time until there is a payoff"* — pharma around ten years because
+of the approval process, software around three because *"products tend to emerge from research much
+more quickly and have shorter commercial lives."*
+
+On how much to capitalise, the secondary sources disagree with each other:
+
+| source | R&D | S&M | G&A |
+|---|---|---|---|
+| Mauboussin & Callahan, as reported | 100% | 70% | 20% |
+| a second summary, software sector | ~90% | 20–25% of SG&A combined | |
+
+**The disagreement is the finding.** The primary Morgan Stanley PDF returned 403 and I did not read
+it, so I am reporting second-hand figures and saying so. But two reputable summaries of the same
+literature differ by an amount that swamps the effect being measured, on a parameter that has **no
+filed value anywhere in the evidence set**. That is exactly the class of author-chosen quantity this
+run has spent six rounds removing — a statutory tax rate, a naked mean, a post-hoc threshold. Adopting
+(A) would put one back, and this time in the numerator of the valuation.
+
+### R-43.5 — A falsifiable gate that branch (A) would have to pass
+
+Mauboussin, on what the adjustment does:
+
+> The reclassification does not affect free cash flow, the main driver of corporate value, but it does
+> provide a more accurate view of profits and investments
+
+So under (A), **year-by-year FCFF must be unchanged to the cent.** R&D is added to earnings and to
+reinvestment in the same amount; their difference cannot move. If an implementation of (A) moves
+FCFF, it is wrong, and that is checkable without any reference to street.
+
+I checked whether the stronger claim follows — *"therefore the valuation is invariant"* — and **it
+does not**, so I am not asserting it. Our model derives growth and the retention charge **from** `r`
+and the reinvestment rate rather than discounting an explicit FCFF series. Changing both inputs
+changes the value. (A) is value-relevant here precisely because FR-28 drives value off `r`. The
+invariance is a property of the cash flows, not of this model's output.
+
+### R-43.6 — Nothing I read recommends branch (B)
+
+No source found proposes crediting growth with no reinvestment charge. McKinsey's answer when the
+capital base is unusable is a **different metric** — economic profit divided by revenue — not the
+removal of the charge, and it is a performance-comparison metric rather than a valuation mechanism, so
+it should not be imported as one. Damodaran's answer is a **different estimator of reinvestment**, not
+its removal.
+
+R-42.3 argued against (B) from asymmetry alone. The literature adds an absence: for a mechanism this
+central, nobody proposing to drop it is evidence, and it points the same way.
+
+### R-43.7 — My recommendation changes, and I am saying so rather than smoothing it
+
+R-42.3 recommended **(A)**. On this reading I recommend **(D) — the sales-to-capital route — measured
+in a probe first, and not adopted before it is measured.**
+
+The reasons are three and none of them is elegance. (A) needs a policy parameter with no filed value
+that reputable practitioners set differently by more than the effect is worth. (D) uses only
+quantities already carried, so it can be measured this week rather than after a fingerprint bump and
+two platforms regenerated. And (D) keeps growth costly, which is the property FR-28 exists to protect
+and the one (B) gives up.
+
+**The caveat that decides whether (D) is real, stated before measuring it:** the sales-to-capital ratio
+still divides by invested capital, the same quantity R-42 found unusable. The difference is
+arithmetic and it is the whole argument — R-42's problem is that the **change** in capital centres at
+zero, while the ratio uses its **level**. A ratio of two levels is far better conditioned than one
+whose denominator is a near-zero difference. That is a claim about this cohort, not a theorem, and it
+is measurable: per issuer, `Sales / Invested Capital`, its dispersion, and how many issuers have a
+usable positive capital **level** at all. If the levels are as ill-conditioned as the differences,
+(D) dies too, and it dies cheaply.
+
+Registered, not decided. Juan chooses.
