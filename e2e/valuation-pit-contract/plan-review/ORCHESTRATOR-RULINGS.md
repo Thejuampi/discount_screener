@@ -3561,3 +3561,113 @@ survives its own killing condition.
 
 Nothing above is a reason to publish a value yet, and the gate still holds either way: all twenty pinned
 issuers refuse today, so the first wave that publishes moves them visibly, by name, in a failing test.
+
+---
+
+## R-46 — Round 11 verified. The window hypothesis survives for one issuer, dies as a general claim, and a worse defect surfaced beside it.
+
+Shipped at `21d48b3` on `r10`. Suite `566 / 4 / 26`, gate green, golden fixture untouched, nothing
+pushed. The probe printed the annual series and **chose no window**, which is what it was sent to do.
+
+### R-46.1 — The hypothesis, graded honestly in three parts rather than one
+
+R-45.4 recorded a suspicion: that a centre taken over nineteen years describes an issuer that no
+longer exists. The series grades it three different ways and the probe kept them separate.
+
+**MSFT — supported, cleanly.** `oper` sales-to-capital is a complete sixteen-year series falling
+essentially monotonically from 4.3–6.8 across 2010–2015 to **1.030 and 0.965** in 2024–2025. Centre
+**3.305**, latest **0.965**, `latest/centre` **0.292**, and **no year was trimmed** — so the centre is
+the whole sixteen years and the current regime is roughly a quarter of it. The return behaves
+identically: 1.137 → **0.341** against a centre of **0.815**. This is the shape the hypothesis
+describes, visible without imposing any window on it.
+
+**AMZN — supported only in a confounded form, and the probe says so rather than claiming the win.**
+`oper` runs 10.5–16.7 across 2009–2013, then **nine consecutive absent years** (2014–2022, dropped for
+a missing filed marginal tax rate), then 2.938 / 2.406 / 1.824. The centre is five old observations
+against three recent ones with the entire middle missing. *"The window is too long"* and *"the middle
+is not there"* both predict that row and **this instrument cannot separate them.** Reporting it as a
+window effect would be the same class of error the round existed to avoid.
+
+**Not a cohort property.** For the other eighteen qualifying `oper` issuers, `latest/centre` runs
+**0.568 to 1.440**, most between roughly 0.8 and 1.2. MSFT at 0.292 and AMZN at 0.187 are the two
+lowest by a wide margin — and they are **the same two the dispersion column flagged in Round 10**, so
+two independent statistics agree on which issuers are unusual. Under `gross`, MSFT is unremarkable at
+0.902 while AMZN is still 0.381: netting amplifies the effect for MSFT but is not what causes AMZN's.
+
+So a blanket window change would be repairing two issuers and perturbing eighteen. That is an argument
+against imposing one, and it is an argument the numbers made rather than one I brought to them.
+
+### R-46.2 — The finding nobody was looking for: the trimming rule can excise the present
+
+`PG gross roic` trims **2022, 2023, 2024 and 2025** — every one of its four most recent years — so its
+latest *kept* value is 2019's 0.024 against a centre of 0.067. `COF gross roic` trims 2024 and 2025.
+
+This is the standing `|z| > 3` rule doing exactly what it was written to do, applied to an axis it was
+not written for. `standardize` trims a **cross-section**: draws from one population, where a point four
+deviations out is a bad observation. A **time series** is not that. When an issuer's economics change,
+the recent regime is a minority of the series and reads as outlying — so the rule deletes the present
+and keeps the past, and reports a confident centre for a firm that has moved.
+
+`OMC oper` is the same failure by a different route: n=12 looks well supplied until you see that the
+twelve end in **2020**, because cash resolution stops there. `AVY` (hole 2018–2024) and `TER` (hole
+2014–2024) have centres that are mostly pre-hole years — AMZN's situation at smaller magnitude.
+
+**A count of retained years is not evidence that a centre is current.** That is now written down, and
+it generalises past this branch: anywhere in this codebase a robust centre runs along time rather than
+across a population, the same failure is available. Registered as a latent defect to be swept for, not
+swept here.
+
+### R-46.3 — AMZN's hole is the price of a correct decision, and the answer is not to un-make it
+
+The nine missing years are years with no filed marginal tax rate. Round 8 removed the statutory
+substitution that used to fill them, and R-41.3 measured what that cost: 76 issuer-years, four issuers
+falling out of the comparison entirely. AMZN was on that list with nine.
+
+That decision stands. The argument then was that a default which is usually right is worse than an
+absence precisely because it is usually right, and nothing here weakens it. But the cost has now
+compounded: **an anchor cannot be estimated across nine of its most informative years**, and the
+resulting hole confounds the very hypothesis we needed to test.
+
+The fix is **supply, not fabrication** — recapture, additional qnames for the marginal rate, or an
+honest refusal for AMZN until the years exist. It is LD-17's consequence arriving at the estimator, and
+it is now on this branch's critical path rather than in the backlog.
+
+### R-46.4 — The window decision, with both parameter-free options and both of their failure modes
+
+This is Juan's. Two options take **no parameter at all**, which is why only these two are on the table.
+A trailing-N, a half-life or a recency weight would each require a constant chosen after seeing which
+issuers it flatters, and none is proposed here.
+
+**(i) `robust_centre` over the whole filed history** — what Rounds 10 and 11 measured.
+*Fails* when the issuer's economics moved: MSFT reads 0.815 against a current 0.341. And it carries
+R-46.2 — the trimming can delete the present, as it does for PG and COF.
+
+**(ii) The latest usable year** — literally what the source prescribes: the ratio *"at its **current**
+level."* No parameter, no trimming, so R-46.2 cannot occur and AMZN's hole stops mattering (latest is
+2025). MSFT reads 0.965 / 0.341, which is the firm that exists.
+*Fails* on single-year noise. `HPE`'s latest return is **0.007**; a growth rate above that makes the
+retention charge violently negative — the `return-below-terminal` row's behaviour, on an issuer whose
+centre says 0.045. One bad filing becomes the estimate.
+
+**(iii) Keep the centre, but refuse when the present was trimmed out** — not an estimator choice but a
+refusal rule, and it uses only the `|z| > 3` that already exists. If the most recent filed year is not
+in the retained set, the centre does not describe the issuer and no value is published. This converts
+PG's and COF's pathology into a refusal rather than a wrong number, and it composes with (i).
+*Costs* coverage, and it does nothing for MSFT, whose sixteen years were **all** retained.
+
+**Neither (i) nor (ii) dominates and I am not choosing.** What I will say is that the prescription
+behind (ii) was quoted in **R-44.1, committed at `b80525b` before Round 10 returned a single number** —
+so preferring it is following a source that predates this evidence rather than fitting a rule to it.
+That is checkable in the history, which is the only reason it is worth asserting.
+
+### R-46.5 — Still open, unchanged, and none of it mine
+
+1. **The window** — R-46.4, three options, Juan's.
+2. **`prod` vs `roic`** — R-45.3; gap 0.202 on AMZN, 0.091 on MSFT, three of four anchors.
+3. **The cash driver's operator** — composition, not selection (R-45.2).
+4. **R-30.1 / R-44.3** — the FCFF base in the slot FR-28 requires NOPAT for. Blocking, upstream.
+5. **New:** sweep for robust centres taken along time rather than across a population (R-46.2).
+6. **New:** AMZN's marginal-rate coverage hole, to be solved by supply (R-46.3).
+
+Every one of the twenty pinned issuers still refuses, so the gate remains armed: the first wave that
+publishes moves them by name, in a failing test.
