@@ -783,6 +783,17 @@ data class ChartRangeSummary(
      * (100 = median, 200 = 2× median). Null when volume is unavailable.
      */
     val volumeRatioHundredths: Int? = null,
+    /** Highest high over the trailing 52-week window (last 252 bars, or fewer if that is all there is). */
+    val high52wCents: Long? = null,
+    /** Lowest low over the same trailing window. */
+    val low52wCents: Long? = null,
+    /** Latest close's position inside the 52-week range, 0..100. Null when the range is degenerate. */
+    val pos52wPct: Double? = null,
+    /**
+     * Bollinger %B: (close − lower) / (upper − lower) over a 20-period, 2σ band.
+     * 0..1 inside the bands, outside that range beyond them. Null below 20 candles.
+     */
+    val bbPercentB: Double? = null,
 )
 
 @Serializable

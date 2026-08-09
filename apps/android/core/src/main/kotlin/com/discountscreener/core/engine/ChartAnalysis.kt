@@ -21,6 +21,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
+import kotlin.math.sqrt
 
 data class ReplayWindow(
     val visibleCandles: List<HistoricalCandle>,
@@ -79,6 +80,7 @@ object ChartAnalysis {
         val ema200 = ema(closes, 200).lastOrNull()?.roundToLong()
         val macd = macd(closes)
         val rsi = rsiAnalysis(candles)
+        val range52w = fiftyTwoWeekRange(candles, latest)
         return ChartRangeSummary(
             range = range,
             capturedAt = capturedAtEpochSeconds,
@@ -93,7 +95,58 @@ object ChartAnalysis {
             latestWilderRsi = rsi?.latestWilderRsi,
             latestRsiSlope = rsi?.latestSlope,
             volumeRatioHundredths = volumeRatioHundredths(candles),
+            high52wCents = range52w?.highCents,
+            low52wCents = range52w?.lowCents,
+            pos52wPct = range52w?.positionPct,
+            bbPercentB = bollingerPercentB(closes, period = 20, k = 2.0),
         )
+    }
+
+    private data class FiftyTwoWeekRange(
+        val highCents: Long,
+        val lowCents: Long,
+        val positionPct: Double?,
+    )
+
+    /**
+     * Trailing 52-week high/low and the latest close's position within them.
+     *
+     * The window is the last 252 bars — a year of daily candles — or the whole series when it is
+     * shorter. Weekly candles therefore span 252 weeks rather than 52; that is the same widening
+     * the Windows engine accepts, and the summary that feeds market-context scoring is the daily
+     * (Year) range, where 252 bars is exactly a year.
+     */
+    private fun fiftyTwoWeekRange(candles: List<HistoricalCandle>, latestCloseCents: Long?): FiftyTwoWeekRange? {
+        if (candles.isEmpty() || latestCloseCents == null) return null
+        val window = candles.takeLast(min(candles.size, 252))
+        val high = window.maxOf(HistoricalCandle::highCents)
+        val low = window.minOf(HistoricalCandle::lowCents)
+        val position = if (high > low) {
+            ((latestCloseCents - low).toDouble() / (high - low).toDouble() * 100.0).coerceIn(0.0, 100.0)
+        } else {
+            null
+        }
+        return FiftyTwoWeekRange(highCents = high, lowCents = low, positionPct = position)
+    }
+
+    /**
+     * Bollinger %B over a [period]-bar, [k]-sigma band: (close − lower) / (upper − lower).
+     *
+     * Inside the bands this lands in 0..1; it deliberately runs past those bounds when price is
+     * outside them, because "how far outside" is the signal. A flat series collapses the band to a
+     * point, which has no meaningful position — that reads as the midpoint rather than a divide by
+     * zero. Null below [period] candles, where the deviation is not yet defined.
+     */
+    private fun bollingerPercentB(closes: List<Double>, period: Int, k: Double): Double? {
+        if (closes.size < period) return null
+        val recent = closes.takeLast(period)
+        val mean = recent.sum() / period
+        val variance = recent.sumOf { close -> (close - mean) * (close - mean) } / period
+        val deviation = sqrt(variance)
+        val upper = mean + (k * deviation)
+        val lower = mean - (k * deviation)
+        val close = closes.last()
+        return if (upper > lower) (close - lower) / (upper - lower) else 0.5
     }
 
     private fun volumeRatioHundredths(candles: List<HistoricalCandle>): Int? {
