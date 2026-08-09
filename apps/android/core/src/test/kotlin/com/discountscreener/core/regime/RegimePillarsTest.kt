@@ -1,7 +1,5 @@
 package com.discountscreener.core.regime
 
-import com.discountscreener.core.model.ChartRange
-import com.discountscreener.core.model.ChartRangeSummary
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -191,38 +189,4 @@ class RegimePillarsTest {
         assertEquals(20.0, spyDrawdownFromAthPct(listOf(100.0, 150.0, 120.0))!!)
     }
 
-    // ── Fixtures ─────────────────────────────────────────────────────────────
-
-    private fun summary(bullish: Boolean) = ChartRangeSummary(
-        range = ChartRange.Year,
-        capturedAt = 0L,
-        candleCount = 260,
-        latestCloseCents = if (bullish) 11_000L else 9_000L,
-        ema20Cents = 10_000L,
-        ema50Cents = if (bullish) 10_000L else 10_500L,
-        ema200Cents = if (bullish) 9_000L else 11_000L,
-        histogramCents = if (bullish) 5L else -5L,
-        latestWilderRsi = if (bullish) 58.0 else 38.0,
-        pos52wPct = if (bullish) 75.0 else 15.0,
-        adx = 25.0,
-        plusDi = if (bullish) 30.0 else 15.0,
-        minusDi = if (bullish) 15.0 else 30.0,
-    )
-
-    private fun universe(count: Int, bullish: Boolean) =
-        (0 until count).map { index -> SymbolChartView("SYM$index.BA", summary(bullish)) }
-
-    private fun fearGreed(score: Double) = CnnFearGreed(score = score, rating = fngZone(score))
-
-    private fun risingCloses() = (0 until 80).map { 400.0 + it }
-
-    private fun spikingVix() = (0 until 60).map { 12.0 } + (0 until 6).map { 30.0 + it }
-
-    private fun decliningVix() = (0 until 60).map { 30.0 - (it * 0.3) }
-
-    private fun rising() = (0 until 40).map { 100.0 + (it * 2.0) }
-
-    private fun falling() = (0 until 40).map { 100.0 - (it * 1.0) }
-
-    private fun flat() = (0 until 40).map { 100.0 }
 }

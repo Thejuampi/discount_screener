@@ -23,6 +23,43 @@ import kotlin.math.sqrt
 internal fun roundHalfAwayFromZero(value: Double): Int =
     if (value < 0.0) -floor(-value + 0.5).toInt() else floor(value + 0.5).toInt()
 
+/** [roundHalfAwayFromZero] for the cents scale, where an `Int` would cap at roughly $21M a share. */
+internal fun roundHalfAwayFromZeroLong(value: Double): Long =
+    if (value < 0.0) -floor(-value + 0.5).toLong() else floor(value + 0.5).toLong()
+
+/**
+ * The exponential moving average `engine.rs::ema` computes, which is *not* the one
+ * `ChartAnalysis.ema` computes. Two differences, both of which change the answer:
+ *
+ *  - Rust refuses below `period` bars; Kotlin returns a number from a single close.
+ *  - Rust seeds with the simple mean of the first `period` closes; Kotlin seeds with the first
+ *    close alone.
+ *
+ * The seed matters for exactly as long as it takes to decay. Measured over 260 daily bars — the
+ * length the market read fetches — the two agree to rounding at periods 20 and 50, and disagree by
+ * **0.73% on the 200-period average, where 55% of Kotlin's answer is still its seed**. Downstream
+ * that flips the "close above the 200-day average" verdict on 2–4% of names, and with it SPY's own
+ * verdict, which the trend and quality pillars both read as a single coin flip rather than an
+ * average.
+ *
+ * So the regime engine derives SPY's averages through here rather than reading them off the app's
+ * chart summary. `ChartAnalysis.ema` is deliberately left alone: it feeds the shipped technicals
+ * bucket, and 2–4% of names is not worth moving every score in the app for.
+ *
+ * [closes] are prices, not cents — the unit `MarketDataBundle.spyCloses` carries, mirroring Rust's
+ * `closes_from_candles`. Rust averages in the cents domain and rounds once; averaging in prices and
+ * scaling at the end is the same line, so the two agree to well under a cent.
+ */
+internal fun regimeEmaCents(closes: List<Double>, period: Int): Long? {
+    if (closes.size < period || period <= 0) return null
+    val multiplier = 2.0 / (period + 1.0)
+    var average = closes.take(period).sum() / period.toDouble()
+    for (index in period until closes.size) {
+        average = closes[index] * multiplier + average * (1.0 - multiplier)
+    }
+    return roundHalfAwayFromZeroLong(average * 100.0)
+}
+
 /** Rust's `as u32` on an `f64`: truncate toward zero, saturating at the bounds. */
 internal fun truncateToU32(value: Double): Int = when {
     value.isNaN() -> 0
