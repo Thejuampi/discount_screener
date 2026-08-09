@@ -1,0 +1,38 @@
+{
+  "contract": "market-universe-classification-v1",
+  "purpose": "The asset classification the market-regime engine breadth pillar filters on. Breadth measures how many *stocks* participate, so ETFs and crypto are excluded from the count on both platforms. Windows held this list as a Rust-only constant (fetcher.rs ETF_SYMBOLS); the Android port needs the same membership, and a second hand-copied list is exactly how the two drift apart without anything failing. Each platform asserts its own constant against this file, so an edit on one side that is not mirrored turns a test red rather than quietly changing what breadth means.",
+  "crypto_rule": {
+    "kind": "suffix",
+    "suffix": "-USD",
+    "note": "Any symbol ending in -USD is treated as crypto. Matches fetcher.rs::is_crypto."
+  },
+  "etf_membership": {
+    "kind": "exact_symbol_set",
+    "case_sensitive": true,
+    "note": "Membership check against the uppercase symbol. Matches fetcher.rs::is_etf."
+  },
+  "etf_symbols": [
+    "SPY", "IVV", "VOO", "VTI", "SCHB",
+    "QQQ", "QQQM", "VUG",
+    "IWM", "IJR", "VB",
+    "DIA", "VTV",
+    "VEA", "VWO", "EFA", "EEM",
+    "AGG", "BND", "LQD", "HYG", "TLT", "IEF", "SHY",
+    "GLD", "SLV", "USO",
+    "VNQ", "IYR",
+    "XLE", "XLF", "XLK", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+    "ARKK", "ARKG", "ARKQ", "VYM", "DVY", "SCHD"
+  ],
+  "etf_symbol_groups": {
+    "broad_market": ["SPY", "IVV", "VOO", "VTI", "SCHB"],
+    "nasdaq_large_growth": ["QQQ", "QQQM", "VUG"],
+    "small_mid_cap": ["IWM", "IJR", "VB"],
+    "dow_value": ["DIA", "VTV"],
+    "international": ["VEA", "VWO", "EFA", "EEM"],
+    "bonds": ["AGG", "BND", "LQD", "HYG", "TLT", "IEF", "SHY"],
+    "commodities": ["GLD", "SLV", "USO"],
+    "real_estate": ["VNQ", "IYR"],
+    "sector_spdrs": ["XLE", "XLF", "XLK", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC"],
+    "thematic_dividend": ["ARKK", "ARKG", "ARKQ", "VYM", "DVY", "SCHD"]
+  }
+}

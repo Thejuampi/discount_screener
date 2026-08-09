@@ -1,0 +1,360 @@
+{
+  "contract": "market-regime-fit-v1",
+  "purpose": "Cross-platform agreement for the fourth V3 scoring bucket. Windows computes it in Rust (apps/windows/src-tauri/src/regime/) and Android in Kotlin (apps/android/core/.../regime/); the two share no code, only mirrored arithmetic. Each case pins the policy derived from a market reading and the regime-fit score and signals a symbol earns under it, so an edit on one platform that is not mirrored on the other fails here instead of silently making the same ticker score differently in the two apps.",
+  "provenance": "Expected values are the Windows/Rust output. Rust is the reference implementation; the Kotlin port is the thing under test. Regenerating these from Kotlin would make the Android test vacuous.",
+  "units": {
+    "volume_ratio": "Raw ratio, 1.0 = the series median. Rust stores this directly as ChartSummary.volume_ratio; Kotlin stores hundredths (ChartRangeSummary.volumeRatioHundredths, 100 = median) and must multiply by 100 when loading. This unit split is the one that already caused a live defect, so it is stated rather than assumed.",
+    "rsi": "Latest Wilder RSI, 0..100. Rust ChartSummary.rsi, Kotlin ChartRangeSummary.latestWilderRsi.",
+    "pos_52w_pct": "0..100 position inside the trailing 52-week range.",
+    "bb_percent_b": "(close - lower) / (upper - lower). Runs outside 0..1 beyond the bands.",
+    "confidence_bps": "Basis points, 10000 = full confidence."
+  },
+  "notes": [
+    "Only the fields either feature extractor actually reads are carried. A field absent here is a field neither platform consults.",
+    "Android has no short side, so every case is long. Rust must be driven with ScoreSide::Long.",
+    "The Risk signal prefix is U+2212 MINUS SIGN, not an ASCII hyphen."
+  ],
+  "cases": [
+    {
+      "name": "quality_name_in_a_flight_to_quality",
+      "regime": {
+        "primary_regime": "Correction",
+        "environment_band": "RiskOff",
+        "action_stance": "Defend",
+        "global_confidence_bps": 8000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": null,
+        "credit_score": null,
+        "cnn_fear_greed": null
+      },
+      "symbol": {
+        "sector_name": "Healthcare",
+        "market_cap_dollars": 50000000000,
+        "free_cash_flow_dollars": 5000000000,
+        "operating_cash_flow_dollars": 6000000000,
+        "return_on_equity_bps": 1800,
+        "debt_to_equity_hundredths": 40,
+        "total_cash_dollars": 10000000000,
+        "total_debt_dollars": 2000000000,
+        "forward_pe_hundredths": 1400,
+        "price_to_book_hundredths": 200,
+        "enterprise_to_ebitda_hundredths": 1000,
+        "beta_millis": 750
+      },
+      "chart": {
+        "latest_close_cents": 8000,
+        "ema20_cents": 9000,
+        "ema50_cents": 10000,
+        "ema200_cents": 11000,
+        "rsi": 28.0,
+        "pos_52w_pct": 12.5,
+        "bb_percent_b": 0.1,
+        "volume_ratio": 1.2
+      },
+      "expected_policy": {
+        "w_quality": 1.0,
+        "w_low_beta": 1.0,
+        "w_value": 0.4,
+        "w_oversold_quality": 0.3,
+        "w_anti_extension": 0.6,
+        "w_trend": 0.1,
+        "w_defensive": 0.8,
+        "w_growth": 0.0,
+        "w_liquidity": 0.6,
+        "beta_haircut_mult": 2.0,
+        "strength": 0.8
+      },
+      "expected_fit": {
+        "score": 60,
+        "signals": [
+          "+Quality",
+          "+LowBeta",
+          "+Defensive"
+        ],
+        "unavailable_reason": null
+      }
+    },
+    {
+      "name": "junk_name_in_the_same_flight_to_quality",
+      "regime": {
+        "primary_regime": "Correction",
+        "environment_band": "RiskOff",
+        "action_stance": "Defend",
+        "global_confidence_bps": 8000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": null,
+        "credit_score": null,
+        "cnn_fear_greed": null
+      },
+      "symbol": {
+        "sector_name": "Technology",
+        "market_cap_dollars": 50000000000,
+        "free_cash_flow_dollars": -500000000,
+        "operating_cash_flow_dollars": 100000000,
+        "return_on_equity_bps": -200,
+        "debt_to_equity_hundredths": 250,
+        "total_cash_dollars": 100000000,
+        "total_debt_dollars": 20000000000,
+        "forward_pe_hundredths": 4000,
+        "price_to_book_hundredths": 200,
+        "enterprise_to_ebitda_hundredths": 1000,
+        "beta_millis": 1700
+      },
+      "chart": {
+        "latest_close_cents": 8000,
+        "ema20_cents": 9000,
+        "ema50_cents": 10000,
+        "ema200_cents": 11000,
+        "rsi": 28.0,
+        "pos_52w_pct": 12.5,
+        "bb_percent_b": 0.1,
+        "volume_ratio": 1.2
+      },
+      "expected_policy": {
+        "w_quality": 1.0,
+        "w_low_beta": 1.0,
+        "w_value": 0.4,
+        "w_oversold_quality": 0.3,
+        "w_anti_extension": 0.6,
+        "w_trend": 0.1,
+        "w_defensive": 0.8,
+        "w_growth": 0.0,
+        "w_liquidity": 0.6,
+        "beta_haircut_mult": 2.0,
+        "strength": 0.8
+      },
+      "expected_fit": {
+        "score": -18,
+        "signals": [
+          "−LowBeta",
+          "−Quality",
+          "+Liquidity"
+        ],
+        "unavailable_reason": null
+      }
+    },
+    {
+      "name": "a_narrow_rally_stops_paying_for_growth",
+      "regime": {
+        "primary_regime": "LateBull",
+        "environment_band": "RiskOn",
+        "action_stance": "Deploy",
+        "global_confidence_bps": 7000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": 32.0,
+        "credit_score": null,
+        "cnn_fear_greed": null
+      },
+      "symbol": {
+        "sector_name": "Technology",
+        "market_cap_dollars": 50000000000,
+        "free_cash_flow_dollars": 5000000000,
+        "operating_cash_flow_dollars": 6000000000,
+        "return_on_equity_bps": 1800,
+        "debt_to_equity_hundredths": 40,
+        "total_cash_dollars": 10000000000,
+        "total_debt_dollars": 2000000000,
+        "forward_pe_hundredths": 3000,
+        "price_to_book_hundredths": 450,
+        "enterprise_to_ebitda_hundredths": 1800,
+        "beta_millis": 1250
+      },
+      "chart": {
+        "latest_close_cents": 12000,
+        "ema20_cents": 11500,
+        "ema50_cents": 11000,
+        "ema200_cents": 10000,
+        "rsi": 68.0,
+        "pos_52w_pct": 92.0,
+        "bb_percent_b": 0.95,
+        "volume_ratio": 1.5
+      },
+      "expected_policy": {
+        "w_quality": 0.35,
+        "w_low_beta": 0.0,
+        "w_value": 0.2,
+        "w_oversold_quality": 0.2,
+        "w_anti_extension": 0.45,
+        "w_trend": 1.0,
+        "w_defensive": 0.0,
+        "w_growth": 0.3,
+        "w_liquidity": 0.1,
+        "beta_haircut_mult": 0.7,
+        "strength": 0.7
+      },
+      "expected_fit": {
+        "score": 25,
+        "signals": [
+          "+Trend",
+          "−Extension",
+          "+Quality"
+        ],
+        "unavailable_reason": null
+      }
+    },
+    {
+      "name": "credit_stress_raises_the_beta_haircut",
+      "regime": {
+        "primary_regime": "Range",
+        "environment_band": "Neutral",
+        "action_stance": "HoldTrim",
+        "global_confidence_bps": 6000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": null,
+        "credit_score": -40,
+        "cnn_fear_greed": null
+      },
+      "symbol": {
+        "sector_name": "Healthcare",
+        "market_cap_dollars": 50000000000,
+        "free_cash_flow_dollars": 5000000000,
+        "operating_cash_flow_dollars": 6000000000,
+        "return_on_equity_bps": 1800,
+        "debt_to_equity_hundredths": 40,
+        "total_cash_dollars": 10000000000,
+        "total_debt_dollars": 2000000000,
+        "forward_pe_hundredths": 1400,
+        "price_to_book_hundredths": 200,
+        "enterprise_to_ebitda_hundredths": 1000,
+        "beta_millis": 750
+      },
+      "chart": {
+        "latest_close_cents": 8000,
+        "ema20_cents": 9000,
+        "ema50_cents": 10000,
+        "ema200_cents": 11000,
+        "rsi": 28.0,
+        "pos_52w_pct": 12.5,
+        "bb_percent_b": 0.1,
+        "volume_ratio": 1.2
+      },
+      "expected_policy": {
+        "w_quality": 0.7,
+        "w_low_beta": 0.6000000000000001,
+        "w_value": 0.3,
+        "w_oversold_quality": 0.1,
+        "w_anti_extension": 0.8,
+        "w_trend": 0.3,
+        "w_defensive": 0.3,
+        "w_growth": 0.2,
+        "w_liquidity": 0.3,
+        "beta_haircut_mult": 1.265,
+        "strength": 0.6
+      },
+      "expected_fit": {
+        "score": 41,
+        "signals": [
+          "+Extension",
+          "+Quality",
+          "+LowBeta"
+        ],
+        "unavailable_reason": null
+      }
+    },
+    {
+      "name": "extreme_greed_penalizes_an_extended_name",
+      "regime": {
+        "primary_regime": "Bull",
+        "environment_band": "RiskOn",
+        "action_stance": "Deploy",
+        "global_confidence_bps": 9000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": null,
+        "credit_score": null,
+        "cnn_fear_greed": 88
+      },
+      "symbol": {
+        "sector_name": "Technology",
+        "market_cap_dollars": 50000000000,
+        "free_cash_flow_dollars": 5000000000,
+        "operating_cash_flow_dollars": 6000000000,
+        "return_on_equity_bps": 1800,
+        "debt_to_equity_hundredths": 40,
+        "total_cash_dollars": 10000000000,
+        "total_debt_dollars": 2000000000,
+        "forward_pe_hundredths": 3000,
+        "price_to_book_hundredths": 450,
+        "enterprise_to_ebitda_hundredths": 1800,
+        "beta_millis": 1250
+      },
+      "chart": {
+        "latest_close_cents": 12000,
+        "ema20_cents": 11500,
+        "ema50_cents": 11000,
+        "ema200_cents": 10000,
+        "rsi": 68.0,
+        "pos_52w_pct": 92.0,
+        "bb_percent_b": 0.95,
+        "volume_ratio": 1.5
+      },
+      "expected_policy": {
+        "w_quality": 0.2,
+        "w_low_beta": 0.0,
+        "w_value": 0.2,
+        "w_oversold_quality": 0.06,
+        "w_anti_extension": 0.45,
+        "w_trend": 1.0,
+        "w_defensive": 0.0,
+        "w_growth": 0.6,
+        "w_liquidity": 0.1,
+        "beta_haircut_mult": 0.7,
+        "strength": 0.9
+      },
+      "expected_fit": {
+        "score": 37,
+        "signals": [
+          "+Trend",
+          "+Growth",
+          "−Extension"
+        ],
+        "unavailable_reason": null
+      }
+    },
+    {
+      "name": "one_readable_feature_is_refused_on_both_platforms",
+      "regime": {
+        "primary_regime": "Correction",
+        "environment_band": "RiskOff",
+        "action_stance": "Defend",
+        "global_confidence_bps": 8000,
+        "prefer_quality": false,
+        "breadth_above_ma200_pct": null,
+        "credit_score": null,
+        "cnn_fear_greed": null
+      },
+      "symbol": {
+        "sector_name": null,
+        "market_cap_dollars": null,
+        "free_cash_flow_dollars": null,
+        "operating_cash_flow_dollars": null,
+        "return_on_equity_bps": null,
+        "debt_to_equity_hundredths": null,
+        "total_cash_dollars": null,
+        "total_debt_dollars": null,
+        "forward_pe_hundredths": null,
+        "price_to_book_hundredths": null,
+        "enterprise_to_ebitda_hundredths": null,
+        "beta_millis": 900
+      },
+      "chart": null,
+      "expected_policy": {
+        "w_quality": 1.0,
+        "w_low_beta": 1.0,
+        "w_value": 0.4,
+        "w_oversold_quality": 0.3,
+        "w_anti_extension": 0.6,
+        "w_trend": 0.1,
+        "w_defensive": 0.8,
+        "w_growth": 0.0,
+        "w_liquidity": 0.6,
+        "beta_haircut_mult": 2.0,
+        "strength": 0.8
+      },
+      "expected_fit": {
+        "score": null,
+        "signals": [],
+        "unavailable_reason": "InsufficientAssetData"
+      }
+    }
+  ]
+}

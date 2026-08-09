@@ -81,6 +81,7 @@ object ChartAnalysis {
         val macd = macd(closes)
         val rsi = rsiAnalysis(candles)
         val range52w = fiftyTwoWeekRange(candles, latest)
+        val directional = directionalMovement(candles, period = 14)
         return ChartRangeSummary(
             range = range,
             capturedAt = capturedAtEpochSeconds,
@@ -99,7 +100,71 @@ object ChartAnalysis {
             low52wCents = range52w?.lowCents,
             pos52wPct = range52w?.positionPct,
             bbPercentB = bollingerPercentB(closes, period = 20, k = 2.0),
+            adx = directional?.adx,
+            plusDi = directional?.plusDi,
+            minusDi = directional?.minusDi,
         )
+    }
+
+    private data class DirectionalMovement(
+        val adx: Double,
+        val plusDi: Double,
+        val minusDi: Double,
+    )
+
+    /**
+     * Wilder's ADX with +DI and −DI, ported from `engine.rs::compute_adx`.
+     *
+     * The market-context trend pillar weights ADX at 0.15 of its reading, so leaving it absent
+     * would put Android's trend score structurally out of reach of Windows' — not merely noisier.
+     *
+     * Two details carried over deliberately, because they decide the number rather than decorate
+     * it: the first ADX value is a plain mean of the first [period] DX readings before Wilder
+     * smoothing takes over, and bars where the smoothed true range or the DI sum collapses to zero
+     * are *skipped* rather than treated as zero, so a flat stretch shortens the series instead of
+     * poisoning it.
+     */
+    private fun directionalMovement(candles: List<HistoricalCandle>, period: Int): DirectionalMovement? {
+        if (candles.size < (period * 2) + 1) return null
+        val trueRange = DoubleArray(candles.size)
+        val plusDm = DoubleArray(candles.size)
+        val minusDm = DoubleArray(candles.size)
+        for (index in 1 until candles.size) {
+            val high = candles[index].highCents.toDouble()
+            val low = candles[index].lowCents.toDouble()
+            val previousHigh = candles[index - 1].highCents.toDouble()
+            val previousLow = candles[index - 1].lowCents.toDouble()
+            val previousClose = candles[index - 1].closeCents.toDouble()
+            trueRange[index] = maxOf(high - low, abs(high - previousClose), abs(low - previousClose))
+            val up = high - previousHigh
+            val down = previousLow - low
+            plusDm[index] = if (up > down && up > 0.0) up else 0.0
+            minusDm[index] = if (down > up && down > 0.0) down else 0.0
+        }
+
+        var smoothedRange = (1..period).sumOf { trueRange[it] }
+        var smoothedPlus = (1..period).sumOf { plusDm[it] }
+        var smoothedMinus = (1..period).sumOf { minusDm[it] }
+        val dxSeries = ArrayList<Triple<Double, Double, Double>>()
+        for (index in (period + 1) until candles.size) {
+            smoothedRange = smoothedRange - (smoothedRange / period) + trueRange[index]
+            smoothedPlus = smoothedPlus - (smoothedPlus / period) + plusDm[index]
+            smoothedMinus = smoothedMinus - (smoothedMinus / period) + minusDm[index]
+            if (smoothedRange == 0.0) continue
+            val plusDi = 100.0 * smoothedPlus / smoothedRange
+            val minusDi = 100.0 * smoothedMinus / smoothedRange
+            val directionalSum = plusDi + minusDi
+            if (directionalSum == 0.0) continue
+            dxSeries.add(Triple(100.0 * abs(plusDi - minusDi) / directionalSum, plusDi, minusDi))
+        }
+        if (dxSeries.size < period) return null
+
+        var adx = dxSeries.take(period).sumOf { it.first } / period
+        for (entry in dxSeries.drop(period)) {
+            adx = ((adx * (period - 1)) + entry.first) / period
+        }
+        val last = dxSeries.last()
+        return DirectionalMovement(adx = adx, plusDi = last.second, minusDi = last.third)
     }
 
     private data class FiftyTwoWeekRange(

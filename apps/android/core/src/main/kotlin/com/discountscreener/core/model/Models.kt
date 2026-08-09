@@ -794,6 +794,12 @@ data class ChartRangeSummary(
      * 0..1 inside the bands, outside that range beyond them. Null below 20 candles.
      */
     val bbPercentB: Double? = null,
+    /** Wilder 14-period ADX, 0..100 — trend strength, direction-blind. Null below 29 candles. */
+    val adx: Double? = null,
+    /** Wilder +DI at the latest bar. Null whenever [adx] is. */
+    val plusDi: Double? = null,
+    /** Wilder −DI at the latest bar. Null whenever [adx] is. */
+    val minusDi: Double? = null,
 )
 
 @Serializable

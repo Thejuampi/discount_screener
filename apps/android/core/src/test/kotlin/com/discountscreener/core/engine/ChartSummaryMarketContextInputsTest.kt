@@ -4,13 +4,15 @@ import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.HistoricalCandle
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The two chart inputs market-context scoring reads that nothing else did: 52-week position and
- * Bollinger %B. Both mirror `apps/windows/src-tauri/src/engine.rs` (`pos_52w_pct`, `bb_percent_b`),
- * so these tests pin the shape of the mirror rather than a calibration.
+ * The chart inputs market-context scoring reads that nothing else did: 52-week position, Bollinger
+ * %B, and Wilder's ADX with its two directional indicators. All mirror
+ * `apps/windows/src-tauri/src/engine.rs` (`pos_52w_pct`, `bb_percent_b`, `compute_adx`), so these
+ * tests pin the shape of the mirror rather than a calibration.
  */
 class ChartSummaryMarketContextInputsTest {
     @Test
@@ -63,6 +65,60 @@ class ChartSummaryMarketContextInputsTest {
         assertNull(summary.bbPercentB)
     }
 
+    @Test
+    fun adx_separates_a_persistent_trend_from_chop() {
+        var trending = summaryOf(risingCandles(count = 60)).adx!!
+
+        assertTrue(trending > summaryOf(choppyCandles(count = 60)).adx!!, "trend $trending must beat chop")
+    }
+
+    /**
+     * ADX measures trend *strength* and is blind to direction — the sign lives in the two
+     * directional indicators. A rising and a falling series that move by the same amount each bar
+     * must therefore read identically here, and differ only in [ChartRangeSummary.plusDi] versus
+     * [ChartRangeSummary.minusDi]. An implementation that leaked direction into ADX would pass a
+     * "trend beats chop" test and fail this one.
+     */
+    @Test
+    fun adx_reads_the_same_strength_whichever_way_the_trend_runs() {
+        var rising = summaryOf(risingCandles(count = 60)).adx!!
+
+        assertEquals(rising, summaryOf(risingCandles(count = 60).reversed()).adx!!, absoluteTolerance = 1e-9)
+    }
+
+    @Test
+    fun plus_di_leads_minus_di_in_an_uptrend() {
+        var summary = summaryOf(risingCandles(count = 60))
+
+        assertTrue(summary.plusDi!! > summary.minusDi!!)
+    }
+
+    @Test
+    fun minus_di_leads_plus_di_in_a_downtrend() {
+        var summary = summaryOf(risingCandles(count = 60).reversed())
+
+        assertTrue(summary.minusDi!! > summary.plusDi!!)
+    }
+
+    /**
+     * Wilder needs `2 × 14 + 1` bars before the first ADX reading exists. The pair of tests is what
+     * makes the guard meaningful: one bar either side of the boundary, so an implementation that
+     * simply never produced an ADX could not pass both.
+     */
+    @Test
+    fun adx_is_absent_one_bar_below_the_wilder_window() {
+        var summary = summaryOf(risingCandles(count = 28))
+
+        assertNull(summary.adx)
+    }
+
+    @Test
+    fun adx_appears_as_soon_as_the_wilder_window_is_full() {
+        var summary = summaryOf(risingCandles(count = 29))
+
+        assertNotNull(summary.adx)
+    }
+
     private fun summaryOf(candles: List<HistoricalCandle>) = ChartAnalysis.buildSummary(
         range = ChartRange.Year,
         candles = candles,
@@ -72,6 +128,11 @@ class ChartSummaryMarketContextInputsTest {
     /** A monotonically rising series, so the latest close sits exactly on the window high. */
     private fun risingCandles(count: Int) = (1..count).map { index ->
         flatCandle(epoch = index, priceCents = 10_000L + (index * 10L))
+    }
+
+    /** Alternating up and down bars of equal size: real range, no net direction. */
+    private fun choppyCandles(count: Int) = (1..count).map { index ->
+        flatCandle(epoch = index, priceCents = 10_000L + ((index % 2) * 100L))
     }
 
     private fun flatCandle(epoch: Int, priceCents: Long) =
