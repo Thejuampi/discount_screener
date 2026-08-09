@@ -205,7 +205,15 @@ data class DashboardUiState(
     val discoveryLastSourceHint: String? = null,
     val discoveryBusy: Boolean = false,
     val discoveryStatusMessage: String? = null,
-)
+) {
+    /**
+     * The ranked row backing the open ticker, or null when that symbol is not in the current
+     * opportunity set. Derived rather than stored, so the detail view can never show a score the
+     * list has already moved past.
+     */
+    val detailScoreRow: OpportunityListRow?
+        get() = detailRoute?.let { route -> opportunityRows.firstOrNull { it.symbol == route.symbol } }
+}
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 class DashboardViewModel(

@@ -124,7 +124,7 @@ internal fun OpportunityList(
     onAction: (DashboardAction) -> Unit,
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(rows, key = { it.symbol }) { row ->
+        itemsIndexed(rows, key = { _, row -> row.symbol }) { index, row ->
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -132,6 +132,7 @@ internal fun OpportunityList(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        RankOrdinal(index = index)
                         SymbolCompanyTitle(
                             symbol = row.symbol,
                             companyName = row.companyName,
@@ -192,12 +193,7 @@ internal fun DiscoveryList(
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "#${rankOffset + index + 1}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(end = 6.dp),
-                        )
+                        RankOrdinal(index = index, rankOffset = rankOffset)
                         SymbolCompanyTitle(
                             symbol = row.symbol,
                             companyName = row.companyName,
@@ -603,8 +599,22 @@ private fun TrackedRowMetrics(row: TrackedSymbolRow) {
     }
 }
 
+/**
+ * The `#N` placing on a ranked row. Opportunities and Discovery share this so the two lists cannot
+ * drift into rendering their ordinals differently.
+ */
 @Composable
-private fun ScoreBadge(score: Int, scoringModel: OpportunityScoringModel) {
+internal fun RankOrdinal(index: Int, rankOffset: Int = 0) {
+    Text(
+        text = "#${rankOffset + index + 1}",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(end = 6.dp),
+    )
+}
+
+@Composable
+internal fun ScoreBadge(score: Int, scoringModel: OpportunityScoringModel) {
     val (textColor, backgroundColor) = scoreBadgeColors(score, scoringModel)
     Text(
         text = "Score $score",
@@ -618,7 +628,7 @@ private fun ScoreBadge(score: Int, scoringModel: OpportunityScoringModel) {
 }
 
 @Composable
-private fun MetricToken(
+internal fun MetricToken(
     text: String,
     color: Color,
     horizontalPadding: Dp = 0.dp,
@@ -651,13 +661,13 @@ internal fun freshnessTimeLabel(
 }
 
 @Composable
-private fun fundamentalsMetricColor(): Color = Color(0xFF26C6DA)
+internal fun fundamentalsMetricColor(): Color = Color(0xFF26C6DA)
 
 @Composable
-private fun technicalMetricColor(): Color = Color(0xFFAB47BC)
+internal fun technicalMetricColor(): Color = Color(0xFFAB47BC)
 
 @Composable
-private fun forecastMetricColor(): Color = Color(0xFFFFB300)
+internal fun forecastMetricColor(): Color = Color(0xFFFFB300)
 
 @Composable
 private fun upsideColor(upsideBps: Int): Color = if (upsideBps >= 0) BullishChartColor else BearishChartColor
@@ -703,7 +713,7 @@ private fun scoreBadgeColors(score: Int, scoringModel: OpportunityScoringModel):
     }
 }
 
-private fun formatOpportunityBucket(score: Int?, scoringModel: OpportunityScoringModel): String = when {
+internal fun formatOpportunityBucket(score: Int?, scoringModel: OpportunityScoringModel): String = when {
     score == null -> "--"
     scoringModel == OpportunityScoringModel.Legacy -> "$score/5"
     else -> score.toString()

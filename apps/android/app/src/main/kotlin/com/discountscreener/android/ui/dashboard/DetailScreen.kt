@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
@@ -96,6 +97,7 @@ import com.discountscreener.core.model.ProjectedDetailData
 import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
 import com.discountscreener.core.model.QuantLensLensId
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import kotlin.math.abs
@@ -120,6 +122,8 @@ fun DetailScreen(
     tickerSearchLoading: Boolean = false,
     tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
+    scoreRow: OpportunityListRow? = null,
+    scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -207,6 +211,13 @@ fun DetailScreen(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
         )
 
+        DetailScoreHeader(
+            route = route,
+            scoreRow = scoreRow,
+            scoringModel = scoringModel,
+            onAction = onAction,
+        )
+
         ScrollableTabRow(
             selectedTabIndex = when (route.subtab) {
                 DetailSubtab.Snapshot -> 0
@@ -265,6 +276,90 @@ fun DetailScreen(
             }
         }
     }
+}
+
+/**
+ * Score, dimension breakdown and the scoring-model control, above the subtabs so they stay visible
+ * on Snapshot, Lens and History alike.
+ *
+ * The row comes from the ranked opportunity set rather than being recomputed here — the list and
+ * the detail view read the same [OpportunityListRow], so a score shown here is by construction the
+ * score the list shows. A symbol reached from Tracked or Watch may not be in that set at all; that
+ * is a real state, and it says so rather than showing a zero.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DetailScoreHeader(
+    route: DetailRoute,
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    onAction: (DashboardAction) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .padding(bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        rankPositionLabel(route)?.let { label ->
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (scoreRow == null) {
+            Text(
+                text = "Not in the ranked set under ${scoringModel.chipLabel()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ScoreBadge(score = scoreRow.compositeScore, scoringModel = scoringModel)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricToken(
+                    "F ${formatOpportunityBucket(scoreRow.fundamentalsScore, scoringModel)}",
+                    fundamentalsMetricColor(),
+                )
+                MetricToken(
+                    "T ${formatOpportunityBucket(scoreRow.technicalScore, scoringModel)}",
+                    technicalMetricColor(),
+                )
+                MetricToken(
+                    "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
+                    forecastMetricColor(),
+                )
+            }
+        }
+        OpportunityScoringModelToggle(selected = scoringModel, onAction = onAction)
+    }
+}
+
+/**
+ * Where this ticker sits in the list it was opened from, as `#60 of 80 · top 75%`.
+ *
+ * [DetailRoute.sourceSymbols] is the ranked, filtered list captured when the ticker was opened, so
+ * the ordinal is read straight off it rather than recomputed against a different ordering. The
+ * percentile counts from the top — rank 24 of 80 is `top 30%` — so a smaller number is a better
+ * placing, the same direction the ordinal reads.
+ *
+ * Returns null when the symbol is not in a ranked list at all; a single-symbol list gets the
+ * ordinal but no percentile, because "top 100%" of one thing says nothing.
+ */
+internal fun rankPositionLabel(route: DetailRoute): String? {
+    val index = route.sourceSymbols.indexOf(route.symbol)
+    if (index < 0) return null
+    val total = route.sourceSymbols.size
+    val rank = index + 1
+    if (total <= 1) return "#$rank of $total"
+    val percentile = ((rank * 100.0) / total).roundToInt().coerceIn(1, 100)
+    return "#$rank of $total · top $percentile%"
 }
 
 @OptIn(ExperimentalLayoutApi::class)

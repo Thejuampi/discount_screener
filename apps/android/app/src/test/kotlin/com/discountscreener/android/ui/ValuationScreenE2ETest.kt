@@ -3,7 +3,6 @@ package com.discountscreener.android.ui
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -65,7 +64,7 @@ class ValuationScreenE2ETest {
     }
 
     private fun assertVisibleAfterScroll(text: String) {
-        composeRule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(text))
+        composeRule.onNode(verticalList()).performScrollToNode(hasText(text))
         composeRule.onNodeWithText(text).assertIsDisplayed()
     }
 

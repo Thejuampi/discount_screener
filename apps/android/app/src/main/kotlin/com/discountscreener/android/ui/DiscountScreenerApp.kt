@@ -78,6 +78,8 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             tickerSearchLoading = state.tickerSearchLoading,
                             tickerSearchNotice = state.tickerSearchNotice,
                             projectedDetail = state.projectedDetailData,
+                            scoreRow = state.detailScoreRow,
+                            scoringModel = state.opportunityScoringModel,
                             onAction = viewModel::dispatch,
                         )
                     }

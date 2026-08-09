@@ -271,8 +271,13 @@ internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
     OpportunityScoringModel.Legacy -> "Legacy"
 }
 
+/**
+ * The single scoring-model control. The Opportunities header and the ticker detail header both
+ * render this same composable against the same state, so the two surfaces cannot drift into
+ * showing scores from different models.
+ */
 @Composable
-private fun OpportunityScoringModelToggle(
+internal fun OpportunityScoringModelToggle(
     selected: OpportunityScoringModel,
     onAction: (DashboardAction) -> Unit,
 ) {
