@@ -3,6 +3,7 @@ package com.discountscreener.core.engine
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
@@ -175,11 +176,15 @@ class ReportingEngineTest {
             Pair(5, listOf(">EMA20", ">EMA50", ">EMA200", "EMA20>50", "MACD+")),
             OpportunityEngine.scoreTechnicals(summary(2_450, 2_100, 1_900, 1_700, 220, 120, 100)),
         )
+        // No `DCF+`, and the score is four rather than five, because model valuation is
+        // deliberately kept out of ranking — it is still too noisy for a composite, while Detail
+        // and the Quant Lens keep computing it. Asserting the exact signal list rather than just
+        // the number is what makes this fail if that gate is ever reopened by accident.
         assertEquals(
-            Pair(5, listOf("Supportive", "5+Analysts", "Rec<=2.0", "Weighted+", "DCF+")),
+            Pair(4, listOf("Supportive", "5+Analysts", "Rec<=2.0", "Weighted+")),
             OpportunityEngine.scoreForecasts(
                 detail,
-                com.discountscreener.core.model.DcfAnalysis(
+                DcfAnalysis(
                     bearIntrinsicValueCents = 25_000,
                     baseIntrinsicValueCents = 32_000,
                     bullIntrinsicValueCents = 38_000,
@@ -195,7 +200,7 @@ class ReportingEngineTest {
     fun aggressive_model_rewards_high_upside_and_trend_more_than_legacy() {
         val detail = engineDetail()
         val summary = summary(2_450, 2_100, 1_900, 1_700, 220, 120, 100)
-        val analysis = com.discountscreener.core.model.DcfAnalysis(
+        val analysis = DcfAnalysis(
             bearIntrinsicValueCents = 25_000,
             baseIntrinsicValueCents = 32_000,
             bullIntrinsicValueCents = 38_000,
@@ -204,8 +209,11 @@ class ReportingEngineTest {
             netDebtDollars = 0,
         )
 
+        // Both numbers below exclude the DCF contribution, which ranking does not consult. The
+        // claim this test makes is the gap between the two models, and that gap survives: were the
+        // quant engine to re-enter ranking, both would rise and this would fail.
         assertEquals(
-            15,
+            14,
             OpportunityEngine.scoreWithModel(
                 detail = detail,
                 summary = summary,
@@ -214,7 +222,7 @@ class ReportingEngineTest {
             ).compositeScore,
         )
         assertEquals(
-            27,
+            23,
             OpportunityEngine.scoreWithModel(
                 detail = detail,
                 summary = summary,
@@ -243,7 +251,7 @@ class ReportingEngineTest {
             ),
         )
         val summary = summary(1_000, 1_100, 1_200, 1_300, -120, 10, -130)
-        val analysis = com.discountscreener.core.model.DcfAnalysis(
+        val analysis = DcfAnalysis(
             bearIntrinsicValueCents = 8_500,
             baseIntrinsicValueCents = 9_000,
             bullIntrinsicValueCents = 9_500,
@@ -253,7 +261,7 @@ class ReportingEngineTest {
         )
 
         assertEquals(
-            -22,
+            -19,
             OpportunityEngine.scoreWithModel(
                 detail = detail,
                 summary = summary,
