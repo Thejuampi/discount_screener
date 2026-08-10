@@ -1054,3 +1054,39 @@ mod list_ready_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod universe_contract_tests {
+    use super::{is_crypto, ETF_SYMBOLS};
+    use std::path::PathBuf;
+
+    fn contract() -> serde_json::Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../shared/contracts/market-universe-classification-v1.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Breadth counts how many *stocks* participate, so Windows and Android have to exclude the
+    /// same names. Each side holds its own constant; this is what makes an unmirrored edit fail
+    /// here instead of quietly changing what breadth measures on one platform only.
+    #[test]
+    fn etf_universe_matches_shared_contract() {
+        let expected: Vec<String> = contract()["etf_symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let actual: Vec<String> = ETF_SYMBOLS.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn crypto_suffix_matches_shared_contract() {
+        let suffix = contract()["crypto_rule"]["suffix"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(is_crypto(&format!("BTC{suffix}")));
+    }
+}

@@ -173,7 +173,7 @@ pub struct ChartSummary {
     pub bb_percent_b: Option<f64>,    // (close - lower) / (upper - lower), 0..1 inside bands
     pub bb_bandwidth: Option<f64>,    // (upper - lower) / middle
     pub obv_slope: Option<f64>,       // normalized slope of OBV over last 20 bars
-    pub volume_ratio: Option<f64>,    // latest volume / SMA20(volume)
+    pub volume_ratio: Option<f64>,    // latest volume / median(volume), raw ratio (1.0 = median)
     pub atr_cents: Option<i64>,       // 14-period ATR
     pub high_52w_cents: Option<i64>,
     pub low_52w_cents: Option<i64>,

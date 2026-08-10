@@ -9,6 +9,8 @@ data class DashboardUseCases(
     val addDashboardSymbols: AddDashboardSymbolsUseCase,
     val selectDashboardProfile: SelectDashboardProfileUseCase,
     val toggleDashboardWatchlist: ToggleDashboardWatchlistUseCase,
+    val loadScoringPreferences: LoadScoringPreferencesUseCase,
+    val persistScoringPreferences: PersistScoringPreferencesUseCase,
     val loadSystemStats: LoadSystemStatsUseCase,
     val pruneOldRevisions: PruneOldRevisionsUseCase,
     val clearAllData: ClearAllDataUseCase,

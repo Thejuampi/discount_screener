@@ -520,7 +520,12 @@ fn liquidity_score(row: &CandidateRow, daily: Option<&ChartSummary>) -> Option<f
         n += 1.0;
     }
     if let Some(vr) = daily.and_then(|d| d.volume_ratio) {
-        acc += ((vr - 50.0) / 100.0).clamp(0.0, 1.0);
+        // `volume_ratio` is latest / median volume — a raw ratio, ~1.0 at the median. The previous
+        // form, `(vr - 50.0) / 100.0`, was written against a hundredths convention this field does
+        // not use, so it clamped to 0.0 for every realistic input while still charging 0.5 to `n`:
+        // the volume half of this feature was in the divisor but never in the sum. Centring on the
+        // median restores the neutral the formula was reaching for.
+        acc += (vr - 0.5).clamp(0.0, 1.0);
         n += 0.5;
     }
     if n <= 0.0 {
@@ -603,7 +608,11 @@ mod tests {
             bb_percent_b: Some(0.1),
             bb_bandwidth: Some(0.3),
             obv_slope: None,
-            volume_ratio: Some(120.0),
+            // A raw ratio, which is what `compute_volume_ratio` returns: 1.2 = 20% above the
+            // median. The old `Some(120.0)` here was a hundredths value the production path can
+            // never produce, and feeding it is why the dead volume term in `liquidity_score`
+            // survived — the fixture was the only input the broken formula worked on.
+            volume_ratio: Some(1.2),
             atr_cents: Some(200),
             high_52w_cents: Some(15_000),
             low_52w_cents: Some(7_000),
@@ -779,6 +788,312 @@ mod tests {
         assert_eq!(
             result.unavailable_reason,
             Some(MarketContextUnavailableReason::InsufficientAssetData)
+        );
+    }
+
+    /// A no-market-cap row so the volume term is the *only* thing `liquidity_score` reads.
+    fn row_without_market_cap() -> CandidateRow {
+        CandidateRow {
+            market_cap_dollars: None,
+            ..row_quality(true)
+        }
+    }
+
+    fn liquidity_at_volume_ratio(vr: f64) -> f64 {
+        let mut chart = chart_oversold();
+        chart.volume_ratio = Some(vr);
+        liquidity_score(&row_without_market_cap(), Some(&chart))
+            .expect("volume ratio alone must yield a liquidity reading")
+    }
+
+    /// Turnover has to actually move the score.
+    ///
+    /// The previous formula, `(vr - 50.0) / 100.0`, clamped to 0.0 for every ratio below 50 —
+    /// which is every ratio the production path can produce — while still charging 0.5 to the
+    /// denominator. Both of these read 0.0 before the fix, so this assertion is what makes the
+    /// volume term's presence observable rather than assumed.
+    #[test]
+    fn liquidity_volume_term_separates_heavy_from_light_turnover() {
+        assert!(
+            liquidity_at_volume_ratio(1.4) > liquidity_at_volume_ratio(0.6),
+            "heavy turnover {} should score above light turnover {}",
+            liquidity_at_volume_ratio(1.4),
+            liquidity_at_volume_ratio(0.6)
+        );
+    }
+
+    /// At the median the term is neutral, which is what `(vr - 50.0) / 100.0` was reaching for on
+    /// a hundredths scale and never reached on a raw ratio.
+    #[test]
+    fn liquidity_volume_term_is_neutral_at_the_median() {
+        assert!(
+            (liquidity_at_volume_ratio(1.0) - 1.0).abs() < 1e-9,
+            "median turnover as the only term should normalize to 1.0, got {}",
+            liquidity_at_volume_ratio(1.0)
+        );
+    }
+}
+
+/// Cross-platform agreement for this bucket, driven by
+/// `shared/contracts/market-regime-fit-v1.json`.
+///
+/// Windows computes regime fit in Rust and Android in Kotlin, sharing no code — only mirrored
+/// arithmetic. This side is the reference: it asserts that the contract still describes what Rust
+/// does, so a Rust change either updates the contract deliberately or fails here. The Android side
+/// runs the same cases against the same file, which is what turns "the two agree" into a claim
+/// something can falsify.
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::engine::{ConfidenceBand, ExternalSignalStatus, QualificationStatus};
+    use crate::regime::scoring_policy::ScoreSide;
+    use crate::regime::types::MarketRegime;
+    use serde::Deserialize;
+    use std::path::PathBuf;
+
+    #[derive(Deserialize)]
+    struct Contract {
+        cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    struct Case {
+        name: String,
+        regime: RegimeInput,
+        symbol: SymbolInput,
+        chart: Option<ChartInput>,
+        expected_policy: Option<PolicyExpectation>,
+        expected_fit: Option<FitExpectation>,
+    }
+
+    #[derive(Deserialize)]
+    struct RegimeInput {
+        primary_regime: String,
+        environment_band: String,
+        action_stance: String,
+        global_confidence_bps: u32,
+        prefer_quality: bool,
+        breadth_above_ma200_pct: Option<f64>,
+        credit_score: Option<i32>,
+        cnn_fear_greed: Option<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct SymbolInput {
+        sector_name: Option<String>,
+        market_cap_dollars: Option<u64>,
+        free_cash_flow_dollars: Option<i64>,
+        operating_cash_flow_dollars: Option<i64>,
+        return_on_equity_bps: Option<i32>,
+        debt_to_equity_hundredths: Option<i32>,
+        total_cash_dollars: Option<i64>,
+        total_debt_dollars: Option<i64>,
+        forward_pe_hundredths: Option<u32>,
+        price_to_book_hundredths: Option<u32>,
+        enterprise_to_ebitda_hundredths: Option<i32>,
+        beta_millis: Option<i32>,
+    }
+
+    #[derive(Deserialize)]
+    struct ChartInput {
+        latest_close_cents: i64,
+        ema20_cents: Option<i64>,
+        ema50_cents: Option<i64>,
+        ema200_cents: Option<i64>,
+        rsi: Option<f64>,
+        pos_52w_pct: Option<f64>,
+        bb_percent_b: Option<f64>,
+        volume_ratio: Option<f64>,
+    }
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct PolicyExpectation {
+        w_quality: f64,
+        w_low_beta: f64,
+        w_value: f64,
+        w_oversold_quality: f64,
+        w_anti_extension: f64,
+        w_trend: f64,
+        w_defensive: f64,
+        w_growth: f64,
+        w_liquidity: f64,
+        beta_haircut_mult: f64,
+        strength: f64,
+    }
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct FitExpectation {
+        score: Option<i32>,
+        signals: Vec<String>,
+        unavailable_reason: Option<String>,
+    }
+
+    fn contract() -> Contract {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../shared/contracts/market-regime-fit-v1.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("contract must parse")
+    }
+
+    fn row_from(input: &SymbolInput) -> CandidateRow {
+        CandidateRow {
+            symbol: "CASE".into(),
+            company_name: None,
+            market_price_cents: 10_000,
+            previous_close_cents: 10_000,
+            next_earnings_epoch: None,
+            intrinsic_value_cents: 12_000,
+            gap_bps: Some(2000),
+            qualification: QualificationStatus::Qualified,
+            confidence: ConfidenceBand::High,
+            signal_status: ExternalSignalStatus::Supportive,
+            analyst_opinion_count: None,
+            recommendation_mean_hundredths: None,
+            sector_name: input.sector_name.clone(),
+            low_fair_value_cents: None,
+            high_fair_value_cents: None,
+            strong_buy_count: None,
+            buy_count: None,
+            hold_count: None,
+            sell_count: None,
+            strong_sell_count: None,
+            free_cash_flow_dollars: input.free_cash_flow_dollars,
+            operating_cash_flow_dollars: input.operating_cash_flow_dollars,
+            market_cap_dollars: input.market_cap_dollars,
+            return_on_equity_bps: input.return_on_equity_bps,
+            earnings_growth_bps: None,
+            debt_to_equity_hundredths: input.debt_to_equity_hundredths,
+            total_cash_dollars: input.total_cash_dollars,
+            total_debt_dollars: input.total_debt_dollars,
+            forward_pe_hundredths: input.forward_pe_hundredths,
+            price_to_book_hundredths: input.price_to_book_hundredths,
+            enterprise_to_ebitda_hundredths: input.enterprise_to_ebitda_hundredths,
+            beta_millis: input.beta_millis,
+            shares_outstanding: None,
+            dcf_value_cents: None,
+            insider_net_shares_90d: None,
+            insider_buy_count: None,
+            insider_sell_count: None,
+        }
+    }
+
+    fn chart_from(input: &ChartInput) -> ChartSummary {
+        ChartSummary {
+            latest_close_cents: input.latest_close_cents,
+            ema20_cents: input.ema20_cents,
+            ema50_cents: input.ema50_cents,
+            ema200_cents: input.ema200_cents,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: None,
+            rsi: input.rsi,
+            rsi_slope: None,
+            adx: None,
+            plus_di: None,
+            minus_di: None,
+            bb_upper_cents: None,
+            bb_middle_cents: None,
+            bb_lower_cents: None,
+            bb_percent_b: input.bb_percent_b,
+            bb_bandwidth: None,
+            obv_slope: None,
+            volume_ratio: input.volume_ratio,
+            atr_cents: None,
+            high_52w_cents: None,
+            low_52w_cents: None,
+            pos_52w_pct: input.pos_52w_pct,
+        }
+    }
+
+    fn regime_from(input: &RegimeInput) -> MarketRegime {
+        MarketRegime {
+            primary_regime: input.primary_regime.clone(),
+            environment_band: input.environment_band.clone(),
+            action_stance: input.action_stance.clone(),
+            global_confidence_bps: input.global_confidence_bps,
+            prefer_quality: input.prefer_quality,
+            breadth_above_ma200_pct: input.breadth_above_ma200_pct,
+            credit_score: input.credit_score,
+            cnn_fear_greed: input.cnn_fear_greed,
+            ..MarketRegime::default()
+        }
+    }
+
+    fn observed_policy(policy: &RegimeScoringPolicy) -> PolicyExpectation {
+        PolicyExpectation {
+            w_quality: policy.w_quality,
+            w_low_beta: policy.w_low_beta,
+            w_value: policy.w_value,
+            w_oversold_quality: policy.w_oversold_quality,
+            w_anti_extension: policy.w_anti_extension,
+            w_trend: policy.w_trend,
+            w_defensive: policy.w_defensive,
+            w_growth: policy.w_growth,
+            w_liquidity: policy.w_liquidity,
+            beta_haircut_mult: policy.beta_haircut_mult,
+            strength: policy.strength,
+        }
+    }
+
+    fn observed_fit(fit: &RegimeFitResult) -> FitExpectation {
+        FitExpectation {
+            score: fit.score,
+            signals: fit.signals.clone(),
+            unavailable_reason: fit.unavailable_reason.map(|r| format!("{r:?}")),
+        }
+    }
+
+    /// Every case is checked before anything fails, and each mismatch is reported as the JSON the
+    /// contract should carry. A test that stopped at the first difference would need one run per
+    /// case to reconcile a deliberate recalibration.
+    #[test]
+    fn regime_fit_matches_the_shared_contract() {
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for case in contract().cases {
+            let regime = regime_from(&case.regime);
+            let policy = RegimeScoringPolicy::from_regime(&regime, ScoreSide::Long)
+                .unwrap_or_else(|| panic!("case {} must yield a policy", case.name));
+            let chart = case.chart.as_ref().map(chart_from);
+            let fit = score_regime_fit(&row_from(&case.symbol), chart.as_ref(), &policy);
+
+            let policy_seen = observed_policy(&policy);
+            let fit_seen = observed_fit(&fit);
+            if case.expected_policy.as_ref() != Some(&policy_seen)
+                || case.expected_fit.as_ref() != Some(&fit_seen)
+            {
+                mismatches.push(format!(
+                    "{}\n      \"expected_policy\": {},\n      \"expected_fit\": {}",
+                    case.name,
+                    serde_json::to_string(&serde_json::json!({
+                        "w_quality": policy_seen.w_quality,
+                        "w_low_beta": policy_seen.w_low_beta,
+                        "w_value": policy_seen.w_value,
+                        "w_oversold_quality": policy_seen.w_oversold_quality,
+                        "w_anti_extension": policy_seen.w_anti_extension,
+                        "w_trend": policy_seen.w_trend,
+                        "w_defensive": policy_seen.w_defensive,
+                        "w_growth": policy_seen.w_growth,
+                        "w_liquidity": policy_seen.w_liquidity,
+                        "beta_haircut_mult": policy_seen.beta_haircut_mult,
+                        "strength": policy_seen.strength,
+                    }))
+                    .unwrap(),
+                    serde_json::to_string(&serde_json::json!({
+                        "score": fit_seen.score,
+                        "signals": fit_seen.signals,
+                        "unavailable_reason": fit_seen.unavailable_reason,
+                    }))
+                    .unwrap(),
+                ));
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "market-regime-fit-v1.json disagrees with this implementation:\n{}",
+            mismatches.join("\n")
         );
     }
 }

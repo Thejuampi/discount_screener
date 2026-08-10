@@ -5,6 +5,7 @@ import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
@@ -17,9 +18,11 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
+import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
+import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
@@ -173,11 +176,11 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun dashboard_defaults_to_opportunities_with_aggressive_v2_scoring() {
+    fun dashboard_defaults_to_opportunities_with_aggressive_v3_scoring() {
         val state = DashboardUiState()
 
         assertEquals(DashboardTab.Opportunities, state.currentTab)
-        assertEquals(OpportunityScoringModel.AggressiveV2, state.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV3, state.opportunityScoringModel)
     }
 
     @Test
@@ -631,20 +634,16 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun toggle_opportunity_model_cycles_v2_to_v3_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
+    fun toggle_opportunity_model_cycles_v3_to_legacy_to_aggressive_to_v2_to_v3() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
             aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
         )
         val viewModel = testViewModel(repository)
-        assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
-
-        // Cycle: AggressiveV2 -> AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2.
-        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
-        advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
-        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
 
+        // The cycle is unchanged; the market dimension moved where it starts.
+        // Cycle: AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2 -> AggressiveV3.
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
@@ -660,6 +659,11 @@ class DashboardViewModelTest {
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
         assertEquals(OpportunityScoringModel.AggressiveV2, repository.lastRequestedOpportunityModel)
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
     }
 
     @Test
@@ -793,6 +797,8 @@ class DashboardViewModelTest {
             addDashboardSymbols = AddDashboardSymbolsUseCase(repository),
             selectDashboardProfile = SelectDashboardProfileUseCase(repository),
             toggleDashboardWatchlist = ToggleDashboardWatchlistUseCase(repository),
+            loadScoringPreferences = LoadScoringPreferencesUseCase(repository),
+            persistScoringPreferences = PersistScoringPreferencesUseCase(repository),
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
@@ -1051,6 +1057,15 @@ class DashboardViewModelTest {
                 isWatched = row.isWatched,
                 )
             }
+        }
+
+        var persistedScoringPreferences: ScoringPreferences? = null
+
+        override suspend fun loadScoringPreferences(): ScoringPreferences =
+            persistedScoringPreferences ?: ScoringPreferences()
+
+        override suspend fun persistScoringPreferences(preferences: ScoringPreferences) {
+            persistedScoringPreferences = preferences
         }
 
         override suspend fun loadDiscoverySnapshot(): DiscoverySnapshot {

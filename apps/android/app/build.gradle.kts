@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    jacoco
 }
 
 val localProperties = Properties().apply {
@@ -73,6 +74,9 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            enableUnitTestCoverage = true
+        }
         getByName("release") {
             signingConfig = if (hasCustomReleaseSigning) {
                 signingConfigs.getByName("release")
@@ -118,4 +122,49 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
 
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+/**
+ * Robolectric loads classes through its own sandbox classloader, which leaves them without a code
+ * location — JaCoCo drops those by default and reports every Robolectric-only class at zero, which
+ * reads as "untested" for code that is in fact exercised. `jdk.internal.*` is excluded because
+ * instrumenting it throws under Java 17.
+ */
+tasks.withType<Test>().configureEach {
+    extensions.configure<JacocoTaskExtension> {
+        isIncludeNoLocationClasses = true
+        excludes = listOf("jdk.internal.*")
+    }
+}
+
+/**
+ * Coverage for the debug unit tests.
+ *
+ * Generated sources are excluded rather than reported at zero: Compose's `*ComposableSingletons*`
+ * holders, Hilt-style `*_Factory` classes and `BuildConfig` are emitted by the toolchain, so
+ * counting them would move the number without any test being able to move it back.
+ */
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
+
+    val excluded = listOf(
+        "**/R.class", "**/R$*.class", "**/BuildConfig.*", "**/Manifest*.*",
+        "**/*_Factory.*", "**/*Test*.*", "**/ComposableSingletons*.*",
+        "**/*\$\$inlined*.*", "**/*_Impl*.*",
+    )
+    classDirectories.setFrom(
+        fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) { exclude(excluded) },
+    )
+    sourceDirectories.setFrom(files("src/main/kotlin"))
+    // Named directories, not a scan of the whole build folder. A `fileTree(buildDirectory)` makes
+    // this task an implicit consumer of every task that writes anywhere under `build/`, so running
+    // it alongside `assembleDebug` fails on an undeclared dependency on the dex tasks.
+    executionData.setFrom(
+        fileTree(layout.buildDirectory.dir("outputs/unit_test_code_coverage")) { include("**/*.exec") },
+        fileTree(layout.buildDirectory.dir("jacoco")) { include("*.exec") },
+    )
 }

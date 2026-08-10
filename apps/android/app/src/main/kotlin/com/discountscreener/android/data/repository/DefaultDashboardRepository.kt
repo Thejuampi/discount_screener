@@ -25,6 +25,7 @@ import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -81,6 +82,7 @@ import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.MarketSnapshot
@@ -118,6 +120,8 @@ import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
+import com.discountscreener.core.regime.MarketRegime
+import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
@@ -203,6 +207,12 @@ class DefaultDashboardRepository(
         remoteDirectoryClient = NasdaqTraderSymbolDirectoryClient(),
     ),
     private val secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
+    /**
+     * The market read behind the 4th scoring dimension. Null leaves every row's dimension
+     * `Unavailable`, which is what the tests that predate it want and what an install with no
+     * network gets.
+     */
+    private val marketDataRepository: MarketDataRepository? = null,
     private val nowProvider: () -> Long = { System.currentTimeMillis() / 1_000 },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val computeDispatcher: CoroutineDispatcher = ioDispatcher,
@@ -248,6 +258,10 @@ class DefaultDashboardRepository(
     private val freshnessTimestampBySymbol = linkedMapOf<String, Long>()
     private val companyNameBySymbol = linkedMapOf<String, String>()
     private val remoteSearchCache = linkedMapOf<String, RemoteSearchCacheEntry>()
+
+    private var marketRegime: MarketRegime? = null
+    private var regimeDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
+    private var regimeScoringEnabled = ScoringPreferences.DEFAULT_REGIME_ENABLED
 
     private var currentProfile = defaultProfile
     private var lastUpdatedAtEpochSeconds: Long? = null
@@ -298,6 +312,40 @@ class DefaultDashboardRepository(
         }
     }
 
+    override suspend fun loadScoringPreferences(): ScoringPreferences {
+        val preferences = stateStore.loadScoringPreferences()
+        stateMutex.withLock { regimeScoringEnabled = preferences.regimeScoringEnabled }
+        return preferences
+    }
+
+    override suspend fun persistScoringPreferences(preferences: ScoringPreferences) {
+        stateStore.saveScoringPreferences(preferences)
+        stateMutex.withLock { regimeScoringEnabled = preferences.regimeScoringEnabled }
+        updates.value = updates.value + 1
+    }
+
+    /**
+     * Read the market alongside the symbol refresh, never in front of it.
+     *
+     * A market read is one request per tracked symbol plus a dozen index series, and the dashboard
+     * has to render before any of that lands — so this is launched and forgotten. When a reading
+     * arrives it bumps [updates], the snapshot is rebuilt, and the fourth dimension appears. Until
+     * then every row reports it `Unavailable`, which is the truth.
+     */
+    private fun startMarketReadForCurrentProfile() {
+        val market = marketDataRepository ?: return
+        repositoryScope.launch {
+            val symbols = stateMutex.withLock { trackedSymbols.toList() }
+            val regime = runCatching { market.refreshIfStale(symbols) }.getOrNull() ?: return@launch
+            val dailySummaries = market.cachedDailySummaries()
+            stateMutex.withLock {
+                marketRegime = regime
+                regimeDailySummaries = dailySummaries
+            }
+            updates.value = updates.value + 1
+        }
+    }
+
     override suspend fun refreshAll(
         filter: ViewFilter,
         selectedSymbol: String?,
@@ -305,6 +353,7 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
         startRefreshForCurrentProfile(stateMutex.withLock { trackedSymbols.toList() })
+        startMarketReadForCurrentProfile()
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
@@ -1514,11 +1563,17 @@ class DefaultDashboardRepository(
                 fundamentalsScore = scoredRow?.fundamentalsScore,
                 technicalScore = scoredRow?.technicalScore,
                 forecastScore = scoredRow?.forecastScore,
+                regimeScore = scoredRow?.regimeScore,
                 compositeScore = scoredRow?.compositeScore ?: 0,
+                compositeScoreBase = scoredRow?.compositeScoreBase ?: 0,
                 coverageCount = scoredRow?.coverageCount ?: 0,
                 fundamentalsSignals = scoredRow?.fundamentalsSignals.orEmpty(),
                 technicalSignals = scoredRow?.technicalSignals.orEmpty(),
                 forecastSignals = scoredRow?.forecastSignals.orEmpty(),
+                regimeStatus = scoredRow?.regimeStatus ?: RegimeScoreStatus.NotApplicable,
+                regimeCauses = scoredRow?.regimeCauses.orEmpty(),
+                regimeSignals = scoredRow?.regimeSignals.orEmpty(),
+                regimeUnavailableReason = scoredRow?.regimeUnavailableReason,
                 companyName = resolvedCompanyNameLocked(projectedRow.symbol, detail)
                     ?: projectedRow.candidateRow.companyName,
                 rankMovement = rankMovement(baselineRank, currentIndex),
@@ -1686,6 +1741,9 @@ class DefaultDashboardRepository(
             chartSummariesBySymbol = chartSummaries,
             analysesBySymbol = dcfCache,
             scoringModel = scoringModel,
+            regimeSummariesBySymbol = regimeDailySummaries,
+            marketRegime = marketRegime,
+            regimeScoringEnabled = regimeScoringEnabled,
         ),
     )
 
@@ -1793,11 +1851,17 @@ class DefaultDashboardRepository(
             fundamentalsScore = row.fundamentalsScore,
             technicalScore = row.technicalScore,
             forecastScore = row.forecastScore,
+            regimeScore = row.regimeScore,
             compositeScore = row.compositeScore,
+            compositeScoreBase = row.compositeScoreBase,
             coverageCount = row.coverageCount,
             fundamentalsSignals = row.fundamentalsSignals,
             technicalSignals = row.technicalSignals,
             forecastSignals = row.forecastSignals,
+            regimeStatus = row.regimeStatus,
+            regimeCauses = row.regimeCauses,
+            regimeSignals = row.regimeSignals,
+            regimeUnavailableReason = row.regimeUnavailableReason,
             companyName = row.companyName,
             rankMovement = currentRankMovement,
             valuationChange = currentValuationChange,

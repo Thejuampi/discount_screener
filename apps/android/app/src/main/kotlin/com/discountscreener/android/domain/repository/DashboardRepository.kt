@@ -2,6 +2,7 @@ package com.discountscreener.android.domain.repository
 
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
@@ -23,6 +24,12 @@ interface DashboardRepository {
     suspend fun addSymbols(rawInput: String, filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
     suspend fun selectProfile(profile: String, filter: ViewFilter, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
     suspend fun toggleWatchlist(symbol: String, filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
+    /** Restores the persisted scoring model and market-dimension switch, and applies the latter. */
+    suspend fun loadScoringPreferences(): ScoringPreferences
+
+    /** Writes both, and re-renders — the switch changes every V3 row's score. */
+    suspend fun persistScoringPreferences(preferences: ScoringPreferences)
+
     suspend fun loadSystemStats(): SystemStats
     suspend fun pruneOldRevisions(retentionDays: Int): Int
     suspend fun clearAllData()

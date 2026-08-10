@@ -1,6 +1,7 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.serialization")
+    jacoco
 }
 
 kotlin {
@@ -17,4 +18,17 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    finalizedBy(tasks.jacocoTestReport)
+}
+
+/**
+ * Deliberately not `dependsOn(test)`. A dependency is skipped when the task it depends on fails,
+ * and this module carries pre-existing failures unrelated to coverage — so the report would vanish
+ * exactly when it is most worth reading. `finalizedBy` above still runs it after every test run.
+ */
+tasks.jacocoTestReport {
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
 }

@@ -14,6 +14,9 @@ import com.discountscreener.core.model.QuantLensReport
 import com.discountscreener.core.model.QuantLensRowSummary
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
+import com.discountscreener.core.regime.MarketContextUnavailableReason
+import com.discountscreener.core.regime.RegimeCause
+import com.discountscreener.core.regime.RegimeScoreStatus
 
 enum class DashboardStartupPhase {
     Restoring,
@@ -155,11 +158,19 @@ data class OpportunityListRow(
     val fundamentalsScore: Int? = null,
     val technicalScore: Int? = null,
     val forecastScore: Int? = null,
+    /** The 4th V3 bucket. Null unless [regimeStatus] is [RegimeScoreStatus.Included]. */
+    val regimeScore: Int? = null,
     val compositeScore: Int,
+    /** What the three original buckets alone score, so the dimension's impact is a subtraction. */
+    val compositeScoreBase: Int = compositeScore,
     val coverageCount: Int,
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
+    val regimeCauses: List<RegimeCause> = emptyList(),
+    val regimeSignals: List<String> = emptyList(),
+    val regimeUnavailableReason: MarketContextUnavailableReason? = null,
     val companyName: String? = null,
     val rankMovement: RankMovement? = null,
     val valuationChange: ValuationChange? = null,

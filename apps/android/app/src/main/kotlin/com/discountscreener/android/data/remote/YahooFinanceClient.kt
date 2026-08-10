@@ -298,9 +298,30 @@ open class YahooFinanceClient(
         }
     }
 
-    open suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> = withContext(Dispatchers.IO) {
-        val requestSymbol = yahooRequestSymbol(symbol)
+    open suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
         val (rangeToken, interval) = chartRangeSpec(range)
+        return fetchCandles(symbol, rangeToken, interval)
+    }
+
+    /**
+     * Candles over a raw Yahoo range and interval, for callers whose pairing has no [ChartRange].
+     *
+     * The market read needs `1y`/`1d` and `3mo`/`1d`; [ChartRange] offers neither — its `Year` is
+     * `1y`/`1wk`, fifty-two *weekly* bars. Adding members for the missing pairings is not an option:
+     * `ChartRange` is a published contract (`shared/contracts/chart-ranges.json`), it is serialized
+     * into persisted state, and it drives the chip row the user taps. So the enum keeps describing
+     * the chart UI's ranges and this takes the tokens directly.
+     *
+     * Index symbols work unchanged. `addPathSegment` percent-encodes the caret in `^VIX` to `%5E`,
+     * which the endpoint accepts and echoes back as `^VIX` — checked against the live endpoint
+     * rather than assumed, since a silent 404 here would read as "VIX unavailable" forever.
+     */
+    open suspend fun fetchCandles(
+        symbol: String,
+        rangeToken: String,
+        interval: String,
+    ): List<HistoricalCandle> = withContext(Dispatchers.IO) {
+        val requestSymbol = yahooRequestSymbol(symbol)
         val url = CHART_API_URL.toHttpUrl().newBuilder()
             .addPathSegment(requestSymbol)
             .addQueryParameter("range", rangeToken)

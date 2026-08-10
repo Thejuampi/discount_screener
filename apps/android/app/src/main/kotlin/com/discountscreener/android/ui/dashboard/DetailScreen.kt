@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
@@ -77,7 +78,7 @@ import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
 import com.discountscreener.android.presentation.dashboard.HistorySubview
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSectionUi
-import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.android.presentation.dashboard.QuantLensUiState
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
@@ -96,6 +97,8 @@ import com.discountscreener.core.model.ProjectedDetailData
 import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
 import com.discountscreener.core.model.QuantLensLensId
+import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import kotlin.math.abs
@@ -120,6 +123,9 @@ fun DetailScreen(
     tickerSearchLoading: Boolean = false,
     tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
+    scoreRow: OpportunityListRow? = null,
+    scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    regimeScoringEnabled: Boolean = true,
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -239,7 +245,11 @@ fun DetailScreen(
         ) {
             when (route.subtab) {
                 DetailSubtab.Snapshot -> SnapshotContent(
+                    route = route,
                     detail = detail,
+                    scoreRow = scoreRow,
+                    scoringModel = scoringModel,
+                    regimeScoringEnabled = regimeScoringEnabled,
                     chartRange = route.chartRange,
                     candles = charts[route.chartRange].orEmpty(),
                     replayOffset = route.replayOffset,
@@ -267,10 +277,146 @@ fun DetailScreen(
     }
 }
 
+/**
+ * Score, dimension breakdown and the scoring-model control, at the head of the Snapshot tab.
+ *
+ * It sat above the subtabs until it did not fit: on a phone the block plus the search bar pushed the
+ * tab row and the first line of content off the fold, so the screen opened on its own chrome. It
+ * lives inside Snapshot now, and scrolls away with everything else there. The cost is that the model
+ * chips are no longer reachable from Lens or History, which is a real loss — but Snapshot is the tab
+ * a ticker opens on, so the score is still the first thing seen.
+ *
+ * The row comes from the ranked opportunity set rather than being recomputed here — the list and
+ * the detail view read the same [OpportunityListRow], so a score shown here is by construction the
+ * score the list shows. A symbol reached from Tracked or Watch may not be in that set at all; that
+ * is a real state, and it says so rather than showing a zero.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DetailScoreHeader(
+    route: DetailRoute,
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
+    onAction: (DashboardAction) -> Unit,
+) {
+    Column(
+        // No horizontal padding: the Snapshot tab's own container already supplies it.
+        modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        rankPositionLabel(route)?.let { label ->
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (scoreRow == null) {
+            Text(
+                text = "Not in the ranked set under ${scoringModel.chipLabel()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ScoreBadge(score = scoreRow.compositeScore, scoringModel = scoringModel)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricToken(
+                    "F ${formatOpportunityBucket(scoreRow.fundamentalsScore, scoringModel)}",
+                    fundamentalsMetricColor(),
+                )
+                MetricToken(
+                    "T ${formatOpportunityBucket(scoreRow.technicalScore, scoringModel)}",
+                    technicalMetricColor(),
+                )
+                MetricToken(
+                    "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
+                    forecastMetricColor(),
+                )
+                if (scoreRow.regimeStatus == RegimeScoreStatus.Included) {
+                    MetricToken(
+                        "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(scoreRow.regimeScore, scoringModel)}",
+                        marketMetricColor(),
+                    )
+                }
+            }
+            MarketContextSection(row = scoreRow, scoringModel = scoringModel)
+        }
+        ScoringControlsRow(
+            selected = scoringModel,
+            regimeScoringEnabled = regimeScoringEnabled,
+            onAction = onAction,
+        )
+    }
+}
+
+/**
+ * What the market dimension did to this name — or, when it did nothing, why.
+ *
+ * Unlike the dense list row, this is where a missing fourth bucket must account for itself: four
+ * states, four different sentences, so no state can be mistaken for another. When it is included,
+ * the decomposition is shown rather than only the final score, because a composite that moved is
+ * worth nothing to a reader who cannot see what moved it.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MarketContextSection(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
+    val statusLine = marketDimensionStatusLine(row.regimeStatus, row.regimeUnavailableReason, scoringModel)
+    if (statusLine != null) {
+        Text(
+            text = statusLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+
+    Text(
+        text = marketDimensionImpactLine(row),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        topRegimeCauses(row.regimeCauses).forEach { cause ->
+            MetricToken(regimeCauseLabel(cause), regimeCauseColor(cause.effect))
+        }
+    }
+}
+
+/**
+ * Where this ticker sits in the list it was opened from, as `#60 of 80 · top 75%`.
+ *
+ * [DetailRoute.sourceSymbols] is the ranked, filtered list captured when the ticker was opened, so
+ * the ordinal is read straight off it rather than recomputed against a different ordering. The
+ * percentile counts from the top — rank 24 of 80 is `top 30%` — so a smaller number is a better
+ * placing, the same direction the ordinal reads.
+ *
+ * Returns null when the symbol is not in a ranked list at all; a single-symbol list gets the
+ * ordinal but no percentile, because "top 100%" of one thing says nothing.
+ */
+internal fun rankPositionLabel(route: DetailRoute): String? {
+    val index = route.sourceSymbols.indexOf(route.symbol)
+    if (index < 0) return null
+    val total = route.sourceSymbols.size
+    val rank = index + 1
+    if (total <= 1) return "#$rank of $total"
+    val percentile = ((rank * 100.0) / total).roundToInt().coerceIn(1, 100)
+    return "#$rank of $total · top $percentile%"
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SnapshotContent(
+    route: DetailRoute,
     detail: SymbolDetail?,
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
     replayOffset: Int,
@@ -310,6 +456,16 @@ private fun SnapshotContent(
     )
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            DetailScoreHeader(
+                route = route,
+                scoreRow = scoreRow,
+                scoringModel = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                onAction = onAction,
+            )
+        }
+
         item {
             var currentDetail = displayedDetail
             if (currentDetail == null) {
@@ -476,16 +632,13 @@ private fun QuantLensMiniStrip(
     onAction: (DashboardAction) -> Unit,
 ) {
     val visibleChips = if (chips.isEmpty()) {
-        listOf(QuantLensChipUi(null, "Lens loading", QuantLensSeverity.Muted))
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensQualifier.Unknown))
     } else {
         chips.take(5)
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         visibleChips.forEach { chip ->
-            AssistChip(
-                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) },
-                label = { Text(chip.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            )
+            SignalChip(chip) { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) }
         }
     }
 }
@@ -588,7 +741,7 @@ private fun InlineNoticeCard(notice: DashboardNotice) {
 private fun QuantLensHeaderStrip(chips: List<QuantLensChipUi>) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         chips.forEach { chip ->
-            QuantLensChipText(chip)
+            SignalChip(chip)
         }
     }
 }
@@ -609,7 +762,7 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            QuantLensChipText(section.chip)
+            SignalChip(section.chip)
         }
         Text(section.primaryLine, style = MaterialTheme.typography.bodyMedium)
         section.evRailModel?.let { rail ->
@@ -636,31 +789,6 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
             }
         }
     }
-}
-
-@Composable
-private fun QuantLensChipText(chip: QuantLensChipUi) {
-    val colors = quantLensColors(chip.severity)
-    Text(
-        text = chip.label,
-        style = MaterialTheme.typography.labelMedium,
-        color = colors.first,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(colors.second)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    )
-}
-
-@Composable
-private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = when (severity) {
-    QuantLensSeverity.Supportive -> BullishChartColor to BullishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Neutral -> MaterialTheme.colorScheme.tertiary to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
-    QuantLensSeverity.Warning -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
-    QuantLensSeverity.Risk -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
 @Composable

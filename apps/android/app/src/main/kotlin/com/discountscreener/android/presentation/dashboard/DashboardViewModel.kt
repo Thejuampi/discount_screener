@@ -16,6 +16,7 @@ import com.discountscreener.android.domain.model.DiscoveryJobStatus
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.parseDiscoveryMembershipDelta
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.TrackedSymbolRow
@@ -32,9 +33,11 @@ import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
+import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
+import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
@@ -142,6 +145,7 @@ sealed interface DashboardAction {
     data class SelectProfile(val profile: String) : DashboardAction
     data object ToggleOpportunityScoringModel : DashboardAction
     data class SetOpportunityScoringModel(val model: OpportunityScoringModel) : DashboardAction
+    data class SetRegimeScoringEnabled(val enabled: Boolean) : DashboardAction
     data object RefreshSystemStats : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
@@ -171,7 +175,9 @@ data class DashboardUiState(
     val watchlistSymbols: List<String> = emptyList(),
     val candidateRows: List<CandidateRow> = emptyList(),
     val opportunityRows: List<OpportunityListRow> = emptyList(),
-    val opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
+    val opportunityScoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
+    /** The market dimension's runtime switch. Only V3 rows are affected by it. */
+    val regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
     val issues: List<IssueRecord> = emptyList(),
     val detailRoute: DetailRoute? = null,
     val detailData: SymbolDetail? = null,
@@ -205,7 +211,15 @@ data class DashboardUiState(
     val discoveryLastSourceHint: String? = null,
     val discoveryBusy: Boolean = false,
     val discoveryStatusMessage: String? = null,
-)
+) {
+    /**
+     * The ranked row backing the open ticker, or null when that symbol is not in the current
+     * opportunity set. Derived rather than stored, so the detail view can never show a score the
+     * list has already moved past.
+     */
+    val detailScoreRow: OpportunityListRow?
+        get() = detailRoute?.let { route -> opportunityRows.firstOrNull { it.symbol == route.symbol } }
+}
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 class DashboardViewModel(
@@ -217,6 +231,8 @@ class DashboardViewModel(
     private val addDashboardSymbols: AddDashboardSymbolsUseCase,
     private val selectDashboardProfile: SelectDashboardProfileUseCase,
     private val toggleDashboardWatchlist: ToggleDashboardWatchlistUseCase,
+    private val loadScoringPreferences: LoadScoringPreferencesUseCase,
+    private val persistScoringPreferences: PersistScoringPreferencesUseCase,
     private val loadSystemStats: LoadSystemStatsUseCase,
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
@@ -277,6 +293,7 @@ class DashboardViewModel(
             is DashboardAction.SelectProfile -> selectProfile(action.profile)
             DashboardAction.ToggleOpportunityScoringModel -> toggleOpportunityScoringModel()
             is DashboardAction.SetOpportunityScoringModel -> setOpportunityScoringModel(action.model)
+            is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
@@ -311,6 +328,13 @@ class DashboardViewModel(
                 .collectLatest { loadEstimates() }
         }
         viewModelScope.launch {
+            // Restored first: rendering the list under a model the user did not choose and then
+            // re-ranking it a moment later is worse than waiting one database read.
+            val preferences = loadScoringPreferences()
+            _state.value = _state.value.copy(
+                opportunityScoringModel = preferences.opportunityModel,
+                regimeScoringEnabled = preferences.regimeScoringEnabled,
+            )
             val initial = bootstrapDashboard(
                 currentFilter(),
                 _state.value.detailRoute?.symbol,
@@ -801,6 +825,7 @@ class DashboardViewModel(
         }
         _state.value = _state.value.copy(opportunityScoringModel = model)
         viewModelScope.launch {
+            persistScoringPreferences(currentScoringPreferences())
             render(
                 getDashboardSnapshot(
                     currentFilter(),
@@ -811,6 +836,33 @@ class DashboardViewModel(
             )
         }
     }
+
+    /**
+     * The switch re-scores every V3 row, so the snapshot is rebuilt rather than the flag flipped in
+     * place. Persisting first is what makes the repository apply it before the rows are rebuilt.
+     */
+    private fun setRegimeScoringEnabled(enabled: Boolean) {
+        if (_state.value.regimeScoringEnabled == enabled) {
+            return
+        }
+        _state.value = _state.value.copy(regimeScoringEnabled = enabled)
+        viewModelScope.launch {
+            persistScoringPreferences(currentScoringPreferences())
+            render(
+                getDashboardSnapshot(
+                    currentFilter(),
+                    _state.value.detailRoute?.symbol,
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                ),
+            )
+        }
+    }
+
+    private fun currentScoringPreferences() = ScoringPreferences(
+        opportunityModel = _state.value.opportunityScoringModel,
+        regimeScoringEnabled = _state.value.regimeScoringEnabled,
+    )
 
     private fun currentFilter(): ViewFilter =
         ViewFilter(query = _state.value.query, watchlistOnly = false)
@@ -983,6 +1035,8 @@ class DashboardViewModel(
                         addDashboardSymbols = useCases.addDashboardSymbols,
                         selectDashboardProfile = useCases.selectDashboardProfile,
                         toggleDashboardWatchlist = useCases.toggleDashboardWatchlist,
+                        loadScoringPreferences = useCases.loadScoringPreferences,
+                        persistScoringPreferences = useCases.persistScoringPreferences,
                         loadSystemStats = useCases.loadSystemStats,
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,

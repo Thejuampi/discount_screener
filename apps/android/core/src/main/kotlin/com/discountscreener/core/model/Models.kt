@@ -1,5 +1,8 @@
 package com.discountscreener.core.model
 
+import com.discountscreener.core.regime.MarketContextUnavailableReason
+import com.discountscreener.core.regime.RegimeCause
+import com.discountscreener.core.regime.RegimeScoreStatus
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -783,6 +786,23 @@ data class ChartRangeSummary(
      * (100 = median, 200 = 2× median). Null when volume is unavailable.
      */
     val volumeRatioHundredths: Int? = null,
+    /** Highest high over the trailing 52-week window (last 252 bars, or fewer if that is all there is). */
+    val high52wCents: Long? = null,
+    /** Lowest low over the same trailing window. */
+    val low52wCents: Long? = null,
+    /** Latest close's position inside the 52-week range, 0..100. Null when the range is degenerate. */
+    val pos52wPct: Double? = null,
+    /**
+     * Bollinger %B: (close − lower) / (upper − lower) over a 20-period, 2σ band.
+     * 0..1 inside the bands, outside that range beyond them. Null below 20 candles.
+     */
+    val bbPercentB: Double? = null,
+    /** Wilder 14-period ADX, 0..100 — trend strength, direction-blind. Null below 29 candles. */
+    val adx: Double? = null,
+    /** Wilder +DI at the latest bar. Null whenever [adx] is. */
+    val plusDi: Double? = null,
+    /** Wilder −DI at the latest bar. Null whenever [adx] is. */
+    val minusDi: Double? = null,
 )
 
 @Serializable
@@ -797,11 +817,25 @@ data class OpportunityRow(
     val fundamentalsScore: Int? = null,
     val technicalScore: Int? = null,
     val forecastScore: Int? = null,
+    /** The 4th V3 bucket: fit with the active market-regime policy. Null unless [regimeStatus] is Included. */
+    val regimeScore: Int? = null,
     val compositeScore: Int,
+    /**
+     * The composite the three original buckets alone produce. Kept beside [compositeScore] rather
+     * than recomputed on demand so the UI can show `base · context · final` and derive the
+     * dimension's impact as a subtraction — one number stored, not two that can disagree.
+     *
+     * Equal to [compositeScore] whenever the market dimension is not included.
+     */
+    val compositeScoreBase: Int = compositeScore,
     val coverageCount: Int,
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
+    val regimeCauses: List<RegimeCause> = emptyList(),
+    val regimeSignals: List<String> = emptyList(),
+    val regimeUnavailableReason: MarketContextUnavailableReason? = null,
     val companyName: String? = null,
 )
 
