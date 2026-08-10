@@ -21,13 +21,20 @@ class OperatingValuationTest {
         val candidate = valueForwardEarnings(input())
 
         assertEquals(CandidateStatus.Available, candidate.status)
-        assertEquals(18_176L, candidate.intrinsicValueCents)
+        // Both numbers moved when the terminal stopped granting free growth: the perpetuity is now
+        // charged the capital that growth consumes, and a non-provisional cost of equity earns
+        // Solid rather than a flat Soft. Both are the shared contract's values, not this test's.
+        assertEquals(14_056L, candidate.intrinsicValueCents)
         assertEquals(300, candidate.stableGrowthBps)
         assertEquals(7, candidate.projectionYears)
-        assertEquals(ModelQuality.Soft, candidate.quality)
+        assertEquals(ModelQuality.Solid, candidate.quality)
         assertEquals(EvidenceFamily.AnalystDerivedModel, candidate.evidenceFamily)
         assertTrue(candidate.fingerprint.contains("|terminal_spread=100|"))
         assertTrue(candidate.fingerprint.contains("|observed=19990|period_end=20200|"))
+        // No return on capital was measured, so growth is priced as value-neutral: the payout is
+        // 1 - g/r with r = the cost of equity. Pinned because a silent drop back to a full payout
+        // is exactly the free-growth defect, and it moves no other assertion here.
+        assertTrue(candidate.fingerprint.contains("|roic=none|terminal_payout=6667"))
     }
 
     @Test
@@ -42,13 +49,19 @@ class OperatingValuationTest {
             ),
         )
         assertEquals(RouteStatus.Disputed, structural.status)
-        assertNull(structural.selectedModel)
-        assertNull(structural.selectedValueCents)
-        assertEquals(11_370L, structural.candidateDifferenceBps)
+        // A dispute no longer suppresses the number. It is still a dispute — the status says so
+        // and keeps the name out of ranking scores — but the value published is the forward lane's,
+        // whose evidence set strictly contains the FCFF lane's under structural distortion. These
+        // assert the resolution rather than merely allowing it: a router that went back to
+        // publishing nothing would fail here, and so would one that resolved to the wrong lane.
+        assertEquals(OperatingModel.ForwardEarningsPower, structural.selectedModel)
+        assertEquals(forward.intrinsicValueCents, structural.selectedValueCents)
+        assertEquals(9_505L, structural.candidateDifferenceBps)
         assertEquals(
             listOf(
                 RouteReason.StructuralDistortionPresent,
                 RouteReason.CandidateDisagreement,
+                RouteReason.DisagreementResolvedToForwardEvidence,
             ),
             structural.reasons,
         )
@@ -316,14 +329,19 @@ class OperatingValuationTest {
     @Test
     fun `durable reported and holdout cohorts recompute in normal gate`() {
         val contract = json.decodeFromString<OperatingContract>(Files.readString(findContract()))
+        // Every value here is Rust's, symbol for symbol, from the same list in
+        // `operating_valuation::durable_reported_and_holdout_cohorts_recompute_in_normal_gate`.
+        // That is the point of the pin: the two engines read one frozen contract and must agree
+        // digit for digit, so a divergence in either port fails here rather than surfacing as a
+        // different number on a phone than on the desktop.
         val expected = listOf(
-            "DVN" to 5_613L, "GDDY" to 12_827L, "WYNN" to 10_741L, "SNDK" to 212_949L,
-            "BR" to 22_403L, "BSX" to 6_481L, "AMZN" to 25_081L, "AVGO" to 46_264L,
-            "HPE" to 7_938L, "MU" to 161_129L, "ORCL" to 23_228L, "AAPL" to 28_177L,
-            "CPRT" to 3_406L, "CEG" to 31_403L, "ALB" to 18_233L, "T" to 3_127L,
-            "MSFT" to 61_424L, "NVDA" to 27_522L, "JNJ" to 24_928L, "XOM" to 13_227L,
-            "V" to null, "WMT" to 11_246L, "GOOGL" to 40_710L, "META" to 93_724L,
-            "HD" to 33_234L, "PG" to 17_400L, "MRK" to 14_303L,
+            "DVN" to 5_018L, "GDDY" to 11_155L, "WYNN" to 8_631L, "SNDK" to 207_006L,
+            "BR" to 20_858L, "BSX" to 5_245L, "AMZN" to 23_092L, "AVGO" to 43_101L,
+            "HPE" to 5_620L, "MU" to 158_235L, "ORCL" to 20_778L, "AAPL" to 27_823L,
+            "CPRT" to 3_178L, "CEG" to 27_689L, "ALB" to 15_492L, "T" to 2_749L,
+            "MSFT" to 57_583L, "NVDA" to 27_522L, "JNJ" to 24_928L, "XOM" to 11_695L,
+            "V" to null, "WMT" to 9_909L, "GOOGL" to 39_040L, "META" to 86_464L,
+            "HD" to 31_356L, "PG" to 17_400L, "MRK" to 14_303L,
         )
         val reportedErrors = mutableListOf<Double>()
         val holdoutErrors = mutableListOf<Double>()
@@ -524,6 +542,11 @@ private data class ValidationName(
     val nearGrowthBps: Int,
     val resolvedCostOfEquityBps: Int,
     val holdYears: Int,
+    /**
+     * Frozen unlevered return on capital. `null` is an explicit resolution, not a default:
+     * `returnOnCapitalAbsentReason` in the contract records which no-evidence case the row is.
+     */
+    val returnOnCapitalBps: Int?,
     val fcffValidationOnlyCents: Long?,
     val routeEvidence: List<String>,
     val validationOnly: ValidationOnly,
@@ -544,8 +567,10 @@ private data class ValidationName(
         ResolvedCostOfEquity(
             resolvedCostOfEquityBps,
             WaccFieldSource.IndustryShrink,
-            true,
-            null,
+            // Durable cohort rows use market-sourced CoE semantics (solid when non-provisional).
+            // Soft rates must not be the default for these pins.
+            false,
+            1_728_000_000,
             "poc5-resolved-rate:$symbol",
         ),
         ProjectionPolicy(
@@ -563,6 +588,9 @@ private data class ValidationName(
             100,
             100,
         ),
+        // Frozen rows carry no FCFF diagnostics, so this is the unlevered-ROE branch of the
+        // production resolver, not the through-cycle one.
+        returnOnCapitalBps = returnOnCapitalBps,
     )
 
     fun distortions() = routeEvidence.mapNotNull {

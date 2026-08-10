@@ -22,7 +22,7 @@ const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
 const val MODEL_POLICY_VERSION = "business-class-policy/16-growth-earned-sustaining-capex"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
-const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/1"
+const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/2"
 
 private const val DEFAULT_RF_BPS = 430
 private const val DEFAULT_ERP_BPS = 450
