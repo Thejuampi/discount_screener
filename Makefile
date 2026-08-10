@@ -1,4 +1,7 @@
-REPO_ROOT := $(subst \,/,$(shell cd))
+# `$(shell cd)` is a cmd.exe idiom: bare `cd` prints the working directory there, but under sh it
+# changes to $HOME and prints nothing, leaving every path below rooted at `/`. CURDIR is make's own,
+# so it is right whatever shell make picked.
+REPO_ROOT := $(subst \,/,$(CURDIR))
 DESKTOP_DIR := $(REPO_ROOT)/apps/desktop
 ANDROID_DIR := $(REPO_ROOT)/apps/android
 WINDOWS_DIR := $(REPO_ROOT)/apps/windows
@@ -7,7 +10,8 @@ APK_EXPORT_DEBUG := $(DIST_DIR)/discount-screener-debug.apk
 APK_EXPORT_RELEASE := $(DIST_DIR)/discount-screener-release.apk
 
 CARGO := cargo
-GRADLE := gradlew.bat
+# Absolute, not bare: cmd.exe resolves a bare `gradlew.bat` from the working directory, sh does not.
+GRADLE := $(ANDROID_DIR)/gradlew.bat
 NPX := npx
 
 .PHONY: all build test clean fmt check release run \
