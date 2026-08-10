@@ -219,7 +219,15 @@ fun stanceMatrix(env: String, sentiment: String): String = when (env) {
     else -> "Mixed"
 }
 
-private fun classifyPrimaryRegime(
+/**
+ * Internal rather than private so the test source set — a Gradle friend of main — can table-test it.
+ *
+ * Nine regimes behind a precedence cascade of seven inputs. Driving each one out through [compose]
+ * means solving for pillar scores that land the composed environment in a band *and* keep the four
+ * earlier branches from firing first, which makes the fixture, not the classifier, the thing under
+ * test. The cascade order is the substance here, and it is only assertable head-on.
+ */
+internal fun classifyPrimaryRegime(
     env: String,
     sentimentZone: String,
     environmentScore: Int,
@@ -247,9 +255,15 @@ private fun classifyPrimaryRegime(
     return "Unknown"
 }
 
-private data class StanceRisk(val multiplierBps: Int, val addBias: Int, val preferQuality: Boolean)
+internal data class StanceRisk(val multiplierBps: Int, val addBias: Int, val preferQuality: Boolean)
 
-private fun stanceRiskParams(stance: String, ceiling: Int): StanceRisk {
+/**
+ * Internal for the same reason as [classifyPrimaryRegime], and with a sharper edge: an unrecognised
+ * stance falls through to `Triple(base, 0, false)` and returns a plausible neutral rather than an
+ * error. A stance the matrix emits but this table has never heard of would therefore be silent —
+ * and the two tables are joined only by string literals. That is the join the test checks.
+ */
+internal fun stanceRiskParams(stance: String, ceiling: Int): StanceRisk {
     val base = ceiling.toDouble() / 100.0
     val (multiplier, bias, quality) = when (stance) {
         "BloodInStreets" -> Triple(base * 0.55, 2, true)
