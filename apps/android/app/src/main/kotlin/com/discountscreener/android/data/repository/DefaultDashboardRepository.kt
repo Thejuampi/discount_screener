@@ -869,7 +869,7 @@ class DefaultDashboardRepository(
                         recordTerminalFailure = recordTerminalIssues || !needsRecovery,
                     )
                 }
-                queuePersist(persistenceDelta)
+                persistDelta(persistenceDelta)
                 emitUpdate()
             }
     }
@@ -2351,6 +2351,22 @@ class DefaultDashboardRepository(
         )
     }
 
+    /**
+     * Persist one delta, waiting for the write.
+     *
+     * Callers used to hand this to `repositoryScope.launch` — fire-and-forget, one coroutine per
+     * symbol. On a 20-symbol profile that is harmless: the writes finish as fast as they arrive. On
+     * the 501-symbol universe it is an unbounded producer feeding a consumer that serialises on a
+     * single SQLite writer, so the launches pile up, each holding its delta and a write in flight.
+     * Measured on emulator-5554 (3 GB): native memory went from 12 MB to 1.7 GB in twenty seconds
+     * until Scudo could not map another page and aborted the process. The same run capped at 20
+     * symbols sat flat at 18 MB for over two minutes — the cost is the pile-up, not the data.
+     *
+     * Waiting is the whole fix. Both callers already collect sequentially, so awaiting the write
+     * back-pressures the pipeline end to end: the upstream `flatMapMerge` buffer fills, fetches stop
+     * being issued, and the refresh runs at the speed the disk can absorb rather than the speed the
+     * network can produce. Slower by the cost of the writes, and bounded.
+     */
     private suspend fun persistDelta(delta: PersistenceDelta) {
         if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
             stateStore.persistBatch(delta.rawCaptures, delta.revisions)
@@ -2358,11 +2374,6 @@ class DefaultDashboardRepository(
         stateStore.replaceIssues(delta.issues)
     }
 
-    private fun queuePersist(delta: PersistenceDelta) {
-        repositoryScope.launch {
-            persistDelta(delta)
-        }
-    }
 
     private suspend fun cancelActiveProfileWork() {
         val (previousSwitchJob, previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
@@ -2766,7 +2777,7 @@ class DefaultDashboardRepository(
                     val toApply = if (finalRound) result else result.copy(errors = emptyList())
                     val delta = stateMutex.withLock { applyEnrichmentResultLocked(toApply) }
                     if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-                        queuePersist(delta)
+                        persistDelta(delta)
                     }
                     emitUpdate()
                 }

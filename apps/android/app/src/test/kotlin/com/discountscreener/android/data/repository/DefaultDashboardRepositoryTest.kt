@@ -94,7 +94,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_uses_qa_profile_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.replaceTrackedSymbols(listOf("MSTR"))
             val repository = buildRepository(
@@ -115,7 +115,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_product_default_sp500_still_available_when_requested() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(
                 store = store,
@@ -133,7 +133,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_restores_cached_rows_and_reorders_by_persisted_ranking() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -155,7 +155,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_filters_projected_tracked_rows_by_query() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -169,7 +169,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_row_quant_lens_summary_uses_projected_row_summary() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -192,7 +192,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_provider_uncertain_quant_lens_summary_uses_projected_row_summary() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(
                 store,
@@ -213,7 +213,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_populates_projected_screen_data_for_warm_rows() = runTest(dispatcher) {
-        var store = SQLiteStateStore(context)
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -227,7 +227,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_legacy_tracked_row_semantics_mirror_projected_screen_data() = runTest(dispatcher) {
-        var store = SQLiteStateStore(context)
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -243,7 +243,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_legacy_opportunity_row_semantics_mirror_projected_screen_data() = runTest(dispatcher) {
-        var store = SQLiteStateStore(context)
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -259,7 +259,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun bootstrap_source_free_dcf_projection_is_visible_in_legacy_row() = runTest(dispatcher) {
-        var store = SQLiteStateStore(context)
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store, nvdaDcfAnalysis = sourceFreeDcfAnalysis(), nvdaHasExternalSignal = false)
             var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
@@ -287,7 +287,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun ticker_switching_with_reversed_analyst_range_keeps_detail_snapshots_alive() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(
                 store = store,
@@ -313,7 +313,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun ticker_switching_with_extreme_valuation_upside_keeps_quant_lens_non_fatal() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = listOf(
@@ -419,7 +419,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_compares_live_rows_against_cached_rank_and_weighted_fair_value() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             val client = object : FakeYahooFinanceClient(delayMs = 5) {
@@ -463,7 +463,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_stable_sorted_rank_does_not_report_relative_rerank() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store)
             val client = object : FakeYahooFinanceClient(delayMs = 5) {
@@ -495,7 +495,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun ensure_detail_loaded_replays_distinct_historical_weighted_fair_values() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = emptyList(),
@@ -574,7 +574,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun sqlite_persists_complete_deduped_pricing_candles_across_chart_captures() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = listOf(
@@ -614,7 +614,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun sqlite_load_pricing_history_merges_pricing_table_and_legacy_raw_ranges() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = listOf(
@@ -1008,7 +1008,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun first_launch_shows_loading_rows_then_progressively_refreshes_live_data() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = FakeYahooFinanceClient(delayMs = 25)
             val repository = buildRepository(store = store, client = client)
@@ -1038,7 +1038,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_keeps_cached_symbol_live_when_quote_html_404s_but_chart_succeeds() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var quoteHtml404Mode = false
             val client = object : FakeYahooFinanceClient() {
@@ -1114,7 +1114,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_uses_dcf_fallback_for_quote_html_404() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1192,7 +1192,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_uses_dcf_fallback_without_chart_when_quote_page_has_market_cap() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1261,7 +1261,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun enrichment_uses_yahoo_when_secondary_provider_is_not_configured() = runTest(dispatcher) {
-        var store = SQLiteStateStore(context)
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1292,7 +1292,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_recomputes_cached_dcf() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var refreshedFundamentals = dcfFundamentals("AAPL")
             var aaplTimeseriesFetches = 0
@@ -1352,7 +1352,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun refresh_fallback_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1394,7 +1394,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun detail_load_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = emptyList(),
@@ -1430,7 +1430,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun enrichment_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1465,7 +1465,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun enrichment_persists_not_eligible_marker_when_all_dcf_sources_are_unusable() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
@@ -1518,7 +1518,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun recompute_preserves_restored_only_resolver_state() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             store.persistBatch(
                 rawCaptures = emptyList(),
@@ -1588,7 +1588,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun not_eligible_reopens_when_fundamentals_fingerprint_changes() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var useUnusable = true
             var fundamentals = dcfFundamentals("AAPL")
@@ -1975,7 +1975,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun enrichment_populates_all_chart_ranges_after_refresh() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = FakeYahooFinanceClient(delayMs = 5)
             val repository = buildRepository(store = store, client = client)
@@ -2005,7 +2005,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun enrichment_records_issues_for_failed_fetches_without_retry() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var fetchCount = 0
             val failingClient = object : FakeYahooFinanceClient(delayMs = 5) {
@@ -2033,7 +2033,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun ensure_detail_is_instant_after_enrichment() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             var enrichmentFetchRequestCount = 0
             val countingClient = object : FakeYahooFinanceClient(delayMs = 5) {
@@ -2074,7 +2074,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun search_meli_returns_remote_suggestion() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = FakeYahooFinanceClient().apply {
                 registerSearch(
@@ -2098,7 +2098,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun search_mercado_returns_meli_from_remote_lookup() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = FakeYahooFinanceClient().apply {
                 registerSearch(
@@ -2123,7 +2123,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun search_ms_stays_local_without_remote_lookup() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = FakeYahooFinanceClient()
             val repository = buildRepository(store = store, client = client)
@@ -2142,7 +2142,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun ensure_detail_loaded_fetches_ad_hoc_symbol_without_tracking_it() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
 
@@ -2159,7 +2159,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun fallback_snapshot_uses_latest_chart_close_when_quote_html_is_missing() {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
 
@@ -2192,7 +2192,7 @@ class DefaultDashboardRepositoryTest {
 
     @Test
     fun quote_html_404_is_suppressible_only_for_quote_page_errors() {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
 
