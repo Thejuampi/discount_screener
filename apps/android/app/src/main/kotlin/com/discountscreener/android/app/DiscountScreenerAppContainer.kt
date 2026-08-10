@@ -38,6 +38,13 @@ import com.discountscreener.android.presentation.dashboard.DashboardViewModel
 class DiscountScreenerAppContainer(context: Context) {
     private val appContext = context.applicationContext
 
+    /**
+     * One client for everything that talks to Yahoo. It carries the cookie jar and crumb session
+     * the endpoint requires, so a second instance would bootstrap its own — twice the handshakes,
+     * and two independent things to get rate-limited. The market read shares this one.
+     */
+    private val yahooClient by lazy { YahooFinanceClient() }
+
     private val repository by lazy {
         // Debug installs (agent live QA / make android-run) always start on profile qa (≤20).
         // Release keeps full product default (sp500). Silence is not permission for full-universe thrash.
@@ -49,7 +56,7 @@ class DiscountScreenerAppContainer(context: Context) {
         DefaultDashboardRepository(
             stateStore = SQLiteStateStore(appContext),
             profileCatalog = ProfileCatalog(appContext.assets),
-            yahooClient = YahooFinanceClient(),
+            yahooClient = yahooClient,
             universeCatalog = UniverseCatalog(appContext.assets),
             secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
             logger = AndroidAppLogger(),
