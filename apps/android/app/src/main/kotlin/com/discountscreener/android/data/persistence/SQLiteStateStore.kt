@@ -36,6 +36,7 @@ import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.DiscoveryUniverseEngine
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.OpportunityScoringModel
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -182,9 +183,21 @@ data class TipRanksAttemptRecord(
     val sentAtEpochSeconds: Long? = null,
 )
 
-class SQLiteStateStore(
+open class SQLiteStateStore(
     private val appContext: Context,
     private val json: Json = Json { ignoreUnknownKeys = true },
+    /**
+     * Where the blocking SQLite work runs.
+     *
+     * Every suspending method here hops off the caller's thread, and until now it hopped to
+     * `Dispatchers.IO` by name. That is invisible while writes are fire-and-forget, but a caller
+     * that *awaits* a write — which the refresh loop now does, to bound its memory — suspends on a
+     * real thread pool. A test driving a `TestDispatcher` then finds its scheduler idle while the
+     * write is still in flight, so `advanceUntilIdle()` returns before the work it is meant to
+     * cover and the assertion races the disk. Injecting the dispatcher lets a test put its own
+     * virtual clock over the writes; production keeps the same `Dispatchers.IO` it always had.
+     */
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION) {
 
     init {
@@ -238,7 +251,7 @@ class SQLiteStateStore(
         throw IllegalStateException("sqlite schema version $oldVersion is newer than supported version $newVersion")
     }
 
-    suspend fun loadWarmStart(): PersistenceBootstrap = withContext(Dispatchers.IO) {
+    suspend fun loadWarmStart(): PersistenceBootstrap = withContext(ioDispatcher) {
         val db = readableDatabase
         setMetaValue(db, META_KEY_LAST_STARTUP_AT, nowEpochSeconds().toString())
         PersistenceBootstrap(
@@ -251,7 +264,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun resetWarmStartState() = withContext(Dispatchers.IO) {
+    suspend fun resetWarmStartState() = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -277,7 +290,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun getSystemStats(): SystemStats = withContext(Dispatchers.IO) {
+    suspend fun getSystemStats(): SystemStats = withContext(ioDispatcher) {
         val db = readableDatabase
         SystemStats(
             databaseFileSizeBytes = databaseFileSizeBytes(),
@@ -295,7 +308,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun pruneOldRevisions(retentionDays: Int): Int = withContext(Dispatchers.IO) {
+    suspend fun pruneOldRevisions(retentionDays: Int): Int = withContext(ioDispatcher) {
         val db = writableDatabase
         val cutoff = nowEpochSeconds() - retentionDays.toLong() * 86_400L
         val cutoffArg = arrayOf(cutoff.toString())
@@ -331,7 +344,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceTrackedSymbols(symbols: List<String>) = withContext(Dispatchers.IO) {
+    suspend fun replaceTrackedSymbols(symbols: List<String>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -352,7 +365,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceWatchlist(symbols: List<String>) = withContext(Dispatchers.IO) {
+    suspend fun replaceWatchlist(symbols: List<String>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -370,7 +383,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceIssues(issues: List<PersistedIssueRecord>) = withContext(Dispatchers.IO) {
+    open suspend fun replaceIssues(issues: List<PersistedIssueRecord>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -398,10 +411,10 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun persistBatch(
+    open suspend fun persistBatch(
         rawCaptures: List<RawCapture>,
         revisions: List<SymbolRevisionInput>,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         if (rawCaptures.isEmpty() && revisions.isEmpty()) {
             return@withContext
         }
@@ -486,7 +499,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(Dispatchers.IO) {
+    suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         db.rawQuery(
             """
@@ -515,7 +528,7 @@ class SQLiteStateStore(
     }
 
     /** Public normalized data; credential deletion deliberately does not clear this cache. */
-    suspend fun loadTipRanksForecast(symbol: String): TipRanksForecast? = withContext(Dispatchers.IO) {
+    suspend fun loadTipRanksForecast(symbol: String): TipRanksForecast? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT payload_json FROM tipranks_forecast_cache WHERE symbol = ?",
             arrayOf(symbol.uppercase()),
@@ -524,7 +537,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun saveTipRanksForecast(forecast: TipRanksForecast) = withContext(Dispatchers.IO) {
+    suspend fun saveTipRanksForecast(forecast: TipRanksForecast) = withContext(ioDispatcher) {
         writableDatabase.insertWithOnConflict(
             "tipranks_forecast_cache", null,
             ContentValues().apply {
@@ -541,7 +554,7 @@ class SQLiteStateStore(
         symbol: String,
         reservedAtEpochSeconds: Long,
         monthlyLimit: Int = 50,
-    ): TipRanksAttemptRecord? = withContext(Dispatchers.IO) {
+    ): TipRanksAttemptRecord? = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -568,7 +581,7 @@ class SQLiteStateStore(
     }
 
     /** The sent mark is committed independently from forecast-cache writes. */
-    suspend fun markTipRanksAttemptSent(id: Long, sentAtEpochSeconds: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun markTipRanksAttemptSent(id: Long, sentAtEpochSeconds: Long): Boolean = withContext(ioDispatcher) {
         writableDatabase.update(
             "tipranks_attempt", ContentValues().apply { put("state", "sent"); put("sent_at", sentAtEpochSeconds) },
             "id = ? AND state = 'reserved'", arrayOf(id.toString()),
@@ -576,14 +589,14 @@ class SQLiteStateStore(
     }
 
     /** Cancellation is legal only before dispatch. */
-    suspend fun cancelReservedTipRanksAttempt(id: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun cancelReservedTipRanksAttempt(id: Long): Boolean = withContext(ioDispatcher) {
         writableDatabase.update(
             "tipranks_attempt", ContentValues().apply { put("state", "cancelled") },
             "id = ? AND state = 'reserved'", arrayOf(id.toString()),
         ) == 1
     }
 
-    suspend fun saveTipRanksUsageSnapshot(record: TipRanksUsageRecord) = withContext(Dispatchers.IO) {
+    suspend fun saveTipRanksUsageSnapshot(record: TipRanksUsageRecord) = withContext(ioDispatcher) {
         writableDatabase.insertWithOnConflict("tipranks_usage_snapshot", null, ContentValues().apply {
             put("provider_month_utc", record.providerMonthUtc)
             put("provider_used", record.providerUsed)
@@ -592,7 +605,7 @@ class SQLiteStateStore(
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    suspend fun loadLatestTipRanksUsageSnapshot(providerMonthUtc: String): TipRanksUsageRecord? = withContext(Dispatchers.IO) {
+    suspend fun loadLatestTipRanksUsageSnapshot(providerMonthUtc: String): TipRanksUsageRecord? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT provider_used, provider_limit, captured_at FROM tipranks_usage_snapshot WHERE provider_month_utc = ?",
             arrayOf(providerMonthUtc),
@@ -888,7 +901,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(Dispatchers.IO) {
+    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         mergePersistedChartHistory(
             symbol = symbol,
@@ -1055,7 +1068,7 @@ class SQLiteStateStore(
     suspend fun saveEstimatesSnapshot(
         report: IndexEstimatesReport,
         replaceSameDay: Boolean = false,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1086,7 +1099,7 @@ class SQLiteStateStore(
     }
 
     suspend fun getEstimatesHistory(profileName: String): List<IndexEstimatesReport> =
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
             // Newest N first, then reverse to chronological order for charts.
             readableDatabase.rawQuery(
                 """
@@ -1116,7 +1129,7 @@ class SQLiteStateStore(
     suspend fun replaceEstimatesHistory(
         profileName: String,
         reports: List<IndexEstimatesReport>,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1155,7 +1168,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun loadDiscoveryConfig(): DiscoveryConfig = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryConfig(): DiscoveryConfig = withContext(ioDispatcher) {
         val db = readableDatabase
         val scoringModel = loadMetaValue(db, META_KEY_DISCOVERY_SCORING_MODEL)
             ?.let { raw -> OpportunityScoringModel.entries.firstOrNull { it.name == raw } }
@@ -1169,7 +1182,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun saveDiscoveryConfig(config: DiscoveryConfig) = withContext(Dispatchers.IO) {
+    suspend fun saveDiscoveryConfig(config: DiscoveryConfig) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1182,7 +1195,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(Dispatchers.IO) {
+    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(ioDispatcher) {
         val db = readableDatabase
         ScoringPreferences(
             opportunityModel = loadMetaValue(db, META_KEY_SCORING_OPPORTUNITY_MODEL)
@@ -1198,7 +1211,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun saveScoringPreferences(preferences: ScoringPreferences) = withContext(Dispatchers.IO) {
+    suspend fun saveScoringPreferences(preferences: ScoringPreferences) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1210,11 +1223,11 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun discoverySymbolCount(): Int = withContext(Dispatchers.IO) {
+    suspend fun discoverySymbolCount(): Int = withContext(ioDispatcher) {
         readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_symbol").simpleQueryForLong().toInt()
     }
 
-    suspend fun loadDiscoverySymbols(): List<String> = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoverySymbols(): List<String> = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT symbol FROM discovery_symbol ORDER BY symbol ASC",
             emptyArray(),
@@ -1234,7 +1247,7 @@ class SQLiteStateStore(
     suspend fun applyDiscoveryMembershipMerge(
         seed: Collection<String>,
         sourceUniverse: String,
-    ): DiscoveryMembershipMerge = withContext(Dispatchers.IO) {
+    ): DiscoveryMembershipMerge = withContext(ioDispatcher) {
         val db = writableDatabase
         val existing = db.rawQuery(
             "SELECT symbol FROM discovery_symbol",
@@ -1274,7 +1287,7 @@ class SQLiteStateStore(
         plan
     }
 
-    suspend fun upsertDiscoveryScores(rows: List<DiscoveryScoreRow>) = withContext(Dispatchers.IO) {
+    suspend fun upsertDiscoveryScores(rows: List<DiscoveryScoreRow>) = withContext(ioDispatcher) {
         if (rows.isEmpty()) return@withContext
         val db = writableDatabase
         db.beginTransaction()
@@ -1321,7 +1334,7 @@ class SQLiteStateStore(
         limit: Int,
         offset: Int = 0,
         qualifiedOnly: Boolean = true,
-    ): List<DiscoveryScoreRow> = withContext(Dispatchers.IO) {
+    ): List<DiscoveryScoreRow> = withContext(ioDispatcher) {
         val qualifiedClause = if (qualifiedOnly) "AND s.is_qualified = 1" else ""
         readableDatabase.rawQuery(
             """
@@ -1366,7 +1379,7 @@ class SQLiteStateStore(
     suspend fun countDiscoveryScores(
         minScore: Int,
         qualifiedOnly: Boolean = true,
-    ): Int = withContext(Dispatchers.IO) {
+    ): Int = withContext(ioDispatcher) {
         val qualifiedClause = if (qualifiedOnly) "AND is_qualified = 1" else ""
         readableDatabase.compileStatement(
             """
@@ -1380,11 +1393,11 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun discoveryScoredSymbolCount(): Int = withContext(Dispatchers.IO) {
+    suspend fun discoveryScoredSymbolCount(): Int = withContext(ioDispatcher) {
         readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_score").simpleQueryForLong().toInt()
     }
 
-    suspend fun loadDiscoveryMaxScoredAt(): Long? = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryMaxScoredAt(): Long? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT MAX(scored_at) FROM discovery_score",
             emptyArray(),
@@ -1397,18 +1410,18 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadDiscoveryLastSourceHint(): String? = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryLastSourceHint(): String? = withContext(ioDispatcher) {
         loadMetaValue(readableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT)
     }
 
-    suspend fun saveDiscoveryLastSourceHint(hint: String) = withContext(Dispatchers.IO) {
+    suspend fun saveDiscoveryLastSourceHint(hint: String) = withContext(ioDispatcher) {
         setMetaValue(writableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT, hint)
     }
 
     suspend fun createDiscoveryJob(
         kind: DiscoveryJobKind,
         totalSymbols: Int,
-    ): Long = withContext(Dispatchers.IO) {
+    ): Long = withContext(ioDispatcher) {
         val db = writableDatabase
         db.insertOrThrow(
             "discovery_job",
@@ -1429,7 +1442,7 @@ class SQLiteStateStore(
         jobId: Long,
         completedSymbols: Int,
         totalSymbols: Int? = null,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val values = ContentValues().apply {
             put("completed_symbols", completedSymbols)
             if (totalSymbols != null) {
@@ -1444,7 +1457,7 @@ class SQLiteStateStore(
         status: DiscoveryJobStatus,
         completedSymbols: Int? = null,
         errorSummary: String? = null,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val values = ContentValues().apply {
             put("status", status.storageValue)
             put("finished_at", nowEpochSeconds())
@@ -1456,7 +1469,7 @@ class SQLiteStateStore(
         writableDatabase.update("discovery_job", values, "job_id = ?", arrayOf(jobId.toString()))
     }
 
-    suspend fun loadLatestDiscoveryJob(): DiscoveryJobRecord? = withContext(Dispatchers.IO) {
+    suspend fun loadLatestDiscoveryJob(): DiscoveryJobRecord? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             """
             SELECT job_id, kind, status, started_at, finished_at, total_symbols, completed_symbols, error_summary
@@ -1483,7 +1496,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun clearDiscoveryData() = withContext(Dispatchers.IO) {
+    suspend fun clearDiscoveryData() = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {

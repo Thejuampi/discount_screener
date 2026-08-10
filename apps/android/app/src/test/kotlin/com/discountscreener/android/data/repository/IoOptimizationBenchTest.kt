@@ -59,7 +59,7 @@ class IoOptimizationBenchTest {
 
     @Test
     fun dow_refresh_enrich_stays_under_post_optimization_ceilings() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = CountingYahooClient()
             val repository = DefaultDashboardRepository(
@@ -112,7 +112,7 @@ class IoOptimizationBenchTest {
 
     @Test
     fun detail_open_does_not_refetch_cached_ranges() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = CountingYahooClient()
             val repository = DefaultDashboardRepository(

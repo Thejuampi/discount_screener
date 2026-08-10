@@ -101,7 +101,7 @@ class MarketDimensionRankingTest {
     /** A preference that reached the ranking must also have reached the database. */
     @Test
     fun the_switch_is_written_where_a_cold_start_will_find_it() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store)
             repository.persistScoringPreferences(ScoringPreferences(regimeScoringEnabled = false))
@@ -120,7 +120,7 @@ class MarketDimensionRankingTest {
     private suspend fun TestScope.withRepository(
         block: suspend (DefaultDashboardRepository) -> Unit,
     ) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store)
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
