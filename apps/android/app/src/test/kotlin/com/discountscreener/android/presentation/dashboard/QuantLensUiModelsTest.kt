@@ -179,6 +179,21 @@ class QuantLensUiModelsTest {
             band = ExpectedValueRangeBand.Sparse,
             reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
         ),
+        evidenceStrength: QuantLensEvidenceStrength = QuantLensEvidenceStrength(
+            primaryStatus = QuantLensPrimaryStatus.Sparse,
+            band = EvidenceStrengthBand.Sparse,
+            reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
+        ),
+        correlationRisk: QuantLensCorrelationRisk = QuantLensCorrelationRisk(
+            primaryStatus = QuantLensPrimaryStatus.Unavailable,
+            band = CorrelationRiskBand.Unavailable,
+            reasonCodes = listOf(QuantLensReasonCode.InsufficientLocalHistory),
+        ),
+        trendReliability: QuantLensTrendReliability = QuantLensTrendReliability(
+            primaryStatus = QuantLensPrimaryStatus.Insufficient,
+            band = TrendReliabilityBand.Insufficient,
+            reasonCodes = listOf(QuantLensReasonCode.InsufficientTrendSamples),
+        ),
     ) = QuantLensReport(
         symbol = "ACME",
         selectedRange = ChartRange.Month,
@@ -186,22 +201,10 @@ class QuantLensUiModelsTest {
         modelVersion = QuantLensModelVersion.CURRENT,
         inputFingerprint = "fingerprint",
         primaryStatus = QuantLensPrimaryStatus.Available,
-        evidenceStrength = QuantLensEvidenceStrength(
-            primaryStatus = QuantLensPrimaryStatus.Sparse,
-            band = EvidenceStrengthBand.Sparse,
-            reasonCodes = listOf(QuantLensReasonCode.ScaffoldPending),
-        ),
+        evidenceStrength = evidenceStrength,
         expectedValueRange = expectedValueRange,
-        correlationRisk = QuantLensCorrelationRisk(
-            primaryStatus = QuantLensPrimaryStatus.Unavailable,
-            band = CorrelationRiskBand.Unavailable,
-            reasonCodes = listOf(QuantLensReasonCode.InsufficientLocalHistory),
-        ),
-        trendReliability = QuantLensTrendReliability(
-            primaryStatus = QuantLensPrimaryStatus.Insufficient,
-            band = TrendReliabilityBand.Insufficient,
-            reasonCodes = listOf(QuantLensReasonCode.InsufficientTrendSamples),
-        ),
+        correlationRisk = correlationRisk,
+        trendReliability = trendReliability,
         horizonContext = horizonContext,
         similarSetups = QuantLensSimilarSetups(
             primaryStatus = QuantLensPrimaryStatus.Sparse,
@@ -372,4 +375,291 @@ class QuantLensUiModelsTest {
         assertNotNull(section.evRailModel)
         assertTrue(section.evRailModel!!.isStale)
     }
+
+    // ── Which way a signal reads ─────────────────────────────────────────────
+
+    /**
+     * The defect the qualifier exists to fix, stated as a pair.
+     *
+     * Chip direction used to come from [QuantLensPrimaryStatus] — which answers "did the lens
+     * compute?", not "is this good?". A clear downtrend and a clear uptrend both report `Available`,
+     * so both would have been painted favourable. Same band, opposite movement, opposite reading:
+     * either test alone would still pass on a constant, so both are here.
+     */
+    @Test
+    fun a_clear_downtrend_reads_strongly_adverse() {
+        assertEquals(
+            QuantLensQualifier.StrongNegative,
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Reliable, -1_200)), QuantLensLensId.TrendReliability),
+        )
+    }
+
+    @Test
+    fun a_clear_uptrend_reads_strongly_favourable() {
+        assertEquals(
+            QuantLensQualifier.StrongPositive,
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Reliable, 1_200)), QuantLensLensId.TrendReliability),
+        )
+    }
+
+    /** Movement the trend itself does not support is not a direction, however large it is. */
+    @Test
+    fun a_choppy_trend_reads_neutral_however_far_price_moved() {
+        assertEquals(
+            QuantLensQualifier.Neutral,
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Noisy, 1_200)), QuantLensLensId.TrendReliability),
+        )
+    }
+
+    /** The band says how emphatic; the support-versus-conflict split says which way. */
+    @Test
+    fun evidence_that_conflicts_more_than_it_supports_reads_adverse() {
+        assertEquals(
+            QuantLensQualifier.StrongNegative,
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Strong, support = 1, conflict = 4)), QuantLensLensId.EvidenceStrength),
+        )
+    }
+
+    @Test
+    fun the_same_split_read_the_other_way_round_is_favourable() {
+        assertEquals(
+            QuantLensQualifier.StrongPositive,
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Strong, support = 4, conflict = 1)), QuantLensLensId.EvidenceStrength),
+        )
+    }
+
+    /**
+     * Totality over the band, rather than one hand-picked case: a new band, or a band quietly
+     * re-pointed, has to show up here.
+     */
+    @Test
+    fun moving_with_the_market_is_the_only_overlap_reading_that_is_strongly_adverse() {
+        assertEquals(
+            listOf(CorrelationRiskBand.High),
+            CorrelationRiskBand.values().toList().filter {
+                qualifierOf(report(correlationRisk = correlation(it)), QuantLensLensId.CorrelationRisk) ==
+                    QuantLensQualifier.StrongNegative
+            },
+        )
+    }
+
+    /**
+     * Every "no reading" band across three lenses, in one list. Asserted together because the
+     * failure mode is one of them defaulting to favourable while the others behave.
+     */
+    @Test
+    fun a_lens_that_could_not_read_carries_no_direction() {
+        val unmeasured = listOf(
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Sparse)), QuantLensLensId.EvidenceStrength),
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Unavailable)), QuantLensLensId.EvidenceStrength),
+            qualifierOf(report(correlationRisk = correlation(CorrelationRiskBand.Sparse)), QuantLensLensId.CorrelationRisk),
+            qualifierOf(report(correlationRisk = correlation(CorrelationRiskBand.Unavailable)), QuantLensLensId.CorrelationRisk),
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Insufficient, 1_200)), QuantLensLensId.TrendReliability),
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Unavailable, 1_200)), QuantLensLensId.TrendReliability),
+        )
+
+        assertEquals(emptyList<QuantLensQualifier>(), unmeasured.filter { it != QuantLensQualifier.Unknown })
+    }
+
+    /** An estimate whose pessimistic end is a loss is not an upside, whatever its best guess says. */
+    @Test
+    fun an_expected_value_range_that_straddles_zero_reads_neutral() {
+        assertEquals(
+            QuantLensQualifier.Neutral,
+            qualifierOf(report(expectedValueRange = weightedEv(1_200, low = 9_600L, high = 12_400L)), QuantLensLensId.ExpectedValueRange, price = 10_000L),
+        )
+    }
+
+    @Test
+    fun a_material_upside_is_emphatic_and_a_slim_one_is_not() {
+        assertEquals(
+            listOf(QuantLensQualifier.StrongPositive, QuantLensQualifier.Positive),
+            listOf(2_500, 500).map {
+                qualifierOf(report(expectedValueRange = weightedEv(it, low = 10_100L, high = 12_400L)), QuantLensLensId.ExpectedValueRange, price = 10_000L)
+            },
+        )
+    }
+
+    /** The scale is symmetric: the same magnitudes, the other way round, read equally emphatic. */
+    @Test
+    fun a_material_downside_is_emphatic_and_a_slim_one_is_not() {
+        assertEquals(
+            listOf(QuantLensQualifier.StrongNegative, QuantLensQualifier.Negative),
+            listOf(-2_500, -500).map {
+                qualifierOf(report(expectedValueRange = weightedEv(it, low = 7_600L, high = 9_900L)), QuantLensLensId.ExpectedValueRange, price = 10_000L)
+            },
+        )
+    }
+
+    /** No expectation and an expectation of exactly nothing are both "no direction", not upside. */
+    @Test
+    fun an_expectation_that_measured_nothing_either_way_reads_neutral() {
+        assertEquals(
+            listOf(QuantLensQualifier.Neutral, QuantLensQualifier.Neutral),
+            listOf(0, null).map {
+                qualifierOf(report(expectedValueRange = weightedEv(it, low = 10_100L, high = 12_400L)), QuantLensLensId.ExpectedValueRange, price = 10_000L)
+            },
+        )
+    }
+
+    /**
+     * The weaker band keeps the direction and drops the emphasis — one plus, not two. Both signs
+     * are here because a band that only ever softened one side would still read as a bias.
+     */
+    @Test
+    fun a_provisional_reading_keeps_its_direction_and_loses_its_emphasis() {
+        assertEquals(
+            listOf(QuantLensQualifier.Positive, QuantLensQualifier.Negative),
+            listOf(4 to 1, 1 to 4).map { (support, conflict) ->
+                qualifierOf(
+                    report(evidenceStrength = evidence(EvidenceStrengthBand.Provisional, support, conflict)),
+                    QuantLensLensId.EvidenceStrength,
+                )
+            },
+        )
+    }
+
+    @Test
+    fun a_moderate_trend_keeps_its_direction_and_loses_its_emphasis() {
+        assertEquals(
+            listOf(QuantLensQualifier.Positive, QuantLensQualifier.Negative),
+            listOf(1_200, -1_200).map {
+                qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Moderate, it)), QuantLensLensId.TrendReliability)
+            },
+        )
+    }
+
+    /** A trend the lens rates clearly but never measured a movement for is not good news. */
+    @Test
+    fun a_trend_with_no_measured_movement_reads_neutral_however_reliable_the_band() {
+        assertEquals(
+            listOf(QuantLensQualifier.Neutral, QuantLensQualifier.Neutral),
+            listOf(TrendReliabilityBand.Reliable, TrendReliabilityBand.Moderate).map {
+                qualifierOf(report(trendReliability = trend(it, movementBps = null)), QuantLensLensId.TrendReliability)
+            },
+        )
+    }
+
+    /**
+     * A lens that read clearly and found no direction is not the same as one that could not read:
+     * these must be [QuantLensQualifier.Neutral], never [QuantLensQualifier.Unknown].
+     */
+    @Test
+    fun a_lens_that_read_and_found_no_direction_is_neutral_rather_than_unread() {
+        val measured = listOf(
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Mixed, support = 2, conflict = 2)), QuantLensLensId.EvidenceStrength),
+            qualifierOf(report(trendReliability = trend(TrendReliabilityBand.Flat, 0)), QuantLensLensId.TrendReliability),
+            qualifierOf(report(evidenceStrength = evidence(EvidenceStrengthBand.Strong, support = 2, conflict = 2)), QuantLensLensId.EvidenceStrength),
+        )
+
+        assertEquals(emptyList<QuantLensQualifier>(), measured.filter { it != QuantLensQualifier.Neutral })
+    }
+
+    // ── Which way a row chip reads ───────────────────────────────────────────
+
+    /**
+     * The compact row state keeps a label but not the numbers under it — no signed movement, no
+     * support/conflict split. "Clear trend" is therefore not enough to call it good news.
+     */
+    @Test
+    fun a_row_label_that_carries_no_direction_reads_neutral_not_favourable() {
+        val summary = summary(state(QuantLensLensId.TrendReliability, QuantLensRowLabel.TrendReliable))
+
+        assertEquals(QuantLensQualifier.Neutral, mapRowQuantLensSummary(summary).single().qualifier)
+    }
+
+    @Test
+    fun a_row_range_judged_from_its_pessimistic_end_is_not_emphatic() {
+        val summary = summary(state(QuantLensLensId.ExpectedValueRange, QuantLensRowLabel.EvRange, low = 500, high = 9_000))
+
+        assertEquals(QuantLensQualifier.Positive, mapRowQuantLensSummary(summary).single().qualifier)
+    }
+
+    /**
+     * The row states that do carry a direction, all of them, in one list.
+     *
+     * [QuantLensRowLabel.CorrLow] is absent because it cannot reach a chip: the eligibility filter
+     * in [mapRowQuantLensSummary] promotes only elevated and high overlap, so a row never shows
+     * "moves independently". Its arm stays in the mapping to keep the `when` exhaustive.
+     */
+    @Test
+    fun the_row_labels_that_carry_a_direction_of_their_own_read_it() {
+        val directed = listOf(
+            QuantLensLensId.CorrelationRisk to QuantLensRowLabel.CorrElevated,
+            QuantLensLensId.CorrelationRisk to QuantLensRowLabel.CorrHigh,
+            QuantLensLensId.ExpectedValueRange to QuantLensRowLabel.EvTension,
+            QuantLensLensId.ExpectedValueRange to QuantLensRowLabel.EvDisputed,
+        )
+
+        assertEquals(
+            listOf(
+                QuantLensQualifier.Negative,
+                QuantLensQualifier.StrongNegative,
+                QuantLensQualifier.Negative,
+                QuantLensQualifier.Negative,
+            ),
+            directed.map { (lensId, label) ->
+                mapRowQuantLensSummary(summary(state(lensId, label, status = QuantLensPrimaryStatus.Available))).single().qualifier
+            },
+        )
+    }
+
+    /** The mirror of the rule above: nearer zero means the optimistic end when both are losses. */
+    @Test
+    fun a_row_range_wholly_below_zero_is_judged_from_its_optimistic_end() {
+        val summary = summary(state(QuantLensLensId.ExpectedValueRange, QuantLensRowLabel.EvRange, low = -9_000, high = -500))
+
+        assertEquals(QuantLensQualifier.Negative, mapRowQuantLensSummary(summary).single().qualifier)
+    }
+
+    /** A range label with no numbers under it cannot be read either way. */
+    @Test
+    fun a_row_range_with_a_missing_bound_reads_neutral() {
+        val summary = summary(state(QuantLensLensId.ExpectedValueRange, QuantLensRowLabel.EvRange, low = 500, high = null))
+
+        assertEquals(QuantLensQualifier.Neutral, mapRowQuantLensSummary(summary).single().qualifier)
+    }
+
+    @Test
+    fun a_row_chip_for_a_lens_that_never_read_carries_no_direction() {
+        val summary = summary(
+            state(QuantLensLensId.EvidenceStrength, QuantLensRowLabel.EvidenceUnavailable, status = QuantLensPrimaryStatus.Unavailable),
+        )
+
+        assertEquals(QuantLensQualifier.Unknown, mapRowQuantLensSummary(summary).single().qualifier)
+    }
+
+    private fun qualifierOf(report: QuantLensReport, lensId: QuantLensLensId, price: Long? = null) =
+        mapQuantLensReport(report, price)!!.sections.first { it.lensId == lensId }.chip.qualifier
+
+    private fun trend(band: TrendReliabilityBand, movementBps: Int?) = QuantLensTrendReliability(
+        primaryStatus = QuantLensPrimaryStatus.Available,
+        band = band,
+        movementBps = movementBps,
+        reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+    )
+
+    private fun evidence(band: EvidenceStrengthBand, support: Int = 0, conflict: Int = 0) = QuantLensEvidenceStrength(
+        primaryStatus = QuantLensPrimaryStatus.Available,
+        band = band,
+        supportCount = support,
+        conflictCount = conflict,
+        reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+    )
+
+    private fun correlation(band: CorrelationRiskBand) = QuantLensCorrelationRisk(
+        primaryStatus = QuantLensPrimaryStatus.Available,
+        band = band,
+        reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+    )
+
+    private fun weightedEv(weightedUpsideBps: Int?, low: Long, high: Long) = QuantLensExpectedValueRange(
+        primaryStatus = QuantLensPrimaryStatus.Available,
+        band = ExpectedValueRangeBand.ScenarioWeighted,
+        weightedUpsideBps = weightedUpsideBps,
+        lowFairValueCents = low,
+        highFairValueCents = high,
+        freshnessQualifier = QuantLensFreshnessQualifier.Fresh,
+        reasonCodes = listOf(QuantLensReasonCode.HistoricalBaselineAvailable),
+    )
 }

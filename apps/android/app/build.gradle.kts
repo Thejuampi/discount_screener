@@ -160,7 +160,11 @@ tasks.register<JacocoReport>("jacocoTestReport") {
         fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) { exclude(excluded) },
     )
     sourceDirectories.setFrom(files("src/main/kotlin"))
+    // Named directories, not a scan of the whole build folder. A `fileTree(buildDirectory)` makes
+    // this task an implicit consumer of every task that writes anywhere under `build/`, so running
+    // it alongside `assembleDebug` fails on an undeclared dependency on the dex tasks.
     executionData.setFrom(
-        fileTree(layout.buildDirectory) { include("**/testDebugUnitTest.exec", "**/jacoco/*.exec") },
+        fileTree(layout.buildDirectory.dir("outputs/unit_test_code_coverage")) { include("**/*.exec") },
+        fileTree(layout.buildDirectory.dir("jacoco")) { include("*.exec") },
     )
 }

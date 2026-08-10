@@ -78,7 +78,7 @@ import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
 import com.discountscreener.android.presentation.dashboard.HistorySubview
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSectionUi
-import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.android.presentation.dashboard.QuantLensUiState
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
@@ -213,14 +213,6 @@ fun DetailScreen(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
         )
 
-        DetailScoreHeader(
-            route = route,
-            scoreRow = scoreRow,
-            scoringModel = scoringModel,
-            regimeScoringEnabled = regimeScoringEnabled,
-            onAction = onAction,
-        )
-
         ScrollableTabRow(
             selectedTabIndex = when (route.subtab) {
                 DetailSubtab.Snapshot -> 0
@@ -253,7 +245,11 @@ fun DetailScreen(
         ) {
             when (route.subtab) {
                 DetailSubtab.Snapshot -> SnapshotContent(
+                    route = route,
                     detail = detail,
+                    scoreRow = scoreRow,
+                    scoringModel = scoringModel,
+                    regimeScoringEnabled = regimeScoringEnabled,
                     chartRange = route.chartRange,
                     candles = charts[route.chartRange].orEmpty(),
                     replayOffset = route.replayOffset,
@@ -282,8 +278,13 @@ fun DetailScreen(
 }
 
 /**
- * Score, dimension breakdown and the scoring-model control, above the subtabs so they stay visible
- * on Snapshot, Lens and History alike.
+ * Score, dimension breakdown and the scoring-model control, at the head of the Snapshot tab.
+ *
+ * It sat above the subtabs until it did not fit: on a phone the block plus the search bar pushed the
+ * tab row and the first line of content off the fold, so the screen opened on its own chrome. It
+ * lives inside Snapshot now, and scrolls away with everything else there. The cost is that the model
+ * chips are no longer reachable from Lens or History, which is a real loss — but Snapshot is the tab
+ * a ticker opens on, so the score is still the first thing seen.
  *
  * The row comes from the ranked opportunity set rather than being recomputed here — the list and
  * the detail view read the same [OpportunityListRow], so a score shown here is by construction the
@@ -300,10 +301,8 @@ private fun DetailScoreHeader(
     onAction: (DashboardAction) -> Unit,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .padding(bottom = 6.dp),
+        // No horizontal padding: the Snapshot tab's own container already supplies it.
+        modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         rankPositionLabel(route)?.let { label ->
@@ -410,7 +409,11 @@ internal fun rankPositionLabel(route: DetailRoute): String? {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SnapshotContent(
+    route: DetailRoute,
     detail: SymbolDetail?,
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
     replayOffset: Int,
@@ -450,6 +453,16 @@ private fun SnapshotContent(
     )
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            DetailScoreHeader(
+                route = route,
+                scoreRow = scoreRow,
+                scoringModel = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                onAction = onAction,
+            )
+        }
+
         item {
             var currentDetail = displayedDetail
             if (currentDetail == null) {
@@ -616,16 +629,13 @@ private fun QuantLensMiniStrip(
     onAction: (DashboardAction) -> Unit,
 ) {
     val visibleChips = if (chips.isEmpty()) {
-        listOf(QuantLensChipUi(null, "Lens loading", QuantLensSeverity.Muted))
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensQualifier.Unknown))
     } else {
         chips.take(5)
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         visibleChips.forEach { chip ->
-            AssistChip(
-                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) },
-                label = { Text(chip.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            )
+            SignalChip(chip) { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Lens)) }
         }
     }
 }
@@ -728,7 +738,7 @@ private fun InlineNoticeCard(notice: DashboardNotice) {
 private fun QuantLensHeaderStrip(chips: List<QuantLensChipUi>) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         chips.forEach { chip ->
-            QuantLensChipText(chip)
+            SignalChip(chip)
         }
     }
 }
@@ -749,7 +759,7 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            QuantLensChipText(section.chip)
+            SignalChip(section.chip)
         }
         Text(section.primaryLine, style = MaterialTheme.typography.bodyMedium)
         section.evRailModel?.let { rail ->
@@ -776,31 +786,6 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
             }
         }
     }
-}
-
-@Composable
-private fun QuantLensChipText(chip: QuantLensChipUi) {
-    val colors = quantLensColors(chip.severity)
-    Text(
-        text = chip.label,
-        style = MaterialTheme.typography.labelMedium,
-        color = colors.first,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(colors.second)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    )
-}
-
-@Composable
-private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = when (severity) {
-    QuantLensSeverity.Supportive -> BullishChartColor to BullishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Neutral -> MaterialTheme.colorScheme.tertiary to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
-    QuantLensSeverity.Warning -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
-    QuantLensSeverity.Risk -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
 @Composable

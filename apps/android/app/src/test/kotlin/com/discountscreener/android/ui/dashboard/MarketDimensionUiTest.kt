@@ -253,7 +253,9 @@ class MarketDimensionUiTest {
         val actions = mutableListOf<DashboardAction>()
         setDetailContent(row = includedRow(base = 31, final = 39), onAction = actions::add)
 
-        composeRule.onNodeWithText("Market context on").performClick()
+        // Scrolled to first: the score header lives inside the Snapshot tab's lazy list now, so on a
+        // short screen the switch can sit below the fold — where a click would land on nothing.
+        composeRule.onNodeWithText("Market context on").performScrollTo().performClick()
 
         assertEquals(listOf(DashboardAction.SetRegimeScoringEnabled(false)), actions)
     }

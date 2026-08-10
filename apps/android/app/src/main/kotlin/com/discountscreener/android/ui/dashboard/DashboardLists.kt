@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,7 +38,7 @@ import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
-import com.discountscreener.android.presentation.dashboard.QuantLensSeverity
+import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.DiscoveryTriage
 import com.discountscreener.core.engine.DiscoveryUniverseEngine
@@ -286,19 +287,12 @@ internal fun parseDiscoveryConfidence(raw: String?): ConfidenceBand? =
 @Composable
 private fun QuantLensStrip(chips: List<QuantLensChipUi>) {
     val visibleChips = if (chips.isEmpty()) {
-        listOf(QuantLensChipUi(null, "Lens loading", QuantLensSeverity.Muted))
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensQualifier.Unknown))
     } else {
         chips.take(3)
     }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        visibleChips.forEach { chip ->
-            val colors = quantLensColors(chip.severity)
-            ChangeBadge(
-                label = chip.label,
-                contentColor = colors.first,
-                backgroundColor = colors.second,
-            )
-        }
+        visibleChips.forEach { chip -> SignalChip(chip) }
     }
 }
 
@@ -504,7 +498,7 @@ private fun ChangeBadge(
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
-            .clip(androidx.compose.foundation.shape.RoundedCornerShape(999.dp))
+            .clip(RoundedCornerShape(999.dp))
             .background(backgroundColor)
             .padding(horizontal = 8.dp, vertical = 3.dp),
     )
@@ -541,15 +535,6 @@ private fun decisionStateColors(decisionState: RowDecisionState?): Pair<Color, C
     RowDecisionState.Watch -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
     RowDecisionState.Avoid -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
     null -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
-}
-
-@Composable
-private fun quantLensColors(severity: QuantLensSeverity): Pair<Color, Color> = when (severity) {
-    QuantLensSeverity.Supportive -> BullishChartColor to BullishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Neutral -> MaterialTheme.colorScheme.tertiary to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
-    QuantLensSeverity.Warning -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
-    QuantLensSeverity.Risk -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
-    QuantLensSeverity.Muted -> MaterialTheme.colorScheme.outline to MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
 }
 
 @Composable
@@ -631,7 +616,7 @@ internal fun ScoreBadge(score: Int, scoringModel: OpportunityScoringModel) {
         color = textColor,
         style = MaterialTheme.typography.labelMedium,
         modifier = Modifier
-            .clip(androidx.compose.foundation.shape.RoundedCornerShape(999.dp))
+            .clip(RoundedCornerShape(999.dp))
             .background(backgroundColor)
             .padding(horizontal = 10.dp, vertical = 4.dp),
     )

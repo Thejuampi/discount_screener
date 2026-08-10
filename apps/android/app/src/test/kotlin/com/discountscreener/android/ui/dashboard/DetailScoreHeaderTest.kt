@@ -12,6 +12,7 @@ import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
+import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -36,6 +37,21 @@ class DetailScoreHeaderTest {
         setDetailContent(scoreRow = scoreRow(composite = 42))
 
         composeRule.onNodeWithText("Score 42").assertIsDisplayed()
+    }
+
+    /**
+     * The block lives inside Snapshot now, not in the chrome above the subtabs.
+     *
+     * It moved because on a phone the old placement plus the search bar pushed the tab row and the
+     * first line of content off the fold, so a ticker opened on nothing but its own header. The
+     * assertion that pins the move is the *absence*: the old layout rendered the score on every
+     * subtab, so it would fail here while the positive case above kept passing.
+     */
+    @Test
+    fun the_score_block_belongs_to_the_snapshot_tab_not_to_the_chrome_above_it() {
+        setDetailContent(scoreRow = scoreRow(composite = 42), subtab = DetailSubtab.Lens)
+
+        composeRule.onNodeWithText("Score 42").assertDoesNotExist()
     }
 
     @Test
@@ -147,10 +163,14 @@ class DetailScoreHeaderTest {
         assertEquals(null, rankPositionLabel(routeOf(sourceSymbols = listOf("OTHER.BA"))))
     }
 
-    private fun routeOf(sourceSymbols: List<String>) = DetailRoute(
+    private fun routeOf(
+        sourceSymbols: List<String>,
+        subtab: DetailSubtab = DetailSubtab.Snapshot,
+    ) = DetailRoute(
         symbol = SYMBOL,
         sourceTab = DetailSourceTab.Opportunities,
         sourceSymbols = sourceSymbols,
+        subtab = subtab,
     )
 
     /** A ranked list of [size] symbols with the symbol under test sitting at 1-based [place]. */
@@ -162,13 +182,14 @@ class DetailScoreHeaderTest {
         scoreRow: OpportunityListRow?,
         scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
         sourceSymbols: List<String> = listOf(SYMBOL),
+        subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
     ) {
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
         activity.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
-                    route = routeOf(sourceSymbols),
+                    route = routeOf(sourceSymbols, subtab),
                     detail = null,
                     charts = emptyMap(),
                     history = emptyList(),
