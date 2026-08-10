@@ -207,14 +207,10 @@ fun DashboardScreen(
                             detail = "Opportunity ranks appear once restored data or live coverage is strong enough to score the current universe.",
                         )
                     } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OpportunityScoringModelToggle(
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ScoringControlsRow(
                                 selected = state.opportunityScoringModel,
-                                onAction = onAction,
-                            )
-                            MarketDimensionSwitch(
-                                model = state.opportunityScoringModel,
-                                enabled = state.regimeScoringEnabled,
+                                regimeScoringEnabled = state.regimeScoringEnabled,
                                 onAction = onAction,
                             )
                             OpportunityList(
@@ -285,6 +281,7 @@ internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
 internal fun OpportunityScoringModelToggle(
     selected: OpportunityScoringModel,
     onAction: (DashboardAction) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
     // Four chips overflow a typical phone width; LazyRow keeps every model reachable and
     // scrolls the selected chip into view so selection never looks like "no chip filled".
@@ -297,7 +294,7 @@ internal fun OpportunityScoringModelToggle(
 
     LazyRow(
         state = listState,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         itemsIndexed(
@@ -316,6 +313,35 @@ internal fun OpportunityScoringModelToggle(
                 modifier = Modifier.semantics { this.selected = isSelected },
             )
         }
+    }
+}
+
+/**
+ * Model chips and the market switch on one line, for both headers.
+ *
+ * They were stacked. On a phone that cost a whole control row of the viewport on every screen that
+ * shows a ranked list — measured at 110px of 2400, against a ticker card of about 270 — for two
+ * controls that are read together anyway. The switch is pinned outside the scrolling chips so it
+ * stays reachable however far they are scrolled, and it disappears with the models that have no
+ * fourth bucket, giving those the full width.
+ */
+@Composable
+internal fun ScoringControlsRow(
+    selected: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
+    onAction: (DashboardAction) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OpportunityScoringModelToggle(
+            selected = selected,
+            onAction = onAction,
+            modifier = Modifier.weight(1f),
+        )
+        MarketDimensionSwitch(model = selected, enabled = regimeScoringEnabled, onAction = onAction)
     }
 }
 

@@ -228,14 +228,14 @@ class MarketDimensionUiTest {
     fun the_switch_reports_the_state_it_is_in() {
         setOpportunitiesContent(row = listRow(), regimeScoringEnabled = true)
 
-        composeRule.onNodeWithText("Market context on").assertIsSelected()
+        composeRule.onNodeWithText("Market on").assertIsSelected()
     }
 
     @Test
     fun the_switch_reports_being_off() {
         setOpportunitiesContent(row = listRow(), regimeScoringEnabled = false)
 
-        composeRule.onNodeWithText("Market context off").assertIsNotSelected()
+        composeRule.onNodeWithText("Market off").assertIsNotSelected()
     }
 
     @Test
@@ -243,7 +243,7 @@ class MarketDimensionUiTest {
         val actions = mutableListOf<DashboardAction>()
         setOpportunitiesContent(row = listRow(), regimeScoringEnabled = true, onAction = actions::add)
 
-        composeRule.onNodeWithText("Market context on").performClick()
+        composeRule.onNodeWithText("Market on").performClick()
 
         assertEquals(listOf(DashboardAction.SetRegimeScoringEnabled(false)), actions)
     }
@@ -255,7 +255,7 @@ class MarketDimensionUiTest {
 
         // Scrolled to first: the score header lives inside the Snapshot tab's lazy list now, so on a
         // short screen the switch can sit below the fold — where a click would land on nothing.
-        composeRule.onNodeWithText("Market context on").performScrollTo().performClick()
+        composeRule.onNodeWithText("Market on").performScrollTo().performClick()
 
         assertEquals(listOf(DashboardAction.SetRegimeScoringEnabled(false)), actions)
     }
@@ -265,7 +265,7 @@ class MarketDimensionUiTest {
     fun the_switch_is_absent_on_a_model_that_has_no_fourth_dimension() {
         setOpportunitiesContent(row = listRow(), model = OpportunityScoringModel.AggressiveV2)
 
-        composeRule.onNodeWithText("Market context on").assertDoesNotExist()
+        composeRule.onNodeWithText("Market on").assertDoesNotExist()
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────

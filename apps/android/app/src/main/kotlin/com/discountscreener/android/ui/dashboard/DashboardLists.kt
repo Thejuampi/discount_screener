@@ -77,8 +77,7 @@ internal fun TrackedList(
                             symbol = row.symbol,
                             companyName = row.companyName,
                         )
-                        TrackedRowSignals(row)
-                        QuantLensStrip(quantLensChipsBySymbol[row.symbol].orEmpty())
+                        TrackedRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
                         TrackedRowMetrics(row)
                     }
                 }
@@ -125,14 +124,14 @@ internal fun OpportunityList(
     quantLensChipsBySymbol: Map<String, List<QuantLensChipUi>> = emptyMap(),
     onAction: (DashboardAction) -> Unit,
 ) {
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         itemsIndexed(rows, key = { _, row -> row.symbol }) { index, row ->
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onAction(DashboardAction.OpenDetail(row.symbol)) },
             ) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         RankOrdinal(index = index)
                         SymbolCompanyTitle(
@@ -142,8 +141,7 @@ internal fun OpportunityList(
                         )
                         ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
                     }
-                    OpportunityRowSignals(row)
-                    QuantLensStrip(quantLensChipsBySymbol[row.symbol].orEmpty())
+                    OpportunityRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
                         MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
@@ -255,7 +253,7 @@ private fun DiscoveryRowSignals(
     }
     val decisionLabel = decisionStateLabel(decisionState)
     val decisionColors = decisionStateColors(decisionState)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (decisionLabel != null) {
             ChangeBadge(
                 label = decisionLabel,
@@ -283,22 +281,18 @@ internal fun parseDiscoveryConfidence(raw: String?): ConfidenceBand? =
         ConfidenceBand.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }
     }
 
+/**
+ * Everything that qualifies a row, on one flowing strip: what to do about it, what changed, how
+ * fresh it is, and what the lens read.
+ *
+ * The lens chips used to own a line of their own, which on a phone was a line carrying one chip and
+ * two thirds empty space — about 60px of a 270px card, spent on nothing. Flowed together they land
+ * on one line for a typical row and wrap to two only when there is genuinely that much to say,
+ * which is what the second line was always meant to be for.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun QuantLensStrip(chips: List<QuantLensChipUi>) {
-    val visibleChips = if (chips.isEmpty()) {
-        listOf(QuantLensChipUi(null, "Lens loading", QuantLensQualifier.Unknown))
-    } else {
-        chips.take(3)
-    }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        visibleChips.forEach { chip -> SignalChip(chip) }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun OpportunityRowSignals(row: OpportunityListRow) {
+private fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<QuantLensChipUi>) {
     val freshness = freshnessColors(row.freshness)
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
@@ -306,7 +300,7 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         decisionLabel?.let {
             val colors = decisionStateColors(row.decisionState)
             ChangeBadge(
@@ -339,8 +333,10 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
                 backgroundColor = colors.second,
             )
         }
+        // "Updated" and "now" were two tokens saying one thing, with a gap and a pill border between
+        // them. One badge reads the same and leaves room for the lens chips on the same line.
         ChangeBadge(
-            label = freshnessLabel(row.freshness),
+            label = listOfNotNull(freshnessLabel(row.freshness), freshnessTime).joinToString(" "),
             contentColor = freshness.first,
             backgroundColor = freshness.second,
         )
@@ -352,9 +348,6 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
                 backgroundColor = colors.second,
             )
         }
-        freshnessTime?.let {
-            MetricToken(it, MaterialTheme.colorScheme.outline)
-        }
         if (row.isWatched) {
             ChangeBadge(
                 label = "Watchlist",
@@ -362,7 +355,24 @@ private fun OpportunityRowSignals(row: OpportunityListRow) {
                 backgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
             )
         }
+        LensChips(lensChips)
     }
+}
+
+/**
+ * The lens chips, emitted into whatever strip is already flowing rather than a strip of their own.
+ *
+ * Call this from inside a `FlowRow`: the chips become that row's children, so they wrap with the
+ * badges around them instead of reserving a line whether or not they need one.
+ */
+@Composable
+private fun LensChips(chips: List<QuantLensChipUi>) {
+    val visible = if (chips.isEmpty()) {
+        listOf(QuantLensChipUi(null, "Lens loading", QuantLensQualifier.Unknown))
+    } else {
+        chips.take(3)
+    }
+    visible.forEach { chip -> SignalChip(chip) }
 }
 
 @Composable
@@ -400,7 +410,7 @@ private fun SymbolCompanyTitle(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TrackedRowSignals(row: TrackedSymbolRow) {
+private fun TrackedRowSignals(row: TrackedSymbolRow, lensChips: List<QuantLensChipUi>) {
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
     val freshness = freshnessColors(row.freshness)
@@ -408,7 +418,7 @@ private fun TrackedRowSignals(row: TrackedSymbolRow) {
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         decisionLabel?.let {
             val colors = decisionStateColors(row.decisionState)
             ChangeBadge(
@@ -442,7 +452,7 @@ private fun TrackedRowSignals(row: TrackedSymbolRow) {
             )
         }
         ChangeBadge(
-            label = freshnessLabel(row.freshness),
+            label = listOfNotNull(freshnessLabel(row.freshness), freshnessTime).joinToString(" "),
             contentColor = freshness.first,
             backgroundColor = freshness.second,
         )
@@ -454,9 +464,7 @@ private fun TrackedRowSignals(row: TrackedSymbolRow) {
                 backgroundColor = colors.second,
             )
         }
-        freshnessTime?.let {
-            MetricToken(it, MaterialTheme.colorScheme.outline)
-        }
+        LensChips(lensChips)
     }
 }
 
@@ -469,14 +477,23 @@ private fun freshnessLabel(freshness: RowFreshness): String = when (freshness) {
     RowFreshness.Issue -> "Issue"
 }
 
+/**
+ * Why this row's numbers moved, or null when there is nothing to say.
+ *
+ * [RowExplanationKind.NoMeaningfulChange] is the `else` of the derivation — a baseline exists and
+ * neither price, target nor rank moved — and it was the widest badge on the strip, present on nearly
+ * every row of a settled screen, spending about a third of the line to report that nothing happened.
+ * It reads the same as its own absence: every other kind renders a label, so no explanation badge
+ * means exactly this one. [RowExplanationKind.NoBaseline] stays visible, because "nothing moved" and
+ * "there is nothing to compare against" are different claims and only one of them is reassuring.
+ */
 private fun explanationLabel(explanation: RowExplanationKind?): String? = when (explanation) {
     RowExplanationKind.PriceMoved -> "Price moved"
     RowExplanationKind.TargetChanged -> "Target changed"
     RowExplanationKind.RelativeReRank -> "Relative re-rank"
     RowExplanationKind.CombinedMove -> "Combined move"
     RowExplanationKind.NoBaseline -> "No baseline"
-    RowExplanationKind.NoMeaningfulChange -> "No meaningful change"
-    null -> null
+    RowExplanationKind.NoMeaningfulChange, null -> null
 }
 
 internal fun decisionStateLabel(decisionState: RowDecisionState?): String? = when (decisionState) {

@@ -43,6 +43,9 @@ internal fun marketMetricColor(): Color = MaterialTheme.colorScheme.primary
  * Rendered only for the model that has a fourth bucket. A switch that visibly does nothing on three
  * of the four models would be a worse answer than no switch, and hiding it keeps "why did nothing
  * change" from being a question the UI invites.
+ *
+ * It says "Market", not "Market context", so it names the dimension exactly as the row token does
+ * and leaves the line it shares with the model chips wide enough for them to be read.
  */
 @Composable
 internal fun MarketDimensionSwitch(
@@ -52,18 +55,12 @@ internal fun MarketDimensionSwitch(
 ) {
     if (model != OpportunityScoringModel.AggressiveV3) return
 
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        FilterChip(
-            selected = enabled,
-            onClick = { onAction(DashboardAction.SetRegimeScoringEnabled(!enabled)) },
-            label = { Text(if (enabled) "Market context on" else "Market context off") },
-            modifier = Modifier.semantics { this.selected = enabled },
-        )
-    }
+    FilterChip(
+        selected = enabled,
+        onClick = { onAction(DashboardAction.SetRegimeScoringEnabled(!enabled)) },
+        label = { Text(if (enabled) "$MARKET_DIMENSION_LABEL on" else "$MARKET_DIMENSION_LABEL off") },
+        modifier = Modifier.semantics { this.selected = enabled },
+    )
 }
 
 /**

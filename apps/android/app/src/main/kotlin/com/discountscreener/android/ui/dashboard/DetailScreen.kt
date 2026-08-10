@@ -347,8 +347,11 @@ private fun DetailScoreHeader(
             }
             MarketContextSection(row = scoreRow, scoringModel = scoringModel)
         }
-        OpportunityScoringModelToggle(selected = scoringModel, onAction = onAction)
-        MarketDimensionSwitch(model = scoringModel, enabled = regimeScoringEnabled, onAction = onAction)
+        ScoringControlsRow(
+            selected = scoringModel,
+            regimeScoringEnabled = regimeScoringEnabled,
+            onAction = onAction,
+        )
     }
 }
 
