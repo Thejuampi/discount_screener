@@ -54,13 +54,7 @@ class DiscountScreenerAppContainer(context: Context) {
     }
 
     private val repository by lazy {
-        // Debug installs (agent live QA / make android-run) always start on profile qa (≤20).
-        // Release keeps full product default (sp500). Silence is not permission for full-universe thrash.
-        val startupProfile = if (BuildConfig.DEBUG) {
-            DefaultDashboardRepository.QA_PROFILE
-        } else {
-            DefaultDashboardRepository.PRODUCT_DEFAULT_PROFILE
-        }
+        val startupProfile = startupProfile(BuildConfig.QA_UNIVERSE)
         DefaultDashboardRepository(
             stateStore = SQLiteStateStore(appContext),
             profileCatalog = ProfileCatalog(appContext.assets),
@@ -105,5 +99,19 @@ class DiscountScreenerAppContainer(context: Context) {
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =
         DashboardViewModel.factory(dashboardUseCases)
 }
+
+/**
+ * Cold-start universe for an installed build.
+ *
+ * Only a QA install (`make android-run-qa`, which sets `BuildConfig.QA_UNIVERSE`) boots the
+ * ≤20-symbol `qa` universe. A regular `make android-run` install and every release build boot the
+ * product default (`sp500`), because the regular app is what a user actually runs.
+ */
+internal fun startupProfile(qaUniverse: Boolean): String =
+    if (qaUniverse) {
+        DefaultDashboardRepository.QA_PROFILE
+    } else {
+        DefaultDashboardRepository.PRODUCT_DEFAULT_PROFILE
+    }
 
 internal fun defaultSecondaryTimeseriesProvider(): FundamentalTimeseriesProvider? = null

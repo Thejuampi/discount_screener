@@ -16,7 +16,7 @@ NPX := npx
 
 .PHONY: all build test clean fmt check release run \
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
-        android-build android-test android-clean android-release android-run android-signing-bootstrap apk \
+        android-build android-test android-clean android-release android-run android-run-qa android-signing-bootstrap apk \
         windows-run windows-dev windows-stop windows-build windows-test run-windows \
         contracts-test
 
@@ -50,8 +50,13 @@ desktop-smoke:
 
 # ── Android (Gradle) ──
 
+# Regular app: cold-starts the product profile (sp500) and keeps existing app data.
 android-run:
 	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/android-run.ps1"
+
+# Live / agent QA: cold-starts profile qa (≤20 symbols) and clears app data first.
+android-run-qa:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/android-run.ps1" -Qa
 
 android-build:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) compileDebugKotlin && popd

@@ -266,7 +266,7 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 - Desktop: `cargo test` from `apps/desktop`; `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke`.
 - Windows: `cargo test` in `apps/windows/src-tauri` (include `dcf_model`, `quant_lens` when touching valuation/lens).
 - Android: `scripts/validate-android.ps1` (always `:core:test`; app tasks when SDK configured).
-- **Android live / agent QA uses profile `qa` only (≤20 symbols).** Debug installs (`make android-run` / `installDebug`) cold-start on `qa`. Never QA on full `sp500` (~500 tickers). See **Android live QA = profile `qa` only** below.
+- **Android live / agent QA uses profile `qa` only (≤20 symbols).** Launch QA with `make android-run-qa`, which cold-starts on `qa`. `make android-run` is the regular app and cold-starts `sp500`. Never QA on full `sp500` (~500 tickers). See **Android live QA = profile `qa` only** below.
 - Valuation / Quant Lens: prefer goldens in `shared/contracts` and fixture regressions (e.g. ACGL residual income, TSLA disputed EV) over inventing market-proximity asserts.
 - **Valuation merge bar (mandatory):** any change to classifier, FCFF/WACC, CapEx→FCF, residual income, or model policy version **must** pass:
   - `cargo test --lib valuation_baseline::` (from `apps/windows/src-tauri`)
@@ -284,7 +284,7 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 | --- | --- |
 | **Profile** | **`qa`** — pin in `apps/android/app/src/main/assets/profiles/qa.txt` (hard cap 20) |
 | **When** | Any live UI QA, agent “check the app,” post-change smoke on Android |
-| **Launch** | `make android-run` — debug builds bootstrap **`qa`** and clear app data on install |
+| **Launch** | `make android-run-qa` — installs with the QA flag, clears app data, bootstraps **`qa`**. Plain `make android-run` is the regular app (`sp500`) and is **not** a QA launcher |
 | **Unless** | User **explicitly** orders another profile (`sp500`, `dow`, …). Silence → **`qa`** |
 | **Forbidden** | Cold-start full `sp500` / 500+ Yahoo thrash “to be thorough” |
 
@@ -463,8 +463,8 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Attach UI without agent bridge / stale slot | DOM row-click + previous symbol text made live checklist “PASS” while Detail never changed | Require DEV `window.__DS_AGENT__`; `ds-ui open-detail` must exit non-zero if selection/slot not settled; `self-check` before claiming live QA green |
 | business_class string mismatch in asserts | Checklist compared PascalCase to snake_case so class asserts never fired | Normalize class tokens (`financial_services` / `FinancialServices`) before asserting |
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
-| Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run` (debug → `qa`); reuse one process; one-shot checklist loads |
-| Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | Debug boots **`qa`**; `pm clear` on `android-run`; never switch UI to sp500 for agent QA |
+| Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run-qa`; reuse one process; one-shot checklist loads |
+| Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | `make android-run-qa` boots **`qa`** and `pm clear`s first; never switch UI to sp500 for agent QA |
 | `tauri dev -- -- --profile qa` | Cargo steals `--profile` → compile error / full universe fallback | `npm run tauri:dev:qa` or `DS_UNIVERSE_PROFILE=qa`; binary `--universe qa` |
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
 | One acquisition zeroes the whole growth window | Historical M&A made BSX/ADSK/AVGO-class estimates ignore later clean growth | Contaminate only Y−1→Y; require two clean recent transitions and a clean latest transition, otherwise zero growth explicitly |

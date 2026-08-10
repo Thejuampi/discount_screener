@@ -39,7 +39,7 @@ This folder contains planning and implementation artifacts generated through BMa
 - **Plan a new feature:** create or update a product brief, then PRD, UX spec if UI-facing, architecture, epics, readiness report, sprint plan.
 - **Modify current behavior:** update the current-functionality PRD only if the baseline product behavior changed; otherwise keep changes in feature artifacts.
 - **Implement stories:** use sprint status and story files. Update sprint status as stories move through backlog, ready, in-progress, review, and done.
-- **Validate UI/app behavior:** include live QA notes when behavior reaches an installed app surface, especially Android via `make android-run`.
+- **Validate UI/app behavior:** include live QA notes when behavior reaches an installed app surface, especially Android via `make android-run-qa`.
 
 ## Maintenance Rules
 

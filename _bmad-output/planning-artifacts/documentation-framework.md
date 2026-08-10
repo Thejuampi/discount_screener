@@ -122,7 +122,7 @@ Required documentation checks:
 - Read `apps/android/README.md`.
 - If UI-facing, check the active UX spec or create one.
 - If persistence/startup/history changes, check architecture and add explicit startup/performance acceptance criteria.
-- Include live QA notes from `make android-run` when behavior reaches the installed app surface.
+- Include live QA notes from `make android-run-qa` when behavior reaches the installed app surface.
 
 ### Desktop Work
 

@@ -32,6 +32,11 @@ val hasCustomReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
 
+// Live / agent QA universe (≤20 symbols) is opt-in via `make android-run-qa`
+// (-PdsQaUniverse=true). A plain debug install is the regular app and cold-starts the
+// product universe. Release never honours the flag.
+val qaUniverseRequested = providers.gradleProperty("dsQaUniverse").orNull.toBoolean()
+
 android {
     namespace = "com.discountscreener.android"
     compileSdk = 35
@@ -76,8 +81,10 @@ android {
     buildTypes {
         getByName("debug") {
             enableUnitTestCoverage = true
+            buildConfigField("boolean", "QA_UNIVERSE", qaUniverseRequested.toString())
         }
         getByName("release") {
+            buildConfigField("boolean", "QA_UNIVERSE", "false")
             signingConfig = if (hasCustomReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {

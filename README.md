@@ -70,7 +70,8 @@ All commands run from the repository root via `make`.
 
 | Command | Purpose |
 |---|---|
-| `make android-run` | Deploy and launch on a connected device or emulator |
+| `make android-run` | Deploy and launch the regular app on a connected device or emulator |
+| `make android-run-qa` | Same, but for live / agent QA: clears app data and cold-starts profile `qa` (≤20 symbols) |
 | `make android-test` | Run unit tests |
 | `make apk` | Build debug APK → `dist/discount-screener-debug.apk` |
 | `make android-release` | Build signed release APK → `dist/discount-screener-release.apk` |

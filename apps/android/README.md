@@ -61,8 +61,8 @@ If you do not already have a release keystore, run `make android-signing-bootstr
 
 ## Run On Device
 
-Use `make android-run` from the repository root to build, install, and launch the debug app. When both a USB phone and an emulator are available, the script prefers the physical device. If the phone is connected but not authorized for USB debugging, unlock it, accept the prompt, and rerun the command.
+Use `make android-run` from the repository root to build, install, and launch the regular app. It cold-starts the product profile (`sp500`) and keeps existing app data. When both a USB phone and an emulator are available, the script prefers the physical device. If the phone is connected but not authorized for USB debugging, unlock it, accept the prompt, and rerun the command.
 
 ### Live / agent QA = profile `qa` only
 
-**QA se hace con profile `qa`.** Debug builds cold-start on `assets/profiles/qa.txt` (≤20 symbols: T, AMZN, CI, JPM/ACGL, AAPL, …). `make android-run` clears app data so a prior `sp500` warm-start cannot thrash 500+ Yahoo requests. Do **not** switch the UI to `sp500` for agent or valuation QA unless a human explicitly orders it. Release builds still default to the full product profile.
+**QA se hace con profile `qa`.** Launch it with `make android-run-qa`. That install carries the QA flag (`-PdsQaUniverse=true` → `BuildConfig.QA_UNIVERSE`), so the app cold-starts on `assets/profiles/qa.txt` (≤20 symbols: T, AMZN, CI, JPM/ACGL, AAPL, …), and it clears app data first so a prior `sp500` warm-start cannot thrash 500+ Yahoo requests. Do **not** use plain `make android-run` for QA, and do **not** switch the UI to `sp500` for agent or valuation QA unless a human explicitly orders it. Release builds ignore the flag and always default to the full product profile.

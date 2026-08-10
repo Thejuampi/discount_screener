@@ -1,4 +1,18 @@
-param()
+<#
+.SYNOPSIS
+Builds, installs, and launches the Android debug app.
+
+.DESCRIPTION
+Without -Qa this deploys the regular app: it cold-starts the product universe (sp500) and keeps
+existing app data.
+
+With -Qa this deploys the live / agent QA app: the install is flagged so the app cold-starts the
+capped `qa` universe (≤20 symbols), and app data is cleared first so a prior warm-start cannot
+thrash 500+ Yahoo requests. Every QA-intended run must use -Qa (`make android-run-qa`).
+#>
+param(
+    [switch]$Qa
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -302,12 +316,12 @@ $unauthorizedPhysicalDevices = Get-UnauthorizedPhysicalDevices -AdbPath $adb
 if (-not $onlineDevices) {
     if ($unauthorizedPhysicalDevices) {
         $serials = ($unauthorizedPhysicalDevices | ForEach-Object { Format-DeviceLabel $_ }) -join ', '
-        throw "Android phone detected but not authorized for USB debugging: $serials. Unlock the phone, accept the USB debugging prompt, then rerun make android-run."
+        throw "Android phone detected but not authorized for USB debugging: $serials. Unlock the phone, accept the USB debugging prompt, then rerun the command."
     }
 
     $avdNames = Get-AvdNames -EmulatorPath $emulator
     if (-not $avdNames) {
-        throw 'No ready Android device or emulator detected, and no Android Virtual Devices were found. Start a device manually, then rerun make android-run.'
+        throw 'No ready Android device or emulator detected, and no Android Virtual Devices were found. Start a device manually, then rerun the command.'
     }
 
     $preferredAvd = $avdNames | Where-Object { $_ -eq 'discount_screener_api35' } | Select-Object -First 1
@@ -340,27 +354,36 @@ if (-not $onlineDevices) {
 }
 
 if (-not $onlineDevices) {
-    throw 'No ready Android device or emulator detected after waiting for boot. Ensure the emulator reaches the Android home screen, then rerun make android-run.'
+    throw 'No ready Android device or emulator detected after waiting for boot. Ensure the emulator reaches the Android home screen, then rerun the command.'
 }
 
 $selectedDevice = Select-PreferredDevice -Devices $onlineDevices
 
 if ($selectedDevice.IsEmulator -and $unauthorizedPhysicalDevices) {
     $serials = ($unauthorizedPhysicalDevices | ForEach-Object { Format-DeviceLabel $_ }) -join ', '
-    throw "A USB phone is connected but not authorized for debugging: $serials. Unlock the phone, accept the USB debugging prompt, then rerun make android-run."
+    throw "A USB phone is connected but not authorized for debugging: $serials. Unlock the phone, accept the USB debugging prompt, then rerun the command."
 }
 
 $env:ANDROID_SERIAL = $selectedDevice.Serial
 Write-Host "Installing on Android device '$(Format-DeviceLabel $selectedDevice)'..."
-Write-Host "QA rule: debug install boots profile 'qa' (≤20 symbols). Do NOT switch to sp500 for agent QA."
+if ($Qa) {
+    Write-Host "QA rule: this install boots profile 'qa' (≤20 symbols). Do NOT switch to sp500 for agent QA."
+} else {
+    Write-Host "Regular app: boots the product profile 'sp500'. For agent QA use 'make android-run-qa'."
+}
 
 if (-not (Wait-ForBootCompletion -AdbPath $adb -Serial $selectedDevice.Serial -TimeoutSeconds 180)) {
     throw "Android device '$($selectedDevice.Serial)' did not finish booting in time."
 }
 
+$gradleArguments = @('installDebug')
+if ($Qa) {
+    $gradleArguments += '-PdsQaUniverse=true'
+}
+
 Push-Location (Join-Path $PSScriptRoot '..\apps\android')
 try {
-    & .\gradlew.bat installDebug
+    & .\gradlew.bat @gradleArguments
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -368,15 +391,21 @@ try {
     Pop-Location
 }
 
-# Drop stale warm-start that may still be pinned to full sp500 from prior sessions.
-Write-Host "Clearing app data so cold-start uses profile qa (avoids 500+ symbol thrash)..."
-& $adb -s $selectedDevice.Serial shell pm clear com.discountscreener.android | Out-Null
+if ($Qa) {
+    # Drop stale warm-start that may still be pinned to full sp500 from prior sessions.
+    Write-Host "Clearing app data so cold-start uses profile qa (avoids 500+ symbol thrash)..."
+    & $adb -s $selectedDevice.Serial shell pm clear com.discountscreener.android | Out-Null
+}
 
 & $adb -s $selectedDevice.Serial shell am start -n com.discountscreener.android/.app.MainActivity
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20."
+if ($Qa) {
+    Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20."
+} else {
+    Write-Host "Launched."
+}
 } catch {
     $message = $_.Exception.Message
     if (-not $message) {

@@ -129,7 +129,7 @@ Both clients help users identify profitable companies trading below public fair-
 
 - Desktop: `cargo fmt`, `cargo test`, and smoke run.
 - Android: `scripts/validate-android.ps1`.
-- Installed Android app behavior: `make android-run` when a change reaches app UI/startup/runtime behavior.
+- Installed Android app behavior: `make android-run-qa` when a change reaches app UI/startup/runtime behavior.
 - Provider-shape changes: at least 5 real Yahoo samples.
 - Meaningful behavior changes: mutation testing or an explicit gap plus manual mutation checks.
 
