@@ -207,31 +207,6 @@ class RegimeEngineTest {
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
-    /** A year of SPY dailies drifting up, long enough for every average and the sixty-day slope. */
-    private fun spyCloses() = (0 until 260).map { 400.0 + (it * 0.5) }
-
-    /** Every series [MARKET_SERIES] asks for, so the fixture fetches exactly what `:app` will. */
-    private fun fullBundle() = MarketDataBundle(
-        spyCloses = spyCloses(),
-        spySummary = summary(bullish = true).copy(latestCloseCents = 52_950L),
-        closesBySymbol = MARKET_SERIES.associate { request ->
-            request.symbol to when (request.symbol) {
-                VIX_SYMBOL -> decliningVix()
-                VIX3M_SYMBOL -> (0 until 60).map { 20.0 }
-                else -> rising()
-            }
-        },
-        cnnFearGreed = fearGreed(55.0),
-    )
-
-    private fun fullUniverse() = (0 until 90).map { index ->
-        SymbolDailyView(
-            symbol = "SYM$index.BA",
-            summary = summary(bullish = index % 3 != 0),
-            closes = (0 until 80).map { bar -> 100.0 + (bar * 0.4) + ((bar + index) % 7) },
-        )
-    }
-
     private fun etfAndCryptoOnly() = listOf("SPY", "QQQ", "IWM", "BTC-USD", "ETH-USD").map { symbol ->
         SymbolDailyView(symbol, summary(bullish = true), (0 until 80).map { 100.0 + it })
     }

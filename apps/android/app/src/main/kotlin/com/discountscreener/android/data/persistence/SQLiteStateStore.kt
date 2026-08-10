@@ -28,6 +28,7 @@ import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.core.engine.DiscoveryMembershipMerge
@@ -1181,6 +1182,34 @@ class SQLiteStateStore(
         }
     }
 
+    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(Dispatchers.IO) {
+        val db = readableDatabase
+        ScoringPreferences(
+            opportunityModel = loadMetaValue(db, META_KEY_SCORING_OPPORTUNITY_MODEL)
+                ?.let { raw -> OpportunityScoringModel.entries.firstOrNull { it.name == raw } }
+                ?: ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
+            // An unreadable value is the default, not `false`. A row of garbage must not be the
+            // thing that silently switches a scoring dimension off.
+            regimeScoringEnabled = when (loadMetaValue(db, META_KEY_SCORING_REGIME_ENABLED)) {
+                "true" -> true
+                "false" -> false
+                else -> ScoringPreferences.DEFAULT_REGIME_ENABLED
+            },
+        )
+    }
+
+    suspend fun saveScoringPreferences(preferences: ScoringPreferences) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            setMetaValue(db, META_KEY_SCORING_OPPORTUNITY_MODEL, preferences.opportunityModel.name)
+            setMetaValue(db, META_KEY_SCORING_REGIME_ENABLED, preferences.regimeScoringEnabled.toString())
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     suspend fun discoverySymbolCount(): Int = withContext(Dispatchers.IO) {
         readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_symbol").simpleQueryForLong().toInt()
     }
@@ -1558,6 +1587,8 @@ class SQLiteStateStore(
         private const val META_KEY_DISCOVERY_SCORING_MODEL = "discovery.scoring_model"
         private const val META_KEY_DISCOVERY_UNIVERSE_NAME = "discovery.universe_name"
         private const val META_KEY_DISCOVERY_LAST_SOURCE_HINT = "discovery.last_source_hint"
+        private const val META_KEY_SCORING_OPPORTUNITY_MODEL = "scoring.opportunity_model"
+        private const val META_KEY_SCORING_REGIME_ENABLED = "scoring.regime_enabled"
         /** Daily points retained per profile (see EstimatesHistoryPolicy.MAX_DAILY_POINTS). */
         private const val ESTIMATES_HISTORY_LIMIT = 180
         private val TABLE_NAMES = listOf(

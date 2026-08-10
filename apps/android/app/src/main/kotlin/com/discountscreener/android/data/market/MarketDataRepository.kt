@@ -4,6 +4,7 @@ import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.regime.MARKET_SERIES
 import com.discountscreener.core.regime.MarketDataBundle
@@ -36,18 +37,33 @@ import kotlinx.coroutines.sync.withLock
  * something a caller schedules; it is not something rendering waits for.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class MarketDataRepository(
+open class MarketDataRepository(
     private val yahooClient: YahooFinanceClient,
     private val fearGreedClient: CnnFearGreedClient,
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000L },
 ) {
     private val mutex = Mutex()
     private var cached: MarketRegime? = null
+    private var cachedDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
     private var lastFailureEpochSeconds: Long? = null
     private var refreshing = false
 
     /** The last usable reading, or null before one lands. Never fetches. */
-    suspend fun cachedRegime(): MarketRegime? = mutex.withLock { cached }
+    open suspend fun cachedRegime(): MarketRegime? = mutex.withLock { cached }
+
+    /**
+     * The daily-bar summaries behind the last usable reading, keyed by symbol.
+     *
+     * These are a by-product worth keeping rather than a second fetch: the universe is already
+     * pulled at `1y`/`1d` for breadth and quality, and per-symbol regime fit needs exactly the same
+     * bars. Discarding them and re-reading the dashboard's weekly summaries would score the fit on
+     * a different interval than the pillars it is being fitted to.
+     *
+     * Replaced wholesale with each usable reading, never merged: a symbol that dropped out of the
+     * universe must not keep scoring against bars from an older market.
+     */
+    open suspend fun cachedDailySummaries(): Map<String, ChartRangeSummary> =
+        mutex.withLock { cachedDailySummaries }
 
     /**
      * Recompute when the cached reading has aged out, otherwise hand back what is held.
@@ -66,7 +82,7 @@ class MarketDataRepository(
      * reading is not a weaker steer to be kept warm; it is the absence of one, and callers must see
      * null so the dimension reports itself unavailable instead of quietly scoring against noise.
      */
-    suspend fun refreshIfStale(symbols: List<String>): MarketRegime? {
+    open suspend fun refreshIfStale(symbols: List<String>): MarketRegime? {
         val now = nowEpochSeconds()
         val shouldRefresh = mutex.withLock {
             val fresh = cached?.let { now - it.asOfEpoch < FRESH_FOR_SECONDS } ?: false
@@ -78,15 +94,19 @@ class MarketDataRepository(
         if (!shouldRefresh) return cachedRegime()
 
         try {
+            val universe = fetchUniverse(symbols)
             val regime = computeMarketRegime(
                 bundle = fetchBundle(now),
-                universe = fetchUniverse(symbols),
+                universe = universe,
                 previousExposurePct = cachedRegime()?.suggestedExposurePct,
             )
             val usable = RegimeScoringPolicy.fromRegime(regime) != null
             mutex.withLock {
                 if (usable) {
                     cached = regime
+                    cachedDailySummaries = universe.mapNotNull { view ->
+                        view.summary?.let { view.symbol to it }
+                    }.toMap()
                     lastFailureEpochSeconds = null
                 } else {
                     lastFailureEpochSeconds = now

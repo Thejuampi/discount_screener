@@ -10,6 +10,14 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.regime.AssetClassification
+import com.discountscreener.core.regime.MarketContextUnavailableReason
+import com.discountscreener.core.regime.MarketRegime
+import com.discountscreener.core.regime.RegimeCause
+import com.discountscreener.core.regime.RegimeFitResult
+import com.discountscreener.core.regime.RegimeScoreStatus
+import com.discountscreener.core.regime.RegimeScoringPolicy
+import com.discountscreener.core.regime.scoreRegimeFit
 import java.math.BigInteger
 import kotlin.math.exp
 import kotlin.math.roundToInt
@@ -149,6 +157,9 @@ private const val V3_FORECAST_FULL_WEIGHT =
 private const val V3_COMPOSITE_COVERAGE_BONUS = 5
 private const val V3_COMPOSITE_BOUND = 110
 private const val V3_BETA_HAIRCUT_MAX = 10.0
+
+/** `beta_haircut_mult.clamp(0.0, 2.5)` in `composite_score_v3_ext`. */
+private const val V3_BETA_HAIRCUT_MULT_MAX = 2.5
 private const val V3_BETA_LOW_MILLIS = 800.0
 private const val V3_BETA_HIGH_MILLIS = 1_600.0
 
@@ -163,17 +174,42 @@ data class OpportunityContext(
     val chartSummariesBySymbol: Map<String, Map<ChartRange, ChartRangeSummary>> = emptyMap(),
     val analysesBySymbol: Map<String, DcfAnalysis> = emptyMap(),
     val scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
+    /**
+     * Per-symbol summaries built from *daily* bars, for the market dimension alone.
+     *
+     * [chartSummariesBySymbol] cannot serve here. Its `ChartRange.Year` entry is `1y`/`1wk` — fifty
+     * two weekly bars — so a %B computed from it spans twenty weeks rather than twenty days, and a
+     * fifty-two-week position is read off fifty-two points. Windows scores the fit on ~252 daily
+     * bars. Measuring a different thing under the same name is how two platforms drift while every
+     * test on both sides stays green, so the daily series is carried separately and the weekly one
+     * keeps driving technicals untouched.
+     *
+     * Empty until a market read lands; a symbol missing from it scores no fourth bucket rather than
+     * falling back to the weekly summary.
+     */
+    val regimeSummariesBySymbol: Map<String, ChartRangeSummary> = emptyMap(),
+    /** Null while the market has not been read yet, or could not be. */
+    val marketRegime: MarketRegime? = null,
+    /** The user's runtime switch. Off scores every name on the three original buckets. */
+    val regimeScoringEnabled: Boolean = true,
 )
 
 data class OpportunityScoreBreakdown(
     val fundamentalsScore: Int?,
     val technicalScore: Int?,
     val forecastScore: Int?,
+    val regimeScore: Int?,
     val compositeScore: Int,
+    /** The three-bucket composite, always computed, so the dimension's impact is a subtraction. */
+    val compositeScoreBase: Int,
     val coverageCount: Int,
     val fundamentalsSignals: List<String>,
     val technicalSignals: List<String>,
     val forecastSignals: List<String>,
+    val regimeStatus: RegimeScoreStatus,
+    val regimeCauses: List<RegimeCause>,
+    val regimeSignals: List<String>,
+    val regimeUnavailableReason: MarketContextUnavailableReason?,
 )
 
 object OpportunityEngine {
@@ -212,6 +248,9 @@ object OpportunityEngine {
                     summary = preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
                     analysis = context.analysesBySymbol[detail.symbol],
                     model = context.scoringModel,
+                    regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
+                    marketRegime = context.marketRegime,
+                    regimeScoringEnabled = context.regimeScoringEnabled,
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -224,11 +263,17 @@ object OpportunityEngine {
                     fundamentalsScore = score.fundamentalsScore,
                     technicalScore = score.technicalScore,
                     forecastScore = score.forecastScore,
+                    regimeScore = score.regimeScore,
                     compositeScore = score.compositeScore,
+                    compositeScoreBase = score.compositeScoreBase,
                     coverageCount = score.coverageCount,
                     fundamentalsSignals = score.fundamentalsSignals,
                     technicalSignals = score.technicalSignals,
                     forecastSignals = score.forecastSignals,
+                    regimeStatus = score.regimeStatus,
+                    regimeCauses = score.regimeCauses,
+                    regimeSignals = score.regimeSignals,
+                    regimeUnavailableReason = score.regimeUnavailableReason,
                     companyName = detail.companyName,
                 )
             }
@@ -244,11 +289,20 @@ object OpportunityEngine {
         return rows
     }
 
+    /**
+     * The defaults reproduce the three-bucket score exactly: no market reading means no policy,
+     * which means [RegimeScoreStatus.Unavailable], a null fourth bucket and a beta multiplier of
+     * one. Every call site that predates the market dimension therefore keeps its old answer.
+     */
     fun scoreWithModel(
         detail: SymbolDetail,
         summary: ChartRangeSummary?,
         analysis: DcfAnalysis?,
         model: OpportunityScoringModel,
+        /** The daily-bar summary — see [OpportunityContext.regimeSummariesBySymbol]. */
+        regimeSummary: ChartRangeSummary? = null,
+        marketRegime: MarketRegime? = null,
+        regimeScoringEnabled: Boolean = true,
     ): OpportunityScoreBreakdown {
         val (fundamentalsScore, fundamentalsSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
@@ -268,35 +322,117 @@ object OpportunityEngine {
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
         }
-        val coverageCount = listOf(fundamentalsScore, technicalScore, forecastScore).count { it != null }
-        val composite = compositeScoreFor(
+        // The fit is computed only where it can count — a V2 screen must not pay for a bucket it
+        // will never carry.
+        val applicable = regimeDimensionApplies(model, detail.symbol)
+        val policy = if (applicable && regimeScoringEnabled) {
+            marketRegime?.let(RegimeScoringPolicy::fromRegime)
+        } else {
+            null
+        }
+        val fit = when {
+            !applicable || !regimeScoringEnabled -> RegimeFitResult()
+            policy == null -> RegimeFitResult(
+                unavailableReason = MarketContextUnavailableReason.MarketReadingUnavailable,
+            )
+            else -> scoreRegimeFit(detail.fundamentals, regimeSummary, policy)
+        }
+        val status = resolveRegimeScoreStatus(applicable, regimeScoringEnabled, policy != null, fit.score)
+        val included = status == RegimeScoreStatus.Included
+        val regimeScore = fit.score.takeIf { included }
+        val betaHaircutMult = if (included) policy?.betaHaircutMult ?: 1.0 else 1.0
+
+        val baseCoverage = listOf(fundamentalsScore, technicalScore, forecastScore).count { it != null }
+        val coverageCount = baseCoverage + if (regimeScore != null) 1 else 0
+        val compositeBase = compositeScoreFor(
             model = model,
             fundamentals = fundamentalsScore,
             technical = technicalScore,
             forecast = forecastScore,
-            coverageCount = coverageCount,
-            detail = detail,
+            regime = null,
+            coverageCount = baseCoverage,
+            betaMillis = detail.fundamentals?.betaMillis,
+            betaHaircutMult = 1.0,
         )
+        val composite = if (included) {
+            compositeScoreFor(
+                model = model,
+                fundamentals = fundamentalsScore,
+                technical = technicalScore,
+                forecast = forecastScore,
+                regime = regimeScore,
+                coverageCount = coverageCount,
+                betaMillis = detail.fundamentals?.betaMillis,
+                betaHaircutMult = betaHaircutMult,
+            )
+        } else {
+            compositeBase
+        }
 
         return OpportunityScoreBreakdown(
             fundamentalsScore = fundamentalsScore,
             technicalScore = technicalScore,
             forecastScore = forecastScore,
+            regimeScore = regimeScore,
             compositeScore = composite,
+            compositeScoreBase = compositeBase,
             coverageCount = coverageCount,
             fundamentalsSignals = fundamentalsSignals,
             technicalSignals = technicalSignals,
             forecastSignals = forecastSignals,
+            regimeStatus = status,
+            regimeCauses = if (included) fit.causes else emptyList(),
+            regimeSignals = if (included) fit.signals else emptyList(),
+            regimeUnavailableReason = fit.unavailableReason.takeIf { status == RegimeScoreStatus.Unavailable },
         )
     }
 
-    private fun compositeScoreFor(
+    /**
+     * Whether the market dimension is a thing this row could carry at all. V2, Legacy and
+     * Aggressive have no fourth bucket, and the fit features are built for operating companies, so
+     * an ETF or a coin has nothing to measure.
+     */
+    internal fun regimeDimensionApplies(model: OpportunityScoringModel, symbol: String): Boolean =
+        model == OpportunityScoringModel.AggressiveV3 && AssetClassification.assetType(symbol) == "stock"
+
+    /**
+     * `commands.rs::resolve_regime_score_status`.
+     *
+     * Order is the whole content of this function. [RegimeScoreStatus.NotApplicable] outranks
+     * [RegimeScoreStatus.Disabled] because telling someone looking at V2 that they switched the
+     * dimension off would be a lie about their own settings. And a [regimeScore] of zero is a
+     * score: a name that fits the regime neither well nor badly is Included, earning the coverage
+     * bonus, rather than falling through to Unavailable and earning nothing.
+     */
+    internal fun resolveRegimeScoreStatus(
+        applicable: Boolean,
+        toggleEnabled: Boolean,
+        policyAvailable: Boolean,
+        regimeScore: Int?,
+    ): RegimeScoreStatus = when {
+        !applicable -> RegimeScoreStatus.NotApplicable
+        !toggleEnabled -> RegimeScoreStatus.Disabled
+        !policyAvailable || regimeScore == null -> RegimeScoreStatus.Unavailable
+        else -> RegimeScoreStatus.Included
+    }
+
+    /**
+     * `composite_score_v3_ext`, with the other three models kept on the same seam.
+     *
+     * Takes [betaMillis] rather than the whole detail so the arithmetic can be exercised on its own
+     * terms: the coverage bonus and the beta multiplier are what a fourth bucket changes for every
+     * V3 name at once, and a test that had to build a plausible company around them would be
+     * measuring the fixture as much as the formula.
+     */
+    internal fun compositeScoreFor(
         model: OpportunityScoringModel,
         fundamentals: Int?,
         technical: Int?,
         forecast: Int?,
+        regime: Int?,
         coverageCount: Int,
-        detail: SymbolDetail,
+        betaMillis: Int?,
+        betaHaircutMult: Double,
     ): Int = when (model) {
         OpportunityScoringModel.Legacy,
         OpportunityScoringModel.Aggressive,
@@ -317,20 +453,20 @@ object OpportunityEngine {
             if (coverageCount == 0) {
                 0
             } else {
-                val sum = (fundamentals ?: 0) + (technical ?: 0) + (forecast ?: 0)
+                val sum = (fundamentals ?: 0) + (technical ?: 0) + (forecast ?: 0) + (regime ?: 0)
                 val mean = sum.toDouble() / coverageCount.toDouble()
                 val bonus = V3_COMPOSITE_COVERAGE_BONUS * (coverageCount - 1)
                 val base = (mean + bonus).coerceIn(-V3_COMPOSITE_BOUND.toDouble(), V3_COMPOSITE_BOUND.toDouble())
-                val haircut = v3BetaRiskHaircut(detail)
+                val haircut = v3BetaRiskHaircut(betaMillis) * betaHaircutMult.coerceIn(0.0, V3_BETA_HAIRCUT_MULT_MAX)
                 (base - haircut).roundToInt().coerceIn(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
             }
         }
     }
 
-    private fun v3BetaRiskHaircut(detail: SymbolDetail): Double {
-        val betaMillis = detail.fundamentals?.betaMillis ?: return 0.0
+    private fun v3BetaRiskHaircut(betaMillis: Int?): Double {
         // Missing beta is not a penalty. High beta (→1.6+) haircuts up to V3_BETA_HAIRCUT_MAX.
-        val ramp = smoothRamp(betaMillis.toDouble(), V3_BETA_LOW_MILLIS, V3_BETA_HIGH_MILLIS)
+        val beta = betaMillis ?: return 0.0
+        val ramp = smoothRamp(beta.toDouble(), V3_BETA_LOW_MILLIS, V3_BETA_HIGH_MILLIS)
         return ((ramp + 1.0) / 2.0) * V3_BETA_HAIRCUT_MAX
     }
 

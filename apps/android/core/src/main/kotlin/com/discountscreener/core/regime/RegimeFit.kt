@@ -6,13 +6,36 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.tanh
+import kotlinx.serialization.Serializable
 
 /**
  * The fourth V3 scoring bucket: how well a name fits the active regime policy, −100..+100.
  * Ported from `regime/regime_fit.rs`.
  */
 
+/**
+ * Why the market dimension is or is not part of a name's composite. Ported from
+ * `commands.rs::RegimeScoreStatus`, and four-valued on purpose: "no fourth number" has four
+ * different causes, and a user who turned the dimension off deserves a different sentence from one
+ * whose phone cannot reach the market.
+ */
+@Serializable
+enum class RegimeScoreStatus {
+    /** Scored, and part of [com.discountscreener.core.model.OpportunityRow.compositeScore]. */
+    Included,
+
+    /** The user switched the dimension off. */
+    Disabled,
+
+    /** The market reading is missing or too weak to yield a policy, or this name has too little data. */
+    Unavailable,
+
+    /** This model or this asset never carries the dimension — V2, Legacy, Aggressive, ETFs, crypto. */
+    NotApplicable,
+}
+
 /** Typed cause factor. No user-facing copy lives here — the UI decides how to say it. */
+@Serializable
 enum class RegimeCauseFactor(val legacyTag: String) {
     Quality("Quality"),
     LowBeta("LowBeta"),
@@ -27,8 +50,10 @@ enum class RegimeCauseFactor(val legacyTag: String) {
     Neutral("RegimeNeutral"),
 }
 
+@Serializable
 enum class RegimeCauseEffect { Support, Risk, Neutral }
 
+@Serializable
 data class RegimeCause(
     val factor: RegimeCauseFactor,
     val effect: RegimeCauseEffect,
@@ -36,6 +61,7 @@ data class RegimeCause(
     val contributionBps: Int,
 )
 
+@Serializable
 enum class MarketContextUnavailableReason { MarketReadingUnavailable, InsufficientAssetData, Unknown }
 
 data class RegimeFitResult(

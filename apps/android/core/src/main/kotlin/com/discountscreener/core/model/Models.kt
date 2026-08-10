@@ -1,5 +1,8 @@
 package com.discountscreener.core.model
 
+import com.discountscreener.core.regime.MarketContextUnavailableReason
+import com.discountscreener.core.regime.RegimeCause
+import com.discountscreener.core.regime.RegimeScoreStatus
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -814,11 +817,25 @@ data class OpportunityRow(
     val fundamentalsScore: Int? = null,
     val technicalScore: Int? = null,
     val forecastScore: Int? = null,
+    /** The 4th V3 bucket: fit with the active market-regime policy. Null unless [regimeStatus] is Included. */
+    val regimeScore: Int? = null,
     val compositeScore: Int,
+    /**
+     * The composite the three original buckets alone produce. Kept beside [compositeScore] rather
+     * than recomputed on demand so the UI can show `base · context · final` and derive the
+     * dimension's impact as a subtraction — one number stored, not two that can disagree.
+     *
+     * Equal to [compositeScore] whenever the market dimension is not included.
+     */
+    val compositeScoreBase: Int = compositeScore,
     val coverageCount: Int,
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
+    val regimeCauses: List<RegimeCause> = emptyList(),
+    val regimeSignals: List<String> = emptyList(),
+    val regimeUnavailableReason: MarketContextUnavailableReason? = null,
     val companyName: String? = null,
 )
 

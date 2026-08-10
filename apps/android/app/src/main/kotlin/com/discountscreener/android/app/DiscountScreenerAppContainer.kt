@@ -3,8 +3,10 @@ package com.discountscreener.android.app
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import com.discountscreener.android.data.persistence.SQLiteStateStore
+import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
+import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.BuildConfig
@@ -20,9 +22,11 @@ import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
+import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
+import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
@@ -45,6 +49,10 @@ class DiscountScreenerAppContainer(context: Context) {
      */
     private val yahooClient by lazy { YahooFinanceClient() }
 
+    private val marketDataRepository by lazy {
+        MarketDataRepository(yahooClient = yahooClient, fearGreedClient = CnnFearGreedClient())
+    }
+
     private val repository by lazy {
         // Debug installs (agent live QA / make android-run) always start on profile qa (≤20).
         // Release keeps full product default (sp500). Silence is not permission for full-universe thrash.
@@ -58,6 +66,7 @@ class DiscountScreenerAppContainer(context: Context) {
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = yahooClient,
             universeCatalog = UniverseCatalog(appContext.assets),
+            marketDataRepository = marketDataRepository,
             secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
             logger = AndroidAppLogger(),
             defaultProfile = startupProfile,
@@ -74,6 +83,8 @@ class DiscountScreenerAppContainer(context: Context) {
             addDashboardSymbols = AddDashboardSymbolsUseCase(repository),
             selectDashboardProfile = SelectDashboardProfileUseCase(repository),
             toggleDashboardWatchlist = ToggleDashboardWatchlistUseCase(repository),
+            loadScoringPreferences = LoadScoringPreferencesUseCase(repository),
+            persistScoringPreferences = PersistScoringPreferencesUseCase(repository),
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllData = ClearAllDataUseCase(repository),
