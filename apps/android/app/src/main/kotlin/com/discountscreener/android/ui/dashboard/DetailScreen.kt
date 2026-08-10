@@ -98,6 +98,7 @@ import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
 import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import kotlin.math.abs
@@ -123,7 +124,8 @@ fun DetailScreen(
     tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
     scoreRow: OpportunityListRow? = null,
-    scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
+    scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    regimeScoringEnabled: Boolean = true,
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -215,6 +217,7 @@ fun DetailScreen(
             route = route,
             scoreRow = scoreRow,
             scoringModel = scoringModel,
+            regimeScoringEnabled = regimeScoringEnabled,
             onAction = onAction,
         )
 
@@ -293,6 +296,7 @@ private fun DetailScoreHeader(
     route: DetailRoute,
     scoreRow: OpportunityListRow?,
     scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
     onAction: (DashboardAction) -> Unit,
 ) {
     Column(
@@ -335,9 +339,50 @@ private fun DetailScoreHeader(
                     "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
                     forecastMetricColor(),
                 )
+                if (scoreRow.regimeStatus == RegimeScoreStatus.Included) {
+                    MetricToken(
+                        "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(scoreRow.regimeScore, scoringModel)}",
+                        marketMetricColor(),
+                    )
+                }
             }
+            MarketContextSection(row = scoreRow, scoringModel = scoringModel)
         }
         OpportunityScoringModelToggle(selected = scoringModel, onAction = onAction)
+        MarketDimensionSwitch(model = scoringModel, enabled = regimeScoringEnabled, onAction = onAction)
+    }
+}
+
+/**
+ * What the market dimension did to this name — or, when it did nothing, why.
+ *
+ * Unlike the dense list row, this is where a missing fourth bucket must account for itself: four
+ * states, four different sentences, so no state can be mistaken for another. When it is included,
+ * the decomposition is shown rather than only the final score, because a composite that moved is
+ * worth nothing to a reader who cannot see what moved it.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MarketContextSection(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
+    val statusLine = marketDimensionStatusLine(row.regimeStatus, row.regimeUnavailableReason, scoringModel)
+    if (statusLine != null) {
+        Text(
+            text = statusLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+
+    Text(
+        text = marketDimensionImpactLine(row),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        topRegimeCauses(row.regimeCauses).forEach { cause ->
+            MetricToken(regimeCauseLabel(cause), regimeCauseColor(cause.effect))
+        }
     }
 }
 

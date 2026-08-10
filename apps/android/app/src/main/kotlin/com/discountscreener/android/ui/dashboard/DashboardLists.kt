@@ -45,6 +45,7 @@ import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.QualificationStatus
 import kotlin.math.max
 
@@ -146,6 +147,15 @@ internal fun OpportunityList(
                         MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
                         MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
                         MetricToken("Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}", forecastMetricColor())
+                        // Only when it is actually in the composite. The dense row has no space to
+                        // say why a dimension is absent, and a token reading "--" would look like a
+                        // measurement that came back empty rather than one that was never taken.
+                        if (row.regimeStatus == RegimeScoreStatus.Included) {
+                            MetricToken(
+                                "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(row.regimeScore, scoringModel)}",
+                                marketMetricColor(),
+                            )
+                        }
                         MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
                         MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
                         MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))

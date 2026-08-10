@@ -80,6 +80,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             projectedDetail = state.projectedDetailData,
                             scoreRow = state.detailScoreRow,
                             scoringModel = state.opportunityScoringModel,
+                            regimeScoringEnabled = state.regimeScoringEnabled,
                             onAction = viewModel::dispatch,
                         )
                     }

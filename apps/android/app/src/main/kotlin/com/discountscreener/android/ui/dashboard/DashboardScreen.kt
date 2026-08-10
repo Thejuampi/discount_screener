@@ -212,6 +212,11 @@ fun DashboardScreen(
                                 selected = state.opportunityScoringModel,
                                 onAction = onAction,
                             )
+                            MarketDimensionSwitch(
+                                model = state.opportunityScoringModel,
+                                enabled = state.regimeScoringEnabled,
+                                onAction = onAction,
+                            )
                             OpportunityList(
                                 state.opportunityRows,
                                 state.opportunityScoringModel,
