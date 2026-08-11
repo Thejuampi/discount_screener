@@ -124,10 +124,15 @@ What this does **not** license anyone to conclude:
 
 ## The contract, and the one way to ruin it
 
-`shared/contracts/opportunity-v4.json` binds twenty-three cases: twelve on the composite (centre,
-spread, bonus, beta haircut, both bounds) and eleven on the fundamentals bucket — one interior case
-per `SectorBenchmarks` field, two boundary cases, and the three share-count readings.
+`shared/contracts/opportunity-v4.json` binds twenty-two cases: twelve on the composite (centre,
+spread, bonus, beta haircut, both bounds) and ten on the fundamentals bucket — one interior case per
+`SectorBenchmarks` field, two boundary cases, and the three share-count readings.
 `OpportunityV4ContractTest` validates it from `:core`.
+
+**Two boundary cases, not three, and that is deliberate.** `smoothRamp` is one function, so its
+`observed <= lower` is pinned once by `forward_pe` and its `observed >= upper` once by `ev_ebitda`.
+A third edge case on `price_to_book` would re-pin a comparison already bound and discriminate
+nothing new, so `price_to_book` has an interior case only.
 
 Every other contract in `shared/contracts/` carries Rust's output, so Kotlin agreeing with it means
 two implementations agree. **This one cannot.** Windows has no V4, so the file has no second
