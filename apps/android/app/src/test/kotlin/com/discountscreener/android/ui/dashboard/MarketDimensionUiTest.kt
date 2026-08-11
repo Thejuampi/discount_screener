@@ -185,7 +185,7 @@ class MarketDimensionUiTest {
             scoringModel = OpportunityScoringModel.AggressiveV2,
         )
 
-        composeRule.onNodeWithText("Market context applies to Aggressive V3 only.").assertIsDisplayed()
+        composeRule.onNodeWithText("Market context applies to Aggressive V3 and V4 only.").assertIsDisplayed()
     }
 
     /** Same status, different cause: an ETF on V3 must not be told to change model. */

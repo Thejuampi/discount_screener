@@ -3,6 +3,7 @@ package com.discountscreener.core.engine
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.carriesMarketDimension
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSignal
 import com.discountscreener.core.model.ExternalSignalStatus
@@ -220,6 +221,7 @@ object OpportunityEngine {
         -> LEGACY_AVOID_BELOW_SCORE
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
         -> CONTINUOUS_AVOID_BELOW_SCORE
     }
 
@@ -230,6 +232,7 @@ object OpportunityEngine {
         -> LEGACY_ACT_AT_OR_ABOVE_SCORE
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
         -> CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
     }
 
@@ -316,19 +319,25 @@ object OpportunityEngine {
             OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
             OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
-            OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            -> aggressiveV3FundamentalsScore(detail)
         }
         val (technicalScore, technicalSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
             OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
-            OpportunityScoringModel.AggressiveV3 -> aggressiveV3TechnicalScore(summary)
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            -> aggressiveV3TechnicalScore(summary)
         }
         val (forecastScore, forecastSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis)
             OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
-            OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            -> aggressiveV3ForecastScore(detail, analysis)
         }
         // The fit is computed only where it can count — a V2 screen must not pay for a bucket it
         // will never carry.
@@ -401,7 +410,7 @@ object OpportunityEngine {
      * an ETF or a coin has nothing to measure.
      */
     internal fun regimeDimensionApplies(model: OpportunityScoringModel, symbol: String): Boolean =
-        model == OpportunityScoringModel.AggressiveV3 && AssetClassification.assetType(symbol) == "stock"
+        model.carriesMarketDimension() && AssetClassification.assetType(symbol) == "stock"
 
     /**
      * `commands.rs::resolve_regime_score_status`.
@@ -457,7 +466,9 @@ object OpportunityEngine {
             }
         }
 
-        OpportunityScoringModel.AggressiveV3 -> {
+        OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
+        -> {
             if (coverageCount == 0) {
                 0
             } else {

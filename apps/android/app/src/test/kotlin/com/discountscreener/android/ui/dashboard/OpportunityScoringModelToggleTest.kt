@@ -97,7 +97,7 @@ class OpportunityScoringModelToggleTest {
     @Test
     fun chip_labels_cover_every_scoring_model() {
         assertEquals(
-            listOf("Aggressive V3", "Aggressive V2", "Aggressive", "Legacy"),
+            listOf("Aggressive V4", "Aggressive V3", "Aggressive V2", "Aggressive", "Legacy"),
             opportunityScoringModelChipOrder.map { it.chipLabel() },
         )
         assertEquals(

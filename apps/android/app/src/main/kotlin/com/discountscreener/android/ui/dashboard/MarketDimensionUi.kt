@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.carriesMarketDimension
 import com.discountscreener.core.regime.MarketContextUnavailableReason
 import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeCauseEffect
@@ -53,7 +54,7 @@ internal fun MarketDimensionSwitch(
     enabled: Boolean,
     onAction: (DashboardAction) -> Unit,
 ) {
-    if (model != OpportunityScoringModel.AggressiveV3) return
+    if (!model.carriesMarketDimension()) return
 
     FilterChip(
         selected = enabled,
@@ -78,10 +79,10 @@ internal fun marketDimensionStatusLine(
     RegimeScoreStatus.Included -> null
     RegimeScoreStatus.Disabled -> "Market context is switched off."
     RegimeScoreStatus.NotApplicable ->
-        if (model == OpportunityScoringModel.AggressiveV3) {
+        if (model.carriesMarketDimension()) {
             "Market context is fitted to stocks; this is not one."
         } else {
-            "Market context applies to Aggressive V3 only."
+            "Market context applies to Aggressive V3 and V4 only."
         }
     RegimeScoreStatus.Unavailable -> when (reason) {
         MarketContextUnavailableReason.InsufficientAssetData ->

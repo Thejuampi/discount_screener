@@ -57,6 +57,36 @@ enum class OpportunityScoringModel {
     Aggressive,
     AggressiveV2,
     AggressiveV3,
+
+    /**
+     * One fact, one bucket.
+     *
+     * V3's four buckets share inputs — the market bucket re-reads the multiples the fundamentals
+     * bucket reads and the EMAs the technicals bucket reads — so their average is one opinion with
+     * extra weight. V4 removes the terms that are duplicates, keeps the ones the regime can invert,
+     * reads multiples against the symbol's own sector, and pays its coverage bonus for agreement
+     * rather than for presence.
+     *
+     * V3 stays and stays beside it, unedited, so there is a control to compare against.
+     */
+    AggressiveV4,
+}
+
+/**
+ * Whether this model has a fourth, market bucket at all.
+ *
+ * A `when` rather than a disjunction, so that the compiler names this place when a fifth model
+ * arrives. A new model quietly defaulting to "no market bucket" is the kind of answer nobody
+ * decided.
+ */
+fun OpportunityScoringModel.carriesMarketDimension(): Boolean = when (this) {
+    OpportunityScoringModel.Legacy,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.AggressiveV2,
+    -> false
+    OpportunityScoringModel.AggressiveV3,
+    OpportunityScoringModel.AggressiveV4,
+    -> true
 }
 
 @Serializable
