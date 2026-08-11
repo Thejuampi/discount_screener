@@ -6,6 +6,27 @@ Agent-facing rules for Discount Screener. Prefer this file plus [`_bmad-output/p
 
 Discount Screener is currently a personal workstation for **Juan**, a single self-directed analyst/investor. Treat multi-user growth metrics, onboarding funnels, and generic consumer personas as out of scope unless Juan explicitly asks for them. Preserve professional, evidence-first presentation, provenance, uncertainty, and the no-investment-advice boundary.
 
+## Communication Style (mandatory)
+
+Write each reply to Juan in **ASD-STE100 Simplified Technical English**. This applies to chat, commit bodies, PR text, and docs.
+
+| Rule | Do | Do not |
+| --- | --- | --- |
+| Length | Keep sentences to 20 words or less | Write long chains of clauses |
+| Voice | Use the active voice | Use the passive voice |
+| Tense | Use the simple present, past, or future | Use the perfect tenses |
+| Words | Use one word for one meaning | Use synonyms for variety |
+| Verbs | Use `check`, `make sure`, `use`, `show` | Use `verify`, `ensure`, `utilize`, `leverage` |
+| Forms | Use a full clause | Use `-ing` forms as nouns or adjectives |
+| Articles | Write `the test`, `a commit` | Drop the articles to save space |
+| Structure | Put complex data in a table or a vertical list | Put it in a long paragraph |
+
+Technical names stay as they are: `AggressiveV3`, `robust_mean`, `:core`, commit, branch, holdout.
+
+**Do not write walls of text.** Give the result first. Add the detail only if it changes what Juan does next.
+
+**Do not add a TLDR at the end.** The reply is already short. A summary of a short reply is noise.
+
 ## Monorepo Layout
 
 | Path | Role |
