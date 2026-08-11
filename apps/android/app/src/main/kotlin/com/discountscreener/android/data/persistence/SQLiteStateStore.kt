@@ -28,6 +28,7 @@ import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
@@ -244,6 +245,9 @@ open class SQLiteStateStore(
         }
         if (oldVersion < 7 && newVersion >= 7) {
             createTipRanksSchema(db)
+        }
+        if (oldVersion < 8 && newVersion >= 8) {
+            createScoreJournalSchema(db)
         }
     }
 
@@ -723,6 +727,39 @@ open class SQLiteStateStore(
         )
         createDiscoverySchema(db)
         createTipRanksSchema(db)
+        createScoreJournalSchema(db)
+    }
+
+    /**
+     * What each model said about each symbol, kept so the models can be compared later.
+     *
+     * `discovery_score` already stores scores, and it is not this: it holds one row per symbol —
+     * the latest — with three buckets and no market score, and it covers Discovery only. A journal
+     * needs history, the fourth bucket, and the Opportunities list.
+     *
+     * The primary key carries `scoring_model` and `scored_at`, so a pass under V3 never overwrites
+     * a pass under V4 and two passes on the same day both survive. The index is on time first,
+     * because every question asked of this table is a range of days.
+     */
+    private fun createScoreJournalSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE score_journal (
+                symbol TEXT NOT NULL,
+                scoring_model TEXT NOT NULL,
+                scored_at INTEGER NOT NULL,
+                fundamentals_score INTEGER,
+                technical_score INTEGER,
+                forecast_score INTEGER,
+                regime_score INTEGER,
+                composite_score INTEGER NOT NULL,
+                composite_score_base INTEGER NOT NULL,
+                market_price_cents INTEGER NOT NULL,
+                PRIMARY KEY (symbol, scoring_model, scored_at)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX score_journal_time_idx ON score_journal(scored_at, scoring_model)")
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -1329,6 +1366,92 @@ open class SQLiteStateStore(
         }
     }
 
+    /**
+     * Appends one scoring pass and drops what has aged out. Returns how many rows were dropped.
+     *
+     * **Capped by age, not by row count, and the count is returned rather than swallowed.** A row
+     * cap would silently keep more days of a twenty-symbol profile than of a five-hundred-symbol
+     * one, so the same retention setting would mean two different things and any comparison across
+     * profiles would be reading a truncation artefact. Age means the same thing everywhere.
+     *
+     * The whole pass is one transaction, so a journal can never hold half of a day's scores.
+     */
+    suspend fun appendScoreJournal(
+        rows: List<ScoreJournalRow>,
+        retentionSeconds: Long,
+        nowEpochSeconds: Long = nowEpochSeconds(),
+    ): Int = withContext(ioDispatcher) {
+        if (rows.isEmpty()) return@withContext 0
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            rows.forEach { row ->
+                db.insertWithOnConflict(
+                    "score_journal",
+                    null,
+                    ContentValues().apply {
+                        put("symbol", row.symbol)
+                        put("scoring_model", row.scoringModel)
+                        put("scored_at", row.scoredAtEpochSeconds)
+                        putNullableInt("fundamentals_score", row.fundamentalsScore)
+                        putNullableInt("technical_score", row.technicalScore)
+                        putNullableInt("forecast_score", row.forecastScore)
+                        putNullableInt("regime_score", row.regimeScore)
+                        put("composite_score", row.compositeScore)
+                        put("composite_score_base", row.compositeScoreBase)
+                        put("market_price_cents", row.marketPriceCents)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            val dropped = db.delete(
+                "score_journal",
+                "scored_at < ?",
+                arrayOf((nowEpochSeconds - retentionSeconds).toString()),
+            )
+            db.setTransactionSuccessful()
+            dropped
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** The journal, oldest first, optionally narrowed to one model. */
+    suspend fun loadScoreJournal(scoringModel: String? = null): List<ScoreJournalRow> = withContext(ioDispatcher) {
+        val where = if (scoringModel == null) "" else "WHERE scoring_model = ?"
+        val args = if (scoringModel == null) emptyArray<String>() else arrayOf(scoringModel)
+        readableDatabase.rawQuery(
+            """
+            SELECT symbol, scoring_model, scored_at, fundamentals_score, technical_score,
+                   forecast_score, regime_score, composite_score, composite_score_base,
+                   market_price_cents
+            FROM score_journal
+            $where
+            ORDER BY scored_at, scoring_model, symbol
+            """.trimIndent(),
+            args,
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        ScoreJournalRow(
+                            symbol = cursor.getString(0),
+                            scoringModel = cursor.getString(1),
+                            scoredAtEpochSeconds = cursor.getLong(2),
+                            fundamentalsScore = cursor.getNullableInt(3),
+                            technicalScore = cursor.getNullableInt(4),
+                            forecastScore = cursor.getNullableInt(5),
+                            regimeScore = cursor.getNullableInt(6),
+                            compositeScore = cursor.getInt(7),
+                            compositeScoreBase = cursor.getInt(8),
+                            marketPriceCents = cursor.getLong(9),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     suspend fun queryDiscoveryScores(
         minScore: Int,
         limit: Int,
@@ -1592,7 +1715,7 @@ open class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 7
+        private const val SQLITE_SCHEMA_VERSION = 8
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
@@ -1610,6 +1733,7 @@ open class SQLiteStateStore(
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
             "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
+            "score_journal",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
@@ -1617,6 +1741,7 @@ open class SQLiteStateStore(
             LogTableQuery("symbol_revision", "evaluated_at"),
             LogTableQuery("discovery_job", "started_at"),
             LogTableQuery("tipranks_attempt", "reserved_at"),
+            LogTableQuery("score_journal", "scored_at"),
         )
     }
 

@@ -85,6 +85,7 @@ import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.readsSectorBenchmarks
@@ -358,9 +359,67 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        startRefreshForCurrentProfile(stateMutex.withLock { trackedSymbols.toList() })
+        startRefreshForCurrentProfile(
+            stateMutex.withLock { trackedSymbols.toList() },
+            opportunityScoringModel,
+        )
         startMarketReadForCurrentProfile()
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+    }
+
+    /**
+     * Records what this pass scored, so that in some weeks there is evidence about which model
+     * works rather than only about which model is cleaner.
+     *
+     * Called from the refresh job once the pass has finished, which is the only moment the rows
+     * exist. `refreshAll` returns before any of that lands — the dashboard has to render first —
+     * so journalling at its return would record an empty list every time.
+     *
+     * Not called from `currentSnapshot` either, and the difference matters: a snapshot is rebuilt
+     * on every state change, several times a second while data arrives, and journalling there
+     * would record one pass a dozen times under a dozen timestamps.
+     *
+     * Failures are logged and dropped. A journal that could break a refresh would be a feature
+     * that costs the app its main job in exchange for a measurement.
+     *
+     * One clock, on purpose. The rows are stamped with [now] and the retention cutoff is cut from
+     * the same reading, so the window is always ninety days of *scoring passes*. Letting the store
+     * fall back to its own clock made a pass whose stamp trailed the wall clock by more than the
+     * window delete itself the moment it was written, which is what the wiring test caught.
+     */
+    private suspend fun journalScores(rows: List<OpportunityListRow>, model: OpportunityScoringModel) {
+        if (rows.isEmpty()) return
+        val scoredAt = now()
+        runCatching {
+            stateStore.appendScoreJournal(
+                rows = rows.map { row ->
+                    ScoreJournalRow(
+                        symbol = row.symbol,
+                        scoringModel = model.name,
+                        scoredAtEpochSeconds = scoredAt,
+                        fundamentalsScore = row.fundamentalsScore,
+                        technicalScore = row.technicalScore,
+                        forecastScore = row.forecastScore,
+                        regimeScore = row.regimeScore,
+                        compositeScore = row.compositeScore,
+                        compositeScoreBase = row.compositeScoreBase,
+                        marketPriceCents = row.marketPriceCents,
+                    )
+                },
+                retentionSeconds = SCORE_JOURNAL_RETENTION_SECONDS,
+                nowEpochSeconds = scoredAt,
+            )
+        }.onSuccess { dropped ->
+            if (dropped > 0) {
+                logger.info(
+                    TAG,
+                    "score journal: dropped $dropped row(s) older than " +
+                        "${SCORE_JOURNAL_RETENTION_SECONDS / 86_400} days",
+                )
+            }
+        }.onFailure { error ->
+            logger.error(TAG, "score journal append failed", error)
+        }
     }
 
     override suspend fun ensureDetailLoaded(
@@ -514,7 +573,7 @@ class DefaultDashboardRepository(
         if (newSymbols.isNotEmpty()) {
             stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
             emitUpdate()
-            startRefreshForCurrentProfile(newSymbols)
+            startRefreshForCurrentProfile(newSymbols, opportunityScoringModel)
         }
 
         return currentSnapshot(
@@ -715,15 +774,28 @@ class DefaultDashboardRepository(
      * top of them.
      */
     private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
-        startRefresh(request.symbols, request.generation)
+        // A profile switch carries no model of its own — the caller is changing the universe, not
+        // the scoring — so the journal records the model the user is actually looking at.
+        startRefresh(
+            request.symbols,
+            request.generation,
+            stateStore.loadScoringPreferences().opportunityModel,
+        )
     }
 
-    private suspend fun startRefreshForCurrentProfile(symbols: List<String>) {
+    private suspend fun startRefreshForCurrentProfile(
+        symbols: List<String>,
+        scoringModel: OpportunityScoringModel,
+    ) {
         val generation = stateMutex.withLock { activeProfileGeneration }
-        startRefresh(symbols, generation)
+        startRefresh(symbols, generation, scoringModel)
     }
 
-    private suspend fun startRefresh(symbols: List<String>, generation: Long) {
+    private suspend fun startRefresh(
+        symbols: List<String>,
+        generation: Long,
+        scoringModel: OpportunityScoringModel,
+    ) {
         if (symbols.isEmpty()) {
             return
         }
@@ -768,6 +840,10 @@ class DefaultDashboardRepository(
                         )
                         trackedSymbols.filter { engine.detail(it) != null }
                     }
+                    journalScores(
+                        stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
+                        scoringModel,
+                    )
                     emitUpdate()
                     startEnrichment(symbolsToEnrich, generation)
                 }
@@ -3434,6 +3510,15 @@ class DefaultDashboardRepository(
         private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
         private const val TAG = "DiscountScreener"
+
+        /**
+         * How long a journalled score is kept: ninety days.
+         *
+         * Long enough to hold the 21-, 63- and 126-day horizons the retrospective reports on, and
+         * short enough that a five-hundred-symbol profile refreshed daily stays in the low
+         * hundreds of thousands of rows.
+         */
+        private const val SCORE_JOURNAL_RETENTION_SECONDS = 90L * 24L * 60L * 60L
 
         private fun retryBackoffMillis(round: Int): Long = when (round) {
             0 -> 1_500L

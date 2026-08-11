@@ -11,6 +11,7 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
@@ -55,6 +56,17 @@ import org.robolectric.RobolectricTestRunner
 class MarketDimensionRankingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val dispatcher = StandardTestDispatcher()
+
+    /**
+     * A clock that ticks, and it has to tick for one of these tests to mean anything.
+     *
+     * [rendering_the_list_again_adds_no_journal_entry] counts distinct journal timestamps. Under a
+     * frozen clock a journal written thirteen times carries thirteen rows at one second, the
+     * primary key folds them into one, and the count reads exactly like a journal written once — so
+     * the assertion could not fail on the defect it exists to catch. A second per reading is enough
+     * to tell one pass from many, and far too little to move any staleness threshold in the suite.
+     */
+    private var clock = NOW
 
     @Before
     fun setUp() {
@@ -146,6 +158,46 @@ class MarketDimensionRankingTest {
         }
     }
 
+    /**
+     * The journal is only worth having if something writes to it. A perfect table that nothing
+     * calls looks identical, from the store's own tests, to a table that works.
+     *
+     * Asserted here rather than in `DefaultDashboardRepositoryTest`, and the reason is worth
+     * recording: that suite's fake client qualifies no symbol at all, so its Opportunities list is
+     * empty and a journal test there passes or fails on the fixture instead of on the wiring. This
+     * fixture puts seventeen names on the list.
+     */
+    @Test
+    fun a_refresh_journals_the_scores_it_produced() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                rankedSymbols(repository).sorted(),
+                journal().map { it.symbol }.sorted(),
+            )
+        }
+    }
+
+    /**
+     * Off the render path, asserted rather than intended.
+     *
+     * A snapshot is rebuilt on every state change, several times a second while data arrives. If
+     * the journal were written there it would record one scoring pass a dozen times under a dozen
+     * timestamps, and the comparison it exists for would be reading its own sampling rate.
+     *
+     * Counted rather than compared against the pre-render reading, and that is the whole point of
+     * the assertion. `before == after` is satisfied by `[] == []`, so a journal that wrote nothing
+     * at all would pass it — measured, not supposed: the mutation that makes the write a no-op left
+     * that form green. **One** is the only number that means one pass, written once.
+     */
+    @Test
+    fun rendering_the_list_again_adds_no_journal_entry() = runTest(dispatcher) {
+        withRepository { repository ->
+            repeat(3) { snapshot(repository) }
+
+            assertEquals(1, journal().map { it.scoredAtEpochSeconds }.distinct().size)
+        }
+    }
+
     /** A preference that reached the ranking must also have reached the database. */
     @Test
     fun the_switch_is_written_where_a_cold_start_will_find_it() = runTest(dispatcher) {
@@ -154,6 +206,19 @@ class MarketDimensionRankingTest {
             val repository = buildRepository(store)
             repository.persistScoringPreferences(ScoringPreferences(regimeScoringEnabled = false))
             assertEquals(false, store.loadScoringPreferences().regimeScoringEnabled)
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * Read through a second store instance, on purpose. The journal exists to be read long after
+     * the process that wrote it has gone, so a cold read is the read worth testing.
+     */
+    private suspend fun journal(): List<ScoreJournalRow> {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            return store.loadScoreJournal()
         } finally {
             store.close()
         }
@@ -189,7 +254,7 @@ class MarketDimensionRankingTest {
         profileCatalog = ProfileCatalog(context.assets),
         yahooClient = FixtureYahooFinanceClient(),
         universeCatalog = UniverseCatalog(context.assets),
-        nowProvider = { NOW },
+        nowProvider = { clock++ },
         ioDispatcher = dispatcher,
         defaultProfile = DefaultDashboardRepository.QA_PROFILE,
         marketDataRepository = StubMarketDataRepository(),
