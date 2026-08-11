@@ -14,6 +14,7 @@ data class DashboardUseCases(
     val loadSystemStats: LoadSystemStatsUseCase,
     val pruneOldRevisions: PruneOldRevisionsUseCase,
     val clearAllData: ClearAllDataUseCase,
+    val exportScores: ExportScoresUseCase,
     val getIndexEstimates: GetIndexEstimatesUseCase,
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     val getEstimatesHistory: GetEstimatesHistoryUseCase,

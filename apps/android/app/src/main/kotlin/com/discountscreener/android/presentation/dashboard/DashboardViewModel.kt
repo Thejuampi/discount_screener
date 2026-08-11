@@ -24,6 +24,7 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
@@ -147,6 +148,9 @@ sealed interface DashboardAction {
     data class SetOpportunityScoringModel(val model: OpportunityScoringModel) : DashboardAction
     data class SetRegimeScoringEnabled(val enabled: Boolean) : DashboardAction
     data object RefreshSystemStats : DashboardAction
+
+    /** Debug surface only — writes the score export and reports where it landed. */
+    data object ExportScores : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
     data object LoadDiscovery : DashboardAction
@@ -236,6 +240,7 @@ class DashboardViewModel(
     private val loadSystemStats: LoadSystemStatsUseCase,
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
+    private val exportScores: ExportScoresUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -295,6 +300,7 @@ class DashboardViewModel(
             is DashboardAction.SetOpportunityScoringModel -> setOpportunityScoringModel(action.model)
             is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
+            DashboardAction.ExportScores -> exportScoreCsv()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
             DashboardAction.LoadDiscovery -> loadDiscovery()
@@ -946,6 +952,21 @@ class DashboardViewModel(
         }
     }
 
+    private fun exportScoreCsv() {
+        viewModelScope.launch {
+            var snapshot = _state.value
+            // A failed export must say so. A silent failure here would look like an export that
+            // produced nothing to correlate, which is the one thing the measurement cannot survive.
+            var message = try {
+                var path = exportScores(snapshot.currentProfile, snapshot.opportunityScoringModel)
+                "Exported ${snapshot.opportunityRows.size} scored rows to $path"
+            } catch (error: Throwable) {
+                "Score export failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(systemStatusMessage = message)
+        }
+    }
+
     private fun pruneOldRevisions(retentionDays: Int) {
         viewModelScope.launch {
             val deleted = pruneOldRevisions(retentionDays)
@@ -1053,6 +1074,7 @@ class DashboardViewModel(
                         loadSystemStats = useCases.loadSystemStats,
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,
+                        exportScores = useCases.exportScores,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

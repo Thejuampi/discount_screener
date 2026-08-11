@@ -15,6 +15,8 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import java.io.File
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -825,6 +827,7 @@ class DashboardViewModelTest {
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
+            exportScores = ExportScoresUseCase(repository, File(System.getProperty("java.io.tmpdir")!!)),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -1064,6 +1067,9 @@ class DashboardViewModelTest {
             dcfSnapshotCallCount++
             return emptyMap()
         }
+
+        override suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String =
+            "symbol\n"
 
         override suspend fun trackedSymbolDetails(): List<SymbolDetail> {
             trackedSymbolDetailsCallCount++

@@ -1,0 +1,96 @@
+package com.discountscreener.android.data.debug
+
+import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.core.model.ChartRangeSummary
+import com.discountscreener.core.model.SymbolDetail
+
+/**
+ * A CSV of what the Opportunities list already scored, for offline analysis.
+ *
+ * This exists to answer one question that reading the code cannot: how much do the four buckets
+ * repeat each other? `RegimeFit.valueScore` reads the same three multiples the fundamentals bucket
+ * reads, and `RegimeFit.trendScore` reads the same EMAs the technicals bucket reads. That the
+ * inputs are shared is a fact of the source. How far that carries into the *scores* is a
+ * measurement, and it needs the whole population, not a screenshot.
+ *
+ * So the export carries both: the four bucket scores, and the raw inputs the duplication is
+ * suspected in. The correlation of the scores says how big the effect is; the correlation of the
+ * inputs says whether the shared inputs are the cause of it.
+ *
+ * Debug surface only. Nothing here is on a render path and nothing here is shipped behaviour.
+ */
+object ScoreExport {
+
+    /**
+     * Column order is the file's contract with the analysis in `lab/`. Append, never reorder.
+     */
+    private val COLUMNS = listOf(
+        "symbol",
+        "sector",
+        "fundamentals",
+        "technical",
+        "forecast",
+        "market",
+        "regime_status",
+        "composite_base",
+        "composite_final",
+        "coverage",
+        "beta_millis",
+        "forward_pe_hundredths",
+        "ev_ebitda_hundredths",
+        "price_to_book_hundredths",
+        "return_on_equity_bps",
+        "close_cents",
+        "ema20_cents",
+        "ema50_cents",
+        "ema200_cents",
+    )
+
+    /**
+     * One header line, then one line per row in [rows] — in list order, so a reader can see the
+     * ranking the export was taken from.
+     *
+     * A symbol with no detail or no daily summary still gets a line, with its input columns empty.
+     * Dropping it would quietly shrink the population the correlation is computed over, and a
+     * measurement that silently loses rows is worse than one that reports gaps.
+     */
+    fun buildCsv(
+        rows: List<OpportunityListRow>,
+        detailsBySymbol: Map<String, SymbolDetail>,
+        dailySummariesBySymbol: Map<String, ChartRangeSummary>,
+    ): String {
+        var lines = mutableListOf(COLUMNS.joinToString(","))
+        for (row in rows) {
+            var fundamentals = detailsBySymbol[row.symbol]?.fundamentals
+            var summary = dailySummariesBySymbol[row.symbol]
+            lines += listOf(
+                quote(row.symbol),
+                quote(fundamentals?.sectorName),
+                cell(row.fundamentalsScore),
+                cell(row.technicalScore),
+                cell(row.forecastScore),
+                cell(row.regimeScore),
+                quote(row.regimeStatus.name),
+                cell(row.compositeScoreBase),
+                cell(row.compositeScore),
+                cell(row.coverageCount),
+                cell(fundamentals?.betaMillis),
+                cell(fundamentals?.forwardPeHundredths),
+                cell(fundamentals?.enterpriseToEbitdaHundredths),
+                cell(fundamentals?.priceToBookHundredths),
+                cell(fundamentals?.returnOnEquityBps),
+                cell(summary?.latestCloseCents),
+                cell(summary?.ema20Cents),
+                cell(summary?.ema50Cents),
+                cell(summary?.ema200Cents),
+            ).joinToString(",")
+        }
+        return lines.joinToString("\n", postfix = "\n")
+    }
+
+    /** A missing number is an empty cell, never a zero — zero is a score a bucket can really have. */
+    private fun cell(value: Number?): String = value?.toString() ?: ""
+
+    private fun quote(value: String?): String =
+        if (value == null) "" else "\"" + value.replace("\"", "\"\"") + "\""
+}

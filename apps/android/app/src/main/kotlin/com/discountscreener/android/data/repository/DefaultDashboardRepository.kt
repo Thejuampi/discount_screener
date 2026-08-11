@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.repository
 
+import com.discountscreener.android.data.debug.ScoreExport
 import com.discountscreener.android.data.persistence.CaptureKind
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
 import com.discountscreener.android.data.persistence.MetricGroupStatus
@@ -3314,6 +3315,16 @@ class DefaultDashboardRepository(
 
     override suspend fun trackedSymbolDetails(): List<SymbolDetail> = stateMutex.withLock {
         trackedSymbols.mapNotNull { engine.detail(it) }
+    }
+
+    override suspend fun scoreExportCsv(
+        opportunityScoringModel: OpportunityScoringModel,
+    ): String = stateMutex.withLock {
+        // The unfiltered ranking, not what the search box happens to show — the correlation is a
+        // claim about the universe, and a filtered export would quietly change the population.
+        var rows = opportunityRowsLocked(ViewFilter(), opportunityScoringModel)
+        var details = rows.mapNotNull { engine.detail(it.symbol) }.associateBy { it.symbol }
+        ScoreExport.buildCsv(rows, details, regimeDailySummaries)
     }
 
     override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {

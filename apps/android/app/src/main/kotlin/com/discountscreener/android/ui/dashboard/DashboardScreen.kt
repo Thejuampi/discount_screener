@@ -33,6 +33,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
@@ -402,6 +403,10 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
             )
         }
 
+        if (BuildConfig.DEBUG) {
+            item { ScoreExportCard(onExport = { onAction(DashboardAction.ExportScores) }) }
+        }
+
         if (state.systemStatusMessage != null) {
             item {
                 Surface(
@@ -564,6 +569,37 @@ private fun LogStatsCard(state: DashboardUiState) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Debug-only. Writes the current Opportunities scores, and the inputs behind them, to a CSV in the
+ * app's private files directory. The written path is reported through the System status line.
+ *
+ * It measures how far the four buckets repeat each other, which is a question about the whole
+ * universe and cannot be answered from a screen.
+ */
+@Composable
+private fun ScoreExportCard(onExport: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Score Export (debug)", fontWeight = FontWeight.Bold)
+            Text(
+                "Writes every scored row and its raw inputs to CSV, for the bucket-overlap analysis.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
+                Text("Export Scores CSV", maxLines = 1, textAlign = TextAlign.Center)
             }
         }
     }
