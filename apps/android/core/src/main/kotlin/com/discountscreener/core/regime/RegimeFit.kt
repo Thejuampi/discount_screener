@@ -3,6 +3,7 @@ package com.discountscreener.core.regime
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.OpportunityScoringModel
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.tanh
@@ -135,14 +136,17 @@ fun regimeFitTerms(
     fundamentals: FundamentalSnapshot?,
     daily: ChartRangeSummary?,
     policy: RegimeScoringPolicy,
+    featureSet: MarketFeatureSet = MarketFeatureSet.Full,
 ): List<RegimeFitTerm> {
-    val features = SymbolFeatures.extract(fundamentals, daily)
+    val features = SymbolFeatures.extract(fundamentals, daily, featureSet)
     if (features.coverage < 2) return emptyList()
 
     val parts = ArrayList<RegimeFitTerm>()
 
-    features.quality?.let { quality ->
-        parts.add(term(RegimeCauseFactor.Quality, clamp((quality - 0.45) / 0.45, -1.0, 1.0), policy.wQuality))
+    if (featureSet.scoresQuality) {
+        features.quality?.let { quality ->
+            parts.add(term(RegimeCauseFactor.Quality, clamp((quality - 0.45) / 0.45, -1.0, 1.0), policy.wQuality))
+        }
     }
     features.lowBeta?.let { lowBeta ->
         parts.add(term(RegimeCauseFactor.LowBeta, clamp((lowBeta - 0.5) / 0.5, -1.0, 1.0), policy.wLowBeta))
@@ -193,8 +197,9 @@ fun scoreRegimeFit(
     fundamentals: FundamentalSnapshot?,
     daily: ChartRangeSummary?,
     policy: RegimeScoringPolicy,
+    featureSet: MarketFeatureSet = MarketFeatureSet.Full,
 ): RegimeFitResult {
-    val parts = regimeFitTerms(fundamentals, daily, policy)
+    val parts = regimeFitTerms(fundamentals, daily, policy, featureSet)
     if (parts.isEmpty()) return RegimeFitResult.insufficient()
 
     var numerator = 0.0
@@ -233,6 +238,49 @@ fun scoreRegimeFit(
     )
 }
 
+/**
+ * Which market terms a model scores.
+ *
+ * V3 scores every one, and three of them repeat a fact another bucket already holds. The overlap
+ * was measured on 498 live rows, per term, and the boundary that decides each case is whether the
+ * regime policy can flip the term's sign:
+ *
+ *  * a term whose weight can invert what it says, by stance, is an **arbitration** and stays —
+ *    `wTrend` runs 0.1 in BloodInStreets to 1.0 in Deploy while `wAntiExtension` runs the other
+ *    way, so the trend pair reads one stretched chart in opposition and the stance decides;
+ *  * a term whose sign is fixed in every stance and is already scored elsewhere is a **duplicate**
+ *    and goes.
+ *
+ * [NonOverlapping] is the second rule applied. Each term it drops was removed in its own commit,
+ * carrying the correlation that justified it, so that a later comparison of V3 against V4 can say
+ * which removal moved the answer.
+ */
+enum class MarketFeatureSet(
+    internal val scoresQuality: Boolean,
+) {
+    /** Every term. V3's set, and the control the journal compares against. */
+    Full(scoresQuality = true),
+
+    /** V4's set: the arbitrations, without the terms another bucket already scores. */
+    NonOverlapping(scoresQuality = false),
+}
+
+/**
+ * Which set a model scores. A `when`, so the compiler names this place when a fifth model arrives.
+ *
+ * It lives here rather than beside the model enum because the answer is a regime concept, and the
+ * model package should not have to know what a market term is.
+ */
+fun OpportunityScoringModel.marketFeatureSet(): MarketFeatureSet = when (this) {
+    OpportunityScoringModel.Legacy,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.AggressiveV2,
+    OpportunityScoringModel.AggressiveV3,
+    -> MarketFeatureSet.Full
+    OpportunityScoringModel.AggressiveV4,
+    -> MarketFeatureSet.NonOverlapping
+}
+
 private data class SymbolFeatures(
     val quality: Double?,
     val lowBeta: Double?,
@@ -246,7 +294,19 @@ private data class SymbolFeatures(
     val coverage: Int,
 ) {
     companion object {
-        fun extract(fundamentals: FundamentalSnapshot?, daily: ChartRangeSummary?): SymbolFeatures {
+        /**
+         * Coverage counts the features this set can turn into a term, and nothing else.
+         *
+         * A floor counted over features the model never scores measures the wrong population: a
+         * symbol could clear it on three facts V4 ignores and then produce no term at all. Quality
+         * is the one that stays computed after it stops being scored, because the oversold term is
+         * gated on it — an oversold junk name is not a dip to buy.
+         */
+        fun extract(
+            fundamentals: FundamentalSnapshot?,
+            daily: ChartRangeSummary?,
+            featureSet: MarketFeatureSet,
+        ): SymbolFeatures {
             val quality = qualityScore(fundamentals)
             val lowBeta = lowBetaScore(fundamentals?.betaMillis)
             val value = valueScore(fundamentals)
@@ -257,7 +317,7 @@ private data class SymbolFeatures(
             val liquidity = liquidityScore(fundamentals, daily)
 
             var coverage = 0
-            if (quality != null) coverage += 1
+            if (featureSet.scoresQuality && quality != null) coverage += 1
             if (lowBeta != null) coverage += 1
             if (value != null) coverage += 1
             if (extension != null) coverage += 1

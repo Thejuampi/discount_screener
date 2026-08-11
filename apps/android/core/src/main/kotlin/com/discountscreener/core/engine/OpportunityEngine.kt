@@ -21,6 +21,7 @@ import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeFitResult
 import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.regime.RegimeScoringPolicy
+import com.discountscreener.core.regime.marketFeatureSet
 import com.discountscreener.core.regime.scoreRegimeFit
 import java.math.BigInteger
 import kotlin.math.abs
@@ -449,7 +450,7 @@ object OpportunityEngine {
             policy == null -> RegimeFitResult(
                 unavailableReason = MarketContextUnavailableReason.MarketReadingUnavailable,
             )
-            else -> scoreRegimeFit(detail.fundamentals, regimeSummary, policy)
+            else -> scoreRegimeFit(detail.fundamentals, regimeSummary, policy, model.marketFeatureSet())
         }
         val status = resolveRegimeScoreStatus(applicable, regimeScoringEnabled, policy != null, fit.score)
         val included = status == RegimeScoreStatus.Included
