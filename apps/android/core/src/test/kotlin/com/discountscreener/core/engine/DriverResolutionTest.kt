@@ -78,6 +78,36 @@ class DriverResolutionTest {
         assertTrue(error.message.orEmpty().contains("marginal tax is unavailable"))
     }
 
+    /**
+     * Four aligned periods give four annual rates, and the median of an even count is the midpoint
+     * of the middle pair. `sorted()[size / 2]` returned 600 here — the upper of the two — which is
+     * one of the observations rather than the middle of them, and is not the median the function's
+     * own comment promises.
+     *
+     * This changes the cost of debt, and so the intrinsic value, for every issuer with an even
+     * number of aligned financing periods. The number is pinned here so the change is a measured
+     * one. Windows's peer (`driver_resolution.rs:222`) still takes the upper value.
+     */
+    @Test
+    fun the_annual_cost_of_debt_is_the_middle_of_an_even_count_not_the_upper_of_it() {
+        var fourPeriods = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue("2020-12-31", 4.0),
+                AnnualReportedValue("2021-12-31", 5.0),
+                AnnualReportedValue("2022-12-31", 6.0),
+                AnnualReportedValue("2023-12-31", 7.0),
+            ),
+            totalDebt = (2020..2023).map { AnnualReportedValue("$it-12-31", 100.0) },
+            marginalTaxRate = (2020..2023).map {
+                AnnualReportedValue("$it-12-31", 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+
+        var resolved = resolveRateInputs(fourPeriods, 100L, 430).getOrThrow()!!
+
+        assertEquals(550, resolved.costOfDebtBps)
+    }
+
     private fun financingTimeseries() = FundamentalTimeseries(
         interestExpense = listOf(
             AnnualReportedValue("2021-12-31", 5.0),
