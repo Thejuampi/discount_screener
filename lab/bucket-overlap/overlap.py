@@ -27,6 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from robust import NoCentre, robust_mean  # noqa: E402  — needs the path above
 
+# The market bucket's terms, in the order `RegimeCauseFactor` declares them.
+TERM_NAMES = [
+    "quality",
+    "lowbeta",
+    "value",
+    "oversoldqual",
+    "extension",
+    "trend",
+    "defensive",
+    "growth",
+    "liquidity",
+]
+
 BUCKETS = [
     ("F", "fundamentals"),
     ("T", "technical"),
@@ -185,6 +198,50 @@ def report(rows, label):
     show("rho(F, M | the three multiples)", rho, count)
 
 
+def report_terms(rows, label):
+    """Which term of the market bucket carries which sign — the mechanism, not the composite.
+
+    The bucket is a weighted mean of up to nine terms, so a correlation against the bucket says
+    two buckets move together and nothing about why. `Trend` and `Extension` read one observable
+    and the regime stance decides which of them wins by weight. Only the terms can show that.
+    """
+    print(f"\n=== Market bucket, term by term — {label} ===")
+    stances = sorted({row.get("stance", "") for row in rows})
+    print(f"  stance(s) in this file: {', '.join(s or '(none)' for s in stances)}")
+    weights = {
+        name: sorted({row.get(f"w_{name}", "") for row in rows if row.get(f"w_{name}", "")})
+        for name in TERM_NAMES
+    }
+    for name in TERM_NAMES:
+        print(f"  w_{name:<13} {', '.join(weights[name]) or '(absent)'}")
+
+    technical = [number(r, "technical") for r in rows]
+    fundamentals = [number(r, "fundamentals") for r in rows]
+    market = [number(r, "market") for r in rows]
+    extension_input = [price_over_ema200(r) for r in rows]
+    terms = {name: [number(r, f"t_{name}") for r in rows] for name in TERM_NAMES}
+
+    print("\n  Each term against the technicals bucket and the price stretch it may read")
+    for name in ("trend", "extension", "oversoldqual"):
+        show(f"rho(T, t_{name})", *spearman(technical, terms[name]))
+        show(f"rho(close/EMA200, t_{name})", *spearman(extension_input, terms[name]))
+
+    print("\n  Each term against the fundamentals bucket")
+    for name in ("value", "quality", "liquidity", "lowbeta"):
+        show(f"rho(F, t_{name})", *spearman(fundamentals, terms[name]))
+
+    print("\n  Each term against the bucket it belongs to")
+    for name in TERM_NAMES:
+        show(f"rho(M, t_{name})", *spearman(market, terms[name]))
+
+    print("\n  Remove the suspected channel and see what is left of the bucket overlap")
+    show(
+        "rho(T, M | t_trend, t_extension)",
+        *partial_spearman(technical, market, [terms["trend"], terms["extension"]]),
+    )
+    show("rho(F, M | t_value)", *partial_spearman(fundamentals, market, [terms["value"]]))
+
+
 def report_spread(rows, label):
     """The distribution V4_SPREAD_FULL has to be chosen from.
 
@@ -220,6 +277,8 @@ def main():
     qualified = [r for r in rows if r["qualified"] == "1"]
     report(rows, "Cohort — every scored candidate")
     report(qualified, "Qualified only — the Opportunities list (range-restricted)")
+    if any("t_trend" in row for row in rows):
+        report_terms(rows, "cohort")
     report_spread(rows, "cohort")
     report_spread(qualified, "qualified only")
     print(
