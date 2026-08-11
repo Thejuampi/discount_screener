@@ -14,9 +14,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -339,10 +339,10 @@ open class YahooFinanceClient(
         val volumes = quote["volume"]?.jsonArray ?: JsonArray(emptyList())
 
         timestamps.indices.mapNotNull { index ->
-            val close = closes.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
-            val open = opens.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
-            val high = highs.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
-            val low = lows.getOrNull(index)?.jsonPrimitive?.doubleOrNull ?: close
+            val close = closes.getOrNull(index)?.jsonPrimitive?.plainDoubleOrNull() ?: return@mapNotNull null
+            val open = opens.getOrNull(index)?.jsonPrimitive?.plainDoubleOrNull() ?: close
+            val high = highs.getOrNull(index)?.jsonPrimitive?.plainDoubleOrNull() ?: close
+            val low = lows.getOrNull(index)?.jsonPrimitive?.plainDoubleOrNull() ?: close
             val volume = volumes.getOrNull(index)?.jsonPrimitive?.longOrNull ?: 0L
             val timestamp = timestamps[index].jsonPrimitive.longOrNull ?: return@mapNotNull null
             HistoricalCandle(
@@ -904,7 +904,7 @@ internal fun parseChartLatestCloseCents(root: JsonObject): Long? {
         ?.jsonArray
         ?: return null
     for (index in closes.indices.reversed()) {
-        val close = closes[index].jsonPrimitive.doubleOrNull ?: continue
+        val close = closes[index].jsonPrimitive.plainDoubleOrNull() ?: continue
         dollarsToCents(close)?.let { return it }
     }
     return null
@@ -913,7 +913,7 @@ internal fun parseChartLatestCloseCents(root: JsonObject): Long? {
 internal fun parseChartRegularMarketPriceCents(root: JsonObject): Long? {
     val meta = root.child("chart").childArray("result").firstOrNull()?.jsonObject?.get("meta")?.jsonObject
         ?: return null
-    val price = meta.get("regularMarketPrice")?.jsonPrimitive?.doubleOrNull ?: return null
+    val price = meta.get("regularMarketPrice")?.jsonPrimitive?.plainDoubleOrNull() ?: return null
     return dollarsToCents(price)
 }
 
@@ -993,7 +993,7 @@ private fun parseTimeseriesMetric(root: JsonObject, name: String): List<AnnualRe
     return series.mapNotNull { element ->
         val obj = element.jsonObject
         val date = obj["asOfDate"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-        val value = obj["reportedValue"]?.jsonObject?.get("raw")?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
+        val value = obj["reportedValue"]?.jsonObject?.get("raw")?.jsonPrimitive?.plainDoubleOrNull() ?: return@mapNotNull null
         AnnualReportedValue(
             asOfDate = date,
             value = value,
@@ -1079,6 +1079,32 @@ internal fun resolveRetentionBps(
 private fun dollarsToCents(value: Double): Long? =
     value.takeIf { it.isFinite() && it > 0.0 }?.times(100.0)?.roundToLong()
 
+/**
+ * `doubleOrNull` with no regex.
+ *
+ * `kotlinx.serialization`'s `doubleOrNull` calls `String.toDoubleOrNull`, which screens the text
+ * against `Regex` before it parses. Each screen builds a `java.util.regex.Matcher`, and on Android
+ * a Matcher owns a native ICU object that only a GC releases. A universe refresh parses four of
+ * these per candle for every tracked symbol, which is roughly 500,000 matchers in a burst on four
+ * dispatcher threads. Measured: the process reached 1.7 GB of native memory in 40 seconds and the
+ * Scudo allocator aborted with SIGABRT. The Java heap cap is 192 MB and was never near it, which
+ * is how the growth showed itself as native.
+ *
+ * `String.toDouble` goes straight to `Double.parseDouble` and allocates no matcher. The catch is
+ * the price of that: `parseDouble` reports a bad value by throwing. Yahoo writes `null` into a
+ * candle array for a bar with no trade, so that branch is common and is checked first.
+ */
+private fun JsonPrimitive.plainDoubleOrNull(): Double? {
+    if (this is JsonNull) {
+        return null
+    }
+    return try {
+        content.toDouble()
+    } catch (_: NumberFormatException) {
+        null
+    }
+}
+
 private fun JsonObject?.child(name: String): JsonObject =
     this?.get(name)?.jsonObject ?: JsonObject(emptyMap())
 
@@ -1092,7 +1118,7 @@ private fun JsonObject?.stringValue(name: String): String? =
     this?.get(name)?.jsonPrimitive?.contentOrNull
 
 private fun JsonObject?.rawDouble(name: String): Double? =
-    this?.get(name)?.jsonObject?.get("raw")?.jsonPrimitive?.doubleOrNull
+    this?.get(name)?.jsonObject?.get("raw")?.jsonPrimitive?.plainDoubleOrNull()
 
 private fun JsonObject?.rawInt(name: String): Int? =
     rawDouble(name)?.takeIf(Double::isFinite)?.roundToLong()?.toInt()

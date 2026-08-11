@@ -2,6 +2,8 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.MarketSnapshot
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import okhttp3.Request
 import org.junit.Assert.assertEquals
@@ -331,6 +333,24 @@ class YahooFinanceClientTest {
         assertEquals(7_200, resolveRetentionBps(empty, summaryOnly))
     }
 
+    /**
+     * Yahoo writes `null` into a candle array for a bar with no trade, so this branch is common.
+     *
+     * The parse used to go through `doubleOrNull`, which screens the text with a Regex first. That
+     * screen made a native ICU Matcher per call and a universe refresh made them faster than the GC
+     * released them, so the process died of native memory. The parse is direct now, and a direct
+     * parse reports a bad value by throwing. These two tests pin the two ways a bar can be bad.
+     */
+    @Test
+    fun a_null_last_candle_falls_back_to_the_last_real_close() {
+        assertEquals(19_950L, parseChartLatestCloseCents(chartClosesJson("199.50", "null")))
+    }
+
+    @Test
+    fun a_non_numeric_candle_falls_back_to_the_last_real_close() {
+        assertEquals(19_950L, parseChartLatestCloseCents(chartClosesJson("199.50", "\"n/a\"")))
+    }
+
     @Test
     fun parses_loews_long_name_from_chart_meta_when_quote_html_is_unavailable() {
         // Live sample shape from query1 chart/L (HTML quote/L returns HTTP 404).
@@ -447,6 +467,14 @@ class YahooFinanceClientTest {
             {"chart":{"result":[{"meta":{"currency":"USD","symbol":"$symbol","longName":"$longName","shortName":"$shortName","regularMarketPrice":$price},"timestamp":[1],"indicators":{"quote":[{"close":[$price],"open":[$price],"high":[$price],"low":[$price],"volume":[1]}]}}],"error":null}}
         """.trimIndent()
         return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+    }
+
+    /** A chart whose close array holds [closes] verbatim, so a test can put a raw JSON token in it. */
+    private fun chartClosesJson(vararg closes: String): JsonObject {
+        val body = """
+            {"chart":{"result":[{"meta":{"currency":"USD","symbol":"X"},"indicators":{"quote":[{"close":[${closes.joinToString(",")}]}]}}],"error":null}}
+        """.trimIndent()
+        return Json.parseToJsonElement(body).jsonObject
     }
 
     private fun loadQuoteSummaryFixture(symbol: String): kotlinx.serialization.json.JsonObject {
