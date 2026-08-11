@@ -89,6 +89,24 @@ class MarketFeatureSetTest {
     }
 
     /**
+     * The third removal: V3 scores a standalone low-beta term, V4 does not.
+     *
+     * ρ(M, t_lowbeta) = +0.686 on the same 498 rows, same sign in every stance. Beta is already
+     * priced by the composite's risk haircut, so a market term that pays for it again pays twice
+     * for one number. Under V4 beta reaches the score in exactly one place: the haircut.
+     */
+    @Test
+    fun the_low_beta_term_is_scored_by_v3_and_not_by_v4() {
+        var v3 = regimeFitTerms(qualityFundamentals(), stretchedChart(), deploy(), MarketFeatureSet.Full)
+        var v4 = v4Terms(deploy())
+
+        assertEquals(
+            listOf(true, false),
+            listOf(v3, v4).map { terms -> terms.any { it.factor == RegimeCauseFactor.LowBeta } },
+        )
+    }
+
+    /**
      * Quality stops being scored and does not stop being computed, because the oversold term is
      * gated on it: an oversold junk name is not a dip to buy. A removal that deleted the feature
      * rather than the term would take the gate with it.
@@ -116,6 +134,24 @@ class MarketFeatureSetTest {
     fun a_symbol_whose_only_features_are_ones_v4_drops_reports_no_fourth_bucket() {
         var v3 = scoreRegimeFit(qualityInADefensiveSector(), null, deploy(), MarketFeatureSet.Full)
         var v4 = scoreRegimeFit(qualityInADefensiveSector(), null, deploy(), V4)
+
+        assertEquals(
+            listOf(false, true),
+            listOf(v3, v4).map { it.unavailableReason == MarketContextUnavailableReason.InsufficientAssetData },
+        )
+    }
+
+    /**
+     * The same floor rule, applied to beta.
+     *
+     * The fixture holds exactly two features: a low beta, and a defensive sector. BloodInStreets is
+     * the stance because it pays for both — under Deploy each weighs zero and the comparison would
+     * be between two refusals rather than between two coverage counts.
+     */
+    @Test
+    fun the_coverage_floor_stops_counting_beta_under_v4() {
+        var v3 = scoreRegimeFit(aLowBetaUtility(), null, bloodInStreets(), MarketFeatureSet.Full)
+        var v4 = scoreRegimeFit(aLowBetaUtility(), null, bloodInStreets(), V4)
 
         assertEquals(
             listOf(false, true),
@@ -181,6 +217,17 @@ class MarketFeatureSetTest {
         sectorName = "Utilities",
         returnOnEquityBps = 2_000,
         debtToEquityHundredths = 30,
+    )
+
+    /**
+     * Two features and no more: a low beta, and a defensive sector. No return on equity, no
+     * leverage, no market cap and no chart — each would add a feature and lift the fixture off the
+     * floor, which is the thing being measured.
+     */
+    private fun aLowBetaUtility() = FundamentalSnapshot(
+        symbol = "CALM",
+        sectorName = "Utilities",
+        betaMillis = 700,
     )
 
     /** Quality, plus the multiples the value term reads. */
