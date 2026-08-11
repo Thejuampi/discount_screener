@@ -12,8 +12,14 @@ import random
 import sys
 
 from overlap import average_ranks, partial_spearman, rank_r_squared, spearman
+from robust import NoCentre, robust_mean
 
 TOLERANCE = 0.15
+
+# Nine ordinary years and one category error, from `valuation-core::numerics`' own test. The plain
+# mean of it is 100.4; a centre that reports anything near that is the contaminated answer wearing
+# a robust label.
+CONTAMINATED = [9.0, 9.0, 10.0, 10.0, 10.0, 11.0, 11.0, 12.0, 12.0, 910.0]
 
 
 def failures():
@@ -67,6 +73,23 @@ def failures():
     )
 
     yield check("ties are averaged, not broken by position", average_ranks([5, 5, 9])[0], 1.5)
+
+    yield check(
+        "one contamination does not move the centre",
+        robust_mean(CONTAMINATED),
+        10.4,
+    )
+    yield check("a sample with no width refuses", refusal(robust_mean, [7.0, 7.0, 7.0, 9.0]), 1.0)
+    yield check("two observations refuse", refusal(robust_mean, [3.0, 8.0]), 1.0)
+
+
+def refusal(function, sample):
+    """1.0 when the call refuses, 0.0 when it answers. A refusal path must be able to fire."""
+    try:
+        function(sample)
+        return 0.0
+    except NoCentre:
+        return 1.0
 
 
 def check(title, measured, expected):

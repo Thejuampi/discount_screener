@@ -18,9 +18,14 @@ Spearman, not Pearson: the buckets are clamped at +/-100 and the tails are flat.
 
 import csv
 import math
+import os
 import sys
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from robust import NoCentre, robust_mean  # noqa: E402  — needs the path above
 
 BUCKETS = [
     ("F", "fundamentals"),
@@ -188,15 +193,21 @@ def report_spread(rows, label):
     without seeing the distribution would be taste wearing a number.
     """
     spreads = []
+    refused = 0
     for row in rows:
         present = [number(row, column) for _, column in BUCKETS]
         present = [value for value in present if value is not None]
-        if len(present) < 2:
+        try:
+            # The same centre production will use. A distribution measured around a plain mean
+            # would fit the constant to one quantity and gate another, and nothing would say so.
+            centre = robust_mean(present)
+        except NoCentre:
+            refused += 1
             continue
-        centre = sum(present) / len(present)
         spreads.append(sum(abs(value - centre) for value in present) / len(present))
     spreads.sort()
     print(f"\n=== Bucket spread (mean absolute deviation) — {label}, {len(spreads)} rows ===")
+    print(f"  {refused} row(s) had no robust centre and are excluded, not defaulted.")
     for percentile in (5, 10, 25, 50, 75, 90, 95, 99):
         index = min(len(spreads) - 1, int(round(percentile / 100.0 * (len(spreads) - 1))))
         print(f"  p{percentile:<3} {spreads[index]:6.1f}")

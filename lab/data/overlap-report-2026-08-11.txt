@@ -59,26 +59,28 @@ Is the shared input the channel? (partial rho, control removed from both sides)
   rho(T, M | close/EMA200)           -0.235   n=65
   rho(F, M | the three multiples)    +0.135   n=55
 
-=== Bucket spread (mean absolute deviation) — cohort, 498 rows ===
+=== Bucket spread (mean absolute deviation) — cohort, 496 rows ===
+  2 row(s) had no robust centre and are excluded, not defaulted.
   p5      6.5
-  p10     8.0
-  p25    11.8
-  p50    17.2
-  p75    23.5
-  p90    30.2
-  p95    34.0
+  p10     7.9
+  p25    11.6
+  p50    17.0
+  p75    23.2
+  p90    29.5
+  p95    33.5
   p99    41.8
-  max    48.8
+  max    45.8
 
 === Bucket spread (mean absolute deviation) — qualified only, 65 rows ===
-  p5     11.2
-  p10    15.1
-  p25    18.5
-  p50    23.8
-  p75    31.8
+  0 row(s) had no robust centre and are excluded, not defaulted.
+  p5      9.8
+  p10    12.5
+  p25    16.5
+  p50    23.1
+  p75    29.5
   p90    39.5
   p95    41.8
-  p99    43.8
-  max    48.8
+  p99    42.5
+  max    43.8
 
 The standard error of a Spearman rho on n rows is about 1/sqrt(n-1); on the cohort that is about 0.045.
