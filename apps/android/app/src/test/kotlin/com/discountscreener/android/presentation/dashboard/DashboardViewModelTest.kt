@@ -104,6 +104,28 @@ class DashboardViewModelTest {
         assertEquals("MSFT", viewModel.state.value.query)
     }
 
+    /**
+     * The reported bug: the Refresh button killed the app.
+     *
+     * `refresh` ran the whole refresh inside `viewModelScope.launch` with no `try`. Anything the
+     * refresh threw reached the coroutine handler, and the handler ends the process. The worst
+     * honest outcome of that button is "the data did not update", so the throw must become a
+     * notice. `loadDetailData` already guarded its own call this way.
+     *
+     * Without the guard this test does not merely miss the notice -- the throw escapes and fails
+     * the test, which is the same exit the user saw.
+     */
+    @Test
+    fun a_throwing_refresh_reports_a_notice_and_does_not_kill_the_scope() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(refreshAllError = IllegalStateException("Yahoo said no"))
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+
+        assertEquals("Refresh failed", viewModel.state.value.detailNotice?.title)
+    }
+
     @Test
     fun select_tab_updates_current_tab() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
@@ -882,6 +904,7 @@ class DashboardViewModelTest {
         private var projectedDetailData: ProjectedDetailData? = null,
         private var detailNotice: DashboardNotice? = null,
         private val tickerSuggestions: List<TickerSearchSuggestion> = emptyList(),
+        private val refreshAllError: Throwable? = null,
     ) : DashboardRepository {
         var saveSnapshotCallCount = 0
         var currentSnapshotCallCount = 0
@@ -941,7 +964,10 @@ class DashboardViewModelTest {
             selectedSymbol: String?,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
-        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
+        ): DashboardSnapshot {
+            refreshAllError?.let { throw it }
+            return emptySnapshot(opportunityScoringModel)
+        }
 
         override suspend fun ensureDetailLoaded(
             symbol: String,

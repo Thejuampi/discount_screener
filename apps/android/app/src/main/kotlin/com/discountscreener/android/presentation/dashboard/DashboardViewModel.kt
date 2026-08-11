@@ -357,13 +357,26 @@ class DashboardViewModel(
 
     private fun refresh() {
         viewModelScope.launch {
-            val snapshot = refreshDashboard(
-                currentFilter(),
-                _state.value.detailRoute?.symbol,
-                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                _state.value.opportunityScoringModel,
-            )
-            render(snapshot)
+            // A throw here reaches the coroutine handler and takes the process with it, which is a
+            // hard exit for a button whose worst honest outcome is "the data did not update".
+            // `loadDetailData` already guards its own call this way.
+            try {
+                val snapshot = refreshDashboard(
+                    currentFilter(),
+                    _state.value.detailRoute?.symbol,
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                )
+                render(snapshot)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    detailNotice = DashboardNotice(
+                        title = "Refresh failed",
+                        message = error.message ?: "The refresh could not complete.",
+                        severity = DashboardNoticeSeverity.Warning,
+                    ),
+                )
+            }
             _state.value.detailRoute?.symbol?.let { loadDetailData(it) }
             loadEstimates()
         }
