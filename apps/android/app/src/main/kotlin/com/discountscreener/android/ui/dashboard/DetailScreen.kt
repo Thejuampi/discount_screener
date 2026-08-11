@@ -346,6 +346,27 @@ private fun DetailScoreHeader(
                     )
                 }
             }
+            // What the F token above is made of, and — the reason this exists — WHICH RULE MADE IT.
+            //
+            // Under V4 a multiple is scored against its sector when that sector has enough members
+            // and against an absolute band when it does not, and the engine marks the difference
+            // with a single character: `Mult§` against the sector, `Mult` against the band. Two
+            // rows in one list scored by two rules with nothing saying which is the same defect as
+            // a refusal drawn as a mute dash, so Wave 2 said the marker "must be visible, and it is
+            // not a follow-up".
+            //
+            // It was not visible. The engine built these strings, the repository carried them into
+            // the snapshot, and no composable ever read them — a claim about the user's screen that
+            // lived entirely in a data class. No model branch here on purpose: V3 emits the same
+            // labels without the marker, so showing them for every model is both simpler and more
+            // honest than showing the user a legend only one model can populate.
+            if (scoreRow.fundamentalsSignals.isNotEmpty()) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    scoreRow.fundamentalsSignals.forEach { signal ->
+                        MetricToken(signal, fundamentalsMetricColor())
+                    }
+                }
+            }
             // Above the market section, and outside it, because agreement is a fact about the
             // composite rather than about the fourth bucket: it is measured over whichever buckets
             // reported, and it still moved the score on a name whose market reading never arrived.

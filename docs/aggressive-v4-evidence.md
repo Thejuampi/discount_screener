@@ -56,19 +56,25 @@ The rule the table encodes: a term whose weight can flip the sign of what it say
 arbitration and stays. A term whose sign is fixed across every stance and is already scored in
 another bucket is a duplicate and goes.
 
-## The `§` marker does not work, and the sector half of V4 has never run on a device
+## The `§` marker shipped late, and the sector half of V4 has never run on a device
 
 The plan's risk section says: *"Which rule scored a metric is now marked with `§` in Wave 2, so the
-switch is visible rather than silent."* **That claim is false and is withdrawn here.** Two facts
-compound, and each alone would be enough.
+switch is visible rather than silent."* **That claim was false when it was written.** Two facts
+compounded, and each alone would have been enough. The first is now fixed; the second cannot be.
 
-**One: nothing renders it.** The engine builds the labels — `Mult§`, `ROE§` — and hands them out as
-`fundamentalsSignals`. That list is carried from `OpportunityEngine` into `Models.kt:879`, copied
-again into `DashboardSnapshot.kt:167`, plumbed through `DefaultDashboardRepository` twice, and read
-by **no UI code at all**. Every reference in the app is a write. A user cannot see `§`, so a list
-holding a sector-scored row beside an absolute-scored row says nothing about which is which. The
-mitigation exists in the engine and does not exist on the screen — which is this repository's own
+**One: nothing rendered it — fixed.** The engine built the labels — `Mult§`, `ROE§` — and handed
+them out as `fundamentalsSignals`. That list was carried from `OpportunityEngine` into
+`Models.kt:879`, copied again into `DashboardSnapshot.kt:167`, plumbed through
+`DefaultDashboardRepository` twice, and read by **no UI code at all**. Every reference in the app was
+a write. The mitigation existed in the engine and did not exist on the screen — this repository's own
 most expensive recurring defect, a refusal that reaches the user as silence.
+
+`DetailScreen` now renders each entry of `fundamentalsSignals` as a metric token directly beneath the
+`F` token it explains, for every model rather than for V4 alone, since V3 emits the same labels
+without the marker. Two paired tests in `DetailScoreHeaderTest` hold it: one asserts a row carrying
+`Mult§++` displays it, the other asserts a row carrying no signal displays no token. Both were
+mutated in isolation — deleting the render kills only the first, hardcoding the token kills only the
+second — so neither passes against a legend that ignores the row.
 
 **Two: it is unreachable in the mandated QA universe anyway.** `MIN_SECTOR_MEMBERS` is 5. Counted
 from the live device's own database, across the twenty symbols of profile `qa`:
@@ -89,9 +95,15 @@ three headline changes in this effort and **not one line of that path has execut
 test.** This is not a coverage gap that happened to be missed; it cannot be closed on the mandated
 universe, and `AGENTS.md:282` allows another one only on the user's explicit order. It is not taken.
 
-Registered as the first follow-up: render `fundamentalsSignals`, then exercise the sector path on a
-universe that can reach five members in a sector. Until both are done, the honest description of the
-fallback is *silent*, not *marked*.
+**Sector-relative fundamentals is unverifiable live under the mandated `qa` universe, by
+construction of `MIN_SECTOR_MEMBERS` versus the 20-symbol cap. It is verified by unit and widget
+test, and by `sp500` structure — not by device QA.** That is a permanent property of the pairing, not
+a round of testing that was skipped, and it is repeated in the standing risks below so a reader who
+opens only that section still meets it.
+
+Registered as a follow-up: exercise the sector path on a universe that can reach five members in a
+sector, either by running `sp500` once under an explicit order or by choosing the twenty `qa` symbols
+so that one sector clears five.
 
 ## Agreement bonus — the constant, and the population it was fitted to
 
@@ -211,6 +223,12 @@ What this does **not** license anyone to conclude:
 - **Sector benchmarks are thin for small sectors.** Below five usable members the fundamentals bucket
   falls back to the absolute band, and the metric token is marked `§` when the sector rule was used,
   so the switch is visible rather than silent.
+- **Sector-relative fundamentals is unverifiable live under the mandated `qa` universe, by
+  construction of `MIN_SECTOR_MEMBERS` versus the 20-symbol cap. It is verified by unit and widget
+  test, and by `sp500` structure — not by device QA.** `qa`'s largest sector holds four names, so no
+  benchmark can be computed there and no `§` can appear. Every V4 score ever shown on a device has
+  used the absolute fallback. This is a property of the pairing, not a testing round that was
+  skipped: closing it needs a different universe, and that is the user's call to give.
 - **Android and Windows diverge for the duration.** Android has a model Windows does not.
   `shared/contracts/opportunity-v4.json` now exists and is what stops that becoming permanent
   drift — see below for the one thing that would break it.

@@ -74,6 +74,35 @@ class DetailScoreHeaderTest {
         composeRule.onNodeWithText("T --").assertIsDisplayed()
     }
 
+    /**
+     * The `§` is the whole point of the sector work: it says the F token above was scored against
+     * this symbol's own industry rather than against one band shared by utilities and chip makers.
+     *
+     * It is asserted here because it cannot be asserted on a device. A sector needs five members
+     * before `computeSectorBenchmarks` will speak, and live QA is pinned to a universe of twenty
+     * symbols spread across every sector, so the marker never appears there. A synthetic row is not
+     * a weaker check than the emulator here — it is the only one available.
+     */
+    @Test
+    fun a_sector_scored_multiple_says_on_screen_that_it_was_scored_against_its_sector() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, fundamentalsSignals = listOf("Mult§++")))
+
+        composeRule.onNodeWithText("Mult§++").assertIsDisplayed()
+    }
+
+    /**
+     * Its companion, and the one that makes the assertion above mean something. A row is displayed
+     * whether or not any composable reads [OpportunityListRow.fundamentalsSignals] — a hardcoded
+     * legend would satisfy the positive case alone. This one fails unless the tokens come from the
+     * row.
+     */
+    @Test
+    fun a_row_that_carries_no_fundamentals_signal_renders_no_signal_token() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, fundamentalsSignals = emptyList()))
+
+        composeRule.onNodeWithText("Mult§++").assertDoesNotExist()
+    }
+
     @Test
     fun detail_header_marks_the_active_scoring_model() {
         setDetailContent(
@@ -208,6 +237,7 @@ class DetailScoreHeaderTest {
         fundamentals: Int? = 20,
         technical: Int? = 20,
         forecast: Int? = 20,
+        fundamentalsSignals: List<String> = emptyList(),
     ) = OpportunityListRow(
         symbol = SYMBOL,
         marketPriceCents = 10_000L,
@@ -220,6 +250,7 @@ class DetailScoreHeaderTest {
         forecastScore = forecast,
         compositeScore = composite,
         coverageCount = listOfNotNull(fundamentals, technical, forecast).size,
+        fundamentalsSignals = fundamentalsSignals,
     )
 
     private companion object {
