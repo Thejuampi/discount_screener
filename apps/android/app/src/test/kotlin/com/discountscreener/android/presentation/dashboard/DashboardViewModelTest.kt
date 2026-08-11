@@ -176,11 +176,11 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun dashboard_defaults_to_opportunities_with_aggressive_v3_scoring() {
+    fun dashboard_defaults_to_opportunities_with_aggressive_v2_scoring() {
         val state = DashboardUiState()
 
         assertEquals(DashboardTab.Opportunities, state.currentTab)
-        assertEquals(OpportunityScoringModel.AggressiveV3, state.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, state.opportunityScoringModel)
     }
 
     @Test
@@ -634,16 +634,22 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun toggle_opportunity_model_cycles_v3_to_legacy_to_aggressive_to_v2_to_v3() = runTest(dispatcher) {
+    fun toggle_opportunity_model_cycles_v2_to_v3_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
             aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
         )
         val viewModel = testViewModel(repository)
-        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
 
-        // The cycle is unchanged; the market dimension moved where it starts.
-        // Cycle: AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2 -> AggressiveV3.
+        // The rotation itself is untouched by the market dimension; only where it starts, and it
+        // starts where it started before the dimension existed.
+        // Cycle: AggressiveV2 -> AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2.
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
+
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
@@ -659,11 +665,6 @@ class DashboardViewModelTest {
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
         assertEquals(OpportunityScoringModel.AggressiveV2, repository.lastRequestedOpportunityModel)
-
-        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
-        advanceUntilIdle()
-        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
-        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
     }
 
     @Test
