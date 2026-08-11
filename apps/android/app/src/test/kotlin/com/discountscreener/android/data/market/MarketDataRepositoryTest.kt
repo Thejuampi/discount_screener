@@ -224,17 +224,62 @@ class MarketDataRepositoryTest {
         )
     }
 
+    /**
+     * The tracked universe's bars are kept, and only those. SPY and the market series are fetched
+     * for the reading itself and are not names anything is scored against, so storing them would
+     * grow the table with rows the retrospective has no score to match them to.
+     */
+    @Test
+    fun a_usable_reading_hands_the_tracked_universe_bars_to_the_sink() = runTest {
+        var sink = RecordingCandleSink()
+        repository(sink = sink).refreshIfStale(tickers())
+
+        assertEquals(tickers().toSet(), sink.stored.keys)
+    }
+
+    /**
+     * A round that failed hard enough to be unusable is a round whose bars are as likely partial,
+     * and a partial year written into the retrospective is worse than a missing day.
+     */
+    @Test
+    fun a_reading_no_policy_can_score_stores_no_bars() = runTest {
+        var sink = RecordingCandleSink()
+        repository(yahoo = FailingYahooClient(), sink = sink).refreshIfStale(tickers())
+
+        assertEquals(0, sink.callCount)
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     private fun repository(
         yahoo: YahooFinanceClient = RecordingYahooClient(),
         fearGreed: CnnFearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
         clock: MutableClock = MutableClock(START_EPOCH),
-    ) = MarketDataRepository(yahoo, fearGreed) { clock.epochSeconds }
+        sink: DailyCandleSink? = null,
+    ) = MarketDataRepository(
+        yahooClient = yahoo,
+        fearGreedClient = fearGreed,
+        nowEpochSeconds = { clock.epochSeconds },
+        dailyCandleSink = sink,
+    )
 
     private fun tickers() = (0 until 90).map { "SYM$it" }
 
     private class MutableClock(var epochSeconds: Long)
+
+    private class RecordingCandleSink : DailyCandleSink {
+        var callCount = 0
+        var stored: Map<String, List<HistoricalCandle>> = emptyMap()
+
+        override suspend fun persistBacktestCandles(
+            candlesBySymbol: Map<String, List<HistoricalCandle>>,
+            capturedAtEpochSeconds: Long,
+        ): Int {
+            callCount += 1
+            stored = candlesBySymbol
+            return 0
+        }
+    }
 
     private data class CandleRequest(val symbol: String, val range: String, val interval: String)
 

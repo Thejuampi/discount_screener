@@ -26,10 +26,12 @@ import com.discountscreener.android.domain.model.DatabaseTableInfo
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
+import com.discountscreener.android.data.market.DailyCandleSink
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
+import kotlin.math.abs
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.core.engine.DiscoveryMembershipMerge
@@ -199,7 +201,7 @@ open class SQLiteStateStore(
      * virtual clock over the writes; production keeps the same `Dispatchers.IO` it always had.
      */
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION) {
+) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION), DailyCandleSink {
 
     init {
         setWriteAheadLoggingEnabled(true)
@@ -276,7 +278,10 @@ open class SQLiteStateStore(
             db.delete("watchlist", null, null)
             db.delete("raw_capture", null, null)
             db.delete("raw_latest", null, null)
-            db.delete("pricing_candle", null, null)
+            // Every chart the user can scroll, and not the retrospective's own series. Clearing the
+            // warm start asks for fresh data; it does not ask to destroy weeks of accumulated
+            // evidence, and `score_journal` is spared here for the same reason.
+            db.delete("pricing_candle", "chart_range <> ?", arrayOf(BACKTEST_CHART_RANGE))
             db.delete("symbol_revision", null, null)
             db.delete("symbol_latest", null, null)
             db.delete("issue_state", null, null)
@@ -936,6 +941,113 @@ open class SQLiteStateStore(
                 ON pricing_candle(symbol, chart_range, epoch_seconds)
             """.trimIndent(),
         )
+    }
+
+    /**
+     * The daily bars behind the market reading, kept so the retrospective has dated prices.
+     *
+     * Stored in `pricing_candle` under [BACKTEST_CHART_RANGE], which is deliberately not a
+     * [ChartRange] name. `loadPricingCandleCache` resolves that column with `ChartRange.valueOf`
+     * and skips what it cannot resolve, so these rows are invisible to the chart the user scrolls —
+     * a different interval, a different purpose, and no chance of one being served as the other.
+     *
+     * **Rebase, not merge.** Yahoo returns the whole requested year on the current split basis. A
+     * stored bar from before a split is therefore on a basis the new bars are not, and a
+     * retrospective that held both would read the split as a fifty-percent loss. So the overlap is
+     * checked: when a date present in both disagrees on close by more than [REBASE_TOLERANCE_BPS],
+     * every stored bar for that symbol is dropped and the incoming year stands alone. Dates outside
+     * the incoming window are kept — that is how the series grows past a year — and they are exactly
+     * what a rebase throws away, which is why the count is returned rather than swallowed.
+     */
+    override suspend fun persistBacktestCandles(
+        candlesBySymbol: Map<String, List<HistoricalCandle>>,
+        capturedAtEpochSeconds: Long,
+    ): Int = withContext(ioDispatcher) {
+        val db = writableDatabase
+        var rebased = 0
+        db.beginTransaction()
+        try {
+            candlesBySymbol.forEach { (symbol, incoming) ->
+                if (incoming.isEmpty()) return@forEach
+                if (splitBasisChanged(db, symbol, incoming)) {
+                    db.delete(
+                        "pricing_candle",
+                        "symbol = ? AND chart_range = ?",
+                        arrayOf(symbol, BACKTEST_CHART_RANGE),
+                    )
+                    rebased++
+                }
+                incoming.forEach { candle ->
+                    db.insertWithOnConflict(
+                        "pricing_candle",
+                        null,
+                        ContentValues().apply {
+                            put("symbol", symbol)
+                            put("chart_range", BACKTEST_CHART_RANGE)
+                            put("captured_at", capturedAtEpochSeconds)
+                            put("epoch_seconds", candle.epochSeconds)
+                            put("open_cents", candle.openCents)
+                            put("high_cents", candle.highCents)
+                            put("low_cents", candle.lowCents)
+                            put("close_cents", candle.closeCents)
+                            put("volume", candle.volume)
+                        },
+                        SQLiteDatabase.CONFLICT_REPLACE,
+                    )
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        rebased
+    }
+
+    /** The retrospective's own series, oldest bar first, keyed by symbol. */
+    suspend fun loadBacktestCandles(symbol: String? = null): Map<String, List<HistoricalCandle>> =
+        withContext(ioDispatcher) {
+            readableDatabase.rawQuery(
+                """
+                    SELECT symbol, epoch_seconds, open_cents, high_cents, low_cents, close_cents, volume
+                    FROM pricing_candle
+                    WHERE chart_range = ?${if (symbol == null) "" else " AND symbol = ?"}
+                    ORDER BY symbol ASC, epoch_seconds ASC
+                """.trimIndent(),
+                listOfNotNull(BACKTEST_CHART_RANGE, symbol).toTypedArray(),
+            ).useRows { cursor ->
+                val bySymbol = linkedMapOf<String, MutableList<HistoricalCandle>>()
+                while (cursor.moveToNext()) {
+                    bySymbol.getOrPut(cursor.getString(0)) { mutableListOf() } += HistoricalCandle(
+                        epochSeconds = cursor.getLong(1),
+                        openCents = cursor.getLong(2),
+                        highCents = cursor.getLong(3),
+                        lowCents = cursor.getLong(4),
+                        closeCents = cursor.getLong(5),
+                        volume = cursor.getLong(6),
+                    )
+                }
+                bySymbol
+            }
+        }
+
+    /**
+     * Asked of the oldest date the two series share, because that is the one furthest from the last
+     * adjustment and so the one most likely to disagree. A symbol with no stored overlap has nothing
+     * to contradict and is never rebased.
+     */
+    private fun splitBasisChanged(
+        db: SQLiteDatabase,
+        symbol: String,
+        incoming: List<HistoricalCandle>,
+    ): Boolean {
+        val oldestIncoming = incoming.minByOrNull { it.epochSeconds } ?: return false
+        val storedCents = db.rawQuery(
+            "SELECT close_cents FROM pricing_candle WHERE symbol = ? AND chart_range = ? AND epoch_seconds = ?",
+            arrayOf(symbol, BACKTEST_CHART_RANGE, oldestIncoming.epochSeconds.toString()),
+        ).useRows { cursor -> if (cursor.moveToNext()) cursor.getLong(0) else null } ?: return false
+        if (storedCents <= 0L) return true
+        val driftBps = abs(oldestIncoming.closeCents - storedCents) * 10_000L / storedCents
+        return driftBps > REBASE_TOLERANCE_BPS
     }
 
     suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
@@ -1716,6 +1828,21 @@ open class SQLiteStateStore(
 
     companion object {
         private const val SQLITE_SCHEMA_VERSION = 8
+
+        /**
+         * The `chart_range` value the retrospective's daily bars are stored under.
+         *
+         * Deliberately not a [ChartRange] name. The chart cache resolves that column with
+         * `ChartRange.valueOf` and skips what it cannot resolve, so this key is the whole reason
+         * the two series can share a table without one ever being served as the other.
+         */
+        const val BACKTEST_CHART_RANGE = "BacktestDaily"
+
+        /**
+         * Below this, a disagreement between a stored close and a re-fetched one is rounding. A
+         * split is a factor, not a fraction of a percent, so there is no band to tune here.
+         */
+        private const val REBASE_TOLERANCE_BPS = 100L
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"

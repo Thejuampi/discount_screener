@@ -50,14 +50,25 @@ class DiscountScreenerAppContainer(context: Context) {
      */
     private val yahooClient by lazy { YahooFinanceClient() }
 
+    /**
+     * One store for the whole app. Two helpers over one database file is two write queues over one
+     * lock, and the market read now writes here too — so the sharing is load-bearing rather than
+     * merely tidy.
+     */
+    private val stateStore by lazy { SQLiteStateStore(appContext) }
+
     private val marketDataRepository by lazy {
-        MarketDataRepository(yahooClient = yahooClient, fearGreedClient = CnnFearGreedClient())
+        MarketDataRepository(
+            yahooClient = yahooClient,
+            fearGreedClient = CnnFearGreedClient(),
+            dailyCandleSink = stateStore,
+        )
     }
 
     private val repository by lazy {
         val startupProfile = startupProfile(BuildConfig.QA_UNIVERSE)
         DefaultDashboardRepository(
-            stateStore = SQLiteStateStore(appContext),
+            stateStore = stateStore,
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = yahooClient,
             universeCatalog = UniverseCatalog(appContext.assets),
