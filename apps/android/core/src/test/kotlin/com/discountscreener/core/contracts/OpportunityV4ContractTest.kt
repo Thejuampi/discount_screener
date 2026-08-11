@@ -41,6 +41,24 @@ class OpportunityV4ContractTest {
         assertEquals(emptyList(), contract.fundamentalsCases.flatMap(::fundamentalsDisagreements))
     }
 
+    /**
+     * The control the first two rounds of this contract did not have.
+     *
+     * Reproducing an expected value proves the arithmetic. It does not prove the case can tell a
+     * right constant from a wrong one, and six cases here could not: each sat exactly on an anchor
+     * computed from the constant it claimed to bind, so it scored the same under both. A mutation
+     * round missed it by moving every constant in one direction only — the direction those cases
+     * happened to see. The product was double-checked and the instrument was not.
+     *
+     * So each case now states what it discriminates, and this test refuses the claim if it is
+     * empty: a mutant that scores what the case already expects has measured nothing, and a
+     * constant probed on one side only is exactly the hole that let the six through.
+     */
+    @Test
+    fun every_fundamentals_case_states_what_a_wrong_constant_would_cost_it() {
+        assertEquals(emptyList(), contract.fundamentalsCases.flatMap(::undischargedClaims))
+    }
+
     /** Null when the case matches; otherwise a line naming the case and both readings. */
     private fun compositeDisagreement(case: CompositeCase): String? {
         var buckets = case.buckets
@@ -83,6 +101,38 @@ class OpportunityV4ContractTest {
         var withoutBenchmarks = scoreOf(case, null)
         if (withoutBenchmarks != absolute) {
             lines += "${case.name} [absolute fallback]: $withoutBenchmarks vs $absolute"
+        }
+        return lines
+    }
+
+    /** Empty when the case's discrimination claim holds up; otherwise a line per hole in it. */
+    private fun undischargedClaims(case: FundamentalsCase): List<String> {
+        var mutants = case.mutants
+        if (mutants.isEmpty()) {
+            if (case.bindsNoConstant != null) return emptyList()
+            return listOf("${case.name}: declares neither `mutants` nor `binds_no_constant`")
+        }
+        if (case.bindsNoConstant != null) {
+            return listOf("${case.name}: declares both `mutants` and `binds_no_constant`")
+        }
+        var lines = mutableListOf<String>()
+        for (mutant in mutants) {
+            var trueValue = contract.provenance.constantsBound[mutant.constant]
+            if (trueValue == null) {
+                lines += "${case.name}: `${mutant.constant}` is not listed in constants_bound"
+            } else if (mutant.value == trueValue) {
+                lines += "${case.name}: `${mutant.constant}` mutant equals the true value $trueValue"
+            }
+            if (mutant.score == case.expected.score) {
+                lines += "${case.name}: `${mutant.constant}` at ${mutant.value} scores ${mutant.score}, " +
+                    "which is what the case already expects — it discriminates nothing"
+            }
+        }
+        for ((constant, probes) in mutants.groupBy { it.constant }) {
+            var trueValue = contract.provenance.constantsBound[constant] ?: continue
+            if (probes.none { it.value < trueValue } || probes.none { it.value > trueValue }) {
+                lines += "${case.name}: `$constant` is probed on one side of $trueValue only"
+            }
         }
         return lines
     }
@@ -156,9 +206,20 @@ class OpportunityV4ContractTest {
 
 @Serializable
 private data class Contract(
+    val provenance: Provenance,
     @SerialName("composite_cases") val compositeCases: List<CompositeCase>,
     @SerialName("fundamentals_cases") val fundamentalsCases: List<FundamentalsCase>,
 )
+
+/** `constants_bound` is the true value a mutant must be measured against, so it lives in the file. */
+@Serializable
+private data class Provenance(
+    @SerialName("constants_bound") val constantsBound: Map<String, Double>,
+)
+
+/** One wrong value of one constant, and what this case would score if a port used it. */
+@Serializable
+private data class Mutant(val constant: String, val value: Double, val score: Int?)
 
 @Serializable
 private data class CompositeCase(
@@ -195,6 +256,8 @@ private data class FundamentalsCase(
     @SerialName("sector_benchmarks") val sectorBenchmarks: BenchmarksInput? = null,
     val expected: FundamentalsExpectation,
     @SerialName("expected_without_benchmarks") val expectedWithoutBenchmarks: FundamentalsExpectation? = null,
+    val mutants: List<Mutant> = emptyList(),
+    @SerialName("binds_no_constant") val bindsNoConstant: String? = null,
 )
 
 @Serializable
