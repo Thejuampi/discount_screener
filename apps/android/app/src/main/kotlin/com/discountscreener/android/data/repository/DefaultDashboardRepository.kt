@@ -536,20 +536,7 @@ class DefaultDashboardRepository(
             activeProfileGeneration
         }
         cancelActiveProfileWork()
-        stateMutex.withLock {
-            resetInMemoryLocked()
-            currentProfile = profile
-            trackedSymbols = symbols.toMutableList()
-            placeholderSymbols.addAll(trackedSymbols)
-            applyTransitionLocked(
-                reduceProfileTransition(
-                    ProfileTransitionEvent.SwitchRequested(
-                        profile = profile,
-                        symbolCount = trackedSymbols.size,
-                    ),
-                ),
-            )
-        }
+        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset())
         emitUpdate()
         val request = ProfileSwitchRequest(
             generation = generation,
@@ -608,8 +595,12 @@ class DefaultDashboardRepository(
         value.lowercase().filter { it.isLetterOrDigit() }
 
     private suspend fun loadUniverse(profile: String) {
-        val symbols = resolveProfileSymbols(profile)
-        val bootstrap = runCatching { stateStore.loadWarmStart() }
+        adoptProfileFromStore(profile, resolveProfileSymbols(profile), loadWarmStartOrReset())
+        emitUpdate()
+    }
+
+    private suspend fun loadWarmStartOrReset(): PersistenceBootstrap =
+        runCatching { stateStore.loadWarmStart() }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
                 stateMutex.withLock {
@@ -619,6 +610,21 @@ class DefaultDashboardRepository(
                 PersistenceBootstrap()
             }
 
+    /**
+     * Move to `profile` and fill it from the database, with nothing published in between.
+     *
+     * [resetInMemoryLocked] empties every cache. Any state the dashboard reads between that reset
+     * and [hydrateWarmStartLocked] is an empty dashboard, and the rows only return when the network
+     * answers — which is what a profile switch used to show: the list cleared, then refilled from
+     * Yahoo while the database sat there holding the same rows. Startup always did this correctly;
+     * the switch emitted the gap. The two halves are one locked step here, and the single
+     * [emitUpdate] belongs to the caller.
+     */
+    private suspend fun adoptProfileFromStore(
+        profile: String,
+        symbols: List<String>,
+        bootstrap: PersistenceBootstrap,
+    ) {
         stateMutex.withLock {
             resetInMemoryLocked()
             currentProfile = profile
@@ -641,7 +647,6 @@ class DefaultDashboardRepository(
         stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
         stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
         stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
-        emitUpdate()
     }
 
     private suspend fun ensureAdHocSymbolLoaded(symbol: String) {
@@ -696,56 +701,14 @@ class DefaultDashboardRepository(
         }
     }
 
+    /**
+     * The live half of a profile switch.
+     *
+     * The cached half already ran, before the caller published anything, so by the time this starts
+     * the dashboard is showing the database rows for the new profile. This only puts live data on
+     * top of them.
+     */
     private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
-        val bootstrap = runCatching { stateStore.loadWarmStart() }
-            .getOrElse { error ->
-                stateStore.resetWarmStartState()
-                stateMutex.withLock {
-                    if (request.generation != activeProfileGeneration) {
-                        return
-                    }
-                    resetInMemoryLocked()
-                    currentProfile = request.profile
-                    trackedSymbols = request.symbols.toMutableList()
-                    placeholderSymbols.addAll(trackedSymbols)
-                    applyTransitionLocked(
-                        reduceProfileTransition(
-                            ProfileTransitionEvent.SwitchRequested(
-                                profile = request.profile,
-                                symbolCount = trackedSymbols.size,
-                            ),
-                        ),
-                    )
-                    statusMessage = "SQLite warm-start reset after restore failure: ${error.message ?: "unknown error"}"
-                }
-                PersistenceBootstrap()
-            }
-
-        stateMutex.withLock {
-            if (request.generation != activeProfileGeneration) {
-                return
-            }
-            currentProfile = request.profile
-            trackedSymbols = request.symbols.toMutableList()
-            hydrateWarmStartLocked(bootstrap)
-            trackedSymbols = reorderSymbolsByPersistedRanking(trackedSymbols).toMutableList()
-            placeholderSymbols.clear()
-            placeholderSymbols.addAll(trackedSymbols.filter { engine.detail(it) == null })
-            applyTransitionLocked(
-                reduceProfileTransition(
-                    ProfileTransitionEvent.CachedHydrated(
-                        profile = currentProfile,
-                        symbolCount = trackedSymbols.size,
-                        cachedSymbolCount = staleSymbols.size,
-                    ),
-                ),
-            )
-        }
-
-        stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
-        stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
-        stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
-        emitUpdate()
         startRefresh(request.symbols, request.generation)
     }
 

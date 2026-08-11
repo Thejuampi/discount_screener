@@ -1019,8 +1019,13 @@ class DefaultDashboardRepositoryTest {
 
             val scheduled = repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             assertEquals("dow", scheduled.currentProfile)
-            assertEquals(DashboardStartupPhase.SwitchingProfile, scheduled.startupPhase)
-            assertEquals("Switching to DOW…", scheduled.statusMessage)
+            // This used to read SwitchingProfile with the "Switching to DOW…" banner, because the
+            // switch emptied every cache and published that before it opened the database. It reads
+            // the database first now, and reports what the database gave -- nothing, for a profile
+            // this test never refreshed. `dow_symbols_come_back_from_the_database_...` covers the
+            // case where there is something to give.
+            assertEquals(DashboardStartupPhase.Ready, scheduled.startupPhase)
+            assertEquals("Loaded DOW symbols", scheduled.statusMessage)
             assertEquals(0, scheduled.refreshCompletedSymbols)
             assertEquals(scheduled.trackedSymbols.size, scheduled.refreshTargetSymbols)
             assertTrue(scheduled.trackedRows.all { it.state == TrackedRowState.Loading })
@@ -1031,6 +1036,41 @@ class DefaultDashboardRepositoryTest {
             }
             assertTrue(finished.trackedRows.any { it.state == TrackedRowState.Live })
             assertTrue(finished.candidateRows.isNotEmpty())
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * The reported bug: a profile switch cleared the list and refilled it from Yahoo, while the
+     * database held those same rows the whole time.
+     *
+     * The cause was an ordering one. `beginProfileSwitch` emptied every cache, published that, and
+     * only then opened the database on a background job. The blank frame was the published one.
+     *
+     * The switch away and back is the shape a user hits: `qa` is loaded and live, `dow` is not, and
+     * coming home must not look like a cold start.
+     */
+    @Test
+    fun switching_back_to_a_loaded_profile_serves_the_database_before_the_network() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            // The delay is what lets awaitSnapshot subscribe before the refresh lands. With an
+            // instant client the first live emission arrives before the collector does.
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient(delayMs = 25))
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            awaitSnapshot(repository) { it.trackedRows.any { row -> row.state == TrackedRowState.Live } }
+
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            val home = repository.selectProfile("qa", ViewFilter(), ChartRange.Year, legacyModel)
+
+            // Loading is the blank row. Cached is the database answering, Live is the network
+            // having answered since; either one means the user did not watch the list empty out.
+            assertEquals(
+                emptyList<String>(),
+                home.trackedRows.filter { it.state == TrackedRowState.Loading }.map { it.symbol },
+            )
         } finally {
             store.close()
         }
