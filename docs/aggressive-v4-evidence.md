@@ -124,10 +124,10 @@ What this does **not** license anyone to conclude:
 
 ## The contract, and the one way to ruin it
 
-`shared/contracts/opportunity-v4.json` binds nineteen cases: twelve on the composite (centre,
-spread, bonus, beta haircut, both bounds) and seven on the fundamentals bucket (one per
-`SectorBenchmarks` field, plus the three share-count readings). `OpportunityV4ContractTest`
-validates it from `:core`.
+`shared/contracts/opportunity-v4.json` binds twenty-three cases: twelve on the composite (centre,
+spread, bonus, beta haircut, both bounds) and eleven on the fundamentals bucket — one interior case
+per `SectorBenchmarks` field, two boundary cases, and the three share-count readings.
+`OpportunityV4ContractTest` validates it from `:core`.
 
 Every other contract in `shared/contracts/` carries Rust's output, so Kotlin agreeing with it means
 two implementations agree. **This one cannot.** Windows has no V4, so the file has no second
@@ -152,3 +152,33 @@ the file claimed the opposite, and was wrong. There are now two ROE cases, both 
 band, one on each side of the centre — because the offsets are a *width*, and a width cannot be
 measured from a point on its boundary. All ten mutations are killed against a baseline verified
 green first, which is the other way a mutation run lies.
+
+**Then review found the fix was necessary and not sufficient, and the reason is worth keeping.** The
+same defect sat in five more cases — both remaining multiples and both share-count readings, each
+pinned on an anchor computed from the constant it claimed to bind. The ten-mutation round had passed
+them, and the commit message had gone as far as asserting that their pinning "is still right". It
+was not. **Every one of those ten mutations moved its constant in one direction only.** A case at
+`0.7 × centre` does move when the multiplier drops to 0.5, and does not move at all when it rises to
+1.0, because `1400 <= 1400` and `1400 <= 2000` clamp identically. The round measured the direction
+the case could see and never tried the other.
+
+Five observations were moved strictly inside their bands. Two edge cases were kept and relabelled
+for what they actually do — `forward_pe` on the low anchor binds `observed <= lower`, `ev_ebitda` on
+the high anchor binds `observed >= upper`, and neither claims to measure the multiplier it is
+computed from. A case that binds a constant and a case that binds a boundary are two cases.
+
+Twelve further mutations then moved all six sector and share constants **in both directions**:
+
+| constant | down | up |
+|---|---|---|
+| `V4_FUND_SECTOR_CHEAP_MULT` 0.7 | 0.5 killed | 1.0 killed |
+| `V4_FUND_SECTOR_RICH_MULT` 1.5 | 1.0 killed | 2.0 killed |
+| `V4_FUND_SHARE_COUNT_SHRINK_BPS` −300 | −500 killed | −100 killed |
+| `V4_FUND_SHARE_COUNT_DILUTE_BPS` 300 | 100 killed | 600 killed |
+| `V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS` −500 | −1000 killed | −100 killed |
+| `V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS` 1500 | 800 killed | 3000 killed |
+
+Twelve of twelve, against a baseline verified green first. **The lesson is about the instrument, not
+the fixture: a one-directional mutation round grades a one-directional test as passing.** Each
+interior case's `binds` note now lists its score under all four mutants of the constants it covers,
+so the next reader can check the claim without re-deriving it.

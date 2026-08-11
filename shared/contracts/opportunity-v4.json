@@ -36,8 +36,9 @@
   "notes": [
     "Intermediates are carried as hundredths, not as floating-point literals. A port that computes 0.9480519480519481 and a port that computes 0.9480519480519480 are both correct, and a JSON float would make one of them fail.",
     "No case is allowed to land on a .5 rounding boundary. Kotlin's roundToInt is half-up and Rust's f64::round is half-away-from-zero, and they disagree on negative halves. That difference is real but it is not what this contract is about, so no case may depend on it.",
-    "Two fundamentals cases sit exactly on a ramp anchor, which binds smoothRamp's inclusive comparisons: forward_pe at the sector low binds `observed <= lower`, ev_ebitda at the sector high binds `observed >= upper`. Both are still discriminating because the OTHER anchor is what moves them: forward_pe at 0.7x separates V4_FUND_SECTOR_CHEAP_MULT, ev_ebitda at 1.5x separates V4_FUND_SECTOR_RICH_MULT.",
-    "The two return-on-equity cases sit strictly INSIDE the band, and that is not a stylistic difference from the multiple cases. Its band is additive, so what a case must measure is a WIDTH, and an observation pinned on an edge measures only the edge it sits on: it returns -1.0 or +1.0 under the additive rule and under a multiplicative one alike. A first draft of this contract pinned ROE at its floor, and a mutation replacing the additive upper offset with the multiplicative one survived it. That is why both ROE cases are unpinned and why there are two of them, one on each side of the centre.",
+    "EVERY case that binds a constant sits strictly INSIDE its band, and the two cases that sit on an edge bind nothing but the edge. An observation placed exactly on a computed anchor returns -1.0 or +1.0 for EVERY constant that puts the anchor at or beyond it, so it cannot separate the right constant from a wrong one on that side. The blindness is one-sided and therefore easy to miss: a case at 0.7 x centre does move when the multiplier falls to 0.5, which is what a first round of mutation testing measured, and does not move at all when it rises to 1.0, which that round never tried. Each interior case's `binds` note lists the score under four mutants, two per constant, one in each direction.",
+    "A case that binds a constant and a case that binds a boundary cannot be the same case, so this file spends two extra cases rather than pretending one does both. forward_pe at exactly 0.7 x centre binds `observed <= lower`; ev_ebitda at exactly 1.5 x centre binds `observed >= upper`. Neither claims to measure the multiplier it is computed from.",
+    "The two return-on-equity cases were the first to be corrected this way, and the mutation that exposed the problem is worth recording: with ROE pinned at its floor, replacing the ADDITIVE lower offset with the multiplicative rule survived, because 500 <= 500 and 500 <= 700 pin identically. The five multiple and share-count cases had exactly the same defect and were corrected in the same way once it was measured in both directions.",
     "expected_without_benchmarks re-scores the SAME inputs with sector_benchmarks withheld. It is not decoration: without it a port that ignored the benchmark entirely could still pass, because a value can score the same under both rules by accident. Every pair below is chosen so the two readings differ in the score, and most also differ in the signal suffix."
   ],
 
@@ -144,7 +145,16 @@
     {
       "name": "forward P/E read against a sector that trades at 20x",
       "field": "forward_pe_hundredths",
-      "binds": "the multiplicative sector band, V4_FUND_SECTOR_CHEAP_MULT. 14.00 sits exactly on 0.7 x 20.00, so the ramp pins at cheap; the absolute band calls the same multiple merely good.",
+      "binds": "V4_FUND_SECTOR_CHEAP_MULT and V4_FUND_SECTOR_RICH_MULT, both of them, in both directions. 16.00 sits strictly inside 0.7 x 20.00 .. 1.5 x 20.00, so every one of the four constant errors below moves the score: cheap 0.5 -> 3, cheap 1.0 -> 7, rich 1.0 -> 2, rich 2.0 -> 6, against 5 here.",
+      "fundamentals": { "forward_pe_hundredths": 1600 },
+      "sector_benchmarks": { "forward_pe_hundredths": 2000 },
+      "expected": { "score": 5, "signals": ["Mult§++"] },
+      "expected_without_benchmarks": { "score": 3, "signals": ["Mult+"] }
+    },
+    {
+      "name": "forward P/E exactly on the cheap edge of its sector band",
+      "field": "forward_pe_hundredths",
+      "binds": "ONLY the inclusivity of smoothRamp's lower comparison — `observed <= lower`, not `<`. It binds NOTHING about the value of V4_FUND_SECTOR_CHEAP_MULT, and that is not a weakness of this case but the reason it exists as a second one. An observation sitting on a computed anchor pins at -1.0 for every multiplier that puts the anchor at or above it, so cheap 0.7 and cheap 1.0 both score 7 here. The case above is what measures the constant; this one measures the boundary.",
       "fundamentals": { "forward_pe_hundredths": 1400 },
       "sector_benchmarks": { "forward_pe_hundredths": 2000 },
       "expected": { "score": 7, "signals": ["Mult§++"] },
@@ -153,7 +163,16 @@
     {
       "name": "EV/EBITDA read against a sector that trades at 10x",
       "field": "enterprise_to_ebitda_hundredths",
-      "binds": "V4_FUND_SECTOR_RICH_MULT. 15.00 sits exactly on 1.5 x 10.00, so the ramp pins at rich; the absolute band, which runs to 20.00, calls the same multiple middling.",
+      "binds": "both sector multipliers from the expensive side, in both directions. 14.00 is strictly inside 7.00 .. 15.00: cheap 0.5 -> -6, cheap 1.0 -> -4, rich 1.0 -> -7, rich 2.0 -> -1, against -5 here. The absolute band, which runs to 20.00, calls the same multiple almost neutral.",
+      "fundamentals": { "enterprise_to_ebitda_hundredths": 1400 },
+      "sector_benchmarks": { "enterprise_to_ebitda_hundredths": 1000 },
+      "expected": { "score": -5, "signals": ["Mult§--"] },
+      "expected_without_benchmarks": { "score": -1, "signals": ["Mult-"] }
+    },
+    {
+      "name": "EV/EBITDA exactly on the rich edge of its sector band",
+      "field": "enterprise_to_ebitda_hundredths",
+      "binds": "ONLY the inclusivity of smoothRamp's upper comparison — `observed >= upper`, not `>`. The companion to the forward P/E edge case above, from the other end of the ramp, and equally blind to the constant that computes its anchor: rich 1.5 and rich 1.0 both score -7 here.",
       "fundamentals": { "enterprise_to_ebitda_hundredths": 1500 },
       "sector_benchmarks": { "enterprise_to_ebitda_hundredths": 1000 },
       "expected": { "score": -7, "signals": ["Mult§--"] },
@@ -162,11 +181,11 @@
     {
       "name": "price to book read against a sector that trades at 4x",
       "field": "price_to_book_hundredths",
-      "binds": "the sector band inverting the absolute verdict. 2.80 is dear against an absolute band that ends at 5.00 and cheap inside a sector at 4.00.",
-      "fundamentals": { "price_to_book_hundredths": 280 },
+      "binds": "the sector band inverting the absolute verdict, and both multipliers in both directions. 3.20 is dear against an absolute band that ends at 5.00 and cheap inside a sector at 4.00, so the sign itself flips: +5 with the benchmark, -1 without. Strictly inside 2.80 .. 6.00, so cheap 0.5 -> 3, cheap 1.0 -> 7, rich 1.0 -> 2, rich 2.0 -> 6.",
+      "fundamentals": { "price_to_book_hundredths": 320 },
       "sector_benchmarks": { "price_to_book_hundredths": 400 },
-      "expected": { "score": 7, "signals": ["Mult§++"] },
-      "expected_without_benchmarks": { "score": 1, "signals": ["Mult+"] }
+      "expected": { "score": 5, "signals": ["Mult§++"] },
+      "expected_without_benchmarks": { "score": -1, "signals": ["Mult-"] }
     },
     {
       "name": "return on equity above a sector earning 10%",
@@ -189,18 +208,18 @@
     {
       "name": "a shrinking share count is a buyback and scores positive",
       "field": "diluted_average_shares",
-      "binds": "V4_FUND_SHARE_COUNT_WEIGHT and the sign. -3.00% is exactly V4_FUND_SHARE_COUNT_SHRINK_BPS, so the ramp pins.",
+      "binds": "V4_FUND_SHARE_COUNT_WEIGHT, the sign, and BOTH ends of the band in both directions. -1.50% is strictly inside -3.00% .. +3.00%, so shrink -500 -> 1, shrink -100 -> 9, dilute 100 -> 2, dilute 600 -> 6, against 5 here. A case at exactly -3.00% would score 9 for every shrink threshold at or above -3.00% and so would measure only that the ramp clamps.",
       "fundamentals": {},
-      "diluted_average_shares": [1000000000.0, 970000000.0],
-      "expected": { "score": 9, "signals": ["Shares++"] }
+      "diluted_average_shares": [1000000000.0, 985000000.0],
+      "expected": { "score": 5, "signals": ["Shares++"] }
     },
     {
       "name": "a growing share count is dilution and scores negative",
       "field": "diluted_average_shares",
-      "binds": "the other side of the same ramp, so the sign is a measured claim and not a reading of the minus in the source",
+      "binds": "the other side of the same ramp, so the sign is a measured claim and not a reading of the minus in the source. Also strictly inside the band: shrink -500 -> -6, shrink -100 -> -2, dilute 100 -> -9, dilute 600 -> 0, against -5 here.",
       "fundamentals": {},
-      "diluted_average_shares": [1000000000.0, 1030000000.0],
-      "expected": { "score": -9, "signals": ["Shares--"] }
+      "diluted_average_shares": [1000000000.0, 1015000000.0],
+      "expected": { "score": -5, "signals": ["Shares-"] }
     },
     {
       "name": "a single-point share series contributes nothing, and nothing is not zero",
