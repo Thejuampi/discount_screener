@@ -222,6 +222,58 @@ class MarketDimensionUiTest {
         assertEquals(null, marketDimensionStatusLine(RegimeScoreStatus.Included, null, MODEL))
     }
 
+    // ── V4's agreement line ──────────────────────────────────────────────────
+
+    @Test
+    fun v4_detail_decomposes_the_score_into_centre_agreement_and_final() {
+        setDetailContent(row = agreementRow(20, 20, 20, 20, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 20 · Agreement 100% · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * The percentage is a reading of `V4_SPREAD_FULL`, not a free-floating adjective. Two buckets
+     * ten points apart sit a quarter of the way to the spread that pays nothing.
+     */
+    @Test
+    fun the_agreement_percentage_is_measured_against_the_fitted_spread() {
+        setDetailContent(row = agreementRow(30, 50, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 40 · Agreement 74% · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * Zero agreement is stated in words rather than as `0%`.
+     *
+     * The number the user acts on is the final score, and "the model is unsure" is the thing a
+     * reader must not have to derive from a percentage sitting at its floor.
+     */
+    @Test
+    fun divided_buckets_are_named_as_a_disagreement() {
+        setDetailContent(row = agreementRow(-100, 100, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 0 · Buckets disagree · Final 45").assertIsDisplayed()
+    }
+
+    /** One bucket also pays no bonus, and is a different fact: there is nobody to disagree with. */
+    @Test
+    fun a_single_bucket_is_not_reported_as_a_disagreement() {
+        setDetailContent(row = agreementRow(20, null, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 20 · One bucket only · Final 45").assertIsDisplayed()
+    }
+
+    /** No other model measures agreement, so no other model may claim a reading of it. */
+    @Test
+    fun only_v4_reports_an_agreement_line() {
+        var row = agreementRow(20, 20, 20, 20, final = 45)
+
+        assertEquals(
+            List(OpportunityScoringModel.entries.size) { OpportunityScoringModel.entries[it] == V4 },
+            OpportunityScoringModel.entries.map { v4AgreementLine(row, it) != null },
+        )
+    }
+
     // ── The switch ───────────────────────────────────────────────────────────
 
     @Test
@@ -347,6 +399,25 @@ class MarketDimensionUiTest {
         ),
     )
 
+    /**
+     * A row whose four buckets are stated one by one, because the agreement line is a reading of
+     * exactly which ones reported and how far apart they are.
+     */
+    private fun agreementRow(
+        fundamentals: Int?,
+        technical: Int?,
+        forecast: Int?,
+        regime: Int?,
+        final: Int,
+    ) = baseRow().copy(
+        fundamentalsScore = fundamentals,
+        technicalScore = technical,
+        forecastScore = forecast,
+        regimeScore = regime,
+        compositeScore = final,
+        compositeScoreBase = final,
+    )
+
     private fun absentRow(
         status: RegimeScoreStatus,
         reason: MarketContextUnavailableReason? = null,
@@ -379,5 +450,6 @@ class MarketDimensionUiTest {
     private companion object {
         const val SYMBOL = "TGNO4.BA"
         val MODEL = OpportunityScoringModel.AggressiveV3
+        val V4 = OpportunityScoringModel.AggressiveV4
     }
 }

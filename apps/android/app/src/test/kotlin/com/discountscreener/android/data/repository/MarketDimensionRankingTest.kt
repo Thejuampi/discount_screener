@@ -36,7 +36,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * The runtime switch, measured where it is supposed to have an effect: the ranked list.
+ * The scoring controls, measured where they are supposed to have an effect: the ranked list.
+ *
+ * Two controls, one fixture: the market switch, and the model chip. Both claim to change what the
+ * user sees, and both are wired through the same snapshot call, so they are asserted against the
+ * same twenty names rather than against two fixtures that could drift apart.
  *
  * A test that asserts `state.regimeScoringEnabled == false` after toggling passes on a repository
  * that never reads the flag, so it cannot fail on the defect it exists to catch. These assert the
@@ -98,6 +102,50 @@ class MarketDimensionRankingTest {
         }
     }
 
+    /**
+     * The fourth chip is a model, not a label.
+     *
+     * Asserted on the ordered symbols rather than on `state.opportunityScoringModel`, for the same
+     * reason the switch is: a chip that set a field the scoring never read would pass a state
+     * assertion and change nothing a user can see.
+     */
+    @Test
+    fun choosing_v4_reranks_the_list_against_v3() = runTest(dispatcher) {
+        withRepository { repository ->
+            var underV3 = rankedSymbols(repository)
+
+            assertNotEquals(underV3, rankedSymbols(repository, OpportunityScoringModel.AggressiveV4))
+        }
+    }
+
+    /**
+     * What V4 scores this fixture, symbol by symbol. The level, not the order.
+     *
+     * [choosing_v4_reranks_the_list_against_v3] is not enough on its own, and two mutations say so.
+     * Replacing V4's composite with a constant leaves it green, because a list of equal scores still
+     * sorts differently from V3's — "different" is satisfied by broken.
+     *
+     * **An order assertion would have been no better, and measuring said so before this test was
+     * written.** V4 scores these twenty names 46, 46, 46, then 45 thirteen times, then 44: the
+     * composite is nearly flat here, because the fixture gives every symbol identical fundamentals
+     * on purpose. `buildRows` therefore settles the order on its fourth tiebreak, `upsideBps`, and
+     * the list comes out in discount order whatever the composite says. Deleting the centre term
+     * from V4 changes every score and moves no symbol.
+     *
+     * So the pairs are asserted. A composite that stops computing fails on the numbers, which is
+     * the thing that has to be right, rather than on a sequence the discount already decided.
+     */
+    @Test
+    fun v4_scores_the_fixture_at_one_named_level() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                V4_LEVEL,
+                snapshot(repository, OpportunityScoringModel.AggressiveV4)
+                    .opportunityRows.map { it.symbol to it.compositeScore },
+            )
+        }
+    }
+
     /** A preference that reached the ranking must also have reached the database. */
     @Test
     fun the_switch_is_written_where_a_cold_start_will_find_it() = runTest(dispatcher) {
@@ -111,11 +159,15 @@ class MarketDimensionRankingTest {
         }
     }
 
-    private suspend fun rankedSymbols(repository: DefaultDashboardRepository): List<String> =
-        snapshot(repository).opportunityRows.map { it.symbol }
+    private suspend fun rankedSymbols(
+        repository: DefaultDashboardRepository,
+        model: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    ): List<String> = snapshot(repository, model).opportunityRows.map { it.symbol }
 
-    private suspend fun snapshot(repository: DefaultDashboardRepository) =
-        repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
+    private suspend fun snapshot(
+        repository: DefaultDashboardRepository,
+        model: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    ) = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
 
     private suspend fun TestScope.withRepository(
         block: suspend (DefaultDashboardRepository) -> Unit,
@@ -208,6 +260,21 @@ class MarketDimensionRankingTest {
         val QA_SYMBOLS = listOf(
             "T", "AMZN", "AAPL", "CI", "JPM", "ACGL", "MSFT", "NVDA", "UNH", "JNJ",
             "XOM", "BAC", "V", "WMT", "GOOGL", "META", "TSLA", "HD", "PG", "MRK",
+        )
+
+        /**
+         * What V4 scores [QA_SYMBOLS], read off a green run rather than predicted.
+         *
+         * Written out so that a change to the composite has to be looked at and re-recorded here on
+         * purpose, instead of passing under an assertion that only asked for "not V3". Three names
+         * qualify at 46 and one at 44; the flat middle is the fixture's doing, not the model's.
+         */
+        val V4_LEVEL = listOf(
+            "MRK" to 46, "PG" to 46, "HD" to 46,
+            "TSLA" to 45, "META" to 45, "GOOGL" to 45, "WMT" to 45, "V" to 45,
+            "BAC" to 45, "XOM" to 45, "JNJ" to 45, "UNH" to 45, "NVDA" to 45,
+            "MSFT" to 45, "ACGL" to 45, "JPM" to 45,
+            "CI" to 44,
         )
 
         /**

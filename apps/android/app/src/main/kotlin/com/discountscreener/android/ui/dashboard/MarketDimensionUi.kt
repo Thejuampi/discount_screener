@@ -15,6 +15,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.carriesMarketDimension
 import com.discountscreener.core.regime.MarketContextUnavailableReason
@@ -23,13 +24,17 @@ import com.discountscreener.core.regime.RegimeCauseEffect
 import com.discountscreener.core.regime.RegimeCauseFactor
 import com.discountscreener.core.regime.RegimeScoreStatus
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * The one place the market dimension's vocabulary lives.
+ * The one place the vocabulary of the fourth bucket, and of what the composite does with it, lives.
  *
  * The Opportunities header, the ticker header, the dense list row and the detail section all read
  * the same state; keeping the copy and the switch here is what stops one surface saying a name is
  * scored on four dimensions while another shows three.
+ *
+ * V4's agreement line lives here too, one line above the market section it is read with, rather
+ * than in a file of its own that would need a second copy of the same Compose harness to test.
  */
 
 /** How the fourth bucket is labelled everywhere it appears. */
@@ -99,6 +104,38 @@ internal fun marketDimensionImpactLine(row: OpportunityListRow): String {
     val impact = row.compositeScore - row.compositeScoreBase
     val signed = if (impact >= 0) "+$impact" else "$impact"
     return "Base ${row.compositeScoreBase} · $MARKET_DIMENSION_LABEL $signed · Final ${row.compositeScore}"
+}
+
+/**
+ * `Centre 42 · Agreement 78% · Final 45` — what V4 shows where V3 shows its impact line.
+ *
+ * Null for every other model, because only V4 pays for agreement and a line that reported 100% on
+ * a model that never measured it would be a fabricated number.
+ *
+ * **The middle term is a percentage and not a point count, and that is deliberate.** V3's line is
+ * an exact subtraction: base plus impact is the final, always. V4's is not — the final is the
+ * centre plus the bonus *minus the beta haircut*, so a bonus printed in points would sit in a line
+ * that visibly fails to add up and invite the reader to think the app had miscounted. The
+ * percentage says the one thing the bonus is for: how close the buckets were.
+ *
+ * Zero agreement and a single bucket both pay nothing and are not the same fact, so they read
+ * differently. One bucket has nobody to disagree with.
+ */
+internal fun v4AgreementLine(row: OpportunityListRow, model: OpportunityScoringModel): String? {
+    if (model != OpportunityScoringModel.AggressiveV4) return null
+    var reading = OpportunityEngine.v4AgreementReading(
+        fundamentals = row.fundamentalsScore,
+        technical = row.technicalScore,
+        forecast = row.forecastScore,
+        regime = row.regimeScore,
+    ) ?: return null
+
+    var middle = when {
+        reading.bucketCount < 2 -> "One bucket only"
+        reading.agreement <= 0.0 -> "Buckets disagree"
+        else -> "Agreement ${(reading.agreement * 100).roundToInt()}%"
+    }
+    return "Centre ${reading.centre.roundToInt()} · $middle · Final ${row.compositeScore}"
 }
 
 /** `+ quality`, `− extension`: what the fit rewarded or marked down, in plain words. */

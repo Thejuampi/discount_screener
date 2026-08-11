@@ -299,6 +299,24 @@ data class OpportunityScoreBreakdown(
     val regimeUnavailableReason: MarketContextUnavailableReason?,
 )
 
+/**
+ * How far apart V4's buckets were, and what that was worth.
+ *
+ * Unrounded, because the composite rounds once at the end and a surface that rounded first would
+ * report numbers the score was not built from. [agreement] runs 0.0 (as divided as the constant
+ * allows) to 1.0 (identical buckets).
+ */
+data class V4AgreementReading(
+    val centre: Double,
+    val agreement: Double,
+    val bonus: Double,
+    /**
+     * How many buckets reported. One bucket pays no bonus and is not a disagreement — a surface
+     * that told the user four buckets disagreed when only one spoke would be inventing a quarrel.
+     */
+    val bucketCount: Int,
+)
+
 object OpportunityEngine {
     /** Composite scores strictly below this mark opportunities as Avoid (when other gates pass). */
     fun avoidBelowScore(model: OpportunityScoringModel): Int = when (model) {
@@ -590,19 +608,41 @@ object OpportunityEngine {
          * an outlier in, and `sum / n` is not a centre this project computes.
          */
         OpportunityScoringModel.AggressiveV4 -> {
-            val present = listOfNotNull(fundamentals, technical, forecast, regime).map { it.toDouble() }
-            val centre = medianOf(present)
-            if (centre == null) {
+            var reading = v4AgreementReading(fundamentals, technical, forecast, regime)
+            if (reading == null) {
                 0
             } else {
-                val spread = meanAbsoluteDeviation(present, centre)
-                val agreement = 1.0 - (spread / V4_SPREAD_FULL).coerceIn(0.0, 1.0)
-                val bonus = V4_COMPOSITE_AGREEMENT_BONUS * (present.size - 1) * agreement
-                val base = (centre + bonus).coerceIn(-V4_COMPOSITE_BOUND.toDouble(), V4_COMPOSITE_BOUND.toDouble())
+                var base = (reading.centre + reading.bonus)
+                    .coerceIn(-V4_COMPOSITE_BOUND.toDouble(), V4_COMPOSITE_BOUND.toDouble())
                 val haircut = v3BetaRiskHaircut(betaMillis) * betaHaircutMult.coerceIn(0.0, V3_BETA_HAIRCUT_MULT_MAX)
                 (base - haircut).roundToInt().coerceIn(-V4_COMPOSITE_BOUND, V4_COMPOSITE_BOUND)
             }
         }
+    }
+
+    /**
+     * What V4's composite paid for agreement, for a surface that wants to show it.
+     *
+     * The composite calls this too, so the detail panel cannot report an agreement the score was
+     * not built from. Null when no bucket reported, which is the same condition under which the
+     * composite scores zero.
+     */
+    fun v4AgreementReading(
+        fundamentals: Int?,
+        technical: Int?,
+        forecast: Int?,
+        regime: Int?,
+    ): V4AgreementReading? {
+        var present = listOfNotNull(fundamentals, technical, forecast, regime).map { it.toDouble() }
+        var centre = medianOf(present) ?: return null
+        var spread = meanAbsoluteDeviation(present, centre)
+        var agreement = 1.0 - (spread / V4_SPREAD_FULL).coerceIn(0.0, 1.0)
+        return V4AgreementReading(
+            centre = centre,
+            agreement = agreement,
+            bonus = V4_COMPOSITE_AGREEMENT_BONUS * (present.size - 1) * agreement,
+            bucketCount = present.size,
+        )
     }
 
     /**

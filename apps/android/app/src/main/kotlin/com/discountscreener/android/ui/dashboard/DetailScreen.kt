@@ -346,6 +346,16 @@ private fun DetailScoreHeader(
                     )
                 }
             }
+            // Above the market section, and outside it, because agreement is a fact about the
+            // composite rather than about the fourth bucket: it is measured over whichever buckets
+            // reported, and it still moved the score on a name whose market reading never arrived.
+            v4AgreementLine(scoreRow, scoringModel)?.let { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             MarketContextSection(row = scoreRow, scoringModel = scoringModel)
         }
         ScoringControlsRow(
