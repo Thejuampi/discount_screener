@@ -308,6 +308,16 @@ data class OpportunityScoreBreakdown(
  */
 data class V4AgreementReading(
     val centre: Double,
+    /**
+     * The measured disagreement: the mean distance of the buckets from [centre].
+     *
+     * Carried alongside [agreement] rather than folded into it, because [agreement] is clamped and
+     * therefore cannot be read backwards. An agreement of 0.0 says only "at least as divided as
+     * `V4_SPREAD_FULL`" — it cannot distinguish a spread of 39 from a spread of 100, and the
+     * distance between those two is the whole quantity V4 claims to price. Anything auditing this
+     * model, `shared/contracts/opportunity-v4.json` included, needs the number before the clamp.
+     */
+    val spread: Double,
     val agreement: Double,
     val bonus: Double,
     /**
@@ -639,6 +649,7 @@ object OpportunityEngine {
         var agreement = 1.0 - (spread / V4_SPREAD_FULL).coerceIn(0.0, 1.0)
         return V4AgreementReading(
             centre = centre,
+            spread = spread,
             agreement = agreement,
             bonus = V4_COMPOSITE_AGREEMENT_BONUS * (present.size - 1) * agreement,
             bucketCount = present.size,

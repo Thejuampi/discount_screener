@@ -47,6 +47,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   Slice 1B typed JSON import document (observations V2 + FEM section); `fixture_transcription` / `manual_transcription_unverified`; unverified requires `transcription_claim`
 - `source-continuity-v1.json`:
   pure SEC vs Yahoo cash continuity gate (SNDK-class); Continuous / Discontinuous / InsufficientEvidence with versioned scale thresholds; no price/target and no absolute year walls
+- `opportunity-v4.json`:
+  the arithmetic unique to the `AggressiveV4` opportunity model — the agreement bonus (centre, spread, bonus, beta haircut, composite) and the sector-relative fundamentals rule, with a case for each of the four `SectorBenchmarks` fields and for the share-count term. **Android-only today**, and the one file here whose expected values are *not* a second implementation's output: they were hand-derived from the constants before the Kotlin validator ran, and regenerating any of them from Kotlin would destroy the only independence the contract has. Kotlin: `OpportunityV4ContractTest`
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

@@ -108,4 +108,27 @@ What this does **not** license anyone to conclude:
   falls back to the absolute band, and the metric token is marked `§` when the sector rule was used,
   so the switch is visible rather than silent.
 - **Android and Windows diverge for the duration.** Android has a model Windows does not.
-  `shared/contracts/opportunity-v4.json` is what stops that becoming permanent drift.
+  `shared/contracts/opportunity-v4.json` now exists and is what stops that becoming permanent
+  drift — see below for the one thing that would break it.
+
+## The contract, and the one way to ruin it
+
+`shared/contracts/opportunity-v4.json` binds nineteen cases: twelve on the composite (centre,
+spread, bonus, beta haircut, both bounds) and seven on the fundamentals bucket (one per
+`SectorBenchmarks` field, plus the three share-count readings). `OpportunityV4ContractTest`
+validates it from `:core`.
+
+Every other contract in `shared/contracts/` carries Rust's output, so Kotlin agreeing with it means
+two implementations agree. **This one cannot.** Windows has no V4, so the file has no second
+implementation behind it, and if its numbers came from Kotlin it would prove only that Kotlin equals
+Kotlin. So the expected values were computed by hand from the constants and written down before the
+validator was run for the first time. That is the whole of its independence.
+
+The consequence is a rule, and it is stated in the file itself: **no expected value in it may ever
+be regenerated from Kotlin.** When the Rust port disagrees, the question is which side is wrong. It
+is never a licence to copy this side's answer across.
+
+Six isolated mutations were run to check the validator can actually fail — one per side of the
+fixture and four against the production rules it claims to bind, including forcing the multiple
+panel to ignore the sector centre and giving return on equity the multiplicative band instead of its
+additive one. All six were killed.
