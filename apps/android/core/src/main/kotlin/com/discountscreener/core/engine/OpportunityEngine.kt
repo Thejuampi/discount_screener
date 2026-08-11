@@ -9,6 +9,7 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSignal
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
@@ -170,11 +171,32 @@ private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
 
 private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
 
+private const val BASIS_POINTS_PER_UNIT = 10_000.0
+
+private const val V4_FUND_SHARE_COUNT_WEIGHT = 10.0
+
 /**
- * V4 inherits V3's term weights and gets its own name for the total, so that the terms V4 adds
- * later move this number and never V3's. Equal today; the equality is not the point.
+ * The share-count band: a three per cent annual move either way is the whole ramp.
+ *
+ * A chosen band, not a measured one, and it is worth saying so. Three per cent a year is roughly
+ * where a buyback stops being housekeeping and starts being a return of capital, and where
+ * dilution stops being option grants and starts being the shareholder paying for growth. Nothing
+ * in this repository has measured that boundary; the score journal is what could later challenge
+ * it, and the band is deliberately narrow enough that most companies land inside the ramp rather
+ * than pinned at an end.
  */
-private const val V4_FUNDAMENTALS_FULL_WEIGHT = V3_FUNDAMENTALS_FULL_WEIGHT
+private const val V4_FUND_SHARE_COUNT_SHRINK_BPS = -300.0
+private const val V4_FUND_SHARE_COUNT_DILUTE_BPS = 300.0
+
+/**
+ * V4 inherits V3's term weights and adds the ones V3 does not have.
+ *
+ * The divisor is the **full** budget, not the weight observed, so a symbol with no share history
+ * scores its other terms against a total that includes the share term. That is deliberate: a
+ * missing input pulls the bucket toward zero rather than being silently excused, which is what
+ * "the term contributes nothing" has to mean if it is not to mean "the term scored zero".
+ */
+private const val V4_FUNDAMENTALS_FULL_WEIGHT = V3_FUNDAMENTALS_FULL_WEIGHT + V4_FUND_SHARE_COUNT_WEIGHT
 private const val V3_TECHNICALS_FULL_WEIGHT = 100.0
 private const val V3_FORECAST_FULL_WEIGHT =
     V3_FORECAST_VALUATION_WEIGHT +
@@ -249,6 +271,13 @@ data class OpportunityContext(
      * sector means the row falls back to the absolute band and says so, never that it throws.
      */
     val sectorBenchmarks: Map<String, SectorBenchmarks> = emptyMap(),
+    /**
+     * The annual driver series, for the one term in V4 that needs history rather than a level.
+     *
+     * Only the share count is read from it here. The rest of the bucket reads
+     * [SymbolDetail.fundamentals], which is a snapshot and cannot say which way anything moved.
+     */
+    val timeseriesBySymbol: Map<String, FundamentalTimeseries> = emptyMap(),
 )
 
 data class OpportunityScoreBreakdown(
@@ -320,6 +349,7 @@ object OpportunityEngine {
                     regimeScoringEnabled = context.regimeScoringEnabled,
                     sectorBenchmarks = detail.fundamentals?.sectorName
                         ?.let { context.sectorBenchmarks[it] },
+                    timeseries = context.timeseriesBySymbol[detail.symbol],
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -380,13 +410,15 @@ object OpportunityEngine {
          * before V4 existed.
          */
         sectorBenchmarks: SectorBenchmarks? = null,
+        /** This symbol's annual driver series, for V4's share-count term. */
+        timeseries: FundamentalTimeseries? = null,
     ): OpportunityScoreBreakdown {
         val (fundamentalsScore, fundamentalsSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
             OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
-            OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks)
+            OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks, timeseries)
         }
         val (technicalScore, technicalSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
@@ -1171,6 +1203,7 @@ object OpportunityEngine {
     internal fun aggressiveV4FundamentalsScore(
         detail: SymbolDetail,
         sectorBenchmarks: SectorBenchmarks?,
+        timeseries: FundamentalTimeseries? = null,
     ): Pair<Int?, List<String>> {
         var fundamentals = detail.fundamentals ?: return null to emptyList()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
@@ -1181,8 +1214,34 @@ object OpportunityEngine {
         addBalanceSheet(acc, fundamentals)
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
         addCashConversion(acc, fundamentals)
+        addShareCountChange(acc, timeseries)
 
         return acc.normalizedScore() to acc.signals
+    }
+
+    /**
+     * What the share count did over the most recent annual pair.
+     *
+     * The series is downloaded by both providers and, until now, only its last point was ever read
+     * — the count itself, never the change. A count that shrinks is the company buying its own
+     * shares and it scores positive; a count that grows is the shareholder being diluted and it
+     * scores negative.
+     *
+     * A single point is not a change and contributes nothing rather than zero: the pair is what
+     * carries the fact, and one point cannot say which way it moved. Both providers sort ascending
+     * by `asOfDate`, so the last two entries are the most recent pair.
+     */
+    private fun addShareCountChange(acc: EvidenceAccumulator, timeseries: FundamentalTimeseries?) {
+        var series = timeseries?.dilutedAverageShares?.filter { it.value > 0.0 } ?: return
+        if (series.size < 2) return
+        var previous = series[series.size - 2].value
+        var latest = series[series.size - 1].value
+        var changeBps = (latest - previous) / previous * BASIS_POINTS_PER_UNIT
+        acc.add(
+            V4_FUND_SHARE_COUNT_WEIGHT,
+            -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
+            "Shares",
+        )
     }
 
     /**

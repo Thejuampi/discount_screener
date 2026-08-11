@@ -26,16 +26,16 @@ class AggressiveV4FundamentalsTest {
      * one end of the panel to the other.
      *
      *  expensive sector  centres 4000 / 2400 / 600  bands [2800,6000] [1680,3600] [420,900]
-     *                    2000 / 1200 / 300 are all under the cheap edge  → panel +1 → 24 × +1
+     *                    2000 / 1200 / 300 are all under the cheap edge  → panel +1 → 24/110
      *  cheap sector      centres 1000 /  600 / 150  bands  [700,1500]  [420,900]  [105,225]
-     *                    the same three are all over the rich edge       → panel −1 → 24 × −1
+     *                    the same three are all over the rich edge       → panel −1 → −24/110
      */
     @Test
     fun a_cheap_symbol_in_an_expensive_sector_outscores_the_same_multiples_in_a_cheap_sector() {
         var expensive = score(benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600))
         var cheap = score(benchmarks(forwardPe = 1_000, evEbitda = 600, priceToBook = 150))
 
-        assertEquals(listOf(24, -24), listOf(expensive.first, cheap.first))
+        assertEquals(listOf(22, -22), listOf(expensive.first, cheap.first))
     }
 
     /**
@@ -44,13 +44,13 @@ class AggressiveV4FundamentalsTest {
      * scored them is not.
      *
      *  2000 in [800,3500] → +0.1111,  1200 in [600,2000] → +0.1429,  300 in [100,500] → 0.0
-     *  median +0.1111 × 24 → 2.67 → 3
+     *  median +0.1111 × 24 / 110 → 2.42 → 2
      */
     @Test
     fun a_symbol_with_no_sector_benchmark_falls_back_to_the_absolute_band_and_says_so() {
         var fallback = score(null)
 
-        assertEquals(3 to listOf("Mult+"), fallback.first to fallback.second)
+        assertEquals(2 to listOf("Mult+"), fallback.first to fallback.second)
     }
 
     /** The other half of the same claim: a sector-scored panel is marked, and marked once. */
@@ -77,8 +77,8 @@ class AggressiveV4FundamentalsTest {
     /**
      * Return on equity is read against the sector too, and the sector moves it.
      *
-     *  absolute  1000 bps in [0,2000]        → 0.0  × 16 → 0
-     *  sector    centre 2000, band [1500,3500]; 1000 is under the low edge → −1 × 16 → −16
+     *  absolute  1000 bps in [0,2000]        → 0.0  × 16 / 110 → 0
+     *  sector    centre 2000, band [1500,3500]; 1000 is under the low edge → −1 × 16 / 110 → −15
      *
      * Twenty per cent on equity is good in most of the market and ordinary among the companies that
      * earn thirty. That is the whole point of the bucket.
@@ -88,7 +88,7 @@ class AggressiveV4FundamentalsTest {
         var absolute = scoreReturnOnEquity(1_000, sectorReturnOnEquityBps = null)
         var sectorRelative = scoreReturnOnEquity(1_000, sectorReturnOnEquityBps = 2_000)
 
-        assertEquals(listOf(0, -16), listOf(absolute, sectorRelative))
+        assertEquals(listOf(0, -15), listOf(absolute, sectorRelative))
     }
 
     /**
@@ -105,7 +105,7 @@ class AggressiveV4FundamentalsTest {
         var weak = scoreReturnOnEquity(-800, sectorReturnOnEquityBps = -300)
         var strong = scoreReturnOnEquity(1_200, sectorReturnOnEquityBps = -300)
 
-        assertEquals(listOf(-16, 16), listOf(weak, strong))
+        assertEquals(listOf(-15, 15), listOf(weak, strong))
     }
 
     /**
@@ -116,15 +116,15 @@ class AggressiveV4FundamentalsTest {
      * just inside each edge, where a moved edge changes the score.
      *
      *  centre 2000 → band [1500, 3500]
-     *  1550 → 2 × 50 / 2000 − 1 = −0.95 × 16 → −15
-     *  3400 → 2 × 1900 / 2000 − 1 = +0.90 × 16 → +14
+     *  1550 → 2 × 50 / 2000 − 1 = −0.95 × 16 / 110 → −14
+     *  3400 → 2 × 1900 / 2000 − 1 = +0.90 × 16 / 110 → +13
      */
     @Test
     fun the_return_on_equity_band_runs_five_hundred_below_the_sector_to_fifteen_hundred_above() {
         var justInsideTheLowEdge = scoreReturnOnEquity(1_550, sectorReturnOnEquityBps = 2_000)
         var justInsideTheHighEdge = scoreReturnOnEquity(3_400, sectorReturnOnEquityBps = 2_000)
 
-        assertEquals(listOf(-15, 14), listOf(justInsideTheLowEdge, justInsideTheHighEdge))
+        assertEquals(listOf(-14, 13), listOf(justInsideTheLowEdge, justInsideTheHighEdge))
     }
 
     /**
@@ -150,7 +150,7 @@ class AggressiveV4FundamentalsTest {
             ),
         )
 
-        assertEquals(24, OpportunityEngine.buildRows(engine, context).single().fundamentalsScore)
+        assertEquals(22, OpportunityEngine.buildRows(engine, context).single().fundamentalsScore)
     }
 
     /** Score the three multiples alone, so the panel is the only term the bucket holds. */

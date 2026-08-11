@@ -1714,6 +1714,7 @@ class DefaultDashboardRepository(
             marketRegime = marketRegime,
             regimeScoringEnabled = regimeScoringEnabled,
             sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
+            timeseriesBySymbol = timeseriesCache,
         ),
     )
 
@@ -3356,6 +3357,7 @@ class DefaultDashboardRepository(
                 marketRegime = marketRegime,
                 regimeScoringEnabled = regimeScoringEnabled,
                 sectorBenchmarks = sectorBenchmarksLocked(opportunityScoringModel),
+                timeseriesBySymbol = timeseriesCache,
             ),
             includeUnqualified = true,
         )
