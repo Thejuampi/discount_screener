@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
@@ -20,6 +21,7 @@ import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.regime.RegimeScoringPolicy
 import com.discountscreener.core.regime.scoreRegimeFit
 import java.math.BigInteger
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.roundToInt
 
@@ -163,6 +165,25 @@ private const val V3_BETA_HAIRCUT_MAX = 10.0
 private const val V3_BETA_HAIRCUT_MULT_MAX = 2.5
 private const val V3_BETA_LOW_MILLIS = 800.0
 private const val V3_BETA_HIGH_MILLIS = 1_600.0
+
+// AggressiveV4 tuning constants. The buckets are V3's until the commits that change them; what is
+// different here is what the composite pays for.
+private const val V4_COMPOSITE_AGREEMENT_BONUS = 5
+private const val V4_COMPOSITE_BOUND = 110
+
+/**
+ * The bucket spread at which the agreement bonus reaches zero.
+ *
+ * Measured, not chosen: the p90 of the mean absolute deviation across the buckets, over the 61
+ * **qualified** rows of a live S&P 500 reading on 2026-08-11, taken around the median — the same
+ * centre this function computes. Recorded in `lab/data/overlap-spread-median-2026-08-11.txt`.
+ *
+ * Both halves of that sentence are load-bearing. The cohort's p90 is 29.0, but the cohort is not
+ * what this constant grades: the Opportunities list is markedly more divided, and its median row's
+ * spread of 22.5 is near the *cohort's* p75. A cohort-fit constant would have paid nothing to about
+ * a third of the list while claiming to zero only its most divided tenth.
+ */
+private const val V4_SPREAD_FULL = 38.5
 
 // Act/Avoid cutoffs. Legacy/Aggressive use the original 0–15-ish point scale; V2/V3 use ±100 means.
 private const val LEGACY_AVOID_BELOW_SCORE = 8
@@ -466,9 +487,7 @@ object OpportunityEngine {
             }
         }
 
-        OpportunityScoringModel.AggressiveV3,
-        OpportunityScoringModel.AggressiveV4,
-        -> {
+        OpportunityScoringModel.AggressiveV3 -> {
             if (coverageCount == 0) {
                 0
             } else {
@@ -480,7 +499,44 @@ object OpportunityEngine {
                 (base - haircut).roundToInt().coerceIn(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
             }
         }
+
+        /**
+         * V4 pays for agreement, not for presence.
+         *
+         * V3's bonus rises with the number of buckets that reported, whatever they said. A real row
+         * showed what that costs: SNDK's market bucket came in at 43, *below* the mean of the other
+         * three, and the composite still rose seven points because the bonus went from +10 to +15.
+         * A bucket that disagrees with the rest must not raise the score for turning up.
+         *
+         * So the bonus is scaled by how close the buckets are to each other, and the centre is the
+         * median rather than the mean — `present` holds two to four values, which is too few to name
+         * an outlier in, and `sum / n` is not a centre this project computes.
+         */
+        OpportunityScoringModel.AggressiveV4 -> {
+            val present = listOfNotNull(fundamentals, technical, forecast, regime).map { it.toDouble() }
+            val centre = medianOf(present)
+            if (centre == null) {
+                0
+            } else {
+                val spread = meanAbsoluteDeviation(present, centre)
+                val agreement = 1.0 - (spread / V4_SPREAD_FULL).coerceIn(0.0, 1.0)
+                val bonus = V4_COMPOSITE_AGREEMENT_BONUS * (present.size - 1) * agreement
+                val base = (centre + bonus).coerceIn(-V4_COMPOSITE_BOUND.toDouble(), V4_COMPOSITE_BOUND.toDouble())
+                val haircut = v3BetaRiskHaircut(betaMillis) * betaHaircutMult.coerceIn(0.0, V3_BETA_HAIRCUT_MULT_MAX)
+                (base - haircut).roundToInt().coerceIn(-V4_COMPOSITE_BOUND, V4_COMPOSITE_BOUND)
+            }
+        }
     }
+
+    /**
+     * How far the buckets sit from their centre, on average.
+     *
+     * A mean, and the one place in this file where a mean is the right statistic: the quantity being
+     * measured *is* the disagreement, so trimming the dissenting bucket would discard exactly what
+     * V4 is trying to price. It is also the quantity `V4_SPREAD_FULL` was fitted to.
+     */
+    private fun meanAbsoluteDeviation(values: List<Double>, centre: Double): Double =
+        values.sumOf { abs(it - centre) } / values.size
 
     private fun v3BetaRiskHaircut(betaMillis: Int?): Double {
         // Missing beta is not a penalty. High beta (→1.6+) haircuts up to V3_BETA_HAIRCUT_MAX.
