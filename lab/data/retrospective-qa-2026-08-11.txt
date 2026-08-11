@@ -1,0 +1,28 @@
+retrospective — technicals bucket, shared by AggressiveV3 and AggressiveV4
+symbols=20 bars=5020 scores=1020 warmup=200
+score range: -83..71
+
+horizon 21 bars
+  held=580 dropped: no-entry-bar=20 no-exit-bar=420 unpriced-entry=0
+  decile   n      score       centre bps
+  1        58     -67..-37    451
+  2        58     -36..-23    511
+  3        58     -22..-13    162
+  4        58     -13..-1     335
+  5        58     0..12       152
+  6        58     12..23      153
+  7        58     23..31      278
+  8        58     31..37      317
+  9        58     37..44      403
+  10       58     45..66      280
+  top-minus-bottom: -171 bps
+
+horizon 63 bars
+  held=0 dropped: no-entry-bar=20 no-exit-bar=1000 unpriced-entry=0
+  decile   n      score       centre bps
+  top-minus-bottom: refused bps
+
+horizon 126 bars
+  held=0 dropped: no-entry-bar=20 no-exit-bar=1000 unpriced-entry=0
+  decile   n      score       centre bps
+  top-minus-bottom: refused bps

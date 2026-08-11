@@ -19,3 +19,13 @@ interface DailyCandleSink {
         capturedAtEpochSeconds: Long,
     ): Int
 }
+
+/**
+ * The other direction, and a separate interface on purpose. The market read writes and never reads;
+ * the retrospective reads and never writes. One combined interface would hand each of them a method
+ * it has no business calling, and would make every fake implement two.
+ */
+interface DailyCandleSource {
+    /** The stored series, oldest bar first, keyed by symbol. */
+    suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>>
+}

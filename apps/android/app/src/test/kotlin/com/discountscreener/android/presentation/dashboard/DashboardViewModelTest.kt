@@ -32,6 +32,8 @@ import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
+import com.discountscreener.android.data.market.DailyCandleSource
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
@@ -855,6 +857,11 @@ class DashboardViewModelTest {
                 File(System.getProperty("java.io.tmpdir")!!),
                 dispatcher,
             ),
+            runRetrospective = RunRetrospectiveUseCase(
+                NoBacktestCandles,
+                File(System.getProperty("java.io.tmpdir")!!),
+                dispatcher,
+            ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -867,6 +874,11 @@ class DashboardViewModelTest {
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
         )
+    }
+
+    /** The retrospective is a debug button; no view-model behaviour depends on what it reads. */
+    private object NoBacktestCandles : DailyCandleSource {
+        override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> = emptyMap()
     }
 
     private fun trackedRow(symbol: String) = TrackedSymbolRow(

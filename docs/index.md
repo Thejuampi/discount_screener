@@ -11,6 +11,7 @@ This index is the starting point for humans and AI agents trying to understand t
 
 ## Operator Documentation
 
+- [Aggressive V4 — what has been measured](aggressive-v4-evidence.md) - bucket overlap, the agreement constant and its population, and the forward-return retrospective including its null result.
 - [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android.
 - [Desktop Quick Start](../apps/desktop/docs/QUICK_START.md) - first-run desktop workflow.
 - [Desktop Screen Guide](../apps/desktop/docs/SCREENS.md) - terminal UI layout and behavior.

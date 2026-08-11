@@ -25,6 +25,7 @@ import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
@@ -151,6 +152,8 @@ sealed interface DashboardAction {
 
     /** Debug surface only — writes the score export and reports where it landed. */
     data object ExportScores : DashboardAction
+
+    data object RunRetrospective : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
     data object LoadDiscovery : DashboardAction
@@ -241,6 +244,7 @@ class DashboardViewModel(
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
     private val exportScores: ExportScoresUseCase,
+    private val runRetrospective: RunRetrospectiveUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -301,6 +305,7 @@ class DashboardViewModel(
             is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             DashboardAction.ExportScores -> exportScoreCsv()
+            DashboardAction.RunRetrospective -> runRetrospectiveReport()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
             DashboardAction.LoadDiscovery -> loadDiscovery()
@@ -968,6 +973,23 @@ class DashboardViewModel(
         }
     }
 
+    /**
+     * The measurement Wave 4b exists to produce. Same failure discipline as the export above: a
+     * silent failure would read as a retrospective that found nothing, which is the one answer this
+     * report must never fake.
+     */
+    private fun runRetrospectiveReport() {
+        viewModelScope.launch {
+            var message = try {
+                var result = runRetrospective(_state.value.currentProfile)
+                "Retrospective over ${result.symbolCount} symbols written to ${result.path}"
+            } catch (error: Throwable) {
+                "Retrospective failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(systemStatusMessage = message)
+        }
+    }
+
     private fun pruneOldRevisions(retentionDays: Int) {
         viewModelScope.launch {
             val deleted = pruneOldRevisions(retentionDays)
@@ -1076,6 +1098,7 @@ class DashboardViewModel(
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,
                         exportScores = useCases.exportScores,
+                        runRetrospective = useCases.runRetrospective,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

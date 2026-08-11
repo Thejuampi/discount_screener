@@ -27,6 +27,7 @@ import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
 import com.discountscreener.android.data.market.DailyCandleSink
+import com.discountscreener.android.data.market.DailyCandleSource
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.ScoreJournalRow
@@ -201,7 +202,7 @@ open class SQLiteStateStore(
      * virtual clock over the writes; production keeps the same `Dispatchers.IO` it always had.
      */
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION), DailyCandleSink {
+) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION), DailyCandleSink, DailyCandleSource {
 
     init {
         setWriteAheadLoggingEnabled(true)
@@ -1003,17 +1004,16 @@ open class SQLiteStateStore(
         rebased
     }
 
-    /** The retrospective's own series, oldest bar first, keyed by symbol. */
-    suspend fun loadBacktestCandles(symbol: String? = null): Map<String, List<HistoricalCandle>> =
+    override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> =
         withContext(ioDispatcher) {
             readableDatabase.rawQuery(
                 """
                     SELECT symbol, epoch_seconds, open_cents, high_cents, low_cents, close_cents, volume
                     FROM pricing_candle
-                    WHERE chart_range = ?${if (symbol == null) "" else " AND symbol = ?"}
+                    WHERE chart_range = ?
                     ORDER BY symbol ASC, epoch_seconds ASC
                 """.trimIndent(),
-                listOfNotNull(BACKTEST_CHART_RANGE, symbol).toTypedArray(),
+                arrayOf(BACKTEST_CHART_RANGE),
             ).useRows { cursor ->
                 val bySymbol = linkedMapOf<String, MutableList<HistoricalCandle>>()
                 while (cursor.moveToNext()) {

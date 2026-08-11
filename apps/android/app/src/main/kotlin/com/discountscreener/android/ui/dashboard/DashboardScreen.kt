@@ -406,7 +406,12 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
         }
 
         if (BuildConfig.DEBUG) {
-            item { ScoreExportCard(onExport = { onAction(DashboardAction.ExportScores) }) }
+            item {
+                MeasurementCard(
+                    onExport = { onAction(DashboardAction.ExportScores) },
+                    onRetrospective = { onAction(DashboardAction.RunRetrospective) },
+                )
+            }
         }
 
         if (state.systemStatusMessage != null) {
@@ -584,7 +589,7 @@ private fun LogStatsCard(state: DashboardUiState) {
  * universe and cannot be answered from a screen.
  */
 @Composable
-private fun ScoreExportCard(onExport: () -> Unit) {
+private fun MeasurementCard(onExport: () -> Unit, onRetrospective: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
@@ -594,7 +599,7 @@ private fun ScoreExportCard(onExport: () -> Unit) {
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Score Export (debug)", fontWeight = FontWeight.Bold)
+            Text("Measurement (debug)", fontWeight = FontWeight.Bold)
             Text(
                 "Writes every scored row and its raw inputs to CSV, for the bucket-overlap analysis.",
                 style = MaterialTheme.typography.bodySmall,
@@ -602,6 +607,15 @@ private fun ScoreExportCard(onExport: () -> Unit) {
             )
             OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
                 Text("Export Scores CSV", maxLines = 1, textAlign = TextAlign.Center)
+            }
+            Text(
+                "Replays the technicals bucket over the stored daily bars and reports the forward " +
+                    "return of each score decile — including when there is none.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onRetrospective, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Retrospective", maxLines = 1, textAlign = TextAlign.Center)
             }
         }
     }
