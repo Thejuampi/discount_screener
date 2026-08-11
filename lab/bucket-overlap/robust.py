@@ -33,6 +33,14 @@ class NoCentre(Exception):
 
 
 def median_of(sample):
+    """The middle of a handful, and the centre of an even one is the middle pair's midpoint.
+
+    This is the centre the Kotlin composite uses on its two-to-four bucket scores, because
+    `robust_mean` refuses on nearly all of them: below three observations no outlier can be named,
+    and four scores with three alike have no width through the middle.
+    """
+    if not sample:
+        return None
     ordered = sorted(sample)
     middle = len(ordered) // 2
     if len(ordered) % 2 == 0:

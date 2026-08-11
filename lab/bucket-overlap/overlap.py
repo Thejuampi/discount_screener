@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from robust import NoCentre, robust_mean  # noqa: E402  — needs the path above
+from robust import median_of  # noqa: E402  — needs the path above
 
 # The market bucket's terms, in the order `RegimeCauseFactor` declares them.
 TERM_NAMES = [
@@ -248,23 +248,30 @@ def report_spread(rows, label):
     V4 pays its coverage bonus for agreement, so it needs a spread at which the bonus reaches zero.
     That constant is a number about this population, not a matter of taste, and a constant chosen
     without seeing the distribution would be taste wearing a number.
+
+    **Centred on the median, because that is what the Kotlin composite uses.** A row holds two to
+    four bucket scores, and `robust_mean` refuses on nearly all of them — below three observations
+    no outlier can be named, and four scores with three alike have no width through the middle. The
+    constant must be fitted to the quantity production computes, not to a stricter one that refuses
+    on the rows it is meant to grade.
+
+    **And the population that matters is the qualified one.** `V4_SPREAD_FULL` grades the rows the
+    user sees. Fitting it on the whole cohort would set the zero point where a broader, calmer
+    population sits and then apply it to a narrower, more divided one.
     """
     spreads = []
     refused = 0
     for row in rows:
         present = [number(row, column) for _, column in BUCKETS]
         present = [value for value in present if value is not None]
-        try:
-            # The same centre production will use. A distribution measured around a plain mean
-            # would fit the constant to one quantity and gate another, and nothing would say so.
-            centre = robust_mean(present)
-        except NoCentre:
+        centre = median_of(present)
+        if centre is None:
             refused += 1
             continue
         spreads.append(sum(abs(value - centre) for value in present) / len(present))
     spreads.sort()
     print(f"\n=== Bucket spread (mean absolute deviation) — {label}, {len(spreads)} rows ===")
-    print(f"  {refused} row(s) had no robust centre and are excluded, not defaulted.")
+    print(f"  {refused} row(s) had no bucket at all and are excluded, not defaulted.")
     for percentile in (5, 10, 25, 50, 75, 90, 95, 99):
         index = min(len(spreads) - 1, int(round(percentile / 100.0 * (len(spreads) - 1))))
         print(f"  p{percentile:<3} {spreads[index]:6.1f}")
