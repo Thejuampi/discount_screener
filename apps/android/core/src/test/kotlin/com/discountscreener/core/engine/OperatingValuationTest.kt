@@ -5,6 +5,7 @@ import com.discountscreener.core.model.WaccFieldSource
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.junit.jupiter.api.Assertions.assertAll
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -374,11 +375,31 @@ class OperatingValuationTest {
                 }
             }
         assertEquals(15, reportedErrors.size)
-        assertTrue(reportedErrors.average() < 11.0)
-        assertTrue(reportedErrors.max() < 24.0)
         assertEquals(11, holdoutErrors.size)
-        assertTrue(holdoutErrors.average() < 11.5)
-        assertTrue(holdoutErrors.max() < 21.0)
+        // The accuracy gate below is red on purpose, on both platforms, against the same numbers:
+        // `operating_valuation::durable_reported_and_holdout_cohorts_recompute_in_normal_gate`
+        // panics on the identical `reported mean < 11.0`. The evidence routing it grades is not
+        // finished on the Rust/Windows side yet, so this is unbuilt work showing through, not a
+        // Kotlin regression — the per-symbol pins above are what guard the port, and they pass.
+        //
+        // Do not buy green here by moving a threshold. Measured 2026-08-10, isolating the terminal
+        // payout as the only mutation: charging the terminal for the capital that growth consumes
+        // moves reported mean error 10.88 -> 15.27, and the free-growth engine that scored 10.88
+        // cleared all four thresholds by a hair (10.88/11.0, 23.38/24.0, 11.26/11.5, 20.91/21.0).
+        // Those thresholds were calibrated on the engine they grade, and the anchor sits above 20
+        // of 26 estimates, so any change that raises every value buys error it did not earn.
+        // Removing the level bias from both sides leaves +0.88 points, CI95 [-2.12, +3.28] — the
+        // two are indistinguishable on shape. What is left is a real -12.1% level bias.
+        //
+        // All four run before reporting: fixing one and rediscovering the next costs a full cohort
+        // recompute each time, and the four together are what say whether a change moved level or
+        // dispersion.
+        assertAll(
+            { assertTrue(reportedErrors.average() < 11.0, "reported mean ${"%.2f".format(reportedErrors.average())} must stay under 11.0") },
+            { assertTrue(reportedErrors.max() < 24.0, "reported max ${"%.2f".format(reportedErrors.max())} must stay under 24.0") },
+            { assertTrue(holdoutErrors.average() < 11.5, "holdout mean ${"%.2f".format(holdoutErrors.average())} must stay under 11.5") },
+            { assertTrue(holdoutErrors.max() < 21.0, "holdout max ${"%.2f".format(holdoutErrors.max())} must stay under 21.0") },
+        )
     }
 
     private fun input(): ForwardEarningsInput = ForwardEarningsInput(
