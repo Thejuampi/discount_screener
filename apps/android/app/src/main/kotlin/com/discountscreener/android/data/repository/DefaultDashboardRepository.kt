@@ -123,6 +123,8 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeScoreStatus
+import com.discountscreener.core.regime.RegimeScoringPolicy
+import com.discountscreener.core.regime.regimeFitTerms
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
@@ -3342,7 +3344,22 @@ class DefaultDashboardRepository(
             .map { it.symbol }
             .toSet()
         var details = rows.mapNotNull { engine.detail(it.symbol) }.associateBy { it.symbol }
-        ScoreExport.buildCsv(rows, qualified, details, regimeDailySummaries)
+        // The market bucket is a weighted mean of up to nine terms, so a correlation against the
+        // bucket alone cannot say which term carries which sign. The terms go in the file next to
+        // it, unfiltered, with the stance that weighted them.
+        var policy = marketRegime?.let(RegimeScoringPolicy::fromRegime)
+        var terms = if (policy == null) {
+            emptyMap()
+        } else {
+            rows.associate { row ->
+                row.symbol to regimeFitTerms(
+                    details[row.symbol]?.fundamentals,
+                    regimeDailySummaries[row.symbol],
+                    policy,
+                )
+            }
+        }
+        ScoreExport.buildCsv(rows, qualified, details, regimeDailySummaries, terms, policy?.stance)
     }
 
     override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {

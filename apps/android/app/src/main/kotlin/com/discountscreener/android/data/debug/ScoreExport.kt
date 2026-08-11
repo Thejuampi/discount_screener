@@ -3,6 +3,8 @@ package com.discountscreener.android.data.debug
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.regime.RegimeCauseFactor
+import com.discountscreener.core.regime.RegimeFitTerm
 
 /**
  * A CSV of what the engine scored, for offline analysis.
@@ -28,6 +30,18 @@ import com.discountscreener.core.model.SymbolDetail
 object ScoreExport {
 
     /**
+     * The market bucket's terms, each written as a signed value and a weight.
+     *
+     * The bucket is a weighted mean of these, so a correlation against the bucket alone cannot say
+     * which term carries which sign. Trend and Extension read the same stretch with opposite signs,
+     * and the regime stance decides which of the two wins by weight — that arbitration is invisible
+     * in the composite and is the whole reason these columns exist.
+     */
+    private val TERM_FACTORS = RegimeCauseFactor.entries.filter {
+        it != RegimeCauseFactor.GeneralFit && it != RegimeCauseFactor.Neutral
+    }
+
+    /**
      * Column order is the file's contract with the analysis in `lab/`. Append, never reorder.
      */
     private val COLUMNS = listOf(
@@ -51,7 +65,8 @@ object ScoreExport {
         "ema20_cents",
         "ema50_cents",
         "ema200_cents",
-    )
+        "stance",
+    ) + TERM_FACTORS.flatMap { listOf("t_${it.legacyTag.lowercase()}", "w_${it.legacyTag.lowercase()}") }
 
     /**
      * One header line, then one line per row in [rows], in the order the engine ranked them.
@@ -65,12 +80,15 @@ object ScoreExport {
         qualifiedSymbols: Set<String>,
         detailsBySymbol: Map<String, SymbolDetail>,
         dailySummariesBySymbol: Map<String, ChartRangeSummary>,
+        termsBySymbol: Map<String, List<RegimeFitTerm>> = emptyMap(),
+        stance: String? = null,
     ): String {
         var lines = mutableListOf(COLUMNS.joinToString(","))
         for (row in rows) {
             var fundamentals = detailsBySymbol[row.symbol]?.fundamentals
             var summary = dailySummariesBySymbol[row.symbol]
-            lines += listOf(
+            var terms = termsBySymbol[row.symbol].orEmpty().associateBy { it.factor }
+            lines += (listOf(
                 quote(row.symbol),
                 if (row.symbol in qualifiedSymbols) "1" else "0",
                 quote(fundamentals?.sectorName),
@@ -91,7 +109,12 @@ object ScoreExport {
                 cell(summary?.ema20Cents),
                 cell(summary?.ema50Cents),
                 cell(summary?.ema200Cents),
-            ).joinToString(",")
+                quote(stance),
+            ) + TERM_FACTORS.flatMap { factor ->
+                // A term the symbol has no input for is absent, and absent is an empty pair of
+                // cells. A zero would read as "the feature was measured and came out neutral".
+                listOf(cell(terms[factor]?.signed), cell(terms[factor]?.weight))
+            }).joinToString(",")
         }
         return lines.joinToString("\n", postfix = "\n")
     }

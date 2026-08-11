@@ -101,24 +101,54 @@ private fun legacySignal(cause: RegimeCause): String = when (cause.effect) {
  * Refuses below two available features: one feature is not a fit, it is a coincidence, and the
  * L1-normalized mean would read as confident on the strength of a single input.
  */
-fun scoreRegimeFit(
+/**
+ * One term of the market fit, as it stands before the weighted mean absorbs it.
+ *
+ * [signed] is the feature mapped to -1..+1 and already carrying its own sign — the anti-extension
+ * term is negated here, so a stretched price reads negative. [weight] is the regime policy's
+ * weight for that factor, and it is stance-dependent: `wTrend` is 1.0 under Deploy and 0.2 under
+ * Euphoria, while `wAntiExtension` runs the other way. Two terms can therefore read the same
+ * observable with opposite signs and different weights, which is the arbitration the policy exists
+ * to perform.
+ */
+data class RegimeFitTerm(
+    val factor: RegimeCauseFactor,
+    val signed: Double,
+    val weight: Double,
+)
+
+/**
+ * Every term the market fit is built from, unfiltered and unranked.
+ *
+ * [RegimeFitResult.causes] is not a substitute for this. It keeps at most three causes and only
+ * those above a magnitude and weight cut, so a study that correlated it would be correlating what
+ * survived a filter — it could not tell which term carries which sign, which is the one thing
+ * such a study is for.
+ *
+ * Zero-weight terms are returned too. Which terms the active stance has switched off is itself the
+ * evidence about that stance.
+ *
+ * Returns empty when coverage is below the [scoreRegimeFit] floor, so a caller cannot read terms
+ * for a symbol the scorer refuses.
+ */
+fun regimeFitTerms(
     fundamentals: FundamentalSnapshot?,
     daily: ChartRangeSummary?,
     policy: RegimeScoringPolicy,
-): RegimeFitResult {
+): List<RegimeFitTerm> {
     val features = SymbolFeatures.extract(fundamentals, daily)
-    if (features.coverage < 2) return RegimeFitResult.insufficient()
+    if (features.coverage < 2) return emptyList()
 
-    val parts = ArrayList<Triple<Double, Double, RegimeCauseFactor>>()
+    val parts = ArrayList<RegimeFitTerm>()
 
     features.quality?.let { quality ->
-        parts.add(Triple(clamp((quality - 0.45) / 0.45, -1.0, 1.0), policy.wQuality, RegimeCauseFactor.Quality))
+        parts.add(term(RegimeCauseFactor.Quality, clamp((quality - 0.45) / 0.45, -1.0, 1.0), policy.wQuality))
     }
     features.lowBeta?.let { lowBeta ->
-        parts.add(Triple(clamp((lowBeta - 0.5) / 0.5, -1.0, 1.0), policy.wLowBeta, RegimeCauseFactor.LowBeta))
+        parts.add(term(RegimeCauseFactor.LowBeta, clamp((lowBeta - 0.5) / 0.5, -1.0, 1.0), policy.wLowBeta))
     }
     features.value?.let { value ->
-        parts.add(Triple(clamp((value - 0.45) / 0.45, -1.0, 1.0), policy.wValue, RegimeCauseFactor.Value))
+        parts.add(term(RegimeCauseFactor.Value, clamp((value - 0.45) / 0.45, -1.0, 1.0), policy.wValue))
     }
 
     val oversold = features.oversold
@@ -132,28 +162,45 @@ fun scoreRegimeFit(
         }
         if (gate > 0.0) {
             val signed = clamp((oversold * 2.0) - 1.0, -1.0, 1.0) * gate
-            parts.add(Triple(signed, policy.wOversoldQuality, RegimeCauseFactor.OversoldQual))
+            parts.add(term(RegimeCauseFactor.OversoldQual, signed, policy.wOversoldQuality))
         }
     }
 
     features.extension?.let { extension ->
         parts.add(
-            Triple(-clamp((extension - 0.45) / 0.45, -1.0, 1.0), policy.wAntiExtension, RegimeCauseFactor.Extension),
+            term(
+                RegimeCauseFactor.Extension,
+                -clamp((extension - 0.45) / 0.45, -1.0, 1.0),
+                policy.wAntiExtension,
+            ),
         )
     }
     features.trendAlign?.let { trend ->
-        parts.add(Triple(clamp((trend - 0.5) / 0.5, -1.0, 1.0), policy.wTrend, RegimeCauseFactor.Trend))
+        parts.add(term(RegimeCauseFactor.Trend, clamp((trend - 0.5) / 0.5, -1.0, 1.0), policy.wTrend))
     }
-    if (features.defensiveSector) parts.add(Triple(0.8, policy.wDefensive, RegimeCauseFactor.Defensive))
-    if (features.growthSector) parts.add(Triple(0.7, policy.wGrowth, RegimeCauseFactor.Growth))
+    if (features.defensiveSector) parts.add(term(RegimeCauseFactor.Defensive, 0.8, policy.wDefensive))
+    if (features.growthSector) parts.add(term(RegimeCauseFactor.Growth, 0.7, policy.wGrowth))
     features.liquidity?.let { liquidity ->
-        parts.add(Triple(clamp((liquidity - 0.4) / 0.5, -1.0, 1.0), policy.wLiquidity, RegimeCauseFactor.Liquidity))
+        parts.add(term(RegimeCauseFactor.Liquidity, clamp((liquidity - 0.4) / 0.5, -1.0, 1.0), policy.wLiquidity))
     }
+    return parts
+}
+
+private fun term(factor: RegimeCauseFactor, signed: Double, weight: Double) =
+    RegimeFitTerm(factor, signed, weight)
+
+fun scoreRegimeFit(
+    fundamentals: FundamentalSnapshot?,
+    daily: ChartRangeSummary?,
+    policy: RegimeScoringPolicy,
+): RegimeFitResult {
+    val parts = regimeFitTerms(fundamentals, daily, policy)
+    if (parts.isEmpty()) return RegimeFitResult.insufficient()
 
     var numerator = 0.0
     var denominator = 0.0
     val candidates = ArrayList<RegimeCause>()
-    for ((signed, weight, factor) in parts) {
+    for ((factor, signed, weight) in parts) {
         if (weight <= 0.0) continue
         numerator += signed * weight
         denominator += weight

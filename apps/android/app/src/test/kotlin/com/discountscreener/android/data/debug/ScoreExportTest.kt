@@ -8,6 +8,8 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.regime.RegimeCauseFactor
+import com.discountscreener.core.regime.RegimeFitTerm
 import com.discountscreener.core.regime.RegimeScoreStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -22,9 +24,58 @@ class ScoreExportTest {
             "symbol,qualified,sector,fundamentals,technical,forecast,market,regime_status," +
                 "composite_base,composite_final,coverage,beta_millis," +
                 "forward_pe_hundredths,ev_ebitda_hundredths,price_to_book_hundredths," +
-                "return_on_equity_bps,close_cents,ema20_cents,ema50_cents,ema200_cents",
+                "return_on_equity_bps,close_cents,ema20_cents,ema50_cents,ema200_cents,stance," +
+                "t_quality,w_quality,t_lowbeta,w_lowbeta,t_value,w_value," +
+                "t_oversoldqual,w_oversoldqual,t_extension,w_extension,t_trend,w_trend," +
+                "t_defensive,w_defensive,t_growth,w_growth,t_liquidity,w_liquidity",
             header,
         )
+    }
+
+    /**
+     * The probe this file exists for. Trend and Extension read one observable with opposite signs,
+     * and the composite market score cannot show that. If the two landed in one column, or a term
+     * were dropped, the study would be back to inferring the mechanism from the bucket.
+     */
+    @Test
+    fun the_market_terms_are_written_one_column_each_with_their_own_sign() {
+        var terms = mapOf(
+            "AAA" to listOf(
+                RegimeFitTerm(RegimeCauseFactor.Trend, 1.0, 1.0),
+                RegimeFitTerm(RegimeCauseFactor.Extension, -1.0, 0.2),
+            ),
+        )
+
+        var cells = ScoreExport
+            .buildCsv(listOf(row("AAA")), emptySet(), emptyMap(), emptyMap(), terms, "Deploy")
+            .trim().lines()[1].split(",")
+
+        assertEquals(
+            listOf("\"Deploy\"", "-1.0", "0.2", "1.0", "1.0"),
+            listOf(cells[20], cells[29], cells[30], cells[31], cells[32]),
+        )
+    }
+
+    /** A term the stance switched off carries weight zero; that zero is evidence, not an absence. */
+    @Test
+    fun a_term_weighted_at_zero_is_written_as_zero_not_as_blank() {
+        var terms = mapOf("AAA" to listOf(RegimeFitTerm(RegimeCauseFactor.Growth, 0.7, 0.0)))
+
+        var cells = ScoreExport
+            .buildCsv(listOf(row("AAA")), emptySet(), emptyMap(), emptyMap(), terms, "Defend")
+            .trim().lines()[1].split(",")
+
+        assertEquals("0.0", cells[36])
+    }
+
+    /** A term the symbol has no input for is absent, and absent must not read as a measured zero. */
+    @Test
+    fun a_term_the_symbol_has_no_input_for_is_blank() {
+        var cells = ScoreExport
+            .buildCsv(listOf(row("AAA")), emptySet(), emptyMap(), emptyMap(), emptyMap(), "Deploy")
+            .trim().lines()[1].split(",")
+
+        assertEquals("", cells[31])
     }
 
     /**
@@ -68,7 +119,9 @@ class ScoreExportTest {
 
         assertEquals(
             "\"AAA\",1,\"Technology\",40,-6,72,43,\"Included\",45,52,4,1200," +
-                "2500,1800,900,1500,19950,19000,18500,17000",
+                "2500,1800,900,1500,19950,19000,18500,17000" +
+                // No stance and no terms were supplied, so those 19 columns are empty, not zero.
+                ",".repeat(19),
             line,
         )
     }
