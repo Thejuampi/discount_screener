@@ -28,8 +28,13 @@ class OpportunityScoringModelToggleTest {
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
+    /**
+     * Named for what the body does — walk [opportunityScoringModelChipOrder] — rather than for a
+     * count. It said "four" while five chips shipped, and a name with a number in it goes stale
+     * every time a model is added, silently, because nothing compiles against a test's name.
+     */
     @Test
-    fun opportunities_tab_exposes_all_four_scoring_model_chips() {
+    fun opportunities_tab_exposes_every_scoring_model_chip() {
         setOpportunitiesContent(
             selected = OpportunityScoringModel.AggressiveV2,
             onAction = { },
@@ -94,12 +99,21 @@ class OpportunityScoringModelToggleTest {
         )
     }
 
+    /**
+     * Two claims, two tests. They were one, and a failure could not say which had broken: a
+     * renamed label and a model missing from the strip are different defects with different fixes.
+     */
     @Test
-    fun chip_labels_cover_every_scoring_model() {
+    fun the_chips_read_newest_model_first() {
         assertEquals(
             listOf("Aggressive V4", "Aggressive V3", "Aggressive V2", "Aggressive", "Legacy"),
             opportunityScoringModelChipOrder.map { it.chipLabel() },
         )
+    }
+
+    /** A model with no chip is a model the user cannot reach. */
+    @Test
+    fun every_scoring_model_has_a_chip() {
         assertEquals(
             OpportunityScoringModel.entries.toSet(),
             opportunityScoringModelChipOrder.toSet(),
