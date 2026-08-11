@@ -21,6 +21,25 @@ never named a sign, so it passed while its unstated same-sign premise half faile
 100 minutes later reproduced every pair within 0.015. Any future gate of this shape must state the
 sign it expects.
 
+**Restated with the sign it should have carried, and re-evaluated, because a PASS with a correcting
+footnote is a PASS and the footnote loses.** The gate asks one question — do the buckets carry
+overlapping information? — and the answer is |ρ| ≥ 0.3 on both pairs. Sign is irrelevant to *that*
+question: a bucket that moves reliably opposite to another restates it just as completely as one that
+moves with it, and the per-term probe below confirms the mechanism rather than leaving it to the sign.
+**So the verdict stands as PASS on the corrected wording, not merely on the wording as written.** What
+the missing sign actually cost was a premise, not the verdict: the plan assumed M and T would move
+*together*, and they do not. That is why the composite could not name a mechanism and why the per-term
+probe was needed at all.
+
+**One authorization item cannot be discharged and is recorded as open.** This export ran the app on the
+`sp500` profile. `AGENTS.md:282` permits another universe *only* on the user's explicit order, and
+"silence is not permission". The plan carries the exception in writing under Verification step 1, and
+plan-mode plans are approved before execution — but **no v0 snapshot of the plan was ever persisted**,
+and the plan file on disk was revised during the effort, so its timestamp cannot show whether that
+clause was in the approved text or added later by the orchestrator. The honest statement is that the
+exception is documented and its prior authorization is unprovable from what exists. Persisting `plan.v0`
+would have settled it in one line; not doing so is the defect, and the fix belongs to the next effort.
+
 A per-term probe followed, because the composite could not name a mechanism
 (`lab/data/overlap-terms-report-2026-08-11.txt`). It is what decided which market terms V4 drops:
 
@@ -37,6 +56,43 @@ The rule the table encodes: a term whose weight can flip the sign of what it say
 arbitration and stays. A term whose sign is fixed across every stance and is already scored in
 another bucket is a duplicate and goes.
 
+## The `§` marker does not work, and the sector half of V4 has never run on a device
+
+The plan's risk section says: *"Which rule scored a metric is now marked with `§` in Wave 2, so the
+switch is visible rather than silent."* **That claim is false and is withdrawn here.** Two facts
+compound, and each alone would be enough.
+
+**One: nothing renders it.** The engine builds the labels — `Mult§`, `ROE§` — and hands them out as
+`fundamentalsSignals`. That list is carried from `OpportunityEngine` into `Models.kt:879`, copied
+again into `DashboardSnapshot.kt:167`, plumbed through `DefaultDashboardRepository` twice, and read
+by **no UI code at all**. Every reference in the app is a write. A user cannot see `§`, so a list
+holding a sector-scored row beside an absolute-scored row says nothing about which is which. The
+mitigation exists in the engine and does not exist on the screen — which is this repository's own
+most expensive recurring defect, a refusal that reaches the user as silence.
+
+**Two: it is unreachable in the mandated QA universe anyway.** `MIN_SECTOR_MEMBERS` is 5. Counted
+from the live device's own database, across the twenty symbols of profile `qa`:
+
+| Sector | Members |
+|---|---|
+| Healthcare | 4 — CI, UNH, JNJ, MRK |
+| Financial Services | 4 — V, ACGL, BAC, JPM |
+| Technology | 3 — NVDA, MSFT, AAPL |
+| Consumer Cyclical | 3 — TSLA, AMZN, HD |
+| Communication Services | 3 — GOOGL, META, T |
+| Consumer Defensive | 2 — WMT, PG |
+| Energy | 1 — XOM |
+
+The largest is 4. **No sector benchmark can ever be computed under profile `qa`**, so every V4 score
+ever rendered on a device has used the absolute fallback. Sector-relative multiples are one of the
+three headline changes in this effort and **not one line of that path has executed outside a unit
+test.** This is not a coverage gap that happened to be missed; it cannot be closed on the mandated
+universe, and `AGENTS.md:282` allows another one only on the user's explicit order. It is not taken.
+
+Registered as the first follow-up: render `fundamentalsSignals`, then exercise the sector path on a
+universe that can reach five members in a sector. Until both are done, the honest description of the
+fallback is *silent*, not *marked*.
+
 ## Agreement bonus — the constant, and the population it was fitted to
 
 `V4_SPREAD_FULL = 38.5`, the p90 of the mean absolute deviation across buckets, measured on the
@@ -51,10 +107,47 @@ The qualified rows are markedly more divided than the cohort — their median ro
 the cohort's p75 — so a cohort-fitted constant would have zeroed the bonus for about a third of the
 Opportunities list.
 
-**The bonus is a hypothesis, not an assumed improvement.** `spec-windows-fourth-dimension-context.md`
-is frozen and states that disagreement between the market dimension and the others is meaningful. The
-market bucket is *built* to disagree with technicals in anti-chase stances, and the agreement bonus
-punishes exactly that. One of the two is wrong and this page cannot yet say which.
+**The bonus is a hypothesis, not an assumed improvement.** The market bucket is *built* to disagree
+with technicals in anti-chase stances, and the agreement bonus lowers the score when it does. Whether
+that is a correction or a loss of information is exactly what the score journal is there to settle,
+and nothing here settles it today.
+
+**An earlier version of this page claimed the frozen spec said otherwise. It does not, and the claim
+is withdrawn.** `spec-windows-fourth-dimension-context.md` was cited as stating that disagreement
+between the market dimension and the others is *meaningful*, making V4 a knowing contradiction of a
+frozen document. Reading the frozen block, its nearest clause is a **Never** — *"claim all four
+dimensions align merely because the final decision is Act"* — which forbids **claiming** an alignment
+that is not there. V4 does the opposite of what that forbids: it lowers the score when the buckets
+diverge, and prints `Buckets disagree by N` on the detail screen. The contradiction was a paraphrase
+of the document rather than a reading of it.
+
+**What that document does say, and what was genuinely missed:** its Ask First list covers *"any change
+to V3 weights, coverage bonus, decision thresholds, ... or non-Windows clients."* V4 replaces the
+coverage bonus, on Android. Windows V3 is untouched and V4 is opt-in behind a non-default model, but
+neither is an exemption the spec grants. The question of whether that Ask First reaches Android at all
+is human-owned, and it is now flagged in that file's append-only Spec Change Log rather than answered
+here.
+
+### Why the bonus scales with `(n - 1)`, which is not the defect it removes
+
+`bonus = 5 × (n − 1) × (1 − clamp(spread ÷ 38.5))`. Four agreeing buckets earn 15 points where two
+equally-agreeing buckets earn 5, so the term does rise with bucket count — the thing this effort set
+out to stop paying for. The distinction is worth stating rather than assuming:
+
+- **The SNDK defect was a bucket that *disagreed* raising the score.** SNDK's market bucket scored 43
+  against a 3-bucket mean of 45.33 and the composite rose 7 points, because the old bonus counted
+  presence and nothing else. Under V4 that same arrival *lowers* the score — it is a case in the
+  contract (`a fourth bucket that dissents lowers the score although it raises the count`).
+- **What `(n − 1)` pays for is corroboration, not presence.** It only pays at all to the extent the
+  buckets agree; at full spread it pays zero no matter how many buckets reported. Four independent
+  witnesses agreeing is stronger evidence than two agreeing, so confidence rising with the number of
+  *concurring* readings is the intended behaviour.
+- **That argument depends on the buckets being independent, which is why Wave 0 and Wave 2 exist.**
+  If the buckets restated each other, extra agreement would be extra copies of one opinion and the
+  term would be indefensible. Removing the duplicated terms is what earns the right to this shape.
+
+It remains a choice, not a measurement. The journal stores every bucket score, so the bonus is exactly
+recomputable offline and a later reading can test `(n − 1)` against a flat term without re-scoring.
 
 ## Forward returns — Wave 4b, 2026-08-11, and the answer is nothing
 

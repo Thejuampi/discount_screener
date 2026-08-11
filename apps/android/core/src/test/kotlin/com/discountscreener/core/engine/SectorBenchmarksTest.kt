@@ -41,6 +41,22 @@ class SectorBenchmarksTest {
         assertNull(computeSectorBenchmarks(details)["Technology"]?.forwardPeHundredths)
     }
 
+    /**
+     * The case beside the one the comments already reason through: the trim removes two, not three.
+     *
+     * Three survivors is exactly `robustCentre`'s floor, so this sector clears both gates and sets
+     * a band for all five of its members from three observations. That is the thinnest band this
+     * code will produce, and it is reachable — so it is pinned here rather than left as something a
+     * reader has to derive from two separate floors that were chosen independently.
+     */
+    @Test
+    fun a_sector_of_five_whose_trim_leaves_three_still_sets_a_band() {
+        var details = listOf(2_000, 2_010, 2_020, 90_000, 95_000)
+            .mapIndexed { index, pe -> detail("S$index", forwardPeHundredths = pe) }
+
+        assertEquals(2_010, computeSectorBenchmarks(details)["Technology"]?.forwardPeHundredths)
+    }
+
     /** A symbol whose provider sent no sector belongs to no sector, and is not a sector of one. */
     @Test
     fun a_symbol_with_no_sector_name_is_in_no_sector() {

@@ -33,6 +33,15 @@ data class SectorBenchmarks(
  * the sector is big enough to have a level at all. [robustCentre]'s own floor then asks whether
  * enough of that sector survived the trim to still speak. A sector of five whose trim removes
  * three fails the second gate after passing the first, and that is right.
+ *
+ * **The neighbouring case is allowed and is worth naming, because reasoning through one boundary
+ * and staying silent on the one beside it is an incomplete argument.** A sector of five whose trim
+ * removes *two* leaves three survivors, clears both gates, and sets the band for every member of
+ * that sector from three observations. That is the intended floor rather than an oversight: three
+ * is the fewest from which [robustCentre] will speak at all, and the alternative — refusing the
+ * sector — sends the whole sector to the absolute band on the strength of two contaminated members.
+ * It is still the thinnest band this code will produce, and a later reading with real sector
+ * populations behind it may well raise [MIN_SECTOR_MEMBERS] rather than leave the case reachable.
  */
 private const val MIN_SECTOR_MEMBERS = 5
 
