@@ -59,11 +59,13 @@ import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.QuantLensExpectedValuePolicy
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.ScreenDataProjectionEngine
+import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.engine.TickerSearchCandidate
 import com.discountscreener.core.engine.TickerSearchEngine
 import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
+import com.discountscreener.core.engine.computeSectorBenchmarks
 import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
@@ -85,6 +87,7 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.readsSectorBenchmarks
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
@@ -1710,8 +1713,25 @@ class DefaultDashboardRepository(
             regimeSummariesBySymbol = regimeDailySummaries,
             marketRegime = marketRegime,
             regimeScoringEnabled = regimeScoringEnabled,
+            sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
         ),
     )
+
+    /**
+     * The sector levels for one pass of the list, computed from **every** ingested symbol.
+     *
+     * The cohort, not the qualified list: qualification keeps roughly one symbol in eight, and a
+     * sector centre taken over the survivors would be the level of the cheap tail rather than the
+     * level of the sector. It is recomputed per pass rather than cached — it is one pass over the
+     * same details [OpportunityEngine.buildRows] is about to score, so a cache here would buy
+     * nothing and would need an invalidation rule that could go stale.
+     */
+    private fun sectorBenchmarksLocked(
+        scoringModel: OpportunityScoringModel,
+    ): Map<String, SectorBenchmarks> {
+        if (!scoringModel.readsSectorBenchmarks()) return emptyMap()
+        return computeSectorBenchmarks(engine.trackedSymbols().mapNotNull { engine.detail(it) })
+    }
 
     private fun buildTrackedRowLocked(
         symbol: String,
@@ -3335,6 +3355,7 @@ class DefaultDashboardRepository(
                 regimeSummariesBySymbol = regimeDailySummaries,
                 marketRegime = marketRegime,
                 regimeScoringEnabled = regimeScoringEnabled,
+                sectorBenchmarks = sectorBenchmarksLocked(opportunityScoringModel),
             ),
             includeUnqualified = true,
         )

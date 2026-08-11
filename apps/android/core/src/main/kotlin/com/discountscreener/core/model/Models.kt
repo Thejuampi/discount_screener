@@ -89,6 +89,23 @@ fun OpportunityScoringModel.carriesMarketDimension(): Boolean = when (this) {
     -> true
 }
 
+/**
+ * Whether this model compares a symbol's multiples against its sector.
+ *
+ * The caller pays for the answer — the benchmarks are a pass over every ingested symbol — so a
+ * model that does not read them must not trigger the work. Exhaustive for the same reason as
+ * [carriesMarketDimension]: the next model is named here or it is not answered at all.
+ */
+fun OpportunityScoringModel.readsSectorBenchmarks(): Boolean = when (this) {
+    OpportunityScoringModel.Legacy,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.AggressiveV2,
+    OpportunityScoringModel.AggressiveV3,
+    -> false
+    OpportunityScoringModel.AggressiveV4,
+    -> true
+}
+
 @Serializable
 enum class TrendSignal {
     Improving,

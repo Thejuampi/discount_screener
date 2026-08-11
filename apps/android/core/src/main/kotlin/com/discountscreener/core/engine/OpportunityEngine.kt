@@ -8,6 +8,7 @@ import com.discountscreener.core.model.carriesMarketDimension
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSignal
 import com.discountscreener.core.model.ExternalSignalStatus
+import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
@@ -111,7 +112,28 @@ private const val V3_FUND_EV_EBITDA_LOW = 600.0
 private const val V3_FUND_EV_EBITDA_HIGH = 2_000.0
 private const val V3_FUND_PB_LOW = 100.0
 private const val V3_FUND_PB_HIGH = 500.0
+
+/** Forward P/E, EV/EBITDA and P/B — the divisor that stops one multiple saturating the panel. */
+private const val VALUATION_PANEL_MULTIPLE_COUNT = 3.0
 private const val V3_FUND_CASH_QUALITY_WEIGHT = 10.0
+
+// V4's sector bands. The three price multiples get a multiplicative ramp around the sector centre
+// and return on equity gets an additive one, because return on equity crosses zero and a
+// percentage band does not survive that. Both shapes and all four numbers are Windows's
+// (`engine.rs:1299-1305`), so the later Rust port has one set of constants to agree with.
+private const val V4_FUND_SECTOR_CHEAP_MULT = 0.7
+private const val V4_FUND_SECTOR_RICH_MULT = 1.5
+private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
+private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
+
+/**
+ * The one character that says a metric was scored against its sector rather than an absolute band.
+ *
+ * Two rows in one list scored by different rules, with nothing saying which, is the same defect as
+ * a refusal drawn as a mute dash. Windows spends the same character for the same reason
+ * (`engine.rs:1303`).
+ */
+private const val SECTOR_ADJUSTED_MARKER = "§"
 
 private const val V3_TECH_TREND_DELTA_BOUND = 0.10
 private const val V3_TECH_TREND_PRICE_20_WEIGHT = 12.0
@@ -147,6 +169,12 @@ private const val V3_FORECAST_DCF_RELIABILITY = 0.75
 private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
 
 private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
+
+/**
+ * V4 inherits V3's term weights and gets its own name for the total, so that the terms V4 adds
+ * later move this number and never V3's. Equal today; the equality is not the point.
+ */
+private const val V4_FUNDAMENTALS_FULL_WEIGHT = V3_FUNDAMENTALS_FULL_WEIGHT
 private const val V3_TECHNICALS_FULL_WEIGHT = 100.0
 private const val V3_FORECAST_FULL_WEIGHT =
     V3_FORECAST_VALUATION_WEIGHT +
@@ -214,6 +242,13 @@ data class OpportunityContext(
     val marketRegime: MarketRegime? = null,
     /** The user's runtime switch. Off scores every name on the three original buckets. */
     val regimeScoringEnabled: Boolean = true,
+    /**
+     * Sector levels for V4's fundamentals bucket, keyed by sector name, computed once per snapshot.
+     *
+     * Empty for every model but V4, and empty for V4 too until a snapshot supplies it: a missing
+     * sector means the row falls back to the absolute band and says so, never that it throws.
+     */
+    val sectorBenchmarks: Map<String, SectorBenchmarks> = emptyMap(),
 )
 
 data class OpportunityScoreBreakdown(
@@ -283,6 +318,8 @@ object OpportunityEngine {
                     regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
                     marketRegime = context.marketRegime,
                     regimeScoringEnabled = context.regimeScoringEnabled,
+                    sectorBenchmarks = detail.fundamentals?.sectorName
+                        ?.let { context.sectorBenchmarks[it] },
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -335,14 +372,21 @@ object OpportunityEngine {
         regimeSummary: ChartRangeSummary? = null,
         marketRegime: MarketRegime? = null,
         regimeScoringEnabled: Boolean = true,
+        /**
+         * The levels for this symbol's own sector, or null when it has none.
+         *
+         * Null is the honest default rather than a convenience: a call site that does not supply
+         * benchmarks gets the absolute band and the plain label, which is exactly what it computed
+         * before V4 existed.
+         */
+        sectorBenchmarks: SectorBenchmarks? = null,
     ): OpportunityScoreBreakdown {
         val (fundamentalsScore, fundamentalsSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
             OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
-            OpportunityScoringModel.AggressiveV3,
-            OpportunityScoringModel.AggressiveV4,
-            -> aggressiveV3FundamentalsScore(detail)
+            OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
+            OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks)
         }
         val (technicalScore, technicalSignals) = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
@@ -1085,6 +1129,122 @@ object OpportunityEngine {
         val fundamentals = detail.fundamentals ?: return null to emptyList()
         val acc = EvidenceAccumulator(V3_FUNDAMENTALS_FULL_WEIGHT)
 
+        addCashFlowVote(acc, fundamentals)
+        addReturnOnEquity(acc, fundamentals, sectorReturnOnEquityBps = null)
+        addEarningsGrowth(acc, fundamentals)
+        addBalanceSheet(acc, fundamentals)
+
+        // Multi-multiple valuation panel: blend available positive multiples so cheaper → +1.
+        // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
+        // saturate the full valuation budget.
+        val valuationRamps = mutableListOf<Double>()
+        fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
+            valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
+        }
+        fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
+            valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
+        }
+        fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
+            valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
+        }
+        if (valuationRamps.isNotEmpty()) {
+            val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
+            val coverageFraction = valuationRamps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
+            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
+        }
+
+        addCashConversion(acc, fundamentals)
+
+        return acc.normalizedScore() to acc.signals
+    }
+
+    /**
+     * V4's fundamentals bucket: V3's terms, with the valuation panel and return on equity read
+     * against the symbol's own sector when that sector has earned a benchmark.
+     *
+     * The defect this fixes is that V3 ranks a utility and a chip maker on one P/E band, so it
+     * ranks industries before it ranks companies. A sector below the five-member floor has no
+     * benchmark and the row falls back to V3's absolute band — visibly, via
+     * [SECTOR_ADJUSTED_MARKER], because a list that scores two rows by two rules and says which is
+     * honest, and one that stays quiet about it is not.
+     */
+    internal fun aggressiveV4FundamentalsScore(
+        detail: SymbolDetail,
+        sectorBenchmarks: SectorBenchmarks?,
+    ): Pair<Int?, List<String>> {
+        var fundamentals = detail.fundamentals ?: return null to emptyList()
+        var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
+
+        addCashFlowVote(acc, fundamentals)
+        addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
+        addEarningsGrowth(acc, fundamentals)
+        addBalanceSheet(acc, fundamentals)
+        addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
+        addCashConversion(acc, fundamentals)
+
+        return acc.normalizedScore() to acc.signals
+    }
+
+    /**
+     * The valuation panel, each multiple scored against its sector centre where there is one.
+     *
+     * Two things differ from V3's panel beyond the sector, and both are deliberate. The blend is a
+     * median, not `sum / n`: three ramps of which one is pinned at ±1 by a saturating multiple
+     * should not drag the panel, and a mean lets it. And the panel carries one label for three
+     * metrics, marked when the sector supplied **at least one** centre — a sector can clear the
+     * five-member floor on P/E and miss it on EV/EBITDA, and the marker's claim is "the sector was
+     * read here", not "every metric was".
+     */
+    private fun addSectorRelativeMultiples(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorBenchmarks: SectorBenchmarks?,
+    ) {
+        var ramps = mutableListOf<Double>()
+        var sectorAdjusted = false
+        fun scoreMultiple(observed: Int?, sectorCentre: Int?, absoluteLow: Double, absoluteHigh: Double) {
+            var value = observed?.takeIf { it > 0 } ?: return
+            var centre = sectorCentre?.takeIf { it > 0 }
+            if (centre != null) sectorAdjusted = true
+            var low = centre?.let { it * V4_FUND_SECTOR_CHEAP_MULT } ?: absoluteLow
+            var high = centre?.let { it * V4_FUND_SECTOR_RICH_MULT } ?: absoluteHigh
+            ramps += -smoothRamp(value.toDouble(), low, high)
+        }
+        scoreMultiple(
+            fundamentals.forwardPeHundredths,
+            sectorBenchmarks?.forwardPeHundredths,
+            V3_FUND_PE_LOW,
+            V3_FUND_PE_HIGH,
+        )
+        scoreMultiple(
+            fundamentals.enterpriseToEbitdaHundredths,
+            sectorBenchmarks?.enterpriseToEbitdaHundredths,
+            V3_FUND_EV_EBITDA_LOW,
+            V3_FUND_EV_EBITDA_HIGH,
+        )
+        scoreMultiple(
+            fundamentals.priceToBookHundredths,
+            sectorBenchmarks?.priceToBookHundredths,
+            V3_FUND_PB_LOW,
+            V3_FUND_PB_HIGH,
+        )
+        var blended = medianOf(ramps) ?: return
+        var coverageFraction = ramps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
+        var label = if (sectorAdjusted) "Mult$SECTOR_ADJUSTED_MARKER" else "Mult"
+        acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, label)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // The fundamentals terms V3 and V4 share.
+    //
+    // Moved out of V3's body unchanged, so that V4 reuses them instead of holding a second copy
+    // that can drift. V4's own terms are deliberately absent from this block: the multiple panel
+    // centres a different way and reads the sector, and the share-count change does not exist in
+    // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
+    // ----------------------------------------------------------------------------------
+
+    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF. */
+    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         val fcfDollars = fundamentals.freeCashFlowDollars
         val marketCapDollars = fundamentals.marketCapDollars
         when {
@@ -1102,15 +1262,46 @@ object OpportunityEngine {
                 }
             }
         }
+    }
 
-        fundamentals.returnOnEquityBps?.let { roeBps ->
+    /**
+     * Return on equity, against the sector's level when there is one and against an absolute band
+     * when there is not.
+     *
+     * The band is **additive**, and that is not an inconsistency with the multiple panel's
+     * multiplicative ramp — it is the reason the two are written apart. A percentage-of-centre band
+     * collapses as the centre nears zero and inverts once it crosses, and return on equity crosses
+     * zero on ordinary companies. Windows draws the same distinction at `engine.rs:1299-1305`.
+     *
+     * A sector-adjusted term is labelled `ROE§`, so a list holding both rules says which one scored
+     * each row. The marker is Windows's convention, kept identical here on purpose.
+     */
+    private fun addReturnOnEquity(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorReturnOnEquityBps: Int?,
+    ) {
+        var roeBps = fundamentals.returnOnEquityBps ?: return
+        if (sectorReturnOnEquityBps == null) {
             acc.add(V3_FUND_ROE_WEIGHT, smoothRamp(roeBps.toDouble(), V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS), "ROE")
+            return
         }
+        var centre = sectorReturnOnEquityBps.toDouble()
+        var ramp = smoothRamp(
+            roeBps.toDouble(),
+            centre + V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS,
+            centre + V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS,
+        )
+        acc.add(V3_FUND_ROE_WEIGHT, ramp, "ROE$SECTOR_ADJUSTED_MARKER")
+    }
 
+    private fun addEarningsGrowth(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         fundamentals.earningsGrowthBps?.let { growthBps ->
             acc.add(V3_FUND_GROWTH_WEIGHT, smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS), "Growth")
         }
+    }
 
+    private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         val deHundredths = fundamentals.debtToEquityHundredths
         if (deHundredths != null) {
             acc.add(V3_FUND_BALANCE_WEIGHT, -smoothRamp(deHundredths.toDouble(), V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH), "D/E")
@@ -1121,34 +1312,16 @@ object OpportunityEngine {
                 acc.add(V3_FUND_BALANCE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
             }
         }
+    }
 
-        // Multi-multiple valuation panel: blend available positive multiples so cheaper → +1.
-        // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
-        // saturate the full valuation budget.
-        val valuationRamps = mutableListOf<Double>()
-        fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
-            valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
-        }
-        fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
-            valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
-        }
-        fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
-            valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
-        }
-        if (valuationRamps.isNotEmpty()) {
-            val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
-            val coverageFraction = valuationRamps.size.toDouble() / 3.0
-            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
-        }
-
-        // Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign).
+    /** Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign). */
+    private fun addCashConversion(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+        val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
             val conversion = fcfDollars.toDouble() / ocfForQuality.toDouble()
             acc.add(V3_FUND_CASH_QUALITY_WEIGHT, smoothRamp(conversion, 0.0, 1.0), "Conv")
         }
-
-        return acc.normalizedScore() to acc.signals
     }
 
     internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {

@@ -1,0 +1,216 @@
+package com.discountscreener.core.engine
+
+import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.ExternalSignalStatus
+import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.MarketSnapshot
+import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.SymbolDetail
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+/**
+ * V4's fundamentals bucket reads a symbol against its own sector.
+ *
+ * The defect being fixed is that V3 puts a utility and a chip maker on one P/E band, so it ranks
+ * industries before it ranks companies. Each test below fixes one part of the replacement: that the
+ * sector is read at all, that return on equity is read with a band of a different shape, and that a
+ * sector too small to have a level falls back to the old rule and says so in the label.
+ */
+class AggressiveV4FundamentalsTest {
+
+    /**
+     * The same three multiples, twice, in two sectors. Nothing about the company changes between
+     * the two rows — only the level its peers trade at — and the bucket moves the whole way from
+     * one end of the panel to the other.
+     *
+     *  expensive sector  centres 4000 / 2400 / 600  bands [2800,6000] [1680,3600] [420,900]
+     *                    2000 / 1200 / 300 are all under the cheap edge  → panel +1 → 24 × +1
+     *  cheap sector      centres 1000 /  600 / 150  bands  [700,1500]  [420,900]  [105,225]
+     *                    the same three are all over the rich edge       → panel −1 → 24 × −1
+     */
+    @Test
+    fun a_cheap_symbol_in_an_expensive_sector_outscores_the_same_multiples_in_a_cheap_sector() {
+        var expensive = score(benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600))
+        var cheap = score(benchmarks(forwardPe = 1_000, evEbitda = 600, priceToBook = 150))
+
+        assertEquals(listOf(24, -24), listOf(expensive.first, cheap.first))
+    }
+
+    /**
+     * A sector with no benchmark scores on V3's absolute band, and the label says `Mult` with no
+     * marker. Two rows in one list scored by two rules is fine; two rows that do not say which rule
+     * scored them is not.
+     *
+     *  2000 in [800,3500] → +0.1111,  1200 in [600,2000] → +0.1429,  300 in [100,500] → 0.0
+     *  median +0.1111 × 24 → 2.67 → 3
+     */
+    @Test
+    fun a_symbol_with_no_sector_benchmark_falls_back_to_the_absolute_band_and_says_so() {
+        var fallback = score(null)
+
+        assertEquals(3 to listOf("Mult+"), fallback.first to fallback.second)
+    }
+
+    /** The other half of the same claim: a sector-scored panel is marked, and marked once. */
+    @Test
+    fun a_sector_scored_panel_carries_the_marker() {
+        var scored = score(benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600))
+
+        assertEquals(listOf("Mult§"), scored.second.map { it.trimEnd('+', '-') })
+    }
+
+    /**
+     * Four members is not a sector, so the benchmark the engine computes for it is null and the row
+     * lands on the absolute band — through the real [computeSectorBenchmarks], not a hand-made
+     * null. The scoring path must survive a sector it cannot use, and produce the old answer.
+     */
+    @Test
+    fun a_sector_of_four_members_falls_back_to_the_absolute_band_without_throwing() {
+        var thinSector = listOf(1_800, 1_900, 2_000, 2_100)
+            .mapIndexed { index, pe -> detail("PEER$index", forwardPeHundredths = pe) }
+
+        assertEquals(score(null).first, score(computeSectorBenchmarks(thinSector)["Technology"]).first)
+    }
+
+    /**
+     * Return on equity is read against the sector too, and the sector moves it.
+     *
+     *  absolute  1000 bps in [0,2000]        → 0.0  × 16 → 0
+     *  sector    centre 2000, band [1500,3500]; 1000 is under the low edge → −1 × 16 → −16
+     *
+     * Twenty per cent on equity is good in most of the market and ordinary among the companies that
+     * earn thirty. That is the whole point of the bucket.
+     */
+    @Test
+    fun return_on_equity_is_read_against_the_sector_level() {
+        var absolute = scoreReturnOnEquity(1_000, sectorReturnOnEquityBps = null)
+        var sectorRelative = scoreReturnOnEquity(1_000, sectorReturnOnEquityBps = 2_000)
+
+        assertEquals(listOf(0, -16), listOf(absolute, sectorRelative))
+    }
+
+    /**
+     * The return-on-equity band is **additive**, and this is the test that would catch it being
+     * made multiplicative like the three price multiples.
+     *
+     * A sector centred at −300 bps is a sector of loss makers, and it is an ordinary thing to be.
+     * The additive band is [−800, +1200] and it orders the two symbols correctly. A `× 0.7 / × 1.5`
+     * band on the same centre would be [−210, −450] — upper below lower — which is not a band at
+     * all; `smoothRamp` refuses it and the row would throw rather than score.
+     */
+    @Test
+    fun the_return_on_equity_band_is_additive_so_a_sector_centred_below_zero_still_orders() {
+        var weak = scoreReturnOnEquity(-800, sectorReturnOnEquityBps = -300)
+        var strong = scoreReturnOnEquity(1_200, sectorReturnOnEquityBps = -300)
+
+        assertEquals(listOf(-16, 16), listOf(weak, strong))
+    }
+
+    /**
+     * Where the two edges of the return-on-equity band actually sit.
+     *
+     * The two tests above put every observation outside the band, so they pin its sign and not its
+     * width: an edge moved a few hundred basis points would keep them green. These observations sit
+     * just inside each edge, where a moved edge changes the score.
+     *
+     *  centre 2000 → band [1500, 3500]
+     *  1550 → 2 × 50 / 2000 − 1 = −0.95 × 16 → −15
+     *  3400 → 2 × 1900 / 2000 − 1 = +0.90 × 16 → +14
+     */
+    @Test
+    fun the_return_on_equity_band_runs_five_hundred_below_the_sector_to_fifteen_hundred_above() {
+        var justInsideTheLowEdge = scoreReturnOnEquity(1_550, sectorReturnOnEquityBps = 2_000)
+        var justInsideTheHighEdge = scoreReturnOnEquity(3_400, sectorReturnOnEquityBps = 2_000)
+
+        assertEquals(listOf(-15, 14), listOf(justInsideTheLowEdge, justInsideTheHighEdge))
+    }
+
+    /**
+     * The benchmarks reach the bucket through the list, and this is the only test that says so.
+     *
+     * Everything above calls the scorer directly, so all of it would stay green if the context
+     * carried the map and the row never looked its sector up. The seam is a map lookup by a name
+     * that lives two objects away from the call, and a seam nothing crosses is a feature nothing
+     * ships.
+     */
+    @Test
+    fun the_list_reads_a_symbols_sector_from_the_context() {
+        var engine = ReportingEngine()
+        engine.ingestSnapshot(
+            MarketSnapshot(symbol = "SUT", profitable = true, marketPriceCents = 8_000, intrinsicValueCents = 10_000),
+        )
+        engine.ingestFundamentals(detail("SUT", 2_000, 1_200, 300).fundamentals!!)
+
+        var context = OpportunityContext(
+            scoringModel = OpportunityScoringModel.AggressiveV4,
+            sectorBenchmarks = mapOf(
+                "Technology" to benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600),
+            ),
+        )
+
+        assertEquals(24, OpportunityEngine.buildRows(engine, context).single().fundamentalsScore)
+    }
+
+    /** Score the three multiples alone, so the panel is the only term the bucket holds. */
+    private fun score(sectorBenchmarks: SectorBenchmarks?) = OpportunityEngine
+        .aggressiveV4FundamentalsScore(
+            detail(
+                "SUT",
+                forwardPeHundredths = 2_000,
+                enterpriseToEbitdaHundredths = 1_200,
+                priceToBookHundredths = 300,
+            ),
+            sectorBenchmarks,
+        )
+
+    /** Score return on equity alone, for the same reason. */
+    private fun scoreReturnOnEquity(observedBps: Int, sectorReturnOnEquityBps: Int?) = OpportunityEngine
+        .aggressiveV4FundamentalsScore(
+            detail("SUT", returnOnEquityBps = observedBps),
+            sectorReturnOnEquityBps?.let { benchmarks(returnOnEquityBps = it) },
+        ).first
+
+    private fun benchmarks(
+        forwardPe: Int? = null,
+        evEbitda: Int? = null,
+        priceToBook: Int? = null,
+        returnOnEquityBps: Int? = null,
+    ) = SectorBenchmarks(
+        forwardPeHundredths = forwardPe,
+        enterpriseToEbitdaHundredths = evEbitda,
+        priceToBookHundredths = priceToBook,
+        returnOnEquityBps = returnOnEquityBps,
+    )
+
+    private fun detail(
+        symbol: String,
+        forwardPeHundredths: Int? = null,
+        enterpriseToEbitdaHundredths: Int? = null,
+        priceToBookHundredths: Int? = null,
+        returnOnEquityBps: Int? = null,
+    ) = SymbolDetail(
+        symbol = symbol,
+        profitable = true,
+        marketPriceCents = 19_950,
+        intrinsicValueCents = 25_000,
+        gapBps = 2_000,
+        minimumGapBps = 1_000,
+        qualification = QualificationStatus.Qualified,
+        externalStatus = ExternalSignalStatus.Supportive,
+        externalSignalMaxAgeSeconds = 86_400,
+        confidence = ConfidenceBand.High,
+        lastSequence = 1,
+        updateCount = 1,
+        isWatched = false,
+        fundamentals = FundamentalSnapshot(
+            symbol = symbol,
+            sectorName = "Technology",
+            forwardPeHundredths = forwardPeHundredths,
+            enterpriseToEbitdaHundredths = enterpriseToEbitdaHundredths,
+            priceToBookHundredths = priceToBookHundredths,
+            returnOnEquityBps = returnOnEquityBps,
+        ),
+    )
+}
