@@ -1,14 +1,14 @@
 package com.discountscreener.android.data.debug
 
-import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.QualificationStatus
-import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.regime.RegimeScoreStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -16,10 +16,10 @@ class ScoreExportTest {
 
     @Test
     fun the_header_names_every_column() {
-        var header = ScoreExport.buildCsv(emptyList(), emptyMap(), emptyMap()).trim()
+        var header = ScoreExport.buildCsv(emptyList(), emptySet(), emptyMap(), emptyMap()).trim()
 
         assertEquals(
-            "symbol,sector,fundamentals,technical,forecast,market,regime_status," +
+            "symbol,qualified,sector,fundamentals,technical,forecast,market,regime_status," +
                 "composite_base,composite_final,coverage,beta_millis," +
                 "forward_pe_hundredths,ev_ebitda_hundredths,price_to_book_hundredths," +
                 "return_on_equity_bps,close_cents,ema20_cents,ema50_cents,ema200_cents",
@@ -38,9 +38,23 @@ class ScoreExportTest {
         var details = mapOf("AAA" to detail("AAA"), "BBB" to detail("BBB"))
         var summaries = mapOf("AAA" to summary())
 
-        var lines = ScoreExport.buildCsv(rows, details, summaries).trim().lines()
+        var lines = ScoreExport.buildCsv(rows, setOf("AAA"), details, summaries).trim().lines()
 
         assertEquals(rows.size + 1, lines.size)
+    }
+
+    /**
+     * Qualification selects roughly one symbol in eight. The column is what lets the analysis
+     * compare the cohort against that subset instead of quietly inheriting its range restriction.
+     */
+    @Test
+    fun an_unqualified_row_is_written_and_marked_unqualified() {
+        var rows = listOf(row("AAA"), row("BBB"))
+
+        var cells = ScoreExport.buildCsv(rows, setOf("AAA"), emptyMap(), emptyMap())
+            .trim().lines()[2].split(",")
+
+        assertEquals("0", cells[1])
     }
 
     @Test
@@ -48,10 +62,12 @@ class ScoreExportTest {
         var rows = listOf(row("AAA"))
         var details = mapOf("AAA" to detail("AAA"))
 
-        var line = ScoreExport.buildCsv(rows, details, mapOf("AAA" to summary())).trim().lines()[1]
+        var line = ScoreExport
+            .buildCsv(rows, setOf("AAA"), details, mapOf("AAA" to summary()))
+            .trim().lines()[1]
 
         assertEquals(
-            "\"AAA\",\"Technology\",40,-6,72,43,\"Included\",45,52,4,1200," +
+            "\"AAA\",1,\"Technology\",40,-6,72,43,\"Included\",45,52,4,1200," +
                 "2500,1800,900,1500,19950,19000,18500,17000",
             line,
         )
@@ -60,14 +76,17 @@ class ScoreExportTest {
     /** A bucket that is absent must read as empty, never as the zero a bucket can really score. */
     @Test
     fun a_missing_bucket_is_an_empty_cell_not_a_zero() {
-        var rows = listOf(row("AAA").copy(regimeScore = null, regimeStatus = RegimeScoreStatus.Unavailable))
+        var rows = listOf(
+            row("AAA").copy(regimeScore = null, regimeStatus = RegimeScoreStatus.Unavailable),
+        )
 
-        var cells = ScoreExport.buildCsv(rows, emptyMap(), emptyMap()).trim().lines()[1].split(",")
+        var cells = ScoreExport.buildCsv(rows, emptySet(), emptyMap(), emptyMap())
+            .trim().lines()[1].split(",")
 
-        assertEquals("", cells[5])
+        assertEquals("", cells[6])
     }
 
-    private fun row(symbol: String) = OpportunityListRow(
+    private fun row(symbol: String) = OpportunityRow(
         symbol = symbol,
         marketPriceCents = 19_950,
         intrinsicValueCents = 25_000,

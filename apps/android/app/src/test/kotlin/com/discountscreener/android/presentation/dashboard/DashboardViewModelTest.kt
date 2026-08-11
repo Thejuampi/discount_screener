@@ -16,7 +16,6 @@ import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
-import java.io.File
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -60,6 +59,7 @@ import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -126,6 +126,22 @@ class DashboardViewModelTest {
         advanceUntilIdle()
 
         assertEquals("Refresh failed", viewModel.state.value.detailNotice?.title)
+    }
+
+    /**
+     * The count must come from the file, not from the Opportunities list. The export covers the
+     * whole scored cohort, which is roughly eight times that list, so a message counting the list
+     * would understate the file by a factor — and a truncated export would then look normal.
+     */
+    @Test
+    fun the_export_message_counts_the_rows_the_file_really_holds() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.ExportScores)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.systemStatusMessage!!.startsWith("Exported 3 scored rows"))
     }
 
     @Test
@@ -827,7 +843,13 @@ class DashboardViewModelTest {
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
-            exportScores = ExportScoresUseCase(repository, File(System.getProperty("java.io.tmpdir")!!)),
+            // The test dispatcher, not IO: on IO the write escapes `advanceUntilIdle` and the
+            // assertion reads a state the export has not reached yet.
+            exportScores = ExportScoresUseCase(
+                repository,
+                File(System.getProperty("java.io.tmpdir")!!),
+                dispatcher,
+            ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -1069,7 +1091,7 @@ class DashboardViewModelTest {
         }
 
         override suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String =
-            "symbol\n"
+            "symbol\n\"AAA\"\n\"BBB\"\n\"CCC\"\n"
 
         override suspend fun trackedSymbolDetails(): List<SymbolDetail> {
             trackedSymbolDetailsCallCount++

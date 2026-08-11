@@ -958,8 +958,8 @@ class DashboardViewModel(
             // A failed export must say so. A silent failure here would look like an export that
             // produced nothing to correlate, which is the one thing the measurement cannot survive.
             var message = try {
-                var path = exportScores(snapshot.currentProfile, snapshot.opportunityScoringModel)
-                "Exported ${snapshot.opportunityRows.size} scored rows to $path"
+                var result = exportScores(snapshot.currentProfile, snapshot.opportunityScoringModel)
+                "Exported ${result.rowCount} scored rows to ${result.path}"
             } catch (error: Throwable) {
                 "Score export failed: ${error.message ?: "unknown error"}"
             }

@@ -3320,11 +3320,29 @@ class DefaultDashboardRepository(
     override suspend fun scoreExportCsv(
         opportunityScoringModel: OpportunityScoringModel,
     ): String = stateMutex.withLock {
-        // The unfiltered ranking, not what the search box happens to show — the correlation is a
-        // claim about the universe, and a filtered export would quietly change the population.
-        var rows = opportunityRowsLocked(ViewFilter(), opportunityScoringModel)
+        // Every candidate, qualified or not, and no view filter. The Opportunities list keeps
+        // roughly one symbol in eight; a correlation over the survivors would be range-restricted
+        // and would understate the very overlap this file exists to size.
+        var rows = OpportunityEngine.buildRows(
+            engine,
+            OpportunityContext(
+                filter = ViewFilter(),
+                chartSummariesBySymbol = chartSummaries,
+                analysesBySymbol = dcfCache,
+                scoringModel = opportunityScoringModel,
+                regimeSummariesBySymbol = regimeDailySummaries,
+                marketRegime = marketRegime,
+                regimeScoringEnabled = regimeScoringEnabled,
+            ),
+            includeUnqualified = true,
+        )
+        var qualified = engine
+            .filteredRows(engine.symbolCount().coerceAtLeast(1), ViewFilter())
+            .filter { it.isQualified }
+            .map { it.symbol }
+            .toSet()
         var details = rows.mapNotNull { engine.detail(it.symbol) }.associateBy { it.symbol }
-        ScoreExport.buildCsv(rows, details, regimeDailySummaries)
+        ScoreExport.buildCsv(rows, qualified, details, regimeDailySummaries)
     }
 
     override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {

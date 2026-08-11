@@ -1,11 +1,11 @@
 package com.discountscreener.android.data.debug
 
-import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.core.model.ChartRangeSummary
+import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.SymbolDetail
 
 /**
- * A CSV of what the Opportunities list already scored, for offline analysis.
+ * A CSV of what the engine scored, for offline analysis.
  *
  * This exists to answer one question that reading the code cannot: how much do the four buckets
  * repeat each other? `RegimeFit.valueScore` reads the same three multiples the fundamentals bucket
@@ -17,6 +17,12 @@ import com.discountscreener.core.model.SymbolDetail
  * suspected in. The correlation of the scores says how big the effect is; the correlation of the
  * inputs says whether the shared inputs are the cause of it.
  *
+ * **The population is the cohort, not the Opportunities list.** Qualification keeps roughly one
+ * symbol in eight, and a correlation over survivors alone is range-restricted — it would report a
+ * smaller overlap than the engine really has, and the gate this measurement feeds would then be
+ * biased toward the wrong answer. Every candidate is written, with `qualified` as a column, so the
+ * analysis can show the attenuation instead of inheriting it.
+ *
  * Debug surface only. Nothing here is on a render path and nothing here is shipped behaviour.
  */
 object ScoreExport {
@@ -26,6 +32,7 @@ object ScoreExport {
      */
     private val COLUMNS = listOf(
         "symbol",
+        "qualified",
         "sector",
         "fundamentals",
         "technical",
@@ -47,15 +54,15 @@ object ScoreExport {
     )
 
     /**
-     * One header line, then one line per row in [rows] — in list order, so a reader can see the
-     * ranking the export was taken from.
+     * One header line, then one line per row in [rows], in the order the engine ranked them.
      *
      * A symbol with no detail or no daily summary still gets a line, with its input columns empty.
      * Dropping it would quietly shrink the population the correlation is computed over, and a
      * measurement that silently loses rows is worse than one that reports gaps.
      */
     fun buildCsv(
-        rows: List<OpportunityListRow>,
+        rows: List<OpportunityRow>,
+        qualifiedSymbols: Set<String>,
         detailsBySymbol: Map<String, SymbolDetail>,
         dailySummariesBySymbol: Map<String, ChartRangeSummary>,
     ): String {
@@ -65,6 +72,7 @@ object ScoreExport {
             var summary = dailySummariesBySymbol[row.symbol]
             lines += listOf(
                 quote(row.symbol),
+                if (row.symbol in qualifiedSymbols) "1" else "0",
                 quote(fundamentals?.sectorName),
                 cell(row.fundamentalsScore),
                 cell(row.technicalScore),

@@ -236,11 +236,19 @@ object OpportunityEngine {
     fun buildRows(
         reportingEngine: ReportingEngine,
         context: OpportunityContext = OpportunityContext(),
+        /**
+         * Score every candidate, not only the ones that clear qualification.
+         *
+         * The product list is a *selected* population — qualification keeps roughly one symbol in
+         * eight. Any statistic taken over that subset is range-restricted, so an offline study that
+         * wants the cohort must ask for it. No shipped call site does; the default is the list.
+         */
+        includeUnqualified: Boolean = false,
     ): List<OpportunityRow> {
         val rows = reportingEngine
             .filteredRows(reportingEngine.symbolCount().coerceAtLeast(1), context.filter)
             .asSequence()
-            .filter { it.isQualified }
+            .filter { includeUnqualified || it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
                 val score = scoreWithModel(
