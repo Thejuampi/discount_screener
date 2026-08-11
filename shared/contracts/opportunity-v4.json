@@ -36,7 +36,8 @@
   "notes": [
     "Intermediates are carried as hundredths, not as floating-point literals. A port that computes 0.9480519480519481 and a port that computes 0.9480519480519480 are both correct, and a JSON float would make one of them fail.",
     "No case is allowed to land on a .5 rounding boundary. Kotlin's roundToInt is half-up and Rust's f64::round is half-away-from-zero, and they disagree on negative halves. That difference is real but it is not what this contract is about, so no case may depend on it.",
-    "Several fundamentals cases sit exactly on a ramp anchor, which binds smoothRamp's inclusive comparisons: forward_pe at the sector low binds `observed <= lower`, ev_ebitda at the sector high binds `observed >= upper`.",
+    "Two fundamentals cases sit exactly on a ramp anchor, which binds smoothRamp's inclusive comparisons: forward_pe at the sector low binds `observed <= lower`, ev_ebitda at the sector high binds `observed >= upper`. Both are still discriminating because the OTHER anchor is what moves them: forward_pe at 0.7x separates V4_FUND_SECTOR_CHEAP_MULT, ev_ebitda at 1.5x separates V4_FUND_SECTOR_RICH_MULT.",
+    "The two return-on-equity cases sit strictly INSIDE the band, and that is not a stylistic difference from the multiple cases. Its band is additive, so what a case must measure is a WIDTH, and an observation pinned on an edge measures only the edge it sits on: it returns -1.0 or +1.0 under the additive rule and under a multiplicative one alike. A first draft of this contract pinned ROE at its floor, and a mutation replacing the additive upper offset with the multiplicative one survived it. That is why both ROE cases are unpinned and why there are two of them, one on each side of the centre.",
     "expected_without_benchmarks re-scores the SAME inputs with sector_benchmarks withheld. It is not decoration: without it a port that ignored the benchmark entirely could still pass, because a value can score the same under both rules by accident. Every pair below is chosen so the two readings differ in the score, and most also differ in the signal suffix."
   ],
 
@@ -168,13 +169,22 @@
       "expected_without_benchmarks": { "score": 1, "signals": ["Mult+"] }
     },
     {
-      "name": "return on equity read against a sector earning 10%",
+      "name": "return on equity above a sector earning 10%",
       "field": "return_on_equity_bps",
-      "binds": "the ADDITIVE band, which is the one field whose band has a different shape. 5% ROE sits exactly on centre + V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS and pins at the floor; the absolute 0..20% band calls it exactly average. A port that applied the multiplicative rule here would score 0.7 x 1000 = 700 as the floor and get a different answer.",
-      "fundamentals": { "return_on_equity_bps": 500 },
+      "binds": "the ADDITIVE band, which is the one field whose band has a different shape. 20% ROE tops out the absolute 0..20% band and is merely good inside a sector at 10%. It sits strictly INSIDE [centre - 500, centre + 1500], which is the point: a case pinned on either edge would score the same under a multiplicative band and would measure only the edge it sat on.",
+      "fundamentals": { "return_on_equity_bps": 2000 },
       "sector_benchmarks": { "return_on_equity_bps": 1000 },
-      "expected": { "score": -15, "signals": ["ROE§--"] },
-      "expected_without_benchmarks": { "score": -7, "signals": ["ROE-"] }
+      "expected": { "score": 7, "signals": ["ROE§++"] },
+      "expected_without_benchmarks": { "score": 15, "signals": ["ROE++"] }
+    },
+    {
+      "name": "return on equity below a sector earning 10%",
+      "field": "return_on_equity_bps",
+      "binds": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS from the other side, and also strictly inside the band. 6% ROE is mediocre against the absolute band and near the floor of a sector at 10%. Both ROE cases are unpinned on purpose — the offsets are a width, and a width cannot be measured from an observation sitting on its edge.",
+      "fundamentals": { "return_on_equity_bps": 600 },
+      "sector_benchmarks": { "return_on_equity_bps": 1000 },
+      "expected": { "score": -13, "signals": ["ROE§--"] },
+      "expected_without_benchmarks": { "score": -6, "signals": ["ROE-"] }
     },
     {
       "name": "a shrinking share count is a buyback and scores positive",

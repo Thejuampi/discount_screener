@@ -252,7 +252,22 @@ class MarketDimensionUiTest {
     fun divided_buckets_are_named_as_a_disagreement() {
         setDetailContent(row = agreementRow(-100, 100, null, null, final = 45), scoringModel = V4)
 
-        composeRule.onNodeWithText("Centre 0 · Buckets disagree · Final 45").assertIsDisplayed()
+        composeRule.onNodeWithText("Centre 0 · Buckets disagree by 100 · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * And the disagreement carries its size, because the percentage cannot.
+     *
+     * Agreement is clamped at the bottom, so this row and the one above both read 0% — one has its
+     * buckets 40 points apart and the other 100. They are not the same row, and the row the model
+     * is least sure about is where a reader most needs the magnitude. This test is what makes the
+     * unclamped spread a rendered fact rather than a field nothing reads.
+     */
+    @Test
+    fun the_size_of_a_disagreement_separates_two_rows_the_percentage_cannot() {
+        setDetailContent(row = agreementRow(-40, 40, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 0 · Buckets disagree by 40 · Final 45").assertIsDisplayed()
     }
 
     /** One bucket also pays no bonus, and is a different fact: there is nobody to disagree with. */

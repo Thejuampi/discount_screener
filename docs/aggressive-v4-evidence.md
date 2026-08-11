@@ -89,9 +89,20 @@ What this does **not** license anyone to conclude:
 
 ## What would change these answers
 
-- **The score journal** (`score_journal`) accumulates one row per symbol per completed pass, for
-  every model viewed, so V3 and V4 land on the same days and can eventually be compared on outcome
-  rather than on tidiness. It starts empty. It is worth nothing until it has weeks in it.
+- **The score journal** (`score_journal`) accumulates one row per symbol per completed refresh, so
+  V3 and V4 can eventually be compared on outcome rather than on tidiness. It starts empty. It is
+  worth nothing until it has weeks in it.
+
+  **Read the sampling rule before reading the data, because it is not "every model viewed".** The
+  journal is written from the refresh job, stamped with whichever model was *selected when the
+  refresh completed*. Toggling to V4, reading the list and toggling back writes no V4 row — the
+  toggle re-scores from the cached snapshot and never reaches the write path. So the sample is
+  weighted by which model happened to be selected at refresh time, not by which models were looked
+  at. That is a deliberate consequence of keeping the write off the render path (the alternative
+  lets a user manufacture rows by toggling, and the primary key is per second, so those rows would
+  be several readings of one day). It is fine for a comparison over weeks and it is **not** fine
+  for any claim about a short window: a V3-heavy user's V4 column is a thinner and differently
+  timed sample, not the same days.
 - **The daily bar series** grows past one year now that it is persisted, which is what makes the
   longer horizons reachable.
 - Re-running the retrospective on `sp500` rather than `qa` would raise the cross-section from 20
@@ -128,7 +139,16 @@ The consequence is a rule, and it is stated in the file itself: **no expected va
 be regenerated from Kotlin.** When the Rust port disagrees, the question is which side is wrong. It
 is never a licence to copy this side's answer across.
 
-Six isolated mutations were run to check the validator can actually fail — one per side of the
-fixture and four against the production rules it claims to bind, including forcing the multiple
-panel to ignore the sector centre and giving return on equity the multiplicative band instead of its
-additive one. All six were killed.
+Ten isolated mutations were run to check the validator can actually fail. **The first pass reported
+six kills and all six were false** — the runner never started a shell, so a launch failure was being
+read as a dead mutant. With a runner that names its killer, one real survivor came out.
+
+**The survivor was in the fixture, in the case that had been called the most important one.** The
+return-on-equity case sat exactly on the floor of its sector band, and an observation on an edge
+returns ±1.0 under the additive rule and under a multiplicative one alike. Replacing the additive
+upper offset with the multiplicative multiplier changed nothing, so the case that existed to bind
+the one field with a differently shaped band was binding only the edge it sat on. Its own note in
+the file claimed the opposite, and was wrong. There are now two ROE cases, both strictly inside the
+band, one on each side of the centre — because the offsets are a *width*, and a width cannot be
+measured from a point on its boundary. All ten mutations are killed against a baseline verified
+green first, which is the other way a mutation run lies.

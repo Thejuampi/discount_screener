@@ -120,6 +120,12 @@ internal fun marketDimensionImpactLine(row: OpportunityListRow): String {
  *
  * Zero agreement and a single bucket both pay nothing and are not the same fact, so they read
  * differently. One bucket has nobody to disagree with.
+ *
+ * **Zero agreement prints the spread, and the percentage cannot.** Agreement is clamped at the
+ * bottom, so 0% covers every row from `V4_SPREAD_FULL` to a hundred points apart and says the same
+ * thing about all of them. Those are not the same row. For the rows the model is least sure about
+ * — the ones where the reader most needs to know how bad it is — the clamped term is exactly where
+ * the information stops, so the unclamped spread is what gets printed there instead.
  */
 internal fun v4AgreementLine(row: OpportunityListRow, model: OpportunityScoringModel): String? {
     if (model != OpportunityScoringModel.AggressiveV4) return null
@@ -132,7 +138,7 @@ internal fun v4AgreementLine(row: OpportunityListRow, model: OpportunityScoringM
 
     var middle = when {
         reading.bucketCount < 2 -> "One bucket only"
-        reading.agreement <= 0.0 -> "Buckets disagree"
+        reading.agreement <= 0.0 -> "Buckets disagree by ${reading.spread.roundToInt()}"
         else -> "Agreement ${(reading.agreement * 100).roundToInt()}%"
     }
     return "Centre ${reading.centre.roundToInt()} · $middle · Final ${row.compositeScore}"
