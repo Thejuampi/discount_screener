@@ -270,6 +270,29 @@ class MarketDimensionUiTest {
         composeRule.onNodeWithText("Centre 0 · Buckets disagree by 40 · Final 45").assertIsDisplayed()
     }
 
+    /**
+     * V4's line goes where V3's line was, not above it.
+     *
+     * Both lines are individually correct, and printing both was still a defect: the reader met two
+     * decompositions of one Final that share no term, and the word "Market" naming three different
+     * quantities on one screen — the bucket's score, this delta, and the on/off toggle. Live QA
+     * failed the build on it, so the exclusion is pinned here rather than left to the layout.
+     */
+    @Test
+    fun v4_replaces_the_market_impact_line_rather_than_joining_it() {
+        setDetailContent(row = twoLineRow(), scoringModel = V4)
+
+        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").assertDoesNotExist()
+    }
+
+    /** And the exclusion is V4's alone — V3 keeps the line it has always shown. */
+    @Test
+    fun v3_still_shows_the_market_impact_line() {
+        setDetailContent(row = twoLineRow(), scoringModel = MODEL)
+
+        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").assertIsDisplayed()
+    }
+
     /** One bucket also pays no bonus, and is a different fact: there is nobody to disagree with. */
     @Test
     fun a_single_bucket_is_not_reported_as_a_disagreement() {
@@ -431,6 +454,12 @@ class MarketDimensionUiTest {
         regimeScore = regime,
         compositeScore = final,
         compositeScoreBase = final,
+    )
+
+    /** A row whose market bucket moved the score, so both candidate lines have something to say. */
+    private fun twoLineRow() = agreementRow(20, 20, 20, 20, final = 45).copy(
+        compositeScoreBase = 30,
+        regimeStatus = RegimeScoreStatus.Included,
     )
 
     private fun absentRow(

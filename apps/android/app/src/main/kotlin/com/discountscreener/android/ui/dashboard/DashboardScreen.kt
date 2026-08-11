@@ -286,8 +286,12 @@ internal fun OpportunityScoringModelToggle(
     onAction: (DashboardAction) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
-    // Four chips overflow a typical phone width; LazyRow keeps every model reachable and
+    // Five chips overflow a typical phone width; LazyRow keeps every model reachable and
     // scrolls the selected chip into view so selection never looks like "no chip filled".
+    //
+    // The cost is that a neighbour chip is clipped at the edge, which live QA raised. It is the
+    // accepted side of the trade: wrapping to a second line costs header height on every screen to
+    // spare one partly-drawn chip, and the clipped chip is still reachable by scrolling and by tap.
     val listState = rememberLazyListState()
     val selectedIndex = opportunityScoringModelChipOrder.indexOf(selected).coerceAtLeast(0)
 

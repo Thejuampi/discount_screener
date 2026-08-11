@@ -349,6 +349,10 @@ private fun DetailScoreHeader(
             // Above the market section, and outside it, because agreement is a fact about the
             // composite rather than about the fourth bucket: it is measured over whichever buckets
             // reported, and it still moved the score on a name whose market reading never arrived.
+            //
+            // It also *replaces* the market section's impact line rather than joining it — see
+            // MarketContextSection. Two decompositions of one Final, side by side, is what live QA
+            // rejected.
             v4AgreementLine(scoreRow, scoringModel)?.let { line ->
                 Text(
                     text = line,
@@ -387,11 +391,20 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
         return
     }
 
-    Text(
-        text = marketDimensionImpactLine(row),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    // Not under V4, which decomposes the same Final its own way one line above.
+    //
+    // Both lines are individually correct — `Base` is the composite without the fourth bucket and
+    // the impact is an exact subtraction — and printing them together was still wrong. A reader met
+    // two breakdowns of one number that share no term, and the word "Market" naming three different
+    // quantities on one screen: the bucket's score, this delta, and the on/off toggle. The plan put
+    // V4's line "in the same place" V3 shows this one; Wave 3 put it above instead of instead of.
+    if (scoringModel != OpportunityScoringModel.AggressiveV4) {
+        Text(
+            text = marketDimensionImpactLine(row),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         topRegimeCauses(row.regimeCauses).forEach { cause ->
             MetricToken(regimeCauseLabel(cause), regimeCauseColor(cause.effect))
