@@ -1,0 +1,68 @@
+package com.discountscreener.core.engine
+
+import com.discountscreener.core.math.robustCentre
+import com.discountscreener.core.model.SymbolDetail
+import kotlin.math.roundToInt
+
+/**
+ * What the symbol's own sector trades at, so a multiple can be read against its industry.
+ *
+ * Scoring a utility and a chip maker on one absolute P/E band ranks industries before it ranks
+ * companies. These centres are what let the fundamentals bucket ask the smaller and more useful
+ * question: is this company cheap *for what it is*.
+ *
+ * A field is null when its sector cannot support the question, and the caller then falls back to
+ * the absolute band. Null is the common case for the thin sectors, and it is the correct one.
+ */
+data class SectorBenchmarks(
+    val forwardPeHundredths: Int?,
+    val enterpriseToEbitdaHundredths: Int?,
+    val priceToBookHundredths: Int?,
+    val returnOnEquityBps: Int?,
+)
+
+/**
+ * The population floor. Below five members the centre is an anecdote about whoever happened to be
+ * in the universe, and a benchmark that moves when one symbol is added is not a benchmark.
+ *
+ * Five is a choice, not a derivation, and it is recorded as one. Windows's `compute_sector_
+ * benchmarks` claims three in its comment and enforces none in its code — it will return a centre
+ * from a single symbol. This is deliberately stricter than the twin, not a copy of it.
+ *
+ * It is also the outer of two gates, and the two ask different questions. This one asks whether
+ * the sector is big enough to have a level at all. [robustCentre]'s own floor then asks whether
+ * enough of that sector survived the trim to still speak. A sector of five whose trim removes
+ * three fails the second gate after passing the first, and that is right.
+ */
+private const val MIN_SECTOR_MEMBERS = 5
+
+/**
+ * One entry per sector named in [details]. A symbol with no sector name belongs to no sector and
+ * is in no entry; it is not a sector of its own and it does not throw.
+ */
+fun computeSectorBenchmarks(details: Collection<SymbolDetail>): Map<String, SectorBenchmarks> {
+    var bySector = details
+        .mapNotNull { it.fundamentals }
+        .filter { !it.sectorName.isNullOrBlank() }
+        .groupBy { it.sectorName.orEmpty() }
+    return bySector.mapValues { (_, members) ->
+        SectorBenchmarks(
+            // A multiple at or below zero is a loss or a negative book, not a price level, and it
+            // would pull the sector's level toward a number no buyer could pay.
+            forwardPeHundredths = centreOfPrices(members.map { it.forwardPeHundredths }),
+            enterpriseToEbitdaHundredths = centreOfPrices(members.map { it.enterpriseToEbitdaHundredths }),
+            priceToBookHundredths = centreOfPrices(members.map { it.priceToBookHundredths }),
+            // Return on equity legitimately crosses zero, so nothing is filtered out of it. A
+            // sector of loss makers has a negative level and that level is the truth about it.
+            returnOnEquityBps = centreOf(members.map { it.returnOnEquityBps }),
+        )
+    }
+}
+
+private fun centreOfPrices(values: List<Int?>): Int? = centreOf(values.map { it?.takeIf { v -> v > 0 } })
+
+private fun centreOf(values: List<Int?>): Int? {
+    var present = values.filterNotNull()
+    if (present.size < MIN_SECTOR_MEMBERS) return null
+    return robustCentre(present.map { it.toDouble() })?.roundToInt()
+}
