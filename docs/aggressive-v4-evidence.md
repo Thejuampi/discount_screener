@@ -76,6 +76,15 @@ without the marker. Two paired tests in `DetailScoreHeaderTest` hold it: one ass
 mutated in isolation — deleting the render kills only the first, hardcoding the token kills only the
 second — so neither passes against a legend that ignores the row.
 
+**One root cause, two symptoms, and the second is the more useful one to record.** The missing
+renderer did not only hide `§`. Wave 2's other addition to the fundamentals bucket — the share-count
+change, the second of the two downloaded-and-never-scored inputs this effort set out to use — emits
+its reading into the same list. So it was equally invisible, and nobody noticed that either. Both
+appeared on the device in the same commit: NVDA under V4 now reads
+`FCFy- ROE++ Growth++ D/E-- Mult-- Conv-`. The defect was never "the `§` marker was forgotten"; it
+was **a write-only signal list with no consumer**, which loses every claim written to it, including
+ones nobody thought to check. A future reader should treat these as one incident, not two.
+
 **Two: it is unreachable in the mandated QA universe anyway.** `MIN_SECTOR_MEMBERS` is 5. Counted
 from the live device's own database, across the twenty symbols of profile `qa`:
 
