@@ -71,6 +71,24 @@ class MarketFeatureSetTest {
     }
 
     /**
+     * The second removal: V3 scores a standalone value term, V4 does not.
+     *
+     * ρ(F, t_value) = +0.511 on the same 498 rows, same sign in every stance. The fundamentals
+     * bucket's multiple panel reads the same three multiples, and under V4 it reads them against
+     * the sector, which is the better of the two readings and the one that stays.
+     */
+    @Test
+    fun the_value_term_is_scored_by_v3_and_not_by_v4() {
+        var v3 = regimeFitTerms(cheapFundamentals(), stretchedChart(), deploy(), MarketFeatureSet.Full)
+        var v4 = regimeFitTerms(cheapFundamentals(), stretchedChart(), deploy(), V4)
+
+        assertEquals(
+            listOf(true, false),
+            listOf(v3, v4).map { terms -> terms.any { it.factor == RegimeCauseFactor.Value } },
+        )
+    }
+
+    /**
      * Quality stops being scored and does not stop being computed, because the oversold term is
      * gated on it: an oversold junk name is not a dip to buy. A removal that deleted the feature
      * rather than the term would take the gate with it.
@@ -163,6 +181,19 @@ class MarketFeatureSetTest {
         sectorName = "Utilities",
         returnOnEquityBps = 2_000,
         debtToEquityHundredths = 30,
+    )
+
+    /** Quality, plus the multiples the value term reads. */
+    private fun cheapFundamentals() = FundamentalSnapshot(
+        symbol = "CHEAP",
+        marketCapDollars = 10_000_000_000L,
+        forwardPeHundredths = 900,
+        priceToBookHundredths = 110,
+        returnOnEquityBps = 2_000,
+        debtToEquityHundredths = 30,
+        freeCashFlowDollars = 800_000_000L,
+        operatingCashFlowDollars = 1_000_000_000L,
+        betaMillis = 700,
     )
 
     /** Loss making and heavily indebted: below the gate that lets an oversold name score. */

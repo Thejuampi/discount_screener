@@ -151,8 +151,10 @@ fun regimeFitTerms(
     features.lowBeta?.let { lowBeta ->
         parts.add(term(RegimeCauseFactor.LowBeta, clamp((lowBeta - 0.5) / 0.5, -1.0, 1.0), policy.wLowBeta))
     }
-    features.value?.let { value ->
-        parts.add(term(RegimeCauseFactor.Value, clamp((value - 0.45) / 0.45, -1.0, 1.0), policy.wValue))
+    if (featureSet.scoresValue) {
+        features.value?.let { value ->
+            parts.add(term(RegimeCauseFactor.Value, clamp((value - 0.45) / 0.45, -1.0, 1.0), policy.wValue))
+        }
     }
 
     val oversold = features.oversold
@@ -257,12 +259,13 @@ fun scoreRegimeFit(
  */
 enum class MarketFeatureSet(
     internal val scoresQuality: Boolean,
+    internal val scoresValue: Boolean,
 ) {
     /** Every term. V3's set, and the control the journal compares against. */
-    Full(scoresQuality = true),
+    Full(scoresQuality = true, scoresValue = true),
 
     /** V4's set: the arbitrations, without the terms another bucket already scores. */
-    NonOverlapping(scoresQuality = false),
+    NonOverlapping(scoresQuality = false, scoresValue = false),
 }
 
 /**
@@ -319,7 +322,7 @@ private data class SymbolFeatures(
             var coverage = 0
             if (featureSet.scoresQuality && quality != null) coverage += 1
             if (lowBeta != null) coverage += 1
-            if (value != null) coverage += 1
+            if (featureSet.scoresValue && value != null) coverage += 1
             if (extension != null) coverage += 1
             if (oversold != null) coverage += 1
             if (trendAlign != null) coverage += 1
