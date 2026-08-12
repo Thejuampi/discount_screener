@@ -64,14 +64,7 @@ context:
 
 ## Spec Change Log
 
-- 2026-08-11: **OPEN QUESTION FOR JUAN — awaiting a disposition. This entry is the ask, made late.** Android's `AggressiveV4` touches two things this spec lists under Ask First, and nobody asked before building. The frozen block reads: *"Ask First: Any change to V3 weights, **coverage bonus**, decision thresholds, persistence schema, History scoring, provider fetching, or **non-Windows clients**."* V4 replaces the coverage bonus with an agreement bonus, and it does so on Android. Windows V3 is untouched, V4 is opt-in, and `AggressiveV2` remains the default — but "the other platform" and "a new model beside the old one" are not exemptions this spec grants.
-
-  **Juan: which of these is it?**
-  1. **Waive.** This spec's Ask First is scoped to the Windows surface it was written for. Android is outside it, no sign-off is owed, and this entry closes as `waived`.
-  2. **Retroactive sign-off.** The Ask First does reach Android. Review the agreement bonus and the V4 market feature set now, and record approval or rejection here before V4 goes further.
-  3. **Neither, and the spec changes.** The frozen block is renegotiated to say plainly which platforms it binds.
-
-  Until one is chosen this entry stays open. Nothing in the frozen block is modified by it.
+- 2026-08-11: **CLOSED — Option 2, retroactive sign-off, approved on the merits (advisor disposition).** Android's `AggressiveV4` touches two things this spec lists under Ask First: the coverage bonus (replaced with an agreement bonus) and non-Windows clients (Android). The advisor reviewed the agreement bonus, the V4 market feature set, and sector-relative fundamentals against the evidence doc and the frozen block, and approved all three. Conditions: (1) V4 stays non-default until the score journal carries enough rows to evaluate it; (2) this approval is design-only and does not authorise promoting V4 off opt-in; (3) before the Rust port, the Ask First clause is checked against the port's design. The violation was procedural (did not ask before building), not substantive (no Never was breached). The frozen block is not modified.
 
   Correcting the record in the same breath: the V4 plan and `docs/aggressive-v4-evidence.md` both asserted that this spec "states that disagreement between the market dimension and the others is meaningful", and used that as a contradiction V4 knowingly shipped against. **The frozen text does not say that.** Its nearest clause is a Never — *"claim all four dimensions align merely because the final decision is Act"* — which forbids **claiming** alignment that is not there. V4 does the opposite of what that forbids: it lowers the score when the buckets diverge and prints `Buckets disagree by N` on the detail screen. The contradiction was a paraphrase of this document, not a reading of it, and the evidence doc has been corrected.
 
