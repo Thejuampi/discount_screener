@@ -160,6 +160,17 @@ class MarketDimensionRankingTest {
         }
     }
 
+    @Test
+    fun v3_scores_the_fixture_at_one_named_level() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                V3_LEVEL,
+                snapshot(repository, OpportunityScoringModel.AggressiveV3)
+                    .opportunityRows.map { it.symbol to it.compositeScore },
+            )
+        }
+    }
+
     /**
      * The journal is only worth having if something writes to it. A perfect table that nothing
      * calls looks identical, from the store's own tests, to a table that works.
@@ -355,6 +366,14 @@ class MarketDimensionRankingTest {
          * purpose, instead of passing under an assertion that only asked for "not V3". Three names
          * qualify at 46 and one at 44; the flat middle is the fixture's doing, not the model's.
          */
+        val V3_LEVEL = listOf(
+            "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
+            "JNJ" to 44, "UNH" to 44, "NVDA" to 44,
+            "META" to 43, "GOOGL" to 43, "WMT" to 43, "V" to 43, "BAC" to 43, "XOM" to 43,
+            "MRK" to 42, "PG" to 42, "HD" to 42,
+            "TSLA" to 42,
+        )
+
         val V4_LEVEL = listOf(
             "MRK" to 46, "PG" to 46, "HD" to 46,
             "TSLA" to 45, "META" to 45, "GOOGL" to 45, "WMT" to 45, "V" to 45,
