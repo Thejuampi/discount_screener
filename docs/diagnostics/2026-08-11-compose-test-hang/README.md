@@ -97,3 +97,49 @@ and a pattern in the instrument has to be answered before the instrument is trus
 When it recurs, the work is already scoped: read the last `STARTED` line, run that class alone in a
 loop until it hangs, and look for an indefinite animation or a coroutine that keeps posting to the
 main looper.
+
+---
+
+## Recurrence, 2026-08-11 (same day)
+
+**It came back.** `./gradlew :core:test --rerun :app:testDebugUnitTest --rerun` failed at **3m02s**
+against a 55-80s baseline. The three-minute task timeout added in `1c866d66` fired and killed the
+JVM. Two tests were reported `FAILED` — `ValuationScreenE2ETest` and `DashboardDensityTest` — and
+both pass in isolation; they were simply in flight when the JVM died. Only one result XML was
+written, because Gradle writes them at task end.
+
+**The timeout worked and the evidence did not.** Three minutes instead of twenty-seven is a real
+improvement. But the kill left no stack trace, so this occurrence contributed nothing to the
+diagnosis. It did not reproduce on the two runs that followed, or on any run since.
+
+### Ruled out this time, by measurement
+
+- **App-side endless work.** No `rememberInfiniteTransition`, no `withFrameNanos`, no
+  `infiniteRepeatable`, no loop inside any `LaunchedEffect`, and no non-terminating flow — every
+  `flow { }` in the module emits exactly once. The only `delay` in a composable is the finite splash
+  minimum in `DiscountScreenerApp.kt:39`.
+- **Leaked compositions accumulating in one JVM.** There is no `forkEvery` anywhere in the Gradle
+  configuration, so all 417 app tests share a single JVM, and six test classes build activities
+  through `Robolectric.buildActivity(...).setup()` and never destroy them. That is a plausible story
+  for a spin that grows likelier as a run proceeds — and it is wrong. On a green run the second half
+  of the 69 Compose test cases averages **0.059s** against the first half's **0.095s**. Per-test cost
+  *falls* through the run. Whatever this is, it is not monotone accumulation.
+
+### What changed
+
+`StuckTestWatchdog` (`app/src/test/.../StuckTestWatchdog.kt`), applied to all six Compose test
+classes. A daemon thread per test that prints every thread's stack if one test passes 45 seconds —
+roughly 200x the slowest widget test here, so it cannot fire on a slow machine.
+
+It **observes and never intervenes**. `org.junit.rules.Timeout` would be the obvious tool and is the
+wrong one: it runs the test body on a separate thread, and these tests must stay on the main looper.
+The watchdog fails nothing, interrupts nothing, and leaves the task timeout as the thing that stops
+the build. `StuckTestWatchdogTest` pins that it fires on a stall and stays silent otherwise, and a
+full green run produces no dump.
+
+### Status
+
+**Still open, still at root-cause.** The bar set above — one recurrence forces root-cause rather than
+another round of bounding — has been met and is *not* discharged by this entry. Two hypotheses are
+dead, the cause is not found, and the next occurrence will finally arrive with a thread dump instead
+of a silence.
