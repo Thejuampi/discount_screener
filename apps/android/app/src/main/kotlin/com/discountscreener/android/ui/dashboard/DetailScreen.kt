@@ -346,7 +346,8 @@ private fun DetailScoreHeader(
                     )
                 }
             }
-            // What the F token above is made of, and — the reason this exists — WHICH RULE MADE IT.
+            // What the four tokens above are made of, and — the reason this exists — WHICH RULE
+            // MADE EACH ONE.
             //
             // Under V4 a multiple is scored against its sector when that sector has enough members
             // and against an absolute band when it does not, and the engine marks the difference
@@ -357,13 +358,32 @@ private fun DetailScoreHeader(
             //
             // It was not visible. The engine built these strings, the repository carried them into
             // the snapshot, and no composable ever read them — a claim about the user's screen that
-            // lived entirely in a data class. No model branch here on purpose: V3 emits the same
-            // labels without the marker, so showing them for every model is both simpler and more
-            // honest than showing the user a legend only one model can populate.
-            if (scoreRow.fundamentalsSignals.isNotEmpty()) {
+            // lived entirely in a data class.
+            //
+            // **All four lists, not just fundamentals, and that is the actual fix.** The first pass
+            // rendered `fundamentalsSignals` alone, because `§` was the symptom being chased. The
+            // root cause was never the marker: it was a write-only list, and there were four of
+            // them. `technicalSignals`, `forecastSignals` and `regimeSignals` were computed on every
+            // scoring pass and read by nothing at all — the engine's reasons for three of the four
+            // buckets, thrown away after the number was taken. Rendering one and leaving three is
+            // fixing the symptom a second time.
+            //
+            // Colour carries which bucket a token explains, matching the token row above, so one
+            // FlowRow says it without four headings. `regimeSignals` needs no `Included` guard here:
+            // `OpportunityEngine` already emits an empty list when the market bucket is excluded, so
+            // an empty list is the exclusion. No model branch either — V3 emits the same labels
+            // without the marker, so showing them for every model is simpler and more honest than a
+            // legend only one model can populate.
+            val signalGroups = listOf(
+                scoreRow.fundamentalsSignals to fundamentalsMetricColor(),
+                scoreRow.technicalSignals to technicalMetricColor(),
+                scoreRow.forecastSignals to forecastMetricColor(),
+                scoreRow.regimeSignals to marketMetricColor(),
+            )
+            if (signalGroups.any { (signals, _) -> signals.isNotEmpty() }) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    scoreRow.fundamentalsSignals.forEach { signal ->
-                        MetricToken(signal, fundamentalsMetricColor())
+                    signalGroups.forEach { (signals, color) ->
+                        signals.forEach { signal -> MetricToken(signal, color) }
                     }
                 }
             }

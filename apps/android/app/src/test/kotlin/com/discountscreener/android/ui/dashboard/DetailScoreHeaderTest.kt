@@ -103,6 +103,34 @@ class DetailScoreHeaderTest {
         composeRule.onNodeWithText("Mult§++").assertDoesNotExist()
     }
 
+    /**
+     * The three lists that were still write-only after `§` was fixed.
+     *
+     * They are asserted one per test rather than in one pass over a row carrying all three, because
+     * a single test would stay green while two of the three renders were deleted — the same reason
+     * the `§` pair is split. Each of these fails alone if its own list loses its consumer.
+     */
+    @Test
+    fun a_technical_reading_reaches_the_screen() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, technicalSignals = listOf("RSI--")))
+
+        composeRule.onNodeWithText("RSI--").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_forecast_reading_reaches_the_screen() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, forecastSignals = listOf("Target++")))
+
+        composeRule.onNodeWithText("Target++").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_market_reading_reaches_the_screen() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, regimeSignals = listOf("Liquidity+")))
+
+        composeRule.onNodeWithText("Liquidity+").assertIsDisplayed()
+    }
+
     @Test
     fun detail_header_marks_the_active_scoring_model() {
         setDetailContent(
@@ -253,6 +281,9 @@ class DetailScoreHeaderTest {
         technical: Int? = 20,
         forecast: Int? = 20,
         fundamentalsSignals: List<String> = emptyList(),
+        technicalSignals: List<String> = emptyList(),
+        forecastSignals: List<String> = emptyList(),
+        regimeSignals: List<String> = emptyList(),
     ) = OpportunityListRow(
         symbol = SYMBOL,
         marketPriceCents = 10_000L,
@@ -266,6 +297,9 @@ class DetailScoreHeaderTest {
         compositeScore = composite,
         coverageCount = listOfNotNull(fundamentals, technical, forecast).size,
         fundamentalsSignals = fundamentalsSignals,
+        technicalSignals = technicalSignals,
+        forecastSignals = forecastSignals,
+        regimeSignals = regimeSignals,
     )
 
     private companion object {
