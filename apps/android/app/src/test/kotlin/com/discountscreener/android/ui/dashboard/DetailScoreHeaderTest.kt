@@ -187,6 +187,21 @@ class DetailScoreHeaderTest {
         )
     }
 
+    /**
+     * The case every other percentile test misses: a list whose size does not divide 100.
+     *
+     * Rank 1 of 3 is 33.33%. Rounding to nearest prints `top 33%`, and the top 33% of three names
+     * holds 0.99 of a name — nobody. The label would claim a standing the list cannot support. Only
+     * `ceil` names the smallest band that really contains this symbol.
+     *
+     * Every case in the tests above — 24 of 80, 60 of 80, the four quarters — divides exactly, so
+     * `ceil` and `roundToInt` agree on all of them and none of them can tell the two apart.
+     */
+    @Test
+    fun a_percentile_that_does_not_divide_evenly_rounds_to_a_band_that_holds_the_symbol() {
+        assertEquals("#1 of 3 · top 34%", rankPositionLabel(routeOf(rankedListOf(size = 3, place = 1))))
+    }
+
     @Test
     fun a_symbol_outside_any_ranked_list_has_no_position_at_all() {
         assertEquals(null, rankPositionLabel(routeOf(sourceSymbols = listOf("OTHER.BA"))))

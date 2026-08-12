@@ -443,6 +443,13 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
  *
  * Returns null when the symbol is not in a ranked list at all; a single-symbol list gets the
  * ordinal but no percentile, because "top 100%" of one thing says nothing.
+ *
+ * **Rounded up, never to nearest, and the difference is a true statement against a false one.**
+ * Rank 1 of 3 is 33.33%, and rounding to nearest prints `top 33%` — but the top 33% of three names
+ * is 0.99 of a name, so it contains nobody, and the label claims a standing the list does not
+ * support. `ceil` prints `top 34%`, the smallest band that actually holds this symbol. The plan
+ * asked for `ceil` for this reason; it was written as `roundToInt` and no test separated the two,
+ * because every case anyone had written divides exactly.
  */
 internal fun rankPositionLabel(route: DetailRoute): String? {
     val index = route.sourceSymbols.indexOf(route.symbol)
@@ -450,7 +457,7 @@ internal fun rankPositionLabel(route: DetailRoute): String? {
     val total = route.sourceSymbols.size
     val rank = index + 1
     if (total <= 1) return "#$rank of $total"
-    val percentile = ((rank * 100.0) / total).roundToInt().coerceIn(1, 100)
+    val percentile = ceil((rank * 100.0) / total).toInt().coerceIn(1, 100)
     return "#$rank of $total · top $percentile%"
 }
 
