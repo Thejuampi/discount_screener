@@ -2,6 +2,7 @@ package com.discountscreener.android.data.market
 
 import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.regime.CnnFearGreed
 import com.discountscreener.core.regime.MARKET_SERIES
@@ -299,7 +300,7 @@ class MarketDataRepositoryTest {
      */
     private open class RecordingYahooClient(
         private val failFor: Set<String> = emptySet(),
-    ) : YahooFinanceClient() {
+    ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
         val requests = mutableListOf<CandleRequest>()
 
         override suspend fun fetchCandles(
@@ -325,7 +326,7 @@ class MarketDataRepositoryTest {
         }
     }
 
-    private class FailingYahooClient : YahooFinanceClient() {
+    private class FailingYahooClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         var attempts = 0
 
         override suspend fun fetchCandles(
@@ -341,11 +342,11 @@ class MarketDataRepositoryTest {
     private class FixedFearGreedClient(
         private val score: Double,
         private val rating: String,
-    ) : CnnFearGreedClient() {
+    ) : CnnFearGreedClient(httpClient = offlineHttpClient()) {
         override suspend fun fetch(today: LocalDate) = CnnFearGreed(score = score, rating = rating)
     }
 
-    private class AbsentFearGreedClient : CnnFearGreedClient() {
+    private class AbsentFearGreedClient : CnnFearGreedClient(httpClient = offlineHttpClient()) {
         override suspend fun fetch(today: LocalDate): CnnFearGreed? = null
     }
 

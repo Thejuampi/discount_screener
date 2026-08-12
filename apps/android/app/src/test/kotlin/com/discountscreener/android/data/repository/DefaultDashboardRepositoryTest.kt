@@ -18,6 +18,7 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.YahooSearchQuote
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -2263,7 +2264,7 @@ class DefaultDashboardRepositoryTest {
 
     private open class FakeYahooFinanceClient(
         private val delayMs: Long = 0,
-    ) : YahooFinanceClient() {
+    ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
         var searchSymbolsCallCount = 0
         private val searchResponses = linkedMapOf<String, List<YahooSearchQuote>>()
 

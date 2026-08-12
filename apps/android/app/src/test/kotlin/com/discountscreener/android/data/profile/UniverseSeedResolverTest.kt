@@ -3,6 +3,7 @@ package com.discountscreener.android.data.profile
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.android.data.remote.NasdaqTraderSymbolDirectoryClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -19,7 +20,7 @@ class UniverseSeedResolverTest {
     fun us_total_uses_remote_when_available() = runTest {
         val resolver = UniverseSeedResolver(
             universeCatalog = UniverseCatalog(context.assets),
-            remoteDirectoryClient = object : NasdaqTraderSymbolDirectoryClient() {
+            remoteDirectoryClient = object : NasdaqTraderSymbolDirectoryClient(httpClient = offlineHttpClient()) {
                 override suspend fun fetchUsEquitySymbols(): List<String> = listOf("ZZZZ", "AAPL")
             },
         )
@@ -33,7 +34,7 @@ class UniverseSeedResolverTest {
     fun us_total_falls_back_to_bundled_asset_when_remote_fails() = runTest {
         val resolver = UniverseSeedResolver(
             universeCatalog = UniverseCatalog(context.assets),
-            remoteDirectoryClient = object : NasdaqTraderSymbolDirectoryClient() {
+            remoteDirectoryClient = object : NasdaqTraderSymbolDirectoryClient(httpClient = offlineHttpClient()) {
                 override suspend fun fetchUsEquitySymbols(): List<String> {
                     throw IOException("offline")
                 }

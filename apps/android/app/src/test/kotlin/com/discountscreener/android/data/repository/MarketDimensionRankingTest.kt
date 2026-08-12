@@ -11,12 +11,14 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -289,7 +291,7 @@ class MarketDimensionRankingTest {
      * through its haircut *and* lowers the fit through the low-beta weight, so a list sorted by beta
      * comes out in the same order either way and a reorder assertion would fail on a correct build.
      */
-    private class FixtureYahooFinanceClient : YahooFinanceClient() {
+    private class FixtureYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
             val price = 10_000L
             val fair = price * (12_000L + rank(symbol) * 200L) / 10_000L
@@ -316,6 +318,25 @@ class MarketDimensionRankingTest {
 
         override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> =
             dailyCandles(symbol)
+
+        /**
+         * Empty, and it is a fix rather than a convenience.
+         *
+         * This override did not exist, so the DCF source coordinator called straight through to the
+         * real client and this test **fetched T and AMZN from Yahoo on every run** — the two names
+         * of twenty whose path reaches the timeseries. A ranking test whose inputs arrive over the
+         * internet is not a ranking test: it is slower than the rest of the suite put together, it
+         * fails when somebody else's service is down or rate-limits the build, and the [V4_LEVEL]
+         * numbers below were recorded from whatever those two issuers reported on the day of the
+         * green run. Nothing said so, because the leak was silent by design — a defaulted
+         * `httpClient` in the superclass constructor and one unoverridden method.
+         *
+         * Empty is the right fixture and not a weakening: it is what the model already sees for the
+         * eighteen other symbols here, so all twenty now enter scoring the same way. That the
+         * recorded levels for T and AMZN did not move is worth reading twice — the live fetch was
+         * paying for data the composite never used.
+         */
+        override suspend fun fetchFundamentalTimeseries(symbol: String) = FundamentalTimeseries()
     }
 
     private companion object {

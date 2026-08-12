@@ -9,6 +9,7 @@ import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
@@ -123,7 +124,7 @@ class RefreshPersistenceBackPressureTest {
      * Every fetch fails, which is the cheapest way to make the refresh persist once per symbol:
      * a failure still produces a delta, and it costs the test no market fixture to maintain.
      */
-    private class UnreachableYahooFinanceClient : YahooFinanceClient() {
+    private class UnreachableYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         override suspend fun fetchSymbol(symbol: String): Nothing = throw IOException("offline")
     }
 

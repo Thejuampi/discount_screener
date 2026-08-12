@@ -9,6 +9,7 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRange
@@ -166,7 +167,7 @@ class IoOptimizationBenchTest {
         snapshot
     }
 
-    private open class CountingYahooClient : YahooFinanceClient() {
+    private open class CountingYahooClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         val quoteFetches = AtomicInteger(0)
         val chartFetches = AtomicInteger(0)
         val timeseriesFetches = AtomicInteger(0)

@@ -2,6 +2,7 @@ package com.discountscreener.android.data.repository
 
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
@@ -51,7 +52,7 @@ class DcfSourceCoordinatorTest {
         )
     }
 
-    private class CountingYahooFinanceClient : YahooFinanceClient() {
+    private class CountingYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         var timeseriesFetchCount = 0
 
         override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
