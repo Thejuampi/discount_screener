@@ -7,6 +7,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToNode
+import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
@@ -26,6 +27,10 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class ValuationScreenE2ETest {
+    /** Prints every thread's stack if this test stalls, so the next hang arrives with evidence. */
+    @get:Rule
+    val stuckTestWatchdog = StuckTestWatchdog()
+
     @get:Rule
     val composeRule = createEmptyComposeRule()
 

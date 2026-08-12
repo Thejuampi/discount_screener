@@ -5,6 +5,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowExplanationKind
@@ -38,6 +39,10 @@ import org.robolectric.annotation.Config
 // measured on; a narrower default would have failed a layout that is correct on every device.
 @Config(qualifiers = "w411dp-h891dp")
 class DashboardDensityTest {
+    /** Prints every thread's stack if this test stalls, so the next hang arrives with evidence. */
+    @get:Rule
+    val stuckTestWatchdog = StuckTestWatchdog()
+
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
