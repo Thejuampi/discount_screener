@@ -55,9 +55,11 @@ When the Android SDK is not available, `:core:test` remains the portable verific
 
 Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug.apk`.
 
-Use `make android-release` to export an **installable release APK** to `dist/discount-screener-release.apk`. If you provide `DISCOUNT_SCREENER_RELEASE_STORE_FILE`, `DISCOUNT_SCREENER_RELEASE_STORE_PASSWORD`, `DISCOUNT_SCREENER_RELEASE_KEY_ALIAS`, and `DISCOUNT_SCREENER_RELEASE_KEY_PASSWORD` as Gradle properties, environment variables, or `local.properties` entries, the release build uses that keystore. Otherwise it falls back to debug signing so the APK is still valid for local install and device testing.
+Use `make android-release` to export an **installable release APK** to `dist/discount-screener-release.apk`. Provide `DISCOUNT_SCREENER_RELEASE_STORE_FILE`, `DISCOUNT_SCREENER_RELEASE_STORE_PASSWORD`, `DISCOUNT_SCREENER_RELEASE_KEY_ALIAS`, and `DISCOUNT_SCREENER_RELEASE_KEY_PASSWORD` as Gradle properties, environment variables, or `local.properties` entries, and the release build uses that keystore.
 
 If you do not already have a release keystore, run `make android-signing-bootstrap`. That script creates one locally and writes the required `DISCOUNT_SCREENER_RELEASE_*` entries into `apps\android\local.properties` so later `make android-release` builds use your own signing identity.
+
+**With no keystore configured the release build now fails rather than falling back to the debug key.** It used to substitute that key in silence and still export the file as a release APK, which is not a release: the Android debug key is on every machine that has ever built an app, so anybody can sign a forged update to an APK carrying it. For a purely local sideload the fallback is still available, but it has to be asked for — `./gradlew :app:assembleRelease -PallowDebugSignedRelease=true` — and it logs a warning next to the artifact. Do not distribute that build.
 
 ## Run On Device
 
