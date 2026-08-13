@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.persistence
 
+import android.content.ContentValues
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.core.model.ChartRange
@@ -8,6 +9,8 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PriceHistoryPoint
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -98,6 +101,46 @@ class WarmStartLoadTest {
             store.reclaimRawCaptureSpace()
 
             assertEquals(0, chartRawCount(store))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun reclaim_copies_latest_chart_json_into_pricing_before_delete() = runTest {
+        var store = SQLiteStateStore(context)
+        try {
+            var payload = Json.encodeToString(
+                RawCapturePayload.serializer(),
+                chartCapture("AAPL").payload,
+            )
+            var captureId = store.writableDatabase.insertOrThrow(
+                "raw_capture",
+                null,
+                ContentValues().apply {
+                    put("symbol", "AAPL")
+                    put("capture_kind", "chart-candles")
+                    put("scope_key", "Year")
+                    put("captured_at", 50)
+                    put("payload_json", payload)
+                },
+            )
+            store.writableDatabase.insertOrThrow(
+                "raw_latest",
+                null,
+                ContentValues().apply {
+                    put("symbol", "AAPL")
+                    put("capture_key", "chart:Year")
+                    put("capture_id", captureId)
+                },
+            )
+
+            store.reclaimRawCaptureSpace()
+
+            assertEquals(
+                10_050L,
+                store.loadPricingHistory("AAPL").single { it.range == ChartRange.Year }.candles.single().closeCents,
+            )
         } finally {
             store.close()
         }

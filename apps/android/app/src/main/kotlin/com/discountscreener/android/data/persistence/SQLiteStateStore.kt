@@ -530,15 +530,18 @@ open class SQLiteStateStore(
     }
 
     /**
-     * Drop Yahoo JSON that raw_latest no longer points at, then shrink the file if anything
-     * was removed. Call this after the list is on screen — VACUUM of a bloated file can take
+     * Copy the latest chart JSON into `pricing_candle`, drop leftover chart blobs, then shrink
+     * the file. Call this after the list is on screen — VACUUM of a bloated file can take
      * minutes and must not sit on the splash.
+     *
+     * The same file stays in place. Quotes, revisions, watchlist, and existing candles stay.
      */
     suspend fun reclaimRawCaptureSpace(): Int = withContext(ioDispatcher) {
         val db = writableDatabase
         var deleted = 0
         db.beginTransaction()
         try {
+            migrateLatestChartCapturesIntoPricing(db)
             deleted += db.delete("raw_latest", "capture_key LIKE 'chart:%'", emptyArray())
             deleted += db.delete(
                 "raw_capture",
@@ -558,6 +561,39 @@ open class SQLiteStateStore(
             db.execSQL("VACUUM")
         }
         deleted
+    }
+
+    private fun migrateLatestChartCapturesIntoPricing(db: SQLiteDatabase) {
+        db.rawQuery(
+            """
+                SELECT raw_capture.symbol, raw_capture.captured_at, raw_capture.payload_json
+                FROM raw_latest
+                JOIN raw_capture ON raw_capture.id = raw_latest.capture_id
+                WHERE raw_latest.capture_key LIKE 'chart:%'
+            """.trimIndent(),
+            emptyArray(),
+        ).useRows { cursor ->
+            while (cursor.moveToNext()) {
+                var symbol = cursor.getString(0)
+                var capturedAt = cursor.getLong(1)
+                var payload = runCatching {
+                    json.decodeFromString<RawCapturePayload>(cursor.getString(2))
+                }.getOrNull()
+                if (payload !is RawCapturePayload.Chart) {
+                    continue
+                }
+                persistPricingCandles(
+                    db,
+                    RawCapture(
+                        symbol = symbol,
+                        captureKind = CaptureKind.ChartCandles,
+                        scopeKey = payload.range.name,
+                        capturedAt = capturedAt,
+                        payload = payload,
+                    ),
+                )
+            }
+        }
     }
 
     private fun trimRevisionHistory(db: SQLiteDatabase, symbol: String) {
