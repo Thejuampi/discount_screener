@@ -101,17 +101,17 @@ object TickerSearchEngine {
         if ('.' in trimmed || '-' in trimmed) return true
 
         val upper = trimmed.uppercase(Locale.US)
-        val typedAsTicker = trimmed == upper && trimmed.all { it.isLetterOrDigit() }
+        val looksLikeTicker = trimmed.all { it.isLetterOrDigit() } && trimmed.length <= 6
 
         if (suggestionSymbols.isNotEmpty()) {
             val exactMatches = suggestionSymbols.filter { it.equals(upper, ignoreCase = true) }
             if (suggestionSymbols.size > 1) {
-                return exactMatches.size == 1 && typedAsTicker
+                return exactMatches.size == 1 && looksLikeTicker
             }
             return exactMatches.size == 1
         }
 
-        return typedAsTicker && trimmed.length <= 6
+        return looksLikeTicker
     }
 
     fun isHighConfidenceMatch(query: String, result: TickerSearchResult): Boolean {

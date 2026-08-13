@@ -665,13 +665,16 @@ class DashboardViewModel(
             sourceTab = sourceTab,
             sourceSymbols = sourceSymbols,
         )
-        _state.value = state.copy(
-            detailRoute = detailRoute,
-            detailNotice = null,
-            tickerSearchQuery = "",
-            tickerSearchExpanded = false,
-            tickerSearchSuggestions = emptyList(),
-            tickerSearchNotice = null,
+        _state.value = clearMismatchedDetail(
+            state.copy(
+                detailRoute = detailRoute,
+                detailNotice = null,
+                tickerSearchQuery = "",
+                tickerSearchExpanded = false,
+                tickerSearchSuggestions = emptyList(),
+                tickerSearchNotice = null,
+            ),
+            symbol,
         )
         viewModelScope.launch {
             try {
@@ -721,12 +724,30 @@ class DashboardViewModel(
         if (currentIndex < 0) return
         val newIndex = (currentIndex + direction).coerceIn(0, symbols.lastIndex)
         val newSymbol = symbols[newIndex]
-        _state.value = _state.value.copy(
-            detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
-            detailNotice = null,
-            tickerSearchQuery = newSymbol,
+        _state.value = clearMismatchedDetail(
+            _state.value.copy(
+                detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
+                detailNotice = null,
+                tickerSearchQuery = newSymbol,
+            ),
+            newSymbol,
         )
         loadDetailData(newSymbol)
+    }
+
+    private fun clearMismatchedDetail(state: DashboardUiState, symbol: String): DashboardUiState {
+        var keep = state.detailData?.symbol == symbol
+        return state.copy(
+            detailData = state.detailData?.takeIf { it.symbol == symbol },
+            projectedDetailData = state.projectedDetailData?.takeIf { it.symbol == symbol },
+            selectedScoreRow = state.opportunityRows.firstOrNull { it.symbol == symbol }
+                ?: state.selectedScoreRow?.takeIf { it.symbol == symbol },
+            detailCharts = if (keep) state.detailCharts else emptyMap(),
+            replayBackingCharts = if (keep) state.replayBackingCharts else emptyMap(),
+            detailHistory = if (keep) state.detailHistory else emptyList(),
+            detailAlerts = if (keep) state.detailAlerts else emptyList(),
+            detailQuantLens = if (keep) state.detailQuantLens else null,
+        )
     }
 
     private fun setDetailSubtab(subtab: DetailSubtab) {
@@ -1034,6 +1055,7 @@ class DashboardViewModel(
         var projectedDetail = snapshot.screenData.selectedDetail
         var selectedDetailMatchesRoute = currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol
         var projectedDetailMatchesRoute = currentRoute != null && projectedDetail?.symbol == currentRoute.symbol
+        var keepStaleDetail = currentRoute != null && currentState.detailData?.symbol == currentRoute.symbol
         _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
@@ -1054,39 +1076,59 @@ class DashboardViewModel(
             issues = snapshot.issues,
             detailData = if (selectedDetailMatchesRoute) {
                 snapshot.selectedDetail
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.detailData
+            } else {
+                null
             },
             projectedDetailData = if (projectedDetailMatchesRoute) {
                 projectedDetail
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.projectedDetailData
+            } else {
+                null
             },
             detailCharts = if (selectedDetailMatchesRoute) {
                 snapshot.selectedCharts
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.detailCharts
+            } else {
+                emptyMap()
             },
             detailHistory = if (selectedDetailMatchesRoute) {
                 snapshot.selectedHistory
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.detailHistory
+            } else {
+                emptyList()
             },
             detailAlerts = if (selectedDetailMatchesRoute) {
                 snapshot.selectedAlerts
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.detailAlerts
+            } else {
+                emptyList()
             },
             detailQuantLens = if (selectedDetailMatchesRoute) {
                 mapQuantLensReport(snapshot.selectedQuantLens, snapshot.selectedDetail?.marketPriceCents)
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.detailQuantLens
+            } else {
+                null
             },
-            detailNotice = if (selectedDetailMatchesRoute) snapshot.detailNotice else currentState.detailNotice,
+            detailNotice = if (selectedDetailMatchesRoute) {
+                snapshot.detailNotice
+            } else if (keepStaleDetail) {
+                currentState.detailNotice
+            } else {
+                null
+            },
             replayBackingCharts = if (selectedDetailMatchesRoute) {
                 snapshot.replayBackingCharts
-            } else {
+            } else if (keepStaleDetail) {
                 currentState.replayBackingCharts
+            } else {
+                emptyMap()
             },
             rowQuantLensChipsBySymbol = buildMap {
                 snapshot.trackedRows.forEach { row ->

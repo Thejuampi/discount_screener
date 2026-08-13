@@ -64,6 +64,7 @@ import com.discountscreener.core.engine.ScreenDataProjectionEngine
 import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.engine.TickerSearchCandidate
 import com.discountscreener.core.engine.TickerSearchEngine
+import com.discountscreener.core.engine.TickerSearchRank
 import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
@@ -536,6 +537,22 @@ class DefaultDashboardRepository(
         if (TickerSearchEngine.shouldTriggerRemoteSearch(query, rankedResults)) {
             val remoteCandidates = remoteSearchCandidates(query, limit)
             rankedResults = TickerSearchEngine.mergeAndRank(candidates + remoteCandidates, limit)
+        }
+        if (TickerSearchEngine.isTickerToken(trimmedQuery)) {
+            var typedSymbol = trimmedQuery.uppercase()
+            if (rankedResults.none { result -> result.symbol.equals(typedSymbol, ignoreCase = true) }) {
+                var profiles = profileCatalog.profileMembership(typedSymbol)
+                rankedResults = TickerSearchEngine.mergeAndRank(
+                    candidates + TickerSearchCandidate(
+                        symbol = typedSymbol,
+                        companyName = localCompanyNameFor(typedSymbol),
+                        profiles = profiles,
+                        inCurrentProfile = normalizedCurrentProfile in profiles,
+                        matchRank = TickerSearchRank.EXACT_TICKER_REMOTE,
+                    ),
+                    limit,
+                )
+            }
         }
 
         hydrateMissingCompanyNames(rankedResults)

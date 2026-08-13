@@ -222,7 +222,7 @@ fun DetailScreen(
                     enabled = route.sourceSymbols.indexOf(route.symbol) < route.sourceSymbols.lastIndex,
                 ) { Text("Next") }
                 TextButton(onClick = { onAction(DashboardAction.ToggleWatchlist(route.symbol)) }) {
-                    Text(if (detail?.isWatched == true) "Unwatch" else "Watch")
+                    Text(if (matchingDetail?.isWatched == true) "Unwatch" else "Watch")
                 }
             },
         )
@@ -285,8 +285,8 @@ fun DetailScreen(
                     scoringModel = scoringModel,
                     regimeScoringEnabled = regimeScoringEnabled,
                     chartRange = route.chartRange,
-                    candles = charts[route.chartRange].orEmpty(),
-                    replayBackingCandles = replayBackingCharts[route.chartRange],
+                    candles = if (matchingDetail != null) charts[route.chartRange].orEmpty() else emptyList(),
+                    replayBackingCandles = if (matchingDetail != null) replayBackingCharts[route.chartRange] else null,
                     replayOffset = route.replayOffset,
                     alerts = alerts,
                     quantLens = quantLens,

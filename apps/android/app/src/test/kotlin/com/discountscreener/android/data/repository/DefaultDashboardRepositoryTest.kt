@@ -2223,6 +2223,21 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun search_lowercase_meli_without_remote_still_offers_the_typed_ticker() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val results = repository.searchTickers("meli", "sp500")
+
+            assertEquals("MELI", results.single().symbol)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun search_mercado_returns_meli_from_remote_lookup() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
