@@ -2688,12 +2688,42 @@ mod tests {
         );
         assert!(loaded.app.is_symbol_stale("AAPL"));
         assert_eq!(loaded.app.issue_center.active_issue_count(), 1);
-        assert!(matches!(
-            loaded.app.detail_chart_entry("AAPL"),
-            Some(super::ChartCacheEntry::Ready { candles }) if candles == &historical_candles()
-        ));
-        assert!(loaded.app.is_chart_stale("AAPL", ChartRange::Year));
-        assert!(loaded.app.chart_summary("AAPL", ChartRange::Year).is_some());
+        assert!(loaded.app.detail_chart_entry("AAPL").is_none());
+        assert!(!loaded.app.is_chart_stale("AAPL", ChartRange::Year));
+        assert!(loaded.app.chart_summary("AAPL", ChartRange::Year).is_none());
+    }
+
+    #[test]
+    fn load_warm_start_skips_chart_cache() {
+        let state_db = unique_test_path("warm-start-skip-charts.sqlite3");
+        let _ = fs::remove_file(&state_db);
+
+        persistence::load_warm_start(&state_db).expect("sqlite schema should initialize");
+        let (sender, _receiver) = mpsc::channel();
+        let publisher = AppEventPublisher::new(sender);
+        let persistence_handle =
+            persistence::spawn_worker(state_db.clone(), publisher).expect("worker should start");
+        persistence_handle
+            .persist_batch(
+                vec![persistence::RawCapture {
+                    symbol: "AAPL".to_string(),
+                    capture_kind: persistence::CaptureKind::ChartCandles,
+                    scope_key: Some(chart_range_label(ChartRange::Year).to_string()),
+                    captured_at: 1_700_000_000,
+                    payload: persistence::RawCapturePayload::Chart {
+                        range: ChartRange::Year,
+                        candles: historical_candles(),
+                    },
+                }],
+                Vec::new(),
+            )
+            .expect("chart capture should persist");
+        persistence_handle.shutdown(1_700_000_100);
+
+        let loaded = persistence::load_warm_start(&state_db).expect("sqlite db should load");
+        let _ = fs::remove_file(&state_db);
+
+        assert!(loaded.chart_cache.is_empty());
     }
 
     #[test]

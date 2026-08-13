@@ -37,9 +37,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Deterministic IO ceilings for refresh+enrich on a fixed profile (DOW, ~30 symbols).
  *
- * Guards against thrashing (many-per-symbol re-fetches). Current bulk path hydrates
- * quotes + all chart ranges + timeseries once per symbol; detail open must not
- * re-fetch already-cached ranges.
+ * Guards against thrashing (many-per-symbol re-fetches). Bulk path hydrates
+ * quotes + Year charts + timeseries once per symbol. Extra ranges wait for Detail.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -95,8 +94,8 @@ class IoOptimizationBenchTest {
                 "Year chart fetches too high: ${client.chartByRange[ChartRange.Year]?.get()}",
                 (client.chartByRange[ChartRange.Year]?.get() ?: 0) <= n * 3L,
             )
-            // All ranges hydrated at most a couple times each (no N² / infinite loops).
-            val rangeCeiling = n * ChartRange.entries.size * 2L
+            // Bulk path fetches Year only. Extra ranges wait for Detail.
+            val rangeCeiling = n * 3L
             assertTrue(
                 "chart fetches too high: ${client.chartFetches.get()} for n=$n ceiling=$rangeCeiling",
                 client.chartFetches.get() <= rangeCeiling,
@@ -104,7 +103,7 @@ class IoOptimizationBenchTest {
             val total = client.quoteFetches.get() + client.chartFetches.get() + client.timeseriesFetches.get()
             assertTrue(
                 "total provider calls $total too high for n=$n",
-                total <= n * (ChartRange.entries.size + 4L) * 2L,
+                total <= n * 8L,
             )
         } finally {
             store.close()
@@ -135,16 +134,16 @@ class IoOptimizationBenchTest {
                 Thread.sleep(5)
             }
 
-            // Enrichment already warms all ranges; detail open must be cache hits only.
+            // Enrichment warms Year only. The first Month fetch is expected; the second is a hit.
             val chartsBefore = client.chartFetches.get()
-            assertTrue("enrichment should have fetched charts", chartsBefore > 0)
+            assertTrue("enrichment should have fetched Year charts", chartsBefore > 0)
             repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Month, legacyModel)
             advanceUntilIdle()
-            assertEquals(chartsBefore, client.chartFetches.get())
+            assertEquals(chartsBefore + 1, client.chartFetches.get())
 
             repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Month, legacyModel)
             advanceUntilIdle()
-            assertEquals(chartsBefore, client.chartFetches.get())
+            assertEquals(chartsBefore + 1, client.chartFetches.get())
         } finally {
             store.close()
         }

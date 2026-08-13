@@ -446,6 +446,11 @@ open class SQLiteStateStore(
             var latestTimestamp: Long? = null
 
             rawCaptures.forEach { capture ->
+                if (capture.captureKind == CaptureKind.ChartCandles) {
+                    persistPricingCandles(db, capture)
+                    latestTimestamp = maxOf(latestTimestamp ?: 0L, capture.capturedAt)
+                    return@forEach
+                }
                 val captureId = db.insertOrThrow(
                     "raw_capture",
                     null,
@@ -467,7 +472,6 @@ open class SQLiteStateStore(
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
-                persistPricingCandles(db, capture)
                 latestTimestamp = maxOf(latestTimestamp ?: 0L, capture.capturedAt)
             }
 
@@ -510,6 +514,7 @@ open class SQLiteStateStore(
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
+                trimRevisionHistory(db, revision.symbol)
                 latestTimestamp = maxOf(latestTimestamp ?: 0L, revision.evaluatedAt)
             }
 
@@ -531,15 +536,47 @@ open class SQLiteStateStore(
      */
     suspend fun reclaimRawCaptureSpace(): Int = withContext(ioDispatcher) {
         val db = writableDatabase
-        val deleted = db.delete(
-            "raw_capture",
-            "id NOT IN (SELECT capture_id FROM raw_latest)",
-            emptyArray(),
-        )
+        var deleted = 0
+        db.beginTransaction()
+        try {
+            deleted += db.delete("raw_latest", "capture_key LIKE 'chart:%'", emptyArray())
+            deleted += db.delete(
+                "raw_capture",
+                "capture_kind = ?",
+                arrayOf(encodeCaptureKind(CaptureKind.ChartCandles)),
+            )
+            deleted += db.delete(
+                "raw_capture",
+                "id NOT IN (SELECT capture_id FROM raw_latest)",
+                emptyArray(),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
         if (deleted > 0) {
             db.execSQL("VACUUM")
         }
         deleted
+    }
+
+    private fun trimRevisionHistory(db: SQLiteDatabase, symbol: String) {
+        db.execSQL(
+            """
+                DELETE FROM symbol_revision
+                WHERE symbol = ?
+                  AND revision_id NOT IN (
+                    SELECT revision_id FROM (
+                      SELECT revision_id
+                      FROM symbol_revision
+                      WHERE symbol = ?
+                      ORDER BY evaluated_at DESC, revision_id DESC
+                      LIMIT ?
+                    )
+                  )
+            """.trimIndent(),
+            arrayOf(symbol, symbol, MAX_REVISION_HISTORY.toString()),
+        )
     }
 
     private fun dropUnreferencedRawCaptures(db: SQLiteDatabase, symbols: Set<String>) {
@@ -881,16 +918,31 @@ open class SQLiteStateStore(
     private fun loadChartCache(db: SQLiteDatabase): List<PersistedChartRecord> =
         loadLatestRawChartCache(db)
 
-    private fun loadPricingCandleCache(db: SQLiteDatabase, symbolFilter: String? = null): List<PersistedChartRecord> =
-        db.rawQuery(
+    private fun loadPricingCandleCache(
+        db: SQLiteDatabase,
+        symbolFilter: String? = null,
+        rangeFilter: ChartRange? = null,
+    ): List<PersistedChartRecord> {
+        var clauses = mutableListOf<String>()
+        var args = mutableListOf<String>()
+        if (symbolFilter != null) {
+            clauses += "symbol = ?"
+            args += symbolFilter
+        }
+        if (rangeFilter != null) {
+            clauses += "chart_range = ?"
+            args += rangeFilter.name
+        }
+        var where = if (clauses.isEmpty()) "" else "WHERE ${clauses.joinToString(" AND ")}"
+        return db.rawQuery(
             """
                 SELECT symbol, chart_range, captured_at, epoch_seconds,
                     open_cents, high_cents, low_cents, close_cents, volume
                 FROM pricing_candle
-                ${if (symbolFilter == null) "" else "WHERE symbol = ?"}
+                $where
                 ORDER BY symbol ASC, chart_range ASC, epoch_seconds ASC
             """.trimIndent(),
-            symbolFilter?.let { arrayOf(it) } ?: emptyArray(),
+            args.toTypedArray(),
         ).useRows { cursor ->
             val grouped = linkedMapOf<Pair<String, ChartRange>, MutableList<Pair<Long, HistoricalCandle>>>()
             while (cursor.moveToNext()) {
@@ -916,6 +968,7 @@ open class SQLiteStateStore(
                 )
             }
         }
+    }
 
     private fun loadLatestRawChartCache(db: SQLiteDatabase): List<PersistedChartRecord> =
         db.rawQuery(
@@ -1119,8 +1172,8 @@ open class SQLiteStateStore(
     private fun persistPricingCandles(db: SQLiteDatabase, capture: RawCapture) {
         if (capture.captureKind != CaptureKind.ChartCandles) return
         val payload = capture.payload as? RawCapturePayload.Chart ?: return
-        val existingCandles = loadPricingCandleCache(db, capture.symbol)
-            .firstOrNull { record -> record.range == payload.range }
+        val existingCandles = loadPricingCandleCache(db, capture.symbol, payload.range)
+            .firstOrNull()
             ?.candles
             .orEmpty()
         val mergedCandles = PricingHistoryMerge.merge(
@@ -1894,6 +1947,9 @@ open class SQLiteStateStore(
          * the two series can share a table without one ever being served as the other.
          */
         const val BACKTEST_CHART_RANGE = "BacktestDaily"
+
+        /** Hard cap on durable revision rows per symbol. Matches the in-memory History window. */
+        const val MAX_REVISION_HISTORY = 240
 
         /**
          * Below this, a disagreement between a stored close and a re-fetched one is rounding. A

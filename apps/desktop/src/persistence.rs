@@ -336,7 +336,8 @@ pub(crate) fn load_warm_start(path: &Path) -> io::Result<PersistenceBootstrap> {
     let tracked_symbols = load_tracked_symbols(&connection)?;
     let watchlist = load_watchlist(&connection)?;
     let symbol_states = load_symbol_latest(&connection)?;
-    let chart_cache = load_chart_cache(&connection)?;
+    // Chart JSON stays on disk. Decode it only when a screen asks for candles.
+    let chart_cache = Vec::new();
     let issues = load_issues(&connection)?;
 
     Ok(PersistenceBootstrap {
@@ -707,6 +708,7 @@ fn load_symbol_latest(connection: &Connection) -> io::Result<Vec<PersistedSymbol
     Ok(symbol_states)
 }
 
+#[allow(dead_code)]
 fn load_chart_cache(connection: &Connection) -> io::Result<Vec<PersistedChartRecord>> {
     let mut statement = connection
         .prepare(
