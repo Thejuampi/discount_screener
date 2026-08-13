@@ -6,6 +6,27 @@ Agent-facing rules for Discount Screener. Prefer this file plus [`_bmad-output/p
 
 Discount Screener is currently a personal workstation for **Juan**, a single self-directed analyst/investor. Treat multi-user growth metrics, onboarding funnels, and generic consumer personas as out of scope unless Juan explicitly asks for them. Preserve professional, evidence-first presentation, provenance, uncertainty, and the no-investment-advice boundary.
 
+## Communication Style (mandatory)
+
+Write each reply to Juan in **ASD-STE100 Simplified Technical English**. This applies to chat, commit bodies, PR text, and docs.
+
+| Rule | Do | Do not |
+| --- | --- | --- |
+| Length | Keep sentences to 20 words or less | Write long chains of clauses |
+| Voice | Use the active voice | Use the passive voice |
+| Tense | Use the simple present, past, or future | Use the perfect tenses |
+| Words | Use one word for one meaning | Use synonyms for variety |
+| Verbs | Use `check`, `make sure`, `use`, `show` | Use `verify`, `ensure`, `utilize`, `leverage` |
+| Forms | Use a full clause | Use `-ing` forms as nouns or adjectives |
+| Articles | Write `the test`, `a commit` | Drop the articles to save space |
+| Structure | Put complex data in a table or a vertical list | Put it in a long paragraph |
+
+Technical names stay as they are: `AggressiveV3`, `robust_mean`, `:core`, commit, branch, holdout.
+
+**Do not write walls of text.** Give the result first. Add the detail only if it changes what Juan does next.
+
+**Do not add a TLDR at the end.** The reply is already short. A summary of a short reply is noise.
+
 ## Monorepo Layout
 
 | Path | Role |
@@ -266,6 +287,7 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 - Desktop: `cargo test` from `apps/desktop`; `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke`.
 - Windows: `cargo test` in `apps/windows/src-tauri` (include `dcf_model`, `quant_lens` when touching valuation/lens).
 - Android: `scripts/validate-android.ps1` (always `:core:test`; app tasks when SDK configured).
+- **`--rerun` binds only to the task it follows.** `./gradlew :core:test :app:testDebugUnitTest --rerun` reruns the app task and leaves `:core:test` **UP-TO-DATE** — reported as success, never executed. Write it once per task: `./gradlew :core:test --rerun :app:testDebugUnitTest --rerun`. Read the task lines before you believe a green run; `UP-TO-DATE` on a test task means the suite did not run.
 - **Android live / agent QA uses profile `qa` only (≤20 symbols).** Launch QA with `make android-run-qa`, which cold-starts on `qa`. `make android-run` is the regular app and cold-starts `sp500`. Never QA on full `sp500` (~500 tickers). See **Android live QA = profile `qa` only** below.
 - Valuation / Quant Lens: prefer goldens in `shared/contracts` and fixture regressions (e.g. ACGL residual income, TSLA disputed EV) over inventing market-proximity asserts.
 - **Valuation merge bar (mandatory):** any change to classifier, FCFF/WACC, CapEx→FCF, residual income, or model policy version **must** pass:
@@ -275,6 +297,10 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 - External providers: ≥5 distinct real upstream samples; never invent Yahoo/SEC payloads when live behavior matters.
 - `cargo fmt` before finishing Rust changes.
 - Mutation testing around changed logic when practical; state the gap if not.
+- **Mutate a constant in both directions, or the round proves half of what it claims.** A test that asserts only `score > x` is killed by lowering the constant and survives raising it. A V4 fixture round of 10 one-directional mutants reported a full kill; a second round of 12 that moved each constant both ways found five more constants pinned on one side only.
+- **A field the engine writes needs a reader, and the check is a grep, not a reading of the plan.** Before a wave that adds anything to a model or DTO is called done, grep the field name under `src/main` and name the consumer. This repository's most expensive recurring defect is a write-only value: `fundamentalsSignals` was built by the engine, carried through the repository into the snapshot, and read by no composable — which hid the sector `§` marker *and* the share-count reading, one root cause and two symptoms, the second found only because somebody looked twice.
+- **A numeric gate must state the sign it expects, not only the magnitude.** V4's Wave 0 gate required `|ρ| ≥ 0.3` on two bucket pairs and passed on `+0.381` and `−0.367`. Its unstated premise was that both run the same way; half of it failed while the gate reported green. A threshold with no sign cannot fail on the population that would falsify it.
+- **A property no live QA can reach is verified by test or it is not verified.** Say which, in the evidence. Android's sector benchmarks need `MIN_SECTOR_MEMBERS = 5` and the mandated `qa` universe's largest sector holds 4, so the sector path is unreachable on a device *by construction*. Re-running QA there buys no evidence; it only looks like it does.
 
 ### Android live QA = profile `qa` only (mandatory)
 
@@ -472,6 +498,13 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Naked `sum / n` over an annual series | One 5208% implied coupon inverted a whole cross-sectional credit fit; a plain mean of 19 annual returns reported restructuring years as return | `valuation_core::robust_mean` / `standardize` — never a hand-rolled average. See **Aggregation — no naked averages** |
 | 3-sigma rule built on mean and standard deviation | Provably cannot fire at `n <= 10` (max score is `(n-1)/sqrt(n)`); the outlier inflates its own scale and hides | Median/MAD scores, which have 50% breakdown and no such ceiling |
 | Cash-flow tag used as an income-statement equivalent | `InterestPaidNet` (interest *paid*) sat in the interest-**expense** qname list and gap-filled an accrual series year by year; it was one issuer's only source across nine years | Equivalence classes hold one statement's concept only; an issuer that files none reads **absent**, not a substitute from another statement |
+| Signal written by the engine, read by nothing | `fundamentalsSignals` was built, persisted and carried into the snapshot with no composable reading it. It hid the sector `§` marker **and** the share-count reading — one root cause, two symptoms, and only the first was being looked for | Grep the field name under `src/main` and name its consumer before calling the wave done. A claim about the user's screen that lives only in a data class is not shipped |
+| Gate states a magnitude and no sign | Wave 0 required `abs(rho) >= 0.3` on two bucket pairs, passed on `+0.381` and `−0.367`, and never said both must run the same way. Half its premise failed under a green gate | Write the sign into the gate. A threshold that cannot fail on the population that would falsify it is not measuring anything |
+| One-directional mutation round | Ten mutants each moved a fixture constant the same way and all died, reported as a full kill. Twelve mutants moving both ways found five constants pinned on one side only | Move every mutated constant in both directions; a `>` assert survives one of them by construction |
+| `--rerun` written once for two tasks | `:core:test :app:testDebugUnitTest --rerun` returned `:core:test UP-TO-DATE` — green, never executed | One `--rerun` per task; read the task lines before believing a green run |
+| Release falls back to the debug key | No keystore configured, so the release build type used the debug signing config and `make android-release` still exported it as an installable release. That key is on every machine that has ever built an app | `packageRelease` refuses; a local sideload asks with `-PallowDebugSignedRelease=true` and gets a warning beside the artifact. Never let a build downgrade its own trust in silence |
+| Approved plan text not snapshotted before execution | The plan authorised one `sp500` run as a named exception to the `qa` rule, then was revised in place. Nothing could later prove the exception had been approved rather than assumed — an unprovable-not-authorized state, which is worse than either answer | Copy the approved plan to `plan.v0.md` under the session directory at approval, before the first builder spawn. Revisions become `plan.vN.md`; `v0` is never edited |
+| Verifying a property no live QA can reach | Sector benchmarks need 5 members and the mandated `qa` universe's largest sector holds 4, so a device pass could never touch the changed path — and a re-QA was nearly ordered anyway | Check path reachability under the QA universe **before** arming a live stage. Unreachable live means prove it by test and say so; it never means defer the fix |
 
 ### Where longer checklists live
 

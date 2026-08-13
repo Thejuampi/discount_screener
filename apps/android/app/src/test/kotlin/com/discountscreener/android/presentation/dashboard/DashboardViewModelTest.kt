@@ -15,12 +15,14 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -31,6 +33,8 @@ import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
+import com.discountscreener.android.data.market.DailyCandleSource
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
@@ -58,6 +62,7 @@ import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -102,6 +107,44 @@ class DashboardViewModelTest {
 
         assertEquals("MSFT", repository.lastCurrentFilter?.query)
         assertEquals("MSFT", viewModel.state.value.query)
+    }
+
+    /**
+     * The reported bug: the Refresh button killed the app.
+     *
+     * `refresh` ran the whole refresh inside `viewModelScope.launch` with no `try`. Anything the
+     * refresh threw reached the coroutine handler, and the handler ends the process. The worst
+     * honest outcome of that button is "the data did not update", so the throw must become a
+     * notice. `loadDetailData` already guarded its own call this way.
+     *
+     * Without the guard this test does not merely miss the notice -- the throw escapes and fails
+     * the test, which is the same exit the user saw.
+     */
+    @Test
+    fun a_throwing_refresh_reports_a_notice_and_does_not_kill_the_scope() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(refreshAllError = IllegalStateException("Yahoo said no"))
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+
+        assertEquals("Refresh failed", viewModel.state.value.detailNotice?.title)
+    }
+
+    /**
+     * The count must come from the file, not from the Opportunities list. The export covers the
+     * whole scored cohort, which is roughly eight times that list, so a message counting the list
+     * would understate the file by a factor — and a truncated export would then look normal.
+     */
+    @Test
+    fun the_export_message_counts_the_rows_the_file_really_holds() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.ExportScores)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.systemStatusMessage!!.startsWith("Exported 3 scored rows"))
     }
 
     @Test
@@ -176,11 +219,11 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun dashboard_defaults_to_opportunities_with_aggressive_v3_scoring() {
+    fun dashboard_defaults_to_opportunities_with_aggressive_v2_scoring() {
         val state = DashboardUiState()
 
         assertEquals(DashboardTab.Opportunities, state.currentTab)
-        assertEquals(OpportunityScoringModel.AggressiveV3, state.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, state.opportunityScoringModel)
     }
 
     @Test
@@ -305,12 +348,7 @@ class DashboardViewModelTest {
         val repository = RecordingDashboardRepository(
             detailData = detail("AAPL"),
             detailCharts = mapOf(
-                ChartRange.Year to listOf(
-                    candle(1),
-                    candle(2),
-                    candle(3),
-                    candle(4),
-                ),
+                ChartRange.Year to (1L..20L).map { candle(it) },
             ),
         )
         val viewModel = testViewModel(repository)
@@ -318,13 +356,18 @@ class DashboardViewModelTest {
         viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
         advanceUntilIdle()
 
-        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayBack) }
-        assertEquals(3, viewModel.state.value.detailRoute?.replayOffset)
+        viewModel.dispatch(DashboardAction.StepReplayBack)
+        advanceUntilIdle()
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
+
+        viewModel.dispatch(DashboardAction.StepReplayBack)
+        advanceUntilIdle()
+        assertEquals(10, viewModel.state.value.detailRoute?.replayOffset)
 
         viewModel.dispatch(DashboardAction.StepReplayForward)
-        assertEquals(2, viewModel.state.value.detailRoute?.replayOffset)
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
 
-        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayForward) }
+        viewModel.dispatch(DashboardAction.StepReplayForward)
         assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
     }
 
@@ -332,14 +375,15 @@ class DashboardViewModelTest {
     fun reset_replay_returns_detail_chart_to_live() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             detailData = detail("AAPL"),
-            detailCharts = mapOf(ChartRange.Year to listOf(candle(1), candle(2))),
+            detailCharts = mapOf(ChartRange.Year to (1L..20L).map { candle(it) }),
         )
         val viewModel = testViewModel(repository)
 
         viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
         advanceUntilIdle()
         viewModel.dispatch(DashboardAction.StepReplayBack)
-        assertEquals(1, viewModel.state.value.detailRoute?.replayOffset)
+        advanceUntilIdle()
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
 
         viewModel.dispatch(DashboardAction.ResetReplay)
         assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
@@ -634,16 +678,27 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun toggle_opportunity_model_cycles_v3_to_legacy_to_aggressive_to_v2_to_v3() = runTest(dispatcher) {
+    fun toggle_opportunity_model_cycles_v2_to_v3_to_v4_to_legacy_to_aggressive_to_v2() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             opportunityRows = listOf(OpportunityListRow(symbol = "LEGACY", marketPriceCents = 10_000L, intrinsicValueCents = 15_000L, gapBps = 3_333, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 15, coverageCount = 3)),
             aggressiveRows = listOf(OpportunityListRow(symbol = "AGGRO", marketPriceCents = 10_000L, intrinsicValueCents = 20_000L, gapBps = 5_000, confidence = ConfidenceBand.High, isWatched = false, compositeScore = 27, coverageCount = 3)),
         )
         val viewModel = testViewModel(repository)
-        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
 
-        // The cycle is unchanged; the market dimension moved where it starts.
-        // Cycle: AggressiveV3 -> Legacy -> Aggressive -> AggressiveV2 -> AggressiveV3.
+        // The rotation itself is untouched by the market dimension; only where it starts, and it
+        // starts where it started before the dimension existed.
+        // Cycle: AggressiveV2 -> AggressiveV3 -> AggressiveV4 -> Legacy -> Aggressive -> AggressiveV2.
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV4, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV4, repository.lastRequestedOpportunityModel)
+
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.Legacy, viewModel.state.value.opportunityScoringModel)
@@ -659,11 +714,6 @@ class DashboardViewModelTest {
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV2, viewModel.state.value.opportunityScoringModel)
         assertEquals(OpportunityScoringModel.AggressiveV2, repository.lastRequestedOpportunityModel)
-
-        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
-        advanceUntilIdle()
-        assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
-        assertEquals(OpportunityScoringModel.AggressiveV3, repository.lastRequestedOpportunityModel)
     }
 
     @Test
@@ -802,6 +852,18 @@ class DashboardViewModelTest {
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
+            // The test dispatcher, not IO: on IO the write escapes `advanceUntilIdle` and the
+            // assertion reads a state the export has not reached yet.
+            exportScores = ExportScoresUseCase(
+                repository,
+                File(System.getProperty("java.io.tmpdir")!!),
+                dispatcher,
+            ),
+            runRetrospective = RunRetrospectiveUseCase(
+                NoBacktestCandles,
+                File(System.getProperty("java.io.tmpdir")!!),
+                dispatcher,
+            ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -813,7 +875,13 @@ class DashboardViewModelTest {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
+    }
+
+    /** The retrospective is a debug button; no view-model behaviour depends on what it reads. */
+    private object NoBacktestCandles : DailyCandleSource {
+        override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> = emptyMap()
     }
 
     private fun trackedRow(symbol: String) = TrackedSymbolRow(
@@ -881,6 +949,7 @@ class DashboardViewModelTest {
         private var projectedDetailData: ProjectedDetailData? = null,
         private var detailNotice: DashboardNotice? = null,
         private val tickerSuggestions: List<TickerSearchSuggestion> = emptyList(),
+        private val refreshAllError: Throwable? = null,
     ) : DashboardRepository {
         var saveSnapshotCallCount = 0
         var currentSnapshotCallCount = 0
@@ -940,7 +1009,10 @@ class DashboardViewModelTest {
             selectedSymbol: String?,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
-        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
+        ): DashboardSnapshot {
+            refreshAllError?.let { throw it }
+            return emptySnapshot(opportunityScoringModel)
+        }
 
         override suspend fun ensureDetailLoaded(
             symbol: String,
@@ -1038,6 +1110,9 @@ class DashboardViewModelTest {
             return emptyMap()
         }
 
+        override suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String =
+            "symbol\n\"AAA\"\n\"BBB\"\n\"CCC\"\n"
+
         override suspend fun trackedSymbolDetails(): List<SymbolDetail> {
             trackedSymbolDetailsCallCount++
             return trackedRows.map { row ->
@@ -1091,6 +1166,8 @@ class DashboardViewModelTest {
         override suspend fun clearDiscoveryData(): DiscoverySnapshot = DiscoverySnapshot()
 
         override fun observeDiscoveryProgress(): Flow<Unit> = emptyFlow()
+
+        override suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange) = Unit
 
         private fun emptySnapshot(
             opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,

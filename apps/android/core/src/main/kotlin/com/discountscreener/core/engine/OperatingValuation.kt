@@ -16,7 +16,7 @@ const val DISPUTED_DIFFERENCE_BPS = 5_000L
 private const val HARD_MAX_PROJECTION_YEARS = 100
 
 object OperatingValuation {
-    const val ENGINE_VERSION = "operating-valuation-router/1"
+    const val ENGINE_VERSION = "operating-valuation-router/2"
     const val ROUTER_POLICY_VERSION = "operating-model-router-policy/1"
 
     fun valueForwardEarnings(input: ForwardEarningsInput): ForwardEarningsCandidate =
@@ -26,7 +26,8 @@ object OperatingValuation {
         com.discountscreener.core.engine.routeOperatingModels(input)
 }
 
-private val BPS_SCALE = BigInteger.valueOf(10_000)
+private const val BPS_SCALE_INT = 10_000
+private val BPS_SCALE = BigInteger.valueOf(BPS_SCALE_INT.toLong())
 private val I128_MIN = BigInteger.ONE.shiftLeft(127).negate()
 private val I128_MAX = BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE)
 
@@ -109,6 +110,17 @@ enum class RouteReason {
     @SerialName("candidate_disagreement") CandidateDisagreement,
     @SerialName("invalid_forward_candidate") InvalidForwardCandidate,
     @SerialName("invalid_fcff_candidate") InvalidFcffCandidate,
+
+    /**
+     * The two lanes disagreed materially and the dispute was resolved to the lane whose evidence
+     * set strictly contains the other's. Recorded alongside [CandidateDisagreement], never instead
+     * of it.
+     *
+     * Declared last on purpose: reasons are canonicalised by sorting, and on both platforms that
+     * sort is by declaration order. Inserting this anywhere else would reorder every fingerprint
+     * that carries it and silently break parity with Rust's `RouteReason`.
+     */
+    @SerialName("disagreement_resolved_to_forward_evidence") DisagreementResolvedToForwardEvidence,
 }
 
 @Serializable
@@ -172,6 +184,12 @@ data class ForwardEarningsInput(
     val forecast: ForwardForecast,
     val costOfEquity: ResolvedCostOfEquity,
     val policy: ProjectionPolicy,
+    /**
+     * Return on total capital (bps) used to charge perpetual growth. `null` means *no evidence*,
+     * and [terminalPayoutBps] then assumes the issuer earns exactly its cost of capital so growth
+     * is value-neutral. It is not a floor on measured returns — see that function.
+     */
+    val returnOnCapitalBps: Int? = null,
 )
 
 @Serializable
@@ -236,6 +254,11 @@ fun valueForwardEarnings(input: ForwardEarningsInput): ForwardEarningsCandidate 
         stableGrowthBps = requireNotNull(stableGrowthBps),
         holdYears = input.policy.holdYears,
         fadeYears = input.policy.fadeYears,
+        terminalPayoutBps = terminalPayoutBps(
+            input.returnOnCapitalBps,
+            input.costOfEquity.costOfEquityBps,
+            requireNotNull(stableGrowthBps),
+        ),
     )
     return if (value != null && value > 0) {
         ForwardEarningsCandidate(
@@ -245,7 +268,9 @@ fun valueForwardEarnings(input: ForwardEarningsInput): ForwardEarningsCandidate 
             input.costOfEquity.costOfEquityBps,
             stableGrowthBps,
             projectionYears,
-            ModelQuality.Soft,
+            // Solid when CoE is market-sourced (non-provisional). Soft when rates still bootstrap
+            // from policy defaults.
+            if (input.costOfEquity.provisional) ModelQuality.Soft else ModelQuality.Solid,
             EvidenceFamily.AnalystDerivedModel,
             emptyList(),
             input,
@@ -296,13 +321,33 @@ fun routeOperatingModels(input: OperatingRouteInput): OperatingRouteDecision {
             when {
                 forward != null && fcff != null -> {
                     difference = differenceBps(forward, fcff)
+                    val forwardSolid = input.forwardCandidate.quality == ModelQuality.Solid
+                    val fcffSolid = input.fcffCandidate.quality == ModelQuality.Solid
                     status = if (difference != null && difference > DISPUTED_DIFFERENCE_BPS) {
+                        // Material disagreement stays labelled `Disputed`, but it no longer
+                        // suppresses the number. This branch is reached only under structural
+                        // distortion — the exact condition under which the trailing series is
+                        // known to be contaminated — and the forward lane observes that same
+                        // filed history plus a forecast. Its evidence set strictly contains the
+                        // FCFF lane's, so the disagreement resolves toward it on evidence grounds
+                        // alone. `Disputed` keeps the disagreement visible and keeps the name out
+                        // of ranking scores; what changes is that a reader gets a value.
                         reasons += RouteReason.CandidateDisagreement
+                        reasons += RouteReason.DisagreementResolvedToForwardEvidence
+                        selectedModel = OperatingModel.ForwardEarningsPower
+                        selectedValue = forward
                         RouteStatus.Disputed
-                    } else {
+                    } else if (forwardSolid || !fcffSolid) {
                         reasons += RouteReason.SelectedForwardEarningsPower
                         selectedModel = OperatingModel.ForwardEarningsPower
                         selectedValue = forward
+                        RouteStatus.Selected
+                    } else {
+                        // Forward soft, FCFF solid — keep FCFF under distortion only when forward
+                        // quality is weaker.
+                        reasons += RouteReason.SelectedRepresentativeFcff
+                        selectedModel = OperatingModel.FcffWacc
+                        selectedValue = fcff
                         RouteStatus.Selected
                     }
                 }
@@ -447,6 +492,53 @@ private fun projectionYears(policy: ProjectionPolicy): Int? = try {
     null
 }
 
+/**
+ * Minimum spread the return on capital must keep over perpetual growth.
+ *
+ * This is a **mathematical guard only** — it keeps `1 - g/ROIC` positive and bounded when the
+ * measured return approaches or falls below `g`. It carries no economic claim about the business,
+ * and it deliberately sits just above `g` rather than at the cost of capital. Mirrors the FCFF
+ * lane's `minimumTerminalSpreadBps`.
+ */
+const val MIN_TERMINAL_ROIC_SPREAD_BPS: Int = 100
+
+/**
+ * Share of terminal earnings that is actually distributable (bps of earnings).
+ *
+ * A business growing perpetually at `g` must retain `b = g / ROIC` of its earnings to fund the
+ * capital that growth consumes; only `1 - b` reaches the owner. Capitalizing the **full** analyst
+ * EPS while also granting `g` forever is free-lunch growth, and it is the reason the forward lane
+ * priced the cohort at a median 1.5x market with the error rising monotonically as return on
+ * capital fell.
+ *
+ * Two different problems meet here and are kept strictly apart:
+ *
+ * * **Missing evidence** — [returnOnCapitalBps] is null. The honest prior is that the issuer merely
+ *   earns its cost of capital, so growth is value-neutral (`terminal` collapses to `EPS / r`). That
+ *   is an economic statement about ignorance.
+ * * **Arithmetic safety** — a measured return at or below `g` would make the payout non-positive.
+ *   [MIN_TERMINAL_ROIC_SPREAD_BPS] bounds it. That is a statement about the formula, not about the
+ *   business.
+ *
+ * Collapsing the two — flooring *observed* returns at the cost of equity — is what flattened every
+ * sub-cost-of-capital issuer onto one payout, erasing exactly the differentiation this function
+ * exists to make.
+ */
+fun terminalPayoutBps(returnOnCapitalBps: Int?, costOfEquityBps: Int, stableGrowthBps: Int): Int {
+    if (costOfEquityBps <= 0) return BPS_SCALE_INT
+    if (stableGrowthBps <= 0) return BPS_SCALE_INT
+    val observed = returnOnCapitalBps ?: costOfEquityBps
+    val effective = maxOf(observed, stableGrowthBps + MIN_TERMINAL_ROIC_SPREAD_BPS)
+    val retention = stableGrowthBps.toLong() * BPS_SCALE_INT / effective.toLong()
+    return (BPS_SCALE_INT - retention).coerceIn(0L, BPS_SCALE_INT.toLong()).toInt()
+}
+
+/**
+ * Analyst EPS over the explicit horizon is taken as given evidence — the forecast already prices
+ * whatever reinvestment the next few years need. Only the **perpetuity** is charged for the capital
+ * its growth consumes, via [terminalPayoutBps]; that is where the free-growth error concentrated
+ * (~70% of a typical name's value sits in the terminal).
+ */
 private fun projectForwardValue(
     epsMeanCents: Long,
     nearGrowthBps: Int,
@@ -454,6 +546,7 @@ private fun projectForwardValue(
     stableGrowthBps: Int,
     holdYears: Int,
     fadeYears: Int,
+    terminalPayoutBps: Int,
 ): Long? {
     val denominator = checkedAdd(BPS_SCALE, BigInteger.valueOf(costOfEquityBps.toLong())) ?: return null
     var discounted = mulDivHalfUp(BigInteger.valueOf(epsMeanCents), BPS_SCALE, denominator) ?: return null
@@ -473,9 +566,10 @@ private fun projectForwardValue(
         discounted = growDiscounted(discounted, growth, denominator) ?: return null
         presentValue = checkedAdd(presentValue, discounted) ?: return null
     }
+    val distributable = mulDivHalfUp(discounted, BigInteger.valueOf(terminalPayoutBps.toLong()), BPS_SCALE) ?: return null
     val terminalMultiplier = checkedAdd(BPS_SCALE, BigInteger.valueOf(stableGrowthBps.toLong())) ?: return null
     val terminalDenominator = BigInteger.valueOf(costOfEquityBps.toLong() - stableGrowthBps.toLong())
-    val terminal = mulDivHalfUp(discounted, terminalMultiplier, terminalDenominator) ?: return null
+    val terminal = mulDivHalfUp(distributable, terminalMultiplier, terminalDenominator) ?: return null
     return checkedAdd(presentValue, terminal)?.longValueExactOrNull()
 }
 
@@ -540,7 +634,13 @@ private fun forwardFingerprint(input: ForwardEarningsInput, stableGrowthBps: Int
         "|eps=${optionalLong(input.forecast.epsLowCents)}/${optionalLong(input.forecast.epsMeanCents)}/${optionalLong(input.forecast.epsHighCents)}" +
         "|coverage=${input.forecast.analystCount?.toString() ?: "none"}" +
         "|growth=${input.forecast.nearGrowthBps}" +
-        "|stable=${stableGrowthBps?.toString() ?: "none"}"
+        "|stable=${stableGrowthBps?.toString() ?: "none"}" +
+        "|roic=${input.returnOnCapitalBps?.toString() ?: "none"}" +
+        "|terminal_payout=${
+            stableGrowthBps?.let {
+                terminalPayoutBps(input.returnOnCapitalBps, input.costOfEquity.costOfEquityBps, it)
+            }?.toString() ?: "none"
+        }"
 
 private fun routeFingerprint(
     businessClass: BusinessClass,

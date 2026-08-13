@@ -35,6 +35,14 @@ interface DashboardRepository {
     suspend fun clearAllData()
     suspend fun dcfSnapshot(): Map<String, DcfAnalysis>
     suspend fun trackedSymbolDetails(): List<SymbolDetail>
+
+    /**
+     * Debug-only: the current opportunity scores plus the raw inputs behind them, as CSV.
+     *
+     * The four buckets share inputs, and only a whole-population measurement can say how much that
+     * matters. Nothing in the product reads this; it is the input to the offline correlation.
+     */
+    suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     /**
      * Records an estimates snapshot using [com.discountscreener.core.engine.EstimatesHistoryPolicy]
@@ -53,4 +61,5 @@ interface DashboardRepository {
     suspend fun cancelDiscoveryJob(): DiscoverySnapshot
     suspend fun clearDiscoveryData(): DiscoverySnapshot
     fun observeDiscoveryProgress(): Flow<Unit>
+    suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange)
 }

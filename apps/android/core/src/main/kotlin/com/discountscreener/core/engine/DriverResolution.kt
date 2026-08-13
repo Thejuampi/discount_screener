@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.WaccFieldSource
@@ -82,19 +83,16 @@ internal fun resolveRateInputs(
     val costOfDebtBps: Int
     val costOfDebtSource: WaccFieldSource
     val debtPeriods: List<String>
-    val averageDebt: Double
     when {
         marketCommon.isNotEmpty() -> {
             costOfDebtBps = marketCommon.last().second
             costOfDebtSource = WaccFieldSource.MarketYield
             debtPeriods = listOf(marketCommon.last().first)
-            averageDebt = totalDebt.toDouble()
         }
         ratedCommon.isNotEmpty() -> {
             costOfDebtBps = (_riskFreeBps + ratedCommon.last().second).coerceAtMost(Int.MAX_VALUE)
             costOfDebtSource = WaccFieldSource.RatedOrSyntheticSpread
             debtPeriods = listOf(ratedCommon.last().first)
-            averageDebt = totalDebt.toDouble()
         }
         accountingCommon.isNotEmpty() -> {
             // Resolve one annual rate per fiscal period. Summing several
@@ -117,8 +115,13 @@ internal fun resolveRateInputs(
                 "fcff unavailable: aligned interest/debt implies invalid cost of debt"
             }
             debtPeriods = annualRates.map { it.first }
-            averageDebt = annualRates.sumOf { it.third } / annualRates.size
-            costOfDebtBps = annualRates.map { it.second }.sorted()[annualRates.size / 2]
+            // `sorted()[size / 2]` took the upper of the two middle rates on an even number of
+            // periods, which is not the median the comment above promises. The statistic stays a
+            // median: turning a short annual series into a trimmed mean would move intrinsic
+            // values and is a model-policy change, not a boy-scout one.
+            costOfDebtBps = (medianOf(annualRates.map { it.second.toDouble() })
+                ?: error("fcff unavailable: no aligned annual cost of debt observations"))
+                .roundToInt()
             val yahooAligned = accountingCommon.all { (period, _, _) ->
                 timeseries.interestExpense.any {
                     annualKey(it) == period && it.source == DcfSource.YahooFinance

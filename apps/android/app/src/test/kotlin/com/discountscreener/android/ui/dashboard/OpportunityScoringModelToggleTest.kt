@@ -9,6 +9,7 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.DashboardAction
@@ -25,11 +26,20 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class OpportunityScoringModelToggleTest {
+    /** Prints every thread's stack if this test stalls, so the next hang arrives with evidence. */
+    @get:Rule
+    val stuckTestWatchdog = StuckTestWatchdog()
+
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
+    /**
+     * Named for what the body does — walk [opportunityScoringModelChipOrder] — rather than for a
+     * count. It said "four" while five chips shipped, and a name with a number in it goes stale
+     * every time a model is added, silently, because nothing compiles against a test's name.
+     */
     @Test
-    fun opportunities_tab_exposes_all_four_scoring_model_chips() {
+    fun opportunities_tab_exposes_every_scoring_model_chip() {
         setOpportunitiesContent(
             selected = OpportunityScoringModel.AggressiveV2,
             onAction = { },
@@ -50,9 +60,9 @@ class OpportunityScoringModelToggleTest {
             onAction = { },
         )
 
-        composeRule.onNodeWithText("Aggressive V2").assertIsSelected()
-        composeRule.onNodeWithText("Aggressive V3").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive").assertIsNotSelected()
+        composeRule.onNodeWithText("V2").assertIsSelected()
+        composeRule.onNodeWithText("V3").assertIsNotSelected()
+        composeRule.onNodeWithText("V1").assertIsNotSelected()
         composeRule
             .onNodeWithText("Legacy")
             .performScrollTo()
@@ -70,9 +80,9 @@ class OpportunityScoringModelToggleTest {
             .onNodeWithText("Legacy")
             .performScrollTo()
             .assertIsSelected()
-        composeRule.onNodeWithText("Aggressive V2").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive V3").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive").assertIsNotSelected()
+        composeRule.onNodeWithText("V2").assertIsNotSelected()
+        composeRule.onNodeWithText("V3").assertIsNotSelected()
+        composeRule.onNodeWithText("V1").assertIsNotSelected()
     }
 
     @Test
@@ -94,12 +104,21 @@ class OpportunityScoringModelToggleTest {
         )
     }
 
+    /**
+     * Two claims, two tests. They were one, and a failure could not say which had broken: a
+     * renamed label and a model missing from the strip are different defects with different fixes.
+     */
     @Test
-    fun chip_labels_cover_every_scoring_model() {
+    fun the_chips_read_newest_model_first() {
         assertEquals(
-            listOf("Aggressive V3", "Aggressive V2", "Aggressive", "Legacy"),
+            listOf("V4", "V3", "V2", "V1", "Legacy"),
             opportunityScoringModelChipOrder.map { it.chipLabel() },
         )
+    }
+
+    /** A model with no chip is a model the user cannot reach. */
+    @Test
+    fun every_scoring_model_has_a_chip() {
         assertEquals(
             OpportunityScoringModel.entries.toSet(),
             opportunityScoringModelChipOrder.toSet(),

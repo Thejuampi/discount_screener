@@ -18,11 +18,14 @@ import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
@@ -49,14 +52,25 @@ class DiscountScreenerAppContainer(context: Context) {
      */
     private val yahooClient by lazy { YahooFinanceClient() }
 
+    /**
+     * One store for the whole app. Two helpers over one database file is two write queues over one
+     * lock, and the market read now writes here too — so the sharing is load-bearing rather than
+     * merely tidy.
+     */
+    private val stateStore by lazy { SQLiteStateStore(appContext) }
+
     private val marketDataRepository by lazy {
-        MarketDataRepository(yahooClient = yahooClient, fearGreedClient = CnnFearGreedClient())
+        MarketDataRepository(
+            yahooClient = yahooClient,
+            fearGreedClient = CnnFearGreedClient(),
+            dailyCandleSink = stateStore,
+        )
     }
 
     private val repository by lazy {
         val startupProfile = startupProfile(BuildConfig.QA_UNIVERSE)
         DefaultDashboardRepository(
-            stateStore = SQLiteStateStore(appContext),
+            stateStore = stateStore,
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = yahooClient,
             universeCatalog = UniverseCatalog(appContext.assets),
@@ -82,6 +96,8 @@ class DiscountScreenerAppContainer(context: Context) {
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllData = ClearAllDataUseCase(repository),
+            exportScores = ExportScoresUseCase(repository, appContext.filesDir),
+            runRetrospective = RunRetrospectiveUseCase(stateStore, appContext.filesDir),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -93,6 +109,7 @@ class DiscountScreenerAppContainer(context: Context) {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
 

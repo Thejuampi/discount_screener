@@ -204,12 +204,30 @@ class ChartAnalysisTest {
     }
 
     @Test
-    fun replay_step_back_and_forward_clamp_to_valid_offsets() {
-        assertEquals(1, ChartAnalysis.stepReplayBack(replayOffset = 0, totalCandles = 4))
-        assertEquals(3, ChartAnalysis.stepReplayBack(replayOffset = 3, totalCandles = 4))
+    fun replay_step_back_advances_by_batch_size_and_clamps() {
+        assertEquals(5, ChartAnalysis.stepReplayBack(replayOffset = 0, totalCandles = 20))
+        assertEquals(3, ChartAnalysis.stepReplayBack(replayOffset = 0, totalCandles = 4))
         assertEquals(0, ChartAnalysis.stepReplayBack(replayOffset = 0, totalCandles = 1))
-        assertEquals(2, ChartAnalysis.stepReplayForward(replayOffset = 3))
+    }
+
+    @Test
+    fun replay_step_forward_retreats_by_batch_size_and_clamps() {
+        assertEquals(5, ChartAnalysis.stepReplayForward(replayOffset = 10))
+        assertEquals(0, ChartAnalysis.stepReplayForward(replayOffset = 3))
         assertEquals(0, ChartAnalysis.stepReplayForward(replayOffset = 0))
+    }
+
+    @Test
+    fun replay_window_slides_when_window_size_is_smaller_than_candle_count() {
+        val candles = (1..20).map { index -> candle(index, volume = index.toLong()) }
+
+        var window = ChartAnalysis.buildReplayWindow(candles, replayOffset = 5, windowSize = 10)
+
+        assertEquals(10, window.visibleCandles.size)
+        assertEquals(20, window.totalCandles)
+        assertEquals(5, window.replayOffset)
+        assertEquals(6L, window.visibleCandles.first().epochSeconds)
+        assertEquals(15L, window.visibleCandles.last().epochSeconds)
     }
 
     @Test

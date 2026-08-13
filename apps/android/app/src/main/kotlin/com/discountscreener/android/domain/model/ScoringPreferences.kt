@@ -15,15 +15,20 @@ data class ScoringPreferences(
 ) {
     companion object {
         /**
-         * V3 rather than V2, because the market dimension only applies to V3 and a default of V2
-         * would ship the fourth dimension switched off for everyone who never touches the model
-         * chips. Windows defaults to `aggressive_v3` for the same reason.
+         * V2, which is what the app defaulted to before the market dimension existed.
          *
-         * This moves scores on first launch for installs that never chose a model — deliberately,
-         * and once. An install that has chosen one keeps it, because the choice is written the
-         * moment it is made.
+         * This was briefly V3, on the argument that the fourth dimension only applies to V3 and a
+         * V2 default ships it invisible. That argument is real but it is not worth its price: V3
+         * scores every name differently from V2, so the default alone moved every number on the
+         * Opportunities tab for every install that had never touched the model chips — a change
+         * with nothing to do with adding a dimension. Adding a dimension must add a dimension.
+         *
+         * The dimension is not lost, it is opted into: pick V3 from the model chips and it appears,
+         * already switched on by [DEFAULT_REGIME_ENABLED]. Windows defaults to `aggressive_v3`, so
+         * the two platforms disagree on the default and agree on every score per model, which is
+         * the direction of disagreement that costs nothing.
          */
-        val DEFAULT_OPPORTUNITY_MODEL: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3
+        val DEFAULT_OPPORTUNITY_MODEL: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2
 
         /** Windows' `apply_regime_scoring = true`. The dimension is on until switched off. */
         const val DEFAULT_REGIME_ENABLED: Boolean = true

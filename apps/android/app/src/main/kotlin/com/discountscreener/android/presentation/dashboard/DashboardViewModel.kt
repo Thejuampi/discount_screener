@@ -24,6 +24,8 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
@@ -36,6 +38,7 @@ import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -83,6 +86,7 @@ enum class DashboardTab {
 
 enum class DetailSubtab {
     Snapshot,
+    Score,
     Lens,
     History,
 }
@@ -147,6 +151,11 @@ sealed interface DashboardAction {
     data class SetOpportunityScoringModel(val model: OpportunityScoringModel) : DashboardAction
     data class SetRegimeScoringEnabled(val enabled: Boolean) : DashboardAction
     data object RefreshSystemStats : DashboardAction
+
+    /** Debug surface only — writes the score export and reports where it landed. */
+    data object ExportScores : DashboardAction
+
+    data object RunRetrospective : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
     data object LoadDiscovery : DashboardAction
@@ -211,6 +220,7 @@ data class DashboardUiState(
     val discoveryLastSourceHint: String? = null,
     val discoveryBusy: Boolean = false,
     val discoveryStatusMessage: String? = null,
+    val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
 ) {
     /**
      * The ranked row backing the open ticker, or null when that symbol is not in the current
@@ -236,6 +246,8 @@ class DashboardViewModel(
     private val loadSystemStats: LoadSystemStatsUseCase,
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
+    private val exportScores: ExportScoresUseCase,
+    private val runRetrospective: RunRetrospectiveUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -247,6 +259,7 @@ class DashboardViewModel(
     private val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
     private val clearDiscoveryData: ClearDiscoveryDataUseCase,
     private val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
+    private val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -295,6 +308,8 @@ class DashboardViewModel(
             is DashboardAction.SetOpportunityScoringModel -> setOpportunityScoringModel(action.model)
             is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
+            DashboardAction.ExportScores -> exportScoreCsv()
+            DashboardAction.RunRetrospective -> runRetrospectiveReport()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
             DashboardAction.LoadDiscovery -> loadDiscovery()
@@ -357,13 +372,26 @@ class DashboardViewModel(
 
     private fun refresh() {
         viewModelScope.launch {
-            val snapshot = refreshDashboard(
-                currentFilter(),
-                _state.value.detailRoute?.symbol,
-                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                _state.value.opportunityScoringModel,
-            )
-            render(snapshot)
+            // A throw here reaches the coroutine handler and takes the process with it, which is a
+            // hard exit for a button whose worst honest outcome is "the data did not update".
+            // `loadDetailData` already guards its own call this way.
+            try {
+                val snapshot = refreshDashboard(
+                    currentFilter(),
+                    _state.value.detailRoute?.symbol,
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                )
+                render(snapshot)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    detailNotice = DashboardNotice(
+                        title = "Refresh failed",
+                        message = error.message ?: "The refresh could not complete.",
+                        severity = DashboardNoticeSeverity.Warning,
+                    ),
+                )
+            }
             _state.value.detailRoute?.symbol?.let { loadDetailData(it) }
             loadEstimates()
         }
@@ -668,6 +696,7 @@ class DashboardViewModel(
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
+            replayBackingCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
@@ -707,12 +736,18 @@ class DashboardViewModel(
     private fun stepReplayBack() {
         val state = _state.value
         val route = state.detailRoute ?: return
-        var totalCandles = projectedChartTotalCandles(state, route) ?: state.detailCharts[route.chartRange].orEmpty().size
+        var backingCandles = state.replayBackingCharts[route.chartRange]
+        var totalCandles = projectedChartTotalCandles(state, route)
+            ?: backingCandles?.size
+            ?: state.detailCharts[route.chartRange].orEmpty().size
         _state.value = state.copy(
             detailRoute = route.copy(
                 replayOffset = ChartAnalysis.stepReplayBack(route.replayOffset, totalCandles),
             ),
         )
+        if (backingCandles == null) {
+            viewModelScope.launch { ensureReplayBackingLoaded(route.symbol, route.chartRange) }
+        }
     }
 
     private fun stepReplayForward() {
@@ -764,6 +799,7 @@ class DashboardViewModel(
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
+            replayBackingCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
@@ -814,7 +850,8 @@ class DashboardViewModel(
             OpportunityScoringModel.Legacy -> OpportunityScoringModel.Aggressive
             OpportunityScoringModel.Aggressive -> OpportunityScoringModel.AggressiveV2
             OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.AggressiveV3
-            OpportunityScoringModel.AggressiveV3 -> OpportunityScoringModel.Legacy
+            OpportunityScoringModel.AggressiveV3 -> OpportunityScoringModel.AggressiveV4
+            OpportunityScoringModel.AggressiveV4 -> OpportunityScoringModel.Legacy
         }
         setOpportunityScoringModel(nextModel)
     }
@@ -933,6 +970,38 @@ class DashboardViewModel(
         }
     }
 
+    private fun exportScoreCsv() {
+        viewModelScope.launch {
+            var snapshot = _state.value
+            // A failed export must say so. A silent failure here would look like an export that
+            // produced nothing to correlate, which is the one thing the measurement cannot survive.
+            var message = try {
+                var result = exportScores(snapshot.currentProfile, snapshot.opportunityScoringModel)
+                "Exported ${result.rowCount} scored rows to ${result.path}"
+            } catch (error: Throwable) {
+                "Score export failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(systemStatusMessage = message)
+        }
+    }
+
+    /**
+     * The measurement Wave 4b exists to produce. Same failure discipline as the export above: a
+     * silent failure would read as a retrospective that found nothing, which is the one answer this
+     * report must never fake.
+     */
+    private fun runRetrospectiveReport() {
+        viewModelScope.launch {
+            var message = try {
+                var result = runRetrospective(_state.value.currentProfile)
+                "Retrospective over ${result.symbolCount} symbols written to ${result.path}"
+            } catch (error: Throwable) {
+                "Retrospective failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(systemStatusMessage = message)
+        }
+    }
+
     private fun pruneOldRevisions(retentionDays: Int) {
         viewModelScope.launch {
             val deleted = pruneOldRevisions(retentionDays)
@@ -1001,6 +1070,11 @@ class DashboardViewModel(
                 currentState.detailQuantLens
             },
             detailNotice = if (selectedDetailMatchesRoute) snapshot.detailNotice else currentState.detailNotice,
+            replayBackingCharts = if (selectedDetailMatchesRoute) {
+                snapshot.replayBackingCharts
+            } else {
+                currentState.replayBackingCharts
+            },
             rowQuantLensChipsBySymbol = buildMap {
                 snapshot.trackedRows.forEach { row ->
                     put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
@@ -1040,6 +1114,8 @@ class DashboardViewModel(
                         loadSystemStats = useCases.loadSystemStats,
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,
+                        exportScores = useCases.exportScores,
+                        runRetrospective = useCases.runRetrospective,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,
@@ -1051,6 +1127,7 @@ class DashboardViewModel(
                         cancelDiscoveryJob = useCases.cancelDiscoveryJob,
                         clearDiscoveryData = useCases.clearDiscoveryData,
                         observeDiscoveryProgress = useCases.observeDiscoveryProgress,
+                        ensureReplayBackingLoaded = useCases.ensureReplayBackingLoaded,
                     )
                 }
             }

@@ -26,9 +26,13 @@ import com.discountscreener.android.domain.model.DatabaseTableInfo
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
+import com.discountscreener.android.data.market.DailyCandleSink
+import com.discountscreener.android.data.market.DailyCandleSource
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
+import kotlin.math.abs
 import com.discountscreener.android.domain.model.LogTableInfo
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.core.engine.DiscoveryMembershipMerge
@@ -36,6 +40,7 @@ import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.DiscoveryUniverseEngine
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.model.OpportunityScoringModel
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -182,10 +187,22 @@ data class TipRanksAttemptRecord(
     val sentAtEpochSeconds: Long? = null,
 )
 
-class SQLiteStateStore(
+open class SQLiteStateStore(
     private val appContext: Context,
     private val json: Json = Json { ignoreUnknownKeys = true },
-) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION) {
+    /**
+     * Where the blocking SQLite work runs.
+     *
+     * Every suspending method here hops off the caller's thread, and until now it hopped to
+     * `Dispatchers.IO` by name. That is invisible while writes are fire-and-forget, but a caller
+     * that *awaits* a write — which the refresh loop now does, to bound its memory — suspends on a
+     * real thread pool. A test driving a `TestDispatcher` then finds its scheduler idle while the
+     * write is still in flight, so `advanceUntilIdle()` returns before the work it is meant to
+     * cover and the assertion races the disk. Injecting the dispatcher lets a test put its own
+     * virtual clock over the writes; production keeps the same `Dispatchers.IO` it always had.
+     */
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION), DailyCandleSink, DailyCandleSource {
 
     init {
         setWriteAheadLoggingEnabled(true)
@@ -232,13 +249,16 @@ class SQLiteStateStore(
         if (oldVersion < 7 && newVersion >= 7) {
             createTipRanksSchema(db)
         }
+        if (oldVersion < 8 && newVersion >= 8) {
+            createScoreJournalSchema(db)
+        }
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         throw IllegalStateException("sqlite schema version $oldVersion is newer than supported version $newVersion")
     }
 
-    suspend fun loadWarmStart(): PersistenceBootstrap = withContext(Dispatchers.IO) {
+    suspend fun loadWarmStart(): PersistenceBootstrap = withContext(ioDispatcher) {
         val db = readableDatabase
         setMetaValue(db, META_KEY_LAST_STARTUP_AT, nowEpochSeconds().toString())
         PersistenceBootstrap(
@@ -251,7 +271,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun resetWarmStartState() = withContext(Dispatchers.IO) {
+    suspend fun resetWarmStartState() = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -259,7 +279,10 @@ class SQLiteStateStore(
             db.delete("watchlist", null, null)
             db.delete("raw_capture", null, null)
             db.delete("raw_latest", null, null)
-            db.delete("pricing_candle", null, null)
+            // Every chart the user can scroll, and not the retrospective's own series. Clearing the
+            // warm start asks for fresh data; it does not ask to destroy weeks of accumulated
+            // evidence, and `score_journal` is spared here for the same reason.
+            db.delete("pricing_candle", "chart_range <> ?", arrayOf(BACKTEST_CHART_RANGE))
             db.delete("symbol_revision", null, null)
             db.delete("symbol_latest", null, null)
             db.delete("issue_state", null, null)
@@ -277,7 +300,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun getSystemStats(): SystemStats = withContext(Dispatchers.IO) {
+    suspend fun getSystemStats(): SystemStats = withContext(ioDispatcher) {
         val db = readableDatabase
         SystemStats(
             databaseFileSizeBytes = databaseFileSizeBytes(),
@@ -295,7 +318,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun pruneOldRevisions(retentionDays: Int): Int = withContext(Dispatchers.IO) {
+    suspend fun pruneOldRevisions(retentionDays: Int): Int = withContext(ioDispatcher) {
         val db = writableDatabase
         val cutoff = nowEpochSeconds() - retentionDays.toLong() * 86_400L
         val cutoffArg = arrayOf(cutoff.toString())
@@ -331,7 +354,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceTrackedSymbols(symbols: List<String>) = withContext(Dispatchers.IO) {
+    suspend fun replaceTrackedSymbols(symbols: List<String>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -352,7 +375,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceWatchlist(symbols: List<String>) = withContext(Dispatchers.IO) {
+    suspend fun replaceWatchlist(symbols: List<String>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -370,7 +393,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun replaceIssues(issues: List<PersistedIssueRecord>) = withContext(Dispatchers.IO) {
+    open suspend fun replaceIssues(issues: List<PersistedIssueRecord>) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -398,10 +421,10 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun persistBatch(
+    open suspend fun persistBatch(
         rawCaptures: List<RawCapture>,
         revisions: List<SymbolRevisionInput>,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         if (rawCaptures.isEmpty() && revisions.isEmpty()) {
             return@withContext
         }
@@ -486,7 +509,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(Dispatchers.IO) {
+    suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         db.rawQuery(
             """
@@ -515,7 +538,7 @@ class SQLiteStateStore(
     }
 
     /** Public normalized data; credential deletion deliberately does not clear this cache. */
-    suspend fun loadTipRanksForecast(symbol: String): TipRanksForecast? = withContext(Dispatchers.IO) {
+    suspend fun loadTipRanksForecast(symbol: String): TipRanksForecast? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT payload_json FROM tipranks_forecast_cache WHERE symbol = ?",
             arrayOf(symbol.uppercase()),
@@ -524,7 +547,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun saveTipRanksForecast(forecast: TipRanksForecast) = withContext(Dispatchers.IO) {
+    suspend fun saveTipRanksForecast(forecast: TipRanksForecast) = withContext(ioDispatcher) {
         writableDatabase.insertWithOnConflict(
             "tipranks_forecast_cache", null,
             ContentValues().apply {
@@ -541,7 +564,7 @@ class SQLiteStateStore(
         symbol: String,
         reservedAtEpochSeconds: Long,
         monthlyLimit: Int = 50,
-    ): TipRanksAttemptRecord? = withContext(Dispatchers.IO) {
+    ): TipRanksAttemptRecord? = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -568,7 +591,7 @@ class SQLiteStateStore(
     }
 
     /** The sent mark is committed independently from forecast-cache writes. */
-    suspend fun markTipRanksAttemptSent(id: Long, sentAtEpochSeconds: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun markTipRanksAttemptSent(id: Long, sentAtEpochSeconds: Long): Boolean = withContext(ioDispatcher) {
         writableDatabase.update(
             "tipranks_attempt", ContentValues().apply { put("state", "sent"); put("sent_at", sentAtEpochSeconds) },
             "id = ? AND state = 'reserved'", arrayOf(id.toString()),
@@ -576,14 +599,14 @@ class SQLiteStateStore(
     }
 
     /** Cancellation is legal only before dispatch. */
-    suspend fun cancelReservedTipRanksAttempt(id: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun cancelReservedTipRanksAttempt(id: Long): Boolean = withContext(ioDispatcher) {
         writableDatabase.update(
             "tipranks_attempt", ContentValues().apply { put("state", "cancelled") },
             "id = ? AND state = 'reserved'", arrayOf(id.toString()),
         ) == 1
     }
 
-    suspend fun saveTipRanksUsageSnapshot(record: TipRanksUsageRecord) = withContext(Dispatchers.IO) {
+    suspend fun saveTipRanksUsageSnapshot(record: TipRanksUsageRecord) = withContext(ioDispatcher) {
         writableDatabase.insertWithOnConflict("tipranks_usage_snapshot", null, ContentValues().apply {
             put("provider_month_utc", record.providerMonthUtc)
             put("provider_used", record.providerUsed)
@@ -592,7 +615,7 @@ class SQLiteStateStore(
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    suspend fun loadLatestTipRanksUsageSnapshot(providerMonthUtc: String): TipRanksUsageRecord? = withContext(Dispatchers.IO) {
+    suspend fun loadLatestTipRanksUsageSnapshot(providerMonthUtc: String): TipRanksUsageRecord? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT provider_used, provider_limit, captured_at FROM tipranks_usage_snapshot WHERE provider_month_utc = ?",
             arrayOf(providerMonthUtc),
@@ -710,6 +733,39 @@ class SQLiteStateStore(
         )
         createDiscoverySchema(db)
         createTipRanksSchema(db)
+        createScoreJournalSchema(db)
+    }
+
+    /**
+     * What each model said about each symbol, kept so the models can be compared later.
+     *
+     * `discovery_score` already stores scores, and it is not this: it holds one row per symbol —
+     * the latest — with three buckets and no market score, and it covers Discovery only. A journal
+     * needs history, the fourth bucket, and the Opportunities list.
+     *
+     * The primary key carries `scoring_model` and `scored_at`, so a pass under V3 never overwrites
+     * a pass under V4 and two passes on the same day both survive. The index is on time first,
+     * because every question asked of this table is a range of days.
+     */
+    private fun createScoreJournalSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE score_journal (
+                symbol TEXT NOT NULL,
+                scoring_model TEXT NOT NULL,
+                scored_at INTEGER NOT NULL,
+                fundamentals_score INTEGER,
+                technical_score INTEGER,
+                forecast_score INTEGER,
+                regime_score INTEGER,
+                composite_score INTEGER NOT NULL,
+                composite_score_base INTEGER NOT NULL,
+                market_price_cents INTEGER NOT NULL,
+                PRIMARY KEY (symbol, scoring_model, scored_at)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX score_journal_time_idx ON score_journal(scored_at, scoring_model)")
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -888,7 +944,113 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(Dispatchers.IO) {
+    /**
+     * The daily bars behind the market reading, kept so the retrospective has dated prices.
+     *
+     * Stored in `pricing_candle` under [BACKTEST_CHART_RANGE], which is deliberately not a
+     * [ChartRange] name. `loadPricingCandleCache` resolves that column with `ChartRange.valueOf`
+     * and skips what it cannot resolve, so these rows are invisible to the chart the user scrolls —
+     * a different interval, a different purpose, and no chance of one being served as the other.
+     *
+     * **Rebase, not merge.** Yahoo returns the whole requested year on the current split basis. A
+     * stored bar from before a split is therefore on a basis the new bars are not, and a
+     * retrospective that held both would read the split as a fifty-percent loss. So the overlap is
+     * checked: when a date present in both disagrees on close by more than [REBASE_TOLERANCE_BPS],
+     * every stored bar for that symbol is dropped and the incoming year stands alone. Dates outside
+     * the incoming window are kept — that is how the series grows past a year — and they are exactly
+     * what a rebase throws away, which is why the count is returned rather than swallowed.
+     */
+    override suspend fun persistBacktestCandles(
+        candlesBySymbol: Map<String, List<HistoricalCandle>>,
+        capturedAtEpochSeconds: Long,
+    ): Int = withContext(ioDispatcher) {
+        val db = writableDatabase
+        var rebased = 0
+        db.beginTransaction()
+        try {
+            candlesBySymbol.forEach { (symbol, incoming) ->
+                if (incoming.isEmpty()) return@forEach
+                if (splitBasisChanged(db, symbol, incoming)) {
+                    db.delete(
+                        "pricing_candle",
+                        "symbol = ? AND chart_range = ?",
+                        arrayOf(symbol, BACKTEST_CHART_RANGE),
+                    )
+                    rebased++
+                }
+                incoming.forEach { candle ->
+                    db.insertWithOnConflict(
+                        "pricing_candle",
+                        null,
+                        ContentValues().apply {
+                            put("symbol", symbol)
+                            put("chart_range", BACKTEST_CHART_RANGE)
+                            put("captured_at", capturedAtEpochSeconds)
+                            put("epoch_seconds", candle.epochSeconds)
+                            put("open_cents", candle.openCents)
+                            put("high_cents", candle.highCents)
+                            put("low_cents", candle.lowCents)
+                            put("close_cents", candle.closeCents)
+                            put("volume", candle.volume)
+                        },
+                        SQLiteDatabase.CONFLICT_REPLACE,
+                    )
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        rebased
+    }
+
+    override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> =
+        withContext(ioDispatcher) {
+            readableDatabase.rawQuery(
+                """
+                    SELECT symbol, epoch_seconds, open_cents, high_cents, low_cents, close_cents, volume
+                    FROM pricing_candle
+                    WHERE chart_range = ?
+                    ORDER BY symbol ASC, epoch_seconds ASC
+                """.trimIndent(),
+                arrayOf(BACKTEST_CHART_RANGE),
+            ).useRows { cursor ->
+                val bySymbol = linkedMapOf<String, MutableList<HistoricalCandle>>()
+                while (cursor.moveToNext()) {
+                    bySymbol.getOrPut(cursor.getString(0)) { mutableListOf() } += HistoricalCandle(
+                        epochSeconds = cursor.getLong(1),
+                        openCents = cursor.getLong(2),
+                        highCents = cursor.getLong(3),
+                        lowCents = cursor.getLong(4),
+                        closeCents = cursor.getLong(5),
+                        volume = cursor.getLong(6),
+                    )
+                }
+                bySymbol
+            }
+        }
+
+    /**
+     * Asked of the oldest date the two series share, because that is the one furthest from the last
+     * adjustment and so the one most likely to disagree. A symbol with no stored overlap has nothing
+     * to contradict and is never rebased.
+     */
+    private fun splitBasisChanged(
+        db: SQLiteDatabase,
+        symbol: String,
+        incoming: List<HistoricalCandle>,
+    ): Boolean {
+        val oldestIncoming = incoming.minByOrNull { it.epochSeconds } ?: return false
+        val storedCents = db.rawQuery(
+            "SELECT close_cents FROM pricing_candle WHERE symbol = ? AND chart_range = ? AND epoch_seconds = ?",
+            arrayOf(symbol, BACKTEST_CHART_RANGE, oldestIncoming.epochSeconds.toString()),
+        ).useRows { cursor -> if (cursor.moveToNext()) cursor.getLong(0) else null } ?: return false
+        if (storedCents <= 0L) return true
+        val driftBps = abs(oldestIncoming.closeCents - storedCents) * 10_000L / storedCents
+        return driftBps > REBASE_TOLERANCE_BPS
+    }
+
+    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         mergePersistedChartHistory(
             symbol = symbol,
@@ -1055,7 +1217,7 @@ class SQLiteStateStore(
     suspend fun saveEstimatesSnapshot(
         report: IndexEstimatesReport,
         replaceSameDay: Boolean = false,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1086,7 +1248,7 @@ class SQLiteStateStore(
     }
 
     suspend fun getEstimatesHistory(profileName: String): List<IndexEstimatesReport> =
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
             // Newest N first, then reverse to chronological order for charts.
             readableDatabase.rawQuery(
                 """
@@ -1116,7 +1278,7 @@ class SQLiteStateStore(
     suspend fun replaceEstimatesHistory(
         profileName: String,
         reports: List<IndexEstimatesReport>,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1155,7 +1317,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun loadDiscoveryConfig(): DiscoveryConfig = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryConfig(): DiscoveryConfig = withContext(ioDispatcher) {
         val db = readableDatabase
         val scoringModel = loadMetaValue(db, META_KEY_DISCOVERY_SCORING_MODEL)
             ?.let { raw -> OpportunityScoringModel.entries.firstOrNull { it.name == raw } }
@@ -1169,7 +1331,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun saveDiscoveryConfig(config: DiscoveryConfig) = withContext(Dispatchers.IO) {
+    suspend fun saveDiscoveryConfig(config: DiscoveryConfig) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1182,7 +1344,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(Dispatchers.IO) {
+    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(ioDispatcher) {
         val db = readableDatabase
         ScoringPreferences(
             opportunityModel = loadMetaValue(db, META_KEY_SCORING_OPPORTUNITY_MODEL)
@@ -1198,7 +1360,7 @@ class SQLiteStateStore(
         )
     }
 
-    suspend fun saveScoringPreferences(preferences: ScoringPreferences) = withContext(Dispatchers.IO) {
+    suspend fun saveScoringPreferences(preferences: ScoringPreferences) = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1210,11 +1372,11 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun discoverySymbolCount(): Int = withContext(Dispatchers.IO) {
+    suspend fun discoverySymbolCount(): Int = withContext(ioDispatcher) {
         readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_symbol").simpleQueryForLong().toInt()
     }
 
-    suspend fun loadDiscoverySymbols(): List<String> = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoverySymbols(): List<String> = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT symbol FROM discovery_symbol ORDER BY symbol ASC",
             emptyArray(),
@@ -1234,7 +1396,7 @@ class SQLiteStateStore(
     suspend fun applyDiscoveryMembershipMerge(
         seed: Collection<String>,
         sourceUniverse: String,
-    ): DiscoveryMembershipMerge = withContext(Dispatchers.IO) {
+    ): DiscoveryMembershipMerge = withContext(ioDispatcher) {
         val db = writableDatabase
         val existing = db.rawQuery(
             "SELECT symbol FROM discovery_symbol",
@@ -1274,7 +1436,7 @@ class SQLiteStateStore(
         plan
     }
 
-    suspend fun upsertDiscoveryScores(rows: List<DiscoveryScoreRow>) = withContext(Dispatchers.IO) {
+    suspend fun upsertDiscoveryScores(rows: List<DiscoveryScoreRow>) = withContext(ioDispatcher) {
         if (rows.isEmpty()) return@withContext
         val db = writableDatabase
         db.beginTransaction()
@@ -1316,12 +1478,98 @@ class SQLiteStateStore(
         }
     }
 
+    /**
+     * Appends one scoring pass and drops what has aged out. Returns how many rows were dropped.
+     *
+     * **Capped by age, not by row count, and the count is returned rather than swallowed.** A row
+     * cap would silently keep more days of a twenty-symbol profile than of a five-hundred-symbol
+     * one, so the same retention setting would mean two different things and any comparison across
+     * profiles would be reading a truncation artefact. Age means the same thing everywhere.
+     *
+     * The whole pass is one transaction, so a journal can never hold half of a day's scores.
+     */
+    suspend fun appendScoreJournal(
+        rows: List<ScoreJournalRow>,
+        retentionSeconds: Long,
+        nowEpochSeconds: Long = nowEpochSeconds(),
+    ): Int = withContext(ioDispatcher) {
+        if (rows.isEmpty()) return@withContext 0
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            rows.forEach { row ->
+                db.insertWithOnConflict(
+                    "score_journal",
+                    null,
+                    ContentValues().apply {
+                        put("symbol", row.symbol)
+                        put("scoring_model", row.scoringModel)
+                        put("scored_at", row.scoredAtEpochSeconds)
+                        putNullableInt("fundamentals_score", row.fundamentalsScore)
+                        putNullableInt("technical_score", row.technicalScore)
+                        putNullableInt("forecast_score", row.forecastScore)
+                        putNullableInt("regime_score", row.regimeScore)
+                        put("composite_score", row.compositeScore)
+                        put("composite_score_base", row.compositeScoreBase)
+                        put("market_price_cents", row.marketPriceCents)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            val dropped = db.delete(
+                "score_journal",
+                "scored_at < ?",
+                arrayOf((nowEpochSeconds - retentionSeconds).toString()),
+            )
+            db.setTransactionSuccessful()
+            dropped
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** The journal, oldest first, optionally narrowed to one model. */
+    suspend fun loadScoreJournal(scoringModel: String? = null): List<ScoreJournalRow> = withContext(ioDispatcher) {
+        val where = if (scoringModel == null) "" else "WHERE scoring_model = ?"
+        val args = if (scoringModel == null) emptyArray<String>() else arrayOf(scoringModel)
+        readableDatabase.rawQuery(
+            """
+            SELECT symbol, scoring_model, scored_at, fundamentals_score, technical_score,
+                   forecast_score, regime_score, composite_score, composite_score_base,
+                   market_price_cents
+            FROM score_journal
+            $where
+            ORDER BY scored_at, scoring_model, symbol
+            """.trimIndent(),
+            args,
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        ScoreJournalRow(
+                            symbol = cursor.getString(0),
+                            scoringModel = cursor.getString(1),
+                            scoredAtEpochSeconds = cursor.getLong(2),
+                            fundamentalsScore = cursor.getNullableInt(3),
+                            technicalScore = cursor.getNullableInt(4),
+                            forecastScore = cursor.getNullableInt(5),
+                            regimeScore = cursor.getNullableInt(6),
+                            compositeScore = cursor.getInt(7),
+                            compositeScoreBase = cursor.getInt(8),
+                            marketPriceCents = cursor.getLong(9),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     suspend fun queryDiscoveryScores(
         minScore: Int,
         limit: Int,
         offset: Int = 0,
         qualifiedOnly: Boolean = true,
-    ): List<DiscoveryScoreRow> = withContext(Dispatchers.IO) {
+    ): List<DiscoveryScoreRow> = withContext(ioDispatcher) {
         val qualifiedClause = if (qualifiedOnly) "AND s.is_qualified = 1" else ""
         readableDatabase.rawQuery(
             """
@@ -1366,7 +1614,7 @@ class SQLiteStateStore(
     suspend fun countDiscoveryScores(
         minScore: Int,
         qualifiedOnly: Boolean = true,
-    ): Int = withContext(Dispatchers.IO) {
+    ): Int = withContext(ioDispatcher) {
         val qualifiedClause = if (qualifiedOnly) "AND is_qualified = 1" else ""
         readableDatabase.compileStatement(
             """
@@ -1380,11 +1628,11 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun discoveryScoredSymbolCount(): Int = withContext(Dispatchers.IO) {
+    suspend fun discoveryScoredSymbolCount(): Int = withContext(ioDispatcher) {
         readableDatabase.compileStatement("SELECT COUNT(*) FROM discovery_score").simpleQueryForLong().toInt()
     }
 
-    suspend fun loadDiscoveryMaxScoredAt(): Long? = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryMaxScoredAt(): Long? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             "SELECT MAX(scored_at) FROM discovery_score",
             emptyArray(),
@@ -1397,18 +1645,18 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun loadDiscoveryLastSourceHint(): String? = withContext(Dispatchers.IO) {
+    suspend fun loadDiscoveryLastSourceHint(): String? = withContext(ioDispatcher) {
         loadMetaValue(readableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT)
     }
 
-    suspend fun saveDiscoveryLastSourceHint(hint: String) = withContext(Dispatchers.IO) {
+    suspend fun saveDiscoveryLastSourceHint(hint: String) = withContext(ioDispatcher) {
         setMetaValue(writableDatabase, META_KEY_DISCOVERY_LAST_SOURCE_HINT, hint)
     }
 
     suspend fun createDiscoveryJob(
         kind: DiscoveryJobKind,
         totalSymbols: Int,
-    ): Long = withContext(Dispatchers.IO) {
+    ): Long = withContext(ioDispatcher) {
         val db = writableDatabase
         db.insertOrThrow(
             "discovery_job",
@@ -1429,7 +1677,7 @@ class SQLiteStateStore(
         jobId: Long,
         completedSymbols: Int,
         totalSymbols: Int? = null,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val values = ContentValues().apply {
             put("completed_symbols", completedSymbols)
             if (totalSymbols != null) {
@@ -1444,7 +1692,7 @@ class SQLiteStateStore(
         status: DiscoveryJobStatus,
         completedSymbols: Int? = null,
         errorSummary: String? = null,
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(ioDispatcher) {
         val values = ContentValues().apply {
             put("status", status.storageValue)
             put("finished_at", nowEpochSeconds())
@@ -1456,7 +1704,7 @@ class SQLiteStateStore(
         writableDatabase.update("discovery_job", values, "job_id = ?", arrayOf(jobId.toString()))
     }
 
-    suspend fun loadLatestDiscoveryJob(): DiscoveryJobRecord? = withContext(Dispatchers.IO) {
+    suspend fun loadLatestDiscoveryJob(): DiscoveryJobRecord? = withContext(ioDispatcher) {
         readableDatabase.rawQuery(
             """
             SELECT job_id, kind, status, started_at, finished_at, total_symbols, completed_symbols, error_summary
@@ -1483,7 +1731,7 @@ class SQLiteStateStore(
         }
     }
 
-    suspend fun clearDiscoveryData() = withContext(Dispatchers.IO) {
+    suspend fun clearDiscoveryData() = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1579,7 +1827,22 @@ class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 7
+        private const val SQLITE_SCHEMA_VERSION = 8
+
+        /**
+         * The `chart_range` value the retrospective's daily bars are stored under.
+         *
+         * Deliberately not a [ChartRange] name. The chart cache resolves that column with
+         * `ChartRange.valueOf` and skips what it cannot resolve, so this key is the whole reason
+         * the two series can share a table without one ever being served as the other.
+         */
+        const val BACKTEST_CHART_RANGE = "BacktestDaily"
+
+        /**
+         * Below this, a disagreement between a stored close and a re-fetched one is rounding. A
+         * split is a factor, not a fraction of a percent, so there is no band to tune here.
+         */
+        private const val REBASE_TOLERANCE_BPS = 100L
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
@@ -1597,6 +1860,7 @@ class SQLiteStateStore(
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
             "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
+            "score_journal",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
@@ -1604,6 +1868,7 @@ class SQLiteStateStore(
             LogTableQuery("symbol_revision", "evaluated_at"),
             LogTableQuery("discovery_job", "started_at"),
             LogTableQuery("tipranks_attempt", "reserved_at"),
+            LogTableQuery("score_journal", "scored_at"),
         )
     }
 

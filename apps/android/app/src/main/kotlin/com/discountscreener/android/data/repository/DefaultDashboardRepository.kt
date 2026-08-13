@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.repository
 
+import com.discountscreener.android.data.debug.ScoreExport
 import com.discountscreener.android.data.persistence.CaptureKind
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
 import com.discountscreener.android.data.persistence.MetricGroupStatus
@@ -21,6 +22,7 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
+import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DashboardNotice
@@ -40,6 +42,7 @@ import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
+import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.rankMovement
 import com.discountscreener.android.domain.model.significantValuationChange
@@ -58,11 +61,13 @@ import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.QuantLensExpectedValuePolicy
 import com.discountscreener.core.engine.ReportingEngine
 import com.discountscreener.core.engine.ScreenDataProjectionEngine
+import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.engine.TickerSearchCandidate
 import com.discountscreener.core.engine.TickerSearchEngine
 import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
+import com.discountscreener.core.engine.computeSectorBenchmarks
 import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
@@ -82,8 +87,10 @@ import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.readsSectorBenchmarks
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
@@ -122,6 +129,8 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeScoreStatus
+import com.discountscreener.core.regime.RegimeScoringPolicy
+import com.discountscreener.core.regime.regimeFitTerms
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
@@ -241,6 +250,7 @@ class DefaultDashboardRepository(
     private var trackedSymbols = mutableListOf<String>()
     private val revisions = linkedMapOf<String, MutableList<SymbolRevision>>()
     private val chartCache = linkedMapOf<String, List<HistoricalCandle>>()
+    private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
@@ -352,9 +362,67 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        startRefreshForCurrentProfile(stateMutex.withLock { trackedSymbols.toList() })
+        startRefreshForCurrentProfile(
+            stateMutex.withLock { trackedSymbols.toList() },
+            opportunityScoringModel,
+        )
         startMarketReadForCurrentProfile()
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+    }
+
+    /**
+     * Records what this pass scored, so that in some weeks there is evidence about which model
+     * works rather than only about which model is cleaner.
+     *
+     * Called from the refresh job once the pass has finished, which is the only moment the rows
+     * exist. `refreshAll` returns before any of that lands — the dashboard has to render first —
+     * so journalling at its return would record an empty list every time.
+     *
+     * Not called from `currentSnapshot` either, and the difference matters: a snapshot is rebuilt
+     * on every state change, several times a second while data arrives, and journalling there
+     * would record one pass a dozen times under a dozen timestamps.
+     *
+     * Failures are logged and dropped. A journal that could break a refresh would be a feature
+     * that costs the app its main job in exchange for a measurement.
+     *
+     * One clock, on purpose. The rows are stamped with [now] and the retention cutoff is cut from
+     * the same reading, so the window is always ninety days of *scoring passes*. Letting the store
+     * fall back to its own clock made a pass whose stamp trailed the wall clock by more than the
+     * window delete itself the moment it was written, which is what the wiring test caught.
+     */
+    private suspend fun journalScores(rows: List<OpportunityListRow>, model: OpportunityScoringModel) {
+        if (rows.isEmpty()) return
+        val scoredAt = now()
+        runCatching {
+            stateStore.appendScoreJournal(
+                rows = rows.map { row ->
+                    ScoreJournalRow(
+                        symbol = row.symbol,
+                        scoringModel = model.name,
+                        scoredAtEpochSeconds = scoredAt,
+                        fundamentalsScore = row.fundamentalsScore,
+                        technicalScore = row.technicalScore,
+                        forecastScore = row.forecastScore,
+                        regimeScore = row.regimeScore,
+                        compositeScore = row.compositeScore,
+                        compositeScoreBase = row.compositeScoreBase,
+                        marketPriceCents = row.marketPriceCents,
+                    )
+                },
+                retentionSeconds = SCORE_JOURNAL_RETENTION_SECONDS,
+                nowEpochSeconds = scoredAt,
+            )
+        }.onSuccess { dropped ->
+            if (dropped > 0) {
+                logger.info(
+                    TAG,
+                    "score journal: dropped $dropped row(s) older than " +
+                        "${SCORE_JOURNAL_RETENTION_SECONDS / 86_400} days",
+                )
+            }
+        }.onFailure { error ->
+            logger.error(TAG, "score journal append failed", error)
+        }
     }
 
     override suspend fun ensureDetailLoaded(
@@ -508,7 +576,7 @@ class DefaultDashboardRepository(
         if (newSymbols.isNotEmpty()) {
             stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
             emitUpdate()
-            startRefreshForCurrentProfile(newSymbols)
+            startRefreshForCurrentProfile(newSymbols, opportunityScoringModel)
         }
 
         return currentSnapshot(
@@ -536,20 +604,7 @@ class DefaultDashboardRepository(
             activeProfileGeneration
         }
         cancelActiveProfileWork()
-        stateMutex.withLock {
-            resetInMemoryLocked()
-            currentProfile = profile
-            trackedSymbols = symbols.toMutableList()
-            placeholderSymbols.addAll(trackedSymbols)
-            applyTransitionLocked(
-                reduceProfileTransition(
-                    ProfileTransitionEvent.SwitchRequested(
-                        profile = profile,
-                        symbolCount = trackedSymbols.size,
-                    ),
-                ),
-            )
-        }
+        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset())
         emitUpdate()
         val request = ProfileSwitchRequest(
             generation = generation,
@@ -608,8 +663,12 @@ class DefaultDashboardRepository(
         value.lowercase().filter { it.isLetterOrDigit() }
 
     private suspend fun loadUniverse(profile: String) {
-        val symbols = resolveProfileSymbols(profile)
-        val bootstrap = runCatching { stateStore.loadWarmStart() }
+        adoptProfileFromStore(profile, resolveProfileSymbols(profile), loadWarmStartOrReset())
+        emitUpdate()
+    }
+
+    private suspend fun loadWarmStartOrReset(): PersistenceBootstrap =
+        runCatching { stateStore.loadWarmStart() }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
                 stateMutex.withLock {
@@ -619,6 +678,21 @@ class DefaultDashboardRepository(
                 PersistenceBootstrap()
             }
 
+    /**
+     * Move to `profile` and fill it from the database, with nothing published in between.
+     *
+     * [resetInMemoryLocked] empties every cache. Any state the dashboard reads between that reset
+     * and [hydrateWarmStartLocked] is an empty dashboard, and the rows only return when the network
+     * answers — which is what a profile switch used to show: the list cleared, then refilled from
+     * Yahoo while the database sat there holding the same rows. Startup always did this correctly;
+     * the switch emitted the gap. The two halves are one locked step here, and the single
+     * [emitUpdate] belongs to the caller.
+     */
+    private suspend fun adoptProfileFromStore(
+        profile: String,
+        symbols: List<String>,
+        bootstrap: PersistenceBootstrap,
+    ) {
         stateMutex.withLock {
             resetInMemoryLocked()
             currentProfile = profile
@@ -641,7 +715,6 @@ class DefaultDashboardRepository(
         stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
         stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
         stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
-        emitUpdate()
     }
 
     private suspend fun ensureAdHocSymbolLoaded(symbol: String) {
@@ -696,65 +769,36 @@ class DefaultDashboardRepository(
         }
     }
 
+    /**
+     * The live half of a profile switch.
+     *
+     * The cached half already ran, before the caller published anything, so by the time this starts
+     * the dashboard is showing the database rows for the new profile. This only puts live data on
+     * top of them.
+     */
     private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
-        val bootstrap = runCatching { stateStore.loadWarmStart() }
-            .getOrElse { error ->
-                stateStore.resetWarmStartState()
-                stateMutex.withLock {
-                    if (request.generation != activeProfileGeneration) {
-                        return
-                    }
-                    resetInMemoryLocked()
-                    currentProfile = request.profile
-                    trackedSymbols = request.symbols.toMutableList()
-                    placeholderSymbols.addAll(trackedSymbols)
-                    applyTransitionLocked(
-                        reduceProfileTransition(
-                            ProfileTransitionEvent.SwitchRequested(
-                                profile = request.profile,
-                                symbolCount = trackedSymbols.size,
-                            ),
-                        ),
-                    )
-                    statusMessage = "SQLite warm-start reset after restore failure: ${error.message ?: "unknown error"}"
-                }
-                PersistenceBootstrap()
-            }
-
-        stateMutex.withLock {
-            if (request.generation != activeProfileGeneration) {
-                return
-            }
-            currentProfile = request.profile
-            trackedSymbols = request.symbols.toMutableList()
-            hydrateWarmStartLocked(bootstrap)
-            trackedSymbols = reorderSymbolsByPersistedRanking(trackedSymbols).toMutableList()
-            placeholderSymbols.clear()
-            placeholderSymbols.addAll(trackedSymbols.filter { engine.detail(it) == null })
-            applyTransitionLocked(
-                reduceProfileTransition(
-                    ProfileTransitionEvent.CachedHydrated(
-                        profile = currentProfile,
-                        symbolCount = trackedSymbols.size,
-                        cachedSymbolCount = staleSymbols.size,
-                    ),
-                ),
-            )
-        }
-
-        stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
-        stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
-        stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
-        emitUpdate()
-        startRefresh(request.symbols, request.generation)
+        // A profile switch carries no model of its own — the caller is changing the universe, not
+        // the scoring — so the journal records the model the user is actually looking at.
+        startRefresh(
+            request.symbols,
+            request.generation,
+            stateStore.loadScoringPreferences().opportunityModel,
+        )
     }
 
-    private suspend fun startRefreshForCurrentProfile(symbols: List<String>) {
+    private suspend fun startRefreshForCurrentProfile(
+        symbols: List<String>,
+        scoringModel: OpportunityScoringModel,
+    ) {
         val generation = stateMutex.withLock { activeProfileGeneration }
-        startRefresh(symbols, generation)
+        startRefresh(symbols, generation, scoringModel)
     }
 
-    private suspend fun startRefresh(symbols: List<String>, generation: Long) {
+    private suspend fun startRefresh(
+        symbols: List<String>,
+        generation: Long,
+        scoringModel: OpportunityScoringModel,
+    ) {
         if (symbols.isEmpty()) {
             return
         }
@@ -799,6 +843,10 @@ class DefaultDashboardRepository(
                         )
                         trackedSymbols.filter { engine.detail(it) != null }
                     }
+                    journalScores(
+                        stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
+                        scoringModel,
+                    )
                     emitUpdate()
                     startEnrichment(symbolsToEnrich, generation)
                 }
@@ -869,7 +917,7 @@ class DefaultDashboardRepository(
                         recordTerminalFailure = recordTerminalIssues || !needsRecovery,
                     )
                 }
-                queuePersist(persistenceDelta)
+                persistDelta(persistenceDelta)
                 emitUpdate()
             }
     }
@@ -1245,6 +1293,13 @@ class DefaultDashboardRepository(
             statusMessage = statusMessage,
             estimatesNotice = estimatesNotice,
             screenData = screenData,
+            replayBackingCharts = if (normalizedSelectedSymbol == null) {
+                emptyMap()
+            } else {
+                ChartRange.entries.mapNotNull { range ->
+                    replayBackingCache[chartKey(normalizedSelectedSymbol, range)]?.let { range to it }
+                }.toMap()
+            },
         )
     }
 
@@ -1555,6 +1610,9 @@ class DefaultDashboardRepository(
                 gapBps = gapBps,
                 upsideBps = upsideBps,
                 confidence = confidence,
+                qualification = detail?.qualification,
+                externalStatus = detail?.externalStatus,
+                analystCoverageCount = preferredAnalystCoverageCount(detail),
                 isWatched = detail?.isWatched ?: scoredRow?.isWatched ?: false,
                 freshness = freshness,
                 providerIssue = issueMessagesBySymbol[projectedRow.symbol],
@@ -1570,6 +1628,9 @@ class DefaultDashboardRepository(
                 fundamentalsSignals = scoredRow?.fundamentalsSignals.orEmpty(),
                 technicalSignals = scoredRow?.technicalSignals.orEmpty(),
                 forecastSignals = scoredRow?.forecastSignals.orEmpty(),
+                fundamentalsFactors = scoredRow?.fundamentalsFactors.orEmpty(),
+                technicalFactors = scoredRow?.technicalFactors.orEmpty(),
+                forecastFactors = scoredRow?.forecastFactors.orEmpty(),
                 regimeStatus = scoredRow?.regimeStatus ?: RegimeScoreStatus.NotApplicable,
                 regimeCauses = scoredRow?.regimeCauses.orEmpty(),
                 regimeSignals = scoredRow?.regimeSignals.orEmpty(),
@@ -1744,8 +1805,26 @@ class DefaultDashboardRepository(
             regimeSummariesBySymbol = regimeDailySummaries,
             marketRegime = marketRegime,
             regimeScoringEnabled = regimeScoringEnabled,
+            sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
+            timeseriesBySymbol = timeseriesCache,
         ),
     )
+
+    /**
+     * The sector levels for one pass of the list, computed from **every** ingested symbol.
+     *
+     * The cohort, not the qualified list: qualification keeps roughly one symbol in eight, and a
+     * sector centre taken over the survivors would be the level of the cheap tail rather than the
+     * level of the sector. It is recomputed per pass rather than cached — it is one pass over the
+     * same details [OpportunityEngine.buildRows] is about to score, so a cache here would buy
+     * nothing and would need an invalidation rule that could go stale.
+     */
+    private fun sectorBenchmarksLocked(
+        scoringModel: OpportunityScoringModel,
+    ): Map<String, SectorBenchmarks> {
+        if (!scoringModel.readsSectorBenchmarks()) return emptyMap()
+        return computeSectorBenchmarks(engine.trackedSymbols().mapNotNull { engine.detail(it) })
+    }
 
     private fun buildTrackedRowLocked(
         symbol: String,
@@ -1843,6 +1922,9 @@ class DefaultDashboardRepository(
             gapBps = row.gapBps,
             upsideBps = row.upsideBps,
             confidence = row.confidence,
+            qualification = detail?.qualification,
+            externalStatus = detail?.externalStatus,
+            analystCoverageCount = preferredAnalystCoverageCount(detail),
             isWatched = row.isWatched,
             freshness = freshness,
             providerIssue = issueMessage,
@@ -1858,6 +1940,9 @@ class DefaultDashboardRepository(
             fundamentalsSignals = row.fundamentalsSignals,
             technicalSignals = row.technicalSignals,
             forecastSignals = row.forecastSignals,
+            fundamentalsFactors = row.fundamentalsFactors,
+            technicalFactors = row.technicalFactors,
+            forecastFactors = row.forecastFactors,
             regimeStatus = row.regimeStatus,
             regimeCauses = row.regimeCauses,
             regimeSignals = row.regimeSignals,
@@ -2351,6 +2436,22 @@ class DefaultDashboardRepository(
         )
     }
 
+    /**
+     * Persist one delta, waiting for the write.
+     *
+     * Callers used to hand this to `repositoryScope.launch` — fire-and-forget, one coroutine per
+     * symbol. On a 20-symbol profile that is harmless: the writes finish as fast as they arrive. On
+     * the 501-symbol universe it is an unbounded producer feeding a consumer that serialises on a
+     * single SQLite writer, so the launches pile up, each holding its delta and a write in flight.
+     * Measured on emulator-5554 (3 GB): native memory went from 12 MB to 1.7 GB in twenty seconds
+     * until Scudo could not map another page and aborted the process. The same run capped at 20
+     * symbols sat flat at 18 MB for over two minutes — the cost is the pile-up, not the data.
+     *
+     * Waiting is the whole fix. Both callers already collect sequentially, so awaiting the write
+     * back-pressures the pipeline end to end: the upstream `flatMapMerge` buffer fills, fetches stop
+     * being issued, and the refresh runs at the speed the disk can absorb rather than the speed the
+     * network can produce. Slower by the cost of the writes, and bounded.
+     */
     private suspend fun persistDelta(delta: PersistenceDelta) {
         if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
             stateStore.persistBatch(delta.rawCaptures, delta.revisions)
@@ -2358,11 +2459,6 @@ class DefaultDashboardRepository(
         stateStore.replaceIssues(delta.issues)
     }
 
-    private fun queuePersist(delta: PersistenceDelta) {
-        repositoryScope.launch {
-            persistDelta(delta)
-        }
-    }
 
     private suspend fun cancelActiveProfileWork() {
         val (previousSwitchJob, previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
@@ -2766,7 +2862,7 @@ class DefaultDashboardRepository(
                     val toApply = if (finalRound) result else result.copy(errors = emptyList())
                     val delta = stateMutex.withLock { applyEnrichmentResultLocked(toApply) }
                     if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-                        queuePersist(delta)
+                        persistDelta(delta)
                     }
                     emitUpdate()
                 }
@@ -3342,6 +3438,51 @@ class DefaultDashboardRepository(
         trackedSymbols.mapNotNull { engine.detail(it) }
     }
 
+    override suspend fun scoreExportCsv(
+        opportunityScoringModel: OpportunityScoringModel,
+    ): String = stateMutex.withLock {
+        // Every candidate, qualified or not, and no view filter. The Opportunities list keeps
+        // roughly one symbol in eight; a correlation over the survivors would be range-restricted
+        // and would understate the very overlap this file exists to size.
+        var rows = OpportunityEngine.buildRows(
+            engine,
+            OpportunityContext(
+                filter = ViewFilter(),
+                chartSummariesBySymbol = chartSummaries,
+                analysesBySymbol = dcfCache,
+                scoringModel = opportunityScoringModel,
+                regimeSummariesBySymbol = regimeDailySummaries,
+                marketRegime = marketRegime,
+                regimeScoringEnabled = regimeScoringEnabled,
+                sectorBenchmarks = sectorBenchmarksLocked(opportunityScoringModel),
+                timeseriesBySymbol = timeseriesCache,
+            ),
+            includeUnqualified = true,
+        )
+        var qualified = engine
+            .filteredRows(engine.symbolCount().coerceAtLeast(1), ViewFilter())
+            .filter { it.isQualified }
+            .map { it.symbol }
+            .toSet()
+        var details = rows.mapNotNull { engine.detail(it.symbol) }.associateBy { it.symbol }
+        // The market bucket is a weighted mean of up to nine terms, so a correlation against the
+        // bucket alone cannot say which term carries which sign. The terms go in the file next to
+        // it, unfiltered, with the stance that weighted them.
+        var policy = marketRegime?.let(RegimeScoringPolicy::fromRegime)
+        var terms = if (policy == null) {
+            emptyMap()
+        } else {
+            rows.associate { row ->
+                row.symbol to regimeFitTerms(
+                    details[row.symbol]?.fundamentals,
+                    regimeDailySummaries[row.symbol],
+                    policy,
+                )
+            }
+        }
+        ScoreExport.buildCsv(rows, qualified, details, regimeDailySummaries, terms, policy?.stance)
+    }
+
     override suspend fun recordEstimatesSnapshot(report: IndexEstimatesReport): Boolean {
         return try {
             val rawHistory = stateStore.getEstimatesHistory(report.profileName)
@@ -3375,6 +3516,20 @@ class DefaultDashboardRepository(
         throw error
     }
 
+    override suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange) {
+        var key = chartKey(symbol, range)
+        if (stateMutex.withLock { replayBackingCache[key] } != null) return
+        try {
+            var candles = yahooClient.fetchReplayBackingCandles(symbol, range)
+            stateMutex.withLock {
+                replayBackingCache[key] = candles
+            }
+            emitUpdate()
+        } catch (error: Throwable) {
+            logger.error(TAG, "Failed to fetch replay backing candles for $symbol/$range", error)
+        }
+    }
+
     companion object {
         /** Product cold-start for release builds. */
         const val PRODUCT_DEFAULT_PROFILE = "sp500"
@@ -3391,6 +3546,15 @@ class DefaultDashboardRepository(
         private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
         private const val TAG = "DiscountScreener"
+
+        /**
+         * How long a journalled score is kept: ninety days.
+         *
+         * Long enough to hold the 21-, 63- and 126-day horizons the retrospective reports on, and
+         * short enough that a five-hundred-symbol profile refreshed daily stays in the low
+         * hundreds of thousands of rows.
+         */
+        private const val SCORE_JOURNAL_RETENTION_SECONDS = 90L * 24L * 60L * 60L
 
         private fun retryBackoffMillis(round: Int): Long = when (round) {
             0 -> 1_500L
@@ -3571,16 +3735,14 @@ internal fun opportunityDecisionStateFor(
     compositeScore: Int,
     trustNote: String?,
     scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
-): RowDecisionState? = when {
-    freshness != RowFreshness.Updated -> null
-    confidence == ConfidenceBand.Low -> RowDecisionState.Avoid
-    upsideBps <= 0 -> RowDecisionState.Avoid
-    compositeScore < OpportunityEngine.avoidBelowScore(scoringModel) -> RowDecisionState.Avoid
-    trustNote != null -> RowDecisionState.Watch
-    confidence == ConfidenceBand.High &&
-        compositeScore >= OpportunityEngine.actAtOrAboveScore(scoringModel) -> RowDecisionState.Act
-    else -> RowDecisionState.Watch
-}
+): RowDecisionState? = explainOpportunityDecision(
+    freshness = freshness,
+    confidence = confidence,
+    upsideBps = upsideBps,
+    compositeScore = compositeScore,
+    trustNote = trustNote,
+    scoringModel = scoringModel,
+).state
 
 internal fun rowTrustNote(
     detail: SymbolDetail?,

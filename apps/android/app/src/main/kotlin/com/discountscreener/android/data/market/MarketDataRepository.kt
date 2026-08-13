@@ -26,11 +26,20 @@ import kotlinx.coroutines.sync.withLock
  * The market reading for the fourth scoring dimension: fetches what `:core` cannot, then hands it
  * over as a [MarketDataBundle].
  *
- * **Nothing here is persisted.** The dashboard's own per-symbol charts go through the chart cache,
- * the merge and the raw-capture ledger because the user can scroll back through them; this data
- * exists only to answer "what is the market doing right now", it is worthless a day later, and it
- * would otherwise double the size of every refresh's persistence delta. It also keeps the second
- * per-symbol series off `ChartRange`, which is a published contract serialized into saved state.
+ * **One thing here is persisted, and it used to be nothing.** The dashboard's own per-symbol charts
+ * go through the chart cache, the merge and the raw-capture ledger because the user can scroll back
+ * through them; the readings computed here exist only to answer "what is the market doing right
+ * now", they are worthless a day later, and none of them is written.
+ *
+ * The daily *bars* are the exception, and the reason the earlier rule changed. The retrospective
+ * needs dated prices and nothing else in the app has them: these bars are fetched at `1y`/`1d`,
+ * used once, and were dropped on exit. They now go to a [DailyCandleSink] — written here, where
+ * they are already in hand, rather than kept in the cache for a caller to collect later. That
+ * distinction is the whole design: five hundred symbols of daily bars is several megabytes, and
+ * retaining them for the life of the process to save a layering hop would be the worse defect.
+ *
+ * The original rule's last clause still holds. The sink stores them under a key that is not a
+ * `ChartRange` name, so the second per-symbol series stays off a published contract.
  *
  * **[cachedRegime] never blocks and never fetches.** The dashboard renders from it — including on
  * a cold start, where it is null and the market dimension reports itself unavailable. Refreshing is
@@ -41,6 +50,11 @@ open class MarketDataRepository(
     private val yahooClient: YahooFinanceClient,
     private val fearGreedClient: CnnFearGreedClient,
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000L },
+    /**
+     * Null keeps the old behaviour exactly: fetch, score, drop. The retrospective is the only
+     * caller that needs the bars kept, so a repository built without one is not silently storing.
+     */
+    private val dailyCandleSink: DailyCandleSink? = null,
 ) {
     private val mutex = Mutex()
     private var cached: MarketRegime? = null
@@ -94,23 +108,28 @@ open class MarketDataRepository(
         if (!shouldRefresh) return cachedRegime()
 
         try {
-            val universe = fetchUniverse(symbols)
+            val fetched = fetchUniverse(symbols)
             val regime = computeMarketRegime(
                 bundle = fetchBundle(now),
-                universe = universe,
+                universe = fetched.views,
                 previousExposurePct = cachedRegime()?.suggestedExposurePct,
             )
             val usable = RegimeScoringPolicy.fromRegime(regime) != null
             mutex.withLock {
                 if (usable) {
                     cached = regime
-                    cachedDailySummaries = universe.mapNotNull { view ->
+                    cachedDailySummaries = fetched.views.mapNotNull { view ->
                         view.summary?.let { view.symbol to it }
                     }.toMap()
                     lastFailureEpochSeconds = null
                 } else {
                     lastFailureEpochSeconds = now
                 }
+            }
+            // Only a usable reading is kept, and only its bars are stored. A round that failed
+            // hard enough to be unusable is a round whose bars are as likely to be partial.
+            if (usable) {
+                dailyCandleSink?.persistBacktestCandles(fetched.candlesBySymbol, now)
             }
         } finally {
             mutex.withLock { refreshing = false }
@@ -139,16 +158,31 @@ open class MarketDataRepository(
      * weekly bars would compare a 200-period average against 52 of them, so this is a second
      * request per symbol rather than a reuse of the summary the dashboard already holds.
      */
-    private suspend fun fetchUniverse(symbols: List<String>): List<SymbolDailyView> =
-        fetchConcurrently(symbols) { symbol ->
+    private suspend fun fetchUniverse(symbols: List<String>): UniverseFetch {
+        val fetched = fetchConcurrently(symbols) { symbol ->
             val candles = dailyCandlesOrEmpty(symbol, YEAR_RANGE)
             SymbolDailyView(
                 symbol = symbol,
                 summary = candles.takeIf { it.isNotEmpty() }
                     ?.let { ChartAnalysis.buildSummary(ChartRange.Year, it, nowEpochSeconds()) },
                 closes = closesOf(candles),
-            )
+            ) to candles
         }
+        return UniverseFetch(
+            views = fetched.map { it.first },
+            candlesBySymbol = fetched.filter { it.second.isNotEmpty() }
+                .associate { it.first.symbol to it.second },
+        )
+    }
+
+    /**
+     * The bars ride alongside the views instead of inside them, because [SymbolDailyView] is a
+     * `:core` regime type and the bars are not something the regime engine has any use for.
+     */
+    private class UniverseFetch(
+        val views: List<SymbolDailyView>,
+        val candlesBySymbol: Map<String, List<HistoricalCandle>>,
+    )
 
     /** One symbol failing costs its pillar a sample; it must not cost the whole reading. */
     private suspend fun dailyCandlesOrEmpty(symbol: String, rangeToken: String): List<HistoricalCandle> =

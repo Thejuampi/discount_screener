@@ -1,6 +1,8 @@
 package com.discountscreener.core.regime
 
 import com.discountscreener.core.engine.ChartAnalysis
+import com.discountscreener.core.engine.ScoreReading
+import com.discountscreener.core.engine.scoreReading
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.HistoricalCandle
@@ -344,12 +346,12 @@ internal fun pillarTone(pillarId: String, score: Int): String {
 }
 
 /** `interpret.rs::score_band`: two bands either side of a neutral middle. */
-private fun scoreBand(score: Int): Int = when {
-    score >= 50 -> 2
-    score >= 15 -> 1
-    score > -15 -> 0
-    score > -50 -> -1
-    else -> -2
+private fun scoreBand(score: Int): Int = when (scoreReading(score)) {
+    ScoreReading.Strong -> 2
+    ScoreReading.Good -> 1
+    ScoreReading.Neutral -> 0
+    ScoreReading.Weak -> -1
+    ScoreReading.Poor -> -2
 }
 
 private const val BREADTH_FULL_UNIVERSE = 80

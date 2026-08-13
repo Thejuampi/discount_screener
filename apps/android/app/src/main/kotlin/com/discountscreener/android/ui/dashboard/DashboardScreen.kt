@@ -33,6 +33,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
 import com.discountscreener.android.domain.model.DiscoveryJobStatus
@@ -259,6 +260,7 @@ fun DashboardScreen(
 }
 
 internal val opportunityScoringModelChipOrder = listOf(
+    OpportunityScoringModel.AggressiveV4,
     OpportunityScoringModel.AggressiveV3,
     OpportunityScoringModel.AggressiveV2,
     OpportunityScoringModel.Aggressive,
@@ -266,9 +268,10 @@ internal val opportunityScoringModelChipOrder = listOf(
 )
 
 internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
-    OpportunityScoringModel.AggressiveV3 -> "Aggressive V3"
-    OpportunityScoringModel.AggressiveV2 -> "Aggressive V2"
-    OpportunityScoringModel.Aggressive -> "Aggressive"
+    OpportunityScoringModel.AggressiveV4 -> "V4"
+    OpportunityScoringModel.AggressiveV3 -> "V3"
+    OpportunityScoringModel.AggressiveV2 -> "V2"
+    OpportunityScoringModel.Aggressive -> "V1"
     OpportunityScoringModel.Legacy -> "Legacy"
 }
 
@@ -283,8 +286,12 @@ internal fun OpportunityScoringModelToggle(
     onAction: (DashboardAction) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
-    // Four chips overflow a typical phone width; LazyRow keeps every model reachable and
+    // Five chips overflow a typical phone width; LazyRow keeps every model reachable and
     // scrolls the selected chip into view so selection never looks like "no chip filled".
+    //
+    // The cost is that a neighbour chip is clipped at the edge, which live QA raised. It is the
+    // accepted side of the trade: wrapping to a second line costs header height on every screen to
+    // spare one partly-drawn chip, and the clipped chip is still reachable by scrolling and by tap.
     val listState = rememberLazyListState()
     val selectedIndex = opportunityScoringModelChipOrder.indexOf(selected).coerceAtLeast(0)
 
@@ -400,6 +407,15 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
                 onPrune = { showPruneDialog = true },
                 onClearAll = { showClearDialog = true },
             )
+        }
+
+        if (BuildConfig.DEBUG) {
+            item {
+                MeasurementCard(
+                    onExport = { onAction(DashboardAction.ExportScores) },
+                    onRetrospective = { onAction(DashboardAction.RunRetrospective) },
+                )
+            }
         }
 
         if (state.systemStatusMessage != null) {
@@ -564,6 +580,46 @@ private fun LogStatsCard(state: DashboardUiState) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Debug-only. Writes the current Opportunities scores, and the inputs behind them, to a CSV in the
+ * app's private files directory. The written path is reported through the System status line.
+ *
+ * It measures how far the four buckets repeat each other, which is a question about the whole
+ * universe and cannot be answered from a screen.
+ */
+@Composable
+private fun MeasurementCard(onExport: () -> Unit, onRetrospective: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Measurement (debug)", fontWeight = FontWeight.Bold)
+            Text(
+                "Writes every scored row and its raw inputs to CSV, for the bucket-overlap analysis.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
+                Text("Export Scores CSV", maxLines = 1, textAlign = TextAlign.Center)
+            }
+            Text(
+                "Replays the technicals bucket over the stored daily bars and reports the forward " +
+                    "return of each score decile — including when there is none.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onRetrospective, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Retrospective", maxLines = 1, textAlign = TextAlign.Center)
             }
         }
     }

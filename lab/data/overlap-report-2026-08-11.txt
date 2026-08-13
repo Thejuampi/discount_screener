@@ -1,0 +1,86 @@
+
+=== Cohort — every scored candidate  (498 rows) ===
+
+Bucket pairs (Spearman rho)
+  rho(F, T)                          +0.128   n=498
+  rho(F, Fc)                         -0.202   n=494
+  rho(F, M)                          +0.381   n=498
+  rho(T, Fc)                         -0.225   n=494
+  rho(T, M)                          -0.367   n=498
+  rho(Fc, M)                         -0.066   n=494
+
+How much of a bucket the other three already know (rank R^2)
+  R^2(F | the other three)           +0.238   n=494
+  R^2(T | the other three)           +0.260   n=494
+  R^2(Fc | the other three)          +0.089   n=494
+  R^2(M | the other three)           +0.328   n=494
+
+Shared inputs — are they the cause, or is the ranking a coincidence?
+  rho(forward P/E, F)                -0.548   n=494
+  rho(forward P/E, M)                -0.448   n=494
+  rho(EV/EBITDA, F)                  -0.546   n=469
+  rho(EV/EBITDA, M)                  -0.560   n=469
+  rho(P/B, F)                        -0.211   n=459
+  rho(P/B, M)                        -0.508   n=459
+  rho(close/EMA200, T)               +0.826   n=498
+  rho(close/EMA200, M)               -0.461   n=498
+
+Is the shared input the channel? (partial rho, control removed from both sides)
+  rho(T, M | close/EMA200)           +0.027   n=498
+  rho(F, M | the three multiples)    +0.148   n=426
+
+=== Qualified only — the Opportunities list (range-restricted)  (65 rows) ===
+
+Bucket pairs (Spearman rho)
+  rho(F, T)                          -0.086   n=65
+  rho(F, Fc)                         -0.062   n=64
+  rho(F, M)                          +0.359   n=65
+  rho(T, Fc)                         +0.008   n=64
+  rho(T, M)                          -0.516   n=65
+  rho(Fc, M)                         -0.165   n=64
+
+How much of a bucket the other three already know (rank R^2)
+  R^2(F | the other three)           +0.151   n=64
+  R^2(T | the other three)           +0.280   n=64
+  R^2(Fc | the other three)          +0.035   n=64
+  R^2(M | the other three)           +0.389   n=64
+
+Shared inputs — are they the cause, or is the ranking a coincidence?
+  rho(forward P/E, F)                -0.433   n=64
+  rho(forward P/E, M)                -0.497   n=64
+  rho(EV/EBITDA, F)                  -0.496   n=64
+  rho(EV/EBITDA, M)                  -0.578   n=64
+  rho(P/B, F)                        -0.141   n=57
+  rho(P/B, M)                        -0.418   n=57
+  rho(close/EMA200, T)               +0.856   n=65
+  rho(close/EMA200, M)               -0.478   n=65
+
+Is the shared input the channel? (partial rho, control removed from both sides)
+  rho(T, M | close/EMA200)           -0.235   n=65
+  rho(F, M | the three multiples)    +0.135   n=55
+
+=== Bucket spread (mean absolute deviation) — cohort, 496 rows ===
+  2 row(s) had no robust centre and are excluded, not defaulted.
+  p5      6.5
+  p10     7.9
+  p25    11.6
+  p50    17.0
+  p75    23.2
+  p90    29.5
+  p95    33.5
+  p99    41.8
+  max    45.8
+
+=== Bucket spread (mean absolute deviation) — qualified only, 65 rows ===
+  0 row(s) had no robust centre and are excluded, not defaulted.
+  p5      9.8
+  p10    12.5
+  p25    16.5
+  p50    23.1
+  p75    29.5
+  p90    39.5
+  p95    41.8
+  p99    42.5
+  max    43.8
+
+The standard error of a Spearman rho on n rows is about 1/sqrt(n-1); on the cohort that is about 0.045.

@@ -5256,8 +5256,17 @@ mod tests {
             OpportunityScoringModel::Aggressive,
         );
 
-        assert_eq!(legacy.composite_score, 15);
-        assert_eq!(aggressive.composite_score, 27);
+        // Legacy was 15 until `14869eb` took the Quant Engine out of ranking. `DCF+` was worth
+        // +1 to the forecast bucket, and Legacy is the plain sum of its buckets, so 15 -> 14.
+        // That commit updated the two direct tests of `score_opportunity_forecasts` and missed
+        // this one, which reads the composite instead. Do not put the 15 back.
+        //
+        // The pair is one assertion so both numbers report together: the claim in the name is a
+        // comparison, and half of a comparison cannot fail usefully.
+        assert_eq!(
+            (legacy.composite_score, aggressive.composite_score),
+            (14, 27),
+        );
     }
 
     #[test]

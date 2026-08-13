@@ -14,6 +14,8 @@ data class DashboardUseCases(
     val loadSystemStats: LoadSystemStatsUseCase,
     val pruneOldRevisions: PruneOldRevisionsUseCase,
     val clearAllData: ClearAllDataUseCase,
+    val exportScores: ExportScoresUseCase,
+    val runRetrospective: RunRetrospectiveUseCase,
     val getIndexEstimates: GetIndexEstimatesUseCase,
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -25,4 +27,5 @@ data class DashboardUseCases(
     val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
     val clearDiscoveryData: ClearDiscoveryDataUseCase,
     val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
+    val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
 )

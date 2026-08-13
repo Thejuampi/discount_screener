@@ -1,0 +1,281 @@
+{
+  "contract": "opportunity-v4",
+  "version": 1,
+  "purpose": "Bind the arithmetic that is unique to the AggressiveV4 opportunity model, so a later Rust port agrees with Android by measurement rather than by re-reading the same prose.",
+  "provenance": {
+    "authored": "2026-08-11",
+    "implementations": ["android/kotlin"],
+    "derivation": "Hand-computed from the constants and formulas in apps/android/core/.../engine/OpportunityEngine.kt and the plan text, and written down before the Kotlin validator was run. This file is NOT a dump of Kotlin output.",
+    "why_it_matters": "market-regime-fit-v1.json can forbid regeneration because Rust is the source of its numbers. V4 has no second implementation yet, so nothing outside this file can catch Kotlin from agreeing with itself. Hand derivation is the only independence available, and it is what makes the first cross-language comparison a real one. Regenerating any expected value from Kotlin destroys that and must not be done.",
+    "constants_bound": {
+      "V4_COMPOSITE_AGREEMENT_BONUS": 5,
+      "V4_COMPOSITE_BOUND": 110,
+      "V4_SPREAD_FULL": 38.5,
+      "V3_BETA_HAIRCUT_MAX": 10.0,
+      "V3_BETA_HAIRCUT_MULT_MAX": 2.5,
+      "V3_BETA_LOW_MILLIS": 800.0,
+      "V3_BETA_HIGH_MILLIS": 1600.0,
+      "V4_FUNDAMENTALS_FULL_WEIGHT": 110.0,
+      "V3_FUND_VALUATION_WEIGHT": 24.0,
+      "V3_FUND_ROE_WEIGHT": 16.0,
+      "V4_FUND_SHARE_COUNT_WEIGHT": 10.0,
+      "V4_FUND_SHARE_COUNT_SHRINK_BPS": -300.0,
+      "V4_FUND_SHARE_COUNT_DILUTE_BPS": 300.0,
+      "V4_FUND_SECTOR_CHEAP_MULT": 0.7,
+      "V4_FUND_SECTOR_RICH_MULT": 1.5,
+      "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS": -500.0,
+      "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS": 1500.0
+    }
+  },
+  "units": {
+    "bucket scores": "integer points, -100..100",
+    "composite": "integer points, clamped to +/- V4_COMPOSITE_BOUND",
+    "_hundredths suffix": "the real value times 100, rounded to the nearest integer",
+    "_bps suffix": "basis points, 1/10000",
+    "_millis suffix": "thousandths",
+    "multiples": "hundredths, so 2000 is a multiple of 20.00"
+  },
+  "notes": [
+    "Intermediates are carried as hundredths, not as floating-point literals. A port that computes 0.9480519480519481 and a port that computes 0.9480519480519480 are both correct, and a JSON float would make one of them fail.",
+    "No case is allowed to land on a .5 rounding boundary. Kotlin's roundToInt is half-up and Rust's f64::round is half-away-from-zero, and they disagree on negative halves. That difference is real but it is not what this contract is about, so no case may depend on it.",
+    "EVERY case that binds a constant sits strictly INSIDE its band, and the two cases that sit on an edge bind nothing but the edge. An observation placed exactly on a computed anchor returns -1.0 or +1.0 for EVERY constant that puts the anchor at or beyond it, so it cannot separate the right constant from a wrong one on that side. The blindness is one-sided and therefore easy to miss: a case at 0.7 x centre does move when the multiplier falls to 0.5, which is what a first round of mutation testing measured, and does not move at all when it rises to 1.0, which that round never tried. Each interior case now carries a machine-checked `mutants` list instead of a prose claim.",
+    "A case that binds a constant and a case that binds a boundary cannot be the same case, so this file spends two extra cases rather than pretending one does both. forward_pe at exactly 0.7 x centre binds `observed <= lower`; ev_ebitda at exactly 1.5 x centre binds `observed >= upper`. Neither claims to measure the multiplier it is computed from.",
+    "The two return-on-equity cases were the first to be corrected this way, and the mutation that exposed the problem is worth recording: with ROE pinned at its floor, replacing the ADDITIVE lower offset with the multiplicative rule survived, because 500 <= 500 and 500 <= 700 pin identically. The five multiple and share-count cases had exactly the same defect and were corrected in the same way once it was measured in both directions.",
+    "Every fundamentals case declares either `mutants` — the score it produces under each wrong value of each constant it claims to bind, at least one below and one above the true value — or `binds_no_constant`, saying so and why. OpportunityV4ContractTest asserts the declaration is present, that both sides of every constant are covered, and that no listed mutant score equals the case's own expected score. THAT is the control this contract was missing. A case which cannot discriminate now fails at authoring time, instead of passing a mutation round that happened to push its constant the one way the case could see.",
+    "expected_without_benchmarks re-scores the SAME inputs with sector_benchmarks withheld. It is not decoration: without it a port that ignored the benchmark entirely could still pass, because a value can score the same under both rules by accident. Every pair below is chosen so the two readings differ in the score, and most also differ in the signal suffix."
+  ],
+
+  "composite_cases": [
+    {
+      "name": "four buckets in exact agreement earn the full bonus",
+      "binds": "agreement = 1 when spread = 0; bonus = V4_COMPOSITE_AGREEMENT_BONUS * (n - 1)",
+      "buckets": { "fundamentals": 40, "technical": 40, "forecast": 40, "regime": 40 },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 55 }
+    },
+    {
+      "name": "three buckets close together, before the fourth arrives",
+      "binds": "the control reading for the case below; odd-count median; a partial bonus",
+      "buckets": { "fundamentals": 50, "technical": 48, "forecast": 44, "regime": null },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4800, "spread_hundredths": 200, "bonus_hundredths": 948, "composite": 57 }
+    },
+    {
+      "name": "a fourth bucket that dissents lowers the score although it raises the count",
+      "binds": "the SNDK defect. V3's bonus would rise from +10 to +15 on arrival; V4's falls, because the arriving bucket disagrees.",
+      "buckets": { "fundamentals": 50, "technical": 48, "forecast": 44, "regime": -20 },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4600, "spread_hundredths": 1850, "bonus_hundredths": 779, "composite": 54 }
+    },
+    {
+      "name": "a spread past V4_SPREAD_FULL pays nothing at all",
+      "binds": "the clamp on spread / V4_SPREAD_FULL. The raw ratio here is 1.0389, so a port that forgot to clamp would produce a negative bonus and a composite of 20 minus something.",
+      "buckets": { "fundamentals": 100, "technical": -60, "forecast": 20, "regime": 20 },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 2000, "spread_hundredths": 4000, "bonus_hundredths": 0, "composite": 20 }
+    },
+    {
+      "name": "two buckets, an even median and a single bonus step",
+      "binds": "medianOf on an even count is the midpoint of the middle pair, not the lower of the two; (n - 1) = 1",
+      "buckets": { "fundamentals": 60, "technical": 30, "forecast": null, "regime": null },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4500, "spread_hundredths": 1500, "bonus_hundredths": 305, "composite": 48 }
+    },
+    {
+      "name": "no bucket reported",
+      "binds": "the composite is 0 and there is no agreement reading, rather than a fabricated centre",
+      "buckets": { "fundamentals": null, "technical": null, "forecast": null, "regime": null },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": null, "spread_hundredths": null, "bonus_hundredths": null, "composite": 0 }
+    },
+    {
+      "name": "beta at the low anchor haircuts nothing",
+      "binds": "v3BetaRiskHaircut at V3_BETA_LOW_MILLIS is 0, so the haircut is applied and is zero — not skipped",
+      "buckets": { "fundamentals": 40, "technical": 40, "forecast": 40, "regime": 40 },
+      "beta_millis": 800,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 55 }
+    },
+    {
+      "name": "beta midway up the ramp haircuts half the maximum",
+      "binds": "smoothRamp is linear between the anchors; ((ramp + 1) / 2) * V3_BETA_HAIRCUT_MAX",
+      "buckets": { "fundamentals": 40, "technical": 40, "forecast": 40, "regime": 40 },
+      "beta_millis": 1200,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 50 }
+    },
+    {
+      "name": "beta at the high anchor haircuts the maximum",
+      "binds": "V3_BETA_HAIRCUT_MAX at V3_BETA_HIGH_MILLIS",
+      "buckets": { "fundamentals": 40, "technical": 40, "forecast": 40, "regime": 40 },
+      "beta_millis": 1600,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 4000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 45 }
+    },
+    {
+      "name": "the regime's haircut multiplier is clamped at V3_BETA_HAIRCUT_MULT_MAX",
+      "binds": "a multiplier of 4.0 must act as 2.5. Unclamped it would take 40 points and land the composite at 15.",
+      "buckets": { "fundamentals": 40, "technical": 40, "forecast": 40, "regime": 40 },
+      "beta_millis": 1600,
+      "beta_haircut_mult": 4.0,
+      "expected": { "centre_hundredths": 4000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 30 }
+    },
+    {
+      "name": "the composite is bounded above",
+      "binds": "V4_COMPOSITE_BOUND. centre + bonus is 115 here.",
+      "buckets": { "fundamentals": 100, "technical": 100, "forecast": 100, "regime": 100 },
+      "beta_millis": null,
+      "beta_haircut_mult": 1.0,
+      "expected": { "centre_hundredths": 10000, "spread_hundredths": 0, "bonus_hundredths": 1500, "composite": 110 }
+    },
+    {
+      "name": "the composite is bounded below, and only the haircut can reach that bound",
+      "binds": "V4_COMPOSITE_BOUND on the negative side. The bonus is never negative and the centre never below -100, so -110 is unreachable without the haircut; here base - haircut is -125.",
+      "buckets": { "fundamentals": -100, "technical": -100, "forecast": -100, "regime": 100 },
+      "beta_millis": 1600,
+      "beta_haircut_mult": 4.0,
+      "expected": { "centre_hundredths": -10000, "spread_hundredths": 5000, "bonus_hundredths": 0, "composite": -110 }
+    }
+  ],
+
+  "fundamentals_cases": [
+    {
+      "name": "forward P/E read against a sector that trades at 20x",
+      "field": "forward_pe_hundredths",
+      "binds": "V4_FUND_SECTOR_CHEAP_MULT and V4_FUND_SECTOR_RICH_MULT, both of them, in both directions. 16.00 sits strictly inside 0.7 x 20.00 .. 1.5 x 20.00, so every one of the four constant errors in `mutants` moves the score, two per constant, one on each side of its true value.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 0.5, "score": 3 },
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 1.0, "score": 7 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 1.0, "score": 2 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 2.0, "score": 6 }
+      ],
+      "fundamentals": { "forward_pe_hundredths": 1600 },
+      "sector_benchmarks": { "forward_pe_hundredths": 2000 },
+      "expected": { "score": 5, "signals": ["Mult§++"] },
+      "expected_without_benchmarks": { "score": 3, "signals": ["Mult+"] }
+    },
+    {
+      "name": "forward P/E exactly on the cheap edge of its sector band",
+      "field": "forward_pe_hundredths",
+      "binds": "ONLY the inclusivity of smoothRamp's lower comparison — `observed <= lower`, not `<`. It binds NOTHING about the value of V4_FUND_SECTOR_CHEAP_MULT, and that is not a weakness of this case but the reason it exists as a second one. An observation sitting on a computed anchor pins at -1.0 for every multiplier that puts the anchor at or above it, so cheap 0.7 and cheap 1.0 both score 7 here. The case above is what measures the constant; this one measures the boundary.",
+      "binds_no_constant": "nothing. It binds smoothRamp's `observed <= lower` and is blind by construction to the multiplier that computes its anchor, which is why the interior forward P/E case exists beside it.",
+      "fundamentals": { "forward_pe_hundredths": 1400 },
+      "sector_benchmarks": { "forward_pe_hundredths": 2000 },
+      "expected": { "score": 7, "signals": ["Mult§++"] },
+      "expected_without_benchmarks": { "score": 4, "signals": ["Mult++"] }
+    },
+    {
+      "name": "EV/EBITDA read against a sector that trades at 10x",
+      "field": "enterprise_to_ebitda_hundredths",
+      "binds": "both sector multipliers from the expensive side, in both directions. 14.00 is strictly inside 7.00 .. 15.00, and `mutants` records what each wrong constant would score. The absolute band, which runs to 20.00, calls the same multiple almost neutral.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 0.5, "score": -6 },
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 1.0, "score": -4 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 1.0, "score": -7 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 2.0, "score": -1 }
+      ],
+      "fundamentals": { "enterprise_to_ebitda_hundredths": 1400 },
+      "sector_benchmarks": { "enterprise_to_ebitda_hundredths": 1000 },
+      "expected": { "score": -5, "signals": ["Mult§--"] },
+      "expected_without_benchmarks": { "score": -1, "signals": ["Mult-"] }
+    },
+    {
+      "name": "EV/EBITDA exactly on the rich edge of its sector band",
+      "field": "enterprise_to_ebitda_hundredths",
+      "binds": "ONLY the inclusivity of smoothRamp's upper comparison — `observed >= upper`, not `>`. The companion to the forward P/E edge case above, from the other end of the ramp, and equally blind to the constant that computes its anchor: rich 1.5 and rich 1.0 both score -7 here.",
+      "binds_no_constant": "nothing. The `observed >= upper` companion to the forward P/E edge case, and blind in the same way.",
+      "fundamentals": { "enterprise_to_ebitda_hundredths": 1500 },
+      "sector_benchmarks": { "enterprise_to_ebitda_hundredths": 1000 },
+      "expected": { "score": -7, "signals": ["Mult§--"] },
+      "expected_without_benchmarks": { "score": -2, "signals": ["Mult-"] }
+    },
+    {
+      "name": "price to book read against a sector that trades at 4x",
+      "field": "price_to_book_hundredths",
+      "binds": "the sector band inverting the absolute verdict, and both multipliers in both directions. 3.20 is dear against an absolute band that ends at 5.00 and cheap inside a sector at 4.00, so the sign itself flips: +5 with the benchmark, -1 without. Strictly inside 2.80 .. 6.00, so all four mutants move it; see `mutants`.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 0.5, "score": 3 },
+        { "constant": "V4_FUND_SECTOR_CHEAP_MULT", "value": 1.0, "score": 7 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 1.0, "score": 2 },
+        { "constant": "V4_FUND_SECTOR_RICH_MULT", "value": 2.0, "score": 6 }
+      ],
+      "fundamentals": { "price_to_book_hundredths": 320 },
+      "sector_benchmarks": { "price_to_book_hundredths": 400 },
+      "expected": { "score": 5, "signals": ["Mult§++"] },
+      "expected_without_benchmarks": { "score": -1, "signals": ["Mult-"] }
+    },
+    {
+      "name": "return on equity above a sector earning 10%",
+      "field": "return_on_equity_bps",
+      "binds": "the ADDITIVE band, which is the one field whose band has a different shape. 20% ROE tops out the absolute 0..20% band and is merely good inside a sector at 10%. It sits strictly INSIDE [centre - 500, centre + 1500], which is the point: a case pinned on either edge would score the same under a multiplicative band and would measure only the edge it sat on.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS", "value": -1000.0, "score": 9 },
+        { "constant": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS", "value": -100.0, "score": 5 },
+        { "constant": "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS", "value": 800.0, "score": 15 },
+        { "constant": "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS", "value": 3000.0, "score": -2 }
+      ],
+      "fundamentals": { "return_on_equity_bps": 2000 },
+      "sector_benchmarks": { "return_on_equity_bps": 1000 },
+      "expected": { "score": 7, "signals": ["ROE§++"] },
+      "expected_without_benchmarks": { "score": 15, "signals": ["ROE++"] }
+    },
+    {
+      "name": "return on equity below a sector earning 10%",
+      "field": "return_on_equity_bps",
+      "binds": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS from the other side, and also strictly inside the band. 6% ROE is mediocre against the absolute band and near the floor of a sector at 10%. Both ROE cases are unpinned on purpose — the offsets are a width, and a width cannot be measured from an observation sitting on its edge.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS", "value": -1000.0, "score": -8 },
+        { "constant": "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS", "value": -100.0, "score": -15 },
+        { "constant": "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS", "value": 800.0, "score": -12 },
+        { "constant": "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS", "value": 3000.0, "score": -14 }
+      ],
+      "fundamentals": { "return_on_equity_bps": 600 },
+      "sector_benchmarks": { "return_on_equity_bps": 1000 },
+      "expected": { "score": -13, "signals": ["ROE§--"] },
+      "expected_without_benchmarks": { "score": -6, "signals": ["ROE-"] }
+    },
+    {
+      "name": "a shrinking share count is a buyback and scores positive",
+      "field": "diluted_average_shares",
+      "binds": "V4_FUND_SHARE_COUNT_WEIGHT, the sign, and BOTH ends of the band in both directions. -1.50% is strictly inside -3.00% .. +3.00%, and `mutants` records all four. A case at exactly -3.00% would score 9 for every shrink threshold at or above -3.00% and so would measure only that the ramp clamps.",
+      "fundamentals": {},
+      "mutants": [
+        { "constant": "V4_FUND_SHARE_COUNT_SHRINK_BPS", "value": -500.0, "score": 1 },
+        { "constant": "V4_FUND_SHARE_COUNT_SHRINK_BPS", "value": -100.0, "score": 9 },
+        { "constant": "V4_FUND_SHARE_COUNT_DILUTE_BPS", "value": 100.0, "score": 2 },
+        { "constant": "V4_FUND_SHARE_COUNT_DILUTE_BPS", "value": 600.0, "score": 6 }
+      ],
+      "diluted_average_shares": [1000000000.0, 985000000.0],
+      "expected": { "score": 5, "signals": ["Shares++"] }
+    },
+    {
+      "name": "a growing share count is dilution and scores negative",
+      "field": "diluted_average_shares",
+      "binds": "the other side of the same ramp, so the sign is a measured claim and not a reading of the minus in the source. Also strictly inside the band, with all four mutants recorded.",
+      "fundamentals": {},
+      "mutants": [
+        { "constant": "V4_FUND_SHARE_COUNT_SHRINK_BPS", "value": -500.0, "score": -6 },
+        { "constant": "V4_FUND_SHARE_COUNT_SHRINK_BPS", "value": -100.0, "score": -2 },
+        { "constant": "V4_FUND_SHARE_COUNT_DILUTE_BPS", "value": 100.0, "score": -9 },
+        { "constant": "V4_FUND_SHARE_COUNT_DILUTE_BPS", "value": 600.0, "score": 0 }
+      ],
+      "diluted_average_shares": [1000000000.0, 1015000000.0],
+      "expected": { "score": -5, "signals": ["Shares-"] }
+    },
+    {
+      "name": "a single-point share series contributes nothing, and nothing is not zero",
+      "field": "diluted_average_shares",
+      "binds": "one point cannot say which way the count moved. The term must be absent, so the bucket reports no evidence at all rather than a neutral score — a zero here would be a claim the data cannot support.",
+      "fundamentals": {},
+      "binds_no_constant": "nothing. One point cannot say which way the count moved, so no band constant can change the answer.",
+      "diluted_average_shares": [1000000000.0],
+      "expected": { "score": null, "signals": [] }
+    }
+  ]
+}

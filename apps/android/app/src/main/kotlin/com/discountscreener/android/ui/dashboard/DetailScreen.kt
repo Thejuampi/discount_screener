@@ -68,7 +68,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.RowDecisionState
+import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
@@ -86,13 +89,17 @@ import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.core.engine.ReplayWindow
+import com.discountscreener.core.engine.EXTERNAL_STATUS_HELP
+import com.discountscreener.core.engine.explainConfidence
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.engine.macdHistogramDerivatives
 import com.discountscreener.core.engine.macdReadingScale
 import com.discountscreener.core.engine.plainMacdReading
 import com.discountscreener.core.engine.plainRsiReading
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ProjectedDetailData
 import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
@@ -113,6 +120,7 @@ fun DetailScreen(
     route: DetailRoute,
     detail: SymbolDetail?,
     charts: Map<ChartRange, List<HistoricalCandle>>,
+    replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     history: List<SymbolRevision>,
     alerts: List<String>,
     quantLens: QuantLensUiState? = null,
@@ -124,8 +132,8 @@ fun DetailScreen(
     tickerSearchNotice: DashboardNotice? = null,
     projectedDetail: ProjectedDetailData? = null,
     scoreRow: OpportunityListRow? = null,
-    scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
-    regimeScoringEnabled: Boolean = true,
+    scoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
+    regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -147,7 +155,10 @@ fun DetailScreen(
         focusRequester.requestFocus()
     }
     var routeProjectedDetail = projectedDetail?.takeIf { projection -> projection.symbol == route.symbol }
-    var titleDetail = detail ?: routeProjectedDetail?.detail
+    var matchingDetail = detail?.takeIf { candidate -> candidate.symbol == route.symbol }
+        ?: routeProjectedDetail?.detail
+    var titleName = matchingDetail?.companyName?.takeIf(String::isNotBlank)
+        ?: scoreRow?.companyName?.takeIf(String::isNotBlank)
 
     Column(
         modifier = Modifier
@@ -166,18 +177,35 @@ fun DetailScreen(
             title = {
                 Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                     Text(
-                        text = titleDetail?.companyName ?: route.symbol,
+                        text = titleName ?: route.symbol,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!titleDetail?.companyName.isNullOrBlank()) {
-                        Text(
-                            text = route.symbol,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    if (!titleName.isNullOrBlank()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = route.symbol,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            var triageLabel = decisionStateLabel(scoreRow?.decisionState)
+                            if (triageLabel != null && route.subtab != DetailSubtab.Score) {
+                                var (fg, bg) = decisionStateColors(scoreRow?.decisionState)
+                                Text(
+                                    text = triageLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = fg,
+                                    modifier = Modifier
+                                        .background(bg, RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                )
+                            }
+                        }
                     }
                 }
             },
@@ -216,8 +244,9 @@ fun DetailScreen(
         ScrollableTabRow(
             selectedTabIndex = when (route.subtab) {
                 DetailSubtab.Snapshot -> 0
-                DetailSubtab.Lens -> 1
-                DetailSubtab.History -> 2
+                DetailSubtab.Score -> 1
+                DetailSubtab.Lens -> 2
+                DetailSubtab.History -> 3
             },
             edgePadding = 0.dp,
         ) {
@@ -225,6 +254,11 @@ fun DetailScreen(
                 selected = route.subtab == DetailSubtab.Snapshot,
                 onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Snapshot)) },
                 text = { Text("Snapshot") },
+            )
+            Tab(
+                selected = route.subtab == DetailSubtab.Score,
+                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Score)) },
+                text = { Text("Score") },
             )
             Tab(
                 selected = route.subtab == DetailSubtab.Lens,
@@ -246,17 +280,24 @@ fun DetailScreen(
             when (route.subtab) {
                 DetailSubtab.Snapshot -> SnapshotContent(
                     route = route,
-                    detail = detail,
+                    detail = matchingDetail,
                     scoreRow = scoreRow,
                     scoringModel = scoringModel,
                     regimeScoringEnabled = regimeScoringEnabled,
                     chartRange = route.chartRange,
                     candles = charts[route.chartRange].orEmpty(),
+                    replayBackingCandles = replayBackingCharts[route.chartRange],
                     replayOffset = route.replayOffset,
                     alerts = alerts,
                     quantLens = quantLens,
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
+                    onAction = onAction,
+                )
+                DetailSubtab.Score -> ScoreContent(
+                    scoreRow = scoreRow,
+                    scoringModel = scoringModel,
+                    regimeScoringEnabled = regimeScoringEnabled,
                     onAction = onAction,
                 )
                 DetailSubtab.Lens -> QuantLensContent(
@@ -267,7 +308,7 @@ fun DetailScreen(
                 )
                 DetailSubtab.History -> HistoryContent(
                     route = route,
-                    detail = detail,
+                    detail = matchingDetail,
                     history = history,
                     charts = charts,
                     onAction = onAction,
@@ -278,13 +319,10 @@ fun DetailScreen(
 }
 
 /**
- * Score, dimension breakdown and the scoring-model control, at the head of the Snapshot tab.
+ * Rank, badge, model chips and the compact F/T/Fc/Market row, at the head of the Snapshot tab.
  *
- * It sat above the subtabs until it did not fit: on a phone the block plus the search bar pushed the
- * tab row and the first line of content off the fold, so the screen opened on its own chrome. It
- * lives inside Snapshot now, and scrolls away with everything else there. The cost is that the model
- * chips are no longer reachable from Lens or History, which is a real loss — but Snapshot is the tab
- * a ticker opens on, so the score is still the first thing seen.
+ * The term-by-term decomp lives on the Score tab. Snapshot only keeps the numbers a reader needs
+ * to place the name, so the chart stays on the first screen.
  *
  * The row comes from the ranked opportunity set rather than being recomputed here — the list and
  * the detail view read the same [OpportunityListRow], so a score shown here is by construction the
@@ -325,33 +363,45 @@ private fun DetailScoreHeader(
             ) {
                 ScoreBadge(score = scoreRow.compositeScore, scoringModel = scoringModel)
             }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricToken(
-                    "F ${formatOpportunityBucket(scoreRow.fundamentalsScore, scoringModel)}",
-                    fundamentalsMetricColor(),
-                )
-                MetricToken(
-                    "T ${formatOpportunityBucket(scoreRow.technicalScore, scoringModel)}",
-                    technicalMetricColor(),
-                )
-                MetricToken(
-                    "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
-                    forecastMetricColor(),
-                )
-                if (scoreRow.regimeStatus == RegimeScoreStatus.Included) {
-                    MetricToken(
-                        "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(scoreRow.regimeScore, scoringModel)}",
-                        marketMetricColor(),
-                    )
-                }
-            }
-            MarketContextSection(row = scoreRow, scoringModel = scoringModel)
         }
         ScoringControlsRow(
             selected = scoringModel,
             regimeScoringEnabled = regimeScoringEnabled,
             onAction = onAction,
         )
+        if (scoreRow != null) {
+            var palette = scoreFactorPalette()
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricToken(
+                    "F ${formatOpportunityBucket(scoreRow.fundamentalsScore, scoringModel)}",
+                    palette.fundamentals,
+                )
+                MetricToken(
+                    "T ${formatOpportunityBucket(scoreRow.technicalScore, scoringModel)}",
+                    palette.technicals,
+                )
+                MetricToken(
+                    "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
+                    palette.forecast,
+                )
+                if (scoreRow.regimeStatus == RegimeScoreStatus.Included) {
+                    MetricToken(
+                        "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(scoreRow.regimeScore, scoringModel)}",
+                        palette.market,
+                    )
+                }
+            }
+            // Agreement is a fact about the composite, so it sits above the bucket list rather
+            // than inside Market. Two decompositions of one Final is what live QA rejected.
+            v4AgreementLine(scoreRow, scoringModel)?.let { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            MarketContextSection(row = scoreRow, scoringModel = scoringModel)
+        }
     }
 }
 
@@ -363,7 +413,6 @@ private fun DetailScoreHeader(
  * the decomposition is shown rather than only the final score, because a composite that moved is
  * worth nothing to a reader who cannot see what moved it.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MarketContextSection(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
     val statusLine = marketDimensionStatusLine(row.regimeStatus, row.regimeUnavailableReason, scoringModel)
@@ -376,14 +425,232 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
         return
     }
 
-    Text(
-        text = marketDimensionImpactLine(row),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        topRegimeCauses(row.regimeCauses).forEach { cause ->
-            MetricToken(regimeCauseLabel(cause), regimeCauseColor(cause.effect))
+    // Not under V4, which decomposes the same Final its own way one line above.
+    //
+    // Both lines are individually correct — `Base` is the composite without the fourth bucket and
+    // the impact is an exact subtraction — and printing them together was still wrong. A reader met
+    // two breakdowns of one number that share no term, and the word "Market" naming three different
+    // quantities on one screen: the bucket's score, this delta, and the on/off toggle. The plan put
+    // V4's line "in the same place" V3 shows this one; Wave 3 put it above instead of instead of.
+    if (scoringModel != OpportunityScoringModel.AggressiveV4) {
+        Text(
+            text = marketDimensionImpactLine(row),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun ScoreContent(
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
+    onAction: (DashboardAction) -> Unit,
+) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            ScoringControlsRow(
+                selected = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                onAction = onAction,
+            )
+        }
+        item {
+            if (scoreRow == null) {
+                Text(
+                    text = "Not in the ranked set under ${scoringModel.chipLabel()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OpportunityDecisionSection(row = scoreRow, scoringModel = scoringModel)
+                    ScoreFactorBreakdown(row = scoreRow, scoringModel = scoringModel)
+                    if (scoringModel != OpportunityScoringModel.Legacy) {
+                        Text(
+                            text = SCORE_READING_LEGEND,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OpportunityDecisionSection(
+    row: OpportunityListRow,
+    scoringModel: OpportunityScoringModel,
+) {
+    var explanation = explainOpportunityDecision(row, scoringModel)
+    var confidenceCauses = row.qualification?.let { qualification ->
+        if (qualification == QualificationStatus.Qualified && row.externalStatus == null) {
+            emptyList()
+        } else {
+            explainConfidence(
+                qualification = qualification,
+                externalStatus = row.externalStatus ?: ExternalSignalStatus.Missing,
+                analystCount = row.analystCoverageCount,
+            ).causes
+        }
+    }.orEmpty()
+    var palette = scoreFactorPalette()
+    var title = decisionStateLabel(explanation.state) ?: "No decision"
+    var titleColor = when (explanation.state) {
+        RowDecisionState.Act -> palette.positive
+        RowDecisionState.Avoid -> palette.negative
+        RowDecisionState.Watch -> MaterialTheme.colorScheme.tertiary
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge,
+            color = titleColor,
+            fontWeight = FontWeight.SemiBold,
+        )
+        explanation.gates
+            .filterNot { gate -> gate.name == "Trust" && gate.value == "Clear" }
+            .forEach { gate ->
+            DecisionGateRow(
+                name = gate.name,
+                value = gate.value,
+                emphasize = gate.blocked,
+                emphasizeColor = titleColor,
+            )
+            if (gate.name == "Confidence") {
+                confidenceCauses.forEach { cause ->
+                    DecisionGateRow(
+                        name = cause.name,
+                        value = cause.value,
+                        emphasize = false,
+                        emphasizeColor = titleColor,
+                        indent = true,
+                        help = EXTERNAL_STATUS_HELP.takeIf { cause.name == "External" },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DecisionGateRow(
+    name: String,
+    value: String,
+    emphasize: Boolean,
+    emphasizeColor: Color,
+    indent: Boolean = false,
+    help: String? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = if (indent) 12.dp else 0.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            help?.let { copy -> InfoTip(copy) }
+        }
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (emphasize) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (emphasize) emphasizeColor else MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun InfoTip(text: String) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Text(
+            text = "(i)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { expanded = true },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .padding(12.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScoreFactorBreakdown(
+    row: OpportunityListRow,
+    scoringModel: OpportunityScoringModel,
+) {
+    var groups = scoreFactorGroups(row)
+    var palette = scoreFactorPalette()
+    if (groups.isEmpty()) {
+        Text(
+            text = "No factor readings.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        groups.forEach { group ->
+            var titleColor = palette.colorFor(group.title)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = scoreFactorGroupTitle(group, scoringModel),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = titleColor,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                group.lines.forEach { line ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = line.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        line.pointsText?.let { points ->
+                            Text(
+                                text = points,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (line.points > 0) palette.positive else palette.negative,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        scoreFactorCaption(groups)?.let { caption ->
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -398,6 +665,13 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
  *
  * Returns null when the symbol is not in a ranked list at all; a single-symbol list gets the
  * ordinal but no percentile, because "top 100%" of one thing says nothing.
+ *
+ * **Rounded up, never to nearest, and the difference is a true statement against a false one.**
+ * Rank 1 of 3 is 33.33%, and rounding to nearest prints `top 33%` — but the top 33% of three names
+ * is 0.99 of a name, so it contains nobody, and the label claims a standing the list does not
+ * support. `ceil` prints `top 34%`, the smallest band that actually holds this symbol. The plan
+ * asked for `ceil` for this reason; it was written as `roundToInt` and no test separated the two,
+ * because every case anyone had written divides exactly.
  */
 internal fun rankPositionLabel(route: DetailRoute): String? {
     val index = route.sourceSymbols.indexOf(route.symbol)
@@ -405,7 +679,7 @@ internal fun rankPositionLabel(route: DetailRoute): String? {
     val total = route.sourceSymbols.size
     val rank = index + 1
     if (total <= 1) return "#$rank of $total"
-    val percentile = ((rank * 100.0) / total).roundToInt().coerceIn(1, 100)
+    val percentile = ceil((rank * 100.0) / total).toInt().coerceIn(1, 100)
     return "#$rank of $total · top $percentile%"
 }
 
@@ -419,6 +693,7 @@ private fun SnapshotContent(
     regimeScoringEnabled: Boolean,
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
+    replayBackingCandles: List<HistoricalCandle>? = null,
     replayOffset: Int,
     alerts: List<String>,
     quantLens: QuantLensUiState?,
@@ -426,15 +701,18 @@ private fun SnapshotContent(
     detailNotice: DashboardNotice? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
-    var chartModelCache = remember(candles, chartRange, projectedDetail?.chart) {
+    var replayCandles = replayBackingCandles ?: candles
+    var replayWindowSize = candles.size
+    var chartModelCache = remember(replayCandles, chartRange, replayWindowSize, projectedDetail?.chart) {
         mutableMapOf<Int, SnapshotChartModels>()
     }
-    var chartModels = remember(candles, chartRange, replayOffset, projectedDetail?.chart) {
+    var chartModels = remember(replayCandles, chartRange, replayWindowSize, replayOffset, projectedDetail?.chart) {
         chartModelCache.getOrPut(replayOffset) {
             buildSnapshotChartModels(
                 chartRange = chartRange,
-                candles = candles,
+                candles = replayCandles,
                 replayOffset = replayOffset,
+                windowSize = replayWindowSize,
                 projectedChart = projectedDetail?.chart,
             )
         }

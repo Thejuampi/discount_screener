@@ -57,6 +57,53 @@ enum class OpportunityScoringModel {
     Aggressive,
     AggressiveV2,
     AggressiveV3,
+
+    /**
+     * One fact, one bucket.
+     *
+     * V3's four buckets share inputs — the market bucket re-reads the multiples the fundamentals
+     * bucket reads and the EMAs the technicals bucket reads — so their average is one opinion with
+     * extra weight. V4 removes the terms that are duplicates, keeps the ones the regime can invert,
+     * reads multiples against the symbol's own sector, and pays its coverage bonus for agreement
+     * rather than for presence.
+     *
+     * V3 stays and stays beside it, unedited, so there is a control to compare against.
+     */
+    AggressiveV4,
+}
+
+/**
+ * Whether this model has a fourth, market bucket at all.
+ *
+ * A `when` rather than a disjunction, so that the compiler names this place when a fifth model
+ * arrives. A new model quietly defaulting to "no market bucket" is the kind of answer nobody
+ * decided.
+ */
+fun OpportunityScoringModel.carriesMarketDimension(): Boolean = when (this) {
+    OpportunityScoringModel.Legacy,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.AggressiveV2,
+    -> false
+    OpportunityScoringModel.AggressiveV3,
+    OpportunityScoringModel.AggressiveV4,
+    -> true
+}
+
+/**
+ * Whether this model compares a symbol's multiples against its sector.
+ *
+ * The caller pays for the answer — the benchmarks are a pass over every ingested symbol — so a
+ * model that does not read them must not trigger the work. Exhaustive for the same reason as
+ * [carriesMarketDimension]: the next model is named here or it is not answered at all.
+ */
+fun OpportunityScoringModel.readsSectorBenchmarks(): Boolean = when (this) {
+    OpportunityScoringModel.Legacy,
+    OpportunityScoringModel.Aggressive,
+    OpportunityScoringModel.AggressiveV2,
+    OpportunityScoringModel.AggressiveV3,
+    -> false
+    OpportunityScoringModel.AggressiveV4,
+    -> true
 }
 
 @Serializable
@@ -805,6 +852,23 @@ data class ChartRangeSummary(
     val minusDi: Double? = null,
 )
 
+/**
+ * One scored term inside a bucket, with the points it added to that bucket.
+ *
+ * [bucketPoints] is `weight × ramp / full weight × 100`, the same unit the bucket score uses.
+ * The tags therefore add (within rounding) to the bucket they explain. They do not add to the
+ * composite: V4 takes the centre of the buckets, then pays for agreement.
+ *
+ * [key] is the engine label (`FCFy`, `ROE§`). [token] keeps the `++` suffix the older surfaces
+ * still read.
+ */
+@Serializable
+data class ScoreFactor(
+    val key: String,
+    val token: String,
+    val bucketPoints: Int,
+)
+
 @Serializable
 data class OpportunityRow(
     val symbol: String,
@@ -832,6 +896,9 @@ data class OpportunityRow(
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val fundamentalsFactors: List<ScoreFactor> = emptyList(),
+    val technicalFactors: List<ScoreFactor> = emptyList(),
+    val forecastFactors: List<ScoreFactor> = emptyList(),
     val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
     val regimeCauses: List<RegimeCause> = emptyList(),
     val regimeSignals: List<String> = emptyList(),

@@ -2,8 +2,15 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.MarketSnapshot
+import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import okhttp3.Interceptor
 import okhttp3.Request
+import okhttp3.Response
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -301,14 +308,14 @@ class YahooFinanceClientTest {
 
     @Test
     fun payout_prefers_financial_data_over_summary_detail() {
-        val financialData = kotlinx.serialization.json.buildJsonObject {
-            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
-                put("raw", kotlinx.serialization.json.JsonPrimitive(0.40))
+        val financialData = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(0.40))
             })
         }
-        val summaryDetail = kotlinx.serialization.json.buildJsonObject {
-            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
-                put("raw", kotlinx.serialization.json.JsonPrimitive(0.1653))
+        val summaryDetail = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(0.1653))
             })
         }
         assertEquals(6_000, resolveRetentionBps(financialData, summaryDetail))
@@ -316,19 +323,37 @@ class YahooFinanceClientTest {
 
     @Test
     fun missing_payout_in_both_modules_yields_null_retention() {
-        val empty = kotlinx.serialization.json.JsonObject(emptyMap())
+        val empty = JsonObject(emptyMap())
         assertNull(resolveRetentionBps(empty, empty))
         // Empty Yahoo payout object (no raw) is missing.
-        val emptyPayout = kotlinx.serialization.json.buildJsonObject {
-            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {})
+        val emptyPayout = buildJsonObject {
+            put("payoutRatio", buildJsonObject {})
         }
         assertNull(resolveRetentionBps(emptyPayout, empty))
-        val summaryOnly = kotlinx.serialization.json.buildJsonObject {
-            put("payoutRatio", kotlinx.serialization.json.buildJsonObject {
-                put("raw", kotlinx.serialization.json.JsonPrimitive(0.28))
+        val summaryOnly = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(0.28))
             })
         }
         assertEquals(7_200, resolveRetentionBps(empty, summaryOnly))
+    }
+
+    /**
+     * Yahoo writes `null` into a candle array for a bar with no trade, so this branch is common.
+     *
+     * The parse used to go through `doubleOrNull`, which screens the text with a Regex first. That
+     * screen made a native ICU Matcher per call and a universe refresh made them faster than the GC
+     * released them, so the process died of native memory. The parse is direct now, and a direct
+     * parse reports a bad value by throwing. These two tests pin the two ways a bar can be bad.
+     */
+    @Test
+    fun a_null_last_candle_falls_back_to_the_last_real_close() {
+        assertEquals(19_950L, parseChartLatestCloseCents(chartClosesJson("199.50", "null")))
+    }
+
+    @Test
+    fun a_non_numeric_candle_falls_back_to_the_last_real_close() {
+        assertEquals(19_950L, parseChartLatestCloseCents(chartClosesJson("199.50", "\"n/a\"")))
     }
 
     @Test
@@ -442,27 +467,35 @@ class YahooFinanceClientTest {
         longName: String,
         shortName: String,
         price: Double,
-    ): kotlinx.serialization.json.JsonObject {
+    ): JsonObject {
         val body = """
             {"chart":{"result":[{"meta":{"currency":"USD","symbol":"$symbol","longName":"$longName","shortName":"$shortName","regularMarketPrice":$price},"timestamp":[1],"indicators":{"quote":[{"close":[$price],"open":[$price],"high":[$price],"low":[$price],"volume":[1]}]}}],"error":null}}
         """.trimIndent()
-        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+        return Json.parseToJsonElement(body).jsonObject
     }
 
-    private fun loadQuoteSummaryFixture(symbol: String): kotlinx.serialization.json.JsonObject {
+    /** A chart whose close array holds [closes] verbatim, so a test can put a raw JSON token in it. */
+    private fun chartClosesJson(vararg closes: String): JsonObject {
+        val body = """
+            {"chart":{"result":[{"meta":{"currency":"USD","symbol":"X"},"indicators":{"quote":[{"close":[${closes.joinToString(",")}]}]}}],"error":null}}
+        """.trimIndent()
+        return Json.parseToJsonElement(body).jsonObject
+    }
+
+    private fun loadQuoteSummaryFixture(symbol: String): JsonObject {
         val stream = requireNotNull(
             javaClass.classLoader?.getResourceAsStream("yahoo/quoteSummary/$symbol.json"),
         ) { "missing fixture yahoo/quoteSummary/$symbol.json" }
         val body = stream.bufferedReader().use { it.readText() }
-        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+        return Json.parseToJsonElement(body).jsonObject
     }
 
-    private fun loadSearchFixture(query: String): kotlinx.serialization.json.JsonObject {
+    private fun loadSearchFixture(query: String): JsonObject {
         val stream = requireNotNull(
             javaClass.classLoader?.getResourceAsStream("yahoo/search/$query.json"),
         ) { "missing fixture yahoo/search/$query.json" }
         val body = stream.bufferedReader().use { it.readText() }
-        return kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+        return Json.parseToJsonElement(body).jsonObject
     }
 
     private class ExpectedStopException : RuntimeException()
@@ -470,9 +503,9 @@ class YahooFinanceClientTest {
     private class TestChain(
         private val originalRequest: Request,
         private val onProceed: (Request) -> Unit,
-    ) : okhttp3.Interceptor.Chain {
+    ) : Interceptor.Chain {
         override fun request() = originalRequest
-        override fun proceed(request: Request): okhttp3.Response {
+        override fun proceed(request: Request): Response {
             onProceed(request)
             throw ExpectedStopException()
         }
@@ -480,9 +513,9 @@ class YahooFinanceClientTest {
         override fun readTimeoutMillis() = 0
         override fun writeTimeoutMillis() = 0
         override fun connectTimeoutMillis() = 0
-        override fun withReadTimeout(timeout: Int, unit: java.util.concurrent.TimeUnit) = this
-        override fun withWriteTimeout(timeout: Int, unit: java.util.concurrent.TimeUnit) = this
-        override fun withConnectTimeout(timeout: Int, unit: java.util.concurrent.TimeUnit) = this
+        override fun withReadTimeout(timeout: Int, unit: TimeUnit) = this
+        override fun withWriteTimeout(timeout: Int, unit: TimeUnit) = this
+        override fun withConnectTimeout(timeout: Int, unit: TimeUnit) = this
         override fun call() = throw UnsupportedOperationException()
     }
 }

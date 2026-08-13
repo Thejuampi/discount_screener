@@ -11,11 +11,14 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
+import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -36,7 +39,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * The runtime switch, measured where it is supposed to have an effect: the ranked list.
+ * The scoring controls, measured where they are supposed to have an effect: the ranked list.
+ *
+ * Two controls, one fixture: the market switch, and the model chip. Both claim to change what the
+ * user sees, and both are wired through the same snapshot call, so they are asserted against the
+ * same twenty names rather than against two fixtures that could drift apart.
  *
  * A test that asserts `state.regimeScoringEnabled == false` after toggling passes on a repository
  * that never reads the flag, so it cannot fail on the defect it exists to catch. These assert the
@@ -51,6 +58,17 @@ import org.robolectric.RobolectricTestRunner
 class MarketDimensionRankingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val dispatcher = StandardTestDispatcher()
+
+    /**
+     * A clock that ticks, and it has to tick for one of these tests to mean anything.
+     *
+     * [rendering_the_list_again_adds_no_journal_entry] counts distinct journal timestamps. Under a
+     * frozen clock a journal written thirteen times carries thirteen rows at one second, the
+     * primary key folds them into one, and the count reads exactly like a journal written once — so
+     * the assertion could not fail on the defect it exists to catch. A second per reading is enough
+     * to tell one pass from many, and far too little to move any staleness threshold in the suite.
+     */
+    private var clock = NOW
 
     @Before
     fun setUp() {
@@ -98,10 +116,105 @@ class MarketDimensionRankingTest {
         }
     }
 
+    /**
+     * The fourth chip is a model, not a label.
+     *
+     * Asserted on the ordered symbols rather than on `state.opportunityScoringModel`, for the same
+     * reason the switch is: a chip that set a field the scoring never read would pass a state
+     * assertion and change nothing a user can see.
+     */
+    @Test
+    fun choosing_v4_reranks_the_list_against_v3() = runTest(dispatcher) {
+        withRepository { repository ->
+            var underV3 = rankedSymbols(repository)
+
+            assertNotEquals(underV3, rankedSymbols(repository, OpportunityScoringModel.AggressiveV4))
+        }
+    }
+
+    /**
+     * What V4 scores this fixture, symbol by symbol. The level, not the order.
+     *
+     * [choosing_v4_reranks_the_list_against_v3] is not enough on its own, and two mutations say so.
+     * Replacing V4's composite with a constant leaves it green, because a list of equal scores still
+     * sorts differently from V3's — "different" is satisfied by broken.
+     *
+     * **An order assertion would have been no better, and measuring said so before this test was
+     * written.** V4 scores these twenty names 46, 46, 46, then 45 thirteen times, then 44: the
+     * composite is nearly flat here, because the fixture gives every symbol identical fundamentals
+     * on purpose. `buildRows` therefore settles the order on its fourth tiebreak, `upsideBps`, and
+     * the list comes out in discount order whatever the composite says. Deleting the centre term
+     * from V4 changes every score and moves no symbol.
+     *
+     * So the pairs are asserted. A composite that stops computing fails on the numbers, which is
+     * the thing that has to be right, rather than on a sequence the discount already decided.
+     */
+    @Test
+    fun v4_scores_the_fixture_at_one_named_level() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                V4_LEVEL,
+                snapshot(repository, OpportunityScoringModel.AggressiveV4)
+                    .opportunityRows.map { it.symbol to it.compositeScore },
+            )
+        }
+    }
+
+    @Test
+    fun v3_scores_the_fixture_at_one_named_level() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                V3_LEVEL,
+                snapshot(repository, OpportunityScoringModel.AggressiveV3)
+                    .opportunityRows.map { it.symbol to it.compositeScore },
+            )
+        }
+    }
+
+    /**
+     * The journal is only worth having if something writes to it. A perfect table that nothing
+     * calls looks identical, from the store's own tests, to a table that works.
+     *
+     * Asserted here rather than in `DefaultDashboardRepositoryTest`, and the reason is worth
+     * recording: that suite's fake client qualifies no symbol at all, so its Opportunities list is
+     * empty and a journal test there passes or fails on the fixture instead of on the wiring. This
+     * fixture puts seventeen names on the list.
+     */
+    @Test
+    fun a_refresh_journals_the_scores_it_produced() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                rankedSymbols(repository).sorted(),
+                journal().map { it.symbol }.sorted(),
+            )
+        }
+    }
+
+    /**
+     * Off the render path, asserted rather than intended.
+     *
+     * A snapshot is rebuilt on every state change, several times a second while data arrives. If
+     * the journal were written there it would record one scoring pass a dozen times under a dozen
+     * timestamps, and the comparison it exists for would be reading its own sampling rate.
+     *
+     * Counted rather than compared against the pre-render reading, and that is the whole point of
+     * the assertion. `before == after` is satisfied by `[] == []`, so a journal that wrote nothing
+     * at all would pass it — measured, not supposed: the mutation that makes the write a no-op left
+     * that form green. **One** is the only number that means one pass, written once.
+     */
+    @Test
+    fun rendering_the_list_again_adds_no_journal_entry() = runTest(dispatcher) {
+        withRepository { repository ->
+            repeat(3) { snapshot(repository) }
+
+            assertEquals(1, journal().map { it.scoredAtEpochSeconds }.distinct().size)
+        }
+    }
+
     /** A preference that reached the ranking must also have reached the database. */
     @Test
     fun the_switch_is_written_where_a_cold_start_will_find_it() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store)
             repository.persistScoringPreferences(ScoringPreferences(regimeScoringEnabled = false))
@@ -111,16 +224,33 @@ class MarketDimensionRankingTest {
         }
     }
 
-    private suspend fun rankedSymbols(repository: DefaultDashboardRepository): List<String> =
-        snapshot(repository).opportunityRows.map { it.symbol }
+    /**
+     * Read through a second store instance, on purpose. The journal exists to be read long after
+     * the process that wrote it has gone, so a cold read is the read worth testing.
+     */
+    private suspend fun journal(): List<ScoreJournalRow> {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            return store.loadScoreJournal()
+        } finally {
+            store.close()
+        }
+    }
 
-    private suspend fun snapshot(repository: DefaultDashboardRepository) =
-        repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
+    private suspend fun rankedSymbols(
+        repository: DefaultDashboardRepository,
+        model: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    ): List<String> = snapshot(repository, model).opportunityRows.map { it.symbol }
+
+    private suspend fun snapshot(
+        repository: DefaultDashboardRepository,
+        model: OpportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+    ) = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
 
     private suspend fun TestScope.withRepository(
         block: suspend (DefaultDashboardRepository) -> Unit,
     ) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val repository = buildRepository(store)
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
@@ -137,7 +267,7 @@ class MarketDimensionRankingTest {
         profileCatalog = ProfileCatalog(context.assets),
         yahooClient = FixtureYahooFinanceClient(),
         universeCatalog = UniverseCatalog(context.assets),
-        nowProvider = { NOW },
+        nowProvider = { clock++ },
         ioDispatcher = dispatcher,
         defaultProfile = DefaultDashboardRepository.QA_PROFILE,
         marketDataRepository = StubMarketDataRepository(),
@@ -172,7 +302,7 @@ class MarketDimensionRankingTest {
      * through its haircut *and* lowers the fit through the low-beta weight, so a list sorted by beta
      * comes out in the same order either way and a reorder assertion would fail on a correct build.
      */
-    private class FixtureYahooFinanceClient : YahooFinanceClient() {
+    private class FixtureYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
             val price = 10_000L
             val fair = price * (12_000L + rank(symbol) * 200L) / 10_000L
@@ -199,6 +329,25 @@ class MarketDimensionRankingTest {
 
         override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> =
             dailyCandles(symbol)
+
+        /**
+         * Empty, and it is a fix rather than a convenience.
+         *
+         * This override did not exist, so the DCF source coordinator called straight through to the
+         * real client and this test **fetched T and AMZN from Yahoo on every run** — the two names
+         * of twenty whose path reaches the timeseries. A ranking test whose inputs arrive over the
+         * internet is not a ranking test: it is slower than the rest of the suite put together, it
+         * fails when somebody else's service is down or rate-limits the build, and the [V4_LEVEL]
+         * numbers below were recorded from whatever those two issuers reported on the day of the
+         * green run. Nothing said so, because the leak was silent by design — a defaulted
+         * `httpClient` in the superclass constructor and one unoverridden method.
+         *
+         * Empty is the right fixture and not a weakening: it is what the model already sees for the
+         * eighteen other symbols here, so all twenty now enter scoring the same way. That the
+         * recorded levels for T and AMZN did not move is worth reading twice — the live fetch was
+         * paying for data the composite never used.
+         */
+        override suspend fun fetchFundamentalTimeseries(symbol: String) = FundamentalTimeseries()
     }
 
     private companion object {
@@ -208,6 +357,29 @@ class MarketDimensionRankingTest {
         val QA_SYMBOLS = listOf(
             "T", "AMZN", "AAPL", "CI", "JPM", "ACGL", "MSFT", "NVDA", "UNH", "JNJ",
             "XOM", "BAC", "V", "WMT", "GOOGL", "META", "TSLA", "HD", "PG", "MRK",
+        )
+
+        /**
+         * What V4 scores [QA_SYMBOLS], read off a green run rather than predicted.
+         *
+         * Written out so that a change to the composite has to be looked at and re-recorded here on
+         * purpose, instead of passing under an assertion that only asked for "not V3". Three names
+         * qualify at 46 and one at 44; the flat middle is the fixture's doing, not the model's.
+         */
+        val V3_LEVEL = listOf(
+            "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
+            "JNJ" to 44, "UNH" to 44, "NVDA" to 44,
+            "META" to 43, "GOOGL" to 43, "WMT" to 43, "V" to 43, "BAC" to 43, "XOM" to 43,
+            "MRK" to 42, "PG" to 42, "HD" to 42,
+            "TSLA" to 42,
+        )
+
+        val V4_LEVEL = listOf(
+            "MRK" to 46, "PG" to 46, "HD" to 46,
+            "TSLA" to 45, "META" to 45, "GOOGL" to 45, "WMT" to 45, "V" to 45,
+            "BAC" to 45, "XOM" to 45, "JNJ" to 45, "UNH" to 45, "NVDA" to 45,
+            "MSFT" to 45, "ACGL" to 45, "JPM" to 45,
+            "CI" to 44,
         )
 
         /**

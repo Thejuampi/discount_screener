@@ -11,6 +11,8 @@ This index is the starting point for humans and AI agents trying to understand t
 
 ## Operator Documentation
 
+- [Aggressive V4 — what has been measured](aggressive-v4-evidence.md) - bucket overlap, the agreement constant and its population, and the forward-return retrospective including its null result.
+- [Compose test hang, 2026-08-11](diagnostics/2026-08-11-compose-test-hang/README.md) - open, cause unknown: the Android suite spun 27 minutes in `waitForIdle`. Thread dumps kept, escalation bar set at one recurrence.
 - [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android.
 - [Desktop Quick Start](../apps/desktop/docs/QUICK_START.md) - first-run desktop workflow.
 - [Desktop Screen Guide](../apps/desktop/docs/SCREENS.md) - terminal UI layout and behavior.
@@ -28,6 +30,7 @@ This index is the starting point for humans and AI agents trying to understand t
 ## Feature Planning
 
 - [Valuation Model Family Architecture](../_bmad-output/planning-artifacts/valuation-model-family-architecture.md) - FCFF vs residual income by business class; dynamic market params; no hard output caps.
+- [Aggressive V4 Contract](../shared/contracts/opportunity-v4.json) - agreement-bonus and sector-relative goldens for the Android-only V4 model; hand-derived, never regenerated from Kotlin.
 - [Valuation Model Family Contract](../shared/contracts/valuation-model-family.json) - classifier / model-selection goldens.
 - [Evidence/SOTP Contract](../shared/contracts/valuation-evidence-sotp.json) - point-in-time evidence, component families, SOTP bridge, refusal, and validation goldens.
 - [Evidence/SOTP Implementation Notes](../_bmad-output/implementation-artifacts/spec-valuation-evidence-sotp-implementation.md) - executable-slice ownership, refusal boundaries, and provider/QA boundaries.

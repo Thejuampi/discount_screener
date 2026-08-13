@@ -132,7 +132,26 @@ class ContractFixtureTest {
                 assertEquals(expected.discountRateKind, analysis.discountRateKind.name, case.name)
                 assertEquals(expected.modelPolicyVersion, analysis.modelPolicyVersion, case.name)
                 assertEquals(expected.latestFcfDollars, analysis.latestFcfDollars, case.name)
-                assertEquals(expected.fcfRunRateDollars, analysis.fcfRunRateDollars, case.name)
+                // A null run rate in the contract is "not pinned to a digit", not "must be absent"
+                // — the same convention `valuationDriver` and `baseIntrinsicRangeDollars` follow
+                // below. The driver-based FCFF path derives the run rate from normalized margins,
+                // so the contract bounds it instead of fixing it, and asserting equality against
+                // null failed on a value that is correct. Bounds, not a skip: Rust pins the same
+                // two floors, and a run rate that collapsed or a base that fell back under $100
+                // still fails here.
+                val runRate = expected.fcfRunRateDollars
+                if (runRate != null) {
+                    assertEquals(runRate, analysis.fcfRunRateDollars, case.name)
+                } else {
+                    assertTrue(
+                        (analysis.fcfRunRateDollars ?: 0L) >= 50_000_000_000L,
+                        "${case.name} owner-earnings run-rate floor",
+                    )
+                    assertTrue(
+                        analysis.baseIntrinsicValueCents >= 10_000L,
+                        "${case.name} base must clear \$100",
+                    )
+                }
                 expected.valuationDriver?.let { driver ->
                     assertEquals(driver, analysis.valuationDriver, case.name)
                 }

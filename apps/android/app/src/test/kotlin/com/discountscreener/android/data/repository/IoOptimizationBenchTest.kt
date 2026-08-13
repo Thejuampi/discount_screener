@@ -9,6 +9,7 @@ import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRange
@@ -59,7 +60,7 @@ class IoOptimizationBenchTest {
 
     @Test
     fun dow_refresh_enrich_stays_under_post_optimization_ceilings() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = CountingYahooClient()
             val repository = DefaultDashboardRepository(
@@ -112,7 +113,7 @@ class IoOptimizationBenchTest {
 
     @Test
     fun detail_open_does_not_refetch_cached_ranges() = runTest(dispatcher) {
-        val store = SQLiteStateStore(context)
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = CountingYahooClient()
             val repository = DefaultDashboardRepository(
@@ -166,7 +167,7 @@ class IoOptimizationBenchTest {
         snapshot
     }
 
-    private open class CountingYahooClient : YahooFinanceClient() {
+    private open class CountingYahooClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         val quoteFetches = AtomicInteger(0)
         val chartFetches = AtomicInteger(0)
         val timeseriesFetches = AtomicInteger(0)

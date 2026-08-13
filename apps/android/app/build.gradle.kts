@@ -32,6 +32,9 @@ val hasCustomReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
 
+// Opt-in to signing a release with the debug key, for a local sideload. See the release build type.
+val allowDebugSignedRelease = providers.gradleProperty("allowDebugSignedRelease").orNull.toBoolean()
+
 // Live / agent QA universe (≤20 symbols) is opt-in via `make android-run-qa`
 // (-PdsQaUniverse=true). A plain debug install is the regular app and cold-starts the
 // product universe. Release never honours the flag.
@@ -85,6 +88,9 @@ android {
         }
         getByName("release") {
             buildConfigField("boolean", "QA_UNIVERSE", "false")
+            // Which key is used is decided here; *whether that key is acceptable* is decided in
+            // `packageRelease` below, because this block is evaluated during configuration and a
+            // refusal thrown here would fail `:app:testDebugUnitTest` too.
             signingConfig = if (hasCustomReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
@@ -137,6 +143,53 @@ dependencies {
  * reads as "untested" for code that is in fact exercised. `jdk.internal.*` is excluded because
  * instrumenting it throws under Java 17.
  */
+/**
+ * A release signed with the debug key is not a release, and it used to become one in silence.
+ *
+ * With no keystore configured the release build type falls through to the debug signing config,
+ * `make android-release` copied the result out as "Installable release APK", and the artifact
+ * carried the Android debug key — a key that sits on every machine that has ever built an app, so
+ * anyone at all can sign a forged update to a package holding it.
+ *
+ * The fallback is kept, because it is genuinely useful for putting a build on your own phone, and
+ * it is now opt-in. Saying `-PallowDebugSignedRelease=true` out loud costs one flag and puts the
+ * decision in the build log beside the artifact it produced. Not saying it fails the build, with
+ * both ways forward named in the message.
+ *
+ * **Checked on the packaging task, not in the `release` build type.** The build type is evaluated
+ * during configuration, so a refusal thrown there fails every invocation in this module — including
+ * `:app:testDebugUnitTest`, which has nothing to do with signing. That is not a hypothetical: the
+ * first version of this guard did exactly that, and a loop of the unit suite is what caught it.
+ *
+ * The two flags are copied into locals first so the action captures plain booleans. Reading the
+ * script's own properties from inside `doFirst` captures the script object, which the configuration
+ * cache cannot serialize — the second version of this guard did that, and `assembleRelease` is what
+ * caught it.
+ */
+run {
+    val signingKeyIsReal = hasCustomReleaseSigning
+    val debugSignedReleaseAllowed = allowDebugSignedRelease
+    tasks.matching { it.name == "packageRelease" }.configureEach {
+        doFirst {
+            if (signingKeyIsReal) return@doFirst
+            if (!debugSignedReleaseAllowed) {
+                throw GradleException(
+                    "Refusing to build a release signed with the debug key.\n" +
+                        "  To sign properly: run `make android-signing-bootstrap` once, which " +
+                        "creates a keystore and writes it into local.properties.\n" +
+                        "  For a local sideload only: re-run with " +
+                        "-PallowDebugSignedRelease=true and do not distribute the result.",
+                )
+            }
+            logger.warn(
+                "WARNING: signing the release with the DEBUG key. This APK is for local " +
+                    "sideloading only and must not be distributed. Run " +
+                    "`make android-signing-bootstrap` to create a real keystore.",
+            )
+        }
+    }
+}
+
 tasks.withType<Test>().configureEach {
     extensions.configure<JacocoTaskExtension> {
         isIncludeNoLocationClasses = true

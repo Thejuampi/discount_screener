@@ -9,12 +9,14 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
+import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -36,6 +38,10 @@ import org.robolectric.RobolectricTestRunner
  */
 @RunWith(RobolectricTestRunner::class)
 class MarketDimensionUiTest {
+    /** Prints every thread's stack if this test stalls, so the next hang arrives with evidence. */
+    @get:Rule
+    val stuckTestWatchdog = StuckTestWatchdog()
+
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
@@ -91,11 +97,24 @@ class MarketDimensionUiTest {
     }
 
     @Test
-    fun detail_names_what_the_market_rewarded_and_what_it_marked_down() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+    fun detail_names_what_the_market_rewarded() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
-        composeRule.onNodeWithText("+ quality").assertIsDisplayed()
-        composeRule.onNodeWithText("− extension").assertIsDisplayed()
+        composeRule.onNodeWithText("quality").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_market_cause_shows_its_fit_weight_on_the_score_tab() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText("+9").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun detail_names_what_the_market_marked_down() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText("extension").performScrollTo().assertIsDisplayed()
     }
 
     /**
@@ -112,7 +131,7 @@ class MarketDimensionUiTest {
     /** The fourth-largest cause is, by construction, the one that changed the answer least. */
     @Test
     fun only_the_three_largest_causes_are_shown() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
         composeRule.onNodeWithText("− growth").assertDoesNotExist()
     }
@@ -120,9 +139,9 @@ class MarketDimensionUiTest {
     /** Largest by magnitude, not by position in the list the engine happened to build. */
     @Test
     fun the_smaller_causes_give_way_to_the_larger_ones() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
-        composeRule.onNodeWithText("+ low beta").assertIsDisplayed()
+        composeRule.onNodeWithText("low beta").performScrollTo().assertIsDisplayed()
     }
 
     /**
@@ -185,7 +204,7 @@ class MarketDimensionUiTest {
             scoringModel = OpportunityScoringModel.AggressiveV2,
         )
 
-        composeRule.onNodeWithText("Market context applies to Aggressive V3 only.").assertIsDisplayed()
+        composeRule.onNodeWithText("Market context applies to Aggressive V3 and V4 only.").assertIsDisplayed()
     }
 
     /** Same status, different cause: an ETF on V3 must not be told to change model. */
@@ -220,6 +239,96 @@ class MarketDimensionUiTest {
     @Test
     fun an_included_dimension_explains_nothing_because_there_is_nothing_to_explain() {
         assertEquals(null, marketDimensionStatusLine(RegimeScoreStatus.Included, null, MODEL))
+    }
+
+    // ── V4's agreement line ──────────────────────────────────────────────────
+
+    @Test
+    fun v4_detail_decomposes_the_score_into_centre_agreement_and_final() {
+        setDetailContent(row = agreementRow(20, 20, 20, 20, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 20 · Agreement 100% · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * The percentage is a reading of `V4_SPREAD_FULL`, not a free-floating adjective. Two buckets
+     * ten points apart sit a quarter of the way to the spread that pays nothing.
+     */
+    @Test
+    fun the_agreement_percentage_is_measured_against_the_fitted_spread() {
+        setDetailContent(row = agreementRow(30, 50, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 40 · Agreement 74% · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * Zero agreement is stated in words rather than as `0%`.
+     *
+     * The number the user acts on is the final score, and "the model is unsure" is the thing a
+     * reader must not have to derive from a percentage sitting at its floor.
+     */
+    @Test
+    fun divided_buckets_are_named_as_a_disagreement() {
+        setDetailContent(row = agreementRow(-100, 100, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 0 · Buckets disagree by 100 · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * And the disagreement carries its size, because the percentage cannot.
+     *
+     * Agreement is clamped at the bottom, so this row and the one above both read 0% — one has its
+     * buckets 40 points apart and the other 100. They are not the same row, and the row the model
+     * is least sure about is where a reader most needs the magnitude. This test is what makes the
+     * unclamped spread a rendered fact rather than a field nothing reads.
+     */
+    @Test
+    fun the_size_of_a_disagreement_separates_two_rows_the_percentage_cannot() {
+        setDetailContent(row = agreementRow(-40, 40, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 0 · Buckets disagree by 40 · Final 45").assertIsDisplayed()
+    }
+
+    /**
+     * V4's line goes where V3's line was, not above it.
+     *
+     * Both lines are individually correct, and printing both was still a defect: the reader met two
+     * decompositions of one Final that share no term, and the word "Market" naming three different
+     * quantities on one screen — the bucket's score, this delta, and the on/off toggle. Live QA
+     * failed the build on it, so the exclusion is pinned here rather than left to the layout.
+     */
+    @Test
+    fun v4_replaces_the_market_impact_line_rather_than_joining_it() {
+        setDetailContent(row = twoLineRow(), scoringModel = V4)
+
+        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").assertDoesNotExist()
+    }
+
+    /** And the exclusion is V4's alone — V3 keeps the line it has always shown. */
+    @Test
+    fun v3_still_shows_the_market_impact_line() {
+        setDetailContent(row = twoLineRow(), scoringModel = MODEL)
+
+        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").assertIsDisplayed()
+    }
+
+    /** One bucket also pays no bonus, and is a different fact: there is nobody to disagree with. */
+    @Test
+    fun a_single_bucket_is_not_reported_as_a_disagreement() {
+        setDetailContent(row = agreementRow(20, null, null, null, final = 45), scoringModel = V4)
+
+        composeRule.onNodeWithText("Centre 20 · One bucket only · Final 45").assertIsDisplayed()
+    }
+
+    /** No other model measures agreement, so no other model may claim a reading of it. */
+    @Test
+    fun only_v4_reports_an_agreement_line() {
+        var row = agreementRow(20, 20, 20, 20, final = 45)
+
+        assertEquals(
+            List(OpportunityScoringModel.entries.size) { OpportunityScoringModel.entries[it] == V4 },
+            OpportunityScoringModel.entries.map { v4AgreementLine(row, it) != null },
+        )
     }
 
     // ── The switch ───────────────────────────────────────────────────────────
@@ -298,6 +407,7 @@ class MarketDimensionUiTest {
     private fun setDetailContent(
         row: OpportunityListRow,
         scoringModel: OpportunityScoringModel = MODEL,
+        subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
     ) {
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
@@ -308,6 +418,7 @@ class MarketDimensionUiTest {
                         symbol = SYMBOL,
                         sourceTab = DetailSourceTab.Opportunities,
                         sourceSymbols = listOf(SYMBOL),
+                        subtab = subtab,
                     ),
                     detail = null,
                     charts = emptyMap(),
@@ -347,6 +458,31 @@ class MarketDimensionUiTest {
         ),
     )
 
+    /**
+     * A row whose four buckets are stated one by one, because the agreement line is a reading of
+     * exactly which ones reported and how far apart they are.
+     */
+    private fun agreementRow(
+        fundamentals: Int?,
+        technical: Int?,
+        forecast: Int?,
+        regime: Int?,
+        final: Int,
+    ) = baseRow().copy(
+        fundamentalsScore = fundamentals,
+        technicalScore = technical,
+        forecastScore = forecast,
+        regimeScore = regime,
+        compositeScore = final,
+        compositeScoreBase = final,
+    )
+
+    /** A row whose market bucket moved the score, so both candidate lines have something to say. */
+    private fun twoLineRow() = agreementRow(20, 20, 20, 20, final = 45).copy(
+        compositeScoreBase = 30,
+        regimeStatus = RegimeScoreStatus.Included,
+    )
+
     private fun absentRow(
         status: RegimeScoreStatus,
         reason: MarketContextUnavailableReason? = null,
@@ -379,5 +515,6 @@ class MarketDimensionUiTest {
     private companion object {
         const val SYMBOL = "TGNO4.BA"
         val MODEL = OpportunityScoringModel.AggressiveV3
+        val V4 = OpportunityScoringModel.AggressiveV4
     }
 }

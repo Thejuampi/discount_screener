@@ -547,7 +547,7 @@ private fun explanationColors(explanation: RowExplanationKind?): Pair<Color, Col
 }
 
 @Composable
-private fun decisionStateColors(decisionState: RowDecisionState?): Pair<Color, Color> = when (decisionState) {
+internal fun decisionStateColors(decisionState: RowDecisionState?): Pair<Color, Color> = when (decisionState) {
     RowDecisionState.Act -> BullishChartColor to BullishChartColor.copy(alpha = 0.16f)
     RowDecisionState.Watch -> Color(0xFF8A6E00) to Color(0xFF8A6E00).copy(alpha = 0.14f)
     RowDecisionState.Avoid -> BearishChartColor to BearishChartColor.copy(alpha = 0.14f)
@@ -714,6 +714,7 @@ private fun scoreBadgeColors(score: Int, scoringModel: OpportunityScoringModel):
         -> 10
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
         -> 15
     }
     val weak = OpportunityEngine.avoidBelowScore(scoringModel)

@@ -1,13 +1,18 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.carriesMarketDimension
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSignal
 import com.discountscreener.core.model.ExternalSignalStatus
+import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
+import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.regime.AssetClassification
@@ -17,8 +22,10 @@ import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeFitResult
 import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.regime.RegimeScoringPolicy
+import com.discountscreener.core.regime.marketFeatureSet
 import com.discountscreener.core.regime.scoreRegimeFit
 import java.math.BigInteger
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.roundToInt
 
@@ -108,7 +115,28 @@ private const val V3_FUND_EV_EBITDA_LOW = 600.0
 private const val V3_FUND_EV_EBITDA_HIGH = 2_000.0
 private const val V3_FUND_PB_LOW = 100.0
 private const val V3_FUND_PB_HIGH = 500.0
+
+/** Forward P/E, EV/EBITDA and P/B — the divisor that stops one multiple saturating the panel. */
+private const val VALUATION_PANEL_MULTIPLE_COUNT = 3.0
 private const val V3_FUND_CASH_QUALITY_WEIGHT = 10.0
+
+// V4's sector bands. The three price multiples get a multiplicative ramp around the sector centre
+// and return on equity gets an additive one, because return on equity crosses zero and a
+// percentage band does not survive that. Both shapes and all four numbers are Windows's
+// (`engine.rs:1299-1305`), so the later Rust port has one set of constants to agree with.
+private const val V4_FUND_SECTOR_CHEAP_MULT = 0.7
+private const val V4_FUND_SECTOR_RICH_MULT = 1.5
+private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
+private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
+
+/**
+ * The one character that says a metric was scored against its sector rather than an absolute band.
+ *
+ * Two rows in one list scored by different rules, with nothing saying which, is the same defect as
+ * a refusal drawn as a mute dash. Windows spends the same character for the same reason
+ * (`engine.rs:1303`).
+ */
+private const val SECTOR_ADJUSTED_MARKER = "§"
 
 private const val V3_TECH_TREND_DELTA_BOUND = 0.10
 private const val V3_TECH_TREND_PRICE_20_WEIGHT = 12.0
@@ -144,6 +172,33 @@ private const val V3_FORECAST_DCF_RELIABILITY = 0.75
 private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
 
 private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
+
+private const val BASIS_POINTS_PER_UNIT = 10_000.0
+
+private const val V4_FUND_SHARE_COUNT_WEIGHT = 10.0
+
+/**
+ * The share-count band: a three per cent annual move either way is the whole ramp.
+ *
+ * A chosen band, not a measured one, and it is worth saying so. Three per cent a year is roughly
+ * where a buyback stops being housekeeping and starts being a return of capital, and where
+ * dilution stops being option grants and starts being the shareholder paying for growth. Nothing
+ * in this repository has measured that boundary; the score journal is what could later challenge
+ * it, and the band is deliberately narrow enough that most companies land inside the ramp rather
+ * than pinned at an end.
+ */
+private const val V4_FUND_SHARE_COUNT_SHRINK_BPS = -300.0
+private const val V4_FUND_SHARE_COUNT_DILUTE_BPS = 300.0
+
+/**
+ * V4 inherits V3's term weights and adds the ones V3 does not have.
+ *
+ * The divisor is the **full** budget, not the weight observed, so a symbol with no share history
+ * scores its other terms against a total that includes the share term. That is deliberate: a
+ * missing input pulls the bucket toward zero rather than being silently excused, which is what
+ * "the term contributes nothing" has to mean if it is not to mean "the term scored zero".
+ */
+private const val V4_FUNDAMENTALS_FULL_WEIGHT = V3_FUNDAMENTALS_FULL_WEIGHT + V4_FUND_SHARE_COUNT_WEIGHT
 private const val V3_TECHNICALS_FULL_WEIGHT = 100.0
 private const val V3_FORECAST_FULL_WEIGHT =
     V3_FORECAST_VALUATION_WEIGHT +
@@ -162,6 +217,25 @@ private const val V3_BETA_HAIRCUT_MAX = 10.0
 private const val V3_BETA_HAIRCUT_MULT_MAX = 2.5
 private const val V3_BETA_LOW_MILLIS = 800.0
 private const val V3_BETA_HIGH_MILLIS = 1_600.0
+
+// AggressiveV4 tuning constants. The buckets are V3's until the commits that change them; what is
+// different here is what the composite pays for.
+private const val V4_COMPOSITE_AGREEMENT_BONUS = 5
+private const val V4_COMPOSITE_BOUND = 110
+
+/**
+ * The bucket spread at which the agreement bonus reaches zero.
+ *
+ * Measured, not chosen: the p90 of the mean absolute deviation across the buckets, over the 61
+ * **qualified** rows of a live S&P 500 reading on 2026-08-11, taken around the median — the same
+ * centre this function computes. Recorded in `lab/data/overlap-spread-median-2026-08-11.txt`.
+ *
+ * Both halves of that sentence are load-bearing. The cohort's p90 is 29.0, but the cohort is not
+ * what this constant grades: the Opportunities list is markedly more divided, and its median row's
+ * spread of 22.5 is near the *cohort's* p75. A cohort-fit constant would have paid nothing to about
+ * a third of the list while claiming to zero only its most divided tenth.
+ */
+private const val V4_SPREAD_FULL = 38.5
 
 // Act/Avoid cutoffs. Legacy/Aggressive use the original 0–15-ish point scale; V2/V3 use ±100 means.
 private const val LEGACY_AVOID_BELOW_SCORE = 8
@@ -192,7 +266,40 @@ data class OpportunityContext(
     val marketRegime: MarketRegime? = null,
     /** The user's runtime switch. Off scores every name on the three original buckets. */
     val regimeScoringEnabled: Boolean = true,
+    /**
+     * Sector levels for V4's fundamentals bucket, keyed by sector name, computed once per snapshot.
+     *
+     * Empty for every model but V4, and empty for V4 too until a snapshot supplies it: a missing
+     * sector means the row falls back to the absolute band and says so, never that it throws.
+     */
+    val sectorBenchmarks: Map<String, SectorBenchmarks> = emptyMap(),
+    /**
+     * The annual driver series, for the one term in V4 that needs history rather than a level.
+     *
+     * Only the share count is read from it here. The rest of the bucket reads
+     * [SymbolDetail.fundamentals], which is a snapshot and cannot say which way anything moved.
+     */
+    val timeseriesBySymbol: Map<String, FundamentalTimeseries> = emptyMap(),
 )
+
+/**
+ * One bucket's score plus the terms that built it.
+ *
+ * [first] and [second] keep the older `Pair` call sites compiling: they read the score and the
+ * `++` tokens. New call sites read [factors] for the points.
+ */
+internal data class BucketEvidence(
+    val score: Int?,
+    val signals: List<String>,
+    val factors: List<ScoreFactor> = emptyList(),
+) {
+    val first: Int? get() = score
+    val second: List<String> get() = signals
+
+    companion object {
+        fun absent(): BucketEvidence = BucketEvidence(score = null, signals = emptyList())
+    }
+}
 
 data class OpportunityScoreBreakdown(
     val fundamentalsScore: Int?,
@@ -206,10 +313,41 @@ data class OpportunityScoreBreakdown(
     val fundamentalsSignals: List<String>,
     val technicalSignals: List<String>,
     val forecastSignals: List<String>,
+    val fundamentalsFactors: List<ScoreFactor> = emptyList(),
+    val technicalFactors: List<ScoreFactor> = emptyList(),
+    val forecastFactors: List<ScoreFactor> = emptyList(),
     val regimeStatus: RegimeScoreStatus,
     val regimeCauses: List<RegimeCause>,
     val regimeSignals: List<String>,
     val regimeUnavailableReason: MarketContextUnavailableReason?,
+)
+
+/**
+ * How far apart V4's buckets were, and what that was worth.
+ *
+ * Unrounded, because the composite rounds once at the end and a surface that rounded first would
+ * report numbers the score was not built from. [agreement] runs 0.0 (as divided as the constant
+ * allows) to 1.0 (identical buckets).
+ */
+data class V4AgreementReading(
+    val centre: Double,
+    /**
+     * The measured disagreement: the mean distance of the buckets from [centre].
+     *
+     * Carried alongside [agreement] rather than folded into it, because [agreement] is clamped and
+     * therefore cannot be read backwards. An agreement of 0.0 says only "at least as divided as
+     * `V4_SPREAD_FULL`" — it cannot distinguish a spread of 39 from a spread of 100, and the
+     * distance between those two is the whole quantity V4 claims to price. Anything auditing this
+     * model, `shared/contracts/opportunity-v4.json` included, needs the number before the clamp.
+     */
+    val spread: Double,
+    val agreement: Double,
+    val bonus: Double,
+    /**
+     * How many buckets reported. One bucket pays no bonus and is not a disagreement — a surface
+     * that told the user four buckets disagreed when only one spoke would be inventing a quarrel.
+     */
+    val bucketCount: Int,
 )
 
 object OpportunityEngine {
@@ -220,6 +358,7 @@ object OpportunityEngine {
         -> LEGACY_AVOID_BELOW_SCORE
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
         -> CONTINUOUS_AVOID_BELOW_SCORE
     }
 
@@ -230,17 +369,26 @@ object OpportunityEngine {
         -> LEGACY_ACT_AT_OR_ABOVE_SCORE
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
+        OpportunityScoringModel.AggressiveV4,
         -> CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
     }
 
     fun buildRows(
         reportingEngine: ReportingEngine,
         context: OpportunityContext = OpportunityContext(),
+        /**
+         * Score every candidate, not only the ones that clear qualification.
+         *
+         * The product list is a *selected* population — qualification keeps roughly one symbol in
+         * eight. Any statistic taken over that subset is range-restricted, so an offline study that
+         * wants the cohort must ask for it. No shipped call site does; the default is the list.
+         */
+        includeUnqualified: Boolean = false,
     ): List<OpportunityRow> {
         val rows = reportingEngine
             .filteredRows(reportingEngine.symbolCount().coerceAtLeast(1), context.filter)
             .asSequence()
-            .filter { it.isQualified }
+            .filter { includeUnqualified || it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
                 val score = scoreWithModel(
@@ -251,6 +399,9 @@ object OpportunityEngine {
                     regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
                     marketRegime = context.marketRegime,
                     regimeScoringEnabled = context.regimeScoringEnabled,
+                    sectorBenchmarks = detail.fundamentals?.sectorName
+                        ?.let { context.sectorBenchmarks[it] },
+                    timeseries = context.timeseriesBySymbol[detail.symbol],
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -270,6 +421,9 @@ object OpportunityEngine {
                     fundamentalsSignals = score.fundamentalsSignals,
                     technicalSignals = score.technicalSignals,
                     forecastSignals = score.forecastSignals,
+                    fundamentalsFactors = score.fundamentalsFactors,
+                    technicalFactors = score.technicalFactors,
+                    forecastFactors = score.forecastFactors,
                     regimeStatus = score.regimeStatus,
                     regimeCauses = score.regimeCauses,
                     regimeSignals = score.regimeSignals,
@@ -303,25 +457,46 @@ object OpportunityEngine {
         regimeSummary: ChartRangeSummary? = null,
         marketRegime: MarketRegime? = null,
         regimeScoringEnabled: Boolean = true,
+        /**
+         * The levels for this symbol's own sector, or null when it has none.
+         *
+         * Null is the honest default rather than a convenience: a call site that does not supply
+         * benchmarks gets the absolute band and the plain label, which is exactly what it computed
+         * before V4 existed.
+         */
+        sectorBenchmarks: SectorBenchmarks? = null,
+        /** This symbol's annual driver series, for V4's share-count term. */
+        timeseries: FundamentalTimeseries? = null,
     ): OpportunityScoreBreakdown {
-        val (fundamentalsScore, fundamentalsSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
-            OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
+        var fundamentals = when (model) {
+            OpportunityScoringModel.Legacy -> scoreFundamentals(detail).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
+            OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks, timeseries)
         }
-        val (technicalScore, technicalSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
-            OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary)
+        var technical = when (model) {
+            OpportunityScoringModel.Legacy -> scoreTechnicals(summary).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
-            OpportunityScoringModel.AggressiveV3 -> aggressiveV3TechnicalScore(summary)
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            -> aggressiveV3TechnicalScore(summary)
         }
-        val (forecastScore, forecastSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis)
-            OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis)
+        var forecast = when (model) {
+            OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
-            OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            -> aggressiveV3ForecastScore(detail, analysis)
         }
+        var fundamentalsScore = fundamentals.score
+        var fundamentalsSignals = fundamentals.signals
+        var technicalScore = technical.score
+        var technicalSignals = technical.signals
+        var forecastScore = forecast.score
+        var forecastSignals = forecast.signals
         // The fit is computed only where it can count — a V2 screen must not pay for a bucket it
         // will never carry.
         val applicable = regimeDimensionApplies(model, detail.symbol)
@@ -335,7 +510,7 @@ object OpportunityEngine {
             policy == null -> RegimeFitResult(
                 unavailableReason = MarketContextUnavailableReason.MarketReadingUnavailable,
             )
-            else -> scoreRegimeFit(detail.fundamentals, regimeSummary, policy)
+            else -> scoreRegimeFit(detail.fundamentals, regimeSummary, policy, model.marketFeatureSet())
         }
         val status = resolveRegimeScoreStatus(applicable, regimeScoringEnabled, policy != null, fit.score)
         val included = status == RegimeScoreStatus.Included
@@ -380,6 +555,9 @@ object OpportunityEngine {
             fundamentalsSignals = fundamentalsSignals,
             technicalSignals = technicalSignals,
             forecastSignals = forecastSignals,
+            fundamentalsFactors = fundamentals.factors,
+            technicalFactors = technical.factors,
+            forecastFactors = forecast.factors,
             regimeStatus = status,
             regimeCauses = if (included) fit.causes else emptyList(),
             regimeSignals = if (included) fit.signals else emptyList(),
@@ -393,7 +571,7 @@ object OpportunityEngine {
      * an ETF or a coin has nothing to measure.
      */
     internal fun regimeDimensionApplies(model: OpportunityScoringModel, symbol: String): Boolean =
-        model == OpportunityScoringModel.AggressiveV3 && AssetClassification.assetType(symbol) == "stock"
+        model.carriesMarketDimension() && AssetClassification.assetType(symbol) == "stock"
 
     /**
      * `commands.rs::resolve_regime_score_status`.
@@ -461,7 +639,67 @@ object OpportunityEngine {
                 (base - haircut).roundToInt().coerceIn(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
             }
         }
+
+        /**
+         * V4 pays for agreement, not for presence.
+         *
+         * V3's bonus rises with the number of buckets that reported, whatever they said. A real row
+         * showed what that costs: SNDK's market bucket came in at 43, *below* the mean of the other
+         * three, and the composite still rose seven points because the bonus went from +10 to +15.
+         * A bucket that disagrees with the rest must not raise the score for turning up.
+         *
+         * So the bonus is scaled by how close the buckets are to each other, and the centre is the
+         * median rather than the mean — `present` holds two to four values, which is too few to name
+         * an outlier in, and `sum / n` is not a centre this project computes.
+         */
+        OpportunityScoringModel.AggressiveV4 -> {
+            var reading = v4AgreementReading(fundamentals, technical, forecast, regime)
+            if (reading == null) {
+                0
+            } else {
+                var base = (reading.centre + reading.bonus)
+                    .coerceIn(-V4_COMPOSITE_BOUND.toDouble(), V4_COMPOSITE_BOUND.toDouble())
+                val haircut = v3BetaRiskHaircut(betaMillis) * betaHaircutMult.coerceIn(0.0, V3_BETA_HAIRCUT_MULT_MAX)
+                (base - haircut).roundToInt().coerceIn(-V4_COMPOSITE_BOUND, V4_COMPOSITE_BOUND)
+            }
+        }
     }
+
+    /**
+     * What V4's composite paid for agreement, for a surface that wants to show it.
+     *
+     * The composite calls this too, so the detail panel cannot report an agreement the score was
+     * not built from. Null when no bucket reported, which is the same condition under which the
+     * composite scores zero.
+     */
+    fun v4AgreementReading(
+        fundamentals: Int?,
+        technical: Int?,
+        forecast: Int?,
+        regime: Int?,
+    ): V4AgreementReading? {
+        var present = listOfNotNull(fundamentals, technical, forecast, regime).map { it.toDouble() }
+        var centre = medianOf(present) ?: return null
+        var spread = meanAbsoluteDeviation(present, centre)
+        var agreement = 1.0 - (spread / V4_SPREAD_FULL).coerceIn(0.0, 1.0)
+        return V4AgreementReading(
+            centre = centre,
+            spread = spread,
+            agreement = agreement,
+            bonus = V4_COMPOSITE_AGREEMENT_BONUS * (present.size - 1) * agreement,
+            bucketCount = present.size,
+        )
+    }
+
+    /**
+     * How far the buckets sit from their centre, on average.
+     *
+     * A mean, and the one place in this file where a mean is the right statistic: the quantity being
+     * measured *is* the disagreement, so trimming the dissenting bucket would discard exactly what
+     * V4 is trying to price. It is also the quantity `V4_SPREAD_FULL` was fitted to.
+     */
+    private fun meanAbsoluteDeviation(values: List<Double>, centre: Double): Double =
+        values.sumOf { abs(it - centre) } / values.size
 
     private fun v3BetaRiskHaircut(betaMillis: Int?): Double {
         // Missing beta is not a penalty. High beta (→1.6+) haircuts up to V3_BETA_HAIRCUT_MAX.
@@ -801,8 +1039,8 @@ object OpportunityEngine {
     //    buckets purely on raw bucket-scale headroom.
     // ----------------------------------------------------------------------------------
 
-    internal fun aggressiveV2FundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
-        val fundamentals = detail.fundamentals ?: return null to emptyList()
+    internal fun aggressiveV2FundamentalsScore(detail: SymbolDetail): BucketEvidence {
+        val fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V2_FUNDAMENTALS_FULL_WEIGHT)
 
         // Free cash flow yield (FCF / market cap). Falls back to OCF positivity only when
@@ -853,12 +1091,12 @@ object OpportunityEngine {
             acc.add(V2_FUND_PE_WEIGHT, -smoothRamp(peHundredths.toDouble(), V2_FUND_PE_LOW, V2_FUND_PE_HIGH), "FwdPE")
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
-    internal fun aggressiveV2TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
-        summary ?: return null to emptyList()
-        val latestCloseCents = summary.latestCloseCents ?: return null to emptyList()
+    internal fun aggressiveV2TechnicalScore(summary: ChartRangeSummary?): BucketEvidence {
+        summary ?: return BucketEvidence.absent()
+        val latestCloseCents = summary.latestCloseCents ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V2_TECHNICALS_FULL_WEIGHT)
 
         // Trend stack: three correlated EMA deltas, but each carries a sub-weight that
@@ -894,10 +1132,10 @@ object OpportunityEngine {
             acc.add(V2_TECH_MACD_DIRECTION_WEIGHT, direction, "MACD")
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
-    internal fun aggressiveV2ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+    internal fun aggressiveV2ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): BucketEvidence {
         val acc = EvidenceAccumulator(V2_FORECAST_FULL_WEIGHT)
         val sufficiencySignals = mutableListOf<String>()
         var reliableEvidenceWeight = 0.0
@@ -983,13 +1221,12 @@ object OpportunityEngine {
             reliableEvidenceWeight += weight * externalFreshness
         }
 
-        val signals = (acc.signals + sufficiencySignals).distinct()
         if (!hasValuationAnchor || reliableEvidenceWeight < V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
-            return null to signals
+            return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
         }
 
-        val raw = acc.normalizedScore() ?: return null to signals
-        return raw.coerceIn(-100, 100) to signals
+        var raw = acc.normalizedScore() ?: return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
     }
 
     // ----------------------------------------------------------------------------------
@@ -1006,10 +1243,153 @@ object OpportunityEngine {
     //  * Composite: coverage-weighted mean + bonus, then beta risk haircut (missing beta = 0).
     // ----------------------------------------------------------------------------------
 
-    internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
-        val fundamentals = detail.fundamentals ?: return null to emptyList()
+    internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): BucketEvidence {
+        val fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V3_FUNDAMENTALS_FULL_WEIGHT)
 
+        addCashFlowVote(acc, fundamentals)
+        addReturnOnEquity(acc, fundamentals, sectorReturnOnEquityBps = null)
+        addEarningsGrowth(acc, fundamentals)
+        addBalanceSheet(acc, fundamentals)
+
+        // Multi-multiple valuation panel: blend available positive multiples so cheaper → +1.
+        // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
+        // saturate the full valuation budget.
+        val valuationRamps = mutableListOf<Double>()
+        fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
+            valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
+        }
+        fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
+            valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
+        }
+        fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
+            valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
+        }
+        if (valuationRamps.isNotEmpty()) {
+            val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
+            val coverageFraction = valuationRamps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
+            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
+        }
+
+        addCashConversion(acc, fundamentals)
+
+        return acc.toEvidence()
+    }
+
+    /**
+     * V4's fundamentals bucket: V3's terms, with the valuation panel and return on equity read
+     * against the symbol's own sector when that sector has earned a benchmark.
+     *
+     * The defect this fixes is that V3 ranks a utility and a chip maker on one P/E band, so it
+     * ranks industries before it ranks companies. A sector below the five-member floor has no
+     * benchmark and the row falls back to V3's absolute band — visibly, via
+     * [SECTOR_ADJUSTED_MARKER], because a list that scores two rows by two rules and says which is
+     * honest, and one that stays quiet about it is not.
+     */
+    internal fun aggressiveV4FundamentalsScore(
+        detail: SymbolDetail,
+        sectorBenchmarks: SectorBenchmarks?,
+        timeseries: FundamentalTimeseries? = null,
+    ): BucketEvidence {
+        var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
+        var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
+
+        addCashFlowVote(acc, fundamentals)
+        addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
+        addEarningsGrowth(acc, fundamentals)
+        addBalanceSheet(acc, fundamentals)
+        addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
+        addCashConversion(acc, fundamentals)
+        addShareCountChange(acc, timeseries)
+
+        return acc.toEvidence()
+    }
+
+    /**
+     * What the share count did over the most recent annual pair.
+     *
+     * The series is downloaded by both providers and, until now, only its last point was ever read
+     * — the count itself, never the change. A count that shrinks is the company buying its own
+     * shares and it scores positive; a count that grows is the shareholder being diluted and it
+     * scores negative.
+     *
+     * A single point is not a change and contributes nothing rather than zero: the pair is what
+     * carries the fact, and one point cannot say which way it moved. Both providers sort ascending
+     * by `asOfDate`, so the last two entries are the most recent pair.
+     */
+    private fun addShareCountChange(acc: EvidenceAccumulator, timeseries: FundamentalTimeseries?) {
+        var series = timeseries?.dilutedAverageShares?.filter { it.value > 0.0 } ?: return
+        if (series.size < 2) return
+        var previous = series[series.size - 2].value
+        var latest = series[series.size - 1].value
+        var changeBps = (latest - previous) / previous * BASIS_POINTS_PER_UNIT
+        acc.add(
+            V4_FUND_SHARE_COUNT_WEIGHT,
+            -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
+            "Shares",
+        )
+    }
+
+    /**
+     * The valuation panel, each multiple scored against its sector centre where there is one.
+     *
+     * Two things differ from V3's panel beyond the sector, and both are deliberate. The blend is a
+     * median, not `sum / n`: three ramps of which one is pinned at ±1 by a saturating multiple
+     * should not drag the panel, and a mean lets it. And the panel carries one label for three
+     * metrics, marked when the sector supplied **at least one** centre — a sector can clear the
+     * five-member floor on P/E and miss it on EV/EBITDA, and the marker's claim is "the sector was
+     * read here", not "every metric was".
+     */
+    private fun addSectorRelativeMultiples(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorBenchmarks: SectorBenchmarks?,
+    ) {
+        var ramps = mutableListOf<Double>()
+        var sectorAdjusted = false
+        fun scoreMultiple(observed: Int?, sectorCentre: Int?, absoluteLow: Double, absoluteHigh: Double) {
+            var value = observed?.takeIf { it > 0 } ?: return
+            var centre = sectorCentre?.takeIf { it > 0 }
+            if (centre != null) sectorAdjusted = true
+            var low = centre?.let { it * V4_FUND_SECTOR_CHEAP_MULT } ?: absoluteLow
+            var high = centre?.let { it * V4_FUND_SECTOR_RICH_MULT } ?: absoluteHigh
+            ramps += -smoothRamp(value.toDouble(), low, high)
+        }
+        scoreMultiple(
+            fundamentals.forwardPeHundredths,
+            sectorBenchmarks?.forwardPeHundredths,
+            V3_FUND_PE_LOW,
+            V3_FUND_PE_HIGH,
+        )
+        scoreMultiple(
+            fundamentals.enterpriseToEbitdaHundredths,
+            sectorBenchmarks?.enterpriseToEbitdaHundredths,
+            V3_FUND_EV_EBITDA_LOW,
+            V3_FUND_EV_EBITDA_HIGH,
+        )
+        scoreMultiple(
+            fundamentals.priceToBookHundredths,
+            sectorBenchmarks?.priceToBookHundredths,
+            V3_FUND_PB_LOW,
+            V3_FUND_PB_HIGH,
+        )
+        var blended = medianOf(ramps) ?: return
+        var coverageFraction = ramps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
+        var label = if (sectorAdjusted) "Mult$SECTOR_ADJUSTED_MARKER" else "Mult"
+        acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, label)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // The fundamentals terms V3 and V4 share.
+    //
+    // Moved out of V3's body unchanged, so that V4 reuses them instead of holding a second copy
+    // that can drift. V4's own terms are deliberately absent from this block: the multiple panel
+    // centres a different way and reads the sector, and the share-count change does not exist in
+    // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
+    // ----------------------------------------------------------------------------------
+
+    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF. */
+    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         val fcfDollars = fundamentals.freeCashFlowDollars
         val marketCapDollars = fundamentals.marketCapDollars
         when {
@@ -1027,15 +1407,46 @@ object OpportunityEngine {
                 }
             }
         }
+    }
 
-        fundamentals.returnOnEquityBps?.let { roeBps ->
+    /**
+     * Return on equity, against the sector's level when there is one and against an absolute band
+     * when there is not.
+     *
+     * The band is **additive**, and that is not an inconsistency with the multiple panel's
+     * multiplicative ramp — it is the reason the two are written apart. A percentage-of-centre band
+     * collapses as the centre nears zero and inverts once it crosses, and return on equity crosses
+     * zero on ordinary companies. Windows draws the same distinction at `engine.rs:1299-1305`.
+     *
+     * A sector-adjusted term is labelled `ROE§`, so a list holding both rules says which one scored
+     * each row. The marker is Windows's convention, kept identical here on purpose.
+     */
+    private fun addReturnOnEquity(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorReturnOnEquityBps: Int?,
+    ) {
+        var roeBps = fundamentals.returnOnEquityBps ?: return
+        if (sectorReturnOnEquityBps == null) {
             acc.add(V3_FUND_ROE_WEIGHT, smoothRamp(roeBps.toDouble(), V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS), "ROE")
+            return
         }
+        var centre = sectorReturnOnEquityBps.toDouble()
+        var ramp = smoothRamp(
+            roeBps.toDouble(),
+            centre + V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS,
+            centre + V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS,
+        )
+        acc.add(V3_FUND_ROE_WEIGHT, ramp, "ROE$SECTOR_ADJUSTED_MARKER")
+    }
 
+    private fun addEarningsGrowth(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         fundamentals.earningsGrowthBps?.let { growthBps ->
             acc.add(V3_FUND_GROWTH_WEIGHT, smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS), "Growth")
         }
+    }
 
+    private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         val deHundredths = fundamentals.debtToEquityHundredths
         if (deHundredths != null) {
             acc.add(V3_FUND_BALANCE_WEIGHT, -smoothRamp(deHundredths.toDouble(), V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH), "D/E")
@@ -1046,39 +1457,21 @@ object OpportunityEngine {
                 acc.add(V3_FUND_BALANCE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
             }
         }
+    }
 
-        // Multi-multiple valuation panel: blend available positive multiples so cheaper → +1.
-        // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
-        // saturate the full valuation budget.
-        val valuationRamps = mutableListOf<Double>()
-        fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
-            valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
-        }
-        fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
-            valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
-        }
-        fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
-            valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
-        }
-        if (valuationRamps.isNotEmpty()) {
-            val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
-            val coverageFraction = valuationRamps.size.toDouble() / 3.0
-            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
-        }
-
-        // Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign).
+    /** Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign). */
+    private fun addCashConversion(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+        val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
             val conversion = fcfDollars.toDouble() / ocfForQuality.toDouble()
             acc.add(V3_FUND_CASH_QUALITY_WEIGHT, smoothRamp(conversion, 0.0, 1.0), "Conv")
         }
-
-        return acc.normalizedScore() to acc.signals
     }
 
-    internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
-        summary ?: return null to emptyList()
-        val latestCloseCents = summary.latestCloseCents ?: return null to emptyList()
+    internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): BucketEvidence {
+        summary ?: return BucketEvidence.absent()
+        val latestCloseCents = summary.latestCloseCents ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V3_TECHNICALS_FULL_WEIGHT)
 
         summary.ema20Cents?.takeIf { it > 0 }?.let { ema20 ->
@@ -1125,7 +1518,7 @@ object OpportunityEngine {
             )
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
     /**
@@ -1142,7 +1535,7 @@ object OpportunityEngine {
         else -> -0.5
     }
 
-    internal fun aggressiveV3ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+    internal fun aggressiveV3ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): BucketEvidence {
         val acc = EvidenceAccumulator(V3_FORECAST_FULL_WEIGHT)
         val sufficiencySignals = mutableListOf<String>()
         var reliableEvidenceWeight = 0.0
@@ -1256,13 +1649,12 @@ object OpportunityEngine {
             reliableEvidenceWeight += weight * externalFreshness
         }
 
-        val signals = (acc.signals + sufficiencySignals).distinct()
         if (!hasValuationAnchor || reliableEvidenceWeight < V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
-            return null to signals
+            return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
         }
 
-        val raw = acc.normalizedScore() ?: return null to signals
-        return raw.coerceIn(-100, 100) to signals
+        var raw = acc.normalizedScore() ?: return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
     }
 
     private fun v3RecommendationSkew(detail: SymbolDetail): Double? {
@@ -1379,6 +1771,7 @@ object OpportunityEngine {
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
         val signals = mutableListOf<String>()
+        val factors = mutableListOf<ScoreFactor>()
 
         init {
             require(normalizationWeight > 0.0) { "EvidenceAccumulator normalizationWeight must be positive" }
@@ -1386,16 +1779,35 @@ object OpportunityEngine {
 
         fun add(weight: Double, ramp: Double, label: String? = null) {
             require(weight > 0.0) { "EvidenceAccumulator weight must be positive" }
-            val clamped = ramp.coerceIn(-1.0, 1.0)
+            var clamped = ramp.coerceIn(-1.0, 1.0)
             weightedSum += weight * clamped
             evidenceWeight += weight
-            if (label != null) signals += "$label${signalSuffix(clamped)}"
+            if (label != null) {
+                var token = "$label${signalSuffix(clamped)}"
+                signals += token
+                var points = ((weight * clamped) / normalizationWeight * 100.0).roundToInt()
+                factors += ScoreFactor(key = label, token = token, bucketPoints = points)
+            }
         }
 
         fun normalizedScore(): Int? {
             if (evidenceWeight == 0.0) return null
-            val normalized = (weightedSum / normalizationWeight) * 100.0
+            var normalized = (weightedSum / normalizationWeight) * 100.0
             return normalized.coerceIn(-100.0, 100.0).roundToInt()
+        }
+
+        fun toEvidence(
+            extraSignals: List<String> = emptyList(),
+            scoreOverride: Int? = normalizedScore(),
+        ): BucketEvidence {
+            var extraFactors = extraSignals.map { signal ->
+                ScoreFactor(key = signal, token = signal, bucketPoints = 0)
+            }
+            return BucketEvidence(
+                score = scoreOverride,
+                signals = (signals + extraSignals).distinct(),
+                factors = factors + extraFactors,
+            )
         }
 
         private fun signalSuffix(r: Double): String = when {
@@ -1405,6 +1817,12 @@ object OpportunityEngine {
             else -> "--"
         }
     }
+
+    private fun Pair<Int?, List<String>>.toEvidence(): BucketEvidence = BucketEvidence(
+        score = first,
+        signals = second,
+        factors = second.map { token -> ScoreFactor(key = token, token = token, bucketPoints = 0) },
+    )
 
 
     private fun dcfMarginOfSafetyBps(analysis: DcfAnalysis, marketPriceCents: Long): Int? {
