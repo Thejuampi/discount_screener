@@ -221,14 +221,21 @@ data class DashboardUiState(
     val discoveryBusy: Boolean = false,
     val discoveryStatusMessage: String? = null,
     val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
+    /**
+     * Score for the open ticker when it is not in [opportunityRows]. The ranked list is a
+     * cache of qualified names; an ad-hoc search ticker is fetched and scored separately.
+     */
+    val selectedScoreRow: OpportunityListRow? = null,
 ) {
     /**
-     * The ranked row backing the open ticker, or null when that symbol is not in the current
-     * opportunity set. Derived rather than stored, so the detail view can never show a score the
-     * list has already moved past.
+     * The open ticker's score: the ranked-list row when present, otherwise the fetched
+     * selected row. Never show a score that belongs to a different symbol.
      */
     val detailScoreRow: OpportunityListRow?
-        get() = detailRoute?.let { route -> opportunityRows.firstOrNull { it.symbol == route.symbol } }
+        get() = detailRoute?.let { route ->
+            selectedScoreRow?.takeIf { row -> row.symbol == route.symbol }
+                ?: opportunityRows.firstOrNull { row -> row.symbol == route.symbol }
+        }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -693,6 +700,7 @@ class DashboardViewModel(
     private fun backFromDetail() {
         _state.value = _state.value.copy(
             detailRoute = null,
+            selectedScoreRow = null,
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
@@ -1037,6 +1045,11 @@ class DashboardViewModel(
             watchlistSymbols = snapshot.watchlistSymbols,
             candidateRows = snapshot.candidateRows,
             opportunityRows = snapshot.opportunityRows,
+            selectedScoreRow = if (currentRoute != null && snapshot.selectedScoreRow?.symbol == currentRoute.symbol) {
+                snapshot.selectedScoreRow
+            } else {
+                null
+            },
             opportunityScoringModel = snapshot.opportunityScoringModel,
             issues = snapshot.issues,
             detailData = if (selectedDetailMatchesRoute) {

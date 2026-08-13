@@ -68,8 +68,8 @@ android-clean:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) clean && popd
 
 android-release:
-	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleRelease && popd
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk' '$(APK_EXPORT_RELEASE)'; Write-Host 'Installable release APK: $(APK_EXPORT_RELEASE)'"
+	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleRelease -PallowDebugSignedRelease=true && popd
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk' '$(APK_EXPORT_RELEASE)'; Write-Host 'Release APK: $(APK_EXPORT_RELEASE)'"
 
 android-signing-bootstrap:
 	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/create-android-release-keystore.ps1" -UpdateLocalProperties

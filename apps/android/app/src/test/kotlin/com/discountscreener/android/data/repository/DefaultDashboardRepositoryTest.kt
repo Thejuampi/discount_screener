@@ -2199,6 +2199,64 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun ensure_detail_loaded_scores_an_unqualified_ad_hoc_ticker() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var base = super.fetchSymbol(symbol)
+                    var price = base.snapshot!!.marketPriceCents
+                    return base.copy(
+                        snapshot = base.snapshot!!.copy(intrinsicValueCents = price + 100),
+                        externalSignal = base.externalSignal!!.copy(fairValueCents = price + 100),
+                    )
+                }
+            }
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            var snapshot = repository.ensureDetailLoaded(
+                "MELI",
+                ViewFilter(),
+                ChartRange.Year,
+                OpportunityScoringModel.AggressiveV4,
+            )
+
+            assertEquals("MELI", snapshot.selectedScoreRow?.symbol)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ensure_detail_loaded_does_not_put_an_unqualified_ad_hoc_ticker_on_the_ranked_list() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var base = super.fetchSymbol(symbol)
+                    var price = base.snapshot!!.marketPriceCents
+                    return base.copy(
+                        snapshot = base.snapshot!!.copy(intrinsicValueCents = price + 100),
+                        externalSignal = base.externalSignal!!.copy(fairValueCents = price + 100),
+                    )
+                }
+            }
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            var snapshot = repository.ensureDetailLoaded(
+                "MELI",
+                ViewFilter(),
+                ChartRange.Year,
+                OpportunityScoringModel.AggressiveV4,
+            )
+
+            assertEquals(emptyList<String>(), snapshot.opportunityRows.map { it.symbol }.filter { it == "MELI" })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun fallback_snapshot_uses_latest_chart_close_when_quote_html_is_missing() {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {

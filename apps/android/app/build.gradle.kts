@@ -59,6 +59,23 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            var bench = providers.gradleProperty("dsWarmStartBench")
+                .orElse(providers.environmentVariable("DS_WARMSTART_BENCH"))
+                .orElse("")
+                .get()
+            it.systemProperty("dsWarmStartBench", bench)
+            it.systemProperty(
+                "dsWarmStartBenchReport",
+                providers.gradleProperty("dsWarmStartBenchReport")
+                    .orElse(providers.environmentVariable("DS_WARMSTART_BENCH_REPORT"))
+                    .orElse("")
+                    .get(),
+            )
+            if (bench == "1") {
+                it.maxHeapSize = "3g"
+            }
+        }
     }
 
     compileOptions {
@@ -146,15 +163,13 @@ dependencies {
 /**
  * A release signed with the debug key is not a release, and it used to become one in silence.
  *
- * With no keystore configured the release build type falls through to the debug signing config,
- * `make android-release` copied the result out as "Installable release APK", and the artifact
- * carried the Android debug key — a key that sits on every machine that has ever built an app, so
- * anyone at all can sign a forged update to a package holding it.
+ * With no keystore configured the release build type falls through to the debug signing config.
+ * A bare `assembleRelease` used to export that as a release APK in silence. The Android debug
+ * key sits on every machine that has ever built an app, so anyone can sign a forged update.
  *
- * The fallback is kept, because it is genuinely useful for putting a build on your own phone, and
- * it is now opt-in. Saying `-PallowDebugSignedRelease=true` out loud costs one flag and puts the
- * decision in the build log beside the artifact it produced. Not saying it fails the build, with
- * both ways forward named in the message.
+ * `make android-release` is the release build type, not a signing identity. It passes
+ * `-PallowDebugSignedRelease=true` on purpose. A bare `assembleRelease` still refuses unless
+ * that flag is set, so a silent Gradle release cannot downgrade its own trust.
  *
  * **Checked on the packaging task, not in the `release` build type.** The build type is evaluated
  * during configuration, so a refusal thrown there fails every invocation in this module — including

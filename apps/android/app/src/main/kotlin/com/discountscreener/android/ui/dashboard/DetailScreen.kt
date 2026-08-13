@@ -459,7 +459,7 @@ private fun ScoreContent(
         item {
             if (scoreRow == null) {
                 Text(
-                    text = "Not in the ranked set under ${scoringModel.chipLabel()}",
+                    text = "Score unavailable for this ticker.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
