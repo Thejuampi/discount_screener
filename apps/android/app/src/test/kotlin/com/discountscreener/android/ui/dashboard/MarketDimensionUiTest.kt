@@ -16,6 +16,7 @@ import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
+import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -96,11 +97,24 @@ class MarketDimensionUiTest {
     }
 
     @Test
-    fun detail_names_what_the_market_rewarded_and_what_it_marked_down() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+    fun detail_names_what_the_market_rewarded() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
-        composeRule.onNodeWithText("+ quality").assertIsDisplayed()
-        composeRule.onNodeWithText("− extension").assertIsDisplayed()
+        composeRule.onNodeWithText("quality").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_market_cause_shows_its_fit_weight_on_the_score_tab() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText("+9").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun detail_names_what_the_market_marked_down() {
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText("extension").performScrollTo().assertIsDisplayed()
     }
 
     /**
@@ -117,7 +131,7 @@ class MarketDimensionUiTest {
     /** The fourth-largest cause is, by construction, the one that changed the answer least. */
     @Test
     fun only_the_three_largest_causes_are_shown() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
         composeRule.onNodeWithText("− growth").assertDoesNotExist()
     }
@@ -125,9 +139,9 @@ class MarketDimensionUiTest {
     /** Largest by magnitude, not by position in the list the engine happened to build. */
     @Test
     fun the_smaller_causes_give_way_to_the_larger_ones() {
-        setDetailContent(row = includedRow(base = 31, final = 39))
+        setDetailContent(row = includedRow(base = 31, final = 39), subtab = DetailSubtab.Score)
 
-        composeRule.onNodeWithText("+ low beta").assertIsDisplayed()
+        composeRule.onNodeWithText("low beta").performScrollTo().assertIsDisplayed()
     }
 
     /**
@@ -393,6 +407,7 @@ class MarketDimensionUiTest {
     private fun setDetailContent(
         row: OpportunityListRow,
         scoringModel: OpportunityScoringModel = MODEL,
+        subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
     ) {
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
@@ -403,6 +418,7 @@ class MarketDimensionUiTest {
                         symbol = SYMBOL,
                         sourceTab = DetailSourceTab.Opportunities,
                         sourceSymbols = listOf(SYMBOL),
+                        subtab = subtab,
                     ),
                     detail = null,
                     charts = emptyMap(),

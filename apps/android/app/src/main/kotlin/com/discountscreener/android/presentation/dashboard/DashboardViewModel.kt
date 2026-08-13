@@ -38,6 +38,7 @@ import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -85,6 +86,7 @@ enum class DashboardTab {
 
 enum class DetailSubtab {
     Snapshot,
+    Score,
     Lens,
     History,
 }
@@ -218,6 +220,7 @@ data class DashboardUiState(
     val discoveryLastSourceHint: String? = null,
     val discoveryBusy: Boolean = false,
     val discoveryStatusMessage: String? = null,
+    val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
 ) {
     /**
      * The ranked row backing the open ticker, or null when that symbol is not in the current
@@ -256,6 +259,7 @@ class DashboardViewModel(
     private val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
     private val clearDiscoveryData: ClearDiscoveryDataUseCase,
     private val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
+    private val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -692,6 +696,7 @@ class DashboardViewModel(
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
+            replayBackingCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
@@ -731,12 +736,18 @@ class DashboardViewModel(
     private fun stepReplayBack() {
         val state = _state.value
         val route = state.detailRoute ?: return
-        var totalCandles = projectedChartTotalCandles(state, route) ?: state.detailCharts[route.chartRange].orEmpty().size
+        var backingCandles = state.replayBackingCharts[route.chartRange]
+        var totalCandles = projectedChartTotalCandles(state, route)
+            ?: backingCandles?.size
+            ?: state.detailCharts[route.chartRange].orEmpty().size
         _state.value = state.copy(
             detailRoute = route.copy(
                 replayOffset = ChartAnalysis.stepReplayBack(route.replayOffset, totalCandles),
             ),
         )
+        if (backingCandles == null) {
+            viewModelScope.launch { ensureReplayBackingLoaded(route.symbol, route.chartRange) }
+        }
     }
 
     private fun stepReplayForward() {
@@ -788,6 +799,7 @@ class DashboardViewModel(
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
+            replayBackingCharts = emptyMap(),
             detailHistory = emptyList(),
             detailAlerts = emptyList(),
             detailQuantLens = null,
@@ -1058,6 +1070,11 @@ class DashboardViewModel(
                 currentState.detailQuantLens
             },
             detailNotice = if (selectedDetailMatchesRoute) snapshot.detailNotice else currentState.detailNotice,
+            replayBackingCharts = if (selectedDetailMatchesRoute) {
+                snapshot.replayBackingCharts
+            } else {
+                currentState.replayBackingCharts
+            },
             rowQuantLensChipsBySymbol = buildMap {
                 snapshot.trackedRows.forEach { row ->
                     put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
@@ -1110,6 +1127,7 @@ class DashboardViewModel(
                         cancelDiscoveryJob = useCases.cancelDiscoveryJob,
                         clearDiscoveryData = useCases.clearDiscoveryData,
                         observeDiscoveryProgress = useCases.observeDiscoveryProgress,
+                        ensureReplayBackingLoaded = useCases.ensureReplayBackingLoaded,
                     )
                 }
             }

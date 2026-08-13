@@ -9,14 +9,22 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import com.discountscreener.android.StuckTestWatchdog
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.RowDecisionState
+import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.ScoreFactor
+import com.discountscreener.core.model.SymbolDetail
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -90,9 +98,12 @@ class DetailScoreHeaderTest {
      */
     @Test
     fun a_sector_scored_multiple_says_on_screen_that_it_was_scored_against_its_sector() {
-        setDetailContent(scoreRow = scoreRow(composite = 42, fundamentalsSignals = listOf("Mult§++")))
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, fundamentalsSignals = listOf("Mult§++")),
+            subtab = DetailSubtab.Score,
+        )
 
-        composeRule.onNodeWithText("Mult§++").assertIsDisplayed()
+        composeRule.onNodeWithText("Mult§++").performScrollTo().assertIsDisplayed()
     }
 
     /**
@@ -103,7 +114,10 @@ class DetailScoreHeaderTest {
      */
     @Test
     fun a_row_that_carries_no_fundamentals_signal_renders_no_signal_token() {
-        setDetailContent(scoreRow = scoreRow(composite = 42, fundamentalsSignals = emptyList()))
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, fundamentalsSignals = emptyList()),
+            subtab = DetailSubtab.Score,
+        )
 
         composeRule.onNodeWithText("Mult§++").assertDoesNotExist()
     }
@@ -116,24 +130,326 @@ class DetailScoreHeaderTest {
      * the `§` pair is split. Each of these fails alone if its own list loses its consumer.
      */
     @Test
-    fun a_technical_reading_reaches_the_screen() {
-        setDetailContent(scoreRow = scoreRow(composite = 42, technicalSignals = listOf("RSI--")))
+    fun a_factor_shows_its_readable_name() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(ScoreFactor("Mult§", "Mult§++", 14)),
+            ),
+            subtab = DetailSubtab.Score,
+        )
 
-        composeRule.onNodeWithText("RSI--").assertIsDisplayed()
+        composeRule.onNodeWithText("Multiples vs sector").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_factor_shows_the_points_it_added_to_the_bucket() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(ScoreFactor("Mult§", "Mult§++", 14)),
+            ),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("+14").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_weak_bucket_says_so_on_the_score_tab() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentals = -22,
+                fundamentalsFactors = listOf(ScoreFactor("Mult", "Mult--", -22)),
+            ),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("F -22 · Weak").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_shows_the_decision_once() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated)
+                .copy(decisionState = RowDecisionState.Act),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+            detail = namedDetail(),
+        )
+
+        composeRule.onAllNodesWithText("Act").assertCountEquals(1)
+    }
+
+    @Test
+    fun snapshot_keeps_the_decision_in_the_app_bar() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated)
+                .copy(decisionState = RowDecisionState.Act),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            detail = namedDetail(),
+        )
+
+        composeRule.onNodeWithText("Act").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_names_qualification_from_the_in_memory_row() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated).copy(
+                qualification = QualificationStatus.Qualified,
+                externalStatus = ExternalSignalStatus.Supportive,
+                analystCoverageCount = 5,
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+            detail = namedDetail().copy(
+                symbol = "OLD.BA",
+                qualification = QualificationStatus.Unprofitable,
+                companyName = "Old Co",
+            ),
+        )
+
+        composeRule.onNodeWithText("Qualified").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_does_not_keep_the_previous_qualification() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated).copy(
+                qualification = QualificationStatus.Qualified,
+                externalStatus = ExternalSignalStatus.Supportive,
+                analystCoverageCount = 5,
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+            detail = namedDetail().copy(
+                symbol = "OLD.BA",
+                qualification = QualificationStatus.Unprofitable,
+                companyName = "Old Co",
+            ),
+        )
+
+        composeRule.onNodeWithText("Unprofitable").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_score_tab_names_external_coverage_from_the_in_memory_row() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated).copy(
+                qualification = QualificationStatus.Qualified,
+                externalStatus = ExternalSignalStatus.Supportive,
+                analystCoverageCount = 5,
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+            detail = namedDetail().copy(symbol = "OLD.BA", companyName = "Old Co"),
+        )
+
+        composeRule.onNodeWithText("Supportive · 5 ≥ 3").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_offers_help_on_external() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated).copy(
+                qualification = QualificationStatus.Qualified,
+                externalStatus = ExternalSignalStatus.Supportive,
+                analystCoverageCount = 5,
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("(i)").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_external_help_opens_the_street_median_copy() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated).copy(
+                qualification = QualificationStatus.Qualified,
+                externalStatus = ExternalSignalStatus.Supportive,
+                analystCoverageCount = 5,
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("(i)").performClick()
+
+        composeRule.onNodeWithText("Street median target versus price.", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun the_app_bar_uses_the_row_company_name_while_detail_is_stale() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42).copy(companyName = "New Co"),
+            detail = namedDetail().copy(symbol = "OLD.BA", companyName = "Old Co"),
+        )
+
+        composeRule.onNodeWithText("New Co").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_app_bar_does_not_keep_the_previous_company_name() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42).copy(companyName = "New Co"),
+            detail = namedDetail().copy(symbol = "OLD.BA", companyName = "Old Co"),
+        )
+
+        composeRule.onNodeWithText("Old Co").assertDoesNotExist()
+    }
+
+    @Test
+    fun snapshot_does_not_explain_confidence() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            detail = namedDetail(),
+        )
+
+        composeRule.onNodeWithText("Qualification").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_clear_trust_gate_is_omitted() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("Clear").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_score_tab_shows_the_act_cut_on_the_composite_gate() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("42 ≥ 30").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_shows_the_trust_note_on_the_trust_gate() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                freshness = RowFreshness.Updated,
+                trustNote = "No analyst target",
+            ),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("No analyst target").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun snapshot_does_not_explain_the_decision() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, freshness = RowFreshness.Updated),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+        )
+
+        composeRule.onNodeWithText("42 ≥ 30").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_score_tab_states_the_five_bands() {
+        setDetailContent(scoreRow = scoreRow(composite = 42), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText(SCORE_READING_LEGEND).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun snapshot_does_not_state_the_five_bands() {
+        setDetailContent(scoreRow = scoreRow(composite = 42))
+
+        composeRule.onNodeWithText(SCORE_READING_LEGEND).assertDoesNotExist()
+    }
+
+    @Test
+    fun the_score_decomp_does_not_sit_on_snapshot() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(ScoreFactor("Mult§", "Mult§++", 14)),
+            ),
+        )
+
+        composeRule.onNodeWithText("Multiples vs sector").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_score_tab_is_selected_when_the_decomp_is_open() {
+        setDetailContent(scoreRow = scoreRow(composite = 42), subtab = DetailSubtab.Score)
+
+        composeRule.onNodeWithText("Score").assertIsSelected()
+    }
+
+    @Test
+    fun the_score_tab_marks_the_active_scoring_model() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42),
+            scoringModel = OpportunityScoringModel.AggressiveV3,
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("V3").assertIsSelected()
+    }
+
+    @Test
+    fun changing_the_model_inside_the_score_tab_drives_the_one_global_selection() {
+        val actions = mutableListOf<DashboardAction>()
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42),
+            scoringModel = OpportunityScoringModel.AggressiveV2,
+            subtab = DetailSubtab.Score,
+            onAction = actions::add,
+        )
+
+        composeRule.onNodeWithText("V3").performClick()
+
+        assertEquals(
+            listOf(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.AggressiveV3)),
+            actions,
+        )
+    }
+
+    @Test
+    fun a_technical_reading_reaches_the_screen() {
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, technicalSignals = listOf("RSI--")),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText("RSI--").performScrollTo().assertIsDisplayed()
     }
 
     @Test
     fun a_forecast_reading_reaches_the_screen() {
-        setDetailContent(scoreRow = scoreRow(composite = 42, forecastSignals = listOf("Target++")))
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, forecastSignals = listOf("Target++")),
+            subtab = DetailSubtab.Score,
+        )
 
-        composeRule.onNodeWithText("Target++").assertIsDisplayed()
+        composeRule.onNodeWithText("Target++").performScrollTo().assertIsDisplayed()
     }
 
     @Test
     fun a_market_reading_reaches_the_screen() {
-        setDetailContent(scoreRow = scoreRow(composite = 42, regimeSignals = listOf("Liquidity+")))
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42, regimeSignals = listOf("Liquidity+")),
+            subtab = DetailSubtab.Score,
+        )
 
-        composeRule.onNodeWithText("Liquidity+").assertIsDisplayed()
+        composeRule.onNodeWithText("Liquidity+").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -143,7 +459,7 @@ class DetailScoreHeaderTest {
             scoringModel = OpportunityScoringModel.AggressiveV3,
         )
 
-        composeRule.onNodeWithText("Aggressive V3").performScrollTo().assertIsSelected()
+        composeRule.onNodeWithText("V3").performScrollTo().assertIsSelected()
     }
 
     @Test
@@ -155,7 +471,7 @@ class DetailScoreHeaderTest {
             onAction = actions::add,
         )
 
-        composeRule.onNodeWithText("Aggressive V3").performScrollTo().performClick()
+        composeRule.onNodeWithText("V3").performScrollTo().performClick()
 
         assertEquals(
             listOf(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.AggressiveV3)),
@@ -178,7 +494,7 @@ class DetailScoreHeaderTest {
         setDetailContent(scoreRow = null, scoringModel = OpportunityScoringModel.AggressiveV3)
 
         composeRule
-            .onNodeWithText("Not in the ranked set under Aggressive V3")
+            .onNodeWithText("Not in the ranked set under V3")
             .assertIsDisplayed()
     }
 
@@ -186,7 +502,7 @@ class DetailScoreHeaderTest {
     fun the_model_selector_stays_reachable_for_a_symbol_outside_the_ranked_set() {
         setDetailContent(scoreRow = null, scoringModel = OpportunityScoringModel.AggressiveV3)
 
-        composeRule.onNodeWithText("Aggressive V2").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("V2").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -255,19 +571,39 @@ class DetailScoreHeaderTest {
         if (position == place) SYMBOL else "SYM$position.BA"
     }
 
+    private fun namedDetail() = SymbolDetail(
+        symbol = SYMBOL,
+        profitable = true,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 15_000L,
+        gapBps = 5_000,
+        minimumGapBps = 1_500,
+        qualification = QualificationStatus.Qualified,
+        externalStatus = ExternalSignalStatus.Supportive,
+        weightedAnalystCount = 5,
+        analystOpinionCount = 5,
+        externalSignalMaxAgeSeconds = 86_400,
+        confidence = ConfidenceBand.High,
+        lastSequence = 1,
+        updateCount = 1,
+        isWatched = false,
+        companyName = "Test Co",
+    )
+
     private fun setDetailContent(
         scoreRow: OpportunityListRow?,
         scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
         sourceSymbols: List<String> = listOf(SYMBOL),
         subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
+        detail: SymbolDetail? = null,
     ) {
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
         activity.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = routeOf(sourceSymbols, subtab),
-                    detail = null,
+                    detail = detail,
                     charts = emptyMap(),
                     history = emptyList(),
                     alerts = emptyList(),
@@ -288,7 +624,10 @@ class DetailScoreHeaderTest {
         fundamentalsSignals: List<String> = emptyList(),
         technicalSignals: List<String> = emptyList(),
         forecastSignals: List<String> = emptyList(),
+        fundamentalsFactors: List<ScoreFactor> = emptyList(),
         regimeSignals: List<String> = emptyList(),
+        freshness: RowFreshness = RowFreshness.Loading,
+        trustNote: String? = null,
     ) = OpportunityListRow(
         symbol = SYMBOL,
         marketPriceCents = 10_000L,
@@ -296,6 +635,8 @@ class DetailScoreHeaderTest {
         gapBps = 5_000,
         confidence = ConfidenceBand.High,
         isWatched = false,
+        freshness = freshness,
+        trustNote = trustNote,
         fundamentalsScore = fundamentals,
         technicalScore = technical,
         forecastScore = forecast,
@@ -304,6 +645,7 @@ class DetailScoreHeaderTest {
         fundamentalsSignals = fundamentalsSignals,
         technicalSignals = technicalSignals,
         forecastSignals = forecastSignals,
+        fundamentalsFactors = fundamentalsFactors,
         regimeSignals = regimeSignals,
     )
 

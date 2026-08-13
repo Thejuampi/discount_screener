@@ -161,7 +161,7 @@ internal fun regimeCauseColor(effect: RegimeCauseEffect): Color = when (effect) 
     RegimeCauseEffect.Neutral -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
-private fun regimeFactorLabel(factor: RegimeCauseFactor): String = when (factor) {
+internal fun regimeFactorLabel(factor: RegimeCauseFactor): String = when (factor) {
     RegimeCauseFactor.Quality -> "quality"
     RegimeCauseFactor.LowBeta -> "low beta"
     RegimeCauseFactor.Value -> "valuation"

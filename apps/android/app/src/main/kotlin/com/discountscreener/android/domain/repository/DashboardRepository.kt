@@ -61,4 +61,5 @@ interface DashboardRepository {
     suspend fun cancelDiscoveryJob(): DiscoverySnapshot
     suspend fun clearDiscoveryData(): DiscoverySnapshot
     fun observeDiscoveryProgress(): Flow<Unit>
+    suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange)
 }

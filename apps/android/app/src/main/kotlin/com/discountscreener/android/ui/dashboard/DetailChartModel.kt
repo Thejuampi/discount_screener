@@ -105,6 +105,7 @@ internal fun buildSnapshotChartModels(
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
     replayOffset: Int,
+    windowSize: Int = candles.size,
     projectedChart: ProjectedChartData? = null,
 ): SnapshotChartModels {
     var projectedCandidate = projectedChart?.takeIf { chart ->
@@ -113,9 +114,9 @@ internal fun buildSnapshotChartModels(
             chart.candles.isNotEmpty()
     }
     if (projectedCandidate != null) {
-        return buildProjectedSnapshotChartModels(projectedCandidate, replayOffset)
+        return buildProjectedSnapshotChartModels(projectedCandidate, replayOffset, windowSize)
     }
-    var replayWindow = ChartAnalysis.buildReplayWindow(candles, replayOffset)
+    var replayWindow = ChartAnalysis.buildReplayWindow(candles, replayOffset, windowSize)
     var visibleCandles = replayWindow.visibleCandles
     var priceChartModel = buildPriceChartModel(visibleCandles)
     var volumeChartModel = buildVolumeChartModel(visibleCandles)
@@ -146,8 +147,9 @@ internal fun buildSnapshotChartModels(
 private fun buildProjectedSnapshotChartModels(
     chart: ProjectedChartData,
     replayOffset: Int,
+    windowSize: Int = chart.candles.size,
 ): SnapshotChartModels {
-    var replayAdjustedChart = projectedChartForReplayOffset(chart, replayOffset)
+    var replayAdjustedChart = projectedChartForReplayOffset(chart, replayOffset, windowSize)
     var projectedReplayWindow = replayAdjustedChart.analysis.replayWindow
     var replayWindow = ReplayWindow(
         visibleCandles = projectedReplayWindow.visibleCandles,
@@ -176,6 +178,7 @@ private fun buildProjectedSnapshotChartModels(
 private fun projectedChartForReplayOffset(
     chart: ProjectedChartData,
     replayOffset: Int,
+    windowSize: Int = chart.candles.size,
 ): ProjectedChartData {
     if (chart.analysis.replayWindow.replayOffset == replayOffset || chart.candles.isEmpty()) {
         return chart
@@ -188,6 +191,7 @@ private fun projectedChartForReplayOffset(
         volumeProfileBinCount = chart.analysis.volumeProfile?.bins?.size?.takeIf { binCount -> binCount > 0 }
             ?: SnapshotVolumeProfileBinCount,
         summary = chart.summary,
+        replayWindowSize = windowSize,
     )
 }
 

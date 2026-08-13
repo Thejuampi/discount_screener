@@ -852,6 +852,23 @@ data class ChartRangeSummary(
     val minusDi: Double? = null,
 )
 
+/**
+ * One scored term inside a bucket, with the points it added to that bucket.
+ *
+ * [bucketPoints] is `weight × ramp / full weight × 100`, the same unit the bucket score uses.
+ * The tags therefore add (within rounding) to the bucket they explain. They do not add to the
+ * composite: V4 takes the centre of the buckets, then pays for agreement.
+ *
+ * [key] is the engine label (`FCFy`, `ROE§`). [token] keeps the `++` suffix the older surfaces
+ * still read.
+ */
+@Serializable
+data class ScoreFactor(
+    val key: String,
+    val token: String,
+    val bucketPoints: Int,
+)
+
 @Serializable
 data class OpportunityRow(
     val symbol: String,
@@ -879,6 +896,9 @@ data class OpportunityRow(
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val fundamentalsFactors: List<ScoreFactor> = emptyList(),
+    val technicalFactors: List<ScoreFactor> = emptyList(),
+    val forecastFactors: List<ScoreFactor> = emptyList(),
     val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
     val regimeCauses: List<RegimeCause> = emptyList(),
     val regimeSignals: List<String> = emptyList(),

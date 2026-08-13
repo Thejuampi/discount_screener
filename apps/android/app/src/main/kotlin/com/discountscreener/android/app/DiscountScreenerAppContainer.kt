@@ -18,6 +18,7 @@ import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
@@ -108,6 +109,7 @@ class DiscountScreenerAppContainer(context: Context) {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
 

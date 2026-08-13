@@ -268,10 +268,10 @@ internal val opportunityScoringModelChipOrder = listOf(
 )
 
 internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
-    OpportunityScoringModel.AggressiveV4 -> "Aggressive V4"
-    OpportunityScoringModel.AggressiveV3 -> "Aggressive V3"
-    OpportunityScoringModel.AggressiveV2 -> "Aggressive V2"
-    OpportunityScoringModel.Aggressive -> "Aggressive"
+    OpportunityScoringModel.AggressiveV4 -> "V4"
+    OpportunityScoringModel.AggressiveV3 -> "V3"
+    OpportunityScoringModel.AggressiveV2 -> "V2"
+    OpportunityScoringModel.Aggressive -> "V1"
     OpportunityScoringModel.Legacy -> "Legacy"
 }
 

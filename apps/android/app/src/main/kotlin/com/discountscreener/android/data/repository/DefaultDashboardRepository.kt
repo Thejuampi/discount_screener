@@ -22,6 +22,7 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
+import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.DashboardNotice
@@ -41,6 +42,7 @@ import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
+import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.rankMovement
 import com.discountscreener.android.domain.model.significantValuationChange
@@ -248,6 +250,7 @@ class DefaultDashboardRepository(
     private var trackedSymbols = mutableListOf<String>()
     private val revisions = linkedMapOf<String, MutableList<SymbolRevision>>()
     private val chartCache = linkedMapOf<String, List<HistoricalCandle>>()
+    private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
@@ -1290,6 +1293,13 @@ class DefaultDashboardRepository(
             statusMessage = statusMessage,
             estimatesNotice = estimatesNotice,
             screenData = screenData,
+            replayBackingCharts = if (normalizedSelectedSymbol == null) {
+                emptyMap()
+            } else {
+                ChartRange.entries.mapNotNull { range ->
+                    replayBackingCache[chartKey(normalizedSelectedSymbol, range)]?.let { range to it }
+                }.toMap()
+            },
         )
     }
 
@@ -1600,6 +1610,9 @@ class DefaultDashboardRepository(
                 gapBps = gapBps,
                 upsideBps = upsideBps,
                 confidence = confidence,
+                qualification = detail?.qualification,
+                externalStatus = detail?.externalStatus,
+                analystCoverageCount = preferredAnalystCoverageCount(detail),
                 isWatched = detail?.isWatched ?: scoredRow?.isWatched ?: false,
                 freshness = freshness,
                 providerIssue = issueMessagesBySymbol[projectedRow.symbol],
@@ -1615,6 +1628,9 @@ class DefaultDashboardRepository(
                 fundamentalsSignals = scoredRow?.fundamentalsSignals.orEmpty(),
                 technicalSignals = scoredRow?.technicalSignals.orEmpty(),
                 forecastSignals = scoredRow?.forecastSignals.orEmpty(),
+                fundamentalsFactors = scoredRow?.fundamentalsFactors.orEmpty(),
+                technicalFactors = scoredRow?.technicalFactors.orEmpty(),
+                forecastFactors = scoredRow?.forecastFactors.orEmpty(),
                 regimeStatus = scoredRow?.regimeStatus ?: RegimeScoreStatus.NotApplicable,
                 regimeCauses = scoredRow?.regimeCauses.orEmpty(),
                 regimeSignals = scoredRow?.regimeSignals.orEmpty(),
@@ -1906,6 +1922,9 @@ class DefaultDashboardRepository(
             gapBps = row.gapBps,
             upsideBps = row.upsideBps,
             confidence = row.confidence,
+            qualification = detail?.qualification,
+            externalStatus = detail?.externalStatus,
+            analystCoverageCount = preferredAnalystCoverageCount(detail),
             isWatched = row.isWatched,
             freshness = freshness,
             providerIssue = issueMessage,
@@ -1921,6 +1940,9 @@ class DefaultDashboardRepository(
             fundamentalsSignals = row.fundamentalsSignals,
             technicalSignals = row.technicalSignals,
             forecastSignals = row.forecastSignals,
+            fundamentalsFactors = row.fundamentalsFactors,
+            technicalFactors = row.technicalFactors,
+            forecastFactors = row.forecastFactors,
             regimeStatus = row.regimeStatus,
             regimeCauses = row.regimeCauses,
             regimeSignals = row.regimeSignals,
@@ -3494,6 +3516,20 @@ class DefaultDashboardRepository(
         throw error
     }
 
+    override suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange) {
+        var key = chartKey(symbol, range)
+        if (stateMutex.withLock { replayBackingCache[key] } != null) return
+        try {
+            var candles = yahooClient.fetchReplayBackingCandles(symbol, range)
+            stateMutex.withLock {
+                replayBackingCache[key] = candles
+            }
+            emitUpdate()
+        } catch (error: Throwable) {
+            logger.error(TAG, "Failed to fetch replay backing candles for $symbol/$range", error)
+        }
+    }
+
     companion object {
         /** Product cold-start for release builds. */
         const val PRODUCT_DEFAULT_PROFILE = "sp500"
@@ -3699,16 +3735,14 @@ internal fun opportunityDecisionStateFor(
     compositeScore: Int,
     trustNote: String?,
     scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
-): RowDecisionState? = when {
-    freshness != RowFreshness.Updated -> null
-    confidence == ConfidenceBand.Low -> RowDecisionState.Avoid
-    upsideBps <= 0 -> RowDecisionState.Avoid
-    compositeScore < OpportunityEngine.avoidBelowScore(scoringModel) -> RowDecisionState.Avoid
-    trustNote != null -> RowDecisionState.Watch
-    confidence == ConfidenceBand.High &&
-        compositeScore >= OpportunityEngine.actAtOrAboveScore(scoringModel) -> RowDecisionState.Act
-    else -> RowDecisionState.Watch
-}
+): RowDecisionState? = explainOpportunityDecision(
+    freshness = freshness,
+    confidence = confidence,
+    upsideBps = upsideBps,
+    compositeScore = compositeScore,
+    trustNote = trustNote,
+    scoringModel = scoringModel,
+).state
 
 internal fun rowTrustNote(
     detail: SymbolDetail?,

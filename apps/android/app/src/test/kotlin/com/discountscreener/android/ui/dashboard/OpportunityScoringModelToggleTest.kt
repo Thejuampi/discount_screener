@@ -60,9 +60,9 @@ class OpportunityScoringModelToggleTest {
             onAction = { },
         )
 
-        composeRule.onNodeWithText("Aggressive V2").assertIsSelected()
-        composeRule.onNodeWithText("Aggressive V3").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive").assertIsNotSelected()
+        composeRule.onNodeWithText("V2").assertIsSelected()
+        composeRule.onNodeWithText("V3").assertIsNotSelected()
+        composeRule.onNodeWithText("V1").assertIsNotSelected()
         composeRule
             .onNodeWithText("Legacy")
             .performScrollTo()
@@ -80,9 +80,9 @@ class OpportunityScoringModelToggleTest {
             .onNodeWithText("Legacy")
             .performScrollTo()
             .assertIsSelected()
-        composeRule.onNodeWithText("Aggressive V2").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive V3").assertIsNotSelected()
-        composeRule.onNodeWithText("Aggressive").assertIsNotSelected()
+        composeRule.onNodeWithText("V2").assertIsNotSelected()
+        composeRule.onNodeWithText("V3").assertIsNotSelected()
+        composeRule.onNodeWithText("V1").assertIsNotSelected()
     }
 
     @Test
@@ -111,7 +111,7 @@ class OpportunityScoringModelToggleTest {
     @Test
     fun the_chips_read_newest_model_first() {
         assertEquals(
-            listOf("Aggressive V4", "Aggressive V3", "Aggressive V2", "Aggressive", "Legacy"),
+            listOf("V4", "V3", "V2", "V1", "Legacy"),
             opportunityScoringModelChipOrder.map { it.chipLabel() },
         )
     }

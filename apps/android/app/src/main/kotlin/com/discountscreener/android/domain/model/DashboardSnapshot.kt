@@ -5,6 +5,7 @@ import com.discountscreener.core.model.AlertEvent
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -12,6 +13,7 @@ import com.discountscreener.core.model.ProjectedDashboardData
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensReport
 import com.discountscreener.core.model.QuantLensRowSummary
+import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.regime.MarketContextUnavailableReason
@@ -150,6 +152,9 @@ data class OpportunityListRow(
     val gapBps: Int,
     val upsideBps: Int = gapBps,
     val confidence: ConfidenceBand,
+    val qualification: QualificationStatus? = null,
+    val externalStatus: ExternalSignalStatus? = null,
+    val analystCoverageCount: Int? = null,
     val isWatched: Boolean,
     val freshness: RowFreshness = RowFreshness.Loading,
     val providerIssue: String? = null,
@@ -167,6 +172,9 @@ data class OpportunityListRow(
     val fundamentalsSignals: List<String> = emptyList(),
     val technicalSignals: List<String> = emptyList(),
     val forecastSignals: List<String> = emptyList(),
+    val fundamentalsFactors: List<ScoreFactor> = emptyList(),
+    val technicalFactors: List<ScoreFactor> = emptyList(),
+    val forecastFactors: List<ScoreFactor> = emptyList(),
     val regimeStatus: RegimeScoreStatus = RegimeScoreStatus.NotApplicable,
     val regimeCauses: List<RegimeCause> = emptyList(),
     val regimeSignals: List<String> = emptyList(),
@@ -202,6 +210,7 @@ data class DashboardSnapshot(
     val statusMessage: String?,
     val estimatesNotice: DashboardNotice? = null,
     val screenData: ProjectedDashboardData = ProjectedDashboardData.empty(),
+    val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
 )
 
 data class TickerSearchSuggestion(

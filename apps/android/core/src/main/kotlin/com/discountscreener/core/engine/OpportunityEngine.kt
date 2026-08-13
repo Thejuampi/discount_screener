@@ -12,6 +12,7 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
+import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.regime.AssetClassification
@@ -281,6 +282,25 @@ data class OpportunityContext(
     val timeseriesBySymbol: Map<String, FundamentalTimeseries> = emptyMap(),
 )
 
+/**
+ * One bucket's score plus the terms that built it.
+ *
+ * [first] and [second] keep the older `Pair` call sites compiling: they read the score and the
+ * `++` tokens. New call sites read [factors] for the points.
+ */
+internal data class BucketEvidence(
+    val score: Int?,
+    val signals: List<String>,
+    val factors: List<ScoreFactor> = emptyList(),
+) {
+    val first: Int? get() = score
+    val second: List<String> get() = signals
+
+    companion object {
+        fun absent(): BucketEvidence = BucketEvidence(score = null, signals = emptyList())
+    }
+}
+
 data class OpportunityScoreBreakdown(
     val fundamentalsScore: Int?,
     val technicalScore: Int?,
@@ -293,6 +313,9 @@ data class OpportunityScoreBreakdown(
     val fundamentalsSignals: List<String>,
     val technicalSignals: List<String>,
     val forecastSignals: List<String>,
+    val fundamentalsFactors: List<ScoreFactor> = emptyList(),
+    val technicalFactors: List<ScoreFactor> = emptyList(),
+    val forecastFactors: List<ScoreFactor> = emptyList(),
     val regimeStatus: RegimeScoreStatus,
     val regimeCauses: List<RegimeCause>,
     val regimeSignals: List<String>,
@@ -398,6 +421,9 @@ object OpportunityEngine {
                     fundamentalsSignals = score.fundamentalsSignals,
                     technicalSignals = score.technicalSignals,
                     forecastSignals = score.forecastSignals,
+                    fundamentalsFactors = score.fundamentalsFactors,
+                    technicalFactors = score.technicalFactors,
+                    forecastFactors = score.forecastFactors,
                     regimeStatus = score.regimeStatus,
                     regimeCauses = score.regimeCauses,
                     regimeSignals = score.regimeSignals,
@@ -442,29 +468,35 @@ object OpportunityEngine {
         /** This symbol's annual driver series, for V4's share-count term. */
         timeseries: FundamentalTimeseries? = null,
     ): OpportunityScoreBreakdown {
-        val (fundamentalsScore, fundamentalsSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreFundamentals(detail)
-            OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail)
+        var fundamentals = when (model) {
+            OpportunityScoringModel.Legacy -> scoreFundamentals(detail).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveFundamentalsScore(detail).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks, timeseries)
         }
-        val (technicalScore, technicalSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreTechnicals(summary)
-            OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary)
+        var technical = when (model) {
+            OpportunityScoringModel.Legacy -> scoreTechnicals(summary).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveTechnicalScore(summary).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
             OpportunityScoringModel.AggressiveV3,
             OpportunityScoringModel.AggressiveV4,
             -> aggressiveV3TechnicalScore(summary)
         }
-        val (forecastScore, forecastSignals) = when (model) {
-            OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis)
-            OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis)
+        var forecast = when (model) {
+            OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis).toEvidence()
+            OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV3,
             OpportunityScoringModel.AggressiveV4,
             -> aggressiveV3ForecastScore(detail, analysis)
         }
+        var fundamentalsScore = fundamentals.score
+        var fundamentalsSignals = fundamentals.signals
+        var technicalScore = technical.score
+        var technicalSignals = technical.signals
+        var forecastScore = forecast.score
+        var forecastSignals = forecast.signals
         // The fit is computed only where it can count — a V2 screen must not pay for a bucket it
         // will never carry.
         val applicable = regimeDimensionApplies(model, detail.symbol)
@@ -523,6 +555,9 @@ object OpportunityEngine {
             fundamentalsSignals = fundamentalsSignals,
             technicalSignals = technicalSignals,
             forecastSignals = forecastSignals,
+            fundamentalsFactors = fundamentals.factors,
+            technicalFactors = technical.factors,
+            forecastFactors = forecast.factors,
             regimeStatus = status,
             regimeCauses = if (included) fit.causes else emptyList(),
             regimeSignals = if (included) fit.signals else emptyList(),
@@ -1004,8 +1039,8 @@ object OpportunityEngine {
     //    buckets purely on raw bucket-scale headroom.
     // ----------------------------------------------------------------------------------
 
-    internal fun aggressiveV2FundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
-        val fundamentals = detail.fundamentals ?: return null to emptyList()
+    internal fun aggressiveV2FundamentalsScore(detail: SymbolDetail): BucketEvidence {
+        val fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V2_FUNDAMENTALS_FULL_WEIGHT)
 
         // Free cash flow yield (FCF / market cap). Falls back to OCF positivity only when
@@ -1056,12 +1091,12 @@ object OpportunityEngine {
             acc.add(V2_FUND_PE_WEIGHT, -smoothRamp(peHundredths.toDouble(), V2_FUND_PE_LOW, V2_FUND_PE_HIGH), "FwdPE")
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
-    internal fun aggressiveV2TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
-        summary ?: return null to emptyList()
-        val latestCloseCents = summary.latestCloseCents ?: return null to emptyList()
+    internal fun aggressiveV2TechnicalScore(summary: ChartRangeSummary?): BucketEvidence {
+        summary ?: return BucketEvidence.absent()
+        val latestCloseCents = summary.latestCloseCents ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V2_TECHNICALS_FULL_WEIGHT)
 
         // Trend stack: three correlated EMA deltas, but each carries a sub-weight that
@@ -1097,10 +1132,10 @@ object OpportunityEngine {
             acc.add(V2_TECH_MACD_DIRECTION_WEIGHT, direction, "MACD")
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
-    internal fun aggressiveV2ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+    internal fun aggressiveV2ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): BucketEvidence {
         val acc = EvidenceAccumulator(V2_FORECAST_FULL_WEIGHT)
         val sufficiencySignals = mutableListOf<String>()
         var reliableEvidenceWeight = 0.0
@@ -1186,13 +1221,12 @@ object OpportunityEngine {
             reliableEvidenceWeight += weight * externalFreshness
         }
 
-        val signals = (acc.signals + sufficiencySignals).distinct()
         if (!hasValuationAnchor || reliableEvidenceWeight < V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
-            return null to signals
+            return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
         }
 
-        val raw = acc.normalizedScore() ?: return null to signals
-        return raw.coerceIn(-100, 100) to signals
+        var raw = acc.normalizedScore() ?: return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
     }
 
     // ----------------------------------------------------------------------------------
@@ -1209,8 +1243,8 @@ object OpportunityEngine {
     //  * Composite: coverage-weighted mean + bonus, then beta risk haircut (missing beta = 0).
     // ----------------------------------------------------------------------------------
 
-    internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): Pair<Int?, List<String>> {
-        val fundamentals = detail.fundamentals ?: return null to emptyList()
+    internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): BucketEvidence {
+        val fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V3_FUNDAMENTALS_FULL_WEIGHT)
 
         addCashFlowVote(acc, fundamentals)
@@ -1239,7 +1273,7 @@ object OpportunityEngine {
 
         addCashConversion(acc, fundamentals)
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
     /**
@@ -1256,8 +1290,8 @@ object OpportunityEngine {
         detail: SymbolDetail,
         sectorBenchmarks: SectorBenchmarks?,
         timeseries: FundamentalTimeseries? = null,
-    ): Pair<Int?, List<String>> {
-        var fundamentals = detail.fundamentals ?: return null to emptyList()
+    ): BucketEvidence {
+        var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
 
         addCashFlowVote(acc, fundamentals)
@@ -1268,7 +1302,7 @@ object OpportunityEngine {
         addCashConversion(acc, fundamentals)
         addShareCountChange(acc, timeseries)
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
     /**
@@ -1435,9 +1469,9 @@ object OpportunityEngine {
         }
     }
 
-    internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): Pair<Int?, List<String>> {
-        summary ?: return null to emptyList()
-        val latestCloseCents = summary.latestCloseCents ?: return null to emptyList()
+    internal fun aggressiveV3TechnicalScore(summary: ChartRangeSummary?): BucketEvidence {
+        summary ?: return BucketEvidence.absent()
+        val latestCloseCents = summary.latestCloseCents ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V3_TECHNICALS_FULL_WEIGHT)
 
         summary.ema20Cents?.takeIf { it > 0 }?.let { ema20 ->
@@ -1484,7 +1518,7 @@ object OpportunityEngine {
             )
         }
 
-        return acc.normalizedScore() to acc.signals
+        return acc.toEvidence()
     }
 
     /**
@@ -1501,7 +1535,7 @@ object OpportunityEngine {
         else -> -0.5
     }
 
-    internal fun aggressiveV3ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): Pair<Int?, List<String>> {
+    internal fun aggressiveV3ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): BucketEvidence {
         val acc = EvidenceAccumulator(V3_FORECAST_FULL_WEIGHT)
         val sufficiencySignals = mutableListOf<String>()
         var reliableEvidenceWeight = 0.0
@@ -1615,13 +1649,12 @@ object OpportunityEngine {
             reliableEvidenceWeight += weight * externalFreshness
         }
 
-        val signals = (acc.signals + sufficiencySignals).distinct()
         if (!hasValuationAnchor || reliableEvidenceWeight < V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
-            return null to signals
+            return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
         }
 
-        val raw = acc.normalizedScore() ?: return null to signals
-        return raw.coerceIn(-100, 100) to signals
+        var raw = acc.normalizedScore() ?: return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
     }
 
     private fun v3RecommendationSkew(detail: SymbolDetail): Double? {
@@ -1738,6 +1771,7 @@ object OpportunityEngine {
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
         val signals = mutableListOf<String>()
+        val factors = mutableListOf<ScoreFactor>()
 
         init {
             require(normalizationWeight > 0.0) { "EvidenceAccumulator normalizationWeight must be positive" }
@@ -1745,16 +1779,35 @@ object OpportunityEngine {
 
         fun add(weight: Double, ramp: Double, label: String? = null) {
             require(weight > 0.0) { "EvidenceAccumulator weight must be positive" }
-            val clamped = ramp.coerceIn(-1.0, 1.0)
+            var clamped = ramp.coerceIn(-1.0, 1.0)
             weightedSum += weight * clamped
             evidenceWeight += weight
-            if (label != null) signals += "$label${signalSuffix(clamped)}"
+            if (label != null) {
+                var token = "$label${signalSuffix(clamped)}"
+                signals += token
+                var points = ((weight * clamped) / normalizationWeight * 100.0).roundToInt()
+                factors += ScoreFactor(key = label, token = token, bucketPoints = points)
+            }
         }
 
         fun normalizedScore(): Int? {
             if (evidenceWeight == 0.0) return null
-            val normalized = (weightedSum / normalizationWeight) * 100.0
+            var normalized = (weightedSum / normalizationWeight) * 100.0
             return normalized.coerceIn(-100.0, 100.0).roundToInt()
+        }
+
+        fun toEvidence(
+            extraSignals: List<String> = emptyList(),
+            scoreOverride: Int? = normalizedScore(),
+        ): BucketEvidence {
+            var extraFactors = extraSignals.map { signal ->
+                ScoreFactor(key = signal, token = signal, bucketPoints = 0)
+            }
+            return BucketEvidence(
+                score = scoreOverride,
+                signals = (signals + extraSignals).distinct(),
+                factors = factors + extraFactors,
+            )
         }
 
         private fun signalSuffix(r: Double): String = when {
@@ -1764,6 +1817,12 @@ object OpportunityEngine {
             else -> "--"
         }
     }
+
+    private fun Pair<Int?, List<String>>.toEvidence(): BucketEvidence = BucketEvidence(
+        score = first,
+        signals = second,
+        factors = second.map { token -> ScoreFactor(key = token, token = token, bucketPoints = 0) },
+    )
 
 
     private fun dcfMarginOfSafetyBps(analysis: DcfAnalysis, marketPriceCents: Long): Int? {

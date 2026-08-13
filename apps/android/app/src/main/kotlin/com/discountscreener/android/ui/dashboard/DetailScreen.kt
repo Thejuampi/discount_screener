@@ -68,7 +68,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
@@ -87,13 +89,17 @@ import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
 import com.discountscreener.android.domain.model.preferredAnalystTargetFairValueCents
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.core.engine.ReplayWindow
+import com.discountscreener.core.engine.EXTERNAL_STATUS_HELP
+import com.discountscreener.core.engine.explainConfidence
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.engine.macdHistogramDerivatives
 import com.discountscreener.core.engine.macdReadingScale
 import com.discountscreener.core.engine.plainMacdReading
 import com.discountscreener.core.engine.plainRsiReading
 import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ProjectedDetailData
 import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
@@ -114,6 +120,7 @@ fun DetailScreen(
     route: DetailRoute,
     detail: SymbolDetail?,
     charts: Map<ChartRange, List<HistoricalCandle>>,
+    replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     history: List<SymbolRevision>,
     alerts: List<String>,
     quantLens: QuantLensUiState? = null,
@@ -148,7 +155,10 @@ fun DetailScreen(
         focusRequester.requestFocus()
     }
     var routeProjectedDetail = projectedDetail?.takeIf { projection -> projection.symbol == route.symbol }
-    var titleDetail = detail ?: routeProjectedDetail?.detail
+    var matchingDetail = detail?.takeIf { candidate -> candidate.symbol == route.symbol }
+        ?: routeProjectedDetail?.detail
+    var titleName = matchingDetail?.companyName?.takeIf(String::isNotBlank)
+        ?: scoreRow?.companyName?.takeIf(String::isNotBlank)
 
     Column(
         modifier = Modifier
@@ -167,18 +177,35 @@ fun DetailScreen(
             title = {
                 Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                     Text(
-                        text = titleDetail?.companyName ?: route.symbol,
+                        text = titleName ?: route.symbol,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!titleDetail?.companyName.isNullOrBlank()) {
-                        Text(
-                            text = route.symbol,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    if (!titleName.isNullOrBlank()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = route.symbol,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            var triageLabel = decisionStateLabel(scoreRow?.decisionState)
+                            if (triageLabel != null && route.subtab != DetailSubtab.Score) {
+                                var (fg, bg) = decisionStateColors(scoreRow?.decisionState)
+                                Text(
+                                    text = triageLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = fg,
+                                    modifier = Modifier
+                                        .background(bg, RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                )
+                            }
+                        }
                     }
                 }
             },
@@ -217,8 +244,9 @@ fun DetailScreen(
         ScrollableTabRow(
             selectedTabIndex = when (route.subtab) {
                 DetailSubtab.Snapshot -> 0
-                DetailSubtab.Lens -> 1
-                DetailSubtab.History -> 2
+                DetailSubtab.Score -> 1
+                DetailSubtab.Lens -> 2
+                DetailSubtab.History -> 3
             },
             edgePadding = 0.dp,
         ) {
@@ -226,6 +254,11 @@ fun DetailScreen(
                 selected = route.subtab == DetailSubtab.Snapshot,
                 onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Snapshot)) },
                 text = { Text("Snapshot") },
+            )
+            Tab(
+                selected = route.subtab == DetailSubtab.Score,
+                onClick = { onAction(DashboardAction.SetDetailSubtab(DetailSubtab.Score)) },
+                text = { Text("Score") },
             )
             Tab(
                 selected = route.subtab == DetailSubtab.Lens,
@@ -247,17 +280,24 @@ fun DetailScreen(
             when (route.subtab) {
                 DetailSubtab.Snapshot -> SnapshotContent(
                     route = route,
-                    detail = detail,
+                    detail = matchingDetail,
                     scoreRow = scoreRow,
                     scoringModel = scoringModel,
                     regimeScoringEnabled = regimeScoringEnabled,
                     chartRange = route.chartRange,
                     candles = charts[route.chartRange].orEmpty(),
+                    replayBackingCandles = replayBackingCharts[route.chartRange],
                     replayOffset = route.replayOffset,
                     alerts = alerts,
                     quantLens = quantLens,
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
+                    onAction = onAction,
+                )
+                DetailSubtab.Score -> ScoreContent(
+                    scoreRow = scoreRow,
+                    scoringModel = scoringModel,
+                    regimeScoringEnabled = regimeScoringEnabled,
                     onAction = onAction,
                 )
                 DetailSubtab.Lens -> QuantLensContent(
@@ -268,7 +308,7 @@ fun DetailScreen(
                 )
                 DetailSubtab.History -> HistoryContent(
                     route = route,
-                    detail = detail,
+                    detail = matchingDetail,
                     history = history,
                     charts = charts,
                     onAction = onAction,
@@ -279,13 +319,10 @@ fun DetailScreen(
 }
 
 /**
- * Score, dimension breakdown and the scoring-model control, at the head of the Snapshot tab.
+ * Rank, badge, model chips and the compact F/T/Fc/Market row, at the head of the Snapshot tab.
  *
- * It sat above the subtabs until it did not fit: on a phone the block plus the search bar pushed the
- * tab row and the first line of content off the fold, so the screen opened on its own chrome. It
- * lives inside Snapshot now, and scrolls away with everything else there. The cost is that the model
- * chips are no longer reachable from Lens or History, which is a real loss — but Snapshot is the tab
- * a ticker opens on, so the score is still the first thing seen.
+ * The term-by-term decomp lives on the Score tab. Snapshot only keeps the numbers a reader needs
+ * to place the name, so the chart stays on the first screen.
  *
  * The row comes from the ranked opportunity set rather than being recomputed here — the list and
  * the detail view read the same [OpportunityListRow], so a score shown here is by construction the
@@ -326,74 +363,36 @@ private fun DetailScoreHeader(
             ) {
                 ScoreBadge(score = scoreRow.compositeScore, scoringModel = scoringModel)
             }
+        }
+        ScoringControlsRow(
+            selected = scoringModel,
+            regimeScoringEnabled = regimeScoringEnabled,
+            onAction = onAction,
+        )
+        if (scoreRow != null) {
+            var palette = scoreFactorPalette()
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricToken(
                     "F ${formatOpportunityBucket(scoreRow.fundamentalsScore, scoringModel)}",
-                    fundamentalsMetricColor(),
+                    palette.fundamentals,
                 )
                 MetricToken(
                     "T ${formatOpportunityBucket(scoreRow.technicalScore, scoringModel)}",
-                    technicalMetricColor(),
+                    palette.technicals,
                 )
                 MetricToken(
                     "Fc ${formatOpportunityBucket(scoreRow.forecastScore, scoringModel)}",
-                    forecastMetricColor(),
+                    palette.forecast,
                 )
                 if (scoreRow.regimeStatus == RegimeScoreStatus.Included) {
                     MetricToken(
                         "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(scoreRow.regimeScore, scoringModel)}",
-                        marketMetricColor(),
+                        palette.market,
                     )
                 }
             }
-            // What the four tokens above are made of, and — the reason this exists — WHICH RULE
-            // MADE EACH ONE.
-            //
-            // Under V4 a multiple is scored against its sector when that sector has enough members
-            // and against an absolute band when it does not, and the engine marks the difference
-            // with a single character: `Mult§` against the sector, `Mult` against the band. Two
-            // rows in one list scored by two rules with nothing saying which is the same defect as
-            // a refusal drawn as a mute dash, so Wave 2 said the marker "must be visible, and it is
-            // not a follow-up".
-            //
-            // It was not visible. The engine built these strings, the repository carried them into
-            // the snapshot, and no composable ever read them — a claim about the user's screen that
-            // lived entirely in a data class.
-            //
-            // **All four lists, not just fundamentals, and that is the actual fix.** The first pass
-            // rendered `fundamentalsSignals` alone, because `§` was the symptom being chased. The
-            // root cause was never the marker: it was a write-only list, and there were four of
-            // them. `technicalSignals`, `forecastSignals` and `regimeSignals` were computed on every
-            // scoring pass and read by nothing at all — the engine's reasons for three of the four
-            // buckets, thrown away after the number was taken. Rendering one and leaving three is
-            // fixing the symptom a second time.
-            //
-            // Colour carries which bucket a token explains, matching the token row above, so one
-            // FlowRow says it without four headings. `regimeSignals` needs no `Included` guard here:
-            // `OpportunityEngine` already emits an empty list when the market bucket is excluded, so
-            // an empty list is the exclusion. No model branch either — V3 emits the same labels
-            // without the marker, so showing them for every model is simpler and more honest than a
-            // legend only one model can populate.
-            val signalGroups = listOf(
-                scoreRow.fundamentalsSignals to fundamentalsMetricColor(),
-                scoreRow.technicalSignals to technicalMetricColor(),
-                scoreRow.forecastSignals to forecastMetricColor(),
-                scoreRow.regimeSignals to marketMetricColor(),
-            )
-            if (signalGroups.any { (signals, _) -> signals.isNotEmpty() }) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    signalGroups.forEach { (signals, color) ->
-                        signals.forEach { signal -> MetricToken(signal, color) }
-                    }
-                }
-            }
-            // Above the market section, and outside it, because agreement is a fact about the
-            // composite rather than about the fourth bucket: it is measured over whichever buckets
-            // reported, and it still moved the score on a name whose market reading never arrived.
-            //
-            // It also *replaces* the market section's impact line rather than joining it — see
-            // MarketContextSection. Two decompositions of one Final, side by side, is what live QA
-            // rejected.
+            // Agreement is a fact about the composite, so it sits above the bucket list rather
+            // than inside Market. Two decompositions of one Final is what live QA rejected.
             v4AgreementLine(scoreRow, scoringModel)?.let { line ->
                 Text(
                     text = line,
@@ -403,11 +402,6 @@ private fun DetailScoreHeader(
             }
             MarketContextSection(row = scoreRow, scoringModel = scoringModel)
         }
-        ScoringControlsRow(
-            selected = scoringModel,
-            regimeScoringEnabled = regimeScoringEnabled,
-            onAction = onAction,
-        )
     }
 }
 
@@ -419,7 +413,6 @@ private fun DetailScoreHeader(
  * the decomposition is shown rather than only the final score, because a composite that moved is
  * worth nothing to a reader who cannot see what moved it.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MarketContextSection(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
     val statusLine = marketDimensionStatusLine(row.regimeStatus, row.regimeUnavailableReason, scoringModel)
@@ -446,9 +439,218 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        topRegimeCauses(row.regimeCauses).forEach { cause ->
-            MetricToken(regimeCauseLabel(cause), regimeCauseColor(cause.effect))
+}
+
+@Composable
+private fun ScoreContent(
+    scoreRow: OpportunityListRow?,
+    scoringModel: OpportunityScoringModel,
+    regimeScoringEnabled: Boolean,
+    onAction: (DashboardAction) -> Unit,
+) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            ScoringControlsRow(
+                selected = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                onAction = onAction,
+            )
+        }
+        item {
+            if (scoreRow == null) {
+                Text(
+                    text = "Not in the ranked set under ${scoringModel.chipLabel()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OpportunityDecisionSection(row = scoreRow, scoringModel = scoringModel)
+                    ScoreFactorBreakdown(row = scoreRow, scoringModel = scoringModel)
+                    if (scoringModel != OpportunityScoringModel.Legacy) {
+                        Text(
+                            text = SCORE_READING_LEGEND,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OpportunityDecisionSection(
+    row: OpportunityListRow,
+    scoringModel: OpportunityScoringModel,
+) {
+    var explanation = explainOpportunityDecision(row, scoringModel)
+    var confidenceCauses = row.qualification?.let { qualification ->
+        if (qualification == QualificationStatus.Qualified && row.externalStatus == null) {
+            emptyList()
+        } else {
+            explainConfidence(
+                qualification = qualification,
+                externalStatus = row.externalStatus ?: ExternalSignalStatus.Missing,
+                analystCount = row.analystCoverageCount,
+            ).causes
+        }
+    }.orEmpty()
+    var palette = scoreFactorPalette()
+    var title = decisionStateLabel(explanation.state) ?: "No decision"
+    var titleColor = when (explanation.state) {
+        RowDecisionState.Act -> palette.positive
+        RowDecisionState.Avoid -> palette.negative
+        RowDecisionState.Watch -> MaterialTheme.colorScheme.tertiary
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge,
+            color = titleColor,
+            fontWeight = FontWeight.SemiBold,
+        )
+        explanation.gates
+            .filterNot { gate -> gate.name == "Trust" && gate.value == "Clear" }
+            .forEach { gate ->
+            DecisionGateRow(
+                name = gate.name,
+                value = gate.value,
+                emphasize = gate.blocked,
+                emphasizeColor = titleColor,
+            )
+            if (gate.name == "Confidence") {
+                confidenceCauses.forEach { cause ->
+                    DecisionGateRow(
+                        name = cause.name,
+                        value = cause.value,
+                        emphasize = false,
+                        emphasizeColor = titleColor,
+                        indent = true,
+                        help = EXTERNAL_STATUS_HELP.takeIf { cause.name == "External" },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DecisionGateRow(
+    name: String,
+    value: String,
+    emphasize: Boolean,
+    emphasizeColor: Color,
+    indent: Boolean = false,
+    help: String? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = if (indent) 12.dp else 0.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            help?.let { copy -> InfoTip(copy) }
+        }
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (emphasize) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (emphasize) emphasizeColor else MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun InfoTip(text: String) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Text(
+            text = "(i)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { expanded = true },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .padding(12.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScoreFactorBreakdown(
+    row: OpportunityListRow,
+    scoringModel: OpportunityScoringModel,
+) {
+    var groups = scoreFactorGroups(row)
+    var palette = scoreFactorPalette()
+    if (groups.isEmpty()) {
+        Text(
+            text = "No factor readings.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        groups.forEach { group ->
+            var titleColor = palette.colorFor(group.title)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = scoreFactorGroupTitle(group, scoringModel),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = titleColor,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                group.lines.forEach { line ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = line.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        line.pointsText?.let { points ->
+                            Text(
+                                text = points,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (line.points > 0) palette.positive else palette.negative,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        scoreFactorCaption(groups)?.let { caption ->
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -491,6 +693,7 @@ private fun SnapshotContent(
     regimeScoringEnabled: Boolean,
     chartRange: ChartRange,
     candles: List<HistoricalCandle>,
+    replayBackingCandles: List<HistoricalCandle>? = null,
     replayOffset: Int,
     alerts: List<String>,
     quantLens: QuantLensUiState?,
@@ -498,15 +701,18 @@ private fun SnapshotContent(
     detailNotice: DashboardNotice? = null,
     onAction: (DashboardAction) -> Unit,
 ) {
-    var chartModelCache = remember(candles, chartRange, projectedDetail?.chart) {
+    var replayCandles = replayBackingCandles ?: candles
+    var replayWindowSize = candles.size
+    var chartModelCache = remember(replayCandles, chartRange, replayWindowSize, projectedDetail?.chart) {
         mutableMapOf<Int, SnapshotChartModels>()
     }
-    var chartModels = remember(candles, chartRange, replayOffset, projectedDetail?.chart) {
+    var chartModels = remember(replayCandles, chartRange, replayWindowSize, replayOffset, projectedDetail?.chart) {
         chartModelCache.getOrPut(replayOffset) {
             buildSnapshotChartModels(
                 chartRange = chartRange,
-                candles = candles,
+                candles = replayCandles,
                 replayOffset = replayOffset,
+                windowSize = replayWindowSize,
                 projectedChart = projectedDetail?.chart,
             )
         }

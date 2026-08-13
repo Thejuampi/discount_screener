@@ -47,6 +47,7 @@ object ChartAnalysis {
         replayOffset: Int,
         volumeProfileBinCount: Int,
         summary: ChartRangeSummary? = null,
+        replayWindowSize: Int = candles.size,
     ): ProjectedChartData {
         var chartSummary = summary ?: candles.takeIf { candidateCandles -> candidateCandles.isNotEmpty() }?.let { visibleCandles ->
             buildSummary(
@@ -55,7 +56,7 @@ object ChartAnalysis {
                 capturedAtEpochSeconds = capturedAtEpochSeconds,
             )
         }
-        var replayWindow = buildReplayWindow(candles, replayOffset)
+        var replayWindow = buildReplayWindow(candles, replayOffset, replayWindowSize)
         return ProjectedChartData(
             range = range,
             candles = candles,
@@ -252,9 +253,12 @@ object ChartAnalysis {
         )
     }
 
+    private const val REPLAY_STEP_SIZE = 5
+
     fun buildReplayWindow(
         candles: List<HistoricalCandle>,
         replayOffset: Int,
+        windowSize: Int = candles.size,
     ): ReplayWindow {
         if (candles.isEmpty()) {
             return ReplayWindow(
@@ -265,8 +269,9 @@ object ChartAnalysis {
         }
         val clampedOffset = replayOffset.coerceIn(0, candles.size - 1)
         val visibleEnd = (candles.size - clampedOffset).coerceAtLeast(1)
+        val visibleStart = (visibleEnd - windowSize).coerceAtLeast(0)
         return ReplayWindow(
-            visibleCandles = candles.take(visibleEnd),
+            visibleCandles = candles.subList(visibleStart, visibleEnd),
             totalCandles = candles.size,
             replayOffset = clampedOffset,
         )
@@ -274,11 +279,11 @@ object ChartAnalysis {
 
     fun stepReplayBack(replayOffset: Int, totalCandles: Int): Int {
         val maxOffset = totalCandles.saturatingLastIndex()
-        return (replayOffset + 1).coerceIn(0, maxOffset)
+        return (replayOffset + REPLAY_STEP_SIZE).coerceIn(0, maxOffset)
     }
 
     fun stepReplayForward(replayOffset: Int): Int =
-        (replayOffset - 1).coerceAtLeast(0)
+        (replayOffset - REPLAY_STEP_SIZE).coerceAtLeast(0)
 
     fun computeVolumeProfile(
         candles: List<HistoricalCandle>,

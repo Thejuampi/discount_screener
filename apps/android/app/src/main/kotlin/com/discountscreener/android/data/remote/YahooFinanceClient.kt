@@ -303,6 +303,11 @@ open class YahooFinanceClient(
         return fetchCandles(symbol, rangeToken, interval)
     }
 
+    open suspend fun fetchReplayBackingCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+        val (rangeToken, interval) = replayBackingRangeSpec(range)
+        return fetchCandles(symbol, rangeToken, interval)
+    }
+
     /**
      * Candles over a raw Yahoo range and interval, for callers whose pairing has no [ChartRange].
      *
@@ -1019,6 +1024,15 @@ private fun chartRangeSpec(range: ChartRange): Pair<String, String> = when (rang
     ChartRange.Month -> "1mo" to "1d"
     ChartRange.Year -> "1y" to "1wk"
     ChartRange.FiveYears -> "5y" to "1mo"
+    ChartRange.TenYears -> "10y" to "1mo"
+}
+
+internal fun replayBackingRangeSpec(range: ChartRange): Pair<String, String> = when (range) {
+    ChartRange.Day -> "5d" to "5m"
+    ChartRange.Week -> "1mo" to "30m"
+    ChartRange.Month -> "3mo" to "1d"
+    ChartRange.Year -> "2y" to "1wk"
+    ChartRange.FiveYears -> "10y" to "1mo"
     ChartRange.TenYears -> "10y" to "1mo"
 }
 

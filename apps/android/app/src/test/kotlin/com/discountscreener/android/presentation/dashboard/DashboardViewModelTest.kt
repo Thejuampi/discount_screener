@@ -22,6 +22,7 @@ import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
+import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -347,12 +348,7 @@ class DashboardViewModelTest {
         val repository = RecordingDashboardRepository(
             detailData = detail("AAPL"),
             detailCharts = mapOf(
-                ChartRange.Year to listOf(
-                    candle(1),
-                    candle(2),
-                    candle(3),
-                    candle(4),
-                ),
+                ChartRange.Year to (1L..20L).map { candle(it) },
             ),
         )
         val viewModel = testViewModel(repository)
@@ -360,13 +356,18 @@ class DashboardViewModelTest {
         viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
         advanceUntilIdle()
 
-        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayBack) }
-        assertEquals(3, viewModel.state.value.detailRoute?.replayOffset)
+        viewModel.dispatch(DashboardAction.StepReplayBack)
+        advanceUntilIdle()
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
+
+        viewModel.dispatch(DashboardAction.StepReplayBack)
+        advanceUntilIdle()
+        assertEquals(10, viewModel.state.value.detailRoute?.replayOffset)
 
         viewModel.dispatch(DashboardAction.StepReplayForward)
-        assertEquals(2, viewModel.state.value.detailRoute?.replayOffset)
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
 
-        repeat(5) { viewModel.dispatch(DashboardAction.StepReplayForward) }
+        viewModel.dispatch(DashboardAction.StepReplayForward)
         assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
     }
 
@@ -374,14 +375,15 @@ class DashboardViewModelTest {
     fun reset_replay_returns_detail_chart_to_live() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             detailData = detail("AAPL"),
-            detailCharts = mapOf(ChartRange.Year to listOf(candle(1), candle(2))),
+            detailCharts = mapOf(ChartRange.Year to (1L..20L).map { candle(it) }),
         )
         val viewModel = testViewModel(repository)
 
         viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
         advanceUntilIdle()
         viewModel.dispatch(DashboardAction.StepReplayBack)
-        assertEquals(1, viewModel.state.value.detailRoute?.replayOffset)
+        advanceUntilIdle()
+        assertEquals(5, viewModel.state.value.detailRoute?.replayOffset)
 
         viewModel.dispatch(DashboardAction.ResetReplay)
         assertEquals(0, viewModel.state.value.detailRoute?.replayOffset)
@@ -873,6 +875,7 @@ class DashboardViewModelTest {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
 
@@ -1163,6 +1166,8 @@ class DashboardViewModelTest {
         override suspend fun clearDiscoveryData(): DiscoverySnapshot = DiscoverySnapshot()
 
         override fun observeDiscoveryProgress(): Flow<Unit> = emptyFlow()
+
+        override suspend fun ensureReplayBackingLoaded(symbol: String, range: ChartRange) = Unit
 
         private fun emptySnapshot(
             opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,

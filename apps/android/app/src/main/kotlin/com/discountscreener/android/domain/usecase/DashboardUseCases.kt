@@ -27,4 +27,5 @@ data class DashboardUseCases(
     val cancelDiscoveryJob: CancelDiscoveryJobUseCase,
     val clearDiscoveryData: ClearDiscoveryDataUseCase,
     val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
+    val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
 )

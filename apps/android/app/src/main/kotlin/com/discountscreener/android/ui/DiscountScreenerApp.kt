@@ -68,6 +68,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             route = detailRoute,
                             detail = state.detailData,
                             charts = state.detailCharts,
+                            replayBackingCharts = state.replayBackingCharts,
                             history = state.detailHistory,
                             alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
                             quantLens = state.detailQuantLens,

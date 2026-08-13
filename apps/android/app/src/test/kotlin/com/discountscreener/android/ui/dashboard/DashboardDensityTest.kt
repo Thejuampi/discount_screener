@@ -50,7 +50,7 @@ class DashboardDensityTest {
     fun the_model_chips_and_the_market_switch_share_one_line() {
         setControlsContent()
 
-        val chips = composeRule.onNodeWithText("Aggressive V3").getUnclippedBoundsInRoot()
+        val chips = composeRule.onNodeWithText("V3").getUnclippedBoundsInRoot()
         val switch = composeRule.onNodeWithText("Market on").getUnclippedBoundsInRoot()
 
         assertTrue(
