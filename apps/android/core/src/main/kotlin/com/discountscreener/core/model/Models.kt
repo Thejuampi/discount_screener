@@ -867,6 +867,8 @@ data class ScoreFactor(
     val key: String,
     val token: String,
     val bucketPoints: Int,
+    /** The rate this term scored, in basis points. Null when the term has no rate. */
+    val inputBps: Int? = null,
 )
 
 @Serializable

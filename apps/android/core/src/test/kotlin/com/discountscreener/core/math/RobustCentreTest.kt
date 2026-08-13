@@ -79,4 +79,33 @@ class RobustCentreTest {
     fun an_empty_sample_has_no_median() {
         assertNull(medianOf(emptyList()))
     }
+
+    /**
+     * 10, 11, 12, 13, 14. Median 12, MAD 1, scale 1.4826. Three scales is 4.4478.
+     * 16.45 sits past that cut. 16.44 does not.
+     */
+    @Test
+    fun a_candidate_past_three_scales_is_foreign() {
+        assertEquals(true, isForeignTo(16.45, listOf(10.0, 11.0, 12.0, 13.0, 14.0)))
+    }
+
+    @Test
+    fun a_candidate_inside_three_scales_belongs() {
+        assertEquals(false, isForeignTo(16.44, listOf(10.0, 11.0, 12.0, 13.0, 14.0)))
+    }
+
+    @Test
+    fun two_observations_cannot_name_a_foreign_candidate() {
+        assertEquals(false, isForeignTo(100.0, listOf(10.0, 11.0)))
+    }
+
+    @Test
+    fun a_zero_width_sample_keeps_a_candidate_on_the_mode() {
+        assertEquals(false, isForeignTo(10.0, listOf(10.0, 10.0, 10.0, 10.0)))
+    }
+
+    @Test
+    fun a_zero_width_sample_rejects_a_candidate_off_the_mode() {
+        assertEquals(true, isForeignTo(16.0, listOf(10.0, 10.0, 10.0, 10.0)))
+    }
 }
