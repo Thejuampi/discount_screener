@@ -199,7 +199,7 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Tracked", "Watch", "Discovery", "System", "Estimates"),
+            listOf("Opportunities", "Market", "Tracked", "Watch", "Discovery", "System", "Estimates"),
             DashboardTab.entries.map { it.name },
         )
     }

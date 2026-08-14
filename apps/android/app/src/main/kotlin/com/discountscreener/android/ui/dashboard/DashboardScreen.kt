@@ -201,6 +201,7 @@ fun DashboardScreen(
                     }
                 }
 
+                DashboardTab.Market -> MarketRegimeScreen(state.marketRegime)
                 DashboardTab.Opportunities -> {
                     if (state.opportunityRows.isEmpty()) {
                         EmptyState(
@@ -717,7 +718,7 @@ internal fun maintenanceLayoutMode(maxWidth: Dp): MaintenanceLayoutMode =
     if (maxWidth < 320.dp) MaintenanceLayoutMode.Stacked else MaintenanceLayoutMode.Split
 
 @Composable
-private fun EmptyState(title: String, detail: String) {
+internal fun EmptyState(title: String, detail: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
@@ -746,6 +747,7 @@ private fun EmptyState(title: String, detail: String) {
 private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when (tab) {
     DashboardTab.Tracked -> "Upside ${state.trackedRows.size}"
     DashboardTab.Opportunities -> "Opps ${state.opportunityRows.size}"
+    DashboardTab.Market -> "Market"
     DashboardTab.Watch -> "Watch ${state.watchlistSymbols.size}"
     DashboardTab.Discovery -> discoveryTabLabel(state)
     DashboardTab.System -> "System"

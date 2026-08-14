@@ -6,9 +6,9 @@ Builds, installs, and launches the Android debug app.
 Without -Qa this deploys the regular app: it cold-starts the product universe (sp500) and keeps
 existing app data.
 
-With -Qa this deploys the live / agent QA app: the install is flagged so the app cold-starts the
-capped `qa` universe (≤20 symbols), and app data is cleared first so a prior warm-start cannot
-thrash 500+ Yahoo requests. Every QA-intended run must use -Qa (`make android-run-qa`).
+With -Qa this deploys the live / agent QA app: the install is flagged so the app boots the
+capped `qa` universe (≤20 symbols). App data is never cleared. The on-device SQLite stays.
+Every QA-intended run must use -Qa (`make android-run-qa`).
 #>
 param(
     [switch]$Qa
@@ -392,9 +392,7 @@ try {
 }
 
 if ($Qa) {
-    # Drop stale warm-start that may still be pinned to full sp500 from prior sessions.
-    Write-Host "Clearing app data so cold-start uses profile qa (avoids 500+ symbol thrash)..."
-    & $adb -s $selectedDevice.Serial shell pm clear com.discountscreener.android | Out-Null
+    Write-Host "Keeping app data. Profile qa comes from BuildConfig, not from wiping SQLite."
 }
 
 & $adb -s $selectedDevice.Serial shell am start -n com.discountscreener.android/.app.MainActivity
@@ -402,7 +400,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 if ($Qa) {
-    Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20."
+    Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20. Database was not cleared."
 } else {
     Write-Host "Launched."
 }

@@ -170,15 +170,21 @@ class MarketDataRepositoryTest {
     }
 
     /**
-     * A degraded reading is not a weaker steer to keep warm; it is the absence of one. Handing it
-     * out would have the market dimension score every name against noise while reporting itself
-     * available — so nothing usable means nothing at all, and Wave E reads that as `Unavailable`.
+     * Windows still returns the computed object when it is not scoreable, so the banner can show
+     * Unknown / degraded copy. Scoring stays on [cachedRegime], which must stay empty.
      */
     @Test
-    fun a_total_network_failure_yields_no_reading_at_all() = runTest {
-        assertNull(
+    fun a_total_network_failure_still_returns_the_computed_reading() = runTest {
+        assertNotNull(
             repository(FailingYahooClient(), fearGreed = AbsentFearGreedClient()).refreshIfStale(tickers()),
         )
+    }
+
+    @Test
+    fun a_total_network_failure_does_not_cache_a_scoreable_reading() = runTest {
+        var repository = repository(FailingYahooClient(), fearGreed = AbsentFearGreedClient())
+        repository.refreshIfStale(tickers())
+        assertNull(repository.cachedRegime())
     }
 
     /** One symbol failing costs its pillar a sample; the other eighty-nine still get counted. */

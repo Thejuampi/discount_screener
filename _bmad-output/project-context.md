@@ -62,7 +62,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Rust verification: run `cargo fmt` after Rust edits, then `cargo test` from `apps/desktop`. Use targeted `cargo test --bin discount_screener -- <name>` only for fast iteration.
 - Desktop smoke verification: run `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke` for non-interactive binary validation.
 - Android verification: use `scripts/validate-android.ps1` from repo root. It always runs `:core:test` and, when SDK is configured, `:app:testDebugUnitTest` and `:app:assembleDebug`.
-- Android live QA is required when behavior reaches the installed app surface. Run `make android-run-qa` (boots profile **`qa`**, ≤20 symbols — never full `sp500` for agent QA; plain `make android-run` is the regular `sp500` app and is not a QA launcher), verify the app launches, confirm the profile chip is QA, inspect UI/logs when relevant, and report blockers.
+- Android live QA is required when behavior reaches the installed app surface. Run `make android-run-qa` (boots profile **`qa`**, ≤20 symbols — never full `sp500` for agent QA; plain `make android-run` is the regular `sp500` app and is not a QA launcher). Do **not** `pm clear` or wipe app data. Verify the app launches, confirm the profile chip is QA, inspect UI/logs when relevant, and report blockers.
 - **Windows live / agent / manual QA always uses universe profile `qa`.** Launch `npm run tauri:dev:qa` from `apps/windows`. Do not cold-start full `sp500` for QA unless the user explicitly orders another universe. See `Agents.md` and `docs/valuation-live-qa-checklist.md`.
 - For external Yahoo/provider behavior, gather at least 5 distinct real upstream samples. Do not invent provider payloads from assumptions.
 - Add persistence tests before changing SQLite schema, warm-start restore, pruning, dedupe, or migration semantics.
@@ -127,7 +127,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Use `apply_patch` for manual edits. Avoid shell write tricks for source changes.
 - Use `rg`/`rg --files` first for search. Prefer parallel reads for independent file inspection.
 - For Android SDK-dependent work, ensure `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `apps/android/local.properties` is configured before expecting app Gradle tasks to pass.
-- For live Android QA, use `make android-run-qa` from repo root. It builds, installs with the QA flag, clears app data (fresh **`qa`** membership), launches, and uses `.agents/workspace/tmp/android-run` for run artifacts. Do not QA on full SP500.
+- For live Android QA, use `make android-run-qa` from repo root. It builds, installs with the QA flag, boots **`qa`** membership, and launches. It does not clear app data. Run artifacts go to `.agents/workspace/tmp/android-run`. Do not QA on full SP500.
 - For cross-platform behavior changes, update or add shared contract fixtures under `shared/contracts` and verify both platform interpretations where applicable.
 - When a feature depends on local persistence plus app UI, validate three layers: pure rule/unit tests, SQLite/repository tests, and installed-app behavior.
 

@@ -8,26 +8,8 @@ import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.HistoricalCandle
 
 /**
- * Assembly of the six pillars into one market reading, ported from
- * `regime/mod.rs::compute_market_regime_parts`.
- *
- * **The one structural departure from Rust: this function does no I/O.** The Rust version fetches
- * from Yahoo and CNN inline, mid-computation, and degrades by pushing a warning when a request
- * fails. `:core` has no HTTP client and must not grow one — so `:app` fetches, hands over a
- * [MarketDataBundle], and this stays a pure function of its inputs. Every "unavailable" branch Rust
- * reaches through a failed request, this reaches through an absent or short series, and the
- * warnings it emits are the same strings.
- *
- * That also makes the whole reading testable from a fixture, which is what the pillar and contract
- * tests in this package rely on.
- *
- * **What is deliberately not ported:** `interpret.rs` and `narrative.rs` — pillar prose, signal
- * hints, the multi-sentence reading and the action bullets, ~1000 lines of it in two languages.
- * Nothing on Android renders any of it: the detail view shows the market bucket's score, its ranked
- * causes and the base/context/final split, none of which come from there. [RegimePillar.tone] and
- * [RegimePillar.radarRadius] *are* ported, because they are classifications rather than copy and a
- * wrong tone is a wrong claim. [RegimePillar.interpretation] is left empty rather than filled with
- * something plausible.
+ * Assembly of the six pillars into one market reading. This function does no I/O.
+ * English copy lives in [enrichRegime].
  */
 
 /** One Yahoo series the market read consumes, with the range it must be fetched over. */
@@ -164,41 +146,44 @@ fun computeMarketRegime(
         warnings.add("global confidence low — degraded regime reading")
     }
 
-    return MarketRegime(
-        primaryRegime = composite.primaryRegime,
-        environmentBand = composite.environmentBand,
-        actionStance = composite.actionStance,
-        suggestedExposurePct = composite.suggestedExposurePct,
-        cashBufferPct = composite.cashBufferPct,
-        newRiskMultiplierBps = composite.newRiskMultiplierBps,
-        addBias = composite.addBias,
-        preferQuality = composite.preferQuality,
-        globalConfidenceBps = composite.globalConfidenceBps,
-        environmentScore = composite.environmentScore,
-        sentimentScore = composite.sentimentScore,
-        qualityScore = composite.qualityScore,
-        pillars = pillars,
-        vix = volSnapshot.vix,
-        vixPercentile1y = volSnapshot.vixPercentile1y,
-        vixTermRatio = volSnapshot.vixTermRatio,
-        vixState = volSnapshot.vixState,
-        // Rust rounds then casts to `u32`, which saturates at zero rather than going negative.
-        cnnFearGreed = bundle.cnnFearGreed?.let { truncateToU32(roundHalfAwayFromZero(it.score).toDouble()) },
-        cnnFearGreedLabel = bundle.cnnFearGreed?.rating,
-        cnnFearGreedPrevClose = bundle.cnnFearGreed?.previousClose,
-        breadthAboveMa200Pct = breadthSnapshot.aboveMa200Pct,
-        breadthAboveMa50Pct = breadthSnapshot.aboveMa50Pct,
-        breadthSample = breadthSnapshot.sample,
-        spyAboveMa200 = spyAboveMa200,
-        spyPriceCents = spySummary?.latestCloseCents,
-        spyMa200Cents = spySummary?.ema200Cents,
-        spyDrawdownFromAthPct = drawdown,
-        creditScore = crossSnapshot.creditScore,
-        leadershipScore = crossSnapshot.leadershipScore,
-        avgCorrMilli = avgCorrMilli,
-        notes = notesFrom(pillars),
-        warnings = warnings,
-        asOfEpoch = bundle.asOfEpochSeconds,
+    return enrichRegime(
+        MarketRegime(
+            primaryRegime = composite.primaryRegime,
+            environmentBand = composite.environmentBand,
+            actionStance = composite.actionStance,
+            suggestedExposurePct = composite.suggestedExposurePct,
+            cashBufferPct = composite.cashBufferPct,
+            newRiskMultiplierBps = composite.newRiskMultiplierBps,
+            addBias = composite.addBias,
+            preferQuality = composite.preferQuality,
+            globalConfidenceBps = composite.globalConfidenceBps,
+            environmentScore = composite.environmentScore,
+            sentimentScore = composite.sentimentScore,
+            qualityScore = composite.qualityScore,
+            pillars = pillars,
+            vix = volSnapshot.vix,
+            vixPercentile1y = volSnapshot.vixPercentile1y,
+            vixTermRatio = volSnapshot.vixTermRatio,
+            vixState = volSnapshot.vixState,
+            // Rust rounds then casts to `u32`, which saturates at zero rather than going negative.
+            cnnFearGreed = bundle.cnnFearGreed?.let { truncateToU32(roundHalfAwayFromZero(it.score).toDouble()) },
+            cnnFearGreedLabel = bundle.cnnFearGreed?.rating,
+            cnnFearGreedPrevClose = bundle.cnnFearGreed?.previousClose,
+            breadthAboveMa200Pct = breadthSnapshot.aboveMa200Pct,
+            breadthAboveMa50Pct = breadthSnapshot.aboveMa50Pct,
+            breadthSample = breadthSnapshot.sample,
+            spyAboveMa200 = spyAboveMa200,
+            spyPriceCents = spySummary?.latestCloseCents,
+            spyMa200Cents = spySummary?.ema200Cents,
+            spyDrawdownFromAthPct = drawdown,
+            creditScore = crossSnapshot.creditScore,
+            leadershipScore = crossSnapshot.leadershipScore,
+            avgCorrMilli = avgCorrMilli,
+            notes = notesFrom(pillars),
+            warnings = warnings,
+            asOfEpoch = bundle.asOfEpochSeconds,
+        ),
+        composite,
     )
 }
 
@@ -309,7 +294,7 @@ private fun makePillar(id: String, name: String, result: PillarResult, weightBps
  * `interpret.rs::radar_radius`. Stress is hostile, so the volatility pillar is the one axis where a
  * high score must plot *near the centre* — every other pillar reaches the edge when it reads well.
  */
-internal fun radarRadius(pillarId: String, score: Int): Int {
+fun radarRadius(pillarId: String, score: Int): Int {
     val bounded = clampI32(score, -100, 100).toDouble()
     val radius = if (pillarId == "volatility") (100.0 - bounded) / 2.0 else (bounded + 100.0) / 2.0
     return clampI32(roundHalfAwayFromZero(radius), 0, 100)

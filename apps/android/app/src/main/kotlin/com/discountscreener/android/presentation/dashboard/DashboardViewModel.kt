@@ -9,6 +9,8 @@ import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.MarketReadStatus
+
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoveryJobKind
 import com.discountscreener.android.domain.model.DiscoveryJobRecord
@@ -77,6 +79,7 @@ import kotlinx.coroutines.launch
 
 enum class DashboardTab {
     Opportunities,
+    Market,
     Tracked,
     Watch,
     Discovery,
@@ -226,6 +229,7 @@ data class DashboardUiState(
      * cache of qualified names; an ad-hoc search ticker is fetched and scored separately.
      */
     val selectedScoreRow: OpportunityListRow? = null,
+    val marketRegime: MarketRegimeUi = presentMarketRegime(null, MarketReadStatus.Pending),
 ) {
     /**
      * The open ticker's score: the ranked-list row when present, otherwise the fetched
@@ -1146,6 +1150,7 @@ class DashboardViewModel(
             providerState = snapshot.screenData.providerState,
             indexEstimates = snapshot.screenData.estimates.report,
             estimatesNotice = snapshot.estimatesNotice ?: currentState.estimatesNotice,
+            marketRegime = presentMarketRegime(snapshot.marketRegime, snapshot.marketReadStatus),
         )
     }
 
