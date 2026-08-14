@@ -1,6 +1,8 @@
 package com.discountscreener.android.data.repository
 
+import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.android.data.persistence.CaptureKind
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
@@ -58,6 +60,7 @@ import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -74,6 +77,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -638,6 +643,13 @@ class DefaultDashboardRepositoryTest {
                 "pricing_candle",
                 "symbol = ? AND chart_range = ?",
                 arrayOf("NVDA", ChartRange.Month.name),
+            )
+            seedLegacyChartRawCapture(
+                store = store,
+                symbol = "NVDA",
+                range = ChartRange.Month,
+                capturedAt = 200,
+                candles = listOf(candle(epochSeconds = 20, closeCents = 2_000)),
             )
 
             val history = store.loadPricingHistory("NVDA")
@@ -1916,6 +1928,40 @@ class DefaultDashboardRepositoryTest {
         ),
     )
 
+    private fun seedLegacyChartRawCapture(
+        store: SQLiteStateStore,
+        symbol: String,
+        range: ChartRange,
+        capturedAt: Long,
+        candles: List<HistoricalCandle>,
+    ) {
+        var payload = Json.encodeToString(
+            RawCapturePayload.serializer(),
+            RawCapturePayload.Chart(range, candles),
+        )
+        var captureId = store.writableDatabase.insertOrThrow(
+            "raw_capture",
+            null,
+            ContentValues().apply {
+                put("symbol", symbol)
+                put("capture_kind", "chart-candles")
+                put("scope_key", range.name)
+                put("captured_at", capturedAt)
+                put("payload_json", payload)
+            },
+        )
+        store.writableDatabase.insertWithOnConflict(
+            "raw_latest",
+            null,
+            ContentValues().apply {
+                put("symbol", symbol)
+                put("capture_key", "chart:${range.name}")
+                put("capture_id", captureId)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
     private fun chartCapture(
         symbol: String,
         range: ChartRange,
@@ -2015,10 +2061,49 @@ class DefaultDashboardRepositoryTest {
     )
 
     @Test
-    fun enrichment_populates_all_chart_ranges_after_refresh() = runTest(dispatcher) {
+    fun enrichment_does_not_fetch_non_year_chart_ranges() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
-            val client = FakeYahooFinanceClient(delayMs = 5)
+            var nonYearFetches = 0
+            val client = object : FakeYahooFinanceClient(delayMs = 5) {
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+                    if (range != ChartRange.Year) {
+                        nonYearFetches += 1
+                    }
+                    return super.fetchHistoricalCandles(symbol, range)
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            awaitSnapshot(repository) { refreshed ->
+                refreshed.trackedRows.any { it.state == TrackedRowState.Live }
+            }
+            repeat(20) {
+                advanceUntilIdle()
+                Thread.sleep(5)
+            }
+
+            assertEquals(0, nonYearFetches)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ensure_detail_loaded_fetches_the_selected_range_when_missing() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var monthFetches = 0
+            val client = object : FakeYahooFinanceClient(delayMs = 5) {
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+                    if (range == ChartRange.Month) {
+                        monthFetches += 1
+                    }
+                    return super.fetchHistoricalCandles(symbol, range)
+                }
+            }
             val repository = buildRepository(store = store, client = client)
 
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
@@ -2026,47 +2111,49 @@ class DefaultDashboardRepositoryTest {
             val snapshot = awaitSnapshot(repository) { refreshed ->
                 refreshed.trackedRows.any { it.state == TrackedRowState.Live }
             }
-            val symbol = snapshot.trackedSymbols.first()
-            awaitSnapshot(repository, selectedSymbol = symbol) { enriched ->
-                ChartRange.entries.all { range ->
-                    enriched.selectedCharts[range].orEmpty().isNotEmpty()
-                }
+            var symbol = snapshot.trackedSymbols.first()
+            repeat(10) {
+                advanceUntilIdle()
+                Thread.sleep(5)
             }
-            val allCharts = ChartRange.entries.associateWith { range ->
-                repository.currentSnapshot(ViewFilter(), symbol, range, legacyModel).selectedCharts[range].orEmpty()
-            }
-            assertTrue(
-                "Expected all chart ranges populated after enrichment, but got: ${allCharts.map { (k, v) -> "$k=${v.size}" }}",
-                allCharts.all { (_, candles) -> candles.isNotEmpty() }
-            )
+
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Month, legacyModel)
+            advanceUntilIdle()
+
+            assertEquals(1, monthFetches)
         } finally {
             store.close()
         }
     }
 
     @Test
-    fun enrichment_records_issues_for_failed_fetches_without_retry() = runTest(dispatcher) {
+    fun a_refresh_emits_fewer_updates_than_symbols() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
-            var fetchCount = 0
-            val failingClient = object : FakeYahooFinanceClient(delayMs = 5) {
-                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
-                    fetchCount++
-                    if (range != ChartRange.Year) {
-                        throw java.io.IOException("enrichment chart $range failed for $symbol")
-                    }
-                    return super.fetchHistoricalCandles(symbol, range)
-                }
-            }
-            val repository = buildRepository(store = store, client = failingClient)
-
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient(delayMs = 5))
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
-            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
-            val snapshot = awaitSnapshot(repository) { current ->
-                current.issues.any { it.key.contains("enrichment") }
+            repository.selectProfile(
+                DefaultDashboardRepository.QA_PROFILE,
+                ViewFilter(),
+                ChartRange.Year,
+                legacyModel,
+            )
+            var snapshot = awaitSnapshot(repository) { refreshed ->
+                refreshed.trackedRows.any { it.state == TrackedRowState.Live }
             }
-            val enrichmentIssues = snapshot.issues.filter { it.key.contains("enrichment") }
-            assertTrue("Expected enrichment issues for failed chart fetches", enrichmentIssues.isNotEmpty())
+            var before = repository.observeUpdates().first()
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repeat(20) {
+                advanceUntilIdle()
+                Thread.sleep(5)
+            }
+            var after = repository.observeUpdates().first()
+            var n = snapshot.trackedSymbols.size
+
+            assertTrue(
+                "refresh emitted ${after - before} updates for $n symbols",
+                after - before < n,
+            )
         } finally {
             store.close()
         }
@@ -2092,9 +2179,7 @@ class DefaultDashboardRepositoryTest {
             }
             val symbol = switched.trackedSymbols.first()
             awaitSnapshot(repository, selectedSymbol = symbol) { enriched ->
-                ChartRange.entries.all { range ->
-                    enriched.selectedCharts[range].orEmpty().isNotEmpty()
-                }
+                enriched.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty()
             }
 
             val afterEnrichment = enrichmentFetchRequestCount
@@ -2132,6 +2217,21 @@ class DefaultDashboardRepositoryTest {
             assertEquals("MercadoLibre, Inc.", results.first().companyName)
             assertTrue(results.first().isRemote)
             assertEquals(1, client.searchSymbolsCallCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun search_lowercase_meli_without_remote_still_offers_the_typed_ticker() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val results = repository.searchTickers("meli", "sp500")
+
+            assertEquals("MELI", results.single().symbol)
         } finally {
             store.close()
         }

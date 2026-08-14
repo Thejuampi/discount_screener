@@ -449,6 +449,43 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun submit_lowercase_meli_direct_opens_detail() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("MELI"),
+            tickerSuggestions = emptyList(),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.UpdateTickerSearchQuery("meli"))
+        viewModel.dispatch(DashboardAction.SubmitTickerSearch)
+        advanceUntilIdle()
+
+        assertEquals("MELI", viewModel.state.value.detailRoute?.symbol)
+    }
+
+    @Test
+    fun opening_a_new_ticker_clears_the_previous_detail_chart() = runTest(dispatcher) {
+        var aaplCandle = HistoricalCandle(
+            epochSeconds = 1_700_000_000L,
+            openCents = 10_000,
+            highCents = 10_100,
+            lowCents = 9_900,
+            closeCents = 10_050,
+            volume = 1_000,
+        )
+        var repository = RecordingDashboardRepository(
+            detailData = detail("AAPL"),
+            detailCharts = mapOf(ChartRange.Year to listOf(aaplCandle)),
+        )
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.SelectTickerSuggestion("MELI"))
+
+        assertTrue(viewModel.state.value.detailCharts.isEmpty())
+    }
+
+    @Test
     fun submit_uppercase_meli_direct_opens_detail() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             detailData = detail("MELI"),

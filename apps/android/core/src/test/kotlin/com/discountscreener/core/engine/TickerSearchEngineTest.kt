@@ -137,6 +137,16 @@ class TickerSearchEngineTest {
         )
     }
 
+    @Test
+    fun lowercase_meli_without_suggestions_direct_opens() {
+        assertTrue(
+            TickerSearchEngine.shouldDirectOpenTickerOnSubmit(
+                query = "meli",
+                suggestionSymbols = emptyList(),
+            ),
+        )
+    }
+
     private fun profileCandidate(
         symbol: String,
         profiles: List<String> = listOf("sp500"),

@@ -64,6 +64,7 @@ import com.discountscreener.core.engine.ScreenDataProjectionEngine
 import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.engine.TickerSearchCandidate
 import com.discountscreener.core.engine.TickerSearchEngine
+import com.discountscreener.core.engine.TickerSearchRank
 import com.discountscreener.core.engine.TickerSearchResult
 import com.discountscreener.core.engine.buildSymbolDetail
 import com.discountscreener.core.engine.checkedUpsideBps
@@ -436,25 +437,24 @@ class DefaultDashboardRepository(
         ensureRevisionHistoryLoaded(symbol)
         hydratePricingHistoryForDetail(symbol)
 
-        val captures = mutableListOf<RawCapture>()
-        ChartRange.entries.forEach { range ->
-            val key = chartKey(symbol, range)
-            if (stateMutex.withLock { chartCache[key] } == null) {
-                val candles = runCatching { yahooClient.fetchHistoricalCandles(symbol, range) }.getOrNull()
-                if (!candles.isNullOrEmpty()) {
-                    stateMutex.withLock {
-                        chartCache[key] = candles
-                        chartSummaries.getOrPut(symbol) { linkedMapOf() }[range] =
-                            ChartAnalysis.buildSummary(range, candles, now())
-                    }
-                    captures += RawCapture(
-                        symbol = symbol,
-                        captureKind = CaptureKind.ChartCandles,
-                        scopeKey = range.name,
-                        capturedAt = now(),
-                        payload = RawCapturePayload.Chart(range, candles),
-                    )
+        var captures = mutableListOf<RawCapture>()
+        var range = selectedRange
+        var key = chartKey(symbol, range)
+        if (stateMutex.withLock { chartCache[key] } == null) {
+            var candles = runCatching { yahooClient.fetchHistoricalCandles(symbol, range) }.getOrNull()
+            if (!candles.isNullOrEmpty()) {
+                stateMutex.withLock {
+                    chartCache[key] = candles
+                    chartSummaries.getOrPut(symbol) { linkedMapOf() }[range] =
+                        ChartAnalysis.buildSummary(range, candles, now())
                 }
+                captures += RawCapture(
+                    symbol = symbol,
+                    captureKind = CaptureKind.ChartCandles,
+                    scopeKey = range.name,
+                    capturedAt = now(),
+                    payload = RawCapturePayload.Chart(range, candles),
+                )
             }
         }
 
@@ -537,6 +537,22 @@ class DefaultDashboardRepository(
         if (TickerSearchEngine.shouldTriggerRemoteSearch(query, rankedResults)) {
             val remoteCandidates = remoteSearchCandidates(query, limit)
             rankedResults = TickerSearchEngine.mergeAndRank(candidates + remoteCandidates, limit)
+        }
+        if (TickerSearchEngine.isTickerToken(trimmedQuery)) {
+            var typedSymbol = trimmedQuery.uppercase()
+            if (rankedResults.none { result -> result.symbol.equals(typedSymbol, ignoreCase = true) }) {
+                var profiles = profileCatalog.profileMembership(typedSymbol)
+                rankedResults = TickerSearchEngine.mergeAndRank(
+                    candidates + TickerSearchCandidate(
+                        symbol = typedSymbol,
+                        companyName = localCompanyNameFor(typedSymbol),
+                        profiles = profiles,
+                        inCurrentProfile = normalizedCurrentProfile in profiles,
+                        matchRank = TickerSearchRank.EXACT_TICKER_REMOTE,
+                    ),
+                    limit,
+                )
+            }
         }
 
         hydrateMissingCompanyNames(rankedResults)
@@ -729,11 +745,11 @@ class DefaultDashboardRepository(
         val fetchedAt = now()
         val providerResult = yahooClient.fetchSymbol(normalizedSymbol)
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
-        ChartRange.entries.forEach { range ->
-            val candles = runCatching { yahooClient.fetchHistoricalCandles(normalizedSymbol, range) }.getOrDefault(emptyList())
-            if (candles.isNotEmpty()) {
-                chartCaptures += range to candles
-            }
+        var yearCandles = runCatching {
+            yahooClient.fetchHistoricalCandles(normalizedSymbol, ChartRange.Year)
+        }.getOrDefault(emptyList())
+        if (yearCandles.isNotEmpty()) {
+            chartCaptures += ChartRange.Year to yearCandles
         }
 
         stateMutex.withLock {
@@ -898,6 +914,7 @@ class DefaultDashboardRepository(
         generation: Long,
         recordTerminalIssues: Boolean,
     ) = coroutineScope {
+        var applied = 0
         symbols
             .asFlow()
             .flatMapMerge(concurrency = REFRESH_CONCURRENCY) { symbol ->
@@ -920,8 +937,14 @@ class DefaultDashboardRepository(
                     )
                 }
                 persistDelta(persistenceDelta)
-                emitUpdate()
+                applied += 1
+                if (applied % EMIT_UPDATE_BATCH == 0) {
+                    emitUpdate()
+                }
             }
+        if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
+            emitUpdate()
+        }
     }
 
     private fun isRefreshResultIncomplete(result: SymbolRefreshResult): Boolean {
@@ -2928,6 +2951,7 @@ class DefaultDashboardRepository(
             val batch = pending.toList()
             pending.clear()
             val finalRound = round == MAX_RETRY_ROUNDS
+            var applied = 0
             batch
                 .asFlow()
                 .flatMapMerge(concurrency = ENRICHMENT_CONCURRENCY) { symbol ->
@@ -2947,8 +2971,14 @@ class DefaultDashboardRepository(
                     if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
                         persistDelta(delta)
                     }
-                    emitUpdate()
+                    applied += 1
+                    if (applied % EMIT_UPDATE_BATCH == 0) {
+                        emitUpdate()
+                    }
                 }
+            if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
+                emitUpdate()
+            }
             round += 1
         }
     }
@@ -2962,7 +2992,7 @@ class DefaultDashboardRepository(
         val errors = mutableListOf<ProviderDiagnostic>()
 
         val missingRanges = stateMutex.withLock {
-            ChartRange.entries.filter { range ->
+            listOf(ChartRange.Year).filter { range ->
                 chartCache[chartKey(symbol, range)] == null
             }
         }
@@ -3638,6 +3668,7 @@ class DefaultDashboardRepository(
         private const val ENRICHMENT_CONCURRENCY = 2
         private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
+        private const val EMIT_UPDATE_BATCH = 8
         private const val TAG = "DiscountScreener"
 
         /**
