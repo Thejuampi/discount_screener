@@ -32,6 +32,7 @@ import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.PlanBoardAssembler
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
 import com.discountscreener.android.domain.model.ProfileTransitionFeedback
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -1351,6 +1352,13 @@ class DefaultDashboardRepository(
                 marketDataRepository == null || marketReadAttempted -> MarketReadStatus.Unavailable
                 else -> MarketReadStatus.Pending
             },
+            planBoard = PlanBoardAssembler.assemble(
+                rows = opportunityRows,
+                yearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
+                },
+                dcfBySymbol = dcfCache.toMap(),
+            ),
         )
     }
 

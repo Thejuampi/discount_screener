@@ -202,6 +202,7 @@ fun DashboardScreen(
                 }
 
                 DashboardTab.Market -> MarketRegimeScreen(state.marketRegime)
+                DashboardTab.Plans -> PlansScreen(state.planBoard, onAction)
                 DashboardTab.Opportunities -> {
                     if (state.opportunityRows.isEmpty()) {
                         EmptyState(
@@ -748,6 +749,7 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.Tracked -> "Upside ${state.trackedRows.size}"
     DashboardTab.Opportunities -> "Opps ${state.opportunityRows.size}"
     DashboardTab.Market -> "Market"
+    DashboardTab.Plans -> "Plans"
     DashboardTab.Watch -> "Watch ${state.watchlistSymbols.size}"
     DashboardTab.Discovery -> discoveryTabLabel(state)
     DashboardTab.System -> "System"

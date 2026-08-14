@@ -16,6 +16,7 @@ import com.discountscreener.core.model.QuantLensRowSummary
 import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
+import com.discountscreener.core.plan.PlanBoard
 import com.discountscreener.core.regime.MarketContextUnavailableReason
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeCause
@@ -225,6 +226,7 @@ data class DashboardSnapshot(
     val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     val marketRegime: MarketRegime? = null,
     val marketReadStatus: MarketReadStatus = MarketReadStatus.Pending,
+    val planBoard: PlanBoard = PlanBoard.EMPTY,
 )
 
 data class TickerSearchSuggestion(
