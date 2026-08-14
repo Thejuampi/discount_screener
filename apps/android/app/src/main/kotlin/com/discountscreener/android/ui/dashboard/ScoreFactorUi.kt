@@ -182,11 +182,17 @@ private fun marketGroup(row: OpportunityListRow): ScoreFactorGroupUi {
 }
 
 private fun lineFromFactor(factor: ScoreFactor) = ScoreFactorLineUi(
-    label = scoreFactorLabel(factor.key),
+    label = scoreFactorLineLabel(factor),
     pointsText = factor.bucketPoints.takeIf { it != 0 }?.let(::formatBucketPoints),
     token = factor.token,
     points = factor.bucketPoints,
 )
+
+internal fun scoreFactorLineLabel(factor: ScoreFactor): String {
+    var name = scoreFactorLabel(factor.key)
+    var rate = factor.inputBps?.let(::formatBpsPercent) ?: return name
+    return "$name · $rate"
+}
 
 private fun lineFromToken(token: String) = ScoreFactorLineUi(
     label = token,
@@ -206,7 +212,10 @@ private val FACTOR_NAMES = mapOf(
     "FCF" to "Free cash flow",
     "OCF" to "Operating cash flow",
     "ROE" to "Return on equity",
-    "Growth" to "Earnings growth",
+    "Growth" to "Quarter EPS YoY",
+    "Pulse" to "Quarter EPS YoY",
+    "Trend" to "Revenue 3–5y",
+    "Pulse≠Trend" to "Pulse vs Trend",
     "D/E" to "Debt / equity",
     "Bal" to "Cash vs debt",
     "FwdPE" to "Forward P/E",
@@ -220,7 +229,7 @@ private val FACTOR_NAMES = mapOf(
     "MACD" to "MACD",
     "RSI" to "RSI",
     "Vol" to "Volume",
-    "Val" to "Valuation",
+    "Val" to "Street target",
     "Rec" to "Recommendation",
     "Skew" to "Rating mix",
     "Cov" to "Analyst coverage",

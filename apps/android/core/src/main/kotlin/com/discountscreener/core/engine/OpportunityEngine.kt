@@ -1,6 +1,8 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.math.isForeignTo
 import com.discountscreener.core.math.medianOf
+import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
@@ -27,6 +29,7 @@ import com.discountscreener.core.regime.scoreRegimeFit
 import java.math.BigInteger
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private const val DCF_OPPORTUNITY_THRESHOLD_BPS = 2_000
@@ -171,11 +174,42 @@ private const val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
 private const val V3_FORECAST_DCF_RELIABILITY = 0.75
 private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
 
+/**
+ * V4 forecast keeps V3's Street centre and rating terms. It does not pay points
+ * for coverage or freshness — those already scale reliability. The leftover
+ * budget goes to target-range disagreement, which V3 underweighted.
+ */
+private const val V4_FORECAST_VALUATION_WEIGHT = V3_FORECAST_VALUATION_WEIGHT
+private const val V4_FORECAST_REC_WEIGHT = V3_FORECAST_REC_WEIGHT
+private const val V4_FORECAST_SKEW_WEIGHT = V3_FORECAST_SKEW_WEIGHT
+private const val V4_FORECAST_UNCERTAINTY_WEIGHT =
+    V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT + V3_FORECAST_BREADTH_WEIGHT + V3_FORECAST_FRESHNESS_WEIGHT
+private const val V4_FORECAST_FULL_WEIGHT =
+    V4_FORECAST_VALUATION_WEIGHT +
+        V4_FORECAST_REC_WEIGHT +
+        V4_FORECAST_SKEW_WEIGHT +
+        V4_FORECAST_UNCERTAINTY_WEIGHT
+private const val V4_FORECAST_UNCERTAINTY_BOUND = V3_FORECAST_UNCERTAINTY_BOUND
+private const val V4_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT
+
 private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
 
 private const val BASIS_POINTS_PER_UNIT = 10_000.0
 
 private const val V4_FUND_SHARE_COUNT_WEIGHT = 10.0
+
+/** Half the old V3 Growth weight of 12. Pulse and Trend share that budget. */
+private const val V4_FUND_TREND_WEIGHT = 6.0
+private const val V4_FUND_PULSE_WEIGHT = 6.0
+private const val V4_FUND_GROWTH_LOWER_BPS = V3_FUND_GROWTH_LOWER_BPS
+private const val V4_FUND_GROWTH_UPPER_BPS = V3_FUND_GROWTH_UPPER_BPS
+
+/** Below this trailing EPS, Yahoo quarter YoY has no usable base. Ten cents is in. */
+private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
+
+/** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
+private const val V4_TREND_MAX_YEARS = 5
+private const val V4_TREND_MIN_TRANSITIONS = 2
 
 /**
  * The share-count band: a three per cent annual move either way is the whole ramp.
@@ -218,8 +252,9 @@ private const val V3_BETA_HAIRCUT_MULT_MAX = 2.5
 private const val V3_BETA_LOW_MILLIS = 800.0
 private const val V3_BETA_HIGH_MILLIS = 1_600.0
 
-// AggressiveV4 tuning constants. The buckets are V3's until the commits that change them; what is
-// different here is what the composite pays for.
+// AggressiveV4 tuning constants. Fundamentals keep V3's term weights except Growth,
+// which splits into Trend (revenue 3–5y) and Pulse (quarter EPS YoY). The composite
+// pays for agreement, not presence.
 private const val V4_COMPOSITE_AGREEMENT_BONUS = 5
 private const val V4_COMPOSITE_BOUND = 110
 
@@ -487,9 +522,8 @@ object OpportunityEngine {
             OpportunityScoringModel.Legacy -> scoreForecasts(detail, analysis).toEvidence()
             OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
-            OpportunityScoringModel.AggressiveV3,
-            OpportunityScoringModel.AggressiveV4,
-            -> aggressiveV3ForecastScore(detail, analysis)
+            OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
+            OpportunityScoringModel.AggressiveV4 -> aggressiveV4ForecastScore(detail, analysis)
         }
         var fundamentalsScore = fundamentals.score
         var fundamentalsSignals = fundamentals.signals
@@ -1069,7 +1103,12 @@ object OpportunityEngine {
         }
 
         fundamentals.earningsGrowthBps?.let { growthBps ->
-            acc.add(V2_FUND_GROWTH_WEIGHT, smoothRamp(growthBps.toDouble(), V2_FUND_GROWTH_LOWER_BPS, V2_FUND_GROWTH_UPPER_BPS), "Growth")
+            acc.add(
+                V2_FUND_GROWTH_WEIGHT,
+                smoothRamp(growthBps.toDouble(), V2_FUND_GROWTH_LOWER_BPS, V2_FUND_GROWTH_UPPER_BPS),
+                "Growth",
+                growthBps,
+            )
         }
 
         // Balance: prefer D/E, fall back to cash >= debt.
@@ -1296,7 +1335,7 @@ object OpportunityEngine {
 
         addCashFlowVote(acc, fundamentals)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
-        addEarningsGrowth(acc, fundamentals)
+        addV4Growth(acc, fundamentals, timeseries)
         addBalanceSheet(acc, fundamentals)
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
         addCashConversion(acc, fundamentals)
@@ -1442,8 +1481,83 @@ object OpportunityEngine {
 
     private fun addEarningsGrowth(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         fundamentals.earningsGrowthBps?.let { growthBps ->
-            acc.add(V3_FUND_GROWTH_WEIGHT, smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS), "Growth")
+            acc.add(
+                V3_FUND_GROWTH_WEIGHT,
+                smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS),
+                "Growth",
+                growthBps,
+            )
         }
+    }
+
+    /**
+     * V4 growth is two facts that used to share one label.
+     *
+     * Pulse is Yahoo quarter EPS YoY. Trend is the median of the last two to four
+     * annual revenue YoY rates. Each takes half of V3's Growth weight, so a name
+     * like MELI (revenue up, EPS down) lands near zero instead of saturating.
+     *
+     * Pulse is refused when trailing EPS is under ten cents, or when the Yahoo
+     * rate is foreign to the annual net-income series. Trend needs two clean
+     * revenue transitions. This path does not read DCF output.
+     */
+    private fun addV4Growth(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var trendBps = trendGrowthBps(timeseries)
+        var pulseBps = pulseGrowthBps(fundamentals, timeseries)
+        var trendRamp = trendBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        var pulseRamp = pulseBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        if (trendRamp != null && trendBps != null) {
+            acc.add(V4_FUND_TREND_WEIGHT, trendRamp, "Trend", trendBps)
+        }
+        if (pulseRamp != null && pulseBps != null) {
+            acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
+        }
+        if (trendRamp != null && pulseRamp != null && trendRamp * pulseRamp < 0.0) {
+            acc.flag("Pulse≠Trend")
+        }
+    }
+
+    private fun pulseGrowthBps(
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ): Int? {
+        var growthBps = fundamentals.earningsGrowthBps ?: return null
+        var epsCents = fundamentals.trailingEpsCents ?: return null
+        if (abs(epsCents) < V4_PULSE_MIN_ABS_EPS_CENTS) return null
+        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty(), requirePositiveLevel = false)
+        if (isForeignTo(growthBps.toDouble(), annualRates.map { it.toDouble() })) return null
+        return growthBps
+    }
+
+    private fun trendGrowthBps(timeseries: FundamentalTimeseries?): Int? {
+        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty(), requirePositiveLevel = true)
+        if (rates.size < V4_TREND_MIN_TRANSITIONS) return null
+        return medianOf(rates.map { it.toDouble() })?.roundToInt()
+    }
+
+    private fun recentGrowthRatesBps(
+        series: List<AnnualReportedValue>,
+        requirePositiveLevel: Boolean,
+    ): List<Int> {
+        var usable = series
+            .filter { it.value.isFinite() }
+            .filter { if (requirePositiveLevel) it.value > 0.0 else it.value != 0.0 }
+            .sortedBy { it.asOfDate }
+            .takeLast(V4_TREND_MAX_YEARS)
+        if (usable.size < V4_TREND_MIN_TRANSITIONS + 1) return emptyList()
+        return usable.zipWithNext { previous, latest ->
+            if (previous.value == 0.0) {
+                null
+            } else {
+                ((latest.value / previous.value - 1.0) * BASIS_POINTS_PER_UNIT)
+                    .takeIf { it.isFinite() }
+                    ?.roundToInt()
+            }
+        }.filterNotNull()
     }
 
     private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
@@ -1657,6 +1771,102 @@ object OpportunityEngine {
         return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
     }
 
+    /**
+     * Street-only forecast for V4. Does not read DCF output.
+     *
+     * Coverage and freshness stay as reliability multipliers. They do not add
+     * points. Target-range width takes that budget, so a 50% book cannot print Good
+     * on headcount alone.
+     */
+    internal fun aggressiveV4ForecastScore(detail: SymbolDetail, analysis: DcfAnalysis?): BucketEvidence {
+        val acc = EvidenceAccumulator(V4_FORECAST_FULL_WEIGHT)
+        val sufficiencySignals = mutableListOf<String>()
+        var reliableEvidenceWeight = 0.0
+        var hasValuationAnchor = false
+
+        val targetFairValue = preferredForecastFairValueCents(detail)
+        val targetCount = targetAnalystCount(detail)
+        val recommendationCount = recommendationAnalystCount(detail)
+        val externalFreshness = v3FreshnessMultiplier(detail)
+        val externalStatusReliability = externalStatusReliability(detail.externalStatus)
+
+        val valuationInputs = mutableListOf<WeightedForecastRamp>()
+        var upsideBps: Int? = null
+        targetFairValue?.let { fairValue ->
+            val targetUpsideBps = checkedUpsideBps(detail.marketPriceCents, fairValue)
+            upsideBps = targetUpsideBps
+            val targetReliability = v3AnalystCoverageReliability(targetCount) * externalFreshness * externalStatusReliability
+            when {
+                targetUpsideBps == null -> Unit
+                !v3HasSufficientAnalystCoverage(targetCount) -> {
+                    sufficiencySignals += if (targetCount == null) "Cov?" else "Cov<${V3_FORECAST_MIN_ANALYST_OPINIONS}"
+                }
+                targetReliability > 0.0 -> {
+                    valuationInputs += WeightedForecastRamp(
+                        ramp = smoothRamp(targetUpsideBps.toDouble(), V3_FORECAST_UPSIDE_LOWER_BPS, V3_FORECAST_UPSIDE_UPPER_BPS),
+                        reliability = targetReliability,
+                    )
+                }
+            }
+        }
+
+        if (valuationInputs.isNotEmpty()) {
+            val reliabilitySum = valuationInputs.sumOf { it.reliability }
+            if (reliabilitySum > 0.0) {
+                val blendedRamp = valuationInputs.sumOf { it.ramp * it.reliability } / reliabilitySum
+                val weight = V4_FORECAST_VALUATION_WEIGHT * reliabilitySum.coerceAtMost(1.0)
+                acc.add(weight, blendedRamp, "Val", upsideBps)
+                reliableEvidenceWeight += weight
+                hasValuationAnchor = true
+            }
+        }
+
+        detail.recommendationMeanHundredths?.let { rec ->
+            val recReliability = v3AnalystCoverageReliability(recommendationCount) * externalFreshness * externalStatusReliability
+            if (!v3HasSufficientAnalystCoverage(recommendationCount)) {
+                sufficiencySignals += if (recommendationCount == null) "RecCov?" else "RecCov<${V3_FORECAST_MIN_ANALYST_OPINIONS}"
+            } else if (recReliability > 0.0) {
+                val weight = V4_FORECAST_REC_WEIGHT * recReliability
+                acc.add(
+                    weight,
+                    -smoothRamp(rec.toDouble(), V3_FORECAST_REC_LOW_HUNDREDTHS, V3_FORECAST_REC_HIGH_HUNDREDTHS),
+                    "Rec",
+                    rec,
+                )
+                reliableEvidenceWeight += weight
+            }
+        }
+
+        val skew = v4RecommendationSkew(detail)
+        if (skew != null) {
+            val skewReliability = v3AnalystCoverageReliability(recommendationCount) * externalFreshness * externalStatusReliability
+            if (v3HasSufficientAnalystCoverage(recommendationCount) && skewReliability > 0.0) {
+                val weight = V4_FORECAST_SKEW_WEIGHT * skewReliability
+                acc.add(weight, skew, "Skew")
+                reliableEvidenceWeight += weight
+            }
+        }
+
+        val targetReliabilityWithoutFreshness = v3AnalystCoverageReliability(targetCount) * externalStatusReliability
+        val low = detail.externalSignalLowFairValueCents
+        val high = detail.externalSignalHighFairValueCents
+        val centre = targetFairValue
+        if (low != null && high != null && centre != null && centre > 0L && high > low && targetReliabilityWithoutFreshness > 0.0) {
+            val spreadFraction = (high - low).toDouble() / centre.toDouble()
+            val weight = V4_FORECAST_UNCERTAINTY_WEIGHT * targetReliabilityWithoutFreshness
+            val spreadBps = ((high - low) * 10_000L / centre).toInt()
+            acc.add(weight, -smoothRamp(spreadFraction, 0.0, V4_FORECAST_UNCERTAINTY_BOUND), "Unc", spreadBps)
+            reliableEvidenceWeight += weight * externalFreshness
+        }
+
+        if (!hasValuationAnchor || reliableEvidenceWeight < V4_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT) {
+            return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        }
+
+        var raw = acc.normalizedScore() ?: return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = null)
+        return acc.toEvidence(extraSignals = sufficiencySignals, scoreOverride = raw.coerceIn(-100, 100))
+    }
+
     private fun v3RecommendationSkew(detail: SymbolDetail): Double? {
         val strongBuy = detail.strongBuyCount ?: 0
         val buy = detail.buyCount ?: 0
@@ -1668,6 +1878,23 @@ object OpportunityEngine {
         val bullish = (strongBuy + buy).toDouble()
         val bearish = (sell + strongSell).toDouble()
         return ((bullish - bearish) / total.toDouble()).coerceIn(-1.0, 1.0)
+    }
+
+    /**
+     * V3's net bull-bear, minus a tail-conflict haircut.
+     *
+     * Two Strong Sells against three Strong Buys is not the same book as fourteen
+     * Buys and two Sells. The net can match; the tails do not.
+     */
+    private fun v4RecommendationSkew(detail: SymbolDetail): Double? {
+        var net = v3RecommendationSkew(detail) ?: return null
+        var strongBuy = detail.strongBuyCount ?: 0
+        var strongSell = detail.strongSellCount ?: 0
+        var total = (detail.strongBuyCount ?: 0) + (detail.buyCount ?: 0) +
+            (detail.holdCount ?: 0) + (detail.sellCount ?: 0) + (detail.strongSellCount ?: 0)
+        if (total <= 0) return net
+        var conflict = 2.0 * min(strongBuy, strongSell).toDouble() / total.toDouble()
+        return (net - conflict).coerceIn(-1.0, 1.0)
     }
 
     private fun v3HasSufficientAnalystCoverage(count: Int?): Boolean =
@@ -1777,7 +2004,7 @@ object OpportunityEngine {
             require(normalizationWeight > 0.0) { "EvidenceAccumulator normalizationWeight must be positive" }
         }
 
-        fun add(weight: Double, ramp: Double, label: String? = null) {
+        fun add(weight: Double, ramp: Double, label: String? = null, inputBps: Int? = null) {
             require(weight > 0.0) { "EvidenceAccumulator weight must be positive" }
             var clamped = ramp.coerceIn(-1.0, 1.0)
             weightedSum += weight * clamped
@@ -1786,8 +2013,13 @@ object OpportunityEngine {
                 var token = "$label${signalSuffix(clamped)}"
                 signals += token
                 var points = ((weight * clamped) / normalizationWeight * 100.0).roundToInt()
-                factors += ScoreFactor(key = label, token = token, bucketPoints = points)
+                factors += ScoreFactor(key = label, token = token, bucketPoints = points, inputBps = inputBps)
             }
+        }
+
+        fun flag(label: String) {
+            signals += label
+            factors += ScoreFactor(key = label, token = label, bucketPoints = 0)
         }
 
         fun normalizedScore(): Int? {

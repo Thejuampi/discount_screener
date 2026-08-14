@@ -81,3 +81,21 @@ fun medianOf(values: List<Double>): Double? {
     var middle = sorted.size / 2
     return if (sorted.size % 2 == 0) (sorted[middle - 1] + sorted[middle]) / 2.0 else sorted[middle]
 }
+
+/**
+ * Whether [candidate] sits outside the sample's population.
+ *
+ * Uses the same median / MAD scale as [robustCentre]. Below three observations no
+ * outlier can be named, so the answer is false. A sample with no width keeps a
+ * candidate on the mode and rejects anything else — there is no scale that can
+ * excuse a miss.
+ */
+fun isForeignTo(candidate: Double, sample: List<Double>): Boolean {
+    if (!candidate.isFinite()) return true
+    if (sample.size < MIN_OBSERVATIONS) return false
+    if (sample.any { !it.isFinite() }) return true
+    var location = medianOf(sample) ?: return true
+    var scale = (medianOf(sample.map { abs(it - location) }) ?: return true) * MAD_TO_DEVIATION
+    if (scale <= 0.0 || !scale.isFinite()) return abs(candidate - location) > 0.0
+    return abs(candidate - location) / scale > MAX_ABSOLUTE_Z
+}

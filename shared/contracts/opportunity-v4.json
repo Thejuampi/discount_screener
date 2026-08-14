@@ -21,6 +21,10 @@
       "V4_FUND_SHARE_COUNT_WEIGHT": 10.0,
       "V4_FUND_SHARE_COUNT_SHRINK_BPS": -300.0,
       "V4_FUND_SHARE_COUNT_DILUTE_BPS": 300.0,
+      "V4_FUND_TREND_WEIGHT": 6.0,
+      "V4_FUND_PULSE_WEIGHT": 6.0,
+      "V4_FUND_GROWTH_LOWER_BPS": -500.0,
+      "V4_FUND_GROWTH_UPPER_BPS": 1500.0,
       "V4_FUND_SECTOR_CHEAP_MULT": 0.7,
       "V4_FUND_SECTOR_RICH_MULT": 1.5,
       "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS": -500.0,
@@ -275,6 +279,63 @@
       "fundamentals": {},
       "binds_no_constant": "nothing. One point cannot say which way the count moved, so no band constant can change the answer.",
       "diluted_average_shares": [1000000000.0],
+      "expected": { "score": null, "signals": [] }
+    },
+    {
+      "name": "pulse at 0% sits in the middle of the old Growth band",
+      "field": "earnings_growth_bps",
+      "binds": "V4_FUND_PULSE_WEIGHT and both ends of the shared growth band, in both directions. 0% is strictly inside -5% .. +15%. Weight 12 would still score -5 here; the split is the point of the case.",
+      "mutants": [
+        { "constant": "V4_FUND_PULSE_WEIGHT", "value": 4.0, "score": -2 },
+        { "constant": "V4_FUND_PULSE_WEIGHT", "value": 8.0, "score": -4 },
+        { "constant": "V4_FUND_GROWTH_LOWER_BPS", "value": -700.0, "score": -2 },
+        { "constant": "V4_FUND_GROWTH_LOWER_BPS", "value": -300.0, "score": -4 },
+        { "constant": "V4_FUND_GROWTH_UPPER_BPS", "value": 800.0, "score": -1 },
+        { "constant": "V4_FUND_GROWTH_UPPER_BPS", "value": 2500.0, "score": -4 }
+      ],
+      "fundamentals": { "earnings_growth_bps": 0, "trailing_eps_cents": 500 },
+      "expected": { "score": -3, "signals": ["Pulse-"] }
+    },
+    {
+      "name": "trend from two flat revenue transitions uses the same band at half weight",
+      "field": "revenue",
+      "binds": "V4_FUND_TREND_WEIGHT and both ends of the shared growth band, in both directions. Three equal revenue years give two 0% transitions. Median 0 is the same observation as the pulse case above, so the two constants cannot hide behind each other.",
+      "mutants": [
+        { "constant": "V4_FUND_TREND_WEIGHT", "value": 4.0, "score": -2 },
+        { "constant": "V4_FUND_TREND_WEIGHT", "value": 8.0, "score": -4 },
+        { "constant": "V4_FUND_GROWTH_LOWER_BPS", "value": -700.0, "score": -2 },
+        { "constant": "V4_FUND_GROWTH_LOWER_BPS", "value": -300.0, "score": -4 },
+        { "constant": "V4_FUND_GROWTH_UPPER_BPS", "value": 800.0, "score": -1 },
+        { "constant": "V4_FUND_GROWTH_UPPER_BPS", "value": 2500.0, "score": -4 }
+      ],
+      "fundamentals": {},
+      "revenue": [100.0, 100.0, 100.0],
+      "expected": { "score": -3, "signals": ["Trend-"] }
+    },
+    {
+      "name": "a revenue boom and an EPS drop cancel instead of saturating negative",
+      "field": "earnings_growth_bps",
+      "binds": "the split. Pulse at or below -5% is -5 points. Two +30% revenue transitions saturate Trend at +5. Net zero. The old single term at weight 12 would have reported -11.",
+      "binds_no_constant": "nothing. Both ramps are pinned at the ends, so a moved band edge or a moved half-weight still lands on the same pair of clamps.",
+      "fundamentals": { "earnings_growth_bps": -1100, "trailing_eps_cents": 500 },
+      "revenue": [100.0, 130.0, 169.0],
+      "expected": { "score": 0, "signals": ["Trend++", "Pulse--", "Pulse≠Trend"] }
+    },
+    {
+      "name": "one revenue transition is not a trend, so the bucket is absent",
+      "field": "revenue",
+      "binds": "two transitions are the floor. One year-over-year move cannot name a 3-5 year franchise.",
+      "binds_no_constant": "nothing. A missing term does not read the band.",
+      "fundamentals": {},
+      "revenue": [100.0, 130.0],
+      "expected": { "score": null, "signals": [] }
+    },
+    {
+      "name": "a near-zero EPS base refuses Pulse",
+      "field": "trailing_eps_cents",
+      "binds": "nine cents is below V4_PULSE_MIN_ABS_EPS_CENTS. The Yahoo rate is present and would otherwise saturate.",
+      "binds_no_constant": "nothing. The floor is a step. Nine cents and ten cents are the pair that bind it.",
+      "fundamentals": { "earnings_growth_bps": -1100, "trailing_eps_cents": 9 },
       "expected": { "score": null, "signals": [] }
     }
   ]

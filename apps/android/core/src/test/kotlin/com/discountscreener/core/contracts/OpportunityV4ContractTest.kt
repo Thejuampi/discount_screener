@@ -141,7 +141,7 @@ class OpportunityV4ContractTest {
         var (score, signals) = OpportunityEngine.aggressiveV4FundamentalsScore(
             detail = detailOf(case.fundamentals),
             sectorBenchmarks = benchmarks,
-            timeseries = case.dilutedAverageShares?.let(::timeseriesOf),
+            timeseries = timeseriesOf(case),
         )
         return FundamentalsExpectation(score = score, signals = signals)
     }
@@ -167,18 +167,28 @@ class OpportunityV4ContractTest {
             enterpriseToEbitdaHundredths = input.enterpriseToEbitdaHundredths,
             priceToBookHundredths = input.priceToBookHundredths,
             returnOnEquityBps = input.returnOnEquityBps,
+            earningsGrowthBps = input.earningsGrowthBps,
+            trailingEpsCents = input.trailingEpsCents,
         ),
     )
 
     /**
-     * The share series, oldest first. Only the last two points are read, and only their ratio, so
-     * the dates carry no weight here beyond keeping the order the providers guarantee.
+     * Annual series, oldest first. Dates only keep the order the providers guarantee.
      */
-    private fun timeseriesOf(shares: List<Double>) = FundamentalTimeseries(
-        dilutedAverageShares = shares.mapIndexed { index, value ->
-            AnnualReportedValue(asOfDate = "${2020 + index}-12-31", value = value)
-        },
-    )
+    private fun timeseriesOf(case: FundamentalsCase): FundamentalTimeseries? {
+        if (case.dilutedAverageShares == null && case.revenue == null && case.netIncome == null) {
+            return null
+        }
+        return FundamentalTimeseries(
+            dilutedAverageShares = annual(case.dilutedAverageShares),
+            revenue = annual(case.revenue),
+            netIncome = annual(case.netIncome),
+        )
+    }
+
+    private fun annual(values: List<Double>?) = values.orEmpty().mapIndexed { index, value ->
+        AnnualReportedValue(asOfDate = "${2020 + index}-12-31", value = value)
+    }
 
     /** The contract carries intermediates as hundredths so no case turns on a last-bit difference. */
     private fun hundredths(value: Double): Int = (value * 100.0).roundToInt()
@@ -253,6 +263,8 @@ private data class FundamentalsCase(
     val name: String,
     val fundamentals: FundamentalsInput,
     @SerialName("diluted_average_shares") val dilutedAverageShares: List<Double>? = null,
+    val revenue: List<Double>? = null,
+    @SerialName("net_income") val netIncome: List<Double>? = null,
     @SerialName("sector_benchmarks") val sectorBenchmarks: BenchmarksInput? = null,
     val expected: FundamentalsExpectation,
     @SerialName("expected_without_benchmarks") val expectedWithoutBenchmarks: FundamentalsExpectation? = null,
@@ -266,6 +278,8 @@ private data class FundamentalsInput(
     @SerialName("enterprise_to_ebitda_hundredths") val enterpriseToEbitdaHundredths: Int? = null,
     @SerialName("price_to_book_hundredths") val priceToBookHundredths: Int? = null,
     @SerialName("return_on_equity_bps") val returnOnEquityBps: Int? = null,
+    @SerialName("earnings_growth_bps") val earningsGrowthBps: Int? = null,
+    @SerialName("trailing_eps_cents") val trailingEpsCents: Long? = null,
 )
 
 @Serializable

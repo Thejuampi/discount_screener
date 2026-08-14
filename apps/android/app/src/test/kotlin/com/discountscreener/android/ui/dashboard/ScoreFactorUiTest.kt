@@ -50,6 +50,30 @@ class ScoreFactorUiTest {
     }
 
     @Test
+    fun pulse_names_the_yahoo_quarter_field() {
+        assertEquals("Quarter EPS YoY", scoreFactorLabel("Pulse"))
+    }
+
+    @Test
+    fun val_names_the_street_target() {
+        assertEquals("Street target", scoreFactorLabel("Val"))
+    }
+
+    @Test
+    fun trend_names_the_revenue_window() {
+        assertEquals("Revenue 3–5y", scoreFactorLabel("Trend"))
+    }
+
+    @Test
+    fun a_growth_line_prints_the_rate_it_scored() {
+        var line = scoreFactorGroups(
+            row(fundamentalsFactors = listOf(ScoreFactor("Pulse", "Pulse--", -5, -1_100))),
+        ).first().lines.single()
+
+        assertEquals("Quarter EPS YoY · -11.0%", line.label)
+    }
+
+    @Test
     fun a_positive_contribution_carries_its_sign() {
         assertEquals("+16", formatBucketPoints(16))
     }
