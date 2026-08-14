@@ -12,7 +12,7 @@ class DiscountScreenerAppContainerTest {
     }
 
     @Test
-    fun qa_install_cold_starts_the_capped_qa_universe() {
+    fun qa_install_selects_the_capped_qa_universe_without_a_data_wipe() {
         assertEquals(DefaultDashboardRepository.QA_PROFILE, startupProfile(qaUniverse = true))
     }
 

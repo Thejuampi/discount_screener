@@ -17,8 +17,15 @@ import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.regime.MarketContextUnavailableReason
+import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeScoreStatus
+
+enum class MarketReadStatus {
+    Pending,
+    Ready,
+    Unavailable,
+}
 
 enum class DashboardStartupPhase {
     Restoring,
@@ -216,6 +223,8 @@ data class DashboardSnapshot(
     val estimatesNotice: DashboardNotice? = null,
     val screenData: ProjectedDashboardData = ProjectedDashboardData.empty(),
     val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
+    val marketRegime: MarketRegime? = null,
+    val marketReadStatus: MarketReadStatus = MarketReadStatus.Pending,
 )
 
 data class TickerSearchSuggestion(

@@ -121,8 +121,8 @@ class DiscountScreenerAppContainer(context: Context) {
  * Cold-start universe for an installed build.
  *
  * Only a QA install (`make android-run-qa`, which sets `BuildConfig.QA_UNIVERSE`) boots the
- * ≤20-symbol `qa` universe. A regular `make android-run` install and every release build boot the
- * product default (`sp500`), because the regular app is what a user actually runs.
+ * ≤20-symbol `qa` universe. The on-device database stays. A regular `make android-run` install
+ * and every release build boot the product default (`sp500`).
  */
 internal fun startupProfile(qaUniverse: Boolean): String =
     if (qaUniverse) {

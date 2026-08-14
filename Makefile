@@ -54,7 +54,7 @@ desktop-smoke:
 android-run:
 	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/android-run.ps1"
 
-# Live / agent QA: cold-starts profile qa (≤20 symbols) and clears app data first.
+# Live / agent QA: boots profile qa (≤20 symbols). Keeps the on-device database.
 android-run-qa:
 	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/android-run.ps1" -Qa
 

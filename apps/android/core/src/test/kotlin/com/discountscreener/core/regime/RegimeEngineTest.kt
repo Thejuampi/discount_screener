@@ -165,16 +165,11 @@ class RegimeEngineTest {
         )
     }
 
-    /**
-     * The prose layer is not ported, and the reading says so by leaving it empty rather than
-     * filling it with something that reads like a conclusion. If an Android surface ever renders
-     * it, `interpret.rs` is the file to port — this test is what will notice.
-     */
     @Test
-    fun no_pillar_claims_an_interpretation_the_port_does_not_have() {
+    fun every_pillar_carries_the_english_interpretation() {
         assertEquals(
-            emptyList(),
-            computeMarketRegime(fullBundle(), fullUniverse()).pillars.filter { it.interpretation.isNotEmpty() },
+            6,
+            computeMarketRegime(fullBundle(), fullUniverse()).pillars.count { it.interpretation.isNotEmpty() },
         )
     }
 

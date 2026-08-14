@@ -310,7 +310,7 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 | --- | --- |
 | **Profile** | **`qa`** — pin in `apps/android/app/src/main/assets/profiles/qa.txt` (hard cap 20) |
 | **When** | Any live UI QA, agent “check the app,” post-change smoke on Android |
-| **Launch** | `make android-run-qa` — installs with the QA flag, clears app data, bootstraps **`qa`**. Plain `make android-run` is the regular app (`sp500`) and is **not** a QA launcher |
+| **Launch** | `make android-run-qa` — installs with the QA flag and boots **`qa`**. **Never** `pm clear` / wipe app data (that deletes the on-device SQLite). Plain `make android-run` is the regular app (`sp500`) and is **not** a QA launcher |
 | **Unless** | User **explicitly** orders another profile (`sp500`, `dow`, …). Silence → **`qa`** |
 | **Forbidden** | Cold-start full `sp500` / 500+ Yahoo thrash “to be thorough” |
 
@@ -491,7 +491,8 @@ When **any** of these change: classifier, CapEx→FCF, WACC/CoE, residual income
 | Only automated tests | Live still shows stale cache or wrong label | Live checklist after model changes |
 | Append chart JSON to `raw_capture` on every refresh | Phone DB grew to 2.2 GB; warm start decoded every latest 10Y blob | Write candles only to `pricing_candle`; copy latest leftover JSON into that table before delete; do not decode charts at warm start |
 | Cold-start full SP500 for every agent QA | Thousands of Yahoo requests; rate limits; wasted time | **QA = profile `qa` only** → Windows `npm run tauri:dev:qa`; Android `make android-run-qa`; reuse one process; one-shot checklist loads |
-| Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | `make android-run-qa` boots **`qa`** and `pm clear`s first; never switch UI to sp500 for agent QA |
+| Android QA on default `sp500` | 500+ tickers; same thrash as Windows full universe | `make android-run-qa` boots **`qa`**; never switch UI to sp500 for agent QA |
+| `pm clear` / wipe app data for QA | Deletes the on-device SQLite (multi-GB warm store) | Install with the QA flag only. Membership switches to `qa`. The database stays |
 | `tauri dev -- -- --profile qa` | Cargo steals `--profile` → compile error / full universe fallback | `npm run tauri:dev:qa` or `DS_UNIVERSE_PROFILE=qa`; binary `--universe qa` |
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
 | One acquisition zeroes the whole growth window | Historical M&A made BSX/ADSK/AVGO-class estimates ignore later clean growth | Contaminate only Y−1→Y; require two clean recent transitions and a clean latest transition, otherwise zero growth explicitly |

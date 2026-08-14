@@ -25,6 +25,7 @@ import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.MarketReadStatus
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.data.market.MarketDataRepository
@@ -271,6 +272,7 @@ class DefaultDashboardRepository(
     private val remoteSearchCache = linkedMapOf<String, RemoteSearchCacheEntry>()
 
     private var marketRegime: MarketRegime? = null
+    private var marketReadAttempted = false
     private var regimeDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
     private var regimeScoringEnabled = ScoringPreferences.DEFAULT_REGIME_ENABLED
 
@@ -344,14 +346,27 @@ class DefaultDashboardRepository(
      * then every row reports it `Unavailable`, which is the truth.
      */
     private fun startMarketReadForCurrentProfile() {
-        val market = marketDataRepository ?: return
+        val market = marketDataRepository
+        if (market == null) {
+            repositoryScope.launch {
+                stateMutex.withLock { marketReadAttempted = true }
+                updates.value = updates.value + 1
+            }
+            return
+        }
         repositoryScope.launch {
             val symbols = stateMutex.withLock { trackedSymbols.toList() }
-            val regime = runCatching { market.refreshIfStale(symbols) }.getOrNull() ?: return@launch
-            val dailySummaries = market.cachedDailySummaries()
+            val regime = runCatching { market.refreshIfStale(symbols) }.getOrNull()
+            val usable = regime != null && RegimeScoringPolicy.fromRegime(regime) != null
+            val dailySummaries = if (usable) market.cachedDailySummaries() else emptyMap()
             stateMutex.withLock {
-                marketRegime = regime
-                regimeDailySummaries = dailySummaries
+                marketReadAttempted = true
+                if (regime != null) {
+                    marketRegime = regime
+                    if (usable) {
+                        regimeDailySummaries = dailySummaries
+                    }
+                }
             }
             updates.value = updates.value + 1
         }
@@ -1329,6 +1344,12 @@ class DefaultDashboardRepository(
                 ChartRange.entries.mapNotNull { range ->
                     replayBackingCache[chartKey(normalizedSelectedSymbol, range)]?.let { range to it }
                 }.toMap()
+            },
+            marketRegime = marketRegime,
+            marketReadStatus = when {
+                marketRegime != null -> MarketReadStatus.Ready
+                marketDataRepository == null || marketReadAttempted -> MarketReadStatus.Unavailable
+                else -> MarketReadStatus.Pending
             },
         )
     }

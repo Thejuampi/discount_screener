@@ -1,18 +1,6 @@
 package com.discountscreener.core.regime
 
-/**
- * Public types for the market regime engine, ported from `regime/types.rs`.
- *
- * Two deliberate departures from the Rust originals:
- *
- *  - **English only.** Rust carries every label, hint, interpretation and thesis twice, `_es` and
- *    `_en`. Android has no i18n layer — no `strings.xml` beyond themes, zero `stringResource`
- *    calls, every label an inline literal — so mirroring the pair would double the surface for a
- *    translation that has nowhere to be selected. The English side is kept.
- *  - **No `regime` compat alias.** Rust keeps it for older clients of the banner payload. Android
- *    has no such clients, and a second name for [MarketRegime.environmentBand] is a way for the
- *    two to disagree.
- */
+/** Public types for the market regime engine. English copy lives in [enrichRegime]. */
 
 const val REGIME_VERSION: Int = 2
 

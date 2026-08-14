@@ -58,6 +58,7 @@ open class MarketDataRepository(
 ) {
     private val mutex = Mutex()
     private var cached: MarketRegime? = null
+    private var lastComputed: MarketRegime? = null
     private var cachedDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
     private var lastFailureEpochSeconds: Long? = null
     private var refreshing = false
@@ -93,8 +94,9 @@ open class MarketDataRepository(
      *    together produce one round of requests rather than two. Rust's `try_begin_refresh`.
      *
      * Only a reading a scoring policy accepts is cached, mirroring `is_usable_regime`. A degraded
-     * reading is not a weaker steer to be kept warm; it is the absence of one, and callers must see
-     * null so the dimension reports itself unavailable instead of quietly scoring against noise.
+     * reading is not a weaker steer to keep warm. The return value can still be that computed
+     * object when the cache is empty, so the Market tab can show Unknown / degraded copy. Scoring
+     * must keep reading [cachedRegime], not this return, when it needs a usable policy.
      */
     open suspend fun refreshIfStale(symbols: List<String>): MarketRegime? {
         val now = nowEpochSeconds()
@@ -105,7 +107,9 @@ open class MarketDataRepository(
             if (go) refreshing = true
             go
         }
-        if (!shouldRefresh) return cachedRegime()
+        if (!shouldRefresh) {
+            return mutex.withLock { cached ?: lastComputed }
+        }
 
         try {
             val fetched = fetchUniverse(symbols)
@@ -116,6 +120,7 @@ open class MarketDataRepository(
             )
             val usable = RegimeScoringPolicy.fromRegime(regime) != null
             mutex.withLock {
+                lastComputed = regime
                 if (usable) {
                     cached = regime
                     cachedDailySummaries = fetched.views.mapNotNull { view ->
@@ -134,7 +139,7 @@ open class MarketDataRepository(
         } finally {
             mutex.withLock { refreshing = false }
         }
-        return cachedRegime()
+        return mutex.withLock { cached ?: lastComputed }
     }
 
     private suspend fun fetchBundle(now: Long): MarketDataBundle {
