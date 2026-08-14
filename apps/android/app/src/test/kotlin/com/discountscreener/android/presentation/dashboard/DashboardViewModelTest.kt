@@ -533,6 +533,31 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun opening_an_ad_hoc_ticker_uses_the_fetched_score_row() = runTest(dispatcher) {
+        var fetched = OpportunityListRow(
+            symbol = "MELI",
+            marketPriceCents = 10_000L,
+            intrinsicValueCents = 10_100L,
+            gapBps = 99,
+            confidence = ConfidenceBand.Low,
+            isWatched = false,
+            compositeScore = 12,
+            coverageCount = 2,
+        )
+        var repository = RecordingDashboardRepository(
+            detailData = detail("MELI"),
+            tickerSuggestions = listOf(tickerSuggestion("MELI", emptyList(), inCurrentProfile = false)),
+            fetchedScoreRows = mapOf("MELI" to fetched),
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTickerSuggestion("MELI"))
+        advanceUntilIdle()
+
+        assertEquals("MELI", viewModel.state.value.detailScoreRow?.symbol)
+    }
+
+    @Test
     fun select_ticker_suggestion_opens_ad_hoc_detail_with_single_symbol_route() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository(
             detailData = detail("SHOP"),
@@ -950,6 +975,7 @@ class DashboardViewModelTest {
         private var detailNotice: DashboardNotice? = null,
         private val tickerSuggestions: List<TickerSearchSuggestion> = emptyList(),
         private val refreshAllError: Throwable? = null,
+        private val fetchedScoreRows: Map<String, OpportunityListRow> = emptyMap(),
     ) : DashboardRepository {
         var saveSnapshotCallCount = 0
         var currentSnapshotCallCount = 0
@@ -1021,7 +1047,9 @@ class DashboardViewModelTest {
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
             lastOpenedSymbol = symbol
-            return emptySnapshot(opportunityScoringModel)
+            return emptySnapshot(opportunityScoringModel).copy(
+                selectedScoreRow = fetchedScoreRows[symbol],
+            )
         }
 
         override suspend fun searchTickers(

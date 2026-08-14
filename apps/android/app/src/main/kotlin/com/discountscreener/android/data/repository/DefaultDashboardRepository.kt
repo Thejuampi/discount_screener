@@ -362,6 +362,7 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
+        reclaimPersistenceSpaceIfNeeded()
         startRefreshForCurrentProfile(
             stateMutex.withLock { trackedSymbols.toList() },
             opportunityScoringModel,
@@ -604,7 +605,7 @@ class DefaultDashboardRepository(
             activeProfileGeneration
         }
         cancelActiveProfileWork()
-        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset())
+        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset(symbols))
         emitUpdate()
         val request = ProfileSwitchRequest(
             generation = generation,
@@ -663,12 +664,13 @@ class DefaultDashboardRepository(
         value.lowercase().filter { it.isLetterOrDigit() }
 
     private suspend fun loadUniverse(profile: String) {
-        adoptProfileFromStore(profile, resolveProfileSymbols(profile), loadWarmStartOrReset())
+        var symbols = resolveProfileSymbols(profile)
+        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset(symbols))
         emitUpdate()
     }
 
-    private suspend fun loadWarmStartOrReset(): PersistenceBootstrap =
-        runCatching { stateStore.loadWarmStart() }
+    private suspend fun loadWarmStartOrReset(symbols: List<String>): PersistenceBootstrap =
+        runCatching { stateStore.loadWarmStart(symbols) }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
                 stateMutex.withLock {
@@ -1281,6 +1283,11 @@ class DefaultDashboardRepository(
             opportunityScoringModel = opportunityScoringModel,
             issues = issueRecords,
             selectedDetail = selectedDetail,
+            selectedScoreRow = selectedScoreRowLocked(
+                symbol = normalizedSelectedSymbol,
+                scoringModel = opportunityScoringModel,
+                rankedRows = opportunityRows,
+            ),
             selectedCharts = selectedCharts,
             selectedHistory = screenData.selectedDetail?.revisions ?: revisions[normalizedSelectedSymbol].orEmpty(),
             selectedAlerts = screenData.selectedDetail?.alerts ?: engine.alerts().filter { it.symbol == normalizedSelectedSymbol }.takeLast(6),
@@ -1879,6 +1886,75 @@ class DefaultDashboardRepository(
         )
     }
 
+    private fun selectedScoreRowLocked(
+        symbol: String?,
+        scoringModel: OpportunityScoringModel,
+        rankedRows: List<OpportunityListRow>,
+    ): OpportunityListRow? {
+        if (symbol.isNullOrBlank()) {
+            return null
+        }
+        rankedRows.firstOrNull { row -> row.symbol == symbol }?.let { return it }
+        var scored = scoreSymbolLocked(symbol, scoringModel) ?: return null
+        return buildOpportunityRowLocked(
+            row = scored,
+            currentIndex = rankedRows.size,
+            scoringModel = scoringModel,
+            issueMessage = activeIssueMessagesBySymbolLocked()[symbol],
+        )
+    }
+
+    private fun scoreSymbolLocked(
+        symbol: String,
+        scoringModel: OpportunityScoringModel,
+    ): OpportunityRow? {
+        var detail = engine.detail(symbol) ?: return null
+        var score = OpportunityEngine.scoreWithModel(
+            detail = detail,
+            summary = preferredChartSummaryLocked(symbol),
+            analysis = dcfCache[symbol],
+            model = scoringModel,
+            regimeSummary = regimeDailySummaries[symbol],
+            marketRegime = marketRegime,
+            regimeScoringEnabled = regimeScoringEnabled,
+            sectorBenchmarks = detail.fundamentals?.sectorName
+                ?.let { sectorName -> sectorBenchmarksLocked(scoringModel)[sectorName] },
+            timeseries = timeseriesCache[symbol],
+        )
+        return OpportunityRow(
+            symbol = detail.symbol,
+            marketPriceCents = detail.marketPriceCents,
+            intrinsicValueCents = detail.intrinsicValueCents,
+            gapBps = detail.gapBps,
+            upsideBps = detail.upsideBps,
+            confidence = detail.confidence,
+            isWatched = detail.isWatched,
+            fundamentalsScore = score.fundamentalsScore,
+            technicalScore = score.technicalScore,
+            forecastScore = score.forecastScore,
+            regimeScore = score.regimeScore,
+            compositeScore = score.compositeScore,
+            compositeScoreBase = score.compositeScoreBase,
+            coverageCount = score.coverageCount,
+            fundamentalsSignals = score.fundamentalsSignals,
+            technicalSignals = score.technicalSignals,
+            forecastSignals = score.forecastSignals,
+            fundamentalsFactors = score.fundamentalsFactors,
+            technicalFactors = score.technicalFactors,
+            forecastFactors = score.forecastFactors,
+            regimeStatus = score.regimeStatus,
+            regimeCauses = score.regimeCauses,
+            regimeSignals = score.regimeSignals,
+            regimeUnavailableReason = score.regimeUnavailableReason,
+            companyName = detail.companyName,
+        )
+    }
+
+    private fun preferredChartSummaryLocked(symbol: String): ChartRangeSummary? {
+        var summaries = chartSummaries[symbol] ?: return null
+        return summaries[ChartRange.Year] ?: summaries.values.maxByOrNull { it.candleCount }
+    }
+
     private fun buildOpportunityRowLocked(
         row: OpportunityRow,
         currentIndex: Int,
@@ -2316,6 +2392,13 @@ class DefaultDashboardRepository(
 
         chartCache.clear()
         chartSummaries.clear()
+        hydratedStates.forEach { state ->
+            if (state.chartSummaries.isNotEmpty()) {
+                chartSummaries.getOrPut(state.symbol) { linkedMapOf() }.putAll(
+                    state.chartSummaries.associateBy { it.range },
+                )
+            }
+        }
         bootstrap.chartCache
             .filter { it.symbol in trackedSymbolSet }
             .forEach { chart ->
@@ -3397,6 +3480,16 @@ class DefaultDashboardRepository(
     }
 
     override suspend fun loadSystemStats(): SystemStats = stateStore.getSystemStats()
+
+    private suspend fun reclaimPersistenceSpaceIfNeeded() {
+        val deleted = runCatching { stateStore.reclaimRawCaptureSpace() }.getOrDefault(0)
+        if (deleted > 0) {
+            stateMutex.withLock {
+                statusMessage = "Compacted $deleted leftover Yahoo capture row(s)"
+            }
+            emitUpdate()
+        }
+    }
 
     override suspend fun pruneOldRevisions(retentionDays: Int): Int =
         stateStore.pruneOldRevisions(retentionDays)

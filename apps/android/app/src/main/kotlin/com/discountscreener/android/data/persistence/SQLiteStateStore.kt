@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import java.io.File
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
@@ -202,7 +203,12 @@ open class SQLiteStateStore(
      * virtual clock over the writes; production keeps the same `Dispatchers.IO` it always had.
      */
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : SQLiteOpenHelper(appContext, DEFAULT_DB_FILE_NAME, null, SQLITE_SCHEMA_VERSION), DailyCandleSink, DailyCandleSource {
+    /**
+     * File name under the app database directory. Production keeps the default.
+     * Benches must pass a different name so they never open the live file.
+     */
+    private val databaseFileName: String = DEFAULT_DB_FILE_NAME,
+) : SQLiteOpenHelper(appContext, databaseFileName, null, SQLITE_SCHEMA_VERSION), DailyCandleSink, DailyCandleSource {
 
     init {
         setWriteAheadLoggingEnabled(true)
@@ -258,14 +264,17 @@ open class SQLiteStateStore(
         throw IllegalStateException("sqlite schema version $oldVersion is newer than supported version $newVersion")
     }
 
-    suspend fun loadWarmStart(): PersistenceBootstrap = withContext(ioDispatcher) {
+    suspend fun loadWarmStart(symbols: Collection<String>? = null): PersistenceBootstrap = withContext(ioDispatcher) {
         val db = readableDatabase
         setMetaValue(db, META_KEY_LAST_STARTUP_AT, nowEpochSeconds().toString())
         PersistenceBootstrap(
             trackedSymbols = loadTrackedSymbols(db),
             watchlist = loadWatchlist(db),
-            symbolStates = loadSymbolLatest(db),
-            chartCache = loadChartCache(db),
+            symbolStates = loadSymbolLatest(db, symbols),
+            // Charts stay on disk until detail asks. Decoding every latest JSON blob is what
+            // made a multi-GB file stall the splash. List scoring uses chart summaries from
+            // the revision payload instead.
+            chartCache = emptyList(),
             issues = loadIssues(db),
             lastPersistedAtEpochSeconds = loadMetaValue(db, META_KEY_LAST_PERSISTED_AT)?.toLongOrNull(),
         )
@@ -339,8 +348,10 @@ open class SQLiteStateStore(
     }
 
     private fun databaseFileSizeBytes(): Long {
-        val dbFile = appContext.getDatabasePath(DEFAULT_DB_FILE_NAME)
-        return if (dbFile.exists()) dbFile.length() else 0L
+        val dbFile = appContext.getDatabasePath(databaseFileName)
+        return listOf(dbFile, File(dbFile.path + "-wal"), File(dbFile.path + "-shm"))
+            .filter { it.exists() }
+            .sumOf { it.length() }
     }
 
     private fun rowCount(db: SQLiteDatabase, tableName: String): Long =
@@ -503,9 +514,41 @@ open class SQLiteStateStore(
             }
 
             latestTimestamp?.let { setMetaValue(db, META_KEY_LAST_PERSISTED_AT, it.toString()) }
+            dropUnreferencedRawCaptures(
+                db,
+                (rawCaptures.map { it.symbol } + revisions.map { it.symbol }).toSet(),
+            )
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
+        }
+    }
+
+    /**
+     * Drop Yahoo JSON that raw_latest no longer points at, then shrink the file if anything
+     * was removed. Call this after the list is on screen — VACUUM of a bloated file can take
+     * minutes and must not sit on the splash.
+     */
+    suspend fun reclaimRawCaptureSpace(): Int = withContext(ioDispatcher) {
+        val db = writableDatabase
+        val deleted = db.delete(
+            "raw_capture",
+            "id NOT IN (SELECT capture_id FROM raw_latest)",
+            emptyArray(),
+        )
+        if (deleted > 0) {
+            db.execSQL("VACUUM")
+        }
+        deleted
+    }
+
+    private fun dropUnreferencedRawCaptures(db: SQLiteDatabase, symbols: Set<String>) {
+        symbols.forEach { symbol ->
+            db.delete(
+                "raw_capture",
+                "symbol = ? AND id NOT IN (SELECT capture_id FROM raw_latest WHERE symbol = ?)",
+                arrayOf(symbol, symbol),
+            )
         }
     }
 
@@ -792,14 +835,26 @@ open class SQLiteStateStore(
             }
         }
 
-    private fun loadSymbolLatest(db: SQLiteDatabase): List<PersistedSymbolState> =
-        db.rawQuery(
+    private fun loadSymbolLatest(
+        db: SQLiteDatabase,
+        symbols: Collection<String>? = null,
+    ): List<PersistedSymbolState> {
+        if (symbols != null && symbols.isEmpty()) {
+            return emptyList()
+        }
+        val inClause = if (symbols == null) {
+            ""
+        } else {
+            "WHERE symbol IN (${symbols.joinToString(",") { "?" }})"
+        }
+        return db.rawQuery(
             """
                 SELECT symbol, snapshot_json, external_json, fundamentals_json, last_sequence, update_count, price_history_json, payload_json
                 FROM symbol_latest
+                $inClause
                 ORDER BY symbol ASC
             """.trimIndent(),
-            emptyArray(),
+            symbols?.toTypedArray(),
         ).useRows { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
@@ -815,11 +870,13 @@ open class SQLiteStateStore(
                             updateCount = cursor.getInt(5),
                             priceHistory = cursor.getNullableString(6)?.let { json.decodeFromString(it) } ?: emptyList(),
                             dcfAnalysis = payload?.dcfAnalysis,
+                            chartSummaries = payload?.chartSummaries.orEmpty(),
                         ),
                     )
                 }
             }
         }
+    }
 
     private fun loadChartCache(db: SQLiteDatabase): List<PersistedChartRecord> =
         loadLatestRawChartCache(db)

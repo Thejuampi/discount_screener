@@ -198,6 +198,11 @@ data class DashboardSnapshot(
     val opportunityScoringModel: OpportunityScoringModel,
     val issues: List<IssueRecord>,
     val selectedDetail: SymbolDetail?,
+    /**
+     * Score for the open ticker. The ranked list is a cache of qualified names.
+     * An ad-hoc search ticker is scored here even when it is not in that list.
+     */
+    val selectedScoreRow: OpportunityListRow? = null,
     val selectedCharts: Map<ChartRange, List<HistoricalCandle>>,
     val selectedHistory: List<SymbolRevision>,
     val selectedAlerts: List<AlertEvent>,
