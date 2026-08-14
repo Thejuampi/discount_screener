@@ -12,6 +12,8 @@ User-visible functionality should be kept in 1:1 parity across both clients by d
 
 ## Exceptions
 
+- **Android Plans tab (Dip hunter, v1)** — Android-only. Windows keeps Dashboard 2.0 Act / Scale / Wait. Spec: [`../_bmad-output/implementation-artifacts/dip-board-spec-v1.md`](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md).
+
 One-platform changes are allowed only when the request explicitly says so or when the platform cannot support the behavior.
 
 - Call out the exception clearly in the task or pull request.

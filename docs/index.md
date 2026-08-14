@@ -13,7 +13,8 @@ This index is the starting point for humans and AI agents trying to understand t
 
 - [Aggressive V4 — what has been measured](aggressive-v4-evidence.md) - bucket overlap, the agreement constant and its population, and the forward-return retrospective including its null result.
 - [Compose test hang, 2026-08-11](diagnostics/2026-08-11-compose-test-hang/README.md) - open, cause unknown: the Android suite spun 27 minutes in `waitForIdle`. Thread dumps kept, escalation bar set at one recurrence.
-- [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android.
+- [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android. Android Plans Dip hunter is an explicit exception.
+- [Dip board spec v1](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md) - Android Plans filter (F, ATR dip, RSI, MACD, Street 20%). Does not change V2/V3/V4 scores.
 - [Desktop Quick Start](../apps/desktop/docs/QUICK_START.md) - first-run desktop workflow.
 - [Desktop Screen Guide](../apps/desktop/docs/SCREENS.md) - terminal UI layout and behavior.
 - [Desktop User Manual](../apps/desktop/docs/USER_MANUAL.md) - keyboard controls and operational behavior.

@@ -49,6 +49,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 
 - Android follows strict functional-core / imperative-shell boundaries: `core/` is pure Kotlin engine/model logic; `app/` contains Android `app`, `domain`, `data`, `presentation`, and `ui` packages.
 - Compose screens are passive Views. They render state and emit actions only; no network calls, SQLite calls, persistence decisions, or business-rule interpretation in Compose.
+- Android Plans is a Dip hunter (`:core` `DipSignalEngine`). Gates: active-model F, signed ATR dip vs 20-day high, RSI 25–45 easing, MACD hist ≤ 0 turning or imminent, Street 12-month target ≥ 20%. Valuation is a tag. Death cross stays in. Do not change V2/V3/V4 scores. Windows Act/Wait is a separate surface. Spec: `_bmad-output/implementation-artifacts/dip-board-spec-v1.md`.
 - `DashboardViewModel` and other presentation classes act as Presenters. They map repository snapshots to UI state and route actions; they do not invent domain rules.
 - Android `domain/` owns repository contracts and use cases. `data/` owns Yahoo client, profile loading, SQLite persistence, and repository implementation.
 - `DefaultDashboardRepository` is the Android orchestration boundary for local state, Yahoo refresh, persistence, and `DashboardSnapshot` production. Keep it thin by moving pure interpretation to `core`.

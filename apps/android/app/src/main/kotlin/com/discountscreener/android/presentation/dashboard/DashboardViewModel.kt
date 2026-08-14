@@ -10,6 +10,7 @@ import com.discountscreener.android.domain.model.DashboardNoticeSeverity
 import com.discountscreener.android.domain.model.DashboardSnapshot
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.MarketReadStatus
+import com.discountscreener.core.plan.PlanBoard
 
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoveryJobKind
@@ -80,6 +81,7 @@ import kotlinx.coroutines.launch
 enum class DashboardTab {
     Opportunities,
     Market,
+    Plans,
     Tracked,
     Watch,
     Discovery,
@@ -230,6 +232,7 @@ data class DashboardUiState(
      */
     val selectedScoreRow: OpportunityListRow? = null,
     val marketRegime: MarketRegimeUi = presentMarketRegime(null, MarketReadStatus.Pending),
+    val planBoard: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
 ) {
     /**
      * The open ticker's score: the ranked-list row when present, otherwise the fetched
@@ -660,7 +663,9 @@ class DashboardViewModel(
     private fun openDetail(symbol: String) {
         val state = _state.value
         val sourceTab = when (state.currentTab) {
-            DashboardTab.Opportunities -> DetailSourceTab.Opportunities
+            DashboardTab.Opportunities,
+            DashboardTab.Plans,
+            -> DetailSourceTab.Opportunities
             else -> DetailSourceTab.Tracked
         }
         val sourceSymbols = sourceSymbolsForTab(state, sourceTab).takeIf { symbol in it } ?: listOf(symbol)
@@ -1151,6 +1156,7 @@ class DashboardViewModel(
             indexEstimates = snapshot.screenData.estimates.report,
             estimatesNotice = snapshot.estimatesNotice ?: currentState.estimatesNotice,
             marketRegime = presentMarketRegime(snapshot.marketRegime, snapshot.marketReadStatus),
+            planBoard = presentPlanBoard(snapshot.planBoard),
         )
     }
 

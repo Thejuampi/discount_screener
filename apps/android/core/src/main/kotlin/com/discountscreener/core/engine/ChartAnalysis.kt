@@ -535,7 +535,7 @@ object ChartAnalysis {
         ProjectedTechnicalSignalKind.RsiInflection -> "RSI inflect"
     }
 
-    private fun rsiAnalysis(candles: List<HistoricalCandle>): ProjectedRsiChartAnalysis? {
+    fun rsiAnalysis(candles: List<HistoricalCandle>): ProjectedRsiChartAnalysis? {
         if (candles.size < 2) return null
         val closes = candles.map { it.closeCents.toDouble() }
         val volumes = candles.map { it.volume.toDouble().coerceAtLeast(0.0) }
@@ -688,21 +688,25 @@ object ChartAnalysis {
         return output
     }
 
-    private data class MacdValues(
+    data class MacdSeries(
         val macd: List<Double>,
         val signal: List<Double>,
         val histogram: List<Double>,
     )
 
-    private fun macd(values: List<Double>): MacdValues {
-        if (values.isEmpty()) return MacdValues(emptyList(), emptyList(), emptyList())
+    fun macdSeries(values: List<Double>): MacdSeries {
+        if (values.isEmpty()) return MacdSeries(emptyList(), emptyList(), emptyList())
         val fast = ema(values, 12)
         val slow = ema(values, 26)
         val macdLine = fast.zip(slow).map { (fastValue, slowValue) -> fastValue - slowValue }
         val signalLine = ema(macdLine, 9)
         val histogram = macdLine.zip(signalLine).map { (macdValue, signalValue) -> macdValue - signalValue }
-        return MacdValues(macdLine, signalLine, histogram)
+        return MacdSeries(macdLine, signalLine, histogram)
     }
+
+    fun wilderRsiSeries(values: List<Double>, period: Int = 14): List<Double> = rsiWilder(values, period)
+
+    private fun macd(values: List<Double>): MacdSeries = macdSeries(values)
 
     private fun Double.roundToLong(): Long = round(this).toLong()
     private fun Float.roundToLong(): Long = round(this).toLong()
