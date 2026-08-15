@@ -89,6 +89,14 @@ class TickerSearchEngineTest {
     }
 
     @Test
+    fun mercado_is_a_word_start_of_mercado_libre() {
+        assertEquals(
+            TickerSearchRank.NAME_WORD_START,
+            TickerSearchEngine.companyNameMatchRank("mercado", "MercadoLibre, Inc."),
+        )
+    }
+
+    @Test
     fun company_name_exact_match_is_high_confidence() {
         val result = TickerSearchResult(
             symbol = "MELI",
@@ -105,6 +113,96 @@ class TickerSearchEngineTest {
         assertTrue(TickerSearchEngine.isTickerToken("BRK.B"))
         assertTrue(TickerSearchEngine.isTickerToken("BRK-B"))
         assertFalse(TickerSearchEngine.isTickerToken("mercado libre"))
+    }
+
+    @Test
+    fun a_seven_letter_company_word_is_not_an_exact_typed_ticker() {
+        assertEquals(
+            TickerSearchRank.TYPED_FALLBACK,
+            TickerSearchEngine.typedQueryFallbackRank("mercado"),
+        )
+    }
+
+    @Test
+    fun a_short_typed_ticker_keeps_exact_remote_rank() {
+        assertEquals(
+            TickerSearchRank.EXACT_TICKER_REMOTE,
+            TickerSearchEngine.typedQueryFallbackRank("meli"),
+        )
+    }
+
+    @Test
+    fun a_multi_letter_suffix_is_a_foreign_listing() {
+        assertTrue(TickerSearchEngine.hasForeignExchangeSuffix("MELI.BA"))
+    }
+
+    @Test
+    fun a_nasdaq_share_class_is_not_a_foreign_listing() {
+        assertTrue(!TickerSearchEngine.hasForeignExchangeSuffix("BRK.B"))
+    }
+
+    @Test
+    fun unsuffixed_meli_is_the_us_listing() {
+        assertTrue(!TickerSearchEngine.hasForeignExchangeSuffix("MELI"))
+    }
+
+    @Test
+    fun remote_name_search_refuses_the_argentina_line_when_the_adr_is_present() {
+        assertTrue(
+            !TickerSearchEngine.admitsRemoteSearchHit(
+                symbol = "MELI.BA",
+                query = "mercado",
+                siblingSymbols = listOf("MELI", "MELI.BA", "MERC.CN"),
+            ),
+        )
+    }
+
+    @Test
+    fun remote_name_search_keeps_other_mercado_names() {
+        assertTrue(
+            TickerSearchEngine.admitsRemoteSearchHit(
+                symbol = "MERC.CN",
+                query = "mercado",
+                siblingSymbols = listOf("MELI", "MELI.BA", "MERC.CN"),
+            ),
+        )
+    }
+
+    @Test
+    fun an_exact_typed_foreign_symbol_is_still_admitted() {
+        assertTrue(TickerSearchEngine.admitsRemoteSearchHit("MELI.BA", "MELI.BA"))
+    }
+
+    @Test
+    fun remote_name_search_keeps_the_nasdaq_meli_line() {
+        assertTrue(TickerSearchEngine.admitsRemoteSearchHit("MELI", "mercado"))
+    }
+
+    @Test
+    fun nasdaq_meli_ranks_above_the_argentina_line() {
+        val ranked = TickerSearchEngine.mergeAndRank(
+            candidates = listOf(
+                remoteCandidate("MELI.BA", "MercadoLibre, Inc.", TickerSearchRank.REMOTE_FUZZY),
+                remoteCandidate("MELI", "MercadoLibre, Inc.", TickerSearchRank.REMOTE_FUZZY),
+            ),
+            limit = 8,
+        )
+        assertEquals("MELI", ranked.first().symbol)
+    }
+
+    @Test
+    fun typed_mercado_fallback_loses_to_meli_name_hit() {
+        val ranked = TickerSearchEngine.mergeAndRank(
+            candidates = listOf(
+                remoteCandidate("MELI", "MercadoLibre, Inc.", TickerSearchRank.REMOTE_FUZZY),
+                TickerSearchCandidate(
+                    symbol = "MERCADO",
+                    matchRank = TickerSearchEngine.typedQueryFallbackRank("mercado")!!,
+                ),
+            ),
+            limit = 8,
+        )
+        assertEquals("MELI", ranked.first().symbol)
     }
 
     @Test

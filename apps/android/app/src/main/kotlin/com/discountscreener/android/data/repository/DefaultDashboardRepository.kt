@@ -32,7 +32,9 @@ import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.LeftoverBoardAssembler
 import com.discountscreener.android.domain.model.PlanBoardAssembler
+import com.discountscreener.core.plan.DipRowInput
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
 import com.discountscreener.android.domain.model.ProfileTransitionFeedback
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -549,25 +551,24 @@ class DefaultDashboardRepository(
             )
         }
 
-        var rankedResults = TickerSearchEngine.mergeAndRank(candidates, limit)
+        var searchCandidates = candidates.toMutableList()
+        var rankedResults = TickerSearchEngine.mergeAndRank(searchCandidates, limit)
         if (TickerSearchEngine.shouldTriggerRemoteSearch(query, rankedResults)) {
-            val remoteCandidates = remoteSearchCandidates(query, limit)
-            rankedResults = TickerSearchEngine.mergeAndRank(candidates + remoteCandidates, limit)
+            searchCandidates += remoteSearchCandidates(query, limit)
+            rankedResults = TickerSearchEngine.mergeAndRank(searchCandidates, limit)
         }
-        if (TickerSearchEngine.isTickerToken(trimmedQuery)) {
+        TickerSearchEngine.typedQueryFallbackRank(trimmedQuery)?.let { fallbackRank ->
             var typedSymbol = trimmedQuery.uppercase()
             if (rankedResults.none { result -> result.symbol.equals(typedSymbol, ignoreCase = true) }) {
                 var profiles = profileCatalog.profileMembership(typedSymbol)
-                rankedResults = TickerSearchEngine.mergeAndRank(
-                    candidates + TickerSearchCandidate(
-                        symbol = typedSymbol,
-                        companyName = localCompanyNameFor(typedSymbol),
-                        profiles = profiles,
-                        inCurrentProfile = normalizedCurrentProfile in profiles,
-                        matchRank = TickerSearchRank.EXACT_TICKER_REMOTE,
-                    ),
-                    limit,
+                searchCandidates += TickerSearchCandidate(
+                    symbol = typedSymbol,
+                    companyName = localCompanyNameFor(typedSymbol),
+                    profiles = profiles,
+                    inCurrentProfile = normalizedCurrentProfile in profiles,
+                    matchRank = fallbackRank,
                 )
+                rankedResults = TickerSearchEngine.mergeAndRank(searchCandidates, limit)
             }
         }
 
@@ -1357,9 +1358,62 @@ class DefaultDashboardRepository(
                 yearCandlesBySymbol = opportunityRows.associate { row ->
                     row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
                 },
+                fiveYearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
+                },
                 dcfBySymbol = dcfCache.toMap(),
             ),
+            planBoardProfile = PlanBoardAssembler.assemble(
+                inputs = profileMemberInputsLocked(
+                    opportunityRows = opportunityRows,
+                    scoringModel = opportunityScoringModel,
+                    fillMissingFundamentals = true,
+                ),
+                universeName = currentProfile,
+            ),
+            leftoverBoard = LeftoverBoardAssembler.assemble(
+                inputs = leftoverInputsLocked(opportunityRows),
+                universeName = currentProfile,
+            ),
         )
+    }
+
+    private fun leftoverInputsLocked(opportunityRows: List<OpportunityListRow>): List<DipRowInput> {
+        return profileMemberInputsLocked(
+            opportunityRows = opportunityRows,
+            scoringModel = null,
+            fillMissingFundamentals = false,
+        )
+    }
+
+    private fun profileMemberInputsLocked(
+        opportunityRows: List<OpportunityListRow>,
+        scoringModel: OpportunityScoringModel?,
+        fillMissingFundamentals: Boolean,
+    ): List<DipRowInput> {
+        var scoredBySymbol = opportunityRows.associateBy { row -> row.symbol }
+        return trackedSymbols.map { symbol ->
+            var detail = engine.detail(symbol)
+            var scored = scoredBySymbol[symbol]
+            var fundamentalsScore = scored?.fundamentalsScore
+            if (fundamentalsScore == null && fillMissingFundamentals && scoringModel != null) {
+                fundamentalsScore = scoreSymbolLocked(symbol, scoringModel)?.fundamentalsScore
+            }
+            DipRowInput(
+                symbol = symbol,
+                companyName = resolvedCompanyNameLocked(symbol, detail) ?: scored?.companyName,
+                fundamentalsScore = fundamentalsScore,
+                marketPriceCents = detail?.marketPriceCents ?: scored?.marketPriceCents ?: 0L,
+                streetFairValueCents = preferredAnalystTargetFairValueCents(detail)
+                    ?: scored?.intrinsicValueCents
+                    ?: 0L,
+                analystCoverageCount = preferredAnalystCoverageCount(detail) ?: scored?.analystCoverageCount,
+                technicalSignals = scored?.technicalSignals.orEmpty(),
+                candles = chartCache[chartKey(symbol, ChartRange.Year)].orEmpty(),
+                horizonCandles = chartCache[chartKey(symbol, ChartRange.FiveYears)].orEmpty(),
+                dcf = dcfCache[symbol],
+            )
+        }
     }
 
     private fun estimatesReportLocked(): IndexEstimatesReport {
@@ -2734,15 +2788,20 @@ class DefaultDashboardRepository(
             yahooClient.searchSymbols(query, limit)
         }.getOrElse { emptyList() }
 
-        val candidates = remoteQuotes.map { quote ->
-            TickerSearchCandidate(
-                symbol = quote.symbol,
-                companyName = quote.companyName,
-                exchange = quote.exchange,
-                matchRank = TickerSearchEngine.remoteMatchRank(quote.symbol, query),
-                isRemote = true,
-            )
-        }
+        var remoteSymbols = remoteQuotes.map { quote -> quote.symbol }
+        val candidates = remoteQuotes
+            .filter { quote ->
+                TickerSearchEngine.admitsRemoteSearchHit(quote.symbol, query, remoteSymbols)
+            }
+            .map { quote ->
+                TickerSearchCandidate(
+                    symbol = quote.symbol,
+                    companyName = quote.companyName,
+                    exchange = quote.exchange,
+                    matchRank = TickerSearchEngine.remoteMatchRank(quote.symbol, query),
+                    isRemote = true,
+                )
+            }
 
         stateMutex.withLock {
             remoteSearchCache[cacheKey] = RemoteSearchCacheEntry(

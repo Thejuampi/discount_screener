@@ -17,6 +17,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,14 +35,20 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.PlanBoardUi
 import com.discountscreener.android.presentation.dashboard.PlanCardUi
+import com.discountscreener.android.presentation.dashboard.PlanDipUniverse
+import com.discountscreener.android.presentation.dashboard.PlanHunt
 import com.discountscreener.core.plan.DipLane
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PlansScreen(
-    board: PlanBoardUi,
+    hunt: PlanHunt,
+    dipUniverse: PlanDipUniverse,
+    dipBoard: PlanBoardUi,
+    leftoverBoard: PlanBoardUi,
     onAction: (DashboardAction) -> Unit,
 ) {
+    var board = if (hunt == PlanHunt.Dip) dipBoard else leftoverBoard
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -47,6 +56,18 @@ fun PlansScreen(
             .padding(horizontal = 4.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        TabRow(
+            selectedTabIndex = hunt.ordinal,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            PlanHunt.entries.forEach { option ->
+                Tab(
+                    selected = hunt == option,
+                    onClick = { onAction(DashboardAction.SelectPlanHunt(option)) },
+                    text = { Text(huntTabLabel(option)) },
+                )
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -56,7 +77,7 @@ fun PlansScreen(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = "DIP HUNTER",
+                text = board.huntLabel,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -66,6 +87,26 @@ fun PlansScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+            if (hunt == PlanHunt.Dip) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Full profile",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Switch(
+                        checked = dipUniverse == PlanDipUniverse.Profile,
+                        onCheckedChange = { on ->
+                            var universe = if (on) PlanDipUniverse.Profile else PlanDipUniverse.Opportunities
+                            onAction(DashboardAction.SelectPlanDipUniverse(universe))
+                        },
+                    )
+                }
+            }
             Text(
                 text = board.universeLine,
                 style = MaterialTheme.typography.bodySmall,
@@ -208,6 +249,11 @@ private fun PlanSpark(values: List<Long>, tone: Color) {
         var lastY = size.height - ((last - min) / span) * size.height
         drawCircle(tone, radius = 3.dp.toPx(), center = Offset(lastX, lastY))
     }
+}
+
+private fun huntTabLabel(hunt: PlanHunt): String = when (hunt) {
+    PlanHunt.Dip -> "Dip"
+    PlanHunt.Leftover -> "Leftover"
 }
 
 private fun laneColor(lane: DipLane): Color = when (lane) {

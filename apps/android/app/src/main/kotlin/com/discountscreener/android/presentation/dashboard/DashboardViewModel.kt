@@ -89,6 +89,16 @@ enum class DashboardTab {
     Estimates,
 }
 
+enum class PlanHunt {
+    Dip,
+    Leftover,
+}
+
+enum class PlanDipUniverse {
+    Opportunities,
+    Profile,
+}
+
 enum class DetailSubtab {
     Snapshot,
     Score,
@@ -130,6 +140,8 @@ sealed interface DashboardAction {
     data object Start : DashboardAction
     data object Refresh : DashboardAction
     data class SelectTab(val tab: DashboardTab) : DashboardAction
+    data class SelectPlanHunt(val hunt: PlanHunt) : DashboardAction
+    data class SelectPlanDipUniverse(val universe: PlanDipUniverse) : DashboardAction
     data class UpdateQuery(val query: String) : DashboardAction
     data class UpdateTickerSearchQuery(val query: String) : DashboardAction
     data class SelectTickerSuggestion(val symbol: String) : DashboardAction
@@ -232,8 +244,14 @@ data class DashboardUiState(
      */
     val selectedScoreRow: OpportunityListRow? = null,
     val marketRegime: MarketRegimeUi = presentMarketRegime(null, MarketReadStatus.Pending),
-    val planBoard: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
+    val planHunt: PlanHunt = PlanHunt.Dip,
+    val planDipUniverse: PlanDipUniverse = PlanDipUniverse.Opportunities,
+    val planBoardOpps: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
+    val planBoardProfile: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
+    val leftoverBoard: PlanBoardUi = presentLeftoverBoard(PlanBoard.EMPTY),
 ) {
+    val planBoard: PlanBoardUi
+        get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
     /**
      * The open ticker's score: the ranked-list row when present, otherwise the fetched
      * selected row. Never show a score that belongs to a different symbol.
@@ -288,6 +306,8 @@ class DashboardViewModel(
             DashboardAction.Start -> start()
             DashboardAction.Refresh -> refresh()
             is DashboardAction.SelectTab -> selectTab(action.tab)
+            is DashboardAction.SelectPlanHunt -> _state.value = _state.value.copy(planHunt = action.hunt)
+            is DashboardAction.SelectPlanDipUniverse -> selectPlanDipUniverse(action.universe)
             is DashboardAction.UpdateQuery -> updateQuery(action.query)
             is DashboardAction.UpdateTickerSearchQuery -> updateTickerSearchQuery(action.query)
             is DashboardAction.SelectTickerSuggestion -> selectTickerSuggestion(action.symbol)
@@ -423,6 +443,10 @@ class DashboardViewModel(
                 ),
             )
         }
+    }
+
+    private fun selectPlanDipUniverse(universe: PlanDipUniverse) {
+        _state.value = _state.value.copy(planDipUniverse = universe)
     }
 
     private fun selectTab(tab: DashboardTab) {
@@ -1156,7 +1180,9 @@ class DashboardViewModel(
             indexEstimates = snapshot.screenData.estimates.report,
             estimatesNotice = snapshot.estimatesNotice ?: currentState.estimatesNotice,
             marketRegime = presentMarketRegime(snapshot.marketRegime, snapshot.marketReadStatus),
-            planBoard = presentPlanBoard(snapshot.planBoard),
+            planBoardOpps = presentPlanBoard(snapshot.planBoard),
+            planBoardProfile = presentPlanBoard(snapshot.planBoardProfile),
+            leftoverBoard = presentLeftoverBoard(snapshot.leftoverBoard),
         )
     }
 

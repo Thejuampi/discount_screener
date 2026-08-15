@@ -13,6 +13,7 @@ object TickerSearchRank {
     const val NAME_WORD_START = 7
     const val NAME_CONTAINS = 8
     const val REMOTE_FUZZY = 9
+    const val TYPED_FALLBACK = 10
 }
 
 data class TickerSearchCandidate(
@@ -95,23 +96,40 @@ object TickerSearchEngine {
     fun isTickerToken(query: String): Boolean =
         query.trim().matches(Regex("^[A-Za-z0-9.\\-]+$"))
 
+    fun looksLikeTicker(query: String): Boolean {
+        val trimmed = query.trim()
+        if (trimmed.isBlank() || !isTickerToken(trimmed)) return false
+        if ('.' in trimmed || '-' in trimmed) return true
+        return trimmed.all { it.isLetterOrDigit() } && trimmed.length <= 6
+    }
+
+    fun typedQueryFallbackRank(query: String): Int? {
+        val trimmed = query.trim()
+        if (trimmed.isBlank() || !isTickerToken(trimmed)) return null
+        return if (looksLikeTicker(trimmed)) {
+            TickerSearchRank.EXACT_TICKER_REMOTE
+        } else {
+            TickerSearchRank.TYPED_FALLBACK
+        }
+    }
+
     fun shouldDirectOpenTickerOnSubmit(query: String, suggestionSymbols: List<String>): Boolean {
         val trimmed = query.trim()
         if (trimmed.isBlank() || !isTickerToken(trimmed)) return false
         if ('.' in trimmed || '-' in trimmed) return true
 
         val upper = trimmed.uppercase(Locale.US)
-        val looksLikeTicker = trimmed.all { it.isLetterOrDigit() } && trimmed.length <= 6
+        var tickerShaped = looksLikeTicker(trimmed)
 
         if (suggestionSymbols.isNotEmpty()) {
             val exactMatches = suggestionSymbols.filter { it.equals(upper, ignoreCase = true) }
             if (suggestionSymbols.size > 1) {
-                return exactMatches.size == 1 && looksLikeTicker
+                return exactMatches.size == 1 && tickerShaped
             }
             return exactMatches.size == 1
         }
 
-        return looksLikeTicker
+        return tickerShaped
     }
 
     fun isHighConfidenceMatch(query: String, result: TickerSearchResult): Boolean {
@@ -128,11 +146,33 @@ object TickerSearchEngine {
     fun normalizeSearchQueryKey(query: String): String =
         query.trim().lowercase(Locale.US)
 
+    fun hasForeignExchangeSuffix(symbol: String): Boolean {
+        var trimmed = symbol.trim().uppercase(Locale.US)
+        var dot = trimmed.lastIndexOf('.')
+        if (dot <= 0 || dot == trimmed.lastIndex) return false
+        var suffix = trimmed.substring(dot + 1)
+        return suffix.length > 1 && suffix.all { it.isLetterOrDigit() }
+    }
+
+    fun admitsRemoteSearchHit(
+        symbol: String,
+        query: String,
+        siblingSymbols: Collection<String> = emptyList(),
+    ): Boolean {
+        if (!hasForeignExchangeSuffix(symbol)) return true
+        if (symbol.equals(query.trim(), ignoreCase = true)) return true
+        var root = symbol.substringBeforeLast('.')
+        return siblingSymbols.none { sibling ->
+            sibling.equals(root, ignoreCase = true) && !hasForeignExchangeSuffix(sibling)
+        }
+    }
+
     private fun normalizeNameQuery(value: String): String =
         value.trim().lowercase(Locale.US).replace(Regex("\\s+"), " ")
 
     private fun candidateComparator(): Comparator<TickerSearchCandidate> =
         compareBy<TickerSearchCandidate> { it.matchRank }
+            .thenBy { if (hasForeignExchangeSuffix(it.symbol)) 1 else 0 }
             .thenBy { if (it.isRemote) 1 else 0 }
             .thenByDescending { it.inCurrentProfile }
             .thenBy { it.symbol.length }

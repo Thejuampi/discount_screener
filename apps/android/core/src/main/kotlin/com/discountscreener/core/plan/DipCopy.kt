@@ -29,6 +29,12 @@ object DipCopy {
         return "RSI ${"%.0f".format(rsi)} $turn."
     }
 
+    fun horizonLine(score: Int): String? = when {
+        score > 0 -> "1Y and 5Y MACD are turning."
+        score < 0 -> "5Y MACD is a drag."
+        else -> null
+    }
+
     fun macdLine(phase: MacdPhase): String = when (phase) {
         MacdPhase.Imminent -> "MACD cross is imminent."
         MacdPhase.Turning -> "MACD histogram is turning up."

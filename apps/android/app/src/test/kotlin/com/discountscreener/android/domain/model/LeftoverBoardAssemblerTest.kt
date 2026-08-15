@@ -1,43 +1,40 @@
 package com.discountscreener.android.domain.model
 
-import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.plan.DipLane
 import com.discountscreener.core.plan.DipRowInput
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class PlanBoardAssemblerTest {
+class LeftoverBoardAssemblerTest {
     @Test
-    fun missing_year_candles_cannot_put_a_name_on_now() {
-        var row = OpportunityListRow(
-            symbol = "SNDK",
-            marketPriceCents = 152_811,
-            intrinsicValueCents = 200_000,
-            gapBps = 3_000,
-            confidence = ConfidenceBand.High,
-            isWatched = false,
-            fundamentalsScore = 25,
-            compositeScore = 61,
-            coverageCount = 3,
+    fun missing_year_candles_cannot_put_a_name_on_primary() {
+        var input = DipRowInput(
+            symbol = "NEAR",
+            fundamentalsScore = 20,
+            marketPriceCents = 10_000,
+            streetFairValueCents = 10_200,
             analystCoverageCount = 8,
+            candles = emptyList(),
         )
-        var board = PlanBoardAssembler.assemble(
-            rows = listOf(row),
-            yearCandlesBySymbol = emptyMap(),
-            dcfBySymbol = emptyMap(),
-        )
+        var board = LeftoverBoardAssembler.assemble(listOf(input), universeName = "qa")
         assertTrue(board.now.none { it.lane == DipLane.Now })
     }
 
     @Test
-    fun profile_inputs_scan_every_member() {
+    fun universe_name_is_the_profile() {
+        var board = LeftoverBoardAssembler.assemble(emptyList(), universeName = "russell")
+        assertEquals("russell", board.universeName)
+    }
+
+    @Test
+    fun scans_every_profile_member() {
         var members = listOf(
             DipRowInput(
                 symbol = "OWNED",
                 fundamentalsScore = 12,
                 marketPriceCents = 10_000,
-                streetFairValueCents = 13_000,
+                streetFairValueCents = 10_100,
                 analystCoverageCount = 4,
             ),
             DipRowInput(
@@ -48,7 +45,7 @@ class PlanBoardAssemblerTest {
                 analystCoverageCount = 8,
             ),
         )
-        var board = PlanBoardAssembler.assemble(members, universeName = "sp500")
+        var board = LeftoverBoardAssembler.assemble(members, universeName = "sp500")
         assertEquals(2, board.scanned)
     }
 }

@@ -18,6 +18,18 @@ enum class MacdPhase {
     Unavailable,
 }
 
+data class MacdTape(
+    val histogram: Double,
+    val histSlope: Double,
+    val histAccel: Double,
+    val macdPhase: MacdPhase,
+)
+
+enum class MacdHorizonSense {
+    DipTurn,
+    LeftoverFade,
+}
+
 enum class DipModelQuality {
     Solid,
     Soft,
@@ -47,6 +59,7 @@ data class DipRowInput(
     val analystCoverageCount: Int? = null,
     val technicalSignals: List<String> = emptyList(),
     val candles: List<HistoricalCandle> = emptyList(),
+    val horizonCandles: List<HistoricalCandle> = emptyList(),
     val dcf: DcfAnalysis? = null,
 )
 
@@ -61,6 +74,7 @@ data class DipSetup(
     val dipAtrUnits: Double?,
     val rsi: Double?,
     val macdPhase: MacdPhase,
+    val macdHorizonScore: Int = 0,
     val streetUpsideBps: Int?,
     val fundamentalsScore: Int?,
     val valuationRelation: AnchorRelation,

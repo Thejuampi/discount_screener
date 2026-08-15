@@ -19,9 +19,11 @@ Show names that match Juan's hunt:
 
 ## Universe
 
-Name the universe on the board. v1 uses `opportunities` (current Opps rows).
+Name the universe on the board.
 
-The tab does not fetch extra Yahoo data. It reads cached Year candles and cached valuation.
+Default is `opportunities` (current Opps rows). A session **Full profile** switch scans the current profile (`trackedSymbols`: `sp500`, `russell`, `qa`, …) with the same dip gates. Leftover stays on the profile only.
+
+The tab does not fetch extra Yahoo data. It reads cached Year candles and cached valuation. Profile dip fills missing F from the active scoring model so names that left Opps can still pass the F gate.
 
 Profile `qa` is small. A full AND name may not appear on a live `qa` device. Prove the AND with fixtures. Do not switch to `sp500` for QA.
 
@@ -42,8 +44,8 @@ Profile `qa` is small. A full AND name may not appear on a live `qa` device. Pro
 | `STREET_NOW_BPS` | `2000` | `(base − last) / last` |
 | `STREET_ALMOST_BPS` | `1500` | Inclusive lower Almost band |
 | `F_FLOOR` | `0` | Active-model F. Null fails |
-| `NOW_CAP` | `6` | After total order |
-| `LATER_CAP` | `4` | Almost, after same order |
+| `NOW_CAP` | `120` | After total order |
+| `LATER_CAP` | `80` | Almost, after same order |
 
 ## Tape
 
@@ -70,6 +72,20 @@ Compute on close cents. Same 12/26/9 as the chart.
 | `Distant` | Else |
 
 Now needs `hist ≤ 0` and (`Imminent` or `Turning`).
+
+## 5Y MACD overlay
+
+Cache-only `ChartRange.FiveYears` (`5y` / `1mo`). Do not fetch extra Yahoo.
+
+Same 12/26/9 MACD math. Missing 5Y is 0, not Out. 1Y still leads rank.
+
+| Token | Value | Role |
+| --- | --- | --- |
+| `ALIGN` | `+3` | 1Y turning **and** 5Y turning |
+| `DRAG` | `−1` | 5Y hist `< 0`, slope `≤ 0`, Distant |
+| `FLAT` | `0` | Missing 5Y, or neither align nor drag |
+
+This is a rank overlay. It is not a Now gate. It does not change V2 / V3 / V4.
 
 ## RSI
 
@@ -141,10 +157,11 @@ Empty Now stays empty. Do not fill it with Almost.
 Total order, then cap. Never sort by Σ. Never sort by DCF.
 
 1. MACD phase: Imminent, Turning, Flipped, Distant
-2. Street bps descending
-3. Dip ATR units descending
-4. F descending
-5. Symbol ascending
+2. 5Y overlay score descending
+3. Street bps descending
+4. Dip ATR units descending
+5. F descending
+6. Symbol ascending
 
 ## UI
 
