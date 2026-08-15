@@ -80,4 +80,31 @@ class PlanBoardPresentationTest {
         var ui = presentPlanBoard(DipSignalEngine.rank(listOf(almost)))
         assertEquals(DipLane.Almost, ui.later.single().lane)
     }
+
+    @Test
+    fun selected_dip_board_uses_the_profile_when_toggled() {
+        var opps = PlanBoard.EMPTY.copy(universeName = "opportunities", scanned = 2)
+        var profile = PlanBoard.EMPTY.copy(universeName = "qa", scanned = 20)
+        var ui = presentSelectedDipBoard(opps, profile, PlanDipUniverse.Profile)
+        assertTrue(ui.universeLine.contains("qa"))
+    }
+
+    @Test
+    fun leftover_empty_primary_uses_fade_copy() {
+        var ui = presentLeftoverBoard(PlanBoard.EMPTY.copy(universeName = "qa"))
+        assertEquals("No leftover fade", ui.emptyNowTitle)
+    }
+
+    @Test
+    fun leftover_counts_line_names_the_profile() {
+        var ui = presentLeftoverBoard(PlanBoard.EMPTY.copy(universeName = "qa"))
+        assertTrue(ui.universeLine.contains("qa"))
+    }
+
+    @Test
+    fun leftover_copy_does_not_say_sell() {
+        var ui = presentLeftoverBoard(PlanBoard.EMPTY.copy(universeName = "qa"))
+        var blob = listOf(ui.huntLabel, ui.emptyNowTitle, ui.emptyNowDetail, ui.nowTitle, ui.laterTitle).joinToString(" ")
+        assertTrue(!blob.contains("sell", ignoreCase = true))
+    }
 }

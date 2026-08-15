@@ -20,6 +20,7 @@ data class PlanCardUi(
 )
 
 data class PlanBoardUi(
+    val huntLabel: String,
     val countsLine: String,
     val offRadarLine: String?,
     val universeLine: String,
@@ -32,6 +33,15 @@ data class PlanBoardUi(
     val emptyNowDetail: String,
 )
 
+fun presentSelectedDipBoard(
+    opportunities: PlanBoard,
+    profile: PlanBoard,
+    universe: PlanDipUniverse,
+): PlanBoardUi {
+    var board = if (universe == PlanDipUniverse.Opportunities) opportunities else profile
+    return presentPlanBoard(board)
+}
+
 fun presentPlanBoard(board: PlanBoard): PlanBoardUi {
     var offRadar = if (board.offRadarAlmost > 0) {
         "${board.offRadarAlmost} more almost off radar"
@@ -39,6 +49,7 @@ fun presentPlanBoard(board: PlanBoard): PlanBoardUi {
         null
     }
     return PlanBoardUi(
+        huntLabel = "DIP HUNTER",
         countsLine = "${board.nowCount} now  ·  ${board.later.size} almost  ·  ${board.refuseCount} out",
         offRadarLine = offRadar,
         universeLine = "Universe ${board.universeName}  ·  ${board.scanned} scanned",
@@ -49,6 +60,27 @@ fun presentPlanBoard(board: PlanBoard): PlanBoardUi {
         emptyNow = board.now.isEmpty(),
         emptyNowTitle = "No dip now",
         emptyNowDetail = "No name meets F, dip, RSI, MACD, and Street 20% together.",
+    )
+}
+
+fun presentLeftoverBoard(board: PlanBoard): PlanBoardUi {
+    var offRadar = if (board.offRadarAlmost > 0) {
+        "${board.offRadarAlmost} more at target off radar"
+    } else {
+        null
+    }
+    return PlanBoardUi(
+        huntLabel = "LEFTOVER REVIEW",
+        countsLine = "${board.nowCount} fade  ·  ${board.later.size} at target  ·  ${board.refuseCount} out",
+        offRadarLine = offRadar,
+        universeLine = "Universe ${board.universeName}  ·  ${board.scanned} scanned",
+        nowTitle = "PRIMARY · FADE",
+        laterTitle = "REVIEW · AT TARGET",
+        now = board.now.map(::presentCard),
+        later = board.later.map(::presentCard),
+        emptyNow = board.now.isEmpty(),
+        emptyNowTitle = "No leftover fade",
+        emptyNowDetail = "No name meets leftover of 5% or less and a fading tape together.",
     )
 }
 

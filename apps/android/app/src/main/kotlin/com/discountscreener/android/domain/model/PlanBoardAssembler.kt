@@ -12,6 +12,7 @@ object PlanBoardAssembler {
         yearCandlesBySymbol: Map<String, List<HistoricalCandle>>,
         dcfBySymbol: Map<String, DcfAnalysis>,
         universeName: String = DipSignalEngine.UNIVERSE_OPPORTUNITIES,
+        fiveYearCandlesBySymbol: Map<String, List<HistoricalCandle>> = emptyMap(),
     ): PlanBoard {
         var setups = rows.map { row ->
             DipSignalEngine.evaluate(
@@ -24,10 +25,19 @@ object PlanBoardAssembler {
                     analystCoverageCount = row.analystCoverageCount,
                     technicalSignals = row.technicalSignals,
                     candles = yearCandlesBySymbol[row.symbol].orEmpty(),
+                    horizonCandles = fiveYearCandlesBySymbol[row.symbol].orEmpty(),
                     dcf = dcfBySymbol[row.symbol],
                 ),
             )
         }
+        return DipSignalEngine.rank(setups, universeName)
+    }
+
+    fun assemble(
+        inputs: List<DipRowInput>,
+        universeName: String,
+    ): PlanBoard {
+        var setups = inputs.map { input -> DipSignalEngine.evaluate(input) }
         return DipSignalEngine.rank(setups, universeName)
     }
 }

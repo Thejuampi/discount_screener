@@ -2246,6 +2246,7 @@ class DefaultDashboardRepositoryTest {
                     "mercado",
                     listOf(
                         YahooSearchQuote("MELI", "MercadoLibre, Inc.", "NASDAQ", "EQUITY"),
+                        YahooSearchQuote("MELI.BA", "MercadoLibre, Inc.", "Buenos Aires", "EQUITY"),
                         YahooSearchQuote("MERC.CN", "Mercado Minerals Ltd.", "CNQ", "EQUITY"),
                     ),
                 )
@@ -2256,6 +2257,8 @@ class DefaultDashboardRepositoryTest {
             val results = repository.searchTickers("mercado", "sp500")
 
             assertEquals("MELI", results.first().symbol)
+            assertTrue(results.any { it.symbol == "MERC.CN" })
+            assertTrue(results.none { it.symbol == "MELI.BA" })
             assertEquals(1, client.searchSymbolsCallCount)
         } finally {
             store.close()

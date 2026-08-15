@@ -227,6 +227,8 @@ data class DashboardSnapshot(
     val marketRegime: MarketRegime? = null,
     val marketReadStatus: MarketReadStatus = MarketReadStatus.Pending,
     val planBoard: PlanBoard = PlanBoard.EMPTY,
+    val planBoardProfile: PlanBoard = PlanBoard.EMPTY,
+    val leftoverBoard: PlanBoard = PlanBoard.EMPTY,
 )
 
 data class TickerSearchSuggestion(

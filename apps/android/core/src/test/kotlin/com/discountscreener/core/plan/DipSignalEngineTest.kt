@@ -109,6 +109,22 @@ class DipSignalEngineTest {
     }
 
     @Test
+    fun rank_puts_aligned_horizon_ahead_of_drag_after_one_year() {
+        var drag = DipSignalEngine.classify(
+            goodInput().copy(symbol = "DRAG"),
+            goodTape(),
+            MacdTape(-20.0, -3.0, -1.0, MacdPhase.Distant),
+        )
+        var align = DipSignalEngine.classify(
+            goodInput().copy(symbol = "BOTH"),
+            goodTape(),
+            MacdTape(-8.0, 4.0, 1.0, MacdPhase.Turning),
+        )
+        var board = DipSignalEngine.rank(listOf(drag, align))
+        assertEquals("BOTH", board.now.first().symbol)
+    }
+
+    @Test
     fun rank_puts_imminent_before_turning() {
         var turning = DipSignalEngine.classify(goodInput().copy(symbol = "TURN"), goodTape(macdPhase = MacdPhase.Turning))
         var imminent = DipSignalEngine.classify(goodInput().copy(symbol = "NEAR"), goodTape(macdPhase = MacdPhase.Imminent))
@@ -125,12 +141,21 @@ class DipSignalEngineTest {
     }
 
     @Test
-    fun now_cap_is_six() {
-        var setups = (1..8).map { index ->
+    fun now_cap_is_one_hundred_twenty() {
+        var setups = (1..121).map { index ->
             DipSignalEngine.classify(goodInput().copy(symbol = "N$index"), goodTape())
         }
         var board = DipSignalEngine.rank(setups)
-        assertEquals(6, board.now.size)
+        assertEquals(120, board.now.size)
+    }
+
+    @Test
+    fun later_cap_is_eighty() {
+        var setups = (1..81).map { index ->
+            DipSignalEngine.classify(goodInput().copy(symbol = "R$index", streetFairValueCents = 11_600), goodTape())
+        }
+        var board = DipSignalEngine.rank(setups)
+        assertEquals(80, board.later.size)
     }
 
     @Test

@@ -202,7 +202,13 @@ fun DashboardScreen(
                 }
 
                 DashboardTab.Market -> MarketRegimeScreen(state.marketRegime)
-                DashboardTab.Plans -> PlansScreen(state.planBoard, onAction)
+                DashboardTab.Plans -> PlansScreen(
+                    hunt = state.planHunt,
+                    dipUniverse = state.planDipUniverse,
+                    dipBoard = state.planBoard,
+                    leftoverBoard = state.leftoverBoard,
+                    onAction = onAction,
+                )
                 DashboardTab.Opportunities -> {
                     if (state.opportunityRows.isEmpty()) {
                         EmptyState(

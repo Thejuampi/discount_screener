@@ -6,7 +6,7 @@ import kotlin.test.assertEquals
 class PlanBoardTest {
     @Test
     fun off_radar_almost_is_almost_count_minus_later_cards() {
-        var setups = (1..6).map { index ->
+        var setups = (1..82).map { index ->
             DipSignalEngine.classify(
                 DipRowInput(
                     symbol = "A$index",
