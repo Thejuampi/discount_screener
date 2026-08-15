@@ -89,6 +89,17 @@ class DipSignalEngineTest {
     }
 
     @Test
+    fun horizon_and_death_cross_keep_the_model_tag() {
+        var dcf = sampleDcf(ValuationModel.ResidualIncomeEquity, BusinessClass.FinancialServices)
+        var setup = DipSignalEngine.classify(
+            goodInput().copy(dcf = dcf),
+            goodTape(deathCross = true),
+            MacdTape(-8.0, 4.0, 1.0, MacdPhase.Turning),
+        )
+        assertTrue(setup.evidence.any { it.contains("Residual income") })
+    }
+
+    @Test
     fun rsi_slope_matches_chart_analysis() {
         var candles = risingCandles(80)
         var tape = DipSignalEngine.measureTape(candles)!!

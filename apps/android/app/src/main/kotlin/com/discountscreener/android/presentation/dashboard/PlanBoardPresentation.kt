@@ -3,6 +3,7 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.core.plan.DipCopy
 import com.discountscreener.core.plan.DipLane
 import com.discountscreener.core.plan.DipSetup
+import com.discountscreener.core.plan.LeftoverCopy
 import com.discountscreener.core.plan.PlanBoard
 import com.discountscreener.core.plan.formatDollars
 
@@ -76,26 +77,42 @@ fun presentLeftoverBoard(board: PlanBoard): PlanBoardUi {
         universeLine = "Universe ${board.universeName}  ·  ${board.scanned} scanned",
         nowTitle = "PRIMARY · FADE",
         laterTitle = "REVIEW · AT TARGET",
-        now = board.now.map(::presentCard),
-        later = board.later.map(::presentCard),
+        now = board.now.map { presentCard(it, leftover = true) },
+        later = board.later.map { presentCard(it, leftover = true) },
         emptyNow = board.now.isEmpty(),
         emptyNowTitle = "No leftover fade",
         emptyNowDetail = "No name meets leftover of 5% or less and a fading tape together.",
     )
 }
 
-private fun presentCard(setup: DipSetup): PlanCardUi {
-    var laneLabel = if (setup.lane == DipLane.Now) "Now" else "Almost"
+private fun presentCard(setup: DipSetup, leftover: Boolean = false): PlanCardUi {
+    var streetLabel = if (leftover) {
+        LeftoverCopy.streetLine(setup.streetUpsideBps)
+    } else {
+        DipCopy.streetLine(setup.streetUpsideBps)
+    }
+    var fLabel = if (leftover) {
+        LeftoverCopy.fLine(setup.fundamentalsScore)
+    } else {
+        DipCopy.fLine(setup.fundamentalsScore)
+    }
+    var laneLabel = when {
+        leftover && setup.lane == DipLane.Now -> "Fade"
+        leftover -> "At target"
+        setup.lane == DipLane.Now -> "Now"
+        else -> "Almost"
+    }
+    var evidence = setup.evidence.filter { line -> line != streetLabel && line != fLabel }
     return PlanCardUi(
         symbol = setup.symbol,
         lane = setup.lane,
         laneLabel = laneLabel,
         deathCross = setup.tags.contains("death_cross"),
         headline = setup.headline,
-        evidence = setup.evidence.take(5),
+        evidence = evidence,
         priceLabel = formatDollars(setup.marketPriceCents),
-        streetLabel = DipCopy.streetLine(setup.streetUpsideBps),
-        fLabel = DipCopy.fLine(setup.fundamentalsScore),
+        streetLabel = streetLabel,
+        fLabel = fLabel,
         spark = setup.spark,
     )
 }

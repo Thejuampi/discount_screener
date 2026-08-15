@@ -147,7 +147,7 @@ object DipSignalEngine {
         var yearMacd = tape?.let { MacdHorizonScore.fromTape(it) }
         var horizonScore = MacdHorizonScore.score(yearMacd, horizon, MacdHorizonSense.DipTurn)
         var headline = DipCopy.headline(lane, streetBps, DipCopy.almostGap(almostGaps))
-        var evidence = buildEvidence(input.fundamentalsScore, tape, streetBps, valuation, tags, horizonScore)
+        var evidence = buildEvidence(tape, valuation, tags, horizonScore)
         return DipSetup(
             symbol = input.symbol,
             companyName = input.companyName,
@@ -318,21 +318,17 @@ object DipSignalEngine {
     }
 
     private fun buildEvidence(
-        f: Int?,
         tape: DipTape?,
-        streetBps: Int?,
         valuation: ValuationTag,
         tags: List<String>,
         horizonScore: Int,
     ): List<String> {
         var lines = ArrayList<String>()
-        lines.add(DipCopy.fLine(f))
         lines.add(DipCopy.dipLine(tape?.dipAtrUnits))
         lines.add(DipCopy.rsiLine(tape?.rsi, tape != null && tape.rsiSlope > 0.0))
         lines.add(DipCopy.macdLine(tape?.macdPhase ?: MacdPhase.Unavailable))
         DipCopy.horizonLine(horizonScore)?.let { lines.add(it) }
         if (tags.contains("death_cross")) lines.add("Death cross tagged. Still in.")
-        lines.add(DipCopy.streetLine(streetBps))
         if (valuation.label != null) {
             lines.add(
                 DipCopy.valuationLine(
@@ -342,6 +338,6 @@ object DipSignalEngine {
                 ),
             )
         }
-        return lines.take(7)
+        return lines
     }
 }

@@ -61,16 +61,7 @@ object LeftoverSignalEngine {
         var yearMacd = tape?.let { MacdHorizonScore.fromTape(it) }
         var horizonScore = MacdHorizonScore.score(yearMacd, horizon, MacdHorizonSense.LeftoverFade)
         var headline = LeftoverCopy.headline(lane, streetBps, LeftoverCopy.reviewGap(reviewGaps))
-        var evidence = buildEvidence(
-            input.fundamentalsScore,
-            tape,
-            streetBps,
-            rsiFade,
-            macdFade,
-            valuation,
-            tags,
-            horizonScore,
-        )
+        var evidence = buildEvidence(tape, rsiFade, macdFade, valuation, tags, horizonScore)
         return DipSetup(
             symbol = input.symbol,
             companyName = input.companyName,
@@ -208,9 +199,7 @@ object LeftoverSignalEngine {
     }
 
     private fun buildEvidence(
-        f: Int?,
         tape: DipTape?,
-        streetBps: Int?,
         rsiFade: Boolean,
         macdFade: Boolean,
         valuation: ValuationTag,
@@ -218,13 +207,11 @@ object LeftoverSignalEngine {
         horizonScore: Int,
     ): List<String> {
         var lines = ArrayList<String>()
-        lines.add(LeftoverCopy.fLine(f))
         lines.add(LeftoverCopy.stretchLine(tape?.dipAtrUnits))
         lines.add(LeftoverCopy.rsiLine(tape?.rsi, rsiFade))
         lines.add(LeftoverCopy.macdLine(macdFade, tape?.macdPhase ?: MacdPhase.Unavailable))
         LeftoverCopy.horizonLine(horizonScore)?.let { lines.add(it) }
         if (tags.contains("death_cross")) lines.add("Death cross tagged. Still in.")
-        lines.add(LeftoverCopy.streetLine(streetBps))
         if (valuation.label != null) {
             lines.add(
                 LeftoverCopy.valuationLine(
@@ -234,6 +221,6 @@ object LeftoverSignalEngine {
                 ),
             )
         }
-        return lines.take(7)
+        return lines
     }
 }

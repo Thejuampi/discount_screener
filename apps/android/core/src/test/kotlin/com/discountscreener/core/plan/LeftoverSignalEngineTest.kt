@@ -245,6 +245,16 @@ class LeftoverSignalEngineTest {
     }
 
     @Test
+    fun horizon_and_death_cross_keep_the_model_tag() {
+        var setup = LeftoverSignalEngine.classify(
+            leftoverInput(dcf = leftoverDcf(ValuationModel.ResidualIncomeEquity, BusinessClass.FinancialServices)),
+            leftoverTape(deathCross = true),
+            MacdTape(10.0, -3.0, -1.0, MacdPhase.Flipped),
+        )
+        assertTrue(setup.evidence.any { it.contains("Residual income") })
+    }
+
+    @Test
     fun leftover_copy_names_fading_horizons() {
         var line = LeftoverCopy.horizonLine(MacdHorizonScore.ALIGN)
         assertEquals("1Y and 5Y MACD are fading.", line)
