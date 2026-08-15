@@ -36,6 +36,8 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Valuation Model Family Contract](../shared/contracts/valuation-model-family.json) - classifier / model-selection goldens.
 - [Evidence/SOTP Contract](../shared/contracts/valuation-evidence-sotp.json) - point-in-time evidence, component families, SOTP bridge, refusal, and validation goldens.
 - [Evidence/SOTP Implementation Notes](../_bmad-output/implementation-artifacts/spec-valuation-evidence-sotp-implementation.md) - executable-slice ownership, refusal boundaries, and provider/QA boundaries.
+- [Operational anti-patterns](operational-anti-patterns.md) - failure-mode ledger that already bit this repo; keep it out of always-on `AGENTS.md` context.
+- [Analyst-method lifecycle](analyst-method-lifecycle.md) - proof obligations for evidence-ledger / analyst-import / model-run closure.
 - [Valuation live QA checklist](valuation-live-qa-checklist.md) - **Windows live QA = profile `qa` only** (`npm run tauri:dev:qa`); checklist T/AMZN/CI/bank/industrial + merge-bar tests.
 - [Multi-name valuation baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar; quarantine ≠ success.
 - [Handover — Quant Valuation Engine (2026-08-02)](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - continuity brief for the next agent on the quant/valuation motor (waterfall, CHTR FCFF blocker, P0+).

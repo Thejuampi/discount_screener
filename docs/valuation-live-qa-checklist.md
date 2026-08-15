@@ -17,7 +17,7 @@ Run this **after any** classifier / FCFF / CapEx / WACC / residual-income / mode
 
 If the running app is **not** on profile `qa` (or is full SP500 / 500+ symbols), **stop**: relaunch with `npm run tauri:dev:qa` (or attach only if the existing process is already locked `qa`).
 
-Standing agent law is also in root [`AGENTS.md`](../AGENTS.md) → **Build And Test** / **Windows live QA = profile `qa` only**.
+Standing agent law is also in root [`AGENTS.md`](../AGENTS.md) → **Build And Test** / **Live QA = profile `qa` only**.
 
 ---
 
