@@ -155,8 +155,14 @@ internal fun OpportunityList(
                                 marketMetricColor(),
                             )
                         }
-                        MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
-                        MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
+                        if (row.gapBps != null && row.upsideBps != null) {
+                            MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
+                            MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
+                        } else {
+                            row.valuationStanceLabel?.let { stance ->
+                                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
+                            }
+                        }
                         MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))
                     }
                     row.providerIssue?.let { issue ->
@@ -589,20 +595,35 @@ private fun TrackedRowMetrics(row: TrackedSymbolRow) {
         )
         return
     }
-    if (row.marketPriceCents == null || row.intrinsicValueCents == null || row.gapBps == null || row.upsideBps == null) {
-        Text(
-            text = "Waiting for real Yahoo data",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    var priceCents = row.marketPriceCents
+    var fairCents = row.intrinsicValueCents
+    var gapBps = row.gapBps
+    var upsideBps = row.upsideBps
+    if (priceCents == null || fairCents == null || gapBps == null || upsideBps == null) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (priceCents != null) {
+                MetricToken("Price ${money(priceCents)}", MaterialTheme.colorScheme.onSurface)
+            }
+            row.valuationStanceLabel?.let { stance ->
+                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
+            } ?: run {
+                if (priceCents == null) {
+                    Text(
+                        text = "Waiting for real Yahoo data",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         return
     }
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        MetricToken("Price ${money(row.marketPriceCents)}", MaterialTheme.colorScheme.onSurface)
-        MetricToken("Fair ${money(row.intrinsicValueCents)}", fairMetricColor())
-        MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
-        MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
+        MetricToken("Price ${money(priceCents)}", MaterialTheme.colorScheme.onSurface)
+        MetricToken("Fair ${money(fairCents)}", fairMetricColor())
+        MetricToken("Disc ${formatPct(gapBps)}", discountColor())
+        MetricToken("Upside ${formatPct(upsideBps)}", upsideColor(upsideBps))
         MetricToken(row.qualification?.name?.lowercase() ?: "unknown", qualificationColor(row.qualification))
         MetricToken(row.confidence?.name?.lowercase() ?: "unknown", confidenceColor(row.confidence))
         if (row.stale) {

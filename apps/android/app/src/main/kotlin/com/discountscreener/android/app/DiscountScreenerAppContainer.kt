@@ -2,15 +2,29 @@ package com.discountscreener.android.app
 
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
+import java.io.File
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.CnnFearGreedClient
+import com.discountscreener.android.data.remote.FredDgs10Client
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
+import com.discountscreener.android.data.remote.SecEdgarCacheGc
+import com.discountscreener.android.data.remote.SecEdgarTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import com.discountscreener.android.data.remote.YahooTnxClient
 import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
+import com.discountscreener.core.engine.CachedObservedMarketParamsSource
+import com.discountscreener.core.engine.CachedYahooTnxMarketParamsSource
+import com.discountscreener.core.engine.FredThenTnxMarketParamsSource
 import com.discountscreener.android.domain.logging.AndroidAppLogger
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
@@ -44,6 +58,7 @@ import com.discountscreener.android.presentation.dashboard.DashboardViewModel
 
 class DiscountScreenerAppContainer(context: Context) {
     private val appContext = context.applicationContext
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * One client for everything that talks to Yahoo. It carries the cookie jar and crumb session
@@ -69,15 +84,30 @@ class DiscountScreenerAppContainer(context: Context) {
 
     private val repository by lazy {
         val startupProfile = startupProfile(BuildConfig.QA_UNIVERSE)
+        val marketParamsDir = File(appContext.cacheDir, "market-params")
+        val marketParamsSource = FredThenTnxMarketParamsSource(
+            fred = CachedObservedMarketParamsSource(
+                fetchCsv = FredDgs10Client()::csv,
+                cacheFile = File(marketParamsDir, "dgs10.csv").toPath(),
+            ),
+            tnx = CachedYahooTnxMarketParamsSource(
+                fetchJson = YahooTnxClient()::chart,
+                cacheFile = File(marketParamsDir, "tnx.json").toPath(),
+            ),
+        )
         DefaultDashboardRepository(
             stateStore = stateStore,
             profileCatalog = ProfileCatalog(appContext.assets),
             yahooClient = yahooClient,
             universeCatalog = UniverseCatalog(appContext.assets),
             marketDataRepository = marketDataRepository,
-            secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(),
+            secondaryTimeseriesProvider = defaultSecondaryTimeseriesProvider(
+                cacheDir = File(appContext.cacheDir, "sec-edgar"),
+                sweepScope = backgroundScope,
+            ),
             logger = AndroidAppLogger(),
             defaultProfile = startupProfile,
+            marketParamsSource = marketParamsSource,
         )
     }
 
@@ -131,4 +161,25 @@ internal fun startupProfile(qaUniverse: Boolean): String =
         DefaultDashboardRepository.PRODUCT_DEFAULT_PROFILE
     }
 
-internal fun defaultSecondaryTimeseriesProvider(): FundamentalTimeseriesProvider? = null
+internal fun defaultSecondaryTimeseriesProvider(
+    cacheDir: File = File("sec-edgar"),
+    sweepScope: CoroutineScope? = null,
+): FundamentalTimeseriesProvider {
+    startSecEdgarCacheGc(cacheDir, sweepScope)
+    return SecEdgarTimeseriesProvider(cacheDir)
+}
+
+internal fun startSecEdgarCacheGc(
+    cacheDir: File,
+    sweepScope: CoroutineScope?,
+    gc: SecEdgarCacheGc = SecEdgarCacheGc(cacheDir),
+) {
+    if (sweepScope == null) return
+    sweepScope.launch {
+        gc.sweep()
+        while (isActive) {
+            delay(SecEdgarCacheGc.SWEEP_INTERVAL_MILLIS)
+            gc.sweep()
+        }
+    }
+}

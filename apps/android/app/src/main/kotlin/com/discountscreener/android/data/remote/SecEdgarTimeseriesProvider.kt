@@ -1,8 +1,9 @@
 package com.discountscreener.android.data.remote
 
+import com.discountscreener.core.engine.SecCompanyFactsSieve
+import com.discountscreener.core.engine.SecDriverNormalizationPolicy
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.FundamentalTimeseries
-import com.discountscreener.core.engine.SecDriverNormalizationPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -16,6 +17,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import kotlin.math.abs
+import java.io.File
+import java.io.OutputStream
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
@@ -23,8 +26,16 @@ import java.util.concurrent.TimeUnit
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
+private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
+internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-residual-1"
 
-class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
+internal fun companyFactsSlimFileName(cikPadded: String): String =
+    "CIK$cikPadded.sieve-$COMPANY_FACTS_SIEVE_VERSION.json"
+
+class SecEdgarTimeseriesProvider(
+    private val cacheDir: File? = null,
+    private val ttlMillis: Long = DEFAULT_TTL_MILLIS,
+) : FundamentalTimeseriesProvider, ResidualCompanyFactsProvider {
 
     private val json = Json { ignoreUnknownKeys = true }
     private val client = OkHttpClient.Builder()
@@ -36,9 +47,13 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
     private var tickerToCik: Map<String, String>? = null
 
     override suspend fun fetch(symbol: String): FundamentalTimeseries? = withContext(Dispatchers.IO) {
-        val cik = resolveCik(symbol) ?: return@withContext null
-        val facts = fetchCompanyFacts(cik) ?: return@withContext null
+        val slim = loadSievedFacts(symbol) ?: return@withContext null
+        var facts = json.parseToJsonElement(slim).jsonObject
         buildTimeseries(facts)
+    }
+
+    override suspend fun fetchSievedCompanyFacts(symbol: String): String? = withContext(Dispatchers.IO) {
+        loadSievedFacts(symbol)
     }
 
     private fun resolveCik(symbol: String): String? {
@@ -48,11 +63,13 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
 
     private fun loadTickerMap(): Map<String, String> {
         return try {
-            val request = Request.Builder()
-                .url(COMPANY_TICKERS_URL)
-                .header("User-Agent", SEC_USER_AGENT)
-                .build()
-            val body = client.newCall(request).execute().use { it.body?.string() } ?: return emptyMap()
+            val body = cachedText("company_tickers.json") {
+                val request = Request.Builder()
+                    .url(COMPANY_TICKERS_URL)
+                    .header("User-Agent", SEC_USER_AGENT)
+                    .build()
+                client.newCall(request).execute().use { it.body?.string() }
+            } ?: return emptyMap()
             val root = json.parseToJsonElement(body).jsonObject
             val map = mutableMapOf<String, String>()
             for ((_, entry) in root) {
@@ -68,18 +85,79 @@ class SecEdgarTimeseriesProvider : FundamentalTimeseriesProvider {
         }
     }
 
-    private fun fetchCompanyFacts(cikPadded: String): JsonObject? {
+    private fun loadSievedFacts(symbol: String): String? {
         return try {
-            val url = "${COMPANY_FACTS_URL}CIK$cikPadded.json"
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", SEC_USER_AGENT)
-                .build()
-            val body = client.newCall(request).execute().use { it.body?.string() } ?: return null
-            json.parseToJsonElement(body).jsonObject
+            val cik = resolveCik(symbol) ?: return null
+            val slimFile = cacheDir?.let { File(it, companyFactsSlimFileName(cik)) }
+            if (slimFile != null && slimFile.isFile) {
+                val age = System.currentTimeMillis() - slimFile.lastModified()
+                if (age < ttlMillis) {
+                    return slimFile.readText()
+                }
+            }
+            val url = "${COMPANY_FACTS_URL}CIK$cik.json"
+            val full = workingFile("CIK$cik.full.json") { sink ->
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", SEC_USER_AGENT)
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@workingFile false
+                    response.body?.byteStream()?.use { input -> input.copyTo(sink) }
+                    true
+                }
+            } ?: return null
+            try {
+                var slim = full.bufferedReader().use { reader -> SecCompanyFactsSieve.sieve(reader) }
+                if (slimFile != null) {
+                    slimFile.parentFile?.mkdirs()
+                    slimFile.writeText(slim)
+                }
+                slim
+            } finally {
+                full.delete()
+            }
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun cachedText(name: String, fetch: () -> String?): String? {
+        val file = cacheDir?.let { File(it, name) }
+        if (file != null && file.isFile) {
+            val age = System.currentTimeMillis() - file.lastModified()
+            if (age < ttlMillis) {
+                return file.readText()
+            }
+        }
+        val body = fetch() ?: return null
+        if (file != null) {
+            file.parentFile?.mkdirs()
+            file.writeText(body)
+        }
+        return body
+    }
+
+    private fun workingFile(name: String, fetchTo: (OutputStream) -> Boolean): File? {
+        val dir = cacheDir
+        val file = if (dir != null) {
+            dir.mkdirs()
+            File(dir, name)
+        } else {
+            File.createTempFile("sec-", ".json").also { it.deleteOnExit() }
+        }
+        var tmp = File(file.parentFile, "${file.name}.part")
+        val ok = tmp.outputStream().use { fetchTo(it) }
+        if (!ok) {
+            tmp.delete()
+            return null
+        }
+        if (file.exists()) file.delete()
+        if (!tmp.renameTo(file)) {
+            tmp.copyTo(file, overwrite = true)
+            tmp.delete()
+        }
+        return file
     }
 
     private fun buildTimeseries(facts: JsonObject): FundamentalTimeseries? = buildSecEdgarTimeseries(facts)

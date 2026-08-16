@@ -8,9 +8,14 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -428,6 +433,60 @@ class YahooFinanceClientTest {
         assertEquals("MELI", quotes.first().symbol)
         assertEquals("MercadoLibre, Inc.", quotes.first().companyName)
         assertEquals("NASDAQ", quotes.first().exchange)
+    }
+
+    @Test
+    fun timeseries_request_sends_the_yahoo_crumb() = runTest {
+        var seen = mutableListOf<String>()
+        var http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                var req = chain.request()
+                seen += req.url.toString()
+                var payload = when {
+                    req.url.encodedPath.contains("getcrumb") -> "testcrumb"
+                    req.url.encodedPath.contains("timeseries") ->
+                        """{"timeseries":{"result":[]}}"""
+                    else -> "<html></html>"
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(payload.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        YahooFinanceClient(httpClient = http).fetchFundamentalTimeseries("AAPL")
+        var timeseriesUrl = seen.first { it.contains("timeseries") }
+        assertEquals(true, timeseriesUrl.contains("crumb=testcrumb"))
+    }
+
+    @Test
+    fun timeseries_request_asks_for_later_interest_types() = runTest {
+        var seen = mutableListOf<String>()
+        var http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                var req = chain.request()
+                seen += req.url.toString()
+                var payload = when {
+                    req.url.encodedPath.contains("getcrumb") -> "testcrumb"
+                    req.url.encodedPath.contains("timeseries") ->
+                        """{"timeseries":{"result":[]}}"""
+                    else -> "<html></html>"
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(payload.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        YahooFinanceClient(httpClient = http).fetchFundamentalTimeseries("AAPL")
+        var timeseriesUrl = seen.first { it.contains("timeseries") }
+        assertEquals(true, timeseriesUrl.contains("annualInterestExpenseNonOperating"))
     }
 
     @Test

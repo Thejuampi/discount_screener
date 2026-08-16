@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "skill": {
+      "*": "allow",
+      "bmad-create-architecture": "deny",
+      "bmad-create-prd": "deny",
+      "bmad-create-story": "deny",
+      "bmad-dev-story": "deny",
+      "bmad-domain-research": "deny",
+      "bmad-edit-prd": "deny",
+      "bmad-editorial-review": "deny",
+      "bmad-editorial-review-prose": "deny",
+      "bmad-editorial-review-structure": "deny",
+      "bmad-market-research": "deny",
+      "bmad-technical-research": "deny",
+      "bmad-validate-prd": "deny",
+      "bmad-review-adversarial-general": "deny",
+      "bmad-review-edge-case-hunter": "deny",
+      "bmad-review-verification-gap": "deny"
+    }
+  }
+}

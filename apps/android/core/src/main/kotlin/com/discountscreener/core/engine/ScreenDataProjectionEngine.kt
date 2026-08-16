@@ -33,6 +33,7 @@ import com.discountscreener.core.model.ProjectedTrustSignal
 import com.discountscreener.core.model.ProjectedTrustSignalKind
 import com.discountscreener.core.model.ProjectedValuationAnchor
 import com.discountscreener.core.model.ProjectedValuationAnchorKind
+import com.discountscreener.core.model.ProjectedValuationJudgment
 import com.discountscreener.core.model.ProjectionSymbolState
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensFreshnessQualifier
@@ -136,11 +137,12 @@ class ScreenDataProjectionEngine {
         var dcfAnalysis = request.dcfBySymbol[symbol]
         var symbolState = request.symbolStateBySymbol[symbol]
         var statistic = request.analystTargetStatisticBySymbol[symbol]
-        var anchor = fairValueAnchor(detail, dcfAnalysis, statistic)
+        var named = namedRowValuation(detail, dcfAnalysis, statistic)
+        var anchor = named.anchor
         var freshness = rowFreshness(symbol, detail != null, dcfAnalysis, request)
         var confidence = projectedConfidence(detail?.confidence, dcfAnalysis, symbolState)
-        var gapBps = projectedDiscountBps(detail?.marketPriceCents, anchor.valueCents)
-        var upsideBps = projectedUpsideBps(detail?.marketPriceCents, anchor.valueCents)
+        var gapBps = namedGapBps(named, detail?.marketPriceCents)
+        var upsideBps = namedUpsideBps(named, detail?.marketPriceCents)
         var blockingIssue = hasBlockingProviderIssue(symbol, detail != null, request)
         var currentTrustSignal = trustSignal(detail, anchor, dcfAnalysis, blockingIssue)
         return ProjectedTrackedRow(
@@ -163,6 +165,7 @@ class ScreenDataProjectionEngine {
             ),
             explanation = rowExplanation(symbol, currentRank, anchor, request),
             quantLensSummary = quantLensRowSummary(symbol, detail, dcfAnalysis),
+            valuationJudgment = named.judgment,
         )
     }
 
@@ -174,11 +177,12 @@ class ScreenDataProjectionEngine {
         var dcfAnalysis = request.dcfBySymbol[row.symbol]
         var symbolState = request.symbolStateBySymbol[row.symbol]
         var statistic = request.analystTargetStatisticBySymbol[row.symbol]
-        var anchor = fairValueAnchor(detail, dcfAnalysis, statistic, row.intrinsicValueCents)
+        var named = namedRowValuation(detail, dcfAnalysis, statistic, row.intrinsicValueCents)
+        var anchor = named.anchor
         var freshness = rowFreshness(row.symbol, true, dcfAnalysis, request)
         var confidence = projectedConfidence(detail?.confidence ?: row.confidence, dcfAnalysis, symbolState)
-        var gapBps = projectedDiscountBps(row.marketPriceCents, anchor.valueCents)
-        var upsideBps = projectedUpsideBps(row.marketPriceCents, anchor.valueCents)
+        var gapBps = namedGapBps(named, row.marketPriceCents)
+        var upsideBps = namedUpsideBps(named, row.marketPriceCents)
         var blockingIssue = hasBlockingProviderIssue(row.symbol, true, request)
         var currentTrustSignal = trustSignal(detail, anchor, dcfAnalysis, blockingIssue)
         var decisionFacts = request.opportunityDecisionFactsBySymbol[row.symbol] ?: ProjectedOpportunityDecisionFacts()
@@ -201,6 +205,7 @@ class ScreenDataProjectionEngine {
                 scoringModel = request.route.opportunityScoringModel,
             ),
             quantLensSummary = quantLensRowSummary(row.symbol, detail, dcfAnalysis),
+            valuationJudgment = named.judgment,
         )
     }
 
@@ -209,7 +214,8 @@ class ScreenDataProjectionEngine {
         var detail = request.detailsBySymbol[symbol] ?: return null
         var dcfAnalysis = request.dcfBySymbol[symbol]
         var statistic = request.analystTargetStatisticBySymbol[symbol]
-        var anchor = fairValueAnchor(detail, dcfAnalysis, statistic)
+        var named = namedRowValuation(detail, dcfAnalysis, statistic)
+        var anchor = named.anchor
         var key = SymbolRangeKey(symbol = symbol, range = request.route.selectedRange)
         var candles = request.chartCandles[key].orEmpty()
         return ProjectedDetailData(
@@ -231,6 +237,9 @@ class ScreenDataProjectionEngine {
             waccProvisional = dcfAnalysis?.waccInputs?.isProvisional() == true ||
                 dcfAnalysis?.pointEstimateUnreliable == true,
             waccAssumptionLabels = dcfAnalysis?.waccInputs?.summaryLabels().orEmpty(),
+            marketParamsLabel = MarketParams.displayLabelFromReasonCodes(
+                dcfAnalysis?.reasonCodes.orEmpty(),
+            ),
             valuationUnavailableReason = valuationUnavailableReason(detail, dcfAnalysis),
             valuationModelLabel = valuationModelLabel(dcfAnalysis),
             latestFcfDollars = dcfAnalysis?.latestFcfDollars,
@@ -247,6 +256,11 @@ class ScreenDataProjectionEngine {
             driverRegime = dcfAnalysis?.driverRegime,
             growthDispersionBps = dcfAnalysis?.growthDispersionBps,
             growthDriver = dcfAnalysis?.growthDriver,
+            valuationJudgment = ValuationJudgmentAssembler.snapshot(
+                ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
+                detail.marketPriceCents,
+                detail.fundamentals?.sharesOutstanding,
+            ),
         )
     }
 
@@ -271,6 +285,7 @@ class ScreenDataProjectionEngine {
             fund?.industryName,
             fund?.sectorKey,
             fund?.industryKey,
+            symbol = fund?.symbol ?: detail.symbol,
         )
         return DcfAnalysisEngine.classificationUnavailableReason(businessClass)
     }
@@ -316,6 +331,85 @@ class ScreenDataProjectionEngine {
         symbolState?.provenanceState == ProjectedProvenanceState.Stale ||
         symbolState?.provenanceState == ProjectedProvenanceState.ParseUncertain ||
         symbolState?.provenanceState == ProjectedProvenanceState.SourceUnknown
+
+    private data class NamedRowValuation(
+        val anchor: ProjectedFairValueAnchor,
+        val judgment: ProjectedValuationJudgment?,
+    )
+
+    private fun namedGapBps(named: NamedRowValuation, marketPriceCents: Long?): Int? {
+        if (named.judgment != null && named.judgment.primaryCents == null) return null
+        return projectedDiscountBps(marketPriceCents, named.anchor.valueCents)
+    }
+
+    private fun namedUpsideBps(named: NamedRowValuation, marketPriceCents: Long?): Int? {
+        if (named.judgment != null && named.judgment.primaryCents == null) return null
+        return projectedUpsideBps(marketPriceCents, named.anchor.valueCents)
+    }
+
+    private fun namedRowValuation(
+        detail: SymbolDetail?,
+        dcfAnalysis: DcfAnalysis?,
+        analystTargetStatistic: ProjectedAnalystTargetStatistic?,
+        fallbackIntrinsicValueCents: Long? = null,
+    ): NamedRowValuation {
+        if (detail == null) {
+            return NamedRowValuation(
+                fairValueAnchor(null, dcfAnalysis, analystTargetStatistic, fallbackIntrinsicValueCents),
+                judgment = null,
+            )
+        }
+        var judgment = ValuationJudgmentAssembler.snapshot(
+            ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
+            detail.marketPriceCents,
+            detail.fundamentals?.sharesOutstanding,
+        )
+        var primary = judgment.primaryCents
+        if (primary == null) {
+            return NamedRowValuation(ProjectedFairValueAnchor.unavailable(), judgment)
+        }
+        var anchor = when (judgment.status) {
+            ValuationJudgmentStatus.Identity -> identityNamedAnchor(dcfAnalysis, primary)
+            ValuationJudgmentStatus.Street -> streetNamedAnchor(detail, analystTargetStatistic, primary)
+            else -> ProjectedFairValueAnchor.unavailable()
+        }
+        return NamedRowValuation(anchor, judgment)
+    }
+
+    private fun identityNamedAnchor(dcfAnalysis: DcfAnalysis?, primary: Long): ProjectedFairValueAnchor {
+        if (dcfAnalysis != null && dcfAnalysis.baseIntrinsicValueCents > 0L) {
+            return ProjectedFairValueAnchor.model(
+                valueCents = primary,
+                sourceLabel = dcfSourceLabel(dcfAnalysis),
+                role = dcfRole(dcfAnalysis),
+                compactLabel = dcfCompactLabel(dcfAnalysis),
+                provenanceState = dcfProvenanceState(dcfAnalysis),
+                trustReason = dcfTrustReason(dcfAnalysis),
+            )
+        }
+        return ProjectedFairValueAnchor.model(
+            valueCents = primary,
+            sourceLabel = "Identity",
+            compactLabel = "Identity",
+        )
+    }
+
+    private fun streetNamedAnchor(
+        detail: SymbolDetail,
+        analystTargetStatistic: ProjectedAnalystTargetStatistic?,
+        primary: Long,
+    ): ProjectedFairValueAnchor {
+        var legacy = fairValueAnchor(detail, dcfAnalysis = null, analystTargetStatistic)
+        if (legacy.valueCents != null) {
+            return legacy.copy(valueCents = primary)
+        }
+        return ProjectedFairValueAnchor.analyst(
+            valueCents = primary,
+            role = ProjectedFairValueRole.AnalystConsensusTarget,
+            compactLabel = "Analyst range",
+            sourceLabel = "Analyst range",
+        )
+    }
 
     private fun fairValueAnchor(
         detail: SymbolDetail?,

@@ -54,14 +54,14 @@ pub mod valuation_core_adapter;
 #[cfg(test)]
 mod valuation_core_measurement;
 #[cfg(test)]
-mod valuation_fixture_capture;
-#[cfg(test)]
 mod valuation_decision_contract;
 mod valuation_divergence;
 pub mod valuation_dossier_view;
 pub mod valuation_evidence;
 #[cfg(test)]
 mod valuation_evidence_contract;
+#[cfg(test)]
+mod valuation_fixture_capture;
 pub mod valuation_gap_attribution;
 #[cfg(test)]
 mod valuation_high_signal;

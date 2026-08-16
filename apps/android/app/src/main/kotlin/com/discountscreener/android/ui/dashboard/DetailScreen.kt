@@ -83,6 +83,8 @@ import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensSectionUi
 import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.android.presentation.dashboard.QuantLensUiState
+import com.discountscreener.android.presentation.dashboard.ValuationJudgmentUi
+import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.domain.model.preferredAnalystCoverageCount
@@ -773,7 +775,7 @@ private fun SnapshotContent(
             }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    "Price ${money(currentDetail.marketPriceCents)}  Fair ${money(currentDetail.intrinsicValueCents)}  Disc ${formatPct(currentDetail.gapBps)}  Upside ${formatPct(currentDetail.upsideBps)}",
+                    detailHeadline(currentDetail, projectedDetail),
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1148,6 +1150,15 @@ private fun ValuationSection(
     detail: SymbolDetail,
     projectedDetail: ProjectedDetailData? = null,
 ) {
+    var judgmentUi = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
+    if (judgmentUi != null) {
+        JudgmentValuationSection(
+            detail = detail,
+            ui = judgmentUi,
+            projectedDetail = projectedDetail,
+        )
+        return
+    }
     var model = valuationRangeModel(detail, projectedDetail)
 
     Text("Valuation", fontWeight = FontWeight.Bold)
@@ -1189,6 +1200,92 @@ private fun ValuationSection(
     AnalystConcentrationSection(detail = detail)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun JudgmentValuationSection(
+    detail: SymbolDetail,
+    ui: ValuationJudgmentUi,
+    projectedDetail: ProjectedDetailData?,
+) {
+    Text("Valuation", fontWeight = FontWeight.Bold)
+    priceSpeechLines(detail, ui).forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+    Text(
+        text = ui.stanceLabel,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+    )
+    if (ui.relationLabel.isNotBlank()) {
+        Text(
+            text = ui.relationLabel,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    ui.reasonLines.forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    var officialGapBps = ui.officialGapBps
+    if (officialGapBps != null) {
+        Text(
+            text = "Official gap $officialGapBps bps",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    if (ui.showPrimary && ui.primaryCents != null) {
+        var model = valuationRangeModelFromJudgment(detail, ui)
+        ValuationHeadline(model = model)
+        ValuationRangeChart(
+            model = model,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(132.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        )
+        if (model.referenceValues.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                model.referenceValues.forEach { reference ->
+                    Text(
+                        text = "${reference.label} ${compactMoney(reference.valueCents)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    } else {
+        Text(
+            text = "No single primary",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+        Text(
+            text = "Price ${money(detail.marketPriceCents)}",
+            style = MaterialTheme.typography.labelMedium,
+        )
+        judgmentReferenceLines(ui).forEach { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    WaccAssumptionsSection(projectedDetail = projectedDetail)
+    FcfDiagnosticsSection(projectedDetail = projectedDetail)
+    AnalystConcentrationSection(detail = detail)
+}
+
 @Composable
 private fun WaccAssumptionsSection(projectedDetail: ProjectedDetailData?) {
     val waccBps = projectedDetail?.waccBps ?: return
@@ -1218,6 +1315,13 @@ private fun WaccAssumptionsSection(projectedDetail: ProjectedDetailData?) {
     if (labels.isNotEmpty()) {
         Text(
             text = "Rate inputs: ${labels.joinToString("; ")}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    projectedDetail.marketParamsLabel?.let { label ->
+        Text(
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -3288,6 +3392,102 @@ internal fun primaryFairValue(detail: SymbolDetail): PrimaryFairValue = detail.w
     sourceLabel = "Mean",
     valueCents = detail.intrinsicValueCents,
 )
+
+private fun valuationRangeModelFromJudgment(
+    detail: SymbolDetail,
+    ui: ValuationJudgmentUi,
+): ValuationRangeModel {
+    var primary = requireNotNull(ui.primaryCents)
+    var source = ui.primarySourceLabel ?: "Primary"
+    var priceMarker = VisualAnchor("Price", detail.marketPriceCents, valuationReferenceColor("Price"))
+    var fairValueMarker = VisualAnchor(source, primary, valuationReferenceColor(source))
+    var low = ui.streetLowCents
+    var high = ui.streetHighCents
+    var targetBand =
+        if (low != null && high != null && low > 0L && high > 0L) low to high else null
+    var references = judgmentChartReferences(ui, primary)
+    return ValuationRangeModel(
+        priceMarker = priceMarker,
+        fairValueMarker = fairValueMarker,
+        fairValueSourceLabel = source,
+        upsideBps = checkedUpsideBps(detail.marketPriceCents, primary),
+        targetBandCents = targetBand,
+        referenceValues = references,
+        axisLabels = valuationAxisLabels(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+        domain = valuationRangeDomain(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+    )
+}
+
+private fun judgmentChartReferences(
+    ui: ValuationJudgmentUi,
+    primary: Long,
+): List<ValuationAnchor> = buildList {
+    ui.identityBaseCents?.takeIf { it > 0L && it != primary }?.let { cents ->
+        add(ValuationAnchor(ui.identityModelLabel ?: "Identity", cents))
+    }
+    ui.streetBaseCents?.takeIf { it > 0L && it != primary }?.let { cents ->
+        add(ValuationAnchor("Analyst range", cents))
+    }
+    ui.femTargetCents?.takeIf { it > 0L }?.let { cents ->
+        add(ValuationAnchor("Justified multiple", cents))
+    }
+}
+
+private fun priceSpeechLines(
+    detail: SymbolDetail,
+    ui: ValuationJudgmentUi,
+): List<String> = buildList {
+    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L }
+    last?.let { add("${ui.lastPriceLabel} ${money(it)}") }
+    ui.horizonPriceCents?.let { add("${ui.horizonPriceLabel} ${money(it)}") }
+    ui.cashIdentityCents?.takeIf { it != ui.horizonPriceCents }?.let { add("${ui.cashLabel} ${money(it)}") }
+}
+
+private fun judgmentReferenceLines(ui: ValuationJudgmentUi): List<String> = buildList {
+    ui.identityBaseCents?.let { base ->
+        var label = ui.identityModelLabel ?: "Identity"
+        add(
+            "$label ${compactMoney(ui.identityBearCents ?: base)} / ${compactMoney(base)} / ${compactMoney(ui.identityBullCents ?: base)}",
+        )
+    }
+    ui.streetBaseCents?.let { base ->
+        add(
+            "Analyst range ${compactMoney(ui.streetLowCents ?: base)} / ${compactMoney(base)} / ${compactMoney(ui.streetHighCents ?: base)}",
+        )
+    }
+    ui.femTargetCents?.let { cents ->
+        add("Justified multiple ${compactMoney(cents)}")
+    }
+}
+
+private fun detailHeadline(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData?,
+): String {
+    var ui = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
+    if (ui != null) {
+        var last = ui.lastPriceCents ?: detail.marketPriceCents
+        var horizon = ui.horizonPriceCents
+        if (horizon != null) {
+            return "Price ${money(last)}  Our price ${money(horizon)}"
+        }
+        if (!ui.showPrimary || ui.primaryCents == null) {
+            return "Price ${money(last)}  ${ui.stanceLabel}"
+        }
+        return "Price ${money(last)}  Fair ${money(ui.primaryCents)}  ${ui.primarySourceLabel}"
+    }
+    return "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}  Disc ${formatPct(detail.gapBps)}  Upside ${formatPct(detail.upsideBps)}"
+}
 
 internal fun valuationRangeModel(
     detail: SymbolDetail,

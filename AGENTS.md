@@ -66,7 +66,8 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 | BusinessClass | Primary model | Discount rate | Cash / driver |
 | --- | --- | --- | --- |
 | `OperatingNonFinancial` | FCFF + WACC | WACC | Free cash flow series (source-resolved) |
-| `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, …) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path (fade to competitive long-run) |
+| `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, **lenders** such as COF) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path; long-run ROE = min(ROE0, CoE+500) |
+| Payment networks (`V`, `MA`) even if Yahoo says Credit Services | **FCFF + WACC** | WACC | Fee cash flow — residual on book prints ~book |
 | `NotEligible` (ETF, fund, crypto shell, REIT, …) | none | — | — |
 | `Unclassified` (missing or uncatalogued sector/industry) | **none — refuse** | — | — |
 
@@ -76,20 +77,13 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 - Classifier inputs: sector/industry keys and names (versioned policy tables), not price multiples. Expand tables only with tests; unmapped text must keep failing closed.
 - UI must surface refusal reasons (`valuation_unavailable_reason` / Detail DCF slot) — empty “—” without explanation is a product bug when the backend knows why.
 
-### Dynamic parameters — no eternal magic constants as truth
+### Dynamic parameters — no eternal magic constants
 
-Prefer **live or versioned market/policy inputs** over frozen literals:
+Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC.
 
-| Input | Expected source of truth |
-| --- | --- |
-| Risk-free rate \(r_f\) | Market series / `MarketParams` (not a permanent `400` bps constant as sole truth) |
-| Equity risk premium | Versioned policy / refreshable table (not eternal `500` bps alone) |
-| Beta | Company beta **shrunk** toward industry/sector beta (shrink is intentional estimation, not “provisional noise”) |
-| Near-term growth | Recent window of drivers (e.g. last ~3–5 years), not full-history CAGR from 2008 |
-| Stable growth \(g_{stable}\) | \(\min(\text{macro ceiling},\ r_f - \text{buffer},\ r - \varepsilon)\) — moves with regime |
-| Cost of equity / WACC | Derived from the above; **do not** use `MIN_WACC` / `MAX_WACC` as valuation truth |
-
-Policy defaults may exist as **bootstrapping** when live series are missing; they must be marked **provisional** in provenance and must not silently masquerade as high-confidence inputs.
+- **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
+- Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
+- Android production is wired: FRED DGS10 → Yahoo `^TNX` (1-day cache) → bootstrap; `ErpPolicy` (Damodaran implied *index* ERP, Kroll overlay, **no firm ICC**), `g_stable` via dated `MacroPolicy`. Windows is still on `from_live_risk_free` and out of this slice. Per-input detail: the canonical doc above.
 
 ### Structural constraints only — forbidden patches
 
@@ -97,7 +91,7 @@ Policy defaults may exist as **bootstrapping** when live series are missing; the
 
 - \(g_{stable} < r\) (Gordon identity)
 - Financial services ↛ FCFF as primary
-- Terminal ROE fade toward competitive long-run (e.g. toward \(r_e\)) for residual income
+- Terminal ROE holds min(through-cycle ROE0, cost of equity + 500 bps); raw ROE0 does not run forever
 - Missing required drivers → `Unavailable` / `NotEligible` with reason codes
 - Beta missing → industry shrink
 
@@ -111,30 +105,22 @@ Policy defaults may exist as **bootstrapping** when live series are missing; the
 
 Regression mindset: **ACGL must not emit FCFF-primary from float OCF**; use residual income (or unavailable if book/ROE missing).
 
-### Provenance and engine versioning
+### Provenance, parity, and engine versioning
 
-Every intrinsic should carry enough metadata for UI and scoring:
+Every intrinsic should carry metadata for UI and scoring: `business_class`, `model` (`fcff_wacc` | `residual_income_equity` | …), `discount_rate_kind`, `engine_version` / `model_policy_version`, WACC/CoE input provenance (reported vs default vs derived), and reason codes (e.g. `model=residual_income_equity`). Cache keys and revisions must invalidate when engine/policy/source fingerprints change.
 
-- `business_class`, `model` (`fcff_wacc` | `residual_income_equity` | …)
-- `discount_rate_kind` (`wacc` | `cost_of_equity`)
-- `engine_version` / `model_policy_version`
-- WACC / CoE input provenance (reported vs default vs derived)
-- Reason codes (e.g. `model=residual_income_equity`, `growth=recent_window_fade_to_stable`)
-
-Cache keys and revisions must invalidate when engine/policy/source fingerprints change.
-
-### Cross-platform parity
-
-- Windows: `apps/windows/src-tauri/src/dcf_model.rs`
-- Android: `apps/android/core/.../DcfAnalysisEngine.kt`
-- Desktop: `apps/desktop/src/workstation/app_core.rs` (FCFF fade + residual income routing)
-- Shared goldens under `shared/contracts/valuation-model-family.json` — dual implementations must not drift.
+Implementations must not drift from the shared goldens (Windows `dcf_model.rs`, Android `DcfAnalysisEngine.kt`, Desktop `app_core.rs` FCFF fade + residual income routing); goldens live under `shared/contracts/valuation-model-family.json`.
 
 Provider **source selection** (Yahoo vs SEC) is a separate layer: [`_bmad-output/implementation-artifacts/dcf-source-consistency-architecture.md`](_bmad-output/implementation-artifacts/dcf-source-consistency-architecture.md).
 
 ### SEC FCFF driver normalization
 
-For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cross a canonical normalization boundary before FCFF. Recurring development CapEx is consumed separately from the reviewed US-GAAP taxonomy set of property/business acquisition cash; acquisition facts stay visible as rejected evidence and are never added to FCFF. Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition from Y−1 to Y. Exclude that transition and retain clean recent observations when at least two exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance. Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved, consolidated USD annual evidence is unavailable—not zero or an imputed cash flow. Financial services remain on residual income.
+For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cross a canonical normalization boundary before FCFF:
+
+- Recurring development CapEx is consumed separately from the reviewed US-GAAP acquisition-cash set; acquisition facts stay visible as rejected evidence and are **never** added to FCFF.
+- Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition Y−1 → Y. Exclude that transition and retain clean recent observations when ≥2 exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance.
+- Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved consolidated USD annual evidence is **unavailable** — not zero, not an imputed cash flow.
+- Financial services remain on residual income.
 
 ## Quant Lens (signal vs noise)
 
@@ -184,29 +170,24 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 
 Windows also accepts `$env:DS_UNIVERSE_PROFILE = "qa"` then `npm run tauri:dev`, or `discount-screener-windows.exe --universe qa` (`--profile qa` on the **exe** only). Alias `test` → `qa`. Invalid profile **fails closed**.
 
-Membership: **≤20 persistent feed symbols** (SP500 ∩ latest snapshot gap≥25% ∩ score DESC ∩ top 20; thin DB → priority fill). Checklist names use one-shot `ensure_symbol_loaded` and must not grow the feed. Restart only after a native rebuild. Attach the running process: `npm run ds-ui -- status|self-check|open-detail SYM|dcf-slot|screenshot|invoke …` (`apps/windows/scripts/ds-ui.mjs`, CDP `127.0.0.1:9222`, DEV `window.__DS_AGENT__`). Gate: `npm run ds-ui:self-check` then `npm run live-qa:checklist`. `qa` is a top-ranking sample, not the whole product.
+`qa` is a **≤20 persistent feed symbol** sample (SP500 ∩ latest snapshot gap≥25% ∩ score DESC ∩ top 20; thin DB → priority fill), not the whole product. Checklist names use one-shot `ensure_symbol_loaded` and must not grow the feed. Restart only after a native rebuild. Attach the running process via `npm run ds-ui -- …` (CDP `127.0.0.1:9222`, DEV `window.__DS_AGENT__`); gate with `npm run ds-ui:self-check` then `npm run live-qa:checklist`.
 
 Checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).
 
 ### Commands and gates
 
 - Strict TDD for behavior changes: failing test → smallest green → refactor while green.
-- Desktop: `cargo test` from `apps/desktop`; `cargo run --manifest-path apps/desktop/Cargo.toml -- --smoke`.
-- Windows: `cargo test` in `apps/windows/src-tauri` (include `dcf_model`, `quant_lens` when touching valuation/lens).
-- Android: `scripts/validate-android.ps1` (always `:core:test`; app tasks when SDK configured).
-- **`--rerun` binds only to the task it follows.** Write it once per task: `./gradlew :core:test --rerun :app:testDebugUnitTest --rerun`. `UP-TO-DATE` on a test task means the suite did not run.
+- Per-surface suites: Desktop `cargo test` (from `apps/desktop`) + `--smoke`; Windows `cargo test` in `apps/windows/src-tauri` (include `dcf_model`, `quant_lens` when touching valuation/lens); Android `scripts/validate-android.ps1` (always `:core:test`; app tasks when SDK configured).
+- **`--rerun` binds only to the task it follows.** One per task; `UP-TO-DATE` on a test task means the suite did not run.
 - Valuation / Quant Lens: prefer goldens in `shared/contracts` and fixture regressions (ACGL residual income, TSLA disputed EV) over market-proximity asserts.
-- **Valuation merge bar (mandatory):** classifier, FCFF/WACC, CapEx→FCF, residual income, or model policy version **must** pass from `apps/windows/src-tauri`:
-  - `cargo test --lib valuation_baseline::`
-  - `cargo test --lib dcf_model::`
-  Single-ticker green is **not** enough. See `_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md`.
+- **Valuation merge bar (mandatory):** a classifier, FCFF/WACC, CapEx→FCF, residual income, or model policy version change **must** pass from `apps/windows/src-tauri`: `cargo test --lib valuation_baseline::` and `cargo test --lib dcf_model::`. Single-ticker green is **not** enough. See `_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md`.
 - External providers: ≥5 distinct real upstream samples; never invent Yahoo/SEC payloads when live behavior matters.
 - `cargo fmt` before finishing Rust changes.
-- Mutation testing around changed logic when practical; state the gap if not.
+- When practical, run mutation testing around changed logic; state the gap if not.
 - **Mutate a constant in both directions**, or the round proves half of what it claims. A `>` assert survives one direction by construction.
-- **A field the engine writes needs a reader.** Grep the field name under `src/main` and name the consumer before the wave is done.
+- **A field the engine writes needs a reader.** Grep the field name under `src/main` and name the consumer before the work is done.
 - **A numeric gate must state the sign it expects**, not only the magnitude.
-- **A property no live QA can reach is verified by test or it is not verified.** Check path reachability under the `qa` universe before you arm a live stage.
+- **A property no live QA can reach is verified by test or it is not verified.** Check `qa`-universe path reachability before arming a live stage.
 
 ## Preventing repeat operational errors (critical)
 

@@ -19,6 +19,7 @@ import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.NasdaqTraderSymbolDirectoryClient
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
+import com.discountscreener.android.data.remote.ResidualCompanyFactsProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
@@ -32,6 +33,7 @@ import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
 import com.discountscreener.android.domain.model.LeftoverBoardAssembler
 import com.discountscreener.android.domain.model.PlanBoardAssembler
 import com.discountscreener.core.plan.DipRowInput
@@ -53,7 +55,10 @@ import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
+import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.MarketParams
+import com.discountscreener.core.engine.MarketParamsSource
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.EstimatesHistoryPolicy
 import com.discountscreener.core.engine.IndexEstimatesEngine
@@ -64,7 +69,9 @@ import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.QuantLensExpectedValuePolicy
 import com.discountscreener.core.engine.ReportingEngine
+import com.discountscreener.core.engine.ResidualFromDrivers
 import com.discountscreener.core.engine.ScreenDataProjectionEngine
+import com.discountscreener.core.engine.ValuationJudgmentAssembler
 import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.engine.TickerSearchCandidate
 import com.discountscreener.core.engine.TickerSearchEngine
@@ -160,6 +167,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToLong
 
 private data class SymbolRefreshResult(
@@ -171,6 +179,7 @@ private data class SymbolRefreshResult(
     val fallbackFundamentals: FundamentalSnapshot? = null,
     val fallbackTimeseries: FundamentalTimeseries? = null,
     val fallbackDcfAnalysis: DcfAnalysis? = null,
+    val residualOutcome: ResidualFromDrivers.Outcome? = null,
     val chartError: Throwable? = null,
     val retryable: Boolean = false,
     val refreshedAtEpochSeconds: Long,
@@ -182,6 +191,7 @@ private data class EnrichmentResult(
     val chartCaptures: List<Pair<ChartRange, List<HistoricalCandle>>>,
     val timeseries: FundamentalTimeseries?,
     val dcfAnalysis: DcfAnalysis?,
+    val residualFundamentals: FundamentalSnapshot? = null,
     val errors: List<ProviderDiagnostic>,
 )
 
@@ -236,12 +246,20 @@ class DefaultDashboardRepository(
      * Release product default remains [PRODUCT_DEFAULT_PROFILE] (`sp500`).
      */
     private val defaultProfile: String = PRODUCT_DEFAULT_PROFILE,
+    /**
+     * Live FRED + versioned ERP in production. Tests keep the bootstrap default
+     * so they stay on rf=430 / erp=450 / provisional=true.
+     */
+    private val marketParamsSource: MarketParamsSource = BootstrapMarketParamsSource,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
     private val updates = MutableStateFlow(0L)
     private val dcfSourceCoordinator = DcfSourceCoordinator(yahooClient, secondaryTimeseriesProvider)
+    private val residualFactsProvider: ResidualCompanyFactsProvider? =
+        secondaryTimeseriesProvider as? ResidualCompanyFactsProvider
+    private val residualChainRan = ConcurrentHashMap.newKeySet<String>()
     private val screenDataProjectionEngine = ScreenDataProjectionEngine()
     private val discoveryCoordinator = DiscoveryCoordinator(
         stateStore = stateStore,
@@ -258,6 +276,27 @@ class DefaultDashboardRepository(
     private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
+    @Volatile
+    private var lastMarketParams: MarketParams = MarketParams()
+    private val marketParamsPrefetch = repositoryScope.launch {
+        logger.info(TAG, "market params prefetch start")
+        var params = runCatching { marketParamsSource.current() }
+            .onFailure { error -> logger.error(TAG, "market params prefetch failed", error) }
+            .getOrElse { MarketParams() }
+        logger.info(TAG, "market params ${params.displayLabel()}")
+        lastMarketParams = params
+        var evicted = false
+        stateMutex.withLock {
+            var stale = dcfCache.filterValues { analysis ->
+                !analysis.reasonCodes.contains(params.fingerprint())
+            }.keys.toList()
+            stale.forEach { symbol -> dcfCache.remove(symbol) }
+            evicted = stale.isNotEmpty()
+        }
+        if (evicted) {
+            updates.value += 1L
+        }
+    }
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
     private val quantLensCache = linkedMapOf<String, QuantLensCacheEntry>()
     private val issues = linkedMapOf<String, PersistedIssueRecord>()
@@ -482,9 +521,20 @@ class DefaultDashboardRepository(
         val needsDcfResolve = stateMutex.withLock {
             fundamentals != null && needsDcfResolutionLocked(symbol)
         }
-        if (fundamentals != null && needsDcfResolve) {
+        if (fundamentals != null && needsDcfResolve && isFinancialServices(fundamentals)) {
+            val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
+            stateMutex.withLock {
+                engine.ingestFundamentals(outcome.fundamentals)
+                putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+            }
+        } else if (fundamentals != null && needsDcfResolve) {
             val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
-                DcfAnalysisEngine.compute(fundamentals, timeseries, marketPriceCents).getOrNull()
+                DcfAnalysisEngine.compute(
+                    fundamentals,
+                    timeseries,
+                    marketPriceCents,
+                    marketParams(),
+                ).getOrThrow()
             }
             val resolvedAnalysis = analysisFromSelection(selection, fundamentals)
             selection.timeseries?.let { timeseries ->
@@ -768,6 +818,15 @@ class DefaultDashboardRepository(
         if (yearCandles.isNotEmpty()) {
             chartCaptures += ChartRange.Year to yearCandles
         }
+        var adHocResidual = providerResult.fundamentals
+            ?.takeIf(::isFinancialServices)
+            ?.let { fund ->
+                residualFromDrivers(
+                    normalizedSymbol,
+                    fund,
+                    providerResult.snapshot?.marketPriceCents,
+                )
+            }
 
         stateMutex.withLock {
             providerResult.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
@@ -787,7 +846,12 @@ class DefaultDashboardRepository(
                 }
             }
             providerResult.externalSignal?.let(engine::ingestExternal)
-            providerResult.fundamentals?.let(engine::ingestFundamentals)
+            if (adHocResidual != null) {
+                engine.ingestFundamentals(adHocResidual.fundamentals)
+                putDcfAnalysisLocked(normalizedSymbol, adHocResidual.analysis, adHocResidual.fundamentals)
+            } else {
+                providerResult.fundamentals?.let(engine::ingestFundamentals)
+            }
             providerResult.snapshot?.let {
                 refreshedSymbols += normalizedSymbol
                 freshnessTimestampBySymbol[normalizedSymbol] = fetchedAt
@@ -1001,6 +1065,16 @@ class DefaultDashboardRepository(
         } else {
             null
         }
+        var residualOutcome = providerResult.fundamentals
+            ?.takeIf(::isFinancialServices)
+            ?.let { fund ->
+                residualFromDrivers(
+                    symbol,
+                    fund,
+                    providerResult.snapshot?.marketPriceCents
+                        ?: chartCandles?.lastOrNull()?.closeCents,
+                )
+            }
         return SymbolRefreshResult(
             generation = generation,
             symbol = symbol,
@@ -1010,6 +1084,7 @@ class DefaultDashboardRepository(
             fallbackFundamentals = dcfFallback?.fundamentals,
             fallbackTimeseries = dcfFallback?.timeseries,
             fallbackDcfAnalysis = dcfFallback?.analysis,
+            residualOutcome = residualOutcome,
             chartError = chartResult.exceptionOrNull(),
             retryable = providerResult.diagnostics.any { it.retryable } ||
                 chartResult.exceptionOrNull()?.let(::isRetryable) == true,
@@ -1034,7 +1109,9 @@ class DefaultDashboardRepository(
             null
         }
         val effectiveSnapshot = providerResult?.snapshot ?: fallbackSnapshot ?: result.fallbackSnapshot
-        val effectiveFundamentals = providerResult?.fundamentals ?: result.fallbackFundamentals
+        val effectiveFundamentals = result.residualOutcome?.fundamentals
+            ?: providerResult?.fundamentals
+            ?: result.fallbackFundamentals
 
         providerResult?.companyName?.takeIf { name -> isUsableCompanyName(name) }?.let { companyName ->
             companyNameBySymbol[result.symbol] = companyName
@@ -1076,13 +1153,23 @@ class DefaultDashboardRepository(
                 capturedAt = result.refreshedAtEpochSeconds,
                 payload = RawCapturePayload.Fundamentals(it),
             )
-            recomputeCachedDcfLocked(result.symbol, it)
+            if (result.residualOutcome != null) {
+                putDcfAnalysisLocked(
+                    result.symbol,
+                    result.residualOutcome.analysis,
+                    result.residualOutcome.fundamentals,
+                )
+            } else {
+                recomputeCachedDcfLocked(result.symbol, it)
+            }
         }
         result.fallbackTimeseries?.let { timeseries ->
             timeseriesCache[result.symbol] = timeseries
         }
-        result.fallbackDcfAnalysis?.let { analysis ->
-            putDcfAnalysisLocked(result.symbol, analysis, effectiveFundamentals)
+        if (result.residualOutcome == null) {
+            result.fallbackDcfAnalysis?.let { analysis ->
+                putDcfAnalysisLocked(result.symbol, analysis, effectiveFundamentals)
+            }
         }
 
         result.chartCandles?.takeIf(List<HistoricalCandle>::isNotEmpty)?.let { candles ->
@@ -1649,12 +1736,13 @@ class DefaultDashboardRepository(
             var detail = projectedRow.detail ?: engine.detail(projectedRow.symbol)
             var state = trackedRowStateFromProjection(projectedRow.symbol, detail, issueMessagesBySymbol[projectedRow.symbol])
             var fairValueCents = projectedRow.fairValueAnchor.valueCents
+            var namesPrimary = projectedRow.valuationJudgment?.primaryCents != null
             TrackedSymbolRow(
                 symbol = projectedRow.symbol,
                 marketPriceCents = projectedRow.marketPriceCents ?: detail?.marketPriceCents,
-                intrinsicValueCents = fairValueCents,
-                gapBps = projectedRow.gapBps ?: detail?.gapBps,
-                upsideBps = projectedRow.upsideBps ?: detail?.upsideBps,
+                intrinsicValueCents = if (namesPrimary) fairValueCents else null,
+                gapBps = if (namesPrimary) projectedRow.gapBps else null,
+                upsideBps = if (namesPrimary) projectedRow.upsideBps else null,
                 confidence = projectedRow.confidence.toConfidenceBandOrNull(),
                 qualification = detail?.qualification,
                 isWatched = engine.isWatched(projectedRow.symbol),
@@ -1683,6 +1771,9 @@ class DefaultDashboardRepository(
                         opportunityRow = null,
                     )
                 },
+                valuationStanceLabel = projectedRow.valuationJudgment?.let {
+                    presentValuationJudgment(it).stanceLabel
+                },
             )
         }
     }
@@ -1710,9 +1801,15 @@ class DefaultDashboardRepository(
         return projectedRows.mapIndexed { currentIndex, projectedRow ->
             var scoredRow = scoredBySymbol[projectedRow.symbol]
             var detail = engine.detail(projectedRow.symbol)
-            var fairValueCents = projectedRow.fairValueAnchor.valueCents ?: projectedRow.candidateRow.intrinsicValueCents
-            var gapBps = projectedRow.gapBps ?: projectedRow.candidateRow.gapBps
-            var upsideBps = projectedRow.upsideBps ?: projectedRow.candidateRow.upsideBps
+            var namesPrimary = projectedRow.valuationJudgment?.primaryCents != null
+            var namedFairValueCents = if (namesPrimary) {
+                projectedRow.fairValueAnchor.valueCents ?: projectedRow.candidateRow.intrinsicValueCents
+            } else {
+                null
+            }
+            var fairValueCents = namedFairValueCents ?: projectedRow.candidateRow.intrinsicValueCents
+            var gapBps = if (namesPrimary) projectedRow.gapBps else null
+            var upsideBps = if (namesPrimary) projectedRow.upsideBps else null
             var freshness = projectedRow.freshness.toRowFreshness()
             var confidence = projectedRow.confidence.toConfidenceBandOrNull() ?: scoredRow?.confidence ?: projectedRow.candidateRow.confidence
             var baselineRank = comparisonBaselineOpportunityRankByModel.getValue(scoringModel)[projectedRow.symbol]
@@ -1753,15 +1850,23 @@ class DefaultDashboardRepository(
                 rankMovement = rankMovement(baselineRank, currentIndex),
                 valuationChange = significantValuationChange(
                     comparisonBaselineWeightedFairValueBySymbol[projectedRow.symbol],
-                    fairValueCents,
+                    namedFairValueCents,
                 ),
-                explanation = opportunityExplanationFromProjection(projectedRow.symbol, currentIndex, fairValueCents, baselineRank),
+                explanation = opportunityExplanationFromProjection(
+                    projectedRow.symbol,
+                    currentIndex,
+                    namedFairValueCents,
+                    baselineRank,
+                ),
                 decisionState = projectedRow.decision.toRowDecisionState(),
                 quantLensSummary = projectedRow.quantLensSummary ?: detail?.let {
                     buildRowQuantLensSummaryLocked(
                         detail = it,
                         opportunityRow = scoredRow,
                     )
+                },
+                valuationStanceLabel = projectedRow.valuationJudgment?.let {
+                    presentValuationJudgment(it).stanceLabel
                 },
             )
         }
@@ -2905,6 +3010,7 @@ class DefaultDashboardRepository(
             fundamentals = fundamentals,
             timeseries = timeseries,
             marketPriceCents = marketPriceCents,
+            marketParams = marketParams(),
         ).getOrNull() ?: return null
         return TimeseriesFallback(
             snapshot = MarketSnapshot(
@@ -2971,6 +3077,7 @@ class DefaultDashboardRepository(
         betaMillis = existing.betaMillis ?: derived.betaMillis,
         trailingEpsCents = existing.trailingEpsCents ?: derived.trailingEpsCents,
         earningsGrowthBps = existing.earningsGrowthBps ?: derived.earningsGrowthBps,
+        bookValuePerShareCents = existing.bookValuePerShareCents ?: derived.bookValuePerShareCents,
         retentionBps = existing.retentionBps ?: derived.retentionBps,
     ) ?: derived
 
@@ -3106,14 +3213,24 @@ class DefaultDashboardRepository(
         var dcfAnalysis: DcfAnalysis? = null
 
         val needsDcfResolve = stateMutex.withLock { needsDcfResolutionLocked(symbol) }
+        var residualFundamentals: FundamentalSnapshot? = null
         if (needsDcfResolve) {
             try {
                 val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
                 val fundamentals = detailForDcf?.fundamentals
                 val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
-                if (fundamentals != null) {
+                if (fundamentals != null && isFinancialServices(fundamentals)) {
+                    val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
+                    residualFundamentals = outcome.fundamentals
+                    dcfAnalysis = outcome.analysis
+                } else if (fundamentals != null) {
                     val selection = dcfSourceCoordinator.resolve(symbol) { selectedTimeseries ->
-                        DcfAnalysisEngine.compute(fundamentals, selectedTimeseries, marketPriceCents).getOrNull()
+                        DcfAnalysisEngine.compute(
+                            fundamentals,
+                            selectedTimeseries,
+                            marketPriceCents,
+                            marketParams(),
+                        ).getOrThrow()
                     }
                     timeseries = selection.timeseries
                     dcfAnalysis = analysisFromSelection(selection, fundamentals)
@@ -3135,6 +3252,7 @@ class DefaultDashboardRepository(
             chartCaptures = chartCaptures,
             timeseries = timeseries,
             dcfAnalysis = dcfAnalysis,
+            residualFundamentals = residualFundamentals,
             // Caller drops errors on non-final rounds; keep retryable markers for queue detection.
             errors = if (recordErrors) {
                 errors
@@ -3177,11 +3295,14 @@ class DefaultDashboardRepository(
                 capturedAt = capturedAt,
             )
         }
+        result.residualFundamentals?.let { fund ->
+            engine.ingestFundamentals(fund)
+        }
         result.dcfAnalysis?.let { analysis ->
             putDcfAnalysisLocked(
                 result.symbol,
                 analysis,
-                engine.detail(result.symbol)?.fundamentals,
+                result.residualFundamentals ?: engine.detail(result.symbol)?.fundamentals,
             )
         }
 
@@ -3233,6 +3354,7 @@ class DefaultDashboardRepository(
             fundamentals = fundamentals,
             timeseries = selectedTimeseries,
             marketPriceCents = marketPriceCents,
+            marketParams = marketParams(),
         ).getOrNull()
         if (recomputed == null) {
             dcfCache.remove(symbol)
@@ -3288,6 +3410,7 @@ class DefaultDashboardRepository(
                 fund.industryName,
                 fund.sectorKey,
                 fund.industryKey,
+                symbol = symbol,
             )
             if (
                 businessClass == BusinessClass.Unclassified ||
@@ -3321,6 +3444,7 @@ class DefaultDashboardRepository(
             fund.industryName,
             fund.sectorKey,
             fund.industryKey,
+            symbol = symbol,
         )
         if (
             businessClass == BusinessClass.Unclassified ||
@@ -3340,34 +3464,66 @@ class DefaultDashboardRepository(
         if (!needsReplace) return
 
         val marketPriceCents = engine.detail(symbol)?.marketPriceCents?.takeIf { it > 0L }
-        val timeseries = timeseriesCache[symbol] ?: FundamentalTimeseries()
-        val recomputed = DcfAnalysisEngine.compute(
-            fundamentals = fund,
-            timeseries = timeseries,
+        val chainRan = residualChainRan.contains(symbol)
+        val outcome = ResidualFromDrivers.compute(
+            yahoo = fund,
+            secFactsJson = null,
+            secFetchAttempted = chainRan,
             marketPriceCents = marketPriceCents,
-        ).getOrNull()
-        if (recomputed == null) {
-            dcfCache.remove(symbol)
+            marketParams = marketParams(),
+            instrumentId = symbol,
+            shareBasis = ValuationJudgmentAssembler.SHARE_BASIS,
+        )
+        if (outcome.analysis.model == ValuationModel.ResidualIncomeEquity) {
+            putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
             return
         }
-        val admitted = if (current != null) {
-            recomputed.copy(
-                source = current.source,
-                sourceFingerprint = current.sourceFingerprint,
-                resolverState = current.resolverState,
-                decisionFingerprint = current.decisionFingerprint,
-                provenance = current.provenance,
-                providerReasons = current.providerReasons,
-            )
-        } else {
-            recomputed
+        if (chainRan) {
+            putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+            return
         }
-        putDcfAnalysisLocked(symbol, admitted, fund)
+        dcfCache.remove(symbol)
     }
+
+    private fun marketParams(): MarketParams = lastMarketParams
+
+    private fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+        DcfAnalysisEngine.classifyBusiness(
+            fundamentals.sectorName,
+            fundamentals.industryName,
+            fundamentals.sectorKey,
+            fundamentals.industryKey,
+            symbol = fundamentals.symbol,
+        ) == BusinessClass.FinancialServices
+
+    private suspend fun residualFromDrivers(
+        symbol: String,
+        yahoo: FundamentalSnapshot,
+        marketPriceCents: Long?,
+    ): ResidualFromDrivers.Outcome {
+        var slim = residualFactsProvider?.fetchSievedCompanyFacts(symbol)
+        residualChainRan.add(symbol)
+        return ResidualFromDrivers.compute(
+            yahoo = yahoo,
+            secFactsJson = slim,
+            secFetchAttempted = residualFactsProvider != null,
+            marketPriceCents = marketPriceCents,
+            marketParams = marketParams(),
+            instrumentId = symbol,
+            shareBasis = ValuationJudgmentAssembler.SHARE_BASIS,
+        )
+    }
+
+    internal fun peekMarketParams(): MarketParams = lastMarketParams
 
     private fun needsDcfResolutionLocked(symbol: String): Boolean {
         val analysis = dcfCache[symbol] ?: return true
         if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
+            dcfCache.remove(symbol)
+            return true
+        }
+        var params = marketParams()
+        if (!analysis.reasonCodes.contains(params.fingerprint())) {
             dcfCache.remove(symbol)
             return true
         }
@@ -3378,6 +3534,7 @@ class DefaultDashboardRepository(
                 fund.industryName,
                 fund.sectorKey,
                 fund.industryKey,
+                symbol = symbol,
             )
             if (
                 businessClass == BusinessClass.Unclassified ||
@@ -3467,6 +3624,7 @@ class DefaultDashboardRepository(
                     it.industryName,
                     it.sectorKey,
                     it.industryKey,
+                    symbol = it.symbol,
                 )
             } ?: BusinessClass.Unclassified,
             model = ValuationModel.None,
@@ -3517,6 +3675,7 @@ class DefaultDashboardRepository(
                     it.industryName,
                     it.sectorKey,
                     it.industryKey,
+                    symbol = it.symbol,
                 )
             } ?: BusinessClass.Unclassified,
             model = ValuationModel.None,
@@ -3568,6 +3727,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dcfCache.clear()
         timeseriesCache.clear()
+        residualChainRan.clear()
         quantLensCache.clear()
         issues.clear()
         staleSymbols.clear()

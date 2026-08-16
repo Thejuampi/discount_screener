@@ -1,7 +1,7 @@
 # SEC Primary Evidence Gate
 
 Date: 2026-05-04
-Status: SEC primary remains disabled by default
+Status: SEC secondary is wired on Android. Five-sample promotion artifact is still open.
 Owner: Android data / DCF source policy
 
 ## Decision

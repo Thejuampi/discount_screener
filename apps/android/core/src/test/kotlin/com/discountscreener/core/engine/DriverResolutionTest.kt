@@ -67,6 +67,20 @@ class DriverResolutionTest {
     }
 
     @Test
+    fun yahoo_tax_rate_for_calcs_is_not_used_as_wacc_tax() {
+        var series = financingTimeseries().copy(
+            marginalTaxRate = emptyList(),
+            taxRateForCalcs = financingTimeseries().marginalTaxRate.map {
+                it.copy(concept = "annualTaxRateForCalcs")
+            },
+        )
+        var error = assertFailsWith<IllegalArgumentException> {
+            resolveRateInputs(series, 120L, 430).getOrThrow()
+        }
+        assertTrue(error.message.orEmpty().contains("marginal tax is unavailable"))
+    }
+
+    @Test
     fun unlabelled_marginal_tax_is_not_used() {
         val unlabelled = financingTimeseries().copy(
             marginalTaxRate = financingTimeseries().marginalTaxRate.map { it.copy(concept = null) },
@@ -88,6 +102,32 @@ class DriverResolutionTest {
      * number of aligned financing periods. The number is pinned here so the change is a measured
      * one. Windows's peer (`driver_resolution.rs:222`) still takes the upper value.
      */
+    @Test
+    fun coverage_synthetic_precedes_a_cheap_accounting_coupon() {
+        var thin = financingTimeseries().copy(
+            pretaxIncome = listOf(
+                AnnualReportedValue("2021-12-31", 5.0),
+                AnnualReportedValue("2022-12-31", 5.5),
+                AnnualReportedValue("2023-12-31", 6.0),
+            ),
+        )
+        var resolved = resolveRateInputs(thin, 120L, 430).getOrThrow()!!
+        assertEquals(734, resolved.costOfDebtBps)
+    }
+
+    @Test
+    fun coverage_synthetic_labels_the_rated_or_synthetic_rung() {
+        var thin = financingTimeseries().copy(
+            pretaxIncome = listOf(
+                AnnualReportedValue("2021-12-31", 5.0),
+                AnnualReportedValue("2022-12-31", 5.5),
+                AnnualReportedValue("2023-12-31", 6.0),
+            ),
+        )
+        var resolved = resolveRateInputs(thin, 120L, 430).getOrThrow()!!
+        assertEquals(WaccFieldSource.RatedOrSyntheticSpread, resolved.costOfDebtSource)
+    }
+
     @Test
     fun the_annual_cost_of_debt_is_the_middle_of_an_even_count_not_the_upper_of_it() {
         var fourPeriods = FundamentalTimeseries(

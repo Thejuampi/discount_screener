@@ -536,7 +536,7 @@ class DcfAnalysisEngineTest {
             analysis.baseIntrinsicValueCents >= 10_000L,
             "AMZN base must clear $100",
         )
-        assertEquals(1_478, analysis.normalizedOcfMarginBps)
+        assertEquals(1_946, analysis.normalizedOcfMarginBps)
         assertEquals(1_238, analysis.normalizedCapexIntensityBps)
         assertEquals(listOf(2025), analysis.capexSpikeYears)
         assertTrue(analysis.baseGrowthBps > -900)
@@ -697,6 +697,17 @@ class DcfAnalysisEngineTest {
                 industryKey = "healthcare-plans",
             ),
         )
+    }
+
+    @Test
+    fun compute_records_the_market_params_fingerprint() {
+        var params = MarketParams.observed(rfBps = 425, asOfEpochMillis = 1_786_752_000_000L)
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries(),
+            marketParams = params,
+        ).getOrThrow()
+        assertTrue(analysis.reasonCodes.contains(params.fingerprint()))
     }
 
     @Test

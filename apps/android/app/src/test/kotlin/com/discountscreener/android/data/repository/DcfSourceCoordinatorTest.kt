@@ -36,6 +36,19 @@ class DcfSourceCoordinatorTest {
     }
 
     @Test
+    fun resolve_keeps_the_compute_error_on_the_candidate() = runTest {
+        var yahoo = CountingYahooFinanceClient()
+        var coordinator = DcfSourceCoordinator(yahooClient = yahoo)
+        var selection = coordinator.resolve("AAPL") {
+            error("fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required")
+        }
+        assertEquals(
+            "fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required",
+            selection.reasons.firstOrNull()?.upstreamStatus,
+        )
+    }
+
+    @Test
     fun resolve_selects_usable_yahoo_when_secondary_provider_is_unavailable() = runTest {
         var yahoo = CountingYahooFinanceClient()
         var secondary = UnavailableTimeseriesProvider()

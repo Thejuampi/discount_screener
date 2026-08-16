@@ -53,6 +53,7 @@ internal fun resolveRateInputs(
     }.distinctBy { it.first }.sortedBy { it.first }
 
     val taxByPeriod = timeseries.marginalTaxRate
+        .ifEmpty { timeseries.taxRateForCalcs }
         .mapNotNull { tax ->
             val value = normalizeTaxBps(tax.value) ?: return@mapNotNull null
             Triple(annualKey(tax), value, taxSource(tax.concept))
@@ -79,6 +80,19 @@ internal fun resolveRateInputs(
     val marketCommon = marketYields.filter { taxPeriodsAll.contains(it.first) }
     val ratedCommon = ratedSpreads.filter { taxPeriodsAll.contains(it.first) }
     val accountingCommon = accounting.filter { taxPeriodsAll.contains(it.first) }
+    val coverageByPeriod = timeseries.interestExpense.mapNotNull { interest ->
+        val key = annualKey(interest)
+        if (!taxPeriodsAll.contains(key)) return@mapNotNull null
+        val pretax = timeseries.pretaxIncome.firstOrNull { annualKey(it) == key }
+            ?: return@mapNotNull null
+        if (!interest.value.isFinite() || interest.value <= 0.0) return@mapNotNull null
+        if (!pretax.value.isFinite()) return@mapNotNull null
+        key to ((pretax.value + interest.value) / interest.value)
+    }.distinctBy { it.first }.sortedBy { it.first }
+    val coverageSpreadBps = coverageByPeriod
+        .map { it.second }
+        .let { medianOf(it) }
+        ?.let { CoverageCreditPolicy.spreadBps(it) }
 
     val costOfDebtBps: Int
     val costOfDebtSource: WaccFieldSource
@@ -93,6 +107,11 @@ internal fun resolveRateInputs(
             costOfDebtBps = (_riskFreeBps + ratedCommon.last().second).coerceAtMost(Int.MAX_VALUE)
             costOfDebtSource = WaccFieldSource.RatedOrSyntheticSpread
             debtPeriods = listOf(ratedCommon.last().first)
+        }
+        coverageSpreadBps != null -> {
+            costOfDebtBps = (_riskFreeBps + coverageSpreadBps).coerceAtMost(Int.MAX_VALUE)
+            costOfDebtSource = WaccFieldSource.RatedOrSyntheticSpread
+            debtPeriods = coverageByPeriod.map { it.first }
         }
         accountingCommon.isNotEmpty() -> {
             // Resolve one annual rate per fiscal period. Summing several
@@ -142,6 +161,7 @@ internal fun resolveRateInputs(
         WaccFieldSource.TaxReconciliation,
         WaccFieldSource.JurisdictionStatutory,
         WaccFieldSource.DomicileTaxProxy,
+        WaccFieldSource.ReportedMarginalTax,
     ).firstOrNull { source ->
         taxByPeriod.any { (period, _, candidate) ->
             candidate == source && debtPeriods.contains(period)
@@ -157,13 +177,23 @@ internal fun resolveRateInputs(
     require(taxPeriods.isNotEmpty()) {
         "fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources"
     }
-    val quality = if (taxPeriods.size >= 3 && selectedTaxSource != WaccFieldSource.DomicileTaxProxy) {
+    val quality = if (
+        taxPeriods.size >= 3 &&
+        selectedTaxSource != WaccFieldSource.DomicileTaxProxy &&
+        selectedTaxSource != WaccFieldSource.ReportedMarginalTax
+    ) {
         DriverEvidenceQuality.Solid
     } else {
         DriverEvidenceQuality.Provisional
     }
     buildList {
         add("cost_of_debt_source=${costOfDebtSource.toSourceToken()}")
+        if (costOfDebtSource == WaccFieldSource.RatedOrSyntheticSpread &&
+            ratedCommon.isEmpty() &&
+            coverageSpreadBps != null
+        ) {
+            add("coverage_synthetic=median_spread:$coverageSpreadBps")
+        }
         add("marginal_tax_source=${selectedTaxSource.toSourceToken()}")
         add("rate_quality=${quality.name.lowercase()}")
         add("aligned_debt_periods=${debtPeriods.joinToString(",")}")
@@ -192,6 +222,7 @@ private fun WaccFieldSource.toSourceToken(): String = when (this) {
     WaccFieldSource.JurisdictionStatutory -> "jurisdiction_statutory"
     WaccFieldSource.DomicileTaxProxy -> "domicile_tax_proxy"
     WaccFieldSource.ReportedMarginalTax -> "reported_marginal_tax"
+    WaccFieldSource.HistoricalEffectiveTax -> "historical_effective_tax"
     else -> name.lowercase()
 }
 
@@ -202,6 +233,10 @@ private fun taxSource(concept: String?): WaccFieldSource = when {
         WaccFieldSource.JurisdictionStatutory
     concept?.contains("Domicile", ignoreCase = true) == true ->
         WaccFieldSource.DomicileTaxProxy
+    concept?.contains("TaxRateForCalcs", ignoreCase = true) == true ->
+        WaccFieldSource.HistoricalEffectiveTax
+    concept?.contains("MarginalTax", ignoreCase = true) == true ->
+        WaccFieldSource.ReportedMarginalTax
     else -> WaccFieldSource.Unavailable
 }
 

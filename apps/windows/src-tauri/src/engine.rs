@@ -2277,7 +2277,8 @@ impl ScreenerState {
         // Never persist FCFF for financials — stale float-OCF DCFs (e.g. ACGL $875) must die here.
         if analysis.model == crate::dcf_model::ValuationModel::FcffWacc {
             if let Some(fund) = self.fundamentals.get(&symbol) {
-                let class = crate::dcf_model::classify_business(
+                let class = crate::dcf_model::classify_business_for(
+                    Some(symbol.as_str()),
                     fund.sector_name.as_deref(),
                     fund.industry_name.as_deref(),
                     fund.sector_key.as_deref(),
@@ -2423,7 +2424,8 @@ impl ScreenerState {
             return None;
         }
         if let Some(fund) = self.fundamentals.get(symbol) {
-            let class = crate::dcf_model::classify_business(
+            let class = crate::dcf_model::classify_business_for(
+                Some(symbol),
                 fund.sector_name.as_deref(),
                 fund.industry_name.as_deref(),
                 fund.sector_key.as_deref(),
@@ -2455,7 +2457,8 @@ impl ScreenerState {
         {
             self.clear_dcf(symbol);
         }
-        let class = crate::dcf_model::classify_business(
+        let class = crate::dcf_model::classify_business_for(
+            Some(symbol),
             fund.sector_name.as_deref(),
             fund.industry_name.as_deref(),
             fund.sector_key.as_deref(),

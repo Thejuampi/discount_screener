@@ -1,5 +1,7 @@
 package com.discountscreener.core.model
 
+import com.discountscreener.core.engine.ValuationJudgmentReason
+import com.discountscreener.core.engine.ValuationJudgmentStatus
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -110,6 +112,7 @@ data class ProjectedTrackedRow(
     val decision: ProjectedRowDecision? = null,
     val explanation: ProjectedRowExplanation? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
+    val valuationJudgment: ProjectedValuationJudgment? = null,
 ) {
     init {
         require(symbol.isNotBlank()) { "Projected tracked row symbol is required." }
@@ -130,6 +133,7 @@ data class ProjectedOpportunityRow(
     val trustSignal: ProjectedTrustSignal? = null,
     val decision: ProjectedRowDecision? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
+    val valuationJudgment: ProjectedValuationJudgment? = null,
 ) {
     init {
         require(symbol.isNotBlank()) { "Projected opportunity row symbol is required." }
@@ -148,6 +152,7 @@ data class ProjectedDetailData(
     val waccBps: Int? = null,
     val waccProvisional: Boolean = false,
     val waccAssumptionLabels: List<String> = emptyList(),
+    val marketParamsLabel: String? = null,
     /** User-visible refuse copy when valuation is unavailable (Windows Detail parity). */
     val valuationUnavailableReason: String? = null,
     /** Honest model label: FCFF DCF vs Residual income. */
@@ -166,6 +171,7 @@ data class ProjectedDetailData(
     val driverRegime: String? = null,
     val growthDispersionBps: Int? = null,
     val growthDriver: String? = null,
+    val valuationJudgment: ProjectedValuationJudgment? = null,
 ) {
     init {
         require(symbol.isNotBlank()) { "Projected detail symbol is required." }
@@ -370,6 +376,30 @@ data class ProjectedFairValueAnchor(
         )
     }
 }
+
+@Serializable
+data class ProjectedValuationJudgment(
+    val status: ValuationJudgmentStatus,
+    val relation: AnchorRelation,
+    val primaryCents: Long? = null,
+    val reasonCodes: List<ValuationJudgmentReason> = emptyList(),
+    val policyVersion: String,
+    val identityBearCents: Long? = null,
+    val identityBaseCents: Long? = null,
+    val identityBullCents: Long? = null,
+    val identityModelLabel: String? = null,
+    val streetLowCents: Long? = null,
+    val streetBaseCents: Long? = null,
+    val streetHighCents: Long? = null,
+    val femTargetCents: Long? = null,
+    val lastPriceCents: Long? = null,
+    val horizonPriceCents: Long? = null,
+    val horizonDays: Int? = null,
+    val cashIdentityCents: Long? = null,
+    val upsideToHorizonBps: Int? = null,
+    val priceSpeechReasons: List<String> = emptyList(),
+    val priceSpeechPolicyVersion: String? = null,
+)
 
 object ProjectedFairValueLabels {
     const val ANALYST_FAIR_VALUE: String = "Analyst fair value"

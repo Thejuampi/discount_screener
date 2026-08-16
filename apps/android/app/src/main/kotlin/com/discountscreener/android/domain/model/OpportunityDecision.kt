@@ -25,7 +25,7 @@ data class OpportunityDecisionExplanation(
 fun explainOpportunityDecision(
     freshness: RowFreshness,
     confidence: ConfidenceBand,
-    upsideBps: Int,
+    upsideBps: Int?,
     compositeScore: Int,
     trustNote: String?,
     scoringModel: OpportunityScoringModel,
@@ -33,7 +33,8 @@ fun explainOpportunityDecision(
     var avoidBelow = OpportunityEngine.avoidBelowScore(scoringModel)
     var actAtOrAbove = OpportunityEngine.actAtOrAboveScore(scoringModel)
     var live = freshness == RowFreshness.Updated
-    var upsideOk = upsideBps > 0
+    var namedUpside = upsideBps != null
+    var upsideOk = upsideBps != null && upsideBps > 0
     var scoreAvoids = compositeScore < avoidBelow
     var scoreMeetsAct = compositeScore >= actAtOrAbove
     var trustClear = trustNote == null
@@ -52,6 +53,11 @@ fun explainOpportunityDecision(
             state = RowDecisionState.Avoid
             why = "Avoid because confidence is Low."
             blocked = "Confidence"
+        }
+        !namedUpside -> {
+            state = RowDecisionState.Watch
+            why = "Watch because judgment names no primary."
+            blocked = "Upside"
         }
         !upsideOk -> {
             state = RowDecisionState.Avoid
@@ -117,7 +123,8 @@ fun explainOpportunityDecision(
     scoringModel = scoringModel,
 )
 
-private fun formatDecisionUpside(upsideBps: Int): String {
+private fun formatDecisionUpside(upsideBps: Int?): String {
+    if (upsideBps == null) return "No named primary"
     var percent = upsideBps / 100
     return if (percent > 0) "+$percent%" else "$percent%"
 }

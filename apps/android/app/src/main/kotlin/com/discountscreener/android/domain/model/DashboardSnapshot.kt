@@ -151,14 +151,15 @@ data class TrackedSymbolRow(
     val explanation: RowExplanationKind? = null,
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
+    val valuationStanceLabel: String? = null,
 )
 
 data class OpportunityListRow(
     val symbol: String,
     val marketPriceCents: Long,
     val intrinsicValueCents: Long,
-    val gapBps: Int,
-    val upsideBps: Int = gapBps,
+    val gapBps: Int? = null,
+    val upsideBps: Int? = gapBps,
     val confidence: ConfidenceBand,
     val qualification: QualificationStatus? = null,
     val externalStatus: ExternalSignalStatus? = null,
@@ -193,6 +194,7 @@ data class OpportunityListRow(
     val explanation: RowExplanationKind? = null,
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
+    val valuationStanceLabel: String? = null,
 )
 
 data class DashboardSnapshot(

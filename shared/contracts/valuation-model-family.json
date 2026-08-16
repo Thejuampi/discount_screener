@@ -11,9 +11,22 @@
     "deferredSurfaces": ["desktop"]
   },
   "fcffRobustEvidencePolicy": {
-    "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
+    "modelPolicyVersion": "business-class-policy/33-path-refine",
     "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median",
     "scenarioMargins": "full_aligned_annual_including_negatives",
+    "scenarioGrowth": "band_around_median_not_historical_iqr",
+    "scenarioGrowthBandBps": 400,
+    "maxNearGrowthDistanceFromStableBps": 1200,
+    "secularNearGrowth": "min_of_raw_and_max_of_stable_band_and_half_demonstrated_capped_at_2500",
+    "ocfLevel": "latest_when_recent_path_non_decreasing_else_median",
+    "interestMissingYear": "keep_ocf_capex_revenue_growth_no_fcff_identity",
+    "shareCount": "current_outstanding_when_near_year_average_else_diluted_was",
+    "residualRetention": "median_of_recent_aligned_years_not_latest_trough_payout",
+    "stableGrowth": "min_of_macro_and_demonstrated_recent",
+    "investmentWave": "capex_spike_or_growth_above_300bps_and_capex_above_maintenance",
+    "costOfDebt": "market_yield_then_rated_or_coverage_synthetic_then_accounting_coupon",
+    "secularRegime": "median_at_least_10pct_and_three_of_four_years_positive_is_secular_even_if_speed_varies",
+    "driverRecentWindowYears": 4,
     "negativeYears": "retained_in_scenario_distribution_and_history_diagnostics",
     "maintenanceCapex": "normalized_capex_intensity * asset_renewal_rate / (asset_renewal_rate + revenue_growth); growth CapEx is earned by revenue growth, never a share of OCF margin",
     "assetRenewalRateBps": 1000,
@@ -108,6 +121,29 @@
       "expectedModel": "ResidualIncomeEquity",
       "mustNotUseModel": "FcffWacc",
       "notes": "Managed care float must not run FCFF primary (same class of failure as ACGL)."
+    },
+    {
+      "name": "visa_payment_network_is_operating_fcff",
+      "symbol": "V",
+      "sectorName": "Financial Services",
+      "industryName": "Credit Services",
+      "sectorKey": "financial-services",
+      "industryKey": "credit-services",
+      "expectedBusinessClass": "OperatingNonFinancial",
+      "expectedModel": "FcffWacc",
+      "mustNotUseModel": "ResidualIncomeEquity",
+      "notes": "Yahoo files V and COF as Credit Services. Payment networks are fee businesses; residual on book prints ~book. Lenders stay residual."
+    },
+    {
+      "name": "cof_credit_services_stays_financial",
+      "symbol": "COF",
+      "sectorName": "Financial Services",
+      "industryName": "Credit Services",
+      "sectorKey": "financial-services",
+      "industryKey": "credit-services",
+      "expectedBusinessClass": "FinancialServices",
+      "expectedModel": "ResidualIncomeEquity",
+      "mustNotUseModel": "FcffWacc"
     },
     {
       "name": "pharma_stays_operating_fcff",
@@ -258,7 +294,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
+        "modelPolicyVersion": "business-class-policy/33-path-refine",
         "latestFcfDollars": 19440000000,
         "fcfRunRateDollars": 24652137600,
         "acceptance": [
@@ -339,7 +375,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/16-growth-earned-sustaining-capex",
+        "modelPolicyVersion": "business-class-policy/33-path-refine",
         "latestFcfDollars": 7695000000,
         "fcfRunRateDollars": null,
         "valuationDriver": "driver_based_fcff",
@@ -359,9 +395,11 @@
   "structuralConstraintsAllowed": [
     "stable_growth_strictly_less_than_discount_rate",
     "financial_services_not_fcff_primary",
-    "terminal_roe_fades_to_competitive_long_run",
+    "terminal_roe_holds_franchise_spread",
     "missing_book_or_roe_is_unavailable_not_silent_fcff_fallback",
-    "no_hardcoded_cost_of_debt_or_terminal_tax_default"
+    "no_hardcoded_cost_of_debt_or_terminal_tax_default",
+    "coverage_synthetic_spread_precedes_accounting_coupon",
+    "high_median_compounder_is_not_cyclical_for_one_soft_year"
   ],
   "multiNameBaseline": {
     "requiredForPolicyChanges": true,

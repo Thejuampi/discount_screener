@@ -169,6 +169,24 @@ pub fn resolve_rate_inputs_for_source(
         .copied()
         .collect();
 
+    let mut coverage_by_period: Vec<(i32, f64)> = history
+        .iter()
+        .filter_map(|point| {
+            if !tax_years.contains(&point.year) {
+                return None;
+            }
+            let interest = point.interest_expense_dollars?;
+            let pretax = point.pretax_income_dollars?;
+            if !interest.is_finite() || interest <= 0.0 || !pretax.is_finite() {
+                return None;
+            }
+            Some((point.year, (pretax + interest) / interest))
+        })
+        .collect();
+    coverage_by_period.sort_by_key(|(year, _)| *year);
+    let coverage_spread_bps =
+        median_coverage(&coverage_by_period).map(coverage_synthetic_spread_bps);
+
     let (cost_of_debt_bps, cost_of_debt_source, valid_debt_periods, average_debt_dollars) =
         if let Some((year, rate)) = market_common.last().copied() {
             (
@@ -182,6 +200,13 @@ pub fn resolve_rate_inputs_for_source(
                 rate,
                 WaccFieldSource::RatedOrSyntheticSpread,
                 vec![year],
+                total_debt as f64,
+            )
+        } else if let Some(spread) = coverage_spread_bps {
+            (
+                rf_bps.saturating_add(spread),
+                WaccFieldSource::RatedOrSyntheticSpread,
+                coverage_by_period.iter().map(|(year, _)| *year).collect(),
                 total_debt as f64,
             )
         } else if !accounting_common.is_empty() {
@@ -286,13 +311,21 @@ pub fn resolve_rate_inputs_for_source(
         return Err("fcff unavailable: no common valid debt and marginal-tax period".into());
     };
 
-    let mut reasons = vec![
-        format!("cost_of_debt_source={}", cost_of_debt_source.as_str()),
+    let mut reasons = vec![format!(
+        "cost_of_debt_source={}",
+        cost_of_debt_source.as_str()
+    )];
+    if cost_of_debt_source == WaccFieldSource::RatedOrSyntheticSpread && rated_common.is_empty() {
+        if let Some(spread) = coverage_spread_bps {
+            reasons.push(format!("coverage_synthetic=median_spread:{spread}"));
+        }
+    }
+    reasons.extend([
         format!("marginal_tax_source={}", tax_source.as_str()),
         format!("rate_quality={}", quality.as_str()),
         format!("aligned_debt_periods={}", join_years(&valid_debt_periods)),
         format!("aligned_tax_periods={}", join_years(&valid_tax_periods)),
-    ];
+    ]);
     reasons.push(format!(
         "period_intersection=common_fiscal_years:{}",
         period_count
@@ -309,6 +342,43 @@ pub fn resolve_rate_inputs_for_source(
         average_debt_dollars,
         reasons,
     }))
+}
+
+fn coverage_synthetic_spread_bps(coverage: f64) -> i32 {
+    if !coverage.is_finite() {
+        return 1_157;
+    }
+    match coverage {
+        c if c >= 12.50 => 59,
+        c if c >= 9.50 => 70,
+        c if c >= 7.50 => 92,
+        c if c >= 6.00 => 107,
+        c if c >= 4.50 => 121,
+        c if c >= 3.50 => 147,
+        c if c >= 3.00 => 178,
+        c if c >= 2.50 => 221,
+        c if c >= 2.00 => 304,
+        c if c >= 1.75 => 359,
+        c if c >= 1.50 => 418,
+        c if c >= 1.25 => 519,
+        c if c >= 0.80 => 798,
+        c if c >= 0.50 => 895,
+        _ => 1_157,
+    }
+}
+
+fn median_coverage(periods: &[(i32, f64)]) -> Option<f64> {
+    if periods.is_empty() {
+        return None;
+    }
+    let mut values: Vec<f64> = periods.iter().map(|(_, coverage)| *coverage).collect();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    })
 }
 
 fn join_years(years: &[i32]) -> String {
@@ -414,6 +484,22 @@ mod tests {
             WaccFieldSource::RatedOrSyntheticSpread
         );
         assert_eq!(resolved.cost_of_debt_bps, 680);
+    }
+
+    #[test]
+    fn coverage_synthetic_precedes_a_cheap_accounting_coupon() {
+        let history = vec![
+            point(2021, Some(100.0), Some(5.0), Some(2_100))
+                .with_return_on_capital_inputs(Some(5.0), None),
+            point(2022, Some(110.0), Some(5.5), Some(2_000))
+                .with_return_on_capital_inputs(Some(5.5), None),
+            point(2023, Some(120.0), Some(6.0), Some(1_900))
+                .with_return_on_capital_inputs(Some(6.0), None),
+        ];
+        let resolved = resolve_rate_inputs(&history, Some(120), 430)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.cost_of_debt_bps, 734);
     }
 
     #[test]

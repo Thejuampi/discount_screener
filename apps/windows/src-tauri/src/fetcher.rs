@@ -998,7 +998,8 @@ mod list_ready_tests {
         for symbol in ["MPWR", "FIS", "HPE", "COF"] {
             // Warms the session crumb the quote-summary endpoint requires.
             let _ = client.fetch_symbol(symbol);
-            let Ok(root) = client.fetch_quote_summary_modules_json(symbol, FORWARD_FORECAST_MODULES)
+            let Ok(root) =
+                client.fetch_quote_summary_modules_json(symbol, FORWARD_FORECAST_MODULES)
             else {
                 eprintln!("{symbol}: fetch fail");
                 continue;
@@ -1008,7 +1009,10 @@ mod list_ready_tests {
                 continue;
             };
             eprintln!("\n=== {symbol} ===");
-            if let Some(trend) = result.pointer("/earningsTrend/trend").and_then(|v| v.as_array()) {
+            if let Some(trend) = result
+                .pointer("/earningsTrend/trend")
+                .and_then(|v| v.as_array())
+            {
                 for row in trend {
                     eprintln!(
                         "  period={:<4} end={:<12} eps_avg={:<10} n={:<4} eps_yr_ago={:<10} growth={:<10} rev_avg={:<16} rev_growth={:?}",

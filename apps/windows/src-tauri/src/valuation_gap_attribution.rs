@@ -1589,7 +1589,9 @@ mod tests {
             if let Ok(evidence) = fetched_forecast.as_ref() {
                 eprintln!(
                     "  RAW forward revG={:?} epsG={:?} analysts={:?}",
-                    evidence.revenue_growth_bps, evidence.earnings_growth_bps, evidence.analyst_count
+                    evidence.revenue_growth_bps,
+                    evidence.earnings_growth_bps,
+                    evidence.analyst_count
                 );
             }
             let forward_evidence = fetched_forecast.map_err(|error| match error {

@@ -29,7 +29,7 @@ pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
 /// (industry-beta-policy/2). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/16-growth-earned-sustaining-capex";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/31-secular-half-demonstrated";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
 pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/2";
 
@@ -53,9 +53,16 @@ const PROJECTION_YEARS_SECULAR: i32 = 10;
 const ASSET_RENEWAL_RATE_BPS: i32 = 1_000;
 /// Floor maintenance intensity (bps of revenue) so owner earnings is not pure OCF.
 const MAINTENANCE_CAPEX_MIN_REVENUE_BPS: i32 = 200;
-/// Operating drivers are regime-sensitive; use a recent multi-year window
-/// rather than allowing a 15-year history to dominate a changed business.
-const DRIVER_RECENT_WINDOW: usize = 5;
+/// Operating drivers use the same 4-year near-term window as growth.
+/// A 5-year cut on a 6-year AMZN pack keeps the 2021 OCF trough and drops
+/// 2025 as a false spike, which is the all-CapEx collapse.
+const DRIVER_RECENT_WINDOW: usize = 4;
+/// Growth CapEx is earned only when revenue itself is compounding.
+const INVESTMENT_WAVE_MIN_GROWTH_BPS: i32 = 300;
+/// Current shares replace year-average diluted shares only inside this band.
+/// A buyback year sits near 1.0. A dual-class quote sits near 0.5.
+const SHARE_COUNT_MIN_CURRENT_OVER_WAS_BPS: i32 = 9_000;
+const SHARE_COUNT_MAX_CURRENT_OVER_WAS_BPS: i32 = 11_500;
 const COE_SCENARIO_BAND_BPS: i32 = 75;
 /// FCFF scenarios stress discount rate when rates are market-sourced.
 const WACC_SCENARIO_BAND_BPS: i32 = 100;
@@ -77,6 +84,8 @@ const GROWTH_RECENT_WINDOW: usize = 4;
 /// Robust recent-growth signal stays within a dynamic band around the macro
 /// stable rate. This constrains noisy endpoint CAGR inputs, not valuation output.
 const MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: i32 = 1_200;
+/// Secular names may keep half of demonstrated recent growth, still capped.
+const MAX_SECULAR_NEAR_GROWTH_BPS: i32 = 2_500;
 /// Real-rate buffer so g_stable < rf (Gordon headroom identity).
 const STABLE_GROWTH_RF_BUFFER_BPS: i32 = 100;
 /// Long-run nominal economy growth ceiling; g_stable ≤ min(this, rf − buffer).
@@ -92,6 +101,9 @@ const CAPEX_SPIKE_MIN_ABS_BPS: i32 = 500;
 /// explicit five-year forecast; this is derived from revenue persistence, not
 /// a company-specific calibration.
 const SECULAR_GROWTH_FADE_EXPONENT: f64 = 1.50;
+/// Bear/bull growth is a band around the median, not the raw year-to-year
+/// IQR stacked for the whole projection (0% vs 126% over 10y secular).
+const SCENARIO_GROWTH_BAND_BPS: i32 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -977,6 +989,24 @@ pub fn classify_business(
     industry_key: Option<&str>,
     asset_not_equity: bool,
 ) -> BusinessClass {
+    classify_business_for(
+        None,
+        sector_name,
+        industry_name,
+        sector_key,
+        industry_key,
+        asset_not_equity,
+    )
+}
+
+pub fn classify_business_for(
+    symbol: Option<&str>,
+    sector_name: Option<&str>,
+    industry_name: Option<&str>,
+    sector_key: Option<&str>,
+    industry_key: Option<&str>,
+    asset_not_equity: bool,
+) -> BusinessClass {
     if asset_not_equity {
         return BusinessClass::NotEligible;
     }
@@ -988,10 +1018,12 @@ pub fn classify_business(
         .to_ascii_lowercase();
     let blob = format!("{sector} {industry}");
 
-    // Closed world: only explicit policy tables route to a model.
-    // Priority: not-eligible shells → financial float → operating → unclassified fail.
+    // Closed world: not-eligible → payment network → financial float → operating → fail.
     if is_not_eligible_equity_text(&blob) {
         return BusinessClass::NotEligible;
+    }
+    if is_payment_network(symbol, &industry, &blob) {
+        return BusinessClass::OperatingNonFinancial;
     }
     if is_financial_services_text(&blob) {
         return BusinessClass::FinancialServices;
@@ -1017,6 +1049,25 @@ pub fn classification_unavailable_reason(class: BusinessClass) -> Option<&'stati
 
 fn contains_any(hay: &str, keys: &[&str]) -> bool {
     keys.iter().any(|k| hay.contains(k))
+}
+
+const PAYMENT_NETWORK_ISSUERS: &[&str] = &["V", "MA"];
+const PAYMENT_NETWORK_INDUSTRY: &[&str] = &[
+    "payment processing",
+    "transaction processing",
+    "financial data",
+    "financial exchanges",
+    "stock exchanges",
+];
+
+fn is_payment_network(symbol: Option<&str>, industry: &str, blob: &str) -> bool {
+    if symbol
+        .map(|s| s.trim().to_ascii_uppercase())
+        .is_some_and(|s| PAYMENT_NETWORK_ISSUERS.contains(&s.as_str()))
+    {
+        return true;
+    }
+    contains_any(industry, PAYMENT_NETWORK_INDUSTRY) || contains_any(blob, PAYMENT_NETWORK_INDUSTRY)
 }
 
 fn is_not_eligible_equity_text(blob: &str) -> bool {
@@ -1248,7 +1299,8 @@ pub fn compute_with_params(
     source: &str,
     asset_not_equity: bool,
 ) -> Result<DcfAnalysis, String> {
-    let class = classify_business(
+    let class = classify_business_for(
+        Some(fundamentals.symbol.as_str()),
         fundamentals.sector_name.as_deref(),
         fundamentals.industry_name.as_deref(),
         fundamentals.sector_key.as_deref(),
@@ -1323,6 +1375,7 @@ fn residual_income(
     let retention = retention_bps as f64 / 10_000.0;
     let fade_years = PROJECTION_YEARS;
 
+    let stable_growth_bps = market_params.stable_growth_bps();
     let bear = ri_scenario(
         book0,
         shares,
@@ -1330,10 +1383,24 @@ fn residual_income(
         re_base + COE_SCENARIO_BAND_BPS,
         retention * 0.9,
         fade_years,
+        long_run_roe_bps(
+            roe0_bps.saturating_sub(ROE_BEAR_HAIRCUT_BPS).max(100),
+            re_base + COE_SCENARIO_BAND_BPS,
+        ),
+        stable_growth_bps,
     )
     .ok_or_else(|| "bear residual income invalid".to_string())?;
-    let base = ri_scenario(book0, shares, roe0_bps, re_base, retention, fade_years)
-        .ok_or_else(|| "base residual income invalid".to_string())?;
+    let base = ri_scenario(
+        book0,
+        shares,
+        roe0_bps,
+        re_base,
+        retention,
+        fade_years,
+        long_run_roe_bps(roe0_bps, re_base),
+        stable_growth_bps,
+    )
+    .ok_or_else(|| "base residual income invalid".to_string())?;
     let bull = ri_scenario(
         book0,
         shares,
@@ -1341,6 +1408,11 @@ fn residual_income(
         (re_base - COE_SCENARIO_BAND_BPS).max(market_params.rf_bps + 50),
         retention.min(0.85),
         fade_years,
+        long_run_roe_bps(
+            roe0_bps.saturating_add(ROE_BULL_BOOST_BPS).min(9_000),
+            (re_base - COE_SCENARIO_BAND_BPS).max(market_params.rf_bps + 50),
+        ),
+        stable_growth_bps,
     )
     .ok_or_else(|| "bull residual income invalid".to_string())?;
 
@@ -1357,7 +1429,8 @@ fn residual_income(
         "model=residual_income_equity".into(),
         "business_class=financial_services".into(),
         format!("retention_source=reported:{}bps", retention_bps),
-        "terminal_roe_fades_to_cost_of_equity".into(),
+        "terminal_roe_holds_franchise_spread".into(),
+        format!("long_run_spread={FRANCHISE_PERSIST_SPREAD_BPS}bps"),
         "scenario_stress=growth_and_discount_rate".into(),
     ];
     if market_params.provisional {
@@ -1426,6 +1499,17 @@ fn residual_income(
     })
 }
 
+const FRANCHISE_PERSIST_SPREAD_BPS: i32 = 500;
+const RESIDUAL_GORDON_EPSILON_BPS: i32 = 50;
+
+fn long_run_roe_bps(roe0_bps: i32, cost_of_equity_bps: i32) -> i32 {
+    if roe0_bps <= cost_of_equity_bps {
+        cost_of_equity_bps
+    } else {
+        roe0_bps.min(cost_of_equity_bps + FRANCHISE_PERSIST_SPREAD_BPS)
+    }
+}
+
 fn ri_scenario(
     book0: f64,
     shares: f64,
@@ -1433,15 +1517,15 @@ fn ri_scenario(
     re_bps: i32,
     retention: f64,
     fade_years: i32,
+    long_run_roe_bps: i32,
+    stable_growth_bps: i32,
 ) -> Option<i64> {
-    if book0 <= 0.0 || shares <= 0.0 || re_bps <= 0 {
+    if book0 <= 0.0 || shares <= 0.0 || re_bps <= 0 || fade_years <= 0 {
         return None;
     }
     let re = re_bps as f64 / 10_000.0;
     let roe0 = roe0_bps as f64 / 10_000.0;
-    // Competitive long-run: ROE fades to cost of equity ⇒ terminal residual income = 0.
-    // V0 = B0 + Σ PV((ROE_t − r_e) × B_{t−1}).
-    let roe_stable = re;
+    let roe_stable = long_run_roe_bps as f64 / 10_000.0;
     let mut book = book0;
     let mut pv_ri = 0.0;
     for t in 1..=fade_years {
@@ -1453,6 +1537,17 @@ fn ri_scenario(
         if !book.is_finite() || book <= 0.0 {
             return None;
         }
+    }
+    if long_run_roe_bps > re_bps {
+        let g_cap = (re_bps - RESIDUAL_GORDON_EPSILON_BPS).max(0);
+        let g_bps = stable_growth_bps.min(g_cap);
+        let g = g_bps as f64 / 10_000.0;
+        if g >= re {
+            return None;
+        }
+        let next_excess = (roe_stable - re) * book;
+        let terminal = next_excess / (re - g);
+        pv_ri += terminal / (1.0 + re).powi(fade_years);
     }
     let equity = book0 + pv_ri;
     if !equity.is_finite() || equity <= 0.0 {
@@ -1535,6 +1630,7 @@ struct DriverModelInputs {
     growth_dispersion_bps: i32,
     growth_fade_exponent: f64,
     tax_defaulted: bool,
+    ocf_persistent_recovery: bool,
 }
 
 /// Build a driver-consistent FCFF path from aligned annual operating data.
@@ -1645,11 +1741,15 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         let revenue_growth_bps = if index == 0 {
             None
         } else {
-            let prior = points[index - 1].revenue_dollars;
-            let growth = revenue / prior - 1.0;
-            growth
-                .is_finite()
-                .then_some((growth * 10_000.0).round() as i32)
+            let prior = &points[index - 1];
+            if year - prior.year != 1 {
+                None
+            } else {
+                let growth = revenue / prior.revenue_dollars - 1.0;
+                growth
+                    .is_finite()
+                    .then_some((growth * 10_000.0).round() as i32)
+            }
         };
         // Stock-funded merger: no cash leaves the company, so the acquisition
         // line stays flat while revenue and the diluted share count step
@@ -1759,7 +1859,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     if margins.len() < 2 {
         return None;
     }
-    let ocf_margins: Vec<i32> = recent_baseline
+    let ocf_margins: Vec<i32> = recent_points
         .iter()
         .map(|point| point.ocf_margin_bps)
         .collect();
@@ -1767,7 +1867,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .iter()
         .map(|point| point.capex_intensity_bps)
         .collect();
-    let interest_margins: Vec<i32> = recent_baseline
+    let interest_margins: Vec<i32> = recent_points
         .iter()
         .filter_map(|point| point.after_tax_interest_margin_bps)
         .collect();
@@ -1782,7 +1882,12 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     } else {
         recent_growths.clone()
     };
-    let recent_ocf_margin_bps = median_bps(&ocf_margins);
+    let ocf_persistent_recovery = !use_cycle_blend && is_non_decreasing(&ocf_margins);
+    let recent_ocf_margin_bps = if ocf_persistent_recovery {
+        *ocf_margins.last().unwrap_or(&0)
+    } else {
+        median_bps(&ocf_margins)
+    };
     let recent_capex_intensity_bps = median_bps(&capex_intensities);
     let recent_interest_margin_bps = median_bps(&interest_margins);
     let (normalized_ocf_margin_bps, normalized_capex_intensity_bps, normalized_interest_margin_bps) =
@@ -1811,16 +1916,21 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
                 recent_interest_margin_bps,
             )
         };
-    let scenario_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
-    let scenario_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
+    let historical_bear_growth_bps = quantile_bps(&scenario_growths, 0.25);
+    let historical_bull_growth_bps = quantile_bps(&scenario_growths, 0.75);
     let base_growth_bps = if acquisition_growth_must_be_zero {
         0
     } else if use_cycle_blend {
         blend_recent_prior(median_bps(&recent_growths), median_bps(&prior_growths))
-            .clamp(scenario_bear_growth_bps, scenario_bull_growth_bps)
+            .clamp(historical_bear_growth_bps, historical_bull_growth_bps)
     } else {
         median_bps(&recent_growths)
     };
+    let (scenario_bear_growth_bps, scenario_bull_growth_bps) = scenario_growth_around_median(
+        base_growth_bps,
+        historical_bear_growth_bps,
+        historical_bull_growth_bps,
+    );
 
     // Base run-rate vs scenarios:
     //
@@ -1855,7 +1965,8 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .map(|point| point.year)
         .collect();
     let investment_wave = !capex_spikes.is_empty()
-        || latest_capex.is_some_and(|capex| capex >= maintenance_capex_intensity_bps + 500);
+        || (base_growth_bps >= INVESTMENT_WAVE_MIN_GROWTH_BPS
+            && latest_capex.is_some_and(|capex| capex > maintenance_capex_intensity_bps));
     let (base_fcff_margin_bps, owner_earnings_base) = if investment_wave
         && owner_earnings_margin_bps > annual_base_margin_bps
         && owner_earnings_margin_bps > 0
@@ -1928,6 +2039,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         // The aligned rows carry no defaulted tax rate: a year either supplied
         // an effective rate with its interest or contributed no FCFF identity.
         tax_defaulted: false,
+        ocf_persistent_recovery,
     })
 }
 
@@ -1948,6 +2060,16 @@ impl DriverRegime {
     }
 }
 
+fn secular_near_growth_cap_bps(regime: &str, raw_growth_bps: i32, mature_cap_bps: i32) -> i32 {
+    if regime != DriverRegime::SecularExpansion.as_str() || raw_growth_bps < 1_000 {
+        return mature_cap_bps;
+    }
+    let half_demonstrated = raw_growth_bps / 2;
+    raw_growth_bps
+        .min(mature_cap_bps.max(half_demonstrated))
+        .min(MAX_SECULAR_NEAR_GROWTH_BPS)
+}
+
 fn classify_driver_regime(recent_growths: &[i32], prior_growths: &[i32]) -> DriverRegime {
     let recent_median = median_bps(recent_growths);
     let recent_positive_share = (recent_growths.iter().filter(|growth| **growth > 0).count()
@@ -1960,10 +2082,7 @@ fn classify_driver_regime(recent_growths: &[i32], prior_growths: &[i32]) -> Driv
     if recent_median >= 500
         && recent_positive_share >= 7_500
         && (prior_growths.is_empty() || recent_median >= prior_median)
-        && (recent_dispersion <= 4_000
-            || (recent_positive_share == 10_000
-                && recent_median >= 1_000
-                && recent_dispersion <= 8_000))
+        && (recent_dispersion <= 4_000 || recent_median >= 1_000)
     {
         DriverRegime::SecularExpansion
     } else if recent_dispersion >= 2_000 || recent_positive_share <= 5_000 {
@@ -1982,6 +2101,36 @@ fn growth_fade_exponent(regime: DriverRegime) -> f64 {
 
 fn blend_recent_prior(recent: i32, prior: i32) -> i32 {
     ((recent as i64 * 6 + prior as i64 * 4) / 10) as i32
+}
+
+fn is_non_decreasing(values: &[i32]) -> bool {
+    values.len() >= 3 && values.windows(2).all(|pair| pair[1] >= pair[0])
+}
+
+fn latest_share_count(fundamentals: &FundamentalSnapshot, history: &[FcfPoint]) -> Option<f64> {
+    let current = fundamentals
+        .shares_outstanding
+        .filter(|&shares| shares > 0)
+        .map(|shares| shares as f64);
+    let year_average = history
+        .iter()
+        .rev()
+        .find_map(|point| point.diluted_average_shares.filter(|shares| *shares > 0.0));
+    match (current, year_average) {
+        (Some(current), Some(year_average)) => {
+            let ratio_bps = ((current / year_average) * 10_000.0).round() as i32;
+            if ratio_bps < SHARE_COUNT_MIN_CURRENT_OVER_WAS_BPS
+                || ratio_bps > SHARE_COUNT_MAX_CURRENT_OVER_WAS_BPS
+            {
+                Some(year_average)
+            } else {
+                Some(current)
+            }
+        }
+        (Some(current), None) => Some(current),
+        (None, Some(year_average)) => Some(year_average),
+        (None, None) => None,
+    }
 }
 
 fn median_bps(values: &[i32]) -> i32 {
@@ -2017,6 +2166,20 @@ fn maintenance_capex_intensity_bps(capex_intensity_bps: i32, revenue_growth_bps:
     let growth = revenue_growth_bps.max(0) as i64;
     let sustaining = (capex as i64 * renewal / (renewal + growth)) as i32;
     sustaining.clamp(MAINTENANCE_CAPEX_MIN_REVENUE_BPS.min(capex), capex)
+}
+
+fn scenario_growth_around_median(
+    base_growth_bps: i32,
+    historical_bear_bps: i32,
+    historical_bull_bps: i32,
+) -> (i32, i32) {
+    let bear = historical_bear_bps
+        .max(base_growth_bps.saturating_sub(SCENARIO_GROWTH_BAND_BPS))
+        .min(base_growth_bps);
+    let bull = historical_bull_bps
+        .min(base_growth_bps.saturating_add(SCENARIO_GROWTH_BAND_BPS))
+        .max(base_growth_bps);
+    (bear, bull)
 }
 
 fn quantile_bps(values: &[i32], quantile: f64) -> i32 {
@@ -2100,10 +2263,17 @@ fn fcff_driver_wacc(
     if drivers.base_fcff_margin_bps <= 0 {
         return Err("non_positive_normalized_fcff: aligned annual FCFF evidence has a non-positive robust margin".into());
     }
-    let g_stable_base = market_params
+    let policy_stable = market_params
         .stable_growth_bps()
         .min(resolved.wacc_bps - GORDON_RATE_EPSILON_BPS)
         .max(MIN_STABLE_GROWTH_BPS);
+    let growth_floor = policy_stable - MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS;
+    let mature_cap = policy_stable + MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS;
+    let growth_cap =
+        secular_near_growth_cap_bps(&drivers.driver_regime, drivers.base_growth_bps, mature_cap);
+    let used_base_growth = drivers.base_growth_bps.clamp(growth_floor, growth_cap);
+    let demonstrated_stable = used_base_growth.max(MIN_STABLE_GROWTH_BPS);
+    let g_stable_base = policy_stable.min(demonstrated_stable);
     let rates_unreliable = resolved.inputs.point_estimate_unreliable();
     let (bear_band, bull_band) = if rates_unreliable {
         (
@@ -2137,12 +2307,17 @@ fn fcff_driver_wacc(
     } else {
         drivers.growth_fade_exponent
     };
+    let (used_bear_growth, used_bull_growth) = scenario_growth_around_median(
+        used_base_growth,
+        drivers.bear_growth_bps,
+        drivers.bull_growth_bps,
+    );
 
     let bear = discounted_driver_fcff(
         drivers.latest_revenue_dollars,
         drivers.bear_fcff_margin_bps,
         drivers.base_fcff_margin_bps,
-        drivers.bear_growth_bps,
+        used_bear_growth,
         shares,
         net_debt,
         bear_g_stable,
@@ -2155,7 +2330,7 @@ fn fcff_driver_wacc(
         drivers.latest_revenue_dollars,
         drivers.base_fcff_margin_bps,
         drivers.base_fcff_margin_bps,
-        drivers.base_growth_bps,
+        used_base_growth,
         shares,
         net_debt,
         g_stable_base,
@@ -2168,7 +2343,7 @@ fn fcff_driver_wacc(
         drivers.latest_revenue_dollars,
         drivers.bull_fcff_margin_bps,
         drivers.base_fcff_margin_bps,
-        drivers.bull_growth_bps,
+        used_bull_growth,
         shares,
         net_debt,
         bull_g_stable,
@@ -2200,6 +2375,7 @@ fn fcff_driver_wacc(
             "growth=recent_driver_median:regime={}",
             drivers.driver_regime
         ),
+        format!("growth=scenario_band_around_median:{SCENARIO_GROWTH_BAND_BPS}"),
         format!(
             "growth_fade=regime:{}_exponent:{:.2}",
             drivers.driver_regime, drivers.growth_fade_exponent
@@ -2252,6 +2428,25 @@ fn fcff_driver_wacc(
                 .join(",")
         ));
     }
+    if used_base_growth != drivers.base_growth_bps {
+        if growth_cap > mature_cap {
+            reasons.push(format!(
+                "growth=secular_half_demonstrated:raw={}:used={used_base_growth}",
+                drivers.base_growth_bps
+            ));
+        } else {
+            reasons.push(format!(
+                "growth=capped_to_stable_band:raw={}:used={used_base_growth}",
+                drivers.base_growth_bps
+            ));
+        }
+    }
+    if g_stable_base < policy_stable {
+        reasons.push(format!("g_stable=not_above_recent:{g_stable_base}"));
+    }
+    if drivers.ocf_persistent_recovery {
+        reasons.push("ocf=latest_on_persistent_recovery".into());
+    }
     reasons.extend(resolved.rate_reasons.iter().cloned());
     if market_params.provisional {
         reasons.push("market_params=provisional".into());
@@ -2287,7 +2482,7 @@ fn fcff_driver_wacc(
         base_intrinsic_value_cents: base,
         bull_intrinsic_value_cents: bull,
         wacc_bps: resolved.wacc_bps,
-        base_growth_bps: drivers.base_growth_bps,
+        base_growth_bps: used_base_growth,
         net_debt_dollars: net_debt,
         wacc_inputs: resolved.inputs.clone(),
         source: source.to_string(),
@@ -2358,10 +2553,7 @@ fn fcff_wacc(
         return Err("need at least 3 annual free cash flow points".into());
     }
 
-    let shares = fundamentals
-        .shares_outstanding
-        .filter(|&s| s > 0)
-        .map(|s| s as f64)
+    let shares = latest_share_count(fundamentals, fcf_history)
         .ok_or_else(|| "share count is missing".to_string())?;
     let resolved = derive_wacc(
         fundamentals,
@@ -3497,7 +3689,7 @@ mod tests {
             run >= 60_000_000_000,
             "AMZN owner-earnings run-rate must clear multi-ten-B, got {run}"
         );
-        assert_eq!(analysis.diagnostics.normalized_ocf_margin_bps, Some(1_478));
+        assert_eq!(analysis.diagnostics.normalized_ocf_margin_bps, Some(1_946));
         assert!(analysis.diagnostics.capex_spike_years.contains(&2025));
         assert!(analysis.base_growth_bps > -900);
         assert!(
@@ -3605,6 +3797,237 @@ mod tests {
     }
 
     #[test]
+    fn growing_retailer_earns_owner_earnings_without_a_spike() {
+        let drivers =
+            driver_model_inputs(&steady_margin_history(500, 600, 300, 50)).expect("driver inputs");
+        assert!(
+            drivers.owner_earnings_base,
+            "5% grower must add back growth CapEx, got margin {} bps",
+            drivers.base_fcff_margin_bps
+        );
+    }
+
+    #[test]
+    fn dual_class_quote_keeps_diluted_year_average() {
+        let history = vec![2022, 2023, 2024, 2025]
+            .into_iter()
+            .map(|year| {
+                FcfPoint::new(year, 70_000_000_000.0)
+                    .with_operating_drivers(
+                        100_000_000_000.0,
+                        30_000_000_000.0,
+                        300_000_000_000.0,
+                        Some(400_000_000.0),
+                        Some(1_600),
+                    )
+                    .with_diluted_average_shares(Some(12_230_000_000.0))
+            })
+            .collect::<Vec<_>>();
+        let class_a = FundamentalSnapshot {
+            symbol: "GOOGL".into(),
+            sector_name: Some("Communication Services".into()),
+            industry_name: Some("Internet Content & Information".into()),
+            market_cap_dollars: Some(2_000_000_000_000),
+            shares_outstanding: Some(5_867_155_790),
+            beta_millis: Some(1_100),
+            total_debt_dollars: Some(25_000_000_000),
+            total_cash_dollars: Some(90_000_000_000),
+            ..Default::default()
+        };
+        let diluted = FundamentalSnapshot {
+            shares_outstanding: Some(12_230_000_000),
+            ..class_a.clone()
+        };
+        let class_a_shares = latest_share_count(&class_a, &history).expect("class a");
+        let diluted_shares = latest_share_count(&diluted, &history).expect("diluted");
+        assert_eq!(class_a_shares, diluted_shares);
+    }
+
+    #[test]
+    fn latest_year_without_interest_still_sets_starting_revenue() {
+        let history = vec![
+            (2022, 394_328_000_000.0, Some(2_931_000_000.0)),
+            (2023, 383_285_000_000.0, Some(3_933_000_000.0)),
+            (2024, 391_035_000_000.0, None),
+            (2025, 416_161_000_000.0, None),
+        ]
+        .into_iter()
+        .map(|(year, revenue, interest)| {
+            FcfPoint::new(year, revenue * 0.26)
+                .with_operating_drivers(
+                    revenue * 0.28,
+                    revenue * 0.03,
+                    revenue,
+                    interest,
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(revenue), Some(2_100), None, None)
+        })
+        .collect::<Vec<_>>();
+        let drivers = driver_model_inputs(&history).expect("driver inputs");
+        assert_eq!(drivers.latest_revenue_dollars, 416_161_000_000.0);
+    }
+
+    #[test]
+    fn fiscal_year_hole_is_not_one_year_of_growth() {
+        let history = vec![
+            (2012, 10_000_000.0),
+            (2022, 110_000_000.0),
+            (2023, 121_000_000.0),
+            (2024, 133_100_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.3)
+                .with_operating_drivers(
+                    revenue * 0.4,
+                    revenue * 0.08,
+                    revenue,
+                    Some(1_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(10_000_000.0), Some(2_100), None, None)
+        })
+        .collect::<Vec<_>>();
+        let drivers = driver_model_inputs(&history).expect("driver inputs");
+        assert!(
+            drivers.growth_dispersion_bps < 5_000,
+            "hole treated as one year: dispersion={}",
+            drivers.growth_dispersion_bps
+        );
+    }
+
+    #[test]
+    fn wide_growth_span_is_a_band_around_the_median() {
+        let history = vec![
+            (2021, 100_000_000.0),
+            (2022, 100_000_000.0),
+            (2023, 100_000_000.0),
+            (2024, 226_000_000.0),
+            (2025, 510_760_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.32)
+                .with_operating_drivers(
+                    revenue * 0.40,
+                    revenue * 0.08,
+                    revenue,
+                    Some(1_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(10_000_000.0), Some(2_100), None, None)
+        })
+        .collect::<Vec<_>>();
+        let drivers = driver_model_inputs(&history).expect("driver inputs");
+        assert!(
+            drivers.bull_growth_bps - drivers.bear_growth_bps <= 2 * SCENARIO_GROWTH_BAND_BPS
+                && drivers.growth_dispersion_bps > 10_000,
+            "scenario stacked the year span: bear={} base={} bull={} disp={}",
+            drivers.bear_growth_bps,
+            drivers.base_growth_bps,
+            drivers.bull_growth_bps,
+            drivers.growth_dispersion_bps
+        );
+    }
+
+    #[test]
+    fn mature_low_growth_does_not_assume_macro_terminal() {
+        let history = vec![
+            (2022, 20_000_000_000.0),
+            (2023, 20_200_000_000.0),
+            (2024, 20_402_000_000.0),
+            (2025, 20_606_000_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.15)
+                .with_operating_drivers(
+                    revenue * 0.20,
+                    revenue * 0.05,
+                    revenue,
+                    Some(200_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(5_000_000_000.0), Some(2_100), None, None)
+        })
+        .collect::<Vec<_>>();
+        let fund = FundamentalSnapshot {
+            symbol: "SLOW".into(),
+            sector_name: Some("Communication Services".into()),
+            industry_name: Some("Telecom Services".into()),
+            market_cap_dollars: Some(20_000_000_000),
+            shares_outstanding: Some(1_000_000_000),
+            beta_millis: Some(1_000),
+            total_debt_dollars: Some(5_000_000_000),
+            total_cash_dollars: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let a = compute(&fund, &history, Some(2_000), "sec_edgar").expect("dcf");
+        assert!(
+            a.stable_growth_bps <= 150,
+            "macro terminal on 1% growth: g_stable={} g_near={}",
+            a.stable_growth_bps,
+            a.base_growth_bps
+        );
+    }
+
+    #[test]
+    fn extreme_recent_growth_stays_within_stable_band() {
+        let history = vec![
+            (2021, 100_000_000.0),
+            (2022, 100_000_000.0),
+            (2023, 100_000_000.0),
+            (2024, 226_000_000.0),
+            (2025, 510_760_000.0),
+        ]
+        .into_iter()
+        .map(|(year, revenue)| {
+            FcfPoint::new(year, revenue * 0.32)
+                .with_operating_drivers(
+                    revenue * 0.40,
+                    revenue * 0.08,
+                    revenue,
+                    Some(1_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(10_000_000.0), Some(2_100), None, None)
+        })
+        .collect::<Vec<_>>();
+        let a = compute(&operating_fund(), &history, Some(1_000), "sec_edgar").expect("dcf");
+        assert!(
+            a.base_growth_bps <= a.stable_growth_bps + MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS,
+            "near-term growth {} exceeds stable {} + 1200",
+            a.base_growth_bps,
+            a.stable_growth_bps
+        );
+    }
+
+    #[test]
+    fn secular_near_growth_keeps_half_the_demonstrated_rate() {
+        assert_eq!(
+            secular_near_growth_cap_bps(DriverRegime::SecularExpansion.as_str(), 5_000, 1_500,),
+            2_500
+        );
+    }
+
+    #[test]
+    fn one_soft_year_does_not_make_a_high_median_compounder_cyclical() {
+        assert_eq!(
+            classify_driver_regime(&[-200, 2_000, 8_000, 12_000], &[]),
+            DriverRegime::SecularExpansion
+        );
+    }
+
+    #[test]
+    fn alternating_zero_and_surge_stays_cyclical() {
+        assert_eq!(
+            classify_driver_regime(&[0, 12_600, 0, 12_600], &[]),
+            DriverRegime::CyclicalOrTransition
+        );
+    }
+
+    #[test]
     fn driver_regime_uses_persistence_before_dispersion() {
         assert_eq!(
             classify_driver_regime(&[4_000, 5_000, 6_000, 7_000], &[1_000, 2_000]),
@@ -3619,6 +4042,32 @@ mod tests {
             SECULAR_GROWTH_FADE_EXPONENT
         );
         assert_eq!(growth_fade_exponent(DriverRegime::StableOperating), 1.0);
+    }
+
+    #[test]
+    fn visa_credit_services_is_operating() {
+        let c = classify_business_for(
+            Some("V"),
+            Some("Financial Services"),
+            Some("Credit Services"),
+            Some("financial-services"),
+            Some("credit-services"),
+            false,
+        );
+        assert_eq!(c, BusinessClass::OperatingNonFinancial);
+    }
+
+    #[test]
+    fn capital_one_credit_services_stays_financial() {
+        let c = classify_business_for(
+            Some("COF"),
+            Some("Financial Services"),
+            Some("Credit Services"),
+            Some("financial-services"),
+            Some("credit-services"),
+            false,
+        );
+        assert_eq!(c, BusinessClass::FinancialServices);
     }
 
     #[test]
@@ -3686,7 +4135,7 @@ mod tests {
         let base = a.base_intrinsic_value_cents as f64 / 100.0;
         // Residual income near book + excess ROE — not the $700+ FCFF mirage.
         assert!(
-            base < 400.0,
+            base < 550.0,
             "CI-class residual income base ${base} still FCFF-like"
         );
         assert!(base > 100.0, "expected above book ballpark, got ${base}");
@@ -3810,6 +4259,13 @@ mod tests {
         // Book + finite excess ROE should clear book (~$65).
         assert!(base_dollars > 65.0);
         assert!(a.reason_codes.iter().any(|r| r.contains("residual_income")));
+        assert!(
+            a.reason_codes
+                .iter()
+                .any(|r| r == "terminal_roe_holds_franchise_spread"),
+            "expected through-cycle persist, got {:?}",
+            a.reason_codes
+        );
     }
 
     #[test]

@@ -7,6 +7,10 @@ Use this index to find active implementation work, story files, QA outputs, and 
 - [Sprint Status](sprint-status.yaml) - current epic/story status for Valuation Change Visibility.
 - [Company Performance Lens Sprint Status](company-performance-lens-sprint-status.yaml) - feature-specific implementation track for Company Performance Lens.
 
+- [Valuation judgment core](spec-valuation-judgment-core-2026-08-15.md) - Android `core` object above exclusive identity. Stance Identity / Street / Tension / Disputed / Unavailable. Tension names no primary. List Disc% follows `primaryCents` only.
+- [QA universe stance table 2026-08-15](qa-universe-stance-table-2026-08-15.md) - Wave 1/1b measure of the 20 Android `qa.txt` names. Official width/`differenceBps`. Wave 2 after-column uses thinkability `/2`.
+- [Model polish categories 2026-08-15](model-polish-categories-2026-08-15.md) - divide and conquer: residual level first, then inputs, then FCFF. `hardcoded()` / `cached()` / `live()`.
+
 ## Story And Spec Artifacts
 
 - [Dip board spec v1](dip-board-spec-v1.md) - Android Plans Dip hunter. Locked cuts after Sensei + Advisor. Does not change V2/V3/V4.

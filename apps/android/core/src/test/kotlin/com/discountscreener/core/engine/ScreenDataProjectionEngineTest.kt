@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.CandidateRow
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ComputationArea
@@ -36,6 +37,7 @@ import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRangeKey
+import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.model.WaccFieldSource
 import com.discountscreener.core.model.WaccInputProvenance
@@ -47,14 +49,41 @@ import kotlin.test.assertTrue
 class ScreenDataProjectionEngineTest {
     @Test
     fun tracked_row_keeps_discount_and_upside_distinct_for_price_10_fair_12() {
-        // $10 → $12: upside 20%, discount ≈ 16.67%
         val result = projectSingleSymbol(
             symbol = "ACME",
             detail = detail("ACME", marketPriceCents = 1_000L, intrinsicValueCents = 1_200L, confidence = ConfidenceBand.High),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 1_100L,
+                baseIntrinsicValueCents = 1_200L,
+                bullIntrinsicValueCents = 1_300L,
+            ).copy(
+                businessClass = BusinessClass.OperatingNonFinancial,
+                model = ValuationModel.FcffWacc,
+            ),
         )
         val row = result.trackedRows.single()
         assertEquals(1_666, row.gapBps)
         assertEquals(2_000, row.upsideBps)
+    }
+
+    @Test
+    fun tracked_row_omits_gap_when_judgment_has_no_primary() {
+        var result = projectDisputedNamedValuation(includeCandidate = false)
+        assertEquals(null, result.trackedRows.single().gapBps)
+    }
+
+    @Test
+    fun opportunity_row_omits_gap_when_judgment_has_no_primary() {
+        var result = projectDisputedNamedValuation(includeCandidate = true)
+        assertEquals(null, result.opportunityRows.single().gapBps)
+    }
+
+    @Test
+    fun selected_detail_drops_named_anchor_when_judgment_has_no_primary() {
+        var result = projectDisputedNamedValuation(includeCandidate = false)
+        assertEquals(null, result.selectedDetail?.fairValueAnchor?.valueCents)
     }
 
     @Test
@@ -268,9 +297,12 @@ class ScreenDataProjectionEngineTest {
                 confidence = ConfidenceBand.High,
                 weightedExternalSignalFairValueCents = 12_500L,
                 weightedAnalystCount = 12,
+                externalSignalLowFairValueCents = 11_000L,
+                externalSignalHighFairValueCents = 14_000L,
             ).copy(
                 profitable = false,
                 qualification = QualificationStatus.Unprofitable,
+                fundamentals = operatingFundamentals("W13P"),
             ),
         )
 
@@ -394,8 +426,10 @@ class ScreenDataProjectionEngineTest {
                 intrinsicValueCents = 12_000L,
                 confidence = ConfidenceBand.High,
                 externalSignalFairValueCents = 12_300L,
+                externalSignalLowFairValueCents = 11_000L,
+                externalSignalHighFairValueCents = 14_000L,
                 analystOpinionCount = 8,
-            ),
+            ).copy(fundamentals = operatingFundamentals("W13A")),
             analystTargetStatistic = ProjectedAnalystTargetStatistic.Median,
         )
 
@@ -412,8 +446,10 @@ class ScreenDataProjectionEngineTest {
                 intrinsicValueCents = 12_000L,
                 confidence = ConfidenceBand.High,
                 externalSignalFairValueCents = 12_300L,
+                externalSignalLowFairValueCents = 11_000L,
+                externalSignalHighFairValueCents = 14_000L,
                 analystOpinionCount = 8,
-            ),
+            ).copy(fundamentals = operatingFundamentals("W13A")),
             analystTargetStatistic = ProjectedAnalystTargetStatistic.Mean,
         )
 
@@ -430,8 +466,10 @@ class ScreenDataProjectionEngineTest {
                 intrinsicValueCents = 12_000L,
                 confidence = ConfidenceBand.High,
                 externalSignalFairValueCents = 12_300L,
+                externalSignalLowFairValueCents = 11_000L,
+                externalSignalHighFairValueCents = 14_000L,
                 analystOpinionCount = 8,
-            ),
+            ).copy(fundamentals = operatingFundamentals("W13A")),
         )
 
         assertEquals("Analyst consensus|Consensus target", labelPair(result))
@@ -512,6 +550,47 @@ class ScreenDataProjectionEngineTest {
         confidence = ConfidenceBand.High,
     )
 
+    private fun projectDisputedNamedValuation(includeCandidate: Boolean): ProjectedDashboardData {
+        var symbol = "DISP1"
+        var detail = detail(
+            symbol = symbol,
+            marketPriceCents = 10_000L,
+            intrinsicValueCents = 12_000L,
+            confidence = ConfidenceBand.High,
+            weightedExternalSignalFairValueCents = 25_001L,
+            weightedAnalystCount = 8,
+            externalSignalLowFairValueCents = 20_000L,
+            externalSignalHighFairValueCents = 30_000L,
+            analystOpinionCount = 8,
+        )
+        var analysis = dcf(
+            source = DcfSource.YahooFinance,
+            resolverState = ResolverState.Selected,
+            bearIntrinsicValueCents = 14_000L,
+            baseIntrinsicValueCents = 14_999L,
+            bullIntrinsicValueCents = 16_000L,
+        ).copy(
+            businessClass = BusinessClass.OperatingNonFinancial,
+            model = ValuationModel.FcffWacc,
+        )
+        return ScreenDataProjectionEngine().project(
+            ScreenDataProjectionRequest(
+                profile = ProjectionProfileFacts(currentProfile = "test"),
+                route = ProjectionRoute(selectedSymbol = symbol, selectedRange = ChartRange.Month),
+                nowEpochSeconds = 42L,
+                trackedSymbols = listOf(symbol),
+                detailsBySymbol = mapOf(symbol to detail),
+                dcfBySymbol = mapOf(symbol to analysis),
+                symbolStateBySymbol = mapOf(symbol to liveState(symbol)),
+                candidateRows = if (includeCandidate) {
+                    listOf(candidateRow().copy(symbol = symbol))
+                } else {
+                    emptyList()
+                },
+            ),
+        ).requireSuccess()
+    }
+
     private fun projectSingleSymbol(
         symbol: String,
         detail: SymbolDetail,
@@ -530,6 +609,31 @@ class ScreenDataProjectionEngineTest {
             analystTargetStatisticBySymbol = analystTargetStatistic?.let { mapOf(symbol to it) }.orEmpty(),
         ),
     ).requireSuccess()
+
+    @Test
+    fun selected_detail_projects_the_market_params_label() {
+        var params = MarketParams.observed(rfBps = 425, asOfEpochMillis = 1_786_752_000_000L)
+        var result = projectSingleSymbol(
+            symbol = "RATES1",
+            detail = detail(
+                symbol = "RATES1",
+                marketPriceCents = 10_000L,
+                intrinsicValueCents = 12_000L,
+                confidence = ConfidenceBand.High,
+            ),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 9_000L,
+                baseIntrinsicValueCents = 12_000L,
+                bullIntrinsicValueCents = 15_000L,
+            ).copy(
+                waccBps = 850,
+                reasonCodes = listOf(params.fingerprint()),
+            ),
+        )
+        assertEquals(params.displayLabel(), result.selectedDetail?.marketParamsLabel)
+    }
 
     @Test
     fun selected_detail_projects_wacc_assumption_labels() {
@@ -562,6 +666,33 @@ class ScreenDataProjectionEngineTest {
         assertEquals(true, selected?.waccProvisional)
         assertTrue(selected?.waccAssumptionLabels?.contains("beta=default") == true)
         assertTrue(selected?.waccAssumptionLabels?.contains("market cap=price×shares") == true)
+    }
+
+    @Test
+    fun selected_detail_attaches_identity_judgment_when_model_only() {
+        var result = projectSingleSymbol(
+            symbol = "JUDGE1",
+            detail = detail(
+                symbol = "JUDGE1",
+                marketPriceCents = 10_000L,
+                intrinsicValueCents = 12_000L,
+                confidence = ConfidenceBand.High,
+            ),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 9_000L,
+                baseIntrinsicValueCents = 12_000L,
+                bullIntrinsicValueCents = 15_000L,
+            ).copy(
+                businessClass = BusinessClass.OperatingNonFinancial,
+                model = ValuationModel.FcffWacc,
+            ),
+        )
+        assertEquals(
+            ValuationJudgmentStatus.Identity,
+            result.selectedDetail?.valuationJudgment?.status,
+        )
     }
 
     @Test
@@ -628,18 +759,18 @@ class ScreenDataProjectionEngineTest {
         marketPriceCents = 10_000L,
         fairValueCents = 12_500L,
         upsideBps = 2_500,
-        displayLabel = ProjectedFairValueLabels.ANALYST_FAIR_VALUE,
-        compactLabel = "Analyst weighted",
-        sourceLabel = "Weighted target",
-        role = ProjectedFairValueRole.AnalystWeightedTarget,
+        displayLabel = ProjectedFairValueLabels.MODEL_FAIR_VALUE,
+        compactLabel = "FCFF DCF",
+        sourceLabel = "FCFF DCF base - Yahoo Finance",
+        role = ProjectedFairValueRole.DcfBaseModel,
         provenanceState = ProjectedProvenanceState.Live,
         confidence = ProjectedConfidence.High,
         freshness = ProjectedRowFreshness.Updated,
-        trustKind = null,
-        decision = ProjectedRowDecision.Act,
-        canPopulateAnalystHistory = true,
+        trustKind = ProjectedTrustSignalKind.ModelValue,
+        decision = ProjectedRowDecision.Watch,
+        canPopulateAnalystHistory = false,
         detailFairValueCents = 12_500L,
-        detailSourceLabel = "Weighted target",
+        detailSourceLabel = "FCFF DCF base - Yahoo Finance",
         evLowUpsideBps = 1_000,
         evHighUpsideBps = 6_000,
         providerCategory = ProjectedProviderCategory.Live,
@@ -682,20 +813,20 @@ class ScreenDataProjectionEngineTest {
     private fun fxProviderUncertainExpectation() = FixtureProjectionExpectation(
         symbol = "W13U",
         marketPriceCents = 10_000L,
-        fairValueCents = 13_000L,
-        upsideBps = 3_000,
-        displayLabel = ProjectedFairValueLabels.MODEL_FAIR_VALUE,
-        compactLabel = "FCFF DCF",
-        sourceLabel = "FCFF DCF base - source uncertain",
-        role = ProjectedFairValueRole.UncertainDcfModel,
-        provenanceState = ProjectedProvenanceState.ProviderUncertain,
+        fairValueCents = null,
+        upsideBps = null,
+        displayLabel = ProjectedFairValueLabels.FAIR_VALUE_UNAVAILABLE,
+        compactLabel = "No fair-value source",
+        sourceLabel = "No fair-value source",
+        role = ProjectedFairValueRole.Unavailable,
+        provenanceState = ProjectedProvenanceState.Unavailable,
         confidence = ProjectedConfidence.Provisional,
         freshness = ProjectedRowFreshness.Updated,
         trustKind = ProjectedTrustSignalKind.SourceUncertain,
-        decision = ProjectedRowDecision.Watch,
+        decision = null,
         canPopulateAnalystHistory = false,
-        detailFairValueCents = 13_000L,
-        detailSourceLabel = "FCFF DCF base - source uncertain",
+        detailFairValueCents = null,
+        detailSourceLabel = "No fair-value source",
         evLowUpsideBps = null,
         evHighUpsideBps = null,
         providerCategory = ProjectedProviderCategory.ProviderUncertain,
@@ -733,6 +864,13 @@ class ScreenDataProjectionEngineTest {
         dcfRestoredCount = 1,
         dcfUncertainCount = 0,
         baseDcfWeightedPriceCents = 0L,
+    )
+
+    private fun operatingFundamentals(symbol: String) = FundamentalSnapshot(
+        symbol = symbol,
+        marketCapDollars = 1_000L,
+        sectorName = "Technology",
+        industryName = "Semiconductors",
     )
 
     private fun liveState(symbol: String) = ProjectionSymbolState(

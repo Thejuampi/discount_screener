@@ -96,7 +96,7 @@ function Start-EmulatorDetached([string]$SdkRoot, [string]$AvdName, [switch]$Hea
         "-no-boot-anim",
         "-no-snapshot-load",
         "-no-snapshot-save",
-        "-gpu", "swiftshader_indirect"
+        "-gpu", "off"
     )
     if ($Headless) {
         $arguments += "-no-window"

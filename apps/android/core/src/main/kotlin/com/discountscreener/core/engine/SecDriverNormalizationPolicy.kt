@@ -56,6 +56,14 @@ object SecDriverNormalizationPolicy {
     val materialAcquisitionRevenueBps: Int
         get() = GeneratedSecDriverNormalizationPolicy.materialAcquisitionRevenueBps
 
+    /** QNames the companyfacts sieve may keep. Everything else is skipped on the stream. */
+    val retainedQnames: Set<String>
+        get() = buildSet {
+            Driver.entries.forEach { driver -> addAll(operator(driver).qnames) }
+            addAll(recurringDevelopmentConcepts)
+            addAll(acquisitionInvestmentConcepts)
+        }
+
     fun operator(driver: Driver): DriverOperator = GeneratedSecDriverNormalizationPolicy.let { generated ->
         val source = when (driver) {
             Driver.OperatingCashFlow -> generated.operatingCashFlow

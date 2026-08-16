@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.remote
 
+import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ChartRange
@@ -388,6 +389,9 @@ open class YahooFinanceClient(
             "annualTotalRevenue",
             "annualDilutedAverageShares",
             "annualInterestExpense",
+            "annualInterestExpenseNonOperating",
+            "annualInterestPaidSupplementalData",
+            "annualInterestPaid",
             "annualPretaxIncome",
             "annualTaxRateForCalcs",
             "annualTotalDebt",
@@ -395,21 +399,19 @@ open class YahooFinanceClient(
             "annualNetIncome",
         ).joinToString(",")
 
-        val url = FUNDAMENTALS_TIMESERIES_URL.toHttpUrl().newBuilder()
-            .addPathSegment(requestSymbol)
-            .addQueryParameter("type", types)
-            .addQueryParameter("period1", "1262304000")
-            .addQueryParameter("period2", "2524608000")
-            .build()
-
-        val root = getJson(url.toString())
+        val root = fetchTimeseriesJson(requestSymbol, types)
         FundamentalTimeseries(
             freeCashFlow = parseTimeseriesMetric(root, "annualFreeCashFlow"),
             operatingCashFlow = parseTimeseriesMetric(root, "annualOperatingCashFlow"),
             capitalExpenditure = parseTimeseriesMetric(root, "annualCapitalExpenditure"),
             revenue = parseTimeseriesMetric(root, "annualTotalRevenue"),
             dilutedAverageShares = parseTimeseriesMetric(root, "annualDilutedAverageShares"),
-            interestExpense = parseTimeseriesMetric(root, "annualInterestExpense"),
+            interestExpense = YahooInterestSeries.mergeByYear(
+                parseTimeseriesMetric(root, "annualInterestExpense"),
+                parseTimeseriesMetric(root, "annualInterestExpenseNonOperating"),
+                parseTimeseriesMetric(root, "annualInterestPaidSupplementalData"),
+                parseTimeseriesMetric(root, "annualInterestPaid"),
+            ),
             pretaxIncome = parseTimeseriesMetric(root, "annualPretaxIncome"),
             taxRateForCalcs = parseTimeseriesMetric(root, "annualTaxRateForCalcs"),
             totalDebt = parseTimeseriesMetric(root, "annualTotalDebt"),
@@ -485,6 +487,34 @@ open class YahooFinanceClient(
             }
         }
         throw lastError ?: IOException("request failed")
+    }
+
+    private fun fetchTimeseriesJson(requestSymbol: String, types: String): JsonObject {
+        fun once(): JsonObject {
+            val crumb = session.ensureCrumb()
+            val url = FUNDAMENTALS_TIMESERIES_URL.toHttpUrl().newBuilder()
+                .addPathSegment(requestSymbol)
+                .addQueryParameter("type", types)
+                .addQueryParameter("period1", "1262304000")
+                .addQueryParameter("period2", "2524608000")
+                .addQueryParameter("crumb", crumb)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+                .build()
+            val body = executeText(request)
+            return json.parseToJsonElement(body).jsonObject
+        }
+        return try {
+            once()
+        } catch (error: IOException) {
+            if (!isAuthError(error)) throw error
+            session.clear()
+            once()
+        }
     }
 
     private fun getJson(url: String): JsonObject {

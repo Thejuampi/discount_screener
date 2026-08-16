@@ -672,12 +672,8 @@ fn baseline_megacap_amzn_class_not_penny_intrinsic() {
     // priced this class near $50 while market/street were multi-hundreds. The
     // owner-earnings path must stay well clear of that collapse.
     //
-    // Levels moved down at policy /16: /15 floored AMZN sustaining CapEx at ~2.0% of
-    // revenue against a ~$300B gross asset base (well under its ~$60B annual D&A),
-    // which inflated the base. /16 charges ~5.8%. This fixture is also stricter than
-    // live AMZN — its six-year window makes 2025 look like a CapEx spike, so the
-    // normalized OCF margin is 12.32% here vs 14.78% on the full SEC history
-    // (live run-rate $65.7B, base > $100). See `live_fcff_driver_audit_cohort`.
+    // Policy /19 uses the last 4 driver years. The 2021 OCF trough no longer
+    // enters the AMZN 6-year pack after 2025 flags as a CapEx spike.
     assert!(
         base >= 10_000,
         "AMZN-class owner-earnings base must stay clear of the all-CapEx-is-maintenance collapse (~$50), base_cents={base}"

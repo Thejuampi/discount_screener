@@ -55,6 +55,7 @@ This index is the starting point for humans and AI agents trying to understand t
 
 - [Sprint Status](../_bmad-output/implementation-artifacts/sprint-status.yaml) - current story and epic status.
 - [Implementation Artifacts Index](../_bmad-output/implementation-artifacts/index.md) - local navigation for stories, specs, and QA artifacts.
+- [QA universe stance table 2026-08-15](../_bmad-output/implementation-artifacts/qa-universe-stance-table-2026-08-15.md) - Wave 1 measure of Android `qa` identity vs Street. Predicted Wave-2 stance. No policy change.
 - [QA Test Summary](../_bmad-output/implementation-artifacts/tests/test-summary.md) - generated/verified QA coverage notes.
 
 ## Maintenance Rules

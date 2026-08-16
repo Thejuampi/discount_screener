@@ -234,7 +234,8 @@ function Start-AndroidEmulator {
     $arguments = @(
         '-avd', $AvdName,
         '-no-audio',
-        '-no-boot-anim'
+        '-no-boot-anim',
+        '-gpu', 'off'
     )
 
     $emulatorCommand = ((@($EmulatorPath) + $arguments | ForEach-Object { Format-CmdArgument $_ }) -join ' ')
