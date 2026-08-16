@@ -27,11 +27,14 @@ Use this index to find active implementation work, story files, QA outputs, and 
 
 ## Active quant / valuation continuity
 
+- **[Handover — Honest path and Street stretch 2026-08-16](handover-honest-path-street-stretch-2026-08-16.md)** — **start here for the next agent** on identity cash, holdout measure, or Street-implied stretch. Branch `valuation/honest-path-and-street-stretch` / PR #39.
+- [Holdout book 2026-08-16](holdout-book-2026-08-16.json) - seeded 20-name holdout. Measure only. Do not retune honest knobs to this Street set.
+- **[Handover — Quant Valuation Engine 2026-08-02](handover-quant-valuation-engine-2026-08-02.md)** — older Windows motor brief (CHTR / high-signal / Shapley). Separate workstream.
+
 - **[`apps/windows/src-tauri/valuation-core/`](../../apps/windows/src-tauri/valuation-core/)** — the pure kernel replacing the valuation modules. `tests/features/*.feature` is the contract, not documentation of it; `tests/schema.rs` enforces the table discipline. The Shell's `dcf_model`, `operating_valuation`, and `driver_resolution` now carry deprecation banners naming what each is being replaced for. The old engine keeps shipping until the core carries the behaviour.
 
-- **[Handover — Quant Valuation Engine 2026-08-02](handover-quant-valuation-engine-2026-08-02.md)** — **start here for the next agent** on the quant motor: state, shipped work, CHTR FCFF blocker, P0–P7, gates, module map.
 - [Multi-name valuation baseline policy](valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar + high-signal cohort + gap-attribution telemetry notes.
-- [Deferred Work](deferred-work.md) - includes quant P0/open process items from the handover.
+- [Deferred Work](deferred-work.md) - includes 2026-08-16 identity/stretch open work and the older 2026-08-02 motor tickets.
 - [AMZN owner-earnings fix notes](fix-amzn-owner-earnings-vs-street-2026-08-01.md) - why policy/15 OE path exists (do not undo blindly while fixing cable CapEx).
 
 ## Learning And Retrospective Artifacts

@@ -1,5 +1,15 @@
 # Deferred Work
 
+## 2026-08-16 — Honest path and Street stretch
+
+Source: [`handover-honest-path-street-stretch-2026-08-16.md`](handover-honest-path-street-stretch-2026-08-16.md)
+
+- **P0 (due):** Live QA on profile `qa` after identity-visible CapEx/interest. Checklist in `docs/valuation-live-qa-checklist.md`. One process. Never `sp500`.
+- **P1:** Windows still lacks Android `persist_frac`, expand-without-franchise, residual-path `/4`, and NonHonest stretch UI. Port only if Juan asks.
+- **P2:** NonHonest is a published diagnostic. Do not switch working mode, and do not build a multi-knob Street mix, unless Juan asks.
+- **Do not:** retune CMCSA / AMAT / DELL / CPAY / DASH honest knobs to this holdout’s Street numbers.
+- Honest extraction on this holdout is exhausted. Remaining gaps are Street vs identity.
+
 ## 2026-08-02 — Quant / valuation motor (handover)
 
 Source: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuation-engine-2026-08-02.md)

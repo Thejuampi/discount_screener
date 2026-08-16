@@ -23,6 +23,7 @@ Use this index to choose the right planning document without loading the full BM
 - [Valuation Model Family Architecture](valuation-model-family-architecture.md) - model routing by business class (FCFF vs residual income), dynamic market params, structural constraints only (no hard output caps). Motivated by ACGL FCFF mis-valuation. Status: implemented Phases 1–4 (Windows/Android/desktop engines + contracts); Quant Lens SNR policy model_version ≥ 4.
 - Contract: [valuation-model-family.json](../../shared/contracts/valuation-model-family.json)
 - Agent conventions: [Agents.md](../../Agents.md) · [project-context.md](../project-context.md)
+- Current continuity: [Handover — Honest path and Street stretch 2026-08-16](../implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md)
 - Related: [DCF Source Consistency Architecture](../implementation-artifacts/dcf-source-consistency-architecture.md) - provider selection for inputs entering the engine.
 - Related runtime: Windows `dcf_model.rs` + `quant_lens.rs`; Android `DcfAnalysisEngine.kt`; desktop `workstation/app_core.rs` valuation routing.
 
