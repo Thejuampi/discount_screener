@@ -1,0 +1,32 @@
+{
+  "seed": 20260816,
+  "policy": "business-class-policy/33-path-refine",
+  "scoreboard": "street_median_target",
+  "formula_reads_street": false,
+  "fit_set_excluded": [
+    "AAPL", "ACGL", "AMZN", "BAC", "CI", "GOOG", "GOOGL", "HD", "JNJ", "JPM",
+    "META", "MRK", "MSFT", "NVDA", "PG", "T", "TSLA", "UNH", "V", "WMT", "XOM"
+  ],
+  "names": [
+    {"symbol": "CMCSA", "stratum": "telecom", "cik": "0001166691"},
+    {"symbol": "DASH", "stratum": "internet_retail", "cik": "0001792789"},
+    {"symbol": "DELL", "stratum": "consumer_electronics", "cik": "0001571996"},
+    {"symbol": "WDAY", "stratum": "software", "cik": "0001327811"},
+    {"symbol": "AMAT", "stratum": "semiconductors", "cik": "0000006951"},
+    {"symbol": "PFE", "stratum": "pharma_a", "cik": "0000078003"},
+    {"symbol": "BIIB", "stratum": "pharma_b", "cik": "0000875045"},
+    {"symbol": "EOG", "stratum": "oil_e_and_p", "cik": "0000821189"},
+    {"symbol": "CPAY", "stratum": "payments", "cik": "0001175454"},
+    {"symbol": "TGT", "stratum": "discount_store", "cik": "0000027419"},
+    {"symbol": "EA", "stratum": "gaming", "cik": "0000712515"},
+    {"symbol": "TTWO", "stratum": "gaming", "cik": "0000946581"},
+    {"symbol": "GM", "stratum": "auto", "cik": "0001467858"},
+    {"symbol": "LOW", "stratum": "home_improvement", "cik": "0000060667"},
+    {"symbol": "CHD", "stratum": "household", "cik": "0000313927"},
+    {"symbol": "PNC", "stratum": "bank", "cik": "0000713676"},
+    {"symbol": "C", "stratum": "bank", "cik": "0000831001"},
+    {"symbol": "CB", "stratum": "insurance", "cik": "0000896159"},
+    {"symbol": "HUM", "stratum": "managed_care", "cik": "0000049071"},
+    {"symbol": "ELV", "stratum": "managed_care", "cik": "0001156039"}
+  ]
+}

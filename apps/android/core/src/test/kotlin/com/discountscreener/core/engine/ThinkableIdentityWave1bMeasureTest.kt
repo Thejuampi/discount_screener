@@ -63,6 +63,38 @@ private val SYMBOL_CIK = mapOf(
     "MRK" to "0000310158",
 )
 
+private val HOLDOUT_ROOT: Path = Path.of(
+    "G:/dev/repos/discount_screener/.agents/workspace/tmp/e2e/thinkable-identity-qa/build/holdout",
+)
+
+private val HOLDOUT_SYMBOLS = listOf(
+    "CMCSA", "DASH", "DELL", "WDAY", "AMAT", "PFE", "BIIB", "EOG", "CPAY", "TGT",
+    "EA", "TTWO", "GM", "LOW", "CHD", "PNC", "C", "CB", "HUM", "ELV",
+)
+
+private val HOLDOUT_CIK = mapOf(
+    "CMCSA" to "0001166691",
+    "DASH" to "0001792789",
+    "DELL" to "0001571996",
+    "WDAY" to "0001327811",
+    "AMAT" to "0000006951",
+    "PFE" to "0000078003",
+    "BIIB" to "0000875045",
+    "EOG" to "0000821189",
+    "CPAY" to "0001175454",
+    "TGT" to "0000027419",
+    "EA" to "0000712515",
+    "TTWO" to "0000946581",
+    "GM" to "0001467858",
+    "LOW" to "0000060667",
+    "CHD" to "0000313927",
+    "PNC" to "0000713676",
+    "C" to "0000831001",
+    "CB" to "0000896159",
+    "HUM" to "0000049071",
+    "ELV" to "0001156039",
+)
+
 class ThinkableIdentityWave1bPrefetchTest {
     @Test
     @EnabledIfEnvironmentVariable(named = "DS_WAVE1B", matches = "true")
@@ -76,6 +108,22 @@ class ThinkableIdentityWave1bPrefetchTest {
             if (ts != null) Files.writeString(dest.resolve("$symbol-ts.json"), ts)
         }
         assertTrue(Files.exists(dest.resolve("JPM-quote.json")))
+    }
+}
+
+class ThinkableIdentityHoldoutPrefetchTest {
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DS_HOLDOUT", matches = "true")
+    fun prefetch_holdout_yahoo_quotes() {
+        var dest = HOLDOUT_ROOT.resolve("yahoo")
+        Files.createDirectories(dest)
+        var transport = HttpYahooTransport()
+        for (symbol in HOLDOUT_SYMBOLS) {
+            Files.writeString(dest.resolve("$symbol-quote.json"), transport.quoteSummary(symbol))
+            var ts = transport.timeseries(symbol)
+            if (ts != null) Files.writeString(dest.resolve("$symbol-ts.json"), ts)
+        }
+        assertTrue(Files.exists(dest.resolve("PNC-quote.json")))
     }
 }
 
@@ -170,11 +218,69 @@ class ThinkableIdentityWave1bMeasureTest {
         )
     }
 
-    private fun measure(symbol: String, marketParams: MarketParams): MeasureRow {
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DS_HOLDOUT", matches = "true")
+    fun measure_holdout_book() {
+        var marketParams = MarketParams(
+            rfBps = 470,
+            erpBps = 442,
+            provisional = false,
+            erpSchool = ErpSchool.ImpliedIndex,
+            rfSource = RF_SOURCE_YAHOO_TNX,
+            macroStableGrowthBps = 380,
+        )
+        var rows = HOLDOUT_SYMBOLS.map {
+            measure(it, marketParams, root = HOLDOUT_ROOT, ciks = HOLDOUT_CIK)
+        }
+        var csv = buildString {
+            appendLine("sym,street,ident,ape,class,model,wacc,g,regime,error")
+            for (row in rows) {
+                var street = row.streetBaseCents?.toDouble() ?: 0.0
+                var ident = row.identityBaseCents?.toDouble() ?: 0.0
+                var ape = if (street > 0.0 && ident > 0.0) {
+                    kotlin.math.abs(ident - street) / street
+                } else {
+                    Double.NaN
+                }
+                appendLine(
+                    listOf(
+                        row.symbol,
+                        street / 100.0,
+                        ident / 100.0,
+                        if (ape.isNaN()) "" else "%.3f".format(ape),
+                        row.businessClass,
+                        row.model,
+                        row.waccOrCoeBps,
+                        row.growthBps,
+                        row.regime,
+                        row.computeError?.replace(",", ";"),
+                    ).joinToString(","),
+                )
+            }
+            var apes = rows.mapNotNull { row ->
+                var street = row.streetBaseCents?.toDouble() ?: return@mapNotNull null
+                var ident = row.identityBaseCents?.toDouble() ?: return@mapNotNull null
+                if (street <= 0.0 || ident <= 0.0) null else kotlin.math.abs(ident - street) / street
+            }
+            appendLine("MEAN_APE,${if (apes.isEmpty()) "" else apes.average().toString()},n=${apes.size}")
+        }
+        Files.createDirectories(HOLDOUT_ROOT)
+        Files.writeString(HOLDOUT_ROOT.resolve("driver-dump.csv"), csv)
+        println(csv)
+        var priced = rows.count { (it.identityBaseCents ?: 0L) > 0L }
+        assertTrue(priced >= 1, "holdout must price at least one name")
+    }
+
+    private fun measure(
+        symbol: String,
+        marketParams: MarketParams,
+        root: Path = WAVE1B_ROOT,
+        ciks: Map<String, String> = SYMBOL_CIK,
+    ): MeasureRow {
         var sources = mutableListOf("sec:companyfacts", "yahoo:quoteSummary")
-        var cik = SYMBOL_CIK[symbol]
-        var factsPath = cik?.let { WAVE1B_ROOT.resolve("sec").resolve("CIK$it.json") }
-        var quotePath = WAVE1B_ROOT.resolve("yahoo").resolve("$symbol-quote.json")
+        var cik = ciks[symbol]
+        var factsPath = cik?.let { root.resolve("sec").resolve("CIK$it.json") }
+        var quotePath = root.resolve("yahoo").resolve("$symbol-quote.json")
         if (factsPath == null || !Files.exists(factsPath)) {
             return MeasureRow(symbol, sourcesTried = sources + "sec:missing_file")
         }
