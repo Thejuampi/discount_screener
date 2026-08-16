@@ -6,6 +6,8 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.HonestPathInputs
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.WaccFieldSource
 import com.discountscreener.core.model.WaccInputProvenance
@@ -20,7 +22,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/33-path-refine"
+const val MODEL_POLICY_VERSION = "business-class-policy/35-weak-franchise-secular"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/2"
 
@@ -339,6 +341,13 @@ object DcfAnalysisEngine {
             driverProvenance = listOf(
                 "source=provider_timeseries",
                 "model=residual_income_equity",
+                "honesty=honest",
+            ),
+            honesty = ValuationHonesty.Honest,
+            honestPath = HonestPathInputs(
+                residualFadeYears = residualPath.fadeYears,
+                residualFranchiseSpreadBps = residualPath.franchiseSpreadBps,
+                residualRetentionBps = retentionBps,
             ),
         )
     }
@@ -543,6 +552,7 @@ object DcfAnalysisEngine {
         val growthFadeExponent: Double,
         val taxDefaulted: Boolean,
         val ocfPersistentRecovery: Boolean = false,
+        val interestAssumedZeroYears: List<Int> = emptyList(),
     )
 
     /**
@@ -556,6 +566,7 @@ object DcfAnalysisEngine {
         val revenueByPeriod = timeseries.revenue.associateBy(::annualKey)
         val interestByPeriod = timeseries.interestExpense.associateBy(::annualKey)
         val taxByPeriod = timeseries.taxRateForCalcs.associateBy(::annualKey)
+        val debtByPeriod = timeseries.totalDebt.associateBy(::annualKey)
 
         val raw = timeseries.operatingCashFlow
             .asSequence()
@@ -570,16 +581,20 @@ object DcfAnalysisEngine {
                 if (revenue <= 0.0) {
                     return@mapNotNull null
                 }
-                val interest = interestByPeriod[period]?.value
+                val filedInterest = interestByPeriod[period]?.value
                     ?.takeIf { it.isFinite() }
                     ?.let { kotlin.math.abs(it) }
+                val periodDebt = debtByPeriod[period]?.value
+                val noPeriodDebt = periodDebt == null || periodDebt == 0.0
+                // A levered issuer that folds interest into other income keeps
+                // the year for growth; FCFF stays absent. An issuer with no
+                // period debt and no filed coupon uses a zero add-back.
+                val interest = filedInterest ?: if (noPeriodDebt) 0.0 else null
                 val tax = normalizedTaxBps(taxByPeriod[period]?.value)
-                // AAPL FY2024+ folded interest into other income. Keep the year
-                // for revenue, OCF, and CapEx; only the FCFF identity is absent.
-                val afterTaxInterest = if (interest != null && tax != null) {
-                    interest * (1.0 - tax / 10_000.0)
-                } else {
-                    null
+                val afterTaxInterest = when {
+                    interest == 0.0 -> 0.0
+                    interest != null && tax != null -> interest * (1.0 - tax / 10_000.0)
+                    else -> null
                 }
                 val fcff = afterTaxInterest?.let { addBack ->
                     operating.value + addBack - kotlin.math.abs(capex)
@@ -597,6 +612,7 @@ object DcfAnalysisEngine {
                         ((it / revenue) * 10_000.0).roundToInt()
                     },
                     taxMissing = false,
+                    interestAssumedZero = filedInterest == null && noPeriodDebt,
                 )
             }
             .toList()
@@ -798,6 +814,7 @@ object DcfAnalysisEngine {
             },
             taxDefaulted = raw.any { it.taxMissing },
             ocfPersistentRecovery = ocfPersistentRecovery,
+            interestAssumedZeroYears = raw.filter { it.interestAssumedZero }.map { it.year },
         )
     }
 
@@ -826,9 +843,11 @@ object DcfAnalysisEngine {
         val dispersion = quantileBps(recentGrowths, 0.75) - quantileBps(recentGrowths, 0.25)
         val priorMedian = medianBps(priorGrowths)
         return when {
+            recentMedian >= 1_000 && positiveShare >= 7_500 ->
+                DriverRegime.SecularExpansion
             recentMedian >= 500 && positiveShare >= 7_500 &&
                 (priorGrowths.isEmpty() || recentMedian >= priorMedian) &&
-                (dispersion <= 4_000 || recentMedian >= 1_000) ->
+                dispersion <= 4_000 ->
                 DriverRegime.SecularExpansion
             dispersion >= 2_000 || positiveShare <= 5_000 -> DriverRegime.CyclicalOrTransition
             else -> DriverRegime.StableOperating
@@ -903,6 +922,7 @@ object DcfAnalysisEngine {
         val acquisitionInvestmentDollars: Double?,
         val afterTaxInterestMarginBps: Int?,
         val taxMissing: Boolean,
+        val interestAssumedZero: Boolean = false,
     )
 
     private fun normalizedTaxBps(value: Double?): Int? {
@@ -1044,6 +1064,7 @@ object DcfAnalysisEngine {
             sector = fundamentals.sectorName,
             fadeYearsDefault = fadeDefault,
             fadeExponentDefault = growthFadeDefault,
+            capexIntensityBps = drivers.normalizedCapexIntensityBps,
         )
         val usedBaseGrowth = path.usedGrowthBps
         val demonstratedStable = usedBaseGrowth.coerceAtLeast(MIN_STABLE_GROWTH_BPS)
@@ -1076,13 +1097,14 @@ object DcfAnalysisEngine {
             path.stableMarginBps, usedBearGrowth,
             currentShares, netDebtDollars, bearStableGrowth, bearWacc,
             growthFade, path.holdYears, path.fadeYears,
-        ) ?: error("bear driver scenario invalid")
+        ) ?: 0L
         val base = discountedDriverFcff(
             drivers.latestRevenueDollars, path.startMarginBps,
             path.stableMarginBps, usedBaseGrowth,
             currentShares, netDebtDollars, stableGrowthBase, pathDiscount,
             growthFade, path.holdYears, path.fadeYears,
-        ) ?: error("base driver scenario invalid")
+        ) ?: error("fcff unavailable: equity wiped after net debt")
+        require(base > 0L) { "fcff unavailable: equity wiped after net debt" }
         val bull = discountedDriverFcff(
             drivers.latestRevenueDollars, maxOf(drivers.bullFcffMarginBps, path.startMarginBps),
             path.stableMarginBps, usedBullGrowth,
@@ -1099,6 +1121,12 @@ object DcfAnalysisEngine {
             add("business_class=operating_non_financial")
             add("valuation_driver=driver_based_fcff")
             add("fcff=ocf_plus_after_tax_interest_minus_capex")
+            if (drivers.interestAssumedZeroYears.isNotEmpty()) {
+                add(
+                    "interest=unfiled_zero_when_no_period_debt:" +
+                        drivers.interestAssumedZeroYears.joinToString(","),
+                )
+            }
             add("growth=recent_driver_median:regime=${drivers.driverRegime}")
             add("growth=scenario_band_around_median:$SCENARIO_GROWTH_BAND_BPS")
             if (drivers.ocfPersistentRecovery) {
@@ -1195,6 +1223,15 @@ object DcfAnalysisEngine {
                 "source=provider_timeseries",
                 "annual_aligned=ocf,capex,revenue,interest,debt,effective_tax,marginal_tax",
                 "fcff=ocf_plus_after_tax_interest_minus_capex",
+                "honesty=honest",
+            ),
+            honesty = ValuationHonesty.Honest,
+            honestPath = HonestPathInputs(
+                holdYears = path.holdYears,
+                fadeYears = path.fadeYears,
+                startMarginBps = path.startMarginBps,
+                stableMarginBps = path.stableMarginBps,
+                fadeExponentHundredths = (path.fadeExponent * 100.0).roundToInt(),
             ),
         )
     }

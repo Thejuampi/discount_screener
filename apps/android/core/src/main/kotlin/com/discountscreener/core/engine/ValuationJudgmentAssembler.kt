@@ -9,6 +9,7 @@ import com.discountscreener.core.model.ValuationAnchorSource
 import com.discountscreener.core.model.ValuationAvailability
 import com.discountscreener.core.model.ValuationCoverage
 import com.discountscreener.core.model.ValuationFreshness
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 
 object ValuationJudgmentAssembler {
@@ -42,6 +43,15 @@ object ValuationJudgmentAssembler {
             analysis = analysis,
             sharesOutstanding = sharesOutstanding,
         )
+        var implied = if (analysis != null && street != null && street.baseCents > 0L) {
+            StreetImpliedHonesty.reconcile(
+                analysis = analysis,
+                streetBaseCents = street.baseCents,
+                shares = sharesOutstanding?.toDouble(),
+            )
+        } else {
+            null
+        }
         return ProjectedValuationJudgment(
             status = judgment.status,
             relation = judgment.relation,
@@ -63,6 +73,8 @@ object ValuationJudgmentAssembler {
             upsideToHorizonBps = price.upsideToHorizonBps,
             priceSpeechReasons = price.reasonCodes,
             priceSpeechPolicyVersion = price.policyVersion,
+            honestyMode = analysis?.honesty ?: ValuationHonesty.Honest,
+            streetImplied = implied,
         )
     }
 

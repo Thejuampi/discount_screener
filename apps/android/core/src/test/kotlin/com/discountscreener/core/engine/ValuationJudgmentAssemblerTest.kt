@@ -7,8 +7,10 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.HonestPathInputs
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -125,6 +127,84 @@ class ValuationJudgmentAssemblerTest {
             sharesOutstanding = 24_221_000_000L,
         )
         assertEquals(10_691L, snap.horizonPriceCents)
+    }
+
+    @Test
+    fun snapshot_keeps_working_mode_honest() {
+        var snap = impliedSnapshot()
+        assertEquals(ValuationHonesty.Honest, snap.honestyMode)
+    }
+
+    @Test
+    fun snapshot_tags_street_implied_knobs_as_non_honest() {
+        var knobs = requireNotNull(impliedSnapshot().streetImplied).knobs
+        assertEquals(true, knobs.isNotEmpty() && knobs.all { it.honesty == ValuationHonesty.NonHonest })
+    }
+
+    @Test
+    fun snapshot_horizon_stays_honest_identity() {
+        var analysis = pricedFcff()
+        var snap = impliedSnapshot(analysis)
+        assertEquals(analysis.baseIntrinsicValueCents, snap.horizonPriceCents)
+    }
+
+    private fun impliedSnapshot(analysis: DcfAnalysis = pricedFcff()) =
+        ValuationJudgmentAssembler.snapshot(
+            ValuationJudgmentAssembler.assemble(
+                completeStreet(
+                    "CMCSA",
+                    fundamentals = FundamentalSnapshot(
+                        symbol = "CMCSA",
+                        sectorName = "Communication Services",
+                        industryName = "Entertainment",
+                        sharesOutstanding = 100_000_000L,
+                    ),
+                ),
+                analysis,
+            ),
+            lastPriceCents = 3_000L,
+            sharesOutstanding = 100_000_000L,
+        )
+
+    private fun pricedFcff(): DcfAnalysis {
+        var startMarginBps = 1_500
+        var stableMarginBps = 1_500
+        var priced = requireNotNull(
+            FcffFadePricer.equityCentsPerShare(
+                latestRevenueDollars = 10_000_000_000.0,
+                fcffMarginBps = startMarginBps,
+                stableFcffMarginBps = stableMarginBps,
+                revenueGrowthBps = 400,
+                currentShares = 100_000_000.0,
+                netDebtDollars = 0L,
+                gStableBps = 300,
+                discountRateBps = 800,
+                growthFadeExponent = 1.0,
+                holdYears = 0,
+                fadeYears = 5,
+            ),
+        )
+        return DcfAnalysis(
+            bearIntrinsicValueCents = priced - 100,
+            baseIntrinsicValueCents = priced,
+            bullIntrinsicValueCents = priced + 100,
+            waccBps = 800,
+            baseGrowthBps = 400,
+            netDebtDollars = 0L,
+            businessClass = BusinessClass.OperatingNonFinancial,
+            model = ValuationModel.FcffWacc,
+            discountRateKind = DiscountRateKind.Wacc,
+            stableGrowthBps = 300,
+            latestRevenueDollars = 10_000_000_000L,
+            honesty = ValuationHonesty.Honest,
+            honestPath = HonestPathInputs(
+                holdYears = 0,
+                fadeYears = 5,
+                startMarginBps = startMarginBps,
+                stableMarginBps = stableMarginBps,
+                fadeExponentHundredths = 100,
+            ),
+        )
     }
 
     private fun detail(

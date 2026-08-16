@@ -5,7 +5,7 @@ package com.discountscreener.core.engine
  * Unmapped industry keeps the issuer's own margin (no invented cut).
  */
 object IndustryOperatingPathPolicy {
-    const val VERSION = "industry-operating-path/2"
+    const val VERSION = "industry-operating-path/3"
 
     data class Prior(
         val id: String,
@@ -46,6 +46,11 @@ object IndustryOperatingPathPolicy {
         Entry("telecom", listOf("telecom"), targetFcffMarginBps = 1_500),
         Entry("pharma", listOf("drug manufacturer", "pharma"), targetFcffMarginBps = 1_600),
         Entry("oil_integrated", listOf("oil & gas integrated", "oil and gas integrated"), targetFcffMarginBps = 900),
+        Entry(
+            "oil_ep",
+            listOf("oil & gas e&p", "oil and gas e&p", "oil & gas exploration", "oil and gas exploration"),
+            targetFcffMarginBps = 900,
+        ),
         Entry("discount_store", listOf("discount store"), targetFcffMarginBps = 400),
         Entry("home_improvement", listOf("home improvement"), targetFcffMarginBps = 1_000),
         Entry("household", listOf("household", "personal products"), targetFcffMarginBps = 1_800),

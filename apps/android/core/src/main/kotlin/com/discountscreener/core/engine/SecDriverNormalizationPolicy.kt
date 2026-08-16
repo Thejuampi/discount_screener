@@ -40,6 +40,15 @@ object SecDriverNormalizationPolicy {
     val recurringDevelopmentConcepts: List<String>
         get() = GeneratedSecDriverNormalizationPolicy.development.toList()
 
+    val recurringWellsConcepts: List<String>
+        get() = GeneratedSecDriverNormalizationPolicy.developmentWells.toList()
+
+    val recurringSoftwareConcepts: List<String>
+        get() = GeneratedSecDriverNormalizationPolicy.developmentSoftware.toList()
+
+    val recurringIntangibleConcepts: List<String>
+        get() = GeneratedSecDriverNormalizationPolicy.developmentIntangibles.toList()
+
     val acquisitionInvestmentConcepts: List<String>
         get() = (GeneratedSecDriverNormalizationPolicy.propertyAcquisition +
             GeneratedSecDriverNormalizationPolicy.businessAcquisition).toList()
@@ -61,6 +70,9 @@ object SecDriverNormalizationPolicy {
         get() = buildSet {
             Driver.entries.forEach { driver -> addAll(operator(driver).qnames) }
             addAll(recurringDevelopmentConcepts)
+            addAll(recurringWellsConcepts)
+            addAll(recurringSoftwareConcepts)
+            addAll(recurringIntangibleConcepts)
             addAll(acquisitionInvestmentConcepts)
         }
 
@@ -90,10 +102,43 @@ object SecDriverNormalizationPolicy {
     }
 
     fun investmentCategory(concept: String): InvestmentCategory = when (concept) {
-        in GeneratedSecDriverNormalizationPolicy.development -> InvestmentCategory.Development
+        in GeneratedSecDriverNormalizationPolicy.development,
+        in GeneratedSecDriverNormalizationPolicy.developmentWells,
+        in GeneratedSecDriverNormalizationPolicy.developmentSoftware,
+        in GeneratedSecDriverNormalizationPolicy.developmentIntangibles,
+        -> InvestmentCategory.Development
         in GeneratedSecDriverNormalizationPolicy.propertyAcquisition -> InvestmentCategory.PropertyAcquisition
         in GeneratedSecDriverNormalizationPolicy.businessAcquisition -> InvestmentCategory.BusinessAcquisition
         else -> InvestmentCategory.UnclassifiedInvestment
+    }
+
+    /**
+     * Plant, capitalized software, purchased intangibles, and the oil well
+     * program are disjoint cash lines. Productive-assets already includes
+     * software and other intangibles, so those components are dropped on that
+     * close. Explore-and-develop already is the well program.
+     */
+    fun recurringDevelopmentTotal(
+        tangibleDollars: Double?,
+        wellsDollars: Double?,
+        tangibleConcept: String?,
+        softwareDollars: Double? = null,
+        intangiblesDollars: Double? = null,
+    ): Double? {
+        var wellsSuppressed =
+            tangibleConcept == "PaymentsToExploreAndDevelopOilAndGasProperties"
+        var aggregateTangible = tangibleConcept != null &&
+            tangibleConcept in GeneratedSecDriverNormalizationPolicy.developmentAggregate
+        var wells = if (wellsSuppressed) null else wellsDollars
+        var software = if (aggregateTangible) null else softwareDollars
+        var intangibles = if (aggregateTangible) null else intangiblesDollars
+        if (tangibleDollars == null && wells == null && software == null && intangibles == null) {
+            return null
+        }
+        return kotlin.math.abs(tangibleDollars ?: 0.0) +
+            kotlin.math.abs(wells ?: 0.0) +
+            kotlin.math.abs(software ?: 0.0) +
+            kotlin.math.abs(intangibles ?: 0.0)
     }
 
     /** First-version SEC scope: consolidated USD annual duration evidence. */

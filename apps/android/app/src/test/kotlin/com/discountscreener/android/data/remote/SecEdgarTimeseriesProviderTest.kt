@@ -90,6 +90,84 @@ class SecEdgarTimeseriesProviderTest {
     }
 
     @Test
+    fun intangible_purchases_are_added_to_plant_capex() {
+        var facts = Json.parseToJsonElement(
+            """
+            {
+              "facts": {
+                "us-gaap": {
+                  "NetCashProvidedByUsedInOperatingActivities": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 20000.0 }
+                      ]
+                    }
+                  },
+                  "PaymentsToAcquirePropertyPlantAndEquipment": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 11750.0 }
+                      ]
+                    }
+                  },
+                  "PaymentsToAcquireIntangibleAssets": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 2658.0 }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        var timeseries = buildSecEdgarTimeseries(facts)
+
+        assertEquals(listOf(AnnualReportedValue("2025-12-31", 5592.0)), timeseries?.freeCashFlow)
+    }
+
+    @Test
+    fun software_development_is_added_to_plant_capex() {
+        var facts = Json.parseToJsonElement(
+            """
+            {
+              "facts": {
+                "us-gaap": {
+                  "NetCashProvidedByUsedInOperatingActivities": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 2000.0 }
+                      ]
+                    }
+                  },
+                  "PaymentsToAcquirePropertyPlantAndEquipment": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 154.0 }
+                      ]
+                    }
+                  },
+                  "PaymentsForSoftware": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "val": 835.0 }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        var timeseries = buildSecEdgarTimeseries(facts)
+
+        assertEquals(listOf(AnnualReportedValue("2025-12-31", 1011.0)), timeseries?.freeCashFlow)
+    }
+
+    @Test
     fun slim_cache_name_includes_residual_sieve_version() {
         var name = companyFactsSlimFileName("0000019617")
         assertEquals("CIK0000019617.sieve-$COMPANY_FACTS_SIEVE_VERSION.json", name)

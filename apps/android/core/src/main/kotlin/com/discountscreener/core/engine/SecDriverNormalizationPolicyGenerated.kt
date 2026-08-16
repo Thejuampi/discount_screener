@@ -9,7 +9,7 @@ internal data class GeneratedSecDriverOperator(
 )
 
 internal object GeneratedSecDriverNormalizationPolicy {
-    const val fingerprint = "sec-driver-normalization/8"
+    const val fingerprint = "sec-driver-normalization/11"
     const val requiredUnit = "USD"
     const val minimumDurationDays = 325
     const val maximumDurationDays = 380
@@ -29,12 +29,17 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "PaymentsForSoftware",
         "PaymentsToDevelopSoftware",
     )
+    val developmentWells = setOf(
+        "PaymentsToAcquireOilAndGasPropertyAndEquipment",
+    )
+    val developmentIntangibles = setOf(
+        "PaymentsToAcquireIntangibleAssets",
+    )
     val developmentAggregate = setOf(
         "PaymentsToAcquireProductiveAssets",
     )
     val propertyAcquisition = setOf(
         "PaymentsToAcquireOilAndGasProperty",
-        "PaymentsToAcquireOilAndGasPropertyAndEquipment",
         "PaymentsToAcquireRoyaltyInterestsInMiningProperties",
         "PaymentsToAcquireMineralRights",
         "PaymentsToAcquireMiningAssets",
@@ -95,7 +100,6 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "InterestExpenseOtherLongTermDebt",
         "InterestIncomeExpenseNet",
         "InterestIncomeExpenseNonoperatingNet",
-        "FinanceLeaseInterestExpense",
     ),
         unit = "USD",
         periodShape = "duration",
@@ -105,6 +109,7 @@ internal object GeneratedSecDriverNormalizationPolicy {
         qnames = listOf(
         "DebtAndCapitalLeaseObligations",
         "LongTermDebtAndCapitalLeaseObligations",
+        "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
         "LongTermDebt",
         "DebtInstrumentCarryingAmount",
     ),

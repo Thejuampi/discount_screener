@@ -129,6 +129,30 @@ class DriverResolutionTest {
     }
 
     @Test
+    fun signed_net_interest_still_forms_a_coverage_coupon() {
+        var series = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2026-01-30",
+                    value = -1_406_000_000.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                ),
+            ),
+            totalDebt = listOf(AnnualReportedValue("2026-01-30", 39_820_000_000.0)),
+            pretaxIncome = listOf(AnnualReportedValue("2026-01-30", 8_747_000_000.0)),
+            marginalTaxRate = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2026-01-30",
+                    value = 0.21,
+                    concept = "IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate",
+                ),
+            ),
+        )
+        var resolved = resolveRateInputs(series, 39_820_000_000L, 470).getOrThrow()!!
+        assertTrue(resolved.validDebtPeriods.contains("2026"))
+    }
+
+    @Test
     fun the_annual_cost_of_debt_is_the_middle_of_an_even_count_not_the_upper_of_it() {
         var fourPeriods = FundamentalTimeseries(
             interestExpense = listOf(

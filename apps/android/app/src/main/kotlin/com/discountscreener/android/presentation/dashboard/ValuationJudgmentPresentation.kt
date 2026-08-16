@@ -6,6 +6,7 @@ import com.discountscreener.core.engine.ValuationJudgmentReason
 import com.discountscreener.core.engine.ValuationJudgmentStatus
 import com.discountscreener.core.model.AnchorRelation
 import com.discountscreener.core.model.ProjectedValuationJudgment
+import com.discountscreener.core.model.ValuationHonesty
 
 data class ValuationJudgmentUi(
     val stanceLabel: String,
@@ -31,6 +32,9 @@ data class ValuationJudgmentUi(
     val lastPriceLabel: String,
     val horizonPriceLabel: String,
     val cashLabel: String,
+    val honestyModeLabel: String,
+    val nonHonestTitle: String?,
+    val nonHonestLines: List<String>,
 )
 
 fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJudgmentUi {
@@ -59,7 +63,32 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         lastPriceLabel = "Price now",
         horizonPriceLabel = "Our price",
         cashLabel = "Cash identity",
+        honestyModeLabel = honestyModeLabel(snapshot),
+        nonHonestTitle = nonHonestTitle(snapshot),
+        nonHonestLines = nonHonestLines(snapshot),
     )
+}
+
+private fun honestyModeLabel(snapshot: ProjectedValuationJudgment): String =
+    when (snapshot.honestyMode) {
+        ValuationHonesty.Honest -> "Mode: Honest"
+        ValuationHonesty.NonHonest -> "Mode: Non-honest"
+    }
+
+private fun nonHonestTitle(snapshot: ProjectedValuationJudgment): String? {
+    var implied = snapshot.streetImplied ?: return null
+    if (implied.aligned) return "Non-honest (Street-implied): aligned"
+    var stretch = implied.winningStretch ?: return "Non-honest (Street-implied)"
+    var knob = implied.winningKnob ?: return "Non-honest (Street-implied): $stretch"
+    var honest = implied.winningHonestBps ?: return "Non-honest (Street-implied): $stretch"
+    var need = implied.winningImpliedBps ?: return "Non-honest (Street-implied): $stretch"
+    var delta = implied.winningDeltaBps ?: return "Non-honest (Street-implied): $stretch"
+    return "Non-honest (Street-implied): $stretch · $knob $need vs $honest (delta $delta)"
+}
+
+private fun nonHonestLines(snapshot: ProjectedValuationJudgment): List<String> {
+    var implied = snapshot.streetImplied ?: return emptyList()
+    return implied.knobs.map { knob -> knob.note }
 }
 
 private fun stanceLabel(status: ValuationJudgmentStatus): String = when (status) {

@@ -29,7 +29,7 @@ pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
 /// (industry-beta-policy/2). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/31-secular-half-demonstrated";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/35-weak-franchise-secular";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
 pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/2";
 
@@ -2079,10 +2079,12 @@ fn classify_driver_regime(recent_growths: &[i32], prior_growths: &[i32]) -> Driv
         quantile_bps(recent_growths, 0.75).saturating_sub(quantile_bps(recent_growths, 0.25));
     let prior_median = median_bps(prior_growths);
 
-    if recent_median >= 500
+    if recent_median >= 1_000 && recent_positive_share >= 7_500 {
+        DriverRegime::SecularExpansion
+    } else if recent_median >= 500
         && recent_positive_share >= 7_500
         && (prior_growths.is_empty() || recent_median >= prior_median)
-        && (recent_dispersion <= 4_000 || recent_median >= 1_000)
+        && recent_dispersion <= 4_000
     {
         DriverRegime::SecularExpansion
     } else if recent_dispersion >= 2_000 || recent_positive_share <= 5_000 {

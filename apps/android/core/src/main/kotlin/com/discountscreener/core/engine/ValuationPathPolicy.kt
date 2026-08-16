@@ -5,7 +5,7 @@ package com.discountscreener.core.engine
  * Street is not an input. Street is only a later scoreboard.
  */
 object ValuationPathPolicy {
-    const val VERSION = "valuation-path/2-cap-industry-margin"
+    const val VERSION = "valuation-path/4-no-expand-without-franchise"
     const val REINVESTMENT_HOLD_YEARS = 18
     const val REINVESTMENT_MARGIN_BPS = 2_800
     const val REINVESTMENT_ERP_WEIGHT_PCT = 80
@@ -22,6 +22,8 @@ object ValuationPathPolicy {
     const val INTERNET_RETAIL_HOLD_MIN_YEARS = 6
     const val DISCOUNT_STORE_HOLD_MIN_YEARS = 5
     const val INTERNET_CONTENT_EXTREME_STABLE_BPS = 1_950
+    const val WEAK_FRANCHISE_EXCESS_ROE_BPS = 300
+    const val REINVESTMENT_MIN_CAPEX_BPS = 500
 
     data class FcffPath(
         val holdYears: Int,
@@ -49,22 +51,32 @@ object ValuationPathPolicy {
         sector: String?,
         fadeYearsDefault: Int = 10,
         fadeExponentDefault: Double = 1.0,
+        capexIntensityBps: Int? = null,
     ): FcffPath {
         var reasons = mutableListOf<String>()
         var excessRoe = if (roe0Bps != null) roe0Bps - discountBps else 0
+        var capexSupportsReinvestment = capexIntensityBps == null ||
+            capexIntensityBps >= REINVESTMENT_MIN_CAPEX_BPS
         var reinvestment = regime == "secular_expansion" &&
             roe0Bps != null &&
             roe0Bps < discountBps &&
-            (retentionBps ?: 0) >= REINVESTMENT_RETENTION_MIN_BPS
+            (retentionBps ?: 0) >= REINVESTMENT_RETENTION_MIN_BPS &&
+            capexSupportsReinvestment
         var persistFracBps = (5_000 + excessRoe / 2).coerceIn(4_500, 8_500)
         var persistGrowth = ((rawGrowthBps.toLong() * persistFracBps) / 10_000L).toInt()
+        var weakFranchise = excessRoe >= 0 && excessRoe < WEAK_FRANCHISE_EXCESS_ROE_BPS
         var usedGrowth = if (regime == "secular_expansion") {
-            minOf(rawGrowthBps, maxOf(matureCapBps, persistGrowth), MAX_SECULAR_GROWTH_BPS)
+            if (weakFranchise) {
+                minOf(rawGrowthBps, persistGrowth, matureCapBps, MAX_SECULAR_GROWTH_BPS)
+            } else {
+                minOf(rawGrowthBps, maxOf(matureCapBps, persistGrowth), MAX_SECULAR_GROWTH_BPS)
+            }
         } else {
             cappedGrowthBps
         }
         if (usedGrowth != rawGrowthBps && regime == "secular_expansion") {
-            reasons += "growth=persist_frac:${persistFracBps}:raw=$rawGrowthBps:used=$usedGrowth"
+            var tag = if (weakFranchise) "weak_franchise_persist" else "persist_frac"
+            reasons += "growth=$tag:${persistFracBps}:raw=$rawGrowthBps:used=$usedGrowth"
         }
         var industryPrior = IndustryOperatingPathPolicy.resolve(industry, sector)
         var startMargin = currentMarginBps
@@ -92,12 +104,15 @@ object ValuationPathPolicy {
         }
         if ((industryPrior.id == "internet_retail" || industryPrior.id == "internet_content") &&
             industryPrior.matched &&
-            currentMarginBps < industryPrior.targetFcffMarginBps
+            currentMarginBps < industryPrior.targetFcffMarginBps &&
+            excessRoe > 0
         ) {
             stableMargin = industryPrior.targetFcffMarginBps
             reasons += "margin=expand_to_industry:${industryPrior.id}:$stableMargin"
         }
-        if (industryPrior.id == "oil_integrated" && regime == "cyclical_or_transition") {
+        if ((industryPrior.id == "oil_integrated" || industryPrior.id == "oil_ep") &&
+            regime == "cyclical_or_transition"
+        ) {
             usedGrowth = maxOf(usedGrowth, 300)
             stableMargin = maxOf(stableMargin, industryPrior.targetFcffMarginBps)
             reasons += "path=through_cycle_commodity:g=$usedGrowth"
@@ -168,12 +183,13 @@ object ValuationPathPolicy {
 }
 
 object ResidualPathPolicy {
-    const val VERSION = "residual-path/2-industry-franchise"
+    const val VERSION = "residual-path/4-care-quality-roe"
     const val BANK_THROUGH_CYCLE_ROE_BPS = 1_300
+    const val BANK_THROUGH_CYCLE_MAX_LIFT_BPS = 400
     const val BANK_SPREAD_BPS = 600
     const val PC_SPREAD_BPS = 120
     const val CARE_SPREAD_BPS = 2_000
-    const val CARE_MODEST_ROE_MAX_BPS = 1_400
+    const val CARE_MODEST_ROE_MAX_BPS = 2_000
     const val CARE_MODEST_SPREAD_BPS = 350
     const val CARE_FADE_YEARS = 1
     const val DEFAULT_FADE_YEARS = 5
@@ -201,7 +217,10 @@ object ResidualPathPolicy {
         when {
             text.contains("bank") -> {
                 if (roe0Bps < BANK_THROUGH_CYCLE_ROE_BPS && roe0Bps < costOfEquityBps) {
-                    starting = BANK_THROUGH_CYCLE_ROE_BPS
+                    starting = minOf(
+                        BANK_THROUGH_CYCLE_ROE_BPS,
+                        roe0Bps + BANK_THROUGH_CYCLE_MAX_LIFT_BPS,
+                    )
                     reasons += "roe=bank_through_cycle:$starting"
                 }
                 spread = BANK_SPREAD_BPS

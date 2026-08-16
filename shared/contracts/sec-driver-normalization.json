@@ -1,16 +1,17 @@
 {
   "contract": "sec-driver-normalization",
   "version": "1",
-  "fingerprint": "sec-driver-normalization/8",
+  "fingerprint": "sec-driver-normalization/11",
   "scope": { "taxonomy": "us-gaap", "forms": ["10-K", "10-K/A"], "businessClass": "OperatingNonFinancial", "unit": "USD", "durationDays": [325, 380] },
   "operations": { "equivalent": "select_one_equivalent", "debt": "sum_disjoint_components", "effectiveTax": "derive", "marginalTax": "reference_policy" },
   "investmentCategories": {
     "development": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireOtherPropertyPlantAndEquipment", "PaymentsForCapitalImprovements", "PaymentsToExploreAndDevelopOilAndGasProperties"],
     "developmentSoftware": ["PaymentsForSoftware", "PaymentsToDevelopSoftware"],
+    "developmentWells": ["PaymentsToAcquireOilAndGasPropertyAndEquipment"],
+    "developmentIntangibles": ["PaymentsToAcquireIntangibleAssets"],
     "developmentAggregate": ["PaymentsToAcquireProductiveAssets"],
     "propertyAcquisition": [
       "PaymentsToAcquireOilAndGasProperty",
-      "PaymentsToAcquireOilAndGasPropertyAndEquipment",
       "PaymentsToAcquireRoyaltyInterestsInMiningProperties",
       "PaymentsToAcquireMineralRights",
       "PaymentsToAcquireMiningAssets",
@@ -44,10 +45,13 @@
   "fcffConsumption": "development_only",
   "developmentComposition": {
     "operation": "sum_disjoint_components",
-    "components": ["development", "developmentSoftware"],
-    "rationale": "An issuer that invests through capitalized software development files nothing under the tangible CapEx concepts. Reading development alone reported FIS 2025 CapEx as $0.154B of plant while the issuer also paid $0.835B to develop software, overstating FCFF by 68%. The two are disjoint cash outflows on the same statement, not alternative tags for one line, so they are summed rather than selected between.",
+    "components": ["development", "developmentSoftware", "developmentWells", "developmentIntangibles"],
+    "rationale": "An issuer that invests through capitalized software development files nothing under the tangible CapEx concepts. Reading development alone reported FIS 2025 CapEx as $0.154B of plant while the issuer also paid $0.835B to develop software, overstating FCFF by 68%. The two are disjoint cash outflows on the same statement, not alternative tags for one line, so they are summed rather than selected between. EOG files the well program as PaymentsToAcquireOilAndGasPropertyAndEquipment and a smaller PaymentsToAcquireOtherPropertyPlantAndEquipment office/plant line. Those are also disjoint. Treating the well program as a property acquisition dropped ~$6.1B of recurring CapEx and invented a 45% FCFF margin. PaymentsToAcquireOilAndGasProperty (no equipment) remains acreage acquisition. Comcast files PaymentsToAcquireIntangibleAssets of $2.0–3.3B every year next to PPE. That line is spectrum, software, and license cash, not a business acquisition. Dropping it overstates FCFF. PaymentsToAcquireBusinesses stays rejected acquisition.",
+    "suppressWellsWhenTangibleQnameIn": ["PaymentsToExploreAndDevelopOilAndGasProperties"],
+    "wellsSuppressionRationale": "PaymentsToExploreAndDevelopOilAndGasProperties is already the well program. Adding PaymentsToAcquireOilAndGasPropertyAndEquipment on the same close would count the wells twice.",
     "suppressSoftwareWhenTangibleQnameIn": "developmentAggregate",
-    "suppressionRationale": "The us-gaap definition of PaymentsToAcquireProductiveAssets is 'the cash outflow for purchases of and capital improvements on property, plant and equipment (capital expenditures), software, and other intangible assets' — software is inside the element by definition, unlike PaymentsToAcquirePropertyPlantAndEquipment, which is tangible by definition. Summing an aggregate with a component it already contains double counts, so when the selected tangible concept is an aggregate the software component is dropped."
+    "suppressIntangiblesWhenTangibleQnameIn": "developmentAggregate",
+    "suppressionRationale": "The us-gaap definition of PaymentsToAcquireProductiveAssets is 'the cash outflow for purchases of and capital improvements on property, plant and equipment (capital expenditures), software, and other intangible assets' — software and other intangibles are inside the element by definition, unlike PaymentsToAcquirePropertyPlantAndEquipment, which is tangible by definition. Summing an aggregate with a component it already contains double counts, so when the selected tangible concept is an aggregate the software and intangible components are dropped."
   },
   "valuationPolicy": {
     "materialAcquisitionRevenueBps": 1000,
@@ -69,14 +73,14 @@
       "operation": "select_one_equivalent"
     },
     "interestExpense": {
-      "qnames": ["InterestExpenseNonOperating", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense", "InterestExpense", "InterestExpenseOtherLongTermDebt", "InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet", "FinanceLeaseInterestExpense"],
+      "qnames": ["InterestExpenseNonOperating", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense", "InterestExpense", "InterestExpenseOtherLongTermDebt", "InterestIncomeExpenseNet", "InterestIncomeExpenseNonoperatingNet"],
       "unit": "USD",
       "periodShape": "duration",
       "operation": "select_one_equivalent",
-      "rationale": "InterestPaidNet was removed. It is the supplemental cash-flow disclosure of interest actually paid, not the accrued income-statement expense, so it is not an equivalent of the other qnames and select_one_equivalent's gap filling was splicing cash into an accrual series year by year. It was EPAM's only source across nine years and padded years for several other issuers. An issuer that files no interest expense now reads as absent, which is the honest answer, rather than as a cash number standing in for an accrual."
+      "rationale": "InterestPaidNet was removed. It is cash paid, not the accrued income-statement expense. FinanceLeaseInterestExpense was removed. It is the lease subset, not total interest. Lowe's 2020-2022 had only that subset (~$30M) next to ~$1.3B of net interest in later years, so coverage looked like AAA. InterestIncomeExpenseNet and InterestIncomeExpenseNonoperatingNet stay. They are income-statement nets. Issuers file them with either sign. Use the magnitude as the coupon. An issuer that files no approved interest expense reads as absent."
     },
     "totalDebt": {
-      "qnames": ["DebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt", "DebtInstrumentCarryingAmount"],
+      "qnames": ["DebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities", "LongTermDebt", "DebtInstrumentCarryingAmount"],
       "unit": "USD",
       "periodShape": "instant",
       "operation": "select_one_equivalent"

@@ -5,7 +5,12 @@ import com.discountscreener.core.engine.ValuationJudgmentPolicy
 import com.discountscreener.core.engine.ValuationJudgmentReason
 import com.discountscreener.core.engine.ValuationJudgmentStatus
 import com.discountscreener.core.model.AnchorRelation
+import com.discountscreener.core.model.HonestyKnob
+import com.discountscreener.core.model.HonestyTaggedKnob
+import com.discountscreener.core.model.ImpliedStretch
 import com.discountscreener.core.model.ProjectedValuationJudgment
+import com.discountscreener.core.model.StreetImpliedView
+import com.discountscreener.core.model.ValuationHonesty
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -118,6 +123,69 @@ class ValuationJudgmentPresentationTest {
     }
 
     @Test
+    fun non_honest_title_names_the_winning_stretch() {
+        var ui = presentValuationJudgment(
+            nonHonestSnapshot().copy(
+                streetImplied = nonHonestSnapshot().streetImplied?.copy(
+                    winningKnob = HonestyKnob.StableMargin,
+                    winningHonestBps = 1_560,
+                    winningImpliedBps = 580,
+                    winningDeltaBps = -980,
+                    winningStretch = ImpliedStretch.Absurd,
+                ),
+            ),
+        )
+        assertEquals(
+            "Non-honest (Street-implied): Absurd · StableMargin 580 vs 1560 (delta -980)",
+            ui.nonHonestTitle,
+        )
+    }
+
+    @Test
+    fun non_honest_block_is_labeled_as_not_honest() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.Aligned,
+                primaryCents = 7_800L,
+                reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
+                identityBaseCents = 7_800L,
+                streetBaseCents = 2_900L,
+            ).copy(
+                streetImplied = StreetImpliedView(
+                    streetBaseCents = 2_900L,
+                    honestBaseCents = 7_800L,
+                    aligned = false,
+                    knobs = listOf(
+                        HonestyTaggedKnob(
+                            knob = HonestyKnob.StableMargin,
+                            honesty = ValuationHonesty.NonHonest,
+                            honestBps = 1_560,
+                            impliedBps = 580,
+                            reachable = true,
+                            note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
+                        ),
+                    ),
+                    policyVersion = "street-implied-honesty/3",
+                ),
+            ),
+        )
+        assertEquals("Non-honest (Street-implied)", ui.nonHonestTitle)
+    }
+
+    @Test
+    fun working_mode_stays_honest_when_street_implied_exists() {
+        var ui = presentValuationJudgment(nonHonestSnapshot())
+        assertEquals("Mode: Honest", ui.honestyModeLabel)
+    }
+
+    @Test
+    fun non_honest_line_says_the_input_is_not_honest() {
+        var ui = presentValuationJudgment(nonHonestSnapshot())
+        assertEquals(true, ui.nonHonestLines.single().contains("not honest"))
+    }
+
+    @Test
     fun `displayed official gap equals decision difference bps`() {
         var identityBase = 700_000L
         var streetBase = 900_000L
@@ -136,6 +204,33 @@ class ValuationJudgmentPresentationTest {
             ui.officialGapBps,
         )
     }
+
+    private fun nonHonestSnapshot(): ProjectedValuationJudgment = snapshot(
+        status = ValuationJudgmentStatus.Identity,
+        relation = AnchorRelation.Aligned,
+        primaryCents = 7_800L,
+        reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
+        identityBaseCents = 7_800L,
+        streetBaseCents = 2_900L,
+    ).copy(
+        honestyMode = ValuationHonesty.Honest,
+        streetImplied = StreetImpliedView(
+            streetBaseCents = 2_900L,
+            honestBaseCents = 7_800L,
+            aligned = false,
+            knobs = listOf(
+                HonestyTaggedKnob(
+                    knob = HonestyKnob.StableMargin,
+                    honesty = ValuationHonesty.NonHonest,
+                    honestBps = 1_560,
+                    impliedBps = 580,
+                    reachable = true,
+                    note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
+                ),
+            ),
+            policyVersion = "street-implied-honesty/3",
+        ),
+    )
 
     private fun snapshot(
         status: ValuationJudgmentStatus,

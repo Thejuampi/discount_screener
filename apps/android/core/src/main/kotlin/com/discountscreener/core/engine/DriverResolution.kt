@@ -45,8 +45,9 @@ internal fun resolveRateInputs(
         val key = annualKey(interest)
         val debt = timeseries.totalDebt.firstOrNull { annualKey(it) == key } ?: return@mapNotNull null
         if (!interest.value.isFinite() || !debt.value.isFinite()) return@mapNotNull null
-        if (debt.value > 0.0 && interest.value > 0.0) {
-            Triple(key, debt.value, abs(interest.value))
+        var coupon = abs(interest.value)
+        if (debt.value > 0.0 && coupon > 0.0) {
+            Triple(key, debt.value, coupon)
         } else {
             null
         }
@@ -85,9 +86,10 @@ internal fun resolveRateInputs(
         if (!taxPeriodsAll.contains(key)) return@mapNotNull null
         val pretax = timeseries.pretaxIncome.firstOrNull { annualKey(it) == key }
             ?: return@mapNotNull null
-        if (!interest.value.isFinite() || interest.value <= 0.0) return@mapNotNull null
+        var coupon = abs(interest.value)
+        if (!interest.value.isFinite() || coupon <= 0.0) return@mapNotNull null
         if (!pretax.value.isFinite()) return@mapNotNull null
-        key to ((pretax.value + interest.value) / interest.value)
+        key to ((pretax.value + coupon) / coupon)
     }.distinctBy { it.first }.sortedBy { it.first }
     val coverageSpreadBps = coverageByPeriod
         .map { it.second }

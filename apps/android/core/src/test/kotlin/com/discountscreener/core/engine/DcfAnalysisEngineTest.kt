@@ -5,6 +5,7 @@ import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.WaccFieldSource
 import java.nio.file.Files
@@ -34,6 +35,86 @@ class DcfAnalysisEngineTest {
         assertTrue(!analysis.pointEstimateUnreliable)
         assertEquals(ENGINE_VERSION, analysis.engineVersion)
         assertEquals(MODEL_POLICY_VERSION, analysis.modelPolicyVersion)
+    }
+
+    @Test
+    fun decelerating_double_digit_growth_stays_secular() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "DASH",
+                sectorName = "Consumer Cyclical",
+                industryName = "Internet Retail",
+                returnOnEquityBps = 889,
+                retentionBps = 10_000,
+            ),
+            timeseries = deceleratingInternetRetailTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals("secular_expansion", analysis.driverRegime)
+    }
+
+    @Test
+    fun driver_based_fcff_is_typed_honest() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(ValuationHonesty.Honest, analysis.honesty)
+    }
+
+    @Test
+    fun missing_interest_without_period_debt_still_forms_fcff() {
+        var years = listOf("2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                sectorName = "Consumer Cyclical",
+                industryName = "Internet Retail",
+                totalDebtDollars = 0L,
+            ),
+            timeseries = completeTimeseries().copy(
+                freeCashFlow = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (50 + index * 10) * 1_000_000.0)
+                },
+                operatingCashFlow = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (70 + index * 10) * 1_000_000.0)
+                },
+                capitalExpenditure = years.map { AnnualReportedValue(it, -20_000_000.0) },
+                revenue = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (200 + index * 20) * 1_000_000.0)
+                },
+                interestExpense = listOf(AnnualReportedValue("2022-12-31", 2_000_000.0)),
+                taxRateForCalcs = years.map {
+                    AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+                },
+                totalDebt = emptyList(),
+                dilutedAverageShares = years.map { AnnualReportedValue(it, 100_000_000.0) },
+                pretaxIncome = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (40 + index * 10) * 1_000_000.0)
+                },
+                marginalTaxRate = years.map {
+                    AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+                },
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun net_debt_that_wipes_equity_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                marketCapDollars = 100_000_000_000L,
+                totalDebtDollars = 500_000_000_000L,
+                totalCashDollars = 0L,
+            ),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertTrue(
+            result.exceptionOrNull()?.message.orEmpty().contains("equity wiped"),
+        )
     }
 
     @Test
@@ -400,6 +481,36 @@ class DcfAnalysisEngineTest {
                     AnnualReportedValue("2022-12-31", 15_000_000_000.0),
                     AnnualReportedValue("2023-12-31", 16_000_000_000.0),
                     AnnualReportedValue("2024-12-31", 17_000_000_000.0),
+                ),
+                operatingCashFlow = listOf(
+                    AnnualReportedValue("2021-12-31", 18_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 19_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 20_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 21_000_000_000.0),
+                ),
+                capitalExpenditure = listOf(
+                    AnnualReportedValue("2021-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", -4_000_000_000.0),
+                ),
+                revenue = listOf(
+                    AnnualReportedValue("2021-12-31", 80_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 84_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 88_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 92_000_000_000.0),
+                ),
+                interestExpense = listOf(
+                    AnnualReportedValue("2021-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 4_000_000_000.0),
+                ),
+                totalDebt = listOf(
+                    AnnualReportedValue("2021-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 90_000_000_000.0),
                 ),
             ),
         ).getOrThrow()
@@ -774,6 +885,55 @@ class DcfAnalysisEngineTest {
         betaMillis = 1_100,
         freeCashFlowDollars = 86_000_000L,
     )
+
+    private fun deceleratingInternetRetailTimeseries(): FundamentalTimeseries {
+        var years = listOf(
+            "2017-12-31",
+            "2018-12-31",
+            "2019-12-31",
+            "2020-12-31",
+            "2021-12-31",
+            "2022-12-31",
+            "2023-12-31",
+            "2024-12-31",
+        )
+        var revenues = listOf(
+            100_000_000.0,
+            145_000_000.0,
+            210_000_000.0,
+            305_000_000.0,
+            442_000_000.0,
+            575_000_000.0,
+            748_000_000.0,
+            972_000_000.0,
+        )
+        return FundamentalTimeseries(
+            freeCashFlow = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.16)
+            },
+            dilutedAverageShares = years.map { AnnualReportedValue(it, 100_000_000.0) },
+            operatingCashFlow = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.18)
+            },
+            capitalExpenditure = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, -revenues[index] * 0.016)
+            },
+            revenue = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index])
+            },
+            interestExpense = years.map { AnnualReportedValue(it, 2_000_000.0) },
+            taxRateForCalcs = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = years.map { AnnualReportedValue(it, 50_000_000.0) },
+            pretaxIncome = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.08)
+            },
+            marginalTaxRate = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+    }
 
     private fun completeTimeseries() = FundamentalTimeseries(
         freeCashFlow = listOf(

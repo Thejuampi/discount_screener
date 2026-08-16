@@ -810,6 +810,8 @@ data class DcfAnalysis(
     /** Human-readable provenance for the driver bridge and source layer. */
     val driverProvenance: List<String> = emptyList(),
     val valuationUnavailableReason: String? = null,
+    val honesty: ValuationHonesty = ValuationHonesty.Honest,
+    val honestPath: HonestPathInputs? = null,
 )
 
 @Serializable

@@ -1242,6 +1242,25 @@ private fun JudgmentValuationSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+    Text(
+        text = ui.honestyModeLabel,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    ui.nonHonestTitle?.let { title ->
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+    }
+    ui.nonHonestLines.forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+    }
     if (ui.showPrimary && ui.primaryCents != null) {
         var model = valuationRangeModelFromJudgment(detail, ui)
         ValuationHeadline(model = model)

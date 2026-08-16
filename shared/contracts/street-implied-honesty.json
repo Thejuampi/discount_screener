@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "street-implied-honesty/3",
+  "workingMode": "Honest",
+  "scoreboard": "Street",
+  "forecastConsumesStreet": false,
+  "nonHonestSignal": "one-knob inversion plus implied magnitude and stretch",
+  "knobHonesty": "NonHonest",
+  "impliedPrice": "best one-knob priced cents; typed NonHonest",
+  "alignedApeBps": 200,
+  "scoreboardColumns": ["ape_h", "ape_nh", "nh_honest", "nh_implied", "nh_delta", "nh_stretch"],
+  "stretchBandsBps": {
+    "DiscountRate": { "modest": 200, "stretched": 500 },
+    "StableMargin": { "modest": 400, "stretched": 1000 },
+    "NearTermGrowth": { "modest": 400, "stretched": 1200 },
+    "StartingRoe": { "modest": 300, "stretched": 800 }
+  },
+  "rules": [
+    "Working identity stays Honest. NonHonest is a diagnostic signal.",
+    "Publish implied bps, delta vs honest, and stretch. ape_nh near 0 is inversion, not a win.",
+    "Every non-honest input is typed ValuationHonesty.NonHonest.",
+    "UI must label non-honest knobs and the winning stretch. Do not hide them.",
+    "Street is the scoreboard only. It is never an honest runtime input."
+  ]
+}

@@ -105,6 +105,17 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 
 Regression mindset: **ACGL must not emit FCFF-primary from float OCF**; use residual income (or unavailable if book/ROE missing).
 
+### Honesty modes
+
+Two typed modes. Street is the scoreboard only.
+
+| Mode | Role |
+| --- | --- |
+| `Honest` | Working identity. Every input is evidence or economics. Exhaust this first. |
+| `NonHonest` | Parallel signal. One-knob inversions that would match Street. Never a hidden mix. |
+
+Every non-honest input is `ValuationHonesty.NonHonest` in the class model and labeled in Detail. Forecast stays honest. Policy: `street-implied-honesty/3`. The scoreboard reports `ape_h`, `ape_nh`, implied bps, delta, and stretch. `ape_nh` near 0 is inversion, not a win.
+
 ### Provenance, parity, and engine versioning
 
 Every intrinsic should carry metadata for UI and scoring: `business_class`, `model` (`fcff_wacc` | `residual_income_equity` | …), `discount_rate_kind`, `engine_version` / `model_policy_version`, WACC/CoE input provenance (reported vs default vs derived), and reason codes (e.g. `model=residual_income_equity`). Cache keys and revisions must invalidate when engine/policy/source fingerprints change.
@@ -118,7 +129,10 @@ Provider **source selection** (Yahoo vs SEC) is a separate layer: [`_bmad-output
 For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cross a canonical normalization boundary before FCFF:
 
 - Recurring development CapEx is consumed separately from the reviewed US-GAAP acquisition-cash set; acquisition facts stay visible as rejected evidence and are **never** added to FCFF.
+- Sum plant, capitalized software (`PaymentsForSoftware`, `PaymentsToDevelopSoftware`), purchased intangibles (`PaymentsToAcquireIntangibleAssets`), and the oil well program. Drop software and intangibles when the tangible tag is `PaymentsToAcquireProductiveAssets` (those components are already inside that aggregate).
+- `PaymentsToAcquireOilAndGasPropertyAndEquipment` is the well program. Sum it with other plant. `PaymentsToAcquireOilAndGasProperty` (no equipment) stays acreage acquisition.
 - Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition Y−1 → Y. Exclude that transition and retain clean recent observations when ≥2 exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance.
+- `FinanceLeaseInterestExpense` is not an interest-expense equivalent. It is the lease subset. Signed net interest (`InterestIncomeExpenseNonoperatingNet`) uses the magnitude.
 - Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved consolidated USD annual evidence is **unavailable** — not zero, not an imputed cash flow.
 - Financial services remain on residual income.
 

@@ -27,7 +27,7 @@ private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_ticke
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
-internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-residual-1"
+internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-intangibles-1"
 
 internal fun companyFactsSlimFileName(cikPadded: String): String =
     "CIK$cikPadded.sieve-$COMPANY_FACTS_SIEVE_VERSION.json"
@@ -254,8 +254,8 @@ private fun annualFyRecordsAny(
     return byDate.values.sortedBy { it.asOfDate }
 }
 
-private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
-    annualFyRecordsAny(
+private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualReportedValue> {
+    var tangible = annualFyRecordsAny(
         usGaap,
         SecDriverNormalizationPolicy.DriverOperator(
             qnames = SecDriverNormalizationPolicy.recurringDevelopmentConcepts,
@@ -264,6 +264,54 @@ private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualRe
             operation = "select_one_equivalent",
         ),
     )
+    var wells = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringWellsConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var software = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringSoftwareConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var intangibles = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringIntangibleConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var tangibleByDate = tangible.associateBy { it.asOfDate }
+    var wellsByDate = wells.associateBy { it.asOfDate }
+    var softwareByDate = software.associateBy { it.asOfDate }
+    var intangiblesByDate = intangibles.associateBy { it.asOfDate }
+    return (
+        tangibleByDate.keys + wellsByDate.keys + softwareByDate.keys + intangiblesByDate.keys
+    ).mapNotNull { date ->
+        var plant = tangibleByDate[date]
+        var wellProgram = wellsByDate[date]
+        var softwareProgram = softwareByDate[date]
+        var intangibleProgram = intangiblesByDate[date]
+        var total = SecDriverNormalizationPolicy.recurringDevelopmentTotal(
+            tangibleDollars = plant?.value,
+            wellsDollars = wellProgram?.value,
+            tangibleConcept = plant?.concept,
+            softwareDollars = softwareProgram?.value,
+            intangiblesDollars = intangibleProgram?.value,
+        ) ?: return@mapNotNull null
+        (plant ?: wellProgram ?: softwareProgram ?: intangibleProgram)?.copy(value = total)
+    }.sortedBy { it.asOfDate }
+}
 
 private fun annualAcquisitionInvestmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
     annualFyRecordsAny(

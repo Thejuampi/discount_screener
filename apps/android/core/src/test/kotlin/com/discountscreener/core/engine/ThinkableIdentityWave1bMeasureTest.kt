@@ -148,44 +148,7 @@ class ThinkableIdentityWave1bMeasureTest {
             }
         }
         Files.writeString(out, body)
-        var csv = buildString {
-            appendLine(
-                "sym,street,ident,ape,wacc,g,gstab,regime,revB,fcffB,ocfM,capexI,book,roe,ret,netDebtB,sharesB,engineReasons",
-            )
-            for (row in rows) {
-                var street = row.streetBaseCents?.toDouble() ?: 0.0
-                var ident = row.identityBaseCents?.toDouble() ?: 0.0
-                var ape = if (street > 0.0) kotlin.math.abs(ident - street) / street else Double.NaN
-                appendLine(
-                    listOf(
-                        row.symbol,
-                        street / 100.0,
-                        ident / 100.0,
-                        "%.3f".format(ape),
-                        row.waccOrCoeBps,
-                        row.growthBps,
-                        row.stableGrowthBps,
-                        row.regime,
-                        row.revenueDollars?.let { it / 1e9 },
-                        row.fcffDollars?.let { it / 1e9 },
-                        row.ocfMarginBps,
-                        row.capexIntensityBps,
-                        row.bookValuePerShareCents?.let { it / 100.0 },
-                        row.roe0Bps,
-                        row.retentionBps,
-                        row.netDebtDollars?.let { it / 1e9 },
-                        row.shares?.let { it / 1e9 },
-                        row.engineReasons.joinToString("|"),
-                    ).joinToString(","),
-                )
-            }
-            var apes = rows.mapNotNull { row ->
-                var street = row.streetBaseCents?.toDouble() ?: return@mapNotNull null
-                var ident = row.identityBaseCents?.toDouble() ?: return@mapNotNull null
-                if (street <= 0.0) null else kotlin.math.abs(ident - street) / street
-            }
-            appendLine("MEAN_APE,${apes.average()},n=${apes.size}")
-        }
+        var csv = scoreboardCsv(rows, extraHoldout = false)
         Files.writeString(WAVE1B_ROOT.resolve("driver-dump.csv"), csv)
         println(csv)
         var jpm = rows.first { it.symbol == "JPM" }
@@ -232,38 +195,7 @@ class ThinkableIdentityWave1bMeasureTest {
         var rows = HOLDOUT_SYMBOLS.map {
             measure(it, marketParams, root = HOLDOUT_ROOT, ciks = HOLDOUT_CIK)
         }
-        var csv = buildString {
-            appendLine("sym,street,ident,ape,class,model,wacc,g,regime,error")
-            for (row in rows) {
-                var street = row.streetBaseCents?.toDouble() ?: 0.0
-                var ident = row.identityBaseCents?.toDouble() ?: 0.0
-                var ape = if (street > 0.0 && ident > 0.0) {
-                    kotlin.math.abs(ident - street) / street
-                } else {
-                    Double.NaN
-                }
-                appendLine(
-                    listOf(
-                        row.symbol,
-                        street / 100.0,
-                        ident / 100.0,
-                        if (ape.isNaN()) "" else "%.3f".format(ape),
-                        row.businessClass,
-                        row.model,
-                        row.waccOrCoeBps,
-                        row.growthBps,
-                        row.regime,
-                        row.computeError?.replace(",", ";"),
-                    ).joinToString(","),
-                )
-            }
-            var apes = rows.mapNotNull { row ->
-                var street = row.streetBaseCents?.toDouble() ?: return@mapNotNull null
-                var ident = row.identityBaseCents?.toDouble() ?: return@mapNotNull null
-                if (street <= 0.0 || ident <= 0.0) null else kotlin.math.abs(ident - street) / street
-            }
-            appendLine("MEAN_APE,${if (apes.isEmpty()) "" else apes.average().toString()},n=${apes.size}")
-        }
+        var csv = scoreboardCsv(rows, extraHoldout = true)
         Files.createDirectories(HOLDOUT_ROOT)
         Files.writeString(HOLDOUT_ROOT.resolve("driver-dump.csv"), csv)
         println(csv)
@@ -337,6 +269,13 @@ class ThinkableIdentityWave1bMeasureTest {
         )
         var analysis = computed.getOrNull()
         var error = computed.exceptionOrNull()?.message
+        var shareCount = fund.sharesOutstanding?.toDouble()
+            ?: timeseries.dilutedAverageShares.lastOrNull()?.value
+        var implied = if (analysis != null && street.baseCents != null) {
+            StreetImpliedHonesty.reconcile(analysis, street.baseCents, shareCount)
+        } else {
+            null
+        }
         var judgment = ValuationJudgmentAssembler.assemble(
             detail(symbol, fund, street),
             analysis,
@@ -392,6 +331,79 @@ class ThinkableIdentityWave1bMeasureTest {
             predictedWave2 = predicted,
             sourcesTried = sources,
             engineReasons = analysis?.reasonCodes.orEmpty(),
+            nonHonestCents = implied?.impliedBaseCents,
+            nonHonestKnob = implied?.winningKnob?.name,
+            nonHonestHonestBps = implied?.winningHonestBps,
+            nonHonestImpliedBps = implied?.winningImpliedBps,
+            nonHonestDeltaBps = implied?.winningDeltaBps,
+            nonHonestStretch = implied?.winningStretch?.name,
+        )
+    }
+
+    private fun scoreboardCsv(rows: List<MeasureRow>, extraHoldout: Boolean): String = buildString {
+        var head = "sym,street,ident,ape_h,nonhonest,ape_nh,nh_knob,nh_honest,nh_implied,nh_delta,nh_stretch"
+        if (extraHoldout) head += ",class,model"
+        head += ",wacc,g,gstab,regime,revB,fcffB,ocfM,capexI,book,roe,ret,netDebtB,sharesB"
+        if (extraHoldout) head += ",error"
+        head += ",engineReasons"
+        appendLine(head)
+        for (row in rows) {
+            var street = row.streetBaseCents?.toDouble() ?: 0.0
+            var ident = row.identityBaseCents?.toDouble() ?: 0.0
+            var apeH = StreetScoreboard.ape(row.identityBaseCents, row.streetBaseCents)
+            var apeNh = StreetScoreboard.ape(row.nonHonestCents, row.streetBaseCents)
+            var cells = mutableListOf<Any?>(
+                row.symbol,
+                street / 100.0,
+                ident / 100.0,
+                StreetScoreboard.formatApe(apeH),
+                row.nonHonestCents?.let { it / 100.0 },
+                StreetScoreboard.formatApe(apeNh),
+                row.nonHonestKnob,
+                row.nonHonestHonestBps,
+                row.nonHonestImpliedBps,
+                row.nonHonestDeltaBps,
+                row.nonHonestStretch,
+            )
+            if (extraHoldout) {
+                cells += row.businessClass
+                cells += row.model
+            }
+            cells.addAll(
+                listOf(
+                    row.waccOrCoeBps,
+                    row.growthBps,
+                    row.stableGrowthBps,
+                    row.regime,
+                    row.revenueDollars?.let { it / 1e9 },
+                    row.fcffDollars?.let { it / 1e9 },
+                    row.ocfMarginBps,
+                    row.capexIntensityBps,
+                    row.bookValuePerShareCents?.let { it / 100.0 },
+                    row.roe0Bps,
+                    row.retentionBps,
+                    row.netDebtDollars?.let { it / 1e9 },
+                    row.shares?.let { it / 1e9 },
+                ),
+            )
+            if (extraHoldout) cells += row.computeError?.replace(",", ";")
+            cells += row.engineReasons.joinToString("|")
+            appendLine(cells.joinToString(","))
+        }
+        var honest = rows.mapNotNull { StreetScoreboard.ape(it.identityBaseCents, it.streetBaseCents) }
+        var nonHonest = rows.mapNotNull { StreetScoreboard.ape(it.nonHonestCents, it.streetBaseCents) }
+        appendLine(
+            "MEAN_APE_HONEST,${if (honest.isEmpty()) "" else honest.average().toString()},n=${honest.size}",
+        )
+        appendLine(
+            "MEAN_APE_NONHONEST,${if (nonHonest.isEmpty()) "" else nonHonest.average().toString()},n=${nonHonest.size}",
+        )
+        var stretchCounts = rows.mapNotNull { it.nonHonestStretch }.groupingBy { it }.eachCount()
+        appendLine(
+            "STRETCH," +
+                listOf("Modest", "Stretched", "Absurd", "Unreachable").joinToString(",") { token ->
+                    "$token=${stretchCounts[token] ?: 0}"
+                },
         )
     }
 
@@ -513,6 +525,12 @@ class ThinkableIdentityWave1bMeasureTest {
         val predictedWave2: String? = null,
         val sourcesTried: List<String> = emptyList(),
         val engineReasons: List<String> = emptyList(),
+        val nonHonestCents: Long? = null,
+        val nonHonestKnob: String? = null,
+        val nonHonestHonestBps: Int? = null,
+        val nonHonestImpliedBps: Int? = null,
+        val nonHonestDeltaBps: Int? = null,
+        val nonHonestStretch: String? = null,
     ) {
         fun toJson(): Map<String, String?> = mapOf(
             "symbol" to symbol,
@@ -541,6 +559,12 @@ class ThinkableIdentityWave1bMeasureTest {
             "marketParams" to marketParams,
             "predictedWave2" to predictedWave2,
             "sourcesTried" to sourcesTried.joinToString(","),
+            "nonHonestCents" to nonHonestCents?.toString(),
+            "nonHonestKnob" to nonHonestKnob,
+            "nonHonestHonestBps" to nonHonestHonestBps?.toString(),
+            "nonHonestImpliedBps" to nonHonestImpliedBps?.toString(),
+            "nonHonestDeltaBps" to nonHonestDeltaBps?.toString(),
+            "nonHonestStretch" to nonHonestStretch,
         )
     }
 }
@@ -550,14 +574,50 @@ private object Wave1bSecTimeseries {
         var facts = Json.parseToJsonElement(slimJson).jsonObject
         var usGaap = facts["facts"]?.jsonObject?.get("us-gaap")?.jsonObject ?: return null
         var opCf = annualAny(usGaap, SecDriverNormalizationPolicy.Driver.OperatingCashFlow)
-        var capex = annualAny(
+        var tangible = annualAny(
             usGaap,
             SecDriverNormalizationPolicy.recurringDevelopmentConcepts,
             "USD",
             SecDriverNormalizationPolicy.PeriodShape.Duration,
         )
+        var wells = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringWellsConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var software = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringSoftwareConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var intangibles = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringIntangibleConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var tangibleByDate = tangible.associateBy { it.asOfDate }
+        var wellsByDate = wells.associateBy { it.asOfDate }
+        var softwareByDate = software.associateBy { it.asOfDate }
+        var intangiblesByDate = intangibles.associateBy { it.asOfDate }
+        var capexByDate = (
+            tangibleByDate.keys + wellsByDate.keys + softwareByDate.keys + intangiblesByDate.keys
+        ).mapNotNull { date ->
+            var total = SecDriverNormalizationPolicy.recurringDevelopmentTotal(
+                tangibleDollars = tangibleByDate[date]?.value,
+                wellsDollars = wellsByDate[date]?.value,
+                tangibleConcept = tangibleByDate[date]?.concept,
+                softwareDollars = softwareByDate[date]?.value,
+                intangiblesDollars = intangiblesByDate[date]?.value,
+            ) ?: return@mapNotNull null
+            date to total
+        }.toMap()
+        var capex = capexByDate.map { (date, value) ->
+            AnnualReportedValue(date, value, source = DcfSource.SecEdgar)
+        }
         if (opCf.isEmpty() || capex.isEmpty()) return null
-        var capexByDate = capex.associate { it.asOfDate to it.value }
         var acceptedOp = opCf.filter { capexByDate.containsKey(it.asOfDate) }
         if (acceptedOp.isEmpty()) return null
         var dates = acceptedOp.map { it.asOfDate }.toSet()
