@@ -90,6 +90,41 @@ class SecEdgarTimeseriesProviderTest {
     }
 
     @Test
+    fun comparative_10k_keeps_period_end_not_filing_fy() {
+        var facts = Json.parseToJsonElement(
+            """
+            {
+              "facts": {
+                "us-gaap": {
+                  "NetCashProvidedByUsedInOperatingActivities": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2023-10-01", "end": "2024-09-28", "val": 118254000000.0, "fy": 2025, "filed": "2025-10-31" },
+                        { "fp": "FY", "form": "10-K", "start": "2024-09-29", "end": "2025-09-27", "val": 111482000000.0, "fy": 2025, "filed": "2025-10-31" }
+                      ]
+                    }
+                  },
+                  "PaymentsToAcquirePropertyPlantAndEquipment": {
+                    "units": {
+                      "USD": [
+                        { "fp": "FY", "form": "10-K", "start": "2023-10-01", "end": "2024-09-28", "val": 9447000000.0, "fy": 2025, "filed": "2025-10-31" },
+                        { "fp": "FY", "form": "10-K", "start": "2024-09-29", "end": "2025-09-27", "val": 12715000000.0, "fy": 2025, "filed": "2025-10-31" }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.trimIndent(),
+        ).jsonObject
+        var timeseries = buildSecEdgarTimeseries(facts)
+        assertEquals(
+            listOf(2024 to "2024-09-28", 2025 to "2025-09-27"),
+            timeseries?.operatingCashFlow?.map { it.fiscalYear to it.asOfDate },
+        )
+    }
+
+    @Test
     fun intangible_purchases_are_added_to_plant_capex() {
         var facts = Json.parseToJsonElement(
             """

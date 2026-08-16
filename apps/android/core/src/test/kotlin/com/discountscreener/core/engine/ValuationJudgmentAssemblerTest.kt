@@ -130,6 +130,115 @@ class ValuationJudgmentAssemblerTest {
     }
 
     @Test
+    fun snapshot_copies_the_engine_refuse_reason() {
+        var reason = "valuation unavailable: fcff unavailable: interest is missing for 2024-09-28"
+        var analysis = DcfAnalysis(
+            bearIntrinsicValueCents = 0L,
+            baseIntrinsicValueCents = 0L,
+            bullIntrinsicValueCents = 0L,
+            waccBps = 0,
+            baseGrowthBps = 0,
+            netDebtDollars = 0L,
+            businessClass = BusinessClass.OperatingNonFinancial,
+            model = ValuationModel.None,
+            valuationUnavailableReason = reason,
+        )
+        var snap = ValuationJudgmentAssembler.snapshot(
+            ValuationJudgmentAssembler.assemble(
+                completeStreet(
+                    "AAPL",
+                    fundamentals = FundamentalSnapshot(
+                        symbol = "AAPL",
+                        sectorName = "Technology",
+                        industryName = "Consumer Electronics",
+                    ),
+                ),
+                analysis,
+            ),
+            dcfAnalysis = analysis,
+        )
+        assertEquals(reason, snap.identityUnavailableReason)
+    }
+
+    @Test
+    fun snapshot_copies_debt_stock_caveat() {
+        var analysis = pricedFcff().copy(
+            reasonCodes = listOf(
+                "model=fcff_wacc",
+                "debt_stock=filed_year_end_instant",
+            ),
+        )
+        var snap = impliedSnapshot(analysis)
+        assertEquals(
+            "Debt stock is the filed year-end instant.",
+            snap.identityCaveatLines.single { it.startsWith("Debt stock") },
+        )
+    }
+
+    @Test
+    fun snapshot_copies_cost_of_debt_caveat() {
+        var analysis = pricedFcff().copy(
+            reasonCodes = listOf(
+                "model=fcff_wacc",
+                "cost_of_debt_source=rated_or_synthetic_spread",
+                "coverage_synthetic=median_spread:59",
+            ),
+        )
+        var snap = impliedSnapshot(analysis)
+        assertEquals(
+            "Cost of debt is a coverage synthetic from filed interest.",
+            snap.identityCaveatLines.single { it.startsWith("Cost of debt") },
+        )
+    }
+
+    @Test
+    fun snapshot_names_factory_plus_lender() {
+        var analysis = pricedFcff().copy(
+            model = ValuationModel.ComponentSum,
+            reasonCodes = listOf("model=component_sum", "component_sotp=$COMPONENT_SOTP_VERSION"),
+        )
+        var snap = impliedSnapshot(analysis)
+        assertEquals(
+            "Value is factory cash plus the lender book.",
+            snap.identityCaveatLines.single(),
+        )
+    }
+
+    @Test
+    fun snapshot_names_current_instrument_yield_bps() {
+        var analysis = pricedFcff().copy(
+            reasonCodes = listOf(
+                "model=fcff_wacc",
+                "cost_of_debt_source=market_yield",
+                "cost_of_debt_bps=471",
+                "market_yield=current_instrument",
+            ),
+        )
+        var snap = impliedSnapshot(analysis)
+        assertEquals(
+            "Cost of debt is the current instrument yield, 471 bps.",
+            snap.identityCaveatLines.single { it.startsWith("Cost of debt") },
+        )
+    }
+
+    @Test
+    fun snapshot_copies_estimated_interest_caveat() {
+        var analysis = pricedFcff().copy(
+            reasonCodes = listOf(
+                "model=fcff_wacc",
+                "interest=estimated:own_effective_rate:medium:2024-09-28,2025-09-27",
+            ),
+        )
+        var snap = impliedSnapshot(analysis)
+        assertEquals(
+            listOf(
+                "Interest for 2024-09-28, 2025-09-27 is an estimate from this issuer's last filed coupon and debt. Confidence is Medium. A later filed tag replaces the estimate.",
+            ),
+            snap.identityCaveatLines,
+        )
+    }
+
+    @Test
     fun snapshot_keeps_working_mode_honest() {
         var snap = impliedSnapshot()
         assertEquals(ValuationHonesty.Honest, snap.honestyMode)

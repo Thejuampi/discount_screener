@@ -3,8 +3,10 @@ package com.discountscreener.core.engine
 import kotlin.math.pow
 import kotlin.math.roundToLong
 
-const val FRANCHISE_PERSIST_SPREAD_BPS = 500
-const val RESIDUAL_GORDON_EPSILON_BPS = 50
+val FRANCHISE_PERSIST_SPREAD_BPS: Int
+    get() = ValuationPolicy.current.residualIncome.franchisePersistSpreadBps
+val RESIDUAL_GORDON_EPSILON_BPS: Int
+    get() = ValuationPolicy.current.residualIncome.gordonEpsilonBps
 
 /**
  * Residual income path.
@@ -58,4 +60,24 @@ object ResidualIncomeMath {
         if (!equity.isFinite() || equity <= 0.0) return null
         return ((equity / shares) * 100.0).roundToLong()
     }
+
+    /** Whole-firm equity cents. Same path as per-share with one claim on the book. */
+    fun valueEquityCents(
+        book0: Double,
+        roe0Bps: Int,
+        costOfEquityBps: Int,
+        retention: Double,
+        fadeYears: Int,
+        longRunRoeBps: Int = costOfEquityBps,
+        stableGrowthBps: Int = 0,
+    ): Long? = valuePerShareCents(
+        book0 = book0,
+        shares = 1.0,
+        roe0Bps = roe0Bps,
+        costOfEquityBps = costOfEquityBps,
+        retention = retention,
+        fadeYears = fadeYears,
+        longRunRoeBps = longRunRoeBps,
+        stableGrowthBps = stableGrowthBps,
+    )
 }

@@ -50,10 +50,10 @@ v5 Street-weighted mix is discarded. Price layer is `price-forecast/6-identity-c
 | Item | Value |
 | --- | --- |
 | Branch | `valuation/honest-path-and-street-stretch` (tracks origin) |
-| Product HEAD | `df0e744b` — *Keep honest identity cash, and publish how far Street sits from it.* |
-| Prior | `beac5107` holdout book; `02078f85` ignore IDE scratch |
-| PR | [#39](https://github.com/Thejuampi/discount_screener/pull/39) — *feat(valuation): keep honest cash and publish Street stretch.* |
-| Worktree at this brief | clean (handover docs may land in a later BMAD-only commit) |
+| Product HEAD | this branch — debt engine, factory plus lender, `valuation-policy/1` |
+| Prior | `df0e744b` honest cash + Street stretch; `beac5107` holdout book |
+| PR | [#39](https://github.com/Thejuampi/discount_screener/pull/39) |
+| Worktree at this brief | dirty product tree lands in the next commit on this PR |
 
 ---
 
@@ -61,7 +61,10 @@ v5 Street-weighted mix is discarded. Price layer is `price-forecast/6-identity-c
 
 | Layer | Version | Owner |
 | --- | --- | --- |
-| Engine / model policy | `business-class-policy/35-weak-franchise-secular` | Android `DcfAnalysisEngine.kt`; Windows string only |
+| Engine / model policy | `business-class-policy/35-weak-franchise-secular` plus Android `coupon-resolution/1`, `debt-resolution/1`, and `issuer-market-yield/2` | Android `DcfAnalysisEngine.kt`. Windows string is `/35` and still drops hole years |
+| Policy book | `valuation-policy/1` | `shared/contracts/valuation-policy.yaml`. Android reads it. Windows keeps literals |
+| Factory plus lender | `component-sotp/2` | Android `ComponentSumValuation`. Mixed factory + finance filings |
+| Industry operating path | `industry-operating-path/4` | Auto through-cycle cash margin is 300 bps |
 | FCFF path | `valuation-path/4-no-expand-without-franchise` | Android `ValuationPathPolicy` |
 | Residual path | `residual-path/4-care-quality-roe` | Android `ResidualPathPolicy` (same file) |
 | SEC normalization | `sec-driver-normalization/11` | Contract + generated Android/Windows |
@@ -84,7 +87,10 @@ Windows carries `/35` and the secular 10% + 3/4-year rule. Windows does **not** 
 - **Secular.** Recent median growth ≥ 10% and growth in at least 3 of 4 years. One soft year is not a cycle.
 - **Bank lift.** Through-cycle floor 13% ROE, but year-1 lift is at most 400 bps.
 - **Managed care.** 2000 bps persist only when ROE ≥ 20%. Mid-teens ROE uses 350 bps.
-- **Honest refuses.** GM: no aligned interest/debt after 2020 (captive finance). TTWO: equity wipe / near-zero OCF.
+- **Honest refuses.** TTWO: equity wipe / near-zero OCF. GM now uses `component-sotp/2` when the 10-K and the finance subsidiary book are present.
+- **Debt engine.** Year-end stock, filed or peer coupon, and `issuer-market-yield/2` for k_d. Estimates stay in year-cash.
+- **Factory plus lender.** Parent dimensions plus the finance-arm 10-K. Factory FCFF is NOPAT + D&A − sustaining CapEx.
+- **Policy YAML.** Engine knobs live in `shared/contracts/valuation-policy.yaml`.
 
 ### 4.2 NonHonest signal (diagnostic, not a second cheat model)
 
@@ -201,13 +207,13 @@ If a new evidence hole appears (wrong qname, missing statement class, sign error
 
 | # | Item | Status | Notes |
 | --- | --- | --- | --- |
-| P0 | Live QA `qa` after CapEx/interest | **Due** | Identity-visible. Checklist: [`docs/valuation-live-qa-checklist.md`](../../docs/valuation-live-qa-checklist.md). One long-lived `npm run tauri:dev:qa`. One-shot missing names. |
-| P1 | Windows lag | Open | Port persist_frac, expand-without-franchise, residual-path `/4`, and NonHonest stretch only if Juan wants parity this slice. Desktop may stay behind if it fails closed. |
+| P0 | Live QA `qa` after CapEx/interest | **Done on Android** | [`live-qa-android-honest-path-2026-08-16.md`](live-qa-android-honest-path-2026-08-16.md). Checklist 1–6 PASS. AAPL remesure: SEC FCFF $343, red coupon caveat, Street primary on a 12361 bps fan. |
+| P1 | Windows lag | **Deferred by Juan 2026-08-16** | Do not port persist_frac / path `/4` / NonHonest UI until he asks. |
 | P2 | NonHonest signal quality | Ready, not working mode | Stretch is published. Next NonHonest work is diagnostic (how far Street sits), not a multi-knob Street mix. Wait for Juan. |
 | P3 | CPAY industry class | Do not ticker-tweak | Payments vs Software-Infrastructure is a classifier table change with tests, or leave it. |
 | P4 | 2026-08-02 motor (high-signal 26/26, CoE function) | Separate | Use the older handover. Do not mix into this slice. |
 
-Juan’s last product order after the push: keep going on the dual-mode battle. Honest is exhausted. Default next product step is **P0 live QA**, then wait for Juan before NonHonest freedom or a Windows port.
+Juan’s last product order: Android is the live QA surface. Windows comes next. Do not port the model to Windows in this slice.
 
 ---
 
@@ -238,10 +244,9 @@ cargo test --lib dcf_model::
 cargo test --lib valuation_baseline::
 cargo fmt
 
-# Live QA (from apps/windows). Never full sp500.
-npm run tauri:dev:qa
-npm run ds-ui:self-check
-npm run live-qa:checklist
+# Live QA this slice = Android profile qa. Never full sp500. Do not pm clear.
+make android-run-qa
+# Windows live QA waits for the later port. Do not launch tauri:dev:qa for this work.
 ```
 
 SEC policy generator (after contract edits): `-ExecutionPolicy Bypass` on the project script. Then remesure.

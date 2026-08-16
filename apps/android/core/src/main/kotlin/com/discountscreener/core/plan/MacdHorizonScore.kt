@@ -1,9 +1,14 @@
 package com.discountscreener.core.plan
 
+import com.discountscreener.core.engine.ValuationPolicy
+
 object MacdHorizonScore {
-    const val ALIGN = 3
-    const val FLAT = 0
-    const val DRAG = -1
+    val ALIGN: Int
+        get() = ValuationPolicy.current.macdHorizon.align
+    val FLAT: Int
+        get() = ValuationPolicy.current.macdHorizon.flat
+    val DRAG: Int
+        get() = ValuationPolicy.current.macdHorizon.drag
 
     fun score(
         year: MacdTape?,

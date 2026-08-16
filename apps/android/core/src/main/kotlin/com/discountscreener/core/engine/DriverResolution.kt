@@ -1,8 +1,6 @@
 package com.discountscreener.core.engine
 
-import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.model.FundamentalTimeseries
-import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.WaccFieldSource
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -21,165 +19,59 @@ internal data class ResolvedRateInputs(
     val reasons: List<String>,
 )
 
+internal data class TaxObservation(
+    val period: String,
+    val bps: Int,
+    val source: WaccFieldSource,
+)
+
+internal fun taxObservations(timeseries: FundamentalTimeseries): List<TaxObservation> =
+    timeseries.marginalTaxRate
+        .ifEmpty { timeseries.taxRateForCalcs }
+        .mapNotNull { tax ->
+            var value = normalizeTaxBps(tax.value) ?: return@mapNotNull null
+            TaxObservation(annualKey(tax), value, taxSource(tax.concept))
+        }
+        .distinctBy { it.period }
+
 internal fun resolveRateInputs(
     timeseries: FundamentalTimeseries,
     reportedTotalDebtDollars: Long?,
     _riskFreeBps: Int,
 ): Result<ResolvedRateInputs?> = runCatching {
-    val totalDebt = reportedTotalDebtDollars
-        ?: error("fcff unavailable: total debt is missing; missing debt is not zero")
-    require(totalDebt >= 0L) { "fcff unavailable: total debt is negative or contradictory" }
-    if (totalDebt == 0L) {
-        val inconsistent = timeseries.totalDebt.any { debt ->
-            debt.value == 0.0 && timeseries.interestExpense.any { interest ->
-                annualKey(interest) == annualKey(debt) && abs(interest.value) > 0.0
-            }
-        }
-        require(!inconsistent) {
-            "fcff unavailable: provider inconsistency, positive interest with zero debt"
-        }
-        return@runCatching null
-    }
+    var published = resolvePublishedCostOfDebt(
+        timeseries,
+        reportedTotalDebtDollars,
+        _riskFreeBps,
+    ).getOrThrow()
+    if (published == null) return@runCatching null
 
-    val accounting = timeseries.interestExpense.mapNotNull { interest ->
-        val key = annualKey(interest)
-        val debt = timeseries.totalDebt.firstOrNull { annualKey(it) == key } ?: return@mapNotNull null
-        if (!interest.value.isFinite() || !debt.value.isFinite()) return@mapNotNull null
-        var coupon = abs(interest.value)
-        if (debt.value > 0.0 && coupon > 0.0) {
-            Triple(key, debt.value, coupon)
-        } else {
-            null
-        }
-    }.distinctBy { it.first }.sortedBy { it.first }
-
-    val taxByPeriod = timeseries.marginalTaxRate
-        .ifEmpty { timeseries.taxRateForCalcs }
-        .mapNotNull { tax ->
-            val value = normalizeTaxBps(tax.value) ?: return@mapNotNull null
-            Triple(annualKey(tax), value, taxSource(tax.concept))
-        }
-        .distinctBy { it.first }
+    var taxByPeriod = taxObservations(timeseries)
     require(taxByPeriod.isNotEmpty()) {
         "fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources"
     }
-    val taxPeriodsAll = taxByPeriod.map { it.first }.toSet()
-    val marketYields = timeseries.marketYieldBps
-        .mapNotNull { point ->
-            point.value.takeIf { it.isFinite() && it.roundToInt() in 0..5_000 }
-                ?.let { annualKey(point) to it.roundToInt() }
-        }
-        .distinctBy { it.first }
-        .sortedBy { it.first }
-    val ratedSpreads = timeseries.ratedOrSyntheticSpreadBps
-        .mapNotNull { point ->
-            point.value.takeIf { it.isFinite() && it.roundToInt() in 0..4_000 }
-                ?.let { annualKey(point) to it.roundToInt() }
-        }
-        .distinctBy { it.first }
-        .sortedBy { it.first }
-    val marketCommon = marketYields.filter { taxPeriodsAll.contains(it.first) }
-    val ratedCommon = ratedSpreads.filter { taxPeriodsAll.contains(it.first) }
-    val accountingCommon = accounting.filter { taxPeriodsAll.contains(it.first) }
-    val coverageByPeriod = timeseries.interestExpense.mapNotNull { interest ->
-        val key = annualKey(interest)
-        if (!taxPeriodsAll.contains(key)) return@mapNotNull null
-        val pretax = timeseries.pretaxIncome.firstOrNull { annualKey(it) == key }
-            ?: return@mapNotNull null
-        var coupon = abs(interest.value)
-        if (!interest.value.isFinite() || coupon <= 0.0) return@mapNotNull null
-        if (!pretax.value.isFinite()) return@mapNotNull null
-        key to ((pretax.value + coupon) / coupon)
-    }.distinctBy { it.first }.sortedBy { it.first }
-    val coverageSpreadBps = coverageByPeriod
-        .map { it.second }
-        .let { medianOf(it) }
-        ?.let { CoverageCreditPolicy.spreadBps(it) }
-
-    val costOfDebtBps: Int
-    val costOfDebtSource: WaccFieldSource
-    val debtPeriods: List<String>
-    when {
-        marketCommon.isNotEmpty() -> {
-            costOfDebtBps = marketCommon.last().second
-            costOfDebtSource = WaccFieldSource.MarketYield
-            debtPeriods = listOf(marketCommon.last().first)
-        }
-        ratedCommon.isNotEmpty() -> {
-            costOfDebtBps = (_riskFreeBps + ratedCommon.last().second).coerceAtMost(Int.MAX_VALUE)
-            costOfDebtSource = WaccFieldSource.RatedOrSyntheticSpread
-            debtPeriods = listOf(ratedCommon.last().first)
-        }
-        coverageSpreadBps != null -> {
-            costOfDebtBps = (_riskFreeBps + coverageSpreadBps).coerceAtMost(Int.MAX_VALUE)
-            costOfDebtSource = WaccFieldSource.RatedOrSyntheticSpread
-            debtPeriods = coverageByPeriod.map { it.first }
-        }
-        accountingCommon.isNotEmpty() -> {
-            // Resolve one annual rate per fiscal period. Summing several
-            // years of interest and dividing by one average debt would
-            // multiply the cost of debt by the number of years. Each annual
-            // observation instead uses the average of the current and prior
-            // fiscal closing debt, then the median annual rate is selected.
-            val annualRates = accountingCommon.mapIndexed { index, (period, debt, interest) ->
-                val priorDebt = accountingCommon
-                    .subList(0, index)
-                    .asReversed()
-                    .firstOrNull { it.first < period }
-                    ?.second
-                    ?: debt
-                val averageDebtForPeriod = (debt + priorDebt) / 2.0
-                val rate = (interest / averageDebtForPeriod * 10_000.0).roundToInt()
-                Triple(period, rate, averageDebtForPeriod)
-            }
-            require(annualRates.all { it.second in 1..5_000 }) {
-                "fcff unavailable: aligned interest/debt implies invalid cost of debt"
-            }
-            debtPeriods = annualRates.map { it.first }
-            // `sorted()[size / 2]` took the upper of the two middle rates on an even number of
-            // periods, which is not the median the comment above promises. The statistic stays a
-            // median: turning a short annual series into a trimmed mean would move intrinsic
-            // values and is a model-policy change, not a boy-scout one.
-            costOfDebtBps = (medianOf(annualRates.map { it.second.toDouble() })
-                ?: error("fcff unavailable: no aligned annual cost of debt observations"))
-                .roundToInt()
-            val yahooAligned = accountingCommon.all { (period, _, _) ->
-                timeseries.interestExpense.any {
-                    annualKey(it) == period && it.source == DcfSource.YahooFinance
-                } && timeseries.totalDebt.any {
-                    annualKey(it) == period && it.source == DcfSource.YahooFinance
-                }
-            }
-            costOfDebtSource = if (yahooAligned) {
-                WaccFieldSource.YahooAlignedInterestOverDebt
-            } else {
-                WaccFieldSource.InterestOverAverageDebt
-            }
-        }
-        else -> error("fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods")
-    }
-
-    val selectedTaxSource = listOf(
+    var debtPeriods = published.validDebtPeriods
+    var selectedTaxSource = listOf(
         WaccFieldSource.TaxReconciliation,
         WaccFieldSource.JurisdictionStatutory,
         WaccFieldSource.DomicileTaxProxy,
         WaccFieldSource.ReportedMarginalTax,
     ).firstOrNull { source ->
-        taxByPeriod.any { (period, _, candidate) ->
-            candidate == source && debtPeriods.contains(period)
+        taxByPeriod.any { observation ->
+            observation.source == source && debtPeriods.contains(observation.period)
         }
     }
     requireNotNull(selectedTaxSource) {
         "fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources"
     }
-    val selectedTax = taxByPeriod.filter { (_, _, source) -> source == selectedTaxSource }
-    val taxPeriods = debtPeriods.filter { period ->
-        selectedTax.any { it.first == period }
+    var selectedTax = taxByPeriod.filter { it.source == selectedTaxSource }
+    var taxPeriods = debtPeriods.filter { period ->
+        selectedTax.any { it.period == period }
     }
     require(taxPeriods.isNotEmpty()) {
         "fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources"
     }
-    val quality = if (
+    var quality = if (
         taxPeriods.size >= 3 &&
         selectedTaxSource != WaccFieldSource.DomicileTaxProxy &&
         selectedTaxSource != WaccFieldSource.ReportedMarginalTax
@@ -188,34 +80,24 @@ internal fun resolveRateInputs(
     } else {
         DriverEvidenceQuality.Provisional
     }
-    buildList {
-        add("cost_of_debt_source=${costOfDebtSource.toSourceToken()}")
-        if (costOfDebtSource == WaccFieldSource.RatedOrSyntheticSpread &&
-            ratedCommon.isEmpty() &&
-            coverageSpreadBps != null
-        ) {
-            add("coverage_synthetic=median_spread:$coverageSpreadBps")
-        }
-        add("marginal_tax_source=${selectedTaxSource.toSourceToken()}")
-        add("rate_quality=${quality.name.lowercase()}")
-        add("aligned_debt_periods=${debtPeriods.joinToString(",")}")
-        add("aligned_tax_periods=${taxPeriods.joinToString(",")}")
-        add("period_intersection=common_fiscal_years:${taxPeriods.size}")
-    }.let { reasons ->
-        ResolvedRateInputs(
-            costOfDebtBps = costOfDebtBps,
-            costOfDebtSource = costOfDebtSource,
-            marginalTaxBps = selectedTax.last { it.first in taxPeriods }.second,
-            marginalTaxSource = selectedTaxSource,
-            quality = quality,
-            validDebtPeriods = debtPeriods,
-            validTaxPeriods = taxPeriods,
-            reasons = reasons,
-        )
-    }
+    var reasons = published.reasons.toMutableList()
+    reasons.add("marginal_tax_source=${waccSourceToken(selectedTaxSource)}")
+    reasons.add("rate_quality=${quality.name.lowercase()}")
+    reasons.add("aligned_tax_periods=${taxPeriods.joinToString(",")}")
+    reasons.add("period_intersection=common_fiscal_years:${taxPeriods.size}")
+    ResolvedRateInputs(
+        costOfDebtBps = published.bps,
+        costOfDebtSource = published.source,
+        marginalTaxBps = selectedTax.last { it.period in taxPeriods }.bps,
+        marginalTaxSource = selectedTaxSource,
+        quality = quality,
+        validDebtPeriods = debtPeriods,
+        validTaxPeriods = taxPeriods,
+        reasons = reasons,
+    )
 }
 
-private fun WaccFieldSource.toSourceToken(): String = when (this) {
+internal fun waccSourceToken(source: WaccFieldSource): String = when (source) {
     WaccFieldSource.MarketYield -> "market_yield"
     WaccFieldSource.RatedOrSyntheticSpread -> "rated_or_synthetic_spread"
     WaccFieldSource.InterestOverAverageDebt -> "interest_over_average_debt"
@@ -225,10 +107,10 @@ private fun WaccFieldSource.toSourceToken(): String = when (this) {
     WaccFieldSource.DomicileTaxProxy -> "domicile_tax_proxy"
     WaccFieldSource.ReportedMarginalTax -> "reported_marginal_tax"
     WaccFieldSource.HistoricalEffectiveTax -> "historical_effective_tax"
-    else -> name.lowercase()
+    else -> source.name.lowercase()
 }
 
-private fun taxSource(concept: String?): WaccFieldSource = when {
+internal fun taxSource(concept: String?): WaccFieldSource = when {
     concept?.contains("Reconciliation", ignoreCase = true) == true ->
         WaccFieldSource.TaxReconciliation
     concept?.contains("Statutory", ignoreCase = true) == true ->
@@ -242,8 +124,9 @@ private fun taxSource(concept: String?): WaccFieldSource = when {
     else -> WaccFieldSource.Unavailable
 }
 
+/** Period-end identity. SEC `fy` is the filing year and collides comparatives. */
 internal fun annualKey(value: com.discountscreener.core.model.AnnualReportedValue): String =
-    value.fiscalYear?.toString() ?: value.periodEnd ?: value.asOfDate
+    value.periodEnd?.takeIf { it.isNotBlank() } ?: value.asOfDate
 
 internal fun normalizeTaxBps(value: Double?): Int? {
     val raw = value?.takeIf { it.isFinite() } ?: return null

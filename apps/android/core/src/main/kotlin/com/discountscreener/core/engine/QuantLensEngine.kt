@@ -32,7 +32,8 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 object QuantLensEngine {
-    private const val MIN_HORIZON_WINDOWS = 10
+    private val MIN_HORIZON_WINDOWS: Int
+        get() = ValuationPolicy.current.quantLens.minHorizonWindows
 
     fun analyze(input: QuantLensInput): ComputationResult<QuantLensReport> = captureComputationResult(
         area = ComputationArea.QuantLens,

@@ -393,8 +393,9 @@ private fun annualFyRecords(
             periodStart = startDate,
             periodEnd = endDate,
             durationDays = durationDays,
-            fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
-                ?: endDate.take(4).toIntOrNull(),
+            // Period-end year. SEC `fy` is the filing year, so a 2025 10-K
+            // stamps fy=2025 on the 2024 comparative and collapses two years.
+            fiscalYear = endDate.take(4).toIntOrNull(),
             source = com.discountscreener.core.model.DcfSource.SecEdgar,
             concept = concept,
             unit = unit,

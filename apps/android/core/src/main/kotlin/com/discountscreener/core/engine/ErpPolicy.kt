@@ -35,7 +35,8 @@ object ErpPolicy {
     val DEFAULT_SCHOOL = ErpSchool.ImpliedIndex
 
     /** A row older than this at the valuation date is dated, so stay provisional. */
-    const val FRESH_DAYS = 180L
+    val FRESH_DAYS: Long
+        get() = ValuationPolicy.current.erp.freshDays
 
     fun resolve(school: ErpSchool, asOfEpochMillis: Long): ErpResolution {
         if (school == ErpSchool.Bootstrap) {
@@ -61,23 +62,10 @@ object ErpPolicy {
     }
 
     private fun rowsFor(school: ErpSchool): List<ErpRow> = when (school) {
-        ErpSchool.ImpliedIndex -> IMPLIED_INDEX
-        ErpSchool.KrollRecommended -> KROLL
+        ErpSchool.ImpliedIndex -> ValuationPolicy.current.erp.impliedIndex.map { it.toErpRow() }
+        ErpSchool.KrollRecommended -> ValuationPolicy.current.erp.kroll.map { it.toErpRow() }
         ErpSchool.Bootstrap -> emptyList()
     }
 }
 
-/**
- * Damodaran US implied ERP on the S&P 500 (index), not a firm ICC.
- * July 2026: https://pages.stern.nyu.edu/~adamodar/pc/implprem/ERPJuly26.xlsx (4.42%).
- */
-private val IMPLIED_INDEX = listOf(
-    ErpRow("2026-07-01", 442, "damodaran_implied_spx_2026-07"),
-)
-
-/**
- * Kroll recommended US ERP. 5.0% from 2025-09-02; still listed April 2026.
- */
-private val KROLL = listOf(
-    ErpRow("2025-09-02", 500, "kroll_recommended_us_2025-09-02"),
-)
+private fun DatedRateRow.toErpRow(): ErpRow = ErpRow(asOfDate, valueBps, source)

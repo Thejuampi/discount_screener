@@ -1,6 +1,7 @@
 package com.discountscreener.core.plan
 
 import com.discountscreener.core.engine.ValuationDecisionPolicy
+import com.discountscreener.core.engine.ValuationPolicy
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.AnchorRelation
 import com.discountscreener.core.model.BusinessClass
@@ -12,12 +13,18 @@ import com.discountscreener.core.model.ValuationConfidence
 import com.discountscreener.core.model.ValuationModel
 
 object LeftoverSignalEngine {
-    const val STREET_DOOR_BPS = 500
-    const val STRETCH_PRIMARY_MAX = 1.0
-    const val STRETCH_OUT = 2.0
-    const val RSI_HOT = 55.0
-    const val NOW_CAP = 120
-    const val LATER_CAP = 80
+    val STREET_DOOR_BPS: Int
+        get() = ValuationPolicy.current.leftover.streetDoorBps
+    val STRETCH_PRIMARY_MAX: Double
+        get() = ValuationPolicy.current.leftover.stretchPrimaryMax
+    val STRETCH_OUT: Double
+        get() = ValuationPolicy.current.leftover.stretchOut
+    val RSI_HOT: Double
+        get() = ValuationPolicy.current.leftover.rsiHot
+    val NOW_CAP: Int
+        get() = ValuationPolicy.current.leftover.nowCap
+    val LATER_CAP: Int
+        get() = ValuationPolicy.current.leftover.laterCap
 
     fun evaluate(input: DipRowInput): DipSetup {
         var tape = DipSignalEngine.measureTape(input.candles)
@@ -192,6 +199,7 @@ object LeftoverSignalEngine {
         if (analysis == null || modelCents == null) return null
         return when (analysis.model) {
             ValuationModel.ResidualIncomeEquity -> "Residual income"
+            ValuationModel.ComponentSum -> "Factory plus lender"
             ValuationModel.FcffWacc ->
                 if (analysis.businessClass == BusinessClass.OperatingNonFinancial) "FCFF DCF" else null
             ValuationModel.None -> null

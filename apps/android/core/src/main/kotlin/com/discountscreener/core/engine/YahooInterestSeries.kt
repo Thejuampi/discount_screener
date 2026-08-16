@@ -13,6 +13,7 @@ object YahooInterestSeries {
         var byYear = linkedMapOf<String, AnnualReportedValue>()
         for (candidate in series) {
             for (point in candidate) {
+                if (isCashPaidCouponConcept(point.concept)) continue
                 var key = annualKey(point)
                 if (key in byYear) continue
                 if (!point.value.isFinite() || abs(point.value) <= 0.0) continue
@@ -21,4 +22,9 @@ object YahooInterestSeries {
         }
         return byYear.values.sortedBy { it.asOfDate }
     }
+}
+
+fun isCashPaidCouponConcept(concept: String?): Boolean {
+    var text = concept.orEmpty()
+    return text.contains("InterestPaid", ignoreCase = true)
 }

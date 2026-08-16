@@ -43,7 +43,8 @@ data class SectorBenchmarks(
  * It is still the thinnest band this code will produce, and a later reading with real sector
  * populations behind it may well raise [MIN_SECTOR_MEMBERS] rather than leave the case reachable.
  */
-private const val MIN_SECTOR_MEMBERS = 5
+private val MIN_SECTOR_MEMBERS: Int
+    get() = ValuationPolicy.current.sectorBenchmarks.minSectorMembers
 
 /**
  * One entry per sector named in [details]. A symbol with no sector name belongs to no sector and

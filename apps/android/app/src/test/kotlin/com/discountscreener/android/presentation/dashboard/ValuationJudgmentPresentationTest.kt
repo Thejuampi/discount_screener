@@ -97,6 +97,111 @@ class ValuationJudgmentPresentationTest {
     }
 
     @Test
+    fun missing_drivers_shows_the_provider_status() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 33_500L,
+                reasons = listOf(
+                    ValuationJudgmentReason.MissingDrivers,
+                    ValuationJudgmentReason.IncompleteIdentity,
+                    ValuationJudgmentReason.StreetPrimary,
+                ),
+            ).copy(
+                identityUnavailableReason =
+                    "valuation unavailable: fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources",
+                providerRefuseLines = listOf(
+                    "YahooFinance: fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources",
+                    "SecEdgar: fcff unavailable: interest is missing for 2024-09-28,2025-09-27",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(
+                "Required drivers are missing.",
+                "Identity is incomplete.",
+                "Primary is the analyst range.",
+            ),
+            ui.reasonLines,
+        )
+        assertEquals(
+            listOf(
+                "valuation unavailable: fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources",
+                "YahooFinance: fcff unavailable: marginal tax is unavailable after filing and jurisdiction sources",
+                "SecEdgar: fcff unavailable: interest is missing for 2024-09-28,2025-09-27",
+            ),
+            ui.alertLines,
+        )
+    }
+
+    @Test
+    fun formed_identity_shows_cost_of_debt_source() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 100_000L,
+                reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
+                identityModelLabel = "FCFF DCF",
+            ).copy(
+                identityCaveatLines = listOf(
+                    "Cost of debt is a coverage synthetic from filed interest.",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf("Cost of debt is a coverage synthetic from filed interest."),
+            ui.alertLines,
+        )
+    }
+
+    @Test
+    fun formed_identity_shows_current_instrument_yield_bps() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 100_000L,
+                reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
+                identityModelLabel = "FCFF DCF",
+            ).copy(
+                identityCaveatLines = listOf(
+                    "Cost of debt is the current instrument yield, 471 bps.",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf("Cost of debt is the current instrument yield, 471 bps."),
+            ui.alertLines,
+        )
+    }
+
+    @Test
+    fun formed_identity_shows_estimated_interest_years() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 100_000L,
+                reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
+                identityModelLabel = "FCFF DCF",
+            ).copy(
+                identityCaveatLines = listOf(
+                    "Interest for 2024-09-28, 2025-09-27 is an estimate from this issuer's last filed coupon and debt. Confidence is Medium. A later filed tag replaces the estimate.",
+                ),
+            ),
+        )
+        assertEquals(listOf("Primary is the identity model."), ui.reasonLines)
+        assertEquals(
+            listOf(
+                "Interest for 2024-09-28, 2025-09-27 is an estimate from this issuer's last filed coupon and debt. Confidence is Medium. A later filed tag replaces the estimate.",
+            ),
+            ui.alertLines,
+        )
+    }
+
+    @Test
     fun `unavailable maps the unclassified reason`() {
         var ui = presentValuationJudgment(
             snapshot(

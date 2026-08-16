@@ -267,4 +267,31 @@ class ValuationPathPolicyTest {
         )
         assertEquals(3_200, prior.targetFcffMarginBps)
     }
+
+    @Test
+    fun auto_through_cycle_margin_is_three_percent() {
+        var prior = IndustryOperatingPathPolicy.resolve(
+            "Auto Manufacturers",
+            "Consumer Cyclical",
+        )
+        assertEquals(300, prior.targetFcffMarginBps)
+    }
+
+    @Test
+    fun cyclical_auto_fades_to_through_cycle_margin() {
+        var path = ValuationPathPolicy.resolveFcff(
+            regime = "cyclical_or_transition",
+            rawGrowthBps = 300,
+            matureCapBps = 1_570,
+            cappedGrowthBps = 300,
+            currentMarginBps = 500,
+            discountBps = 900,
+            roe0Bps = 1_200,
+            retentionBps = 5_000,
+            rfBps = 470,
+            industry = "Auto Manufacturers",
+            sector = "Consumer Cyclical",
+        )
+        assertEquals(300, path.stableMarginBps)
+    }
 }

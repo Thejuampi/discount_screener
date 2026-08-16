@@ -1,5 +1,6 @@
 package com.discountscreener.core.math
 
+import com.discountscreener.core.engine.ValuationPolicy
 import kotlin.math.abs
 
 /**
@@ -23,13 +24,14 @@ import kotlin.math.abs
  */
 
 /** Ratio between the median absolute deviation and the deviation of a normal sample. */
-private const val MAD_TO_DEVIATION = 1.482602218505602
+private val MAD_TO_DEVIATION: Double
+    get() = ValuationPolicy.current.robustCentre.madToDeviation
 
-/** Beyond this many deviations from the middle, an observation belongs to another population. */
-private const val MAX_ABSOLUTE_Z = 3.0
+private val MAX_ABSOLUTE_Z: Double
+    get() = ValuationPolicy.current.robustCentre.maxAbsoluteZ
 
-/** Below three observations there is a centre and a spread to find, and not enough to find both. */
-private const val MIN_OBSERVATIONS = 3
+private val MIN_OBSERVATIONS: Int
+    get() = ValuationPolicy.current.robustCentre.minObservations
 
 /**
  * The centre of a sample, computed only from the observations that belong to it.

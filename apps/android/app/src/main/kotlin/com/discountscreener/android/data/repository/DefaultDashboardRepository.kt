@@ -20,6 +20,7 @@ import com.discountscreener.android.data.remote.NasdaqTraderSymbolDirectoryClien
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.ResidualCompanyFactsProvider
+import com.discountscreener.android.data.remote.IssuerComponentLookup
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
@@ -57,6 +58,11 @@ import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.IssuerYieldLookup
+import com.discountscreener.core.engine.IssuerYieldPoint
+import com.discountscreener.core.engine.PeerCouponEvidence
+import com.discountscreener.core.engine.lastFiledIssuerSample
+import com.discountscreener.core.engine.similarIssuerCoupons
 import com.discountscreener.core.engine.MarketParams
 import com.discountscreener.core.engine.MarketParamsSource
 import com.discountscreener.core.engine.ENGINE_VERSION
@@ -251,6 +257,12 @@ class DefaultDashboardRepository(
      * so they stay on rf=430 / erp=450 / provisional=true.
      */
     private val marketParamsSource: MarketParamsSource = BootstrapMarketParamsSource,
+    /**
+     * Current issuer-instrument yield for k_d. Empty when the source has no USD quote.
+     * Tests keep the default so the market-yield rung stays empty.
+     */
+    private val issuerYieldLookup: IssuerYieldLookup? = null,
+    private val componentLookup: IssuerComponentLookup? = null,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
@@ -276,6 +288,8 @@ class DefaultDashboardRepository(
     private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
+    private val issuerYieldBySymbol = linkedMapOf<String, IssuerYieldPoint>()
+    private val componentsBySymbol = linkedMapOf<String, com.discountscreener.core.engine.IssuerComponentSet>()
     @Volatile
     private var lastMarketParams: MarketParams = MarketParams()
     private val marketParamsPrefetch = repositoryScope.launch {
@@ -528,12 +542,18 @@ class DefaultDashboardRepository(
                 putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
             }
         } else if (fundamentals != null && needsDcfResolve) {
+            var peers = peerCouponsFor(symbol, fundamentals)
+            var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
+            var components = resolveComponents(symbol, detailForDcf?.companyName)
             val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
                 DcfAnalysisEngine.compute(
                     fundamentals,
                     timeseries,
                     marketPriceCents,
                     marketParams(),
+                    peerCoupons = peers,
+                    issuerYield = issuerYield,
+                    components = components,
                 ).getOrThrow()
             }
             val resolvedAnalysis = analysisFromSelection(selection, fundamentals)
@@ -3011,6 +3031,8 @@ class DefaultDashboardRepository(
             timeseries = timeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            issuerYield = cachedIssuerYield(symbol),
+            components = cachedComponents(symbol),
         ).getOrNull() ?: return null
         return TimeseriesFallback(
             snapshot = MarketSnapshot(
@@ -3032,6 +3054,9 @@ class DefaultDashboardRepository(
         providerFundamentals: FundamentalSnapshot?,
         chartCandles: List<HistoricalCandle>?,
     ): TimeseriesFallback? {
+        if (providerFundamentals == null || !isFinancialServices(providerFundamentals)) {
+            resolveIssuerYield(symbol, companyName)
+        }
         val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
             dcfFallbackFromTimeseries(
                 symbol = symbol,
@@ -3224,12 +3249,18 @@ class DefaultDashboardRepository(
                     residualFundamentals = outcome.fundamentals
                     dcfAnalysis = outcome.analysis
                 } else if (fundamentals != null) {
+                    var peers = peerCouponsFor(symbol, fundamentals)
+                    var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
+                    var components = resolveComponents(symbol, detailForDcf?.companyName)
                     val selection = dcfSourceCoordinator.resolve(symbol) { selectedTimeseries ->
                         DcfAnalysisEngine.compute(
                             fundamentals,
                             selectedTimeseries,
                             marketPriceCents,
                             marketParams(),
+                            peerCoupons = peers,
+                            issuerYield = issuerYield,
+                            components = components,
                         ).getOrThrow()
                     }
                     timeseries = selection.timeseries
@@ -3343,6 +3374,10 @@ class DefaultDashboardRepository(
             dcfCache.remove(symbol)
             return
         }
+        if (cachedAnalysis.model == ValuationModel.ComponentSum && cachedComponents(symbol) == null) {
+            dcfCache.remove(symbol)
+            return
+        }
         val selectedTimeseries = timeseriesCache[symbol]
             ?: if (cachedAnalysis.model == ValuationModel.ResidualIncomeEquity) {
                 FundamentalTimeseries()
@@ -3355,6 +3390,9 @@ class DefaultDashboardRepository(
             timeseries = selectedTimeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            peerCoupons = peerCouponsLocked(symbol, fundamentals),
+            issuerYield = cachedIssuerYieldLocked(symbol),
+            components = cachedComponents(symbol),
         ).getOrNull()
         if (recomputed == null) {
             dcfCache.remove(symbol)
@@ -3374,6 +3412,64 @@ class DefaultDashboardRepository(
             ),
             fundamentals,
         )
+    }
+
+    private suspend fun resolveIssuerYield(
+        symbol: String,
+        companyName: String?,
+    ): IssuerYieldPoint? {
+        var key = symbol.uppercase()
+        stateMutex.withLock { issuerYieldBySymbol[key] }?.let { return it }
+        var lookup = issuerYieldLookup ?: return null
+        var name = companyName?.trim()?.takeIf { it.isNotBlank() }
+            ?: stateMutex.withLock { companyNameBySymbol[symbol] ?: companyNameBySymbol[key] }
+        var point = withContext(ioDispatcher) {
+            runCatching { lookup.lookup(symbol, name) }.getOrNull()
+        } ?: return null
+        stateMutex.withLock { issuerYieldBySymbol[key] = point }
+        return point
+    }
+
+    private fun cachedIssuerYield(symbol: String): IssuerYieldPoint? =
+        issuerYieldBySymbol[symbol.uppercase()]
+
+    private fun cachedIssuerYieldLocked(symbol: String): IssuerYieldPoint? =
+        cachedIssuerYield(symbol)
+
+    private suspend fun resolveComponents(
+        symbol: String,
+        companyName: String?,
+    ): com.discountscreener.core.engine.IssuerComponentSet? {
+        var key = symbol.uppercase()
+        stateMutex.withLock { componentsBySymbol[key] }?.let { return it }
+        var lookup = componentLookup ?: return null
+        var name = companyName?.trim()?.takeIf { it.isNotBlank() }
+            ?: stateMutex.withLock { companyNameBySymbol[symbol] ?: companyNameBySymbol[key] }
+        var set = withContext(ioDispatcher) {
+            runCatching { lookup.lookup(symbol, name) }.getOrNull()
+        } ?: return null
+        stateMutex.withLock { componentsBySymbol[key] = set }
+        return set
+    }
+
+    private fun cachedComponents(symbol: String): com.discountscreener.core.engine.IssuerComponentSet? =
+        componentsBySymbol[symbol.uppercase()]
+
+    private suspend fun peerCouponsFor(
+        symbol: String,
+        subject: FundamentalSnapshot,
+    ): List<PeerCouponEvidence> = stateMutex.withLock { peerCouponsLocked(symbol, subject) }
+
+    private fun peerCouponsLocked(
+        symbol: String,
+        subject: FundamentalSnapshot,
+    ): List<PeerCouponEvidence> {
+        var samples = timeseriesCache.mapNotNull { (other, ts) ->
+            if (other.equals(symbol, ignoreCase = true)) return@mapNotNull null
+            var fund = engine.detail(other)?.fundamentals ?: return@mapNotNull null
+            lastFiledIssuerSample(other, fund.sectorName, fund.industryName, ts)
+        }
+        return similarIssuerCoupons(subject.sectorName, subject.industryName, samples)
     }
 
     /**
@@ -3458,7 +3554,7 @@ class DefaultDashboardRepository(
         val current = dcfCache[symbol]
         val needsReplace = when (current?.model) {
             null -> true
-            ValuationModel.FcffWacc, ValuationModel.None -> true
+            ValuationModel.FcffWacc, ValuationModel.ComponentSum, ValuationModel.None -> true
             ValuationModel.ResidualIncomeEquity -> !DcfAnalysisEngine.isCurrentPolicy(current)
         }
         if (!needsReplace) return

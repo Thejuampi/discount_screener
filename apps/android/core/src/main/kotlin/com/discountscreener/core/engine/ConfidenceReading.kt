@@ -11,16 +11,18 @@ import com.discountscreener.core.model.QualificationStatus
  * the analyst signal. High needs a supportive signal and at least [HIGH_CONFIDENCE_ANALYST_COUNT]
  * opinions.
  */
-const val HIGH_CONFIDENCE_ANALYST_COUNT = 3
+val HIGH_CONFIDENCE_ANALYST_COUNT: Int
+    get() = ValuationPolicy.current.score.highConfidenceAnalystCount
 
 /** What External is: Street median target versus price. */
-const val EXTERNAL_STATUS_HELP =
-    "Street median target versus price.\n\n" +
-        "Supportive — median is ≥ 20% above price.\n" +
-        "Divergent — median does not show that gap, or the ticker does not match.\n" +
-        "Missing — no median target.\n" +
-        "Stale — the signal is too old.\n\n" +
-        "High also needs at least $HIGH_CONFIDENCE_ANALYST_COUNT opinions."
+val EXTERNAL_STATUS_HELP: String
+    get() =
+        "Street median target versus price.\n\n" +
+            "Supportive — median is ≥ 20% above price.\n" +
+            "Divergent — median does not show that gap, or the ticker does not match.\n" +
+            "Missing — no median target.\n" +
+            "Stale — the signal is too old.\n\n" +
+            "High also needs at least $HIGH_CONFIDENCE_ANALYST_COUNT opinions."
 
 data class ConfidenceCause(
     val name: String,

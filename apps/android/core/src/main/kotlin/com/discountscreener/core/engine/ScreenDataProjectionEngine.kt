@@ -52,8 +52,10 @@ import com.discountscreener.core.model.lowerForProviderUncertainty
 import com.discountscreener.core.model.toProjectedConfidence
 
 
-private const val QUANT_LENS_ROW_UPSIDE_MIN_BPS = -100_000
-private const val QUANT_LENS_ROW_UPSIDE_MAX_BPS = 100_000
+private val QUANT_LENS_ROW_UPSIDE_MIN_BPS: Int
+    get() = ValuationPolicy.current.quantLens.rowUpsideMinBps
+private val QUANT_LENS_ROW_UPSIDE_MAX_BPS: Int
+    get() = ValuationPolicy.current.quantLens.rowUpsideMaxBps
 
 class ScreenDataProjectionEngine {
     fun project(request: ScreenDataProjectionRequest): ComputationResult<ProjectedDashboardData> = captureComputationResult(
@@ -260,6 +262,7 @@ class ScreenDataProjectionEngine {
                 ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
                 detail.marketPriceCents,
                 detail.fundamentals?.sharesOutstanding,
+                dcfAnalysis,
             ),
         )
     }
@@ -267,6 +270,7 @@ class ScreenDataProjectionEngine {
     private fun valuationModelLabel(analysis: DcfAnalysis?): String? = when (analysis?.model) {
         com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
         com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
+        com.discountscreener.core.model.ValuationModel.ComponentSum -> "Factory plus lender"
         com.discountscreener.core.model.ValuationModel.None, null -> null
     }
 
@@ -363,6 +367,7 @@ class ScreenDataProjectionEngine {
             ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
             detail.marketPriceCents,
             detail.fundamentals?.sharesOutstanding,
+            dcfAnalysis,
         )
         var primary = judgment.primaryCents
         if (primary == null) {
@@ -582,6 +587,7 @@ class ScreenDataProjectionEngine {
     private fun modelKindLabel(analysis: DcfAnalysis): String = when (analysis.model) {
         com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
         com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
+        com.discountscreener.core.model.ValuationModel.ComponentSum -> "Factory plus lender"
         com.discountscreener.core.model.ValuationModel.None -> "Model"
     }
 

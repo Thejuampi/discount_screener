@@ -692,6 +692,8 @@ enum class BusinessClass {
 enum class ValuationModel {
     FcffWacc,
     ResidualIncomeEquity,
+    /** Factory cash plus lender book. Each part keeps its own model. */
+    ComponentSum,
     None,
 }
 

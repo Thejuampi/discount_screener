@@ -1208,6 +1208,13 @@ private fun JudgmentValuationSection(
     projectedDetail: ProjectedDetailData?,
 ) {
     Text("Valuation", fontWeight = FontWeight.Bold)
+    ui.alertLines.forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
     priceSpeechLines(detail, ui).forEach { line ->
         Text(
             text = line,

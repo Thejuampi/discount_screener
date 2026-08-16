@@ -12,6 +12,8 @@ import com.discountscreener.android.data.remote.FredDgs10Client
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.SecEdgarCacheGc
 import com.discountscreener.android.data.remote.SecEdgarTimeseriesProvider
+import com.discountscreener.android.data.remote.SecIssuerComponentClient
+import com.discountscreener.android.data.remote.MarketsInsiderYieldClient
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -108,6 +110,10 @@ class DiscountScreenerAppContainer(context: Context) {
             logger = AndroidAppLogger(),
             defaultProfile = startupProfile,
             marketParamsSource = marketParamsSource,
+            issuerYieldLookup = MarketsInsiderYieldClient(),
+            componentLookup = SecIssuerComponentClient(
+                cacheDir = File(appContext.cacheDir, "sec-edgar"),
+            ),
         )
     }
 

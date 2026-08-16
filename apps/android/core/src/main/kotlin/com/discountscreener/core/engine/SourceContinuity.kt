@@ -5,9 +5,12 @@ import kotlinx.serialization.Serializable
 
 /** Exact semantic peer of Windows `source_continuity.rs`. */
 const val CONTINUITY_POLICY_VERSION = "source-continuity/1"
-const val DEFAULT_SCALE_RATIO_THRESHOLD = 5L
-const val DEFAULT_MATERIALITY_FLOOR_DOLLARS = 10_000_000L
-const val DEFAULT_MIN_CONFIDENT_SERIES_LENGTH = 4
+val DEFAULT_SCALE_RATIO_THRESHOLD: Long
+    get() = ValuationPolicy.current.sourceContinuity.defaultScaleRatioThreshold
+val DEFAULT_MATERIALITY_FLOOR_DOLLARS: Long
+    get() = ValuationPolicy.current.sourceContinuity.defaultMaterialityFloorDollars
+val DEFAULT_MIN_CONFIDENT_SERIES_LENGTH: Int
+    get() = ValuationPolicy.current.sourceContinuity.defaultMinConfidentSeriesLength
 
 @Serializable
 enum class ContinuityStatus {

@@ -65,7 +65,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 | BusinessClass | Primary model | Discount rate | Cash / driver |
 | --- | --- | --- | --- |
-| `OperatingNonFinancial` | FCFF + WACC | WACC | Free cash flow series (source-resolved) |
+| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing |
 | `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, **lenders** such as COF) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path; long-run ROE = min(ROE0, CoE+500) |
 | Payment networks (`V`, `MA`) even if Yahoo says Credit Services | **FCFF + WACC** | WACC | Fee cash flow — residual on book prints ~book |
 | `NotEligible` (ETF, fund, crypto shell, REIT, …) | none | — | — |
@@ -79,7 +79,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 ### Dynamic parameters — no eternal magic constants
 
-Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC.
+Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Edit that file. Do not put a second copy in Kotlin.
 
 - **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
 - Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
@@ -133,7 +133,9 @@ For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cro
 - `PaymentsToAcquireOilAndGasPropertyAndEquipment` is the well program. Sum it with other plant. `PaymentsToAcquireOilAndGasProperty` (no equipment) stays acreage acquisition.
 - Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition Y−1 → Y. Exclude that transition and retain clean recent observations when ≥2 exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance.
 - `FinanceLeaseInterestExpense` is not an interest-expense equivalent. It is the lease subset. Signed net interest (`InterestIncomeExpenseNonoperatingNet`) uses the magnitude.
-- Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved consolidated USD annual evidence is **unavailable** — not zero, not an imputed cash flow.
+- Missing coupon years: estimate when `coupon-resolution/1` confidence allows. Own last effective rate first. Else the median of similar issuers' filed rates. Label method and band. A later filed tag replaces the estimate. No own points and fewer than three peers stay Absent. Never invent a coupon from Other income, `InterestPaid*`, or a note rate range.
+- Android `debt-resolution/1` owns stock, coupon, and published k_d. Stock is the filed year-end instant. Estimated coupons enter year-cash only. k_d stays market yield, then rated/coverage synthetic, then the filed coupon over average debt. `InterestPaid*` is not a filed coupon. A current instrument yield attaches through `issuer-market-yield/2` onto `marketYieldBps`. The yield sets k_d. It does not shrink the tax-year window. Android reads Markets Insider issuer bond rows, keeps USD quotes, and takes the median of remaining 4–15 year yields. Missing yield leaves the rung empty.
+- Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved CapEx, OCF, or tax evidence is **unavailable** — not zero.
 - Financial services remain on residual income.
 
 ## Quant Lens (signal vs noise)
@@ -172,6 +174,10 @@ Count **families**, not every positive flag:
 Opening Quant Lens may compute residual income from fundamentals when analysis is missing (financials skip FCFF/EDGAR FCF by design). Do not reintroduce FCFF-on-float for that path.
 
 ## Build And Test
+
+### Iterate on the harness first (mandatory while developing)
+
+Use `QuantHarness.hardcoded()` → `cached()` → `live()` (`DS_QUANT_LIVE=true` to refresh a pack). Do **not** run device `make android-run-qa` until Juan says the product is ready for live QA.
 
 ### Live QA = profile `qa` only (mandatory)
 

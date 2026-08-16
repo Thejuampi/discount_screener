@@ -15,6 +15,7 @@ data class ValuationJudgmentUi(
     val primaryCents: Long?,
     val primarySourceLabel: String?,
     val reasonLines: List<String>,
+    val alertLines: List<String>,
     val identityBearCents: Long?,
     val identityBaseCents: Long?,
     val identityBullCents: Long?,
@@ -46,6 +47,11 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         primaryCents = snapshot.primaryCents,
         primarySourceLabel = if (showPrimary) primarySourceLabel(snapshot) else null,
         reasonLines = snapshot.reasonCodes.map(::reasonLabel),
+        alertLines = buildList {
+            snapshot.identityUnavailableReason?.takeIf { it.isNotBlank() }?.let(::add)
+            addAll(snapshot.providerRefuseLines.filter { it.isNotBlank() })
+            addAll(snapshot.identityCaveatLines.filter { it.isNotBlank() })
+        }.distinct(),
         identityBearCents = snapshot.identityBearCents,
         identityBaseCents = snapshot.identityBaseCents,
         identityBullCents = snapshot.identityBullCents,

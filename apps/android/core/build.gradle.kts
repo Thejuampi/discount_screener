@@ -8,9 +8,16 @@ kotlin {
     jvmToolchain(17)
 }
 
+val valuationPolicyYaml = rootProject.projectDir.resolve("../../shared/contracts/valuation-policy.yaml")
+
+tasks.processResources {
+    from(valuationPolicyYaml)
+}
+
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.yaml:snakeyaml:2.3")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")

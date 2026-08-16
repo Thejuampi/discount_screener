@@ -11,15 +11,24 @@ import kotlin.math.abs
 
 object StreetImpliedHonesty {
     const val POLICY_VERSION = "street-implied-honesty/3"
-    const val ALIGNED_APE_BPS = 200
-    const val DISCOUNT_MODEST_BPS = 200
-    const val DISCOUNT_STRETCH_BPS = 500
-    const val MARGIN_MODEST_BPS = 400
-    const val MARGIN_STRETCH_BPS = 1_000
-    const val GROWTH_MODEST_BPS = 400
-    const val GROWTH_STRETCH_BPS = 1_200
-    const val ROE_MODEST_BPS = 300
-    const val ROE_STRETCH_BPS = 800
+    val ALIGNED_APE_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.alignedApeBps
+    val DISCOUNT_MODEST_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.discountModestBps
+    val DISCOUNT_STRETCH_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.discountStretchBps
+    val MARGIN_MODEST_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.marginModestBps
+    val MARGIN_STRETCH_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.marginStretchBps
+    val GROWTH_MODEST_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.growthModestBps
+    val GROWTH_STRETCH_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.growthStretchBps
+    val ROE_MODEST_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.roeModestBps
+    val ROE_STRETCH_BPS: Int
+        get() = ValuationPolicy.current.streetImplied.roeStretchBps
 
     fun classifyStretch(
         knob: HonestyKnob,
@@ -59,7 +68,7 @@ object StreetImpliedHonesty {
         var apeBps = ((abs(honest - streetBaseCents) * 10_000L) / streetBaseCents).toInt()
         var aligned = apeBps <= ALIGNED_APE_BPS
         var knobs = when (analysis.model) {
-            ValuationModel.FcffWacc -> fcffKnobs(analysis, streetBaseCents, shares)
+            ValuationModel.FcffWacc, ValuationModel.ComponentSum -> fcffKnobs(analysis, streetBaseCents, shares)
             ValuationModel.ResidualIncomeEquity -> residualKnobs(analysis, streetBaseCents, shares)
             ValuationModel.None -> emptyList()
         }
