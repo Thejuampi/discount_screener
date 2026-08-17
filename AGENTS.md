@@ -114,7 +114,7 @@ Two typed modes. Street is the scoreboard only.
 | `Honest` | Working identity. Every input is evidence or economics. Exhaust this first. |
 | `NonHonest` | Parallel signal. One-knob inversions that would match Street. Never a hidden mix. |
 
-Every non-honest input is `ValuationHonesty.NonHonest` in the class model and labeled in Detail. Forecast stays honest. Policy: `street-implied-honesty/3`. The scoreboard reports `ape_h`, `ape_nh`, implied bps, delta, and stretch. `ape_nh` near 0 is inversion, not a win.
+Every non-honest input is `ValuationHonesty.NonHonest` in the class model. Detail prints both dollars. The non-honest line names the bent input. Forecast stays honest. Policy: `street-implied-honesty/3`. The scoreboard reports `ape_h`, `ape_nh`, implied bps, delta, and stretch. `ape_nh` near 0 is inversion, not a win.
 
 ### Provenance, parity, and engine versioning
 

@@ -3,6 +3,17 @@ package com.discountscreener.android.ui.dashboard
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
+import com.discountscreener.core.engine.ValuationJudgmentPolicy
+import com.discountscreener.core.engine.ValuationJudgmentReason
+import com.discountscreener.core.engine.ValuationJudgmentStatus
+import com.discountscreener.core.model.AnchorRelation
+import com.discountscreener.core.model.HonestyKnob
+import com.discountscreener.core.model.HonestyTaggedKnob
+import com.discountscreener.core.model.ImpliedStretch
+import com.discountscreener.core.model.ProjectedValuationJudgment
+import com.discountscreener.core.model.StreetImpliedView
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
@@ -735,6 +746,53 @@ class DetailScreenTest {
         assertEquals(AnalystTargetHistoryState.Changed, overview?.state)
         assertEquals("Median", overview?.sourceLabel)
         assertEquals(2, overview?.changeCount)
+    }
+
+    @Test
+    fun honesty_pair_lines_print_both_dollars_and_the_reason() {
+        var ui = presentValuationJudgment(
+            ProjectedValuationJudgment(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.Aligned,
+                primaryCents = 7_800L,
+                reasonCodes = listOf(ValuationJudgmentReason.IdentityPrimary),
+                policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
+                identityBaseCents = 7_800L,
+                streetBaseCents = 2_900L,
+                honestyMode = ValuationHonesty.Honest,
+                streetImplied = StreetImpliedView(
+                    streetBaseCents = 2_900L,
+                    honestBaseCents = 7_800L,
+                    impliedBaseCents = 2_900L,
+                    winningKnob = HonestyKnob.StableMargin,
+                    winningHonestBps = 1_560,
+                    winningImpliedBps = 580,
+                    winningDeltaBps = -980,
+                    winningStretch = ImpliedStretch.Absurd,
+                    aligned = false,
+                    knobs = listOf(
+                        HonestyTaggedKnob(
+                            knob = HonestyKnob.StableMargin,
+                            honesty = ValuationHonesty.NonHonest,
+                            honestBps = 1_560,
+                            impliedBps = 580,
+                            impliedCents = 2_900L,
+                            reachable = true,
+                            note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
+                        ),
+                    ),
+                    policyVersion = "street-implied-honesty/3",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(
+                "Honest $78.00",
+                "Non-honest $29.00",
+                "This number bends the stable cash margin from 15.60% to 5.80% so it matches Street.",
+            ),
+            honestyPairLines(ui),
+        )
     }
 
     @Test

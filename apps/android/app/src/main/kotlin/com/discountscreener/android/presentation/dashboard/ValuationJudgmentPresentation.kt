@@ -5,8 +5,10 @@ import com.discountscreener.core.engine.ValuationDecisionPolicy
 import com.discountscreener.core.engine.ValuationJudgmentReason
 import com.discountscreener.core.engine.ValuationJudgmentStatus
 import com.discountscreener.core.model.AnchorRelation
+import com.discountscreener.core.model.HonestyKnob
 import com.discountscreener.core.model.ProjectedValuationJudgment
 import com.discountscreener.core.model.ValuationHonesty
+import java.util.Locale
 
 data class ValuationJudgmentUi(
     val stanceLabel: String,
@@ -34,6 +36,9 @@ data class ValuationJudgmentUi(
     val horizonPriceLabel: String,
     val cashLabel: String,
     val honestyModeLabel: String,
+    val honestValueLine: String?,
+    val nonHonestValueLine: String?,
+    val nonHonestReason: String?,
     val nonHonestTitle: String?,
     val nonHonestLines: List<String>,
 )
@@ -70,6 +75,9 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         horizonPriceLabel = "Our price",
         cashLabel = "Cash identity",
         honestyModeLabel = honestyModeLabel(snapshot),
+        honestValueLine = honestValueLine(snapshot),
+        nonHonestValueLine = nonHonestValueLine(snapshot),
+        nonHonestReason = nonHonestReason(snapshot),
         nonHonestTitle = nonHonestTitle(snapshot),
         nonHonestLines = nonHonestLines(snapshot),
     )
@@ -77,19 +85,55 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
 
 private fun honestyModeLabel(snapshot: ProjectedValuationJudgment): String =
     when (snapshot.honestyMode) {
-        ValuationHonesty.Honest -> "Mode: Honest"
-        ValuationHonesty.NonHonest -> "Mode: Non-honest"
+        ValuationHonesty.Honest -> "Working number is Honest."
+        ValuationHonesty.NonHonest -> "Working number is Non-honest."
     }
 
-private fun nonHonestTitle(snapshot: ProjectedValuationJudgment): String? {
+private fun honestValueLine(snapshot: ProjectedValuationJudgment): String? {
+    var cents = snapshot.streetImplied?.honestBaseCents
+        ?: snapshot.identityBaseCents
+        ?: snapshot.cashIdentityCents
+        ?: return null
+    if (cents <= 0L) return null
+    return "Honest ${moneyLine(cents)}"
+}
+
+private fun nonHonestValueLine(snapshot: ProjectedValuationJudgment): String? {
     var implied = snapshot.streetImplied ?: return null
-    if (implied.aligned) return "Non-honest (Street-implied): aligned"
-    var stretch = implied.winningStretch ?: return "Non-honest (Street-implied)"
-    var knob = implied.winningKnob ?: return "Non-honest (Street-implied): $stretch"
-    var honest = implied.winningHonestBps ?: return "Non-honest (Street-implied): $stretch"
-    var need = implied.winningImpliedBps ?: return "Non-honest (Street-implied): $stretch"
-    var delta = implied.winningDeltaBps ?: return "Non-honest (Street-implied): $stretch"
-    return "Non-honest (Street-implied): $stretch · $knob $need vs $honest (delta $delta)"
+    var cents = implied.impliedBaseCents ?: return null
+    if (cents <= 0L) return null
+    return "Non-honest ${moneyLine(cents)}"
+}
+
+private fun nonHonestReason(snapshot: ProjectedValuationJudgment): String? {
+    var implied = snapshot.streetImplied ?: return null
+    if (implied.aligned) {
+        return "Honest and Street already sit together. No input was bent."
+    }
+    var knob = implied.winningKnob ?: return "Street is not reachable by bending one input."
+    var fromBps = implied.winningHonestBps ?: return "Street is not reachable by bending one input."
+    var toBps = implied.winningImpliedBps ?: return "Street is not reachable by bending one input."
+    return "This number bends the ${knobLabel(knob)} from ${bpsPercent(fromBps)} to ${bpsPercent(toBps)} so it matches Street."
+}
+
+private fun knobLabel(knob: HonestyKnob): String = when (knob) {
+    HonestyKnob.StableMargin -> "stable cash margin"
+    HonestyKnob.NearTermGrowth -> "near-term growth"
+    HonestyKnob.DiscountRate -> "discount rate"
+    HonestyKnob.StartingRoe -> "starting return on equity"
+}
+
+private fun bpsPercent(bps: Int): String {
+    var pct = bps / 100.0
+    return String.format(Locale.US, "%.2f%%", pct)
+}
+
+private fun moneyLine(cents: Long): String =
+    "$" + String.format(Locale.US, "%.2f", cents / 100.0)
+
+private fun nonHonestTitle(snapshot: ProjectedValuationJudgment): String? {
+    if (snapshot.streetImplied == null) return null
+    return nonHonestValueLine(snapshot) ?: "Non-honest"
 }
 
 private fun nonHonestLines(snapshot: ProjectedValuationJudgment): List<String> {

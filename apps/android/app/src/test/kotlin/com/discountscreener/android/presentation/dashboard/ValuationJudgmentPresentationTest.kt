@@ -228,60 +228,60 @@ class ValuationJudgmentPresentationTest {
     }
 
     @Test
-    fun non_honest_title_names_the_winning_stretch() {
+    fun honest_line_prints_the_honest_dollar() {
+        var ui = presentValuationJudgment(nonHonestSnapshot())
+        assertEquals("Honest $78.00", ui.honestValueLine)
+    }
+
+    @Test
+    fun non_honest_line_prints_the_implied_dollar() {
+        var ui = presentValuationJudgment(nonHonestSnapshot())
+        assertEquals("Non-honest $29.00", ui.nonHonestValueLine)
+    }
+
+    @Test
+    fun non_honest_reason_names_the_bent_input() {
+        var ui = presentValuationJudgment(nonHonestSnapshot())
+        assertEquals(
+            "This number bends the stable cash margin from 15.60% to 5.80% so it matches Street.",
+            ui.nonHonestReason,
+        )
+    }
+
+    @Test
+    fun aligned_pair_says_no_input_was_bent() {
         var ui = presentValuationJudgment(
             nonHonestSnapshot().copy(
                 streetImplied = nonHonestSnapshot().streetImplied?.copy(
-                    winningKnob = HonestyKnob.StableMargin,
-                    winningHonestBps = 1_560,
-                    winningImpliedBps = 580,
-                    winningDeltaBps = -980,
-                    winningStretch = ImpliedStretch.Absurd,
+                    aligned = true,
+                    impliedBaseCents = 7_800L,
+                    winningStretch = ImpliedStretch.Modest,
+                    winningImpliedBps = 1_560,
+                    winningDeltaBps = 0,
                 ),
             ),
         )
-        assertEquals(
-            "Non-honest (Street-implied): Absurd · StableMargin 580 vs 1560 (delta -980)",
-            ui.nonHonestTitle,
-        )
+        assertEquals("Honest and Street already sit together. No input was bent.", ui.nonHonestReason)
     }
 
     @Test
-    fun non_honest_block_is_labeled_as_not_honest() {
+    fun missing_street_implied_hides_the_non_honest_dollar() {
         var ui = presentValuationJudgment(
             snapshot(
                 status = ValuationJudgmentStatus.Identity,
-                relation = AnchorRelation.Aligned,
+                relation = AnchorRelation.SingleSource,
                 primaryCents = 7_800L,
                 reasons = listOf(ValuationJudgmentReason.IdentityPrimary),
                 identityBaseCents = 7_800L,
-                streetBaseCents = 2_900L,
-            ).copy(
-                streetImplied = StreetImpliedView(
-                    streetBaseCents = 2_900L,
-                    honestBaseCents = 7_800L,
-                    aligned = false,
-                    knobs = listOf(
-                        HonestyTaggedKnob(
-                            knob = HonestyKnob.StableMargin,
-                            honesty = ValuationHonesty.NonHonest,
-                            honestBps = 1_560,
-                            impliedBps = 580,
-                            reachable = true,
-                            note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
-                        ),
-                    ),
-                    policyVersion = "street-implied-honesty/3",
-                ),
             ),
         )
-        assertEquals("Non-honest (Street-implied)", ui.nonHonestTitle)
+        assertEquals(null, ui.nonHonestValueLine)
     }
 
     @Test
-    fun working_mode_stays_honest_when_street_implied_exists() {
+    fun working_number_stays_honest_when_both_print() {
         var ui = presentValuationJudgment(nonHonestSnapshot())
-        assertEquals("Mode: Honest", ui.honestyModeLabel)
+        assertEquals("Working number is Honest.", ui.honestyModeLabel)
     }
 
     @Test
@@ -322,6 +322,12 @@ class ValuationJudgmentPresentationTest {
         streetImplied = StreetImpliedView(
             streetBaseCents = 2_900L,
             honestBaseCents = 7_800L,
+            impliedBaseCents = 2_900L,
+            winningKnob = HonestyKnob.StableMargin,
+            winningHonestBps = 1_560,
+            winningImpliedBps = 580,
+            winningDeltaBps = -980,
+            winningStretch = ImpliedStretch.Absurd,
             aligned = false,
             knobs = listOf(
                 HonestyTaggedKnob(
@@ -329,6 +335,7 @@ class ValuationJudgmentPresentationTest {
                     honesty = ValuationHonesty.NonHonest,
                     honestBps = 1_560,
                     impliedBps = 580,
+                    impliedCents = 2_900L,
                     reachable = true,
                     note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
                 ),

@@ -1254,11 +1254,21 @@ private fun JudgmentValuationSection(
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    ui.nonHonestTitle?.let { title ->
+    honestyPairLines(ui).forEach { line ->
+        var bent = line != ui.honestValueLine
         Text(
-            text = title,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.tertiary,
+            text = line,
+            style = if (line == ui.nonHonestReason) {
+                MaterialTheme.typography.bodySmall
+            } else {
+                MaterialTheme.typography.titleSmall
+            },
+            fontWeight = if (bent) FontWeight.Normal else FontWeight.SemiBold,
+            color = if (bent) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
         )
     }
     ui.nonHonestLines.forEach { line ->
@@ -3468,6 +3478,12 @@ private fun judgmentChartReferences(
         add(ValuationAnchor("Justified multiple", cents))
     }
 }
+
+internal fun honestyPairLines(ui: ValuationJudgmentUi): List<String> = listOfNotNull(
+    ui.honestValueLine,
+    ui.nonHonestValueLine,
+    ui.nonHonestReason,
+)
 
 private fun priceSpeechLines(
     detail: SymbolDetail,
