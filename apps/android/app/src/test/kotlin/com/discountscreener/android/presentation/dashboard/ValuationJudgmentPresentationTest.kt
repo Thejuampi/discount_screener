@@ -80,7 +80,48 @@ class ValuationJudgmentPresentationTest {
                 streetBaseCents = 28_000L,
             ).copy(horizonDays = 90, horizonPriceCents = 28_000L),
         )
-        assertEquals("Our price", ui.horizonPriceLabel)
+        assertEquals("Identity model", ui.horizonPriceLabel)
+    }
+
+    @Test
+    fun street_headline_is_price_and_analyst() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 155_000L,
+                reasons = listOf(ValuationJudgmentReason.StreetPrimary),
+                streetBaseCents = 155_000L,
+            ).copy(lastPriceCents = 97_166L),
+        )
+        assertEquals("Price $971.66  Analyst $1550.00", ui.forecastHeadline)
+    }
+
+    @Test
+    fun missing_street_headline_says_no_analyst_forecast() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Unavailable,
+                relation = AnchorRelation.Unavailable,
+                primaryCents = null,
+                reasons = listOf(ValuationJudgmentReason.NoCompleteFamily),
+            ).copy(lastPriceCents = 97_166L),
+        )
+        assertEquals("Price $971.66  No analyst forecast", ui.forecastHeadline)
+    }
+
+    @Test
+    fun street_source_line_names_the_analyst_range() {
+        var ui = presentValuationJudgment(
+            snapshot(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 155_000L,
+                reasons = listOf(ValuationJudgmentReason.StreetPrimary),
+                streetBaseCents = 155_000L,
+            ),
+        )
+        assertEquals("Forecast is the analyst range.", ui.forecastSourceLine)
     }
 
     @Test
@@ -152,7 +193,7 @@ class ValuationJudgmentPresentationTest {
         )
         assertEquals(
             listOf("Cost of debt is a coverage synthetic from filed interest."),
-            ui.alertLines,
+            ui.caveatLines,
         )
     }
 
@@ -173,7 +214,7 @@ class ValuationJudgmentPresentationTest {
         )
         assertEquals(
             listOf("Cost of debt is the current instrument yield, 471 bps."),
-            ui.alertLines,
+            ui.caveatLines,
         )
     }
 
@@ -197,7 +238,7 @@ class ValuationJudgmentPresentationTest {
             listOf(
                 "Interest for 2024-09-28, 2025-09-27 is an estimate from this issuer's last filed coupon and debt. Confidence is Medium. A later filed tag replaces the estimate.",
             ),
-            ui.alertLines,
+            ui.caveatLines,
         )
     }
 

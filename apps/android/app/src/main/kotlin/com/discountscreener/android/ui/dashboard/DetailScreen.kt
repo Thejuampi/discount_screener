@@ -737,16 +737,6 @@ private fun SnapshotContent(
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
-            DetailScoreHeader(
-                route = route,
-                scoreRow = scoreRow,
-                scoringModel = scoringModel,
-                regimeScoringEnabled = regimeScoringEnabled,
-                onAction = onAction,
-            )
-        }
-
-        item {
             var currentDetail = displayedDetail
             if (currentDetail == null) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -773,18 +763,22 @@ private fun SnapshotContent(
                 }
                 return@item
             }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    detailHeadline(currentDetail, projectedDetail),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    "Qual ${currentDetail.qualification.name.lowercase()}  Conf ${currentDetail.confidence.name.lowercase()}  External ${currentDetail.externalStatus.name.lowercase()}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
-            }
+            ForecastSection(
+                detail = currentDetail,
+                projectedDetail = projectedDetail,
+                quantLens = quantLens,
+                onAction = onAction,
+            )
+        }
+
+        item {
+            DetailScoreHeader(
+                route = route,
+                scoreRow = scoreRow,
+                scoringModel = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                onAction = onAction,
+            )
         }
 
         item {
@@ -1146,13 +1140,76 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+private fun ForecastSection(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData?,
+    quantLens: QuantLensUiState?,
+    onAction: (DashboardAction) -> Unit,
+) {
+    var ui = projectedDetail?.valuationJudgment?.let { snapshot ->
+        var priced = if (snapshot.lastPriceCents == null && detail.marketPriceCents > 0L) {
+            snapshot.copy(lastPriceCents = detail.marketPriceCents)
+        } else {
+            snapshot
+        }
+        presentValuationJudgment(priced)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "Forecast",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = snapshotForecastHeadline(detail, projectedDetail),
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        if (ui != null) {
+            Text(
+                text = ui.forecastSourceLine,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            var model = forecastRangeModel(detail, ui)
+            if (model != null) {
+                ValuationHeadline(model = model)
+                ValuationRangeChart(
+                    model = model,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(132.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+            }
+        } else {
+            var model = valuationRangeModel(detail, projectedDetail)
+            ValuationHeadline(model = model)
+            ValuationRangeChart(
+                model = model,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(132.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+        }
+        Text(
+            text = "Qual ${detail.qualification.name.lowercase()}  Conf ${detail.confidence.name.lowercase()}  External ${detail.externalStatus.name.lowercase()}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun ValuationSection(
     detail: SymbolDetail,
     projectedDetail: ProjectedDetailData? = null,
 ) {
     var judgmentUi = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
     if (judgmentUi != null) {
-        JudgmentValuationSection(
+        ModelValuationSection(
             detail = detail,
             ui = judgmentUi,
             projectedDetail = projectedDetail,
@@ -1202,12 +1259,12 @@ private fun ValuationSection(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun JudgmentValuationSection(
+private fun ModelValuationSection(
     detail: SymbolDetail,
     ui: ValuationJudgmentUi,
     projectedDetail: ProjectedDetailData?,
 ) {
-    Text("Valuation", fontWeight = FontWeight.Bold)
+    Text("Model", fontWeight = FontWeight.Bold)
     ui.alertLines.forEach { line ->
         Text(
             text = line,
@@ -1215,26 +1272,14 @@ private fun JudgmentValuationSection(
             color = MaterialTheme.colorScheme.error,
         )
     }
-    priceSpeechLines(detail, ui).forEach { line ->
+    ui.caveatLines.forEach { line ->
         Text(
             text = line,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-    Text(
-        text = ui.stanceLabel,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-    )
-    if (ui.relationLabel.isNotBlank()) {
-        Text(
-            text = ui.relationLabel,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    ui.reasonLines.forEach { line ->
+    modelReasonLines(ui).forEach { line ->
         Text(
             text = line,
             style = MaterialTheme.typography.bodySmall,
@@ -1244,16 +1289,11 @@ private fun JudgmentValuationSection(
     var officialGapBps = ui.officialGapBps
     if (officialGapBps != null) {
         Text(
-            text = "Official gap $officialGapBps bps",
+            text = "Identity vs analyst $officialGapBps bps",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    Text(
-        text = ui.honestyModeLabel,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
     honestyPairLines(ui).forEach { line ->
         var bent = line != ui.honestValueLine
         Text(
@@ -1277,45 +1317,6 @@ private fun JudgmentValuationSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.tertiary,
         )
-    }
-    if (ui.showPrimary && ui.primaryCents != null) {
-        var model = valuationRangeModelFromJudgment(detail, ui)
-        ValuationHeadline(model = model)
-        ValuationRangeChart(
-            model = model,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(132.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        )
-        if (model.referenceValues.isNotEmpty()) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                model.referenceValues.forEach { reference ->
-                    Text(
-                        text = "${reference.label} ${compactMoney(reference.valueCents)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    } else {
-        Text(
-            text = "No single primary",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.tertiary,
-        )
-        Text(
-            text = "Price ${money(detail.marketPriceCents)}",
-            style = MaterialTheme.typography.labelMedium,
-        )
-        judgmentReferenceLines(ui).forEach { line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
     WaccAssumptionsSection(projectedDetail = projectedDetail)
     FcfDiagnosticsSection(projectedDetail = projectedDetail)
@@ -3485,50 +3486,61 @@ internal fun honestyPairLines(ui: ValuationJudgmentUi): List<String> = listOfNot
     ui.nonHonestReason,
 )
 
-private fun priceSpeechLines(
-    detail: SymbolDetail,
-    ui: ValuationJudgmentUi,
-): List<String> = buildList {
-    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L }
-    last?.let { add("${ui.lastPriceLabel} ${money(it)}") }
-    ui.horizonPriceCents?.let { add("${ui.horizonPriceLabel} ${money(it)}") }
-    ui.cashIdentityCents?.takeIf { it != ui.horizonPriceCents }?.let { add("${ui.cashLabel} ${money(it)}") }
-}
+internal fun modelReasonLines(ui: ValuationJudgmentUi): List<String> =
+    ui.reasonLines.filterNot { line ->
+        line == "Primary is the analyst range." || line == "Primary is the identity model."
+    }
 
-private fun judgmentReferenceLines(ui: ValuationJudgmentUi): List<String> = buildList {
-    ui.identityBaseCents?.let { base ->
-        var label = ui.identityModelLabel ?: "Identity"
-        add(
-            "$label ${compactMoney(ui.identityBearCents ?: base)} / ${compactMoney(base)} / ${compactMoney(ui.identityBullCents ?: base)}",
-        )
-    }
-    ui.streetBaseCents?.let { base ->
-        add(
-            "Analyst range ${compactMoney(ui.streetLowCents ?: base)} / ${compactMoney(base)} / ${compactMoney(ui.streetHighCents ?: base)}",
-        )
-    }
-    ui.femTargetCents?.let { cents ->
-        add("Justified multiple ${compactMoney(cents)}")
-    }
-}
-
-private fun detailHeadline(
+internal fun snapshotForecastHeadline(
     detail: SymbolDetail,
     projectedDetail: ProjectedDetailData?,
 ): String {
-    var ui = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
-    if (ui != null) {
-        var last = ui.lastPriceCents ?: detail.marketPriceCents
-        var horizon = ui.horizonPriceCents
-        if (horizon != null) {
-            return "Price ${money(last)}  Our price ${money(horizon)}"
-        }
-        if (!ui.showPrimary || ui.primaryCents == null) {
-            return "Price ${money(last)}  ${ui.stanceLabel}"
-        }
-        return "Price ${money(last)}  Fair ${money(ui.primaryCents)}  ${ui.primarySourceLabel}"
+    var snapshot = projectedDetail?.valuationJudgment
+    if (snapshot != null && snapshot.lastPriceCents == null && detail.marketPriceCents > 0L) {
+        snapshot = snapshot.copy(lastPriceCents = detail.marketPriceCents)
     }
-    return "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}  Disc ${formatPct(detail.gapBps)}  Upside ${formatPct(detail.upsideBps)}"
+    var ui = snapshot?.let(::presentValuationJudgment)
+    if (ui != null) return ui.forecastHeadline
+    return "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}"
+}
+
+internal fun forecastRangeModel(
+    detail: SymbolDetail,
+    ui: ValuationJudgmentUi,
+): ValuationRangeModel? {
+    var street = ui.streetBaseCents?.takeIf { it > 0L } ?: return null
+    var price = ui.lastPriceCents?.takeIf { it > 0L } ?: detail.marketPriceCents
+    var priceMarker = VisualAnchor("Price", price, valuationReferenceColor("Price"))
+    var fairValueMarker = VisualAnchor("Analyst range", street, valuationReferenceColor("Analyst range"))
+    var low = ui.streetLowCents
+    var high = ui.streetHighCents
+    var targetBand =
+        if (low != null && high != null && low > 0L && high > 0L) low to high else null
+    var references = buildList {
+        ui.identityBaseCents?.takeIf { it > 0L && it != street }?.let { cents ->
+            add(ValuationAnchor(ui.identityModelLabel ?: "Identity model", cents))
+        }
+    }
+    return ValuationRangeModel(
+        priceMarker = priceMarker,
+        fairValueMarker = fairValueMarker,
+        fairValueSourceLabel = "Analyst range",
+        upsideBps = checkedUpsideBps(price, street),
+        targetBandCents = targetBand,
+        referenceValues = references,
+        axisLabels = valuationAxisLabels(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+        domain = valuationRangeDomain(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+    )
 }
 
 internal fun valuationRangeModel(

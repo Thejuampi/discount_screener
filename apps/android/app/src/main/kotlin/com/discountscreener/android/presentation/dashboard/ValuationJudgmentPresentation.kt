@@ -35,6 +35,9 @@ data class ValuationJudgmentUi(
     val lastPriceLabel: String,
     val horizonPriceLabel: String,
     val cashLabel: String,
+    val forecastHeadline: String,
+    val forecastSourceLine: String,
+    val caveatLines: List<String>,
     val honestyModeLabel: String,
     val honestValueLine: String?,
     val nonHonestValueLine: String?,
@@ -55,8 +58,10 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         alertLines = buildList {
             snapshot.identityUnavailableReason?.takeIf { it.isNotBlank() }?.let(::add)
             addAll(snapshot.providerRefuseLines.filter { it.isNotBlank() })
-            addAll(snapshot.identityCaveatLines.filter { it.isNotBlank() })
         }.distinct(),
+        caveatLines = snapshot.identityCaveatLines.filter { it.isNotBlank() },
+        forecastHeadline = forecastHeadline(snapshot),
+        forecastSourceLine = forecastSourceLine(snapshot),
         identityBearCents = snapshot.identityBearCents,
         identityBaseCents = snapshot.identityBaseCents,
         identityBullCents = snapshot.identityBullCents,
@@ -72,7 +77,7 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         cashIdentityCents = snapshot.cashIdentityCents,
         upsideToHorizonBps = snapshot.upsideToHorizonBps,
         lastPriceLabel = "Price now",
-        horizonPriceLabel = "Our price",
+        horizonPriceLabel = snapshot.identityModelLabel ?: "Identity model",
         cashLabel = "Cash identity",
         honestyModeLabel = honestyModeLabel(snapshot),
         honestValueLine = honestValueLine(snapshot),
@@ -81,6 +86,24 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         nonHonestTitle = nonHonestTitle(snapshot),
         nonHonestLines = nonHonestLines(snapshot),
     )
+}
+
+private fun forecastHeadline(snapshot: ProjectedValuationJudgment): String {
+    var price = snapshot.lastPriceCents?.takeIf { it > 0L }
+    var priceText = price?.let(::moneyLine) ?: "—"
+    var street = snapshot.streetBaseCents?.takeIf { it > 0L }
+    if (street == null) {
+        return "Price $priceText  No analyst forecast"
+    }
+    return "Price $priceText  Analyst ${moneyLine(street)}"
+}
+
+private fun forecastSourceLine(snapshot: ProjectedValuationJudgment): String {
+    var street = snapshot.streetBaseCents?.takeIf { it > 0L }
+    if (street == null) {
+        return "No analyst range."
+    }
+    return "Forecast is the analyst range."
 }
 
 private fun honestyModeLabel(snapshot: ProjectedValuationJudgment): String =

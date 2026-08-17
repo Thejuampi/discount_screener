@@ -749,6 +749,29 @@ class DetailScreenTest {
     }
 
     @Test
+    fun snapshot_forecast_headline_leads_with_analyst() {
+        var detail = detailWithValuationAnchors().copy(marketPriceCents = 97_166L)
+        var projected = ProjectedDetailData(
+            symbol = detail.symbol,
+            detail = detail,
+            valuationJudgment = ProjectedValuationJudgment(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 155_000L,
+                reasonCodes = listOf(ValuationJudgmentReason.StreetPrimary),
+                policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
+                streetBaseCents = 155_000L,
+                lastPriceCents = 97_166L,
+                horizonPriceCents = 63_437L,
+            ),
+        )
+        assertEquals(
+            "Price $971.66  Analyst $1550.00",
+            snapshotForecastHeadline(detail, projected),
+        )
+    }
+
+    @Test
     fun honesty_pair_lines_print_both_dollars_and_the_reason() {
         var ui = presentValuationJudgment(
             ProjectedValuationJudgment(

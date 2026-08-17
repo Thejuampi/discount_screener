@@ -24,6 +24,7 @@ Use this index to find active implementation work, story files, QA outputs, and 
 ## QA Artifacts
 
 - [Test Summary](tests/test-summary.md)
+- [Live QA — Android forecast-first Detail 2026-08-16](live-qa-android-forecast-ux-2026-08-16.md) - Snapshot Forecast = Price + Analyst. Identity pair under Model. 6/6 `qa`.
 
 ## Active quant / valuation continuity
 
