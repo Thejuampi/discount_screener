@@ -94,6 +94,7 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Terminal ROE holds min(through-cycle ROE0, cost of equity + 500 bps); raw ROE0 does not run forever
 - Missing required drivers → `Unavailable` / `NotEligible` with reason codes
 - Beta missing → industry shrink
+- Latest OCF is the run-rate only when the prior window already printed two positive OCF years. A first-cash ramp keeps the recent OCF centre.
 
 **Forbidden**
 
@@ -194,6 +195,26 @@ Windows also accepts `$env:DS_UNIVERSE_PROFILE = "qa"` then `npm run tauri:dev`,
 
 Checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).
 
+### Live QA report (mandatory after a QA session)
+
+Write use-case scenarios (Sommerville / UML). Every executed path is one scenario. Paths not exercised are **Not run**.
+
+| Field | Content |
+| --- | --- |
+| ID | `UC-n` plus a letter for an extension (`UC-3a`) |
+| Use case | Goal the actor tries to complete |
+| Precondition | State before the first step |
+| Steps | Numbered actions the actor takes |
+| Expected | Observable result if the product is correct |
+| Actual | What the session showed |
+| Status | Pass, Fail, or Not run |
+
+Close with a count of Pass / Fail / Not run. List every **Not run** use case by name.
+
+### Specification by example (mandatory)
+
+Behaviour is a Gherkin `Scenario Outline` with an `Examples` table. Each row is one Case and one automated test. A bare `Scenario` is rejected. A table needs at least two Cases. Add a Case to an existing table before you write a new outline.
+
 ### Commands and gates
 
 - Strict TDD for behavior changes: failing test → smallest green → refactor while green.
@@ -278,6 +299,7 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 - Temp work only under `.agents/workspace/tmp`.
 - User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments.
 - Demand-driven expensive work: history, valuation, and heavy fetches stay bounded and on-demand where practical.
+- Android Detail second open of a warm ticker paints from the session cache. Skip disk and network when memory already holds the chart and DCF. Leftover and dip boards reuse the last assemble when the input fingerprint is unchanged. Session flags (`revisionHistoryHydrated`, `pricingHistoryHydrated`, `liveDcfResolvedSymbols`, replay backing) clear in `resetInMemoryLocked`.
 - Sparse/unavailable/stale states must be explicit — never smooth missing valuation into a fake “Strong” story.
 
 ## Documentation Map

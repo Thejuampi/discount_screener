@@ -10,8 +10,16 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -21,12 +29,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.JavaNetCookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.CookieManager
 import java.net.CookiePolicy
 import java.time.Duration
@@ -170,7 +181,7 @@ open class YahooFinanceClient(
         val requestSymbol = yahooRequestSymbol(symbol)
 
         var chartProbe: ChartMetaProbe? = null
-        fun loadChartProbe(): ChartMetaProbe {
+        suspend fun loadChartProbe(): ChartMetaProbe {
             chartProbe?.let { return it }
             val probe = try {
                 fetchChartMetaProbe(requestSymbol, displaySymbol = symbol)
@@ -187,6 +198,7 @@ open class YahooFinanceClient(
             return probe
         }
 
+        currentCoroutineContext().ensureActive()
         // Primary path: JSON quoteSummary (same modules Yahoo's web JS uses).
         var quoteContext = try {
             val root = fetchQuoteSummaryJson(requestSymbol)
@@ -272,8 +284,8 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
-        fun once(): JsonObject {
+    private suspend fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
+        suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
@@ -420,7 +432,7 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun fetchQuotePage(requestSymbol: String): String {
+    private suspend fun fetchQuotePage(requestSymbol: String): String {
         val url = QUOTE_PAGE_URL.toHttpUrl().newBuilder()
             .addPathSegment(requestSymbol)
             .build()
@@ -434,7 +446,7 @@ open class YahooFinanceClient(
         return executeText(request)
     }
 
-    private fun fetchChartMetaProbe(requestSymbol: String, displaySymbol: String): ChartMetaProbe {
+    private suspend fun fetchChartMetaProbe(requestSymbol: String, displaySymbol: String): ChartMetaProbe {
         val (rangeToken, interval) = chartRangeSpec(ChartRange.Day)
         val url = CHART_API_URL.toHttpUrl().newBuilder()
             .addPathSegment(requestSymbol)
@@ -451,13 +463,15 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun executeText(request: Request, maxAttempts: Int = 4): String {
+    private suspend fun executeText(request: Request, maxAttempts: Int = 4): String {
         var attempt = 0
         var lastError: IOException? = null
         while (attempt < maxAttempts) {
+            currentCoroutineContext().ensureActive()
             attempt += 1
+            val call = httpClient.newCall(request)
             try {
-                httpClient.newCall(request).execute().use { response ->
+                executeCancellable(call).use { response ->
                     val code = response.code
                     if (code == 429 || code >= 500) {
                         val retryAfterSeconds = response.header("Retry-After")?.toLongOrNull()
@@ -469,28 +483,92 @@ open class YahooFinanceClient(
                         if (attempt >= maxAttempts) {
                             throw lastError!!
                         }
-                        Thread.sleep(delayMs)
+                        currentCoroutineContext().ensureActive()
+                        delay(delayMs)
                         return@use
                     }
                     if (!response.isSuccessful) {
-                        val body = response.body?.string().orEmpty()
+                        val body = readBodyCancellable(call, response)
                         throw IOException("HTTP $code for ${request.url}: $body")
                     }
-                    return response.body?.string() ?: throw IOException("empty response body")
+                    return readBodyCancellable(call, response)
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: IOException) {
+                if (isCanceledIo(error)) {
+                    throw CancellationException("Yahoo call cancelled", error)
+                }
                 lastError = error
                 if (!isRetryable(error) || attempt >= maxAttempts) {
                     throw error
                 }
-                Thread.sleep((400L * (1L shl (attempt - 1).coerceAtMost(4))).coerceAtMost(12_000L))
+                currentCoroutineContext().ensureActive()
+                delay((400L * (1L shl (attempt - 1).coerceAtMost(4))).coerceAtMost(12_000L))
+            } finally {
+                if (!currentCoroutineContext().isActive) {
+                    call.cancel()
+                }
             }
         }
         throw lastError ?: IOException("request failed")
     }
 
-    private fun fetchTimeseriesJson(requestSymbol: String, types: String): JsonObject {
-        fun once(): JsonObject {
+    private suspend fun executeCancellable(call: Call): okhttp3.Response {
+        return suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (!continuation.isActive || call.isCanceled() || isCanceledIo(e)) {
+                        if (continuation.isActive) {
+                            continuation.cancel(CancellationException("Yahoo call cancelled", e))
+                        }
+                    } else {
+                        continuation.resumeWithException(e)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: okhttp3.Response) {
+                    if (continuation.isActive) {
+                        continuation.resume(response) { _, _, _ -> response.close() }
+                    } else {
+                        response.close()
+                    }
+                }
+            })
+        }
+    }
+
+    private suspend fun readBodyCancellable(call: Call, response: okhttp3.Response): String =
+        suspendCancellableCoroutine { continuation ->
+            val reader = Thread({
+                try {
+                    val text = response.body?.string() ?: throw IOException("empty response body")
+                    if (continuation.isActive) {
+                        continuation.resume(text)
+                    }
+                } catch (error: IOException) {
+                    if (!continuation.isActive) {
+                        return@Thread
+                    }
+                    if (call.isCanceled() || isCanceledIo(error)) {
+                        continuation.cancel(CancellationException("Yahoo call cancelled", error))
+                    } else {
+                        continuation.resumeWithException(error)
+                    }
+                }
+            }, "yahoo-body")
+            continuation.invokeOnCancellation {
+                call.cancel()
+                response.close()
+            }
+            reader.start()
+        }
+
+    private fun isCanceledIo(error: IOException): Boolean = canceledIo(error)
+
+    private suspend fun fetchTimeseriesJson(requestSymbol: String, types: String): JsonObject {
+        suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = FUNDAMENTALS_TIMESERIES_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
@@ -517,7 +595,7 @@ open class YahooFinanceClient(
         }
     }
 
-    private fun getJson(url: String): JsonObject {
+    private suspend fun getJson(url: String): JsonObject {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
@@ -1181,3 +1259,13 @@ private val JsonPrimitive.longOrNull: Long?
 
 private val JsonPrimitive.contentOrNull: String?
     get() = runCatching { content }.getOrNull()
+
+internal fun canceledIo(error: IOException): Boolean {
+    if (error is SocketTimeoutException) {
+        return false
+    }
+    val message = error.message.orEmpty()
+    return error is java.io.InterruptedIOException ||
+        message.contains("Canceled", ignoreCase = true) ||
+        message.contains("Cancelled", ignoreCase = true)
+}

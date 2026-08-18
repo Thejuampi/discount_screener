@@ -31,6 +31,7 @@ object ValuationJudgmentAssembler {
         lastPriceCents: Long? = null,
         sharesOutstanding: Long? = null,
         dcfAnalysis: DcfAnalysis? = null,
+        includeStreetImplied: Boolean = true,
     ): ProjectedValuationJudgment {
         var analysis = judgment.identity
         var refuseSource = dcfAnalysis ?: analysis
@@ -45,7 +46,12 @@ object ValuationJudgmentAssembler {
             analysis = analysis,
             sharesOutstanding = sharesOutstanding,
         )
-        var implied = if (analysis != null && street != null && street.baseCents > 0L) {
+        var implied = if (
+            includeStreetImplied &&
+            analysis != null &&
+            street != null &&
+            street.baseCents > 0L
+        ) {
             StreetImpliedHonesty.reconcile(
                 analysis = analysis,
                 streetBaseCents = street.baseCents,

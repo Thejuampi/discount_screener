@@ -11,7 +11,7 @@
     "deferredSurfaces": ["desktop"]
   },
   "fcffRobustEvidencePolicy": {
-    "modelPolicyVersion": "business-class-policy/35-weak-franchise-secular",
+    "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
     "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median",
     "scenarioMargins": "full_aligned_annual_including_negatives",
     "scenarioGrowth": "band_around_median_not_historical_iqr",
@@ -302,7 +302,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/35-weak-franchise-secular",
+        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
         "latestFcfDollars": 19440000000,
         "fcfRunRateDollars": 24652137600,
         "acceptance": [
@@ -383,7 +383,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/35-weak-franchise-secular",
+        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
         "latestFcfDollars": 7695000000,
         "fcfRunRateDollars": null,
         "valuationDriver": "driver_based_fcff",

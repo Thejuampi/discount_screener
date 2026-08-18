@@ -1,6 +1,16 @@
 package com.discountscreener.android.data.remote
 
+import java.time.LocalDate
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okio.buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -60,6 +70,43 @@ class CnnFearGreedClientTest {
         assertNull(parse("<html>418 I'm a teapot</html>"))
     }
 
+    @Test
+    fun cancelled_cnn_body_read_aborts() = runTest {
+        var started = java.util.concurrent.atomic.AtomicBoolean(false)
+        var interceptor = Interceptor { chain ->
+            started.set(true)
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(SlowCnnBody())
+                .build()
+        }
+        var client = CnnFearGreedClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        var job = launch {
+            try {
+                client.fetch(LocalDate.of(2026, 8, 17))
+            } catch (_: CancellationException) {
+            }
+        }
+        while (!started.get()) {
+            kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(20)
+        var startedAt = System.nanoTime()
+        job.cancel()
+        job.join()
+        var elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertEquals(
+            "cancel waited ${elapsedMs}ms on a CNN body read",
+            true,
+            elapsedMs < 250,
+        )
+    }
+
     private fun parse(body: String) = parseFearGreed(body, JSON)
 
     private fun bodyOf(score: Double, rating: String) =
@@ -81,5 +128,33 @@ class CnnFearGreedClientTest {
 
     private companion object {
         val JSON = Json { ignoreUnknownKeys = true }
+    }
+}
+
+private class SlowCnnBody : okhttp3.ResponseBody() {
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    override fun contentType() = "application/json".toMediaType()
+    override fun contentLength() = Long.MAX_VALUE
+    override fun source(): okio.BufferedSource {
+        return object : okio.Source {
+            override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                var waited = 0
+                while (waited < 10_000) {
+                    if (closed.get()) {
+                        throw java.io.IOException("Canceled")
+                    }
+                    Thread.sleep(20)
+                    waited += 20
+                }
+                return -1
+            }
+
+            override fun timeout() = okio.Timeout.NONE
+
+            override fun close() {
+                closed.set(true)
+            }
+        }.buffer()
     }
 }

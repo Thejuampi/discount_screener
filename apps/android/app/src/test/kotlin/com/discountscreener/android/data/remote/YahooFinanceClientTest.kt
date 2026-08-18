@@ -8,6 +8,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -16,6 +18,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -224,6 +227,203 @@ class YahooFinanceClientTest {
     @Test
     fun usable_company_name_rejects_null_string() {
         assertEquals(false, isUsableCompanyName("null"))
+    }
+
+    @Test
+    fun cancelled_request_does_not_retry_sleep() = runTest {
+        val quoteSummaryStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val interceptor = Interceptor { chain ->
+            val url = chain.request().url.toString()
+            when {
+                url.contains("getcrumb") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("testcrumb".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                url.contains("finance.yahoo.com/") && !url.contains("quoteSummary") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("<html></html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+                else -> {
+                    quoteSummaryStarted.set(true)
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(429)
+                        .message("Too Many Requests")
+                        .body("rate limited".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        }
+        val client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        val job = launch {
+            try {
+                client.fetchSymbol("AAPL")
+            } catch (_: CancellationException) {
+            }
+        }
+        while (!quoteSummaryStarted.get()) {
+            kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(20)
+        val startedAt = System.nanoTime()
+        job.cancel()
+        job.join()
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertEquals(
+            "cancel waited ${elapsedMs}ms on a Yahoo retry sleep",
+            true,
+            elapsedMs < 250,
+        )
+    }
+
+    @Test
+    fun socket_timeout_is_not_treated_as_cancel() = runTest {
+        val interceptor = Interceptor { chain ->
+            val url = chain.request().url.toString()
+            when {
+                url.contains("getcrumb") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("testcrumb".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                url.contains("finance.yahoo.com/") && !url.contains("quoteSummary") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("<html></html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+                else -> throw java.net.SocketTimeoutException("read timed out")
+            }
+        }
+        val client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        val outcome = runCatching { client.fetchSymbol("AAPL") }
+        assertEquals(false, outcome.exceptionOrNull() is CancellationException)
+    }
+
+    @Test
+    fun cancelled_request_aborts_body_read() = runTest {
+        var quoteSummaryStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            when {
+                url.contains("getcrumb") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("testcrumb".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                url.contains("finance.yahoo.com/") && !url.contains("quoteSummary") ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("<html></html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+                else -> {
+                    quoteSummaryStarted.set(true)
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(SlowResponseBody())
+                        .build()
+                }
+            }
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        var job = launch {
+            try {
+                client.fetchSymbol("AAPL")
+            } catch (_: CancellationException) {
+            }
+        }
+        while (!quoteSummaryStarted.get()) {
+            kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(20)
+        var startedAt = System.nanoTime()
+        job.cancel()
+        job.join()
+        var elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertEquals(
+            "cancel waited ${elapsedMs}ms on a Yahoo body read",
+            true,
+            elapsedMs < 250,
+        )
+    }
+
+    @Test
+    fun cancelled_crumb_aborts_body_read() = runTest {
+        var crumbStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            when {
+                url.contains("getcrumb") -> {
+                    crumbStarted.set(true)
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(SlowResponseBody())
+                        .build()
+                }
+                else ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("<html></html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+            }
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        var job = launch {
+            try {
+                client.fetchSymbol("AAPL")
+            } catch (_: CancellationException) {
+            }
+        }
+        while (!crumbStarted.get()) {
+            kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(20)
+        var startedAt = System.nanoTime()
+        job.cancel()
+        job.join()
+        var elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertEquals(
+            "cancel waited ${elapsedMs}ms on a Yahoo crumb body read",
+            true,
+            elapsedMs < 250,
+        )
     }
 
     @Test
@@ -576,5 +776,33 @@ class YahooFinanceClientTest {
         override fun withWriteTimeout(timeout: Int, unit: TimeUnit) = this
         override fun withConnectTimeout(timeout: Int, unit: TimeUnit) = this
         override fun call() = throw UnsupportedOperationException()
+    }
+
+    private class SlowResponseBody : okhttp3.ResponseBody() {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        override fun contentType() = "application/json".toMediaType()
+        override fun contentLength() = Long.MAX_VALUE
+        override fun source(): okio.BufferedSource {
+            return object : okio.Source {
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    var waited = 0
+                    while (waited < 10_000) {
+                        if (closed.get()) {
+                            throw java.io.IOException("Canceled")
+                        }
+                        Thread.sleep(20)
+                        waited += 20
+                    }
+                    return -1
+                }
+
+                override fun timeout() = okio.Timeout.NONE
+
+                override fun close() {
+                    closed.set(true)
+                }
+            }.buffer()
+        }
     }
 }

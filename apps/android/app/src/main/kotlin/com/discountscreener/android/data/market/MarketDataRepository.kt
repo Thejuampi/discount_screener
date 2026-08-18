@@ -80,6 +80,14 @@ open class MarketDataRepository(
     open suspend fun cachedDailySummaries(): Map<String, ChartRangeSummary> =
         mutex.withLock { cachedDailySummaries }
 
+    /** Drop a prior-universe reading so the next refresh cannot reuse it. */
+    open suspend fun invalidate() = mutex.withLock {
+        cached = null
+        lastComputed = null
+        cachedDailySummaries = emptyMap()
+        lastFailureEpochSeconds = null
+    }
+
     /**
      * Recompute when the cached reading has aged out, otherwise hand back what is held.
      *

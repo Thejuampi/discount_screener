@@ -29,7 +29,7 @@ pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
 /// (industry-beta-policy/2). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/35-weak-franchise-secular";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/36-ocf-prior-franchise";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
 pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/2";
 
@@ -1631,6 +1631,7 @@ struct DriverModelInputs {
     growth_fade_exponent: f64,
     tax_defaulted: bool,
     ocf_persistent_recovery: bool,
+    ocf_centre_without_prior_franchise: bool,
 }
 
 /// Build a driver-consistent FCFF path from aligned annual operating data.
@@ -1882,7 +1883,14 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
     } else {
         recent_growths.clone()
     };
-    let ocf_persistent_recovery = !use_cycle_blend && is_non_decreasing(&ocf_margins);
+    let prior_ocf_margins: Vec<i32> = prior_points
+        .iter()
+        .map(|point| point.ocf_margin_bps)
+        .collect();
+    let prior_ocf_franchise = has_prior_ocf_franchise(&prior_ocf_margins);
+    let recent_ocf_rising = !use_cycle_blend && is_non_decreasing(&ocf_margins);
+    let ocf_persistent_recovery = recent_ocf_rising && prior_ocf_franchise;
+    let ocf_centre_without_prior_franchise = recent_ocf_rising && !prior_ocf_franchise;
     let recent_ocf_margin_bps = if ocf_persistent_recovery {
         *ocf_margins.last().unwrap_or(&0)
     } else {
@@ -2040,6 +2048,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         // an effective rate with its interest or contributed no FCFF identity.
         tax_defaulted: false,
         ocf_persistent_recovery,
+        ocf_centre_without_prior_franchise,
     })
 }
 
@@ -2107,6 +2116,14 @@ fn blend_recent_prior(recent: i32, prior: i32) -> i32 {
 
 fn is_non_decreasing(values: &[i32]) -> bool {
     values.len() >= 3 && values.windows(2).all(|pair| pair[1] >= pair[0])
+}
+
+fn has_prior_ocf_franchise(prior_ocf_margins: &[i32]) -> bool {
+    prior_ocf_margins
+        .iter()
+        .filter(|margin| **margin > 0)
+        .count()
+        >= 2
 }
 
 fn latest_share_count(fundamentals: &FundamentalSnapshot, history: &[FcfPoint]) -> Option<f64> {
@@ -2448,6 +2465,9 @@ fn fcff_driver_wacc(
     }
     if drivers.ocf_persistent_recovery {
         reasons.push("ocf=latest_on_persistent_recovery".into());
+    }
+    if drivers.ocf_centre_without_prior_franchise {
+        reasons.push("ocf=centre_without_prior_franchise".into());
     }
     reasons.extend(resolved.rate_reasons.iter().cloned());
     if market_params.provisional {
@@ -3394,6 +3414,42 @@ mod tests {
 
     fn amzn_driver_fcf() -> Vec<FcfPoint> {
         vec![
+            FcfPoint::new(2018, 17_296_000_000.0)
+                .with_operating_drivers(
+                    30_723_000_000.0,
+                    13_427_000_000.0,
+                    232_887_000_000.0,
+                    Some(1_417_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(150_000_000_000.0), Some(2_100), None, None),
+            FcfPoint::new(2019, 21_653_000_000.0)
+                .with_operating_drivers(
+                    38_514_000_000.0,
+                    16_861_000_000.0,
+                    280_522_000_000.0,
+                    Some(1_600_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(160_000_000_000.0), Some(2_100), None, None),
+            FcfPoint::new(2020, 25_924_000_000.0)
+                .with_operating_drivers(
+                    66_064_000_000.0,
+                    40_140_000_000.0,
+                    386_064_000_000.0,
+                    Some(1_647_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(170_000_000_000.0), Some(2_100), None, None),
+            FcfPoint::new(2021, -14_726_000_000.0)
+                .with_operating_drivers(
+                    46_327_000_000.0,
+                    61_053_000_000.0,
+                    469_822_000_000.0,
+                    Some(1_809_000_000.0),
+                    Some(2_100),
+                )
+                .with_rate_resolution_inputs(Some(180_000_000_000.0), Some(2_100), None, None),
             FcfPoint::new(2022, -16_893_000_000.0)
                 .with_operating_drivers(
                     46_752_000_000.0,
@@ -3713,6 +3769,108 @@ mod tests {
             .reason_codes
             .iter()
             .all(|reason| !reason.contains("analyst") && !reason.contains("calibration_target")));
+    }
+
+    #[test]
+    fn first_cash_ramp_uses_ocf_centre_not_latest_year() {
+        let history = first_cash_ramp_history();
+        let fund = FundamentalSnapshot {
+            symbol: "PLT".into(),
+            sector_name: Some("Technology".into()),
+            industry_name: Some("Software - Application".into()),
+            market_cap_dollars: Some(155_000_000_000),
+            shares_outstanding: Some(2_040_000_000),
+            beta_millis: Some(1_100),
+            total_debt_dollars: Some(14_700_000_000),
+            total_cash_dollars: Some(5_400_000_000),
+            ..Default::default()
+        };
+        let analysis = compute(&fund, &history, Some(7_595), "sec_edgar")
+            .expect("first-cash ramp still values");
+        assert!(
+            analysis
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "ocf=centre_without_prior_franchise"),
+            "expected centre_without_prior_franchise, got {:?}",
+            analysis.reason_codes
+        );
+    }
+
+    fn first_cash_ramp_history() -> Vec<FcfPoint> {
+        vec![
+            (
+                2018,
+                10_433_000_000.0,
+                -1_541_000_000.0,
+                558_000_000.0,
+                -2_099_000_000.0,
+                7_491_000_000.0,
+            ),
+            (
+                2019,
+                13_000_000_000.0,
+                -4_321_000_000.0,
+                588_000_000.0,
+                -4_909_000_000.0,
+                5_791_000_000.0,
+            ),
+            (
+                2020,
+                11_139_000_000.0,
+                -2_745_000_000.0,
+                616_000_000.0,
+                -3_361_000_000.0,
+                7_914_000_000.0,
+            ),
+            (
+                2021,
+                17_455_000_000.0,
+                -445_000_000.0,
+                298_000_000.0,
+                -743_000_000.0,
+                9_388_000_000.0,
+            ),
+            (
+                2022,
+                31_877_000_000.0,
+                642_000_000.0,
+                252_000_000.0,
+                390_000_000.0,
+                9_361_000_000.0,
+            ),
+            (
+                2023,
+                37_281_000_000.0,
+                3_585_000_000.0,
+                223_000_000.0,
+                3_362_000_000.0,
+                9_560_000_000.0,
+            ),
+            (
+                2024,
+                43_978_000_000.0,
+                7_137_000_000.0,
+                242_000_000.0,
+                6_895_000_000.0,
+                9_575_000_000.0,
+            ),
+            (
+                2025,
+                52_017_000_000.0,
+                10_099_000_000.0,
+                336_000_000.0,
+                9_763_000_000.0,
+                10_600_000_000.0,
+            ),
+        ]
+        .into_iter()
+        .map(|(year, revenue, ocf, capex, fcf, debt)| {
+            FcfPoint::new(year, fcf)
+                .with_operating_drivers(ocf, capex, revenue, Some(500_000_000.0), Some(2_100))
+                .with_rate_resolution_inputs(Some(debt), Some(2_100), None, None)
+        })
+        .collect()
     }
 
     /// Synthetic operating history with constant margins and a constant revenue

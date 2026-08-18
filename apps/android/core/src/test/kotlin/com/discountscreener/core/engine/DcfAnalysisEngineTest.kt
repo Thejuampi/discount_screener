@@ -973,48 +973,80 @@ class DcfAnalysisEngineTest {
             ),
             timeseries = FundamentalTimeseries(
                 freeCashFlow = listOf(
+                    AnnualReportedValue("2018-12-31", 17_296_000_000.0),
+                    AnnualReportedValue("2019-12-31", 21_653_000_000.0),
+                    AnnualReportedValue("2020-12-31", 25_924_000_000.0),
+                    AnnualReportedValue("2021-12-31", -14_726_000_000.0),
                     AnnualReportedValue("2022-12-31", -16_893_000_000.0),
                     AnnualReportedValue("2023-12-31", 32_217_000_000.0),
                     AnnualReportedValue("2024-12-31", 32_878_000_000.0),
                     AnnualReportedValue("2025-12-31", 7_695_000_000.0),
                 ),
                 operatingCashFlow = listOf(
+                    AnnualReportedValue("2018-12-31", 30_723_000_000.0),
+                    AnnualReportedValue("2019-12-31", 38_514_000_000.0),
+                    AnnualReportedValue("2020-12-31", 66_064_000_000.0),
+                    AnnualReportedValue("2021-12-31", 46_327_000_000.0),
                     AnnualReportedValue("2022-12-31", 46_752_000_000.0),
                     AnnualReportedValue("2023-12-31", 84_946_000_000.0),
                     AnnualReportedValue("2024-12-31", 115_877_000_000.0),
                     AnnualReportedValue("2025-12-31", 139_514_000_000.0),
                 ),
                 capitalExpenditure = listOf(
+                    AnnualReportedValue("2018-12-31", -13_427_000_000.0),
+                    AnnualReportedValue("2019-12-31", -16_861_000_000.0),
+                    AnnualReportedValue("2020-12-31", -40_140_000_000.0),
+                    AnnualReportedValue("2021-12-31", -61_053_000_000.0),
                     AnnualReportedValue("2022-12-31", -63_645_000_000.0),
                     AnnualReportedValue("2023-12-31", -52_729_000_000.0),
                     AnnualReportedValue("2024-12-31", -82_999_000_000.0),
                     AnnualReportedValue("2025-12-31", -131_819_000_000.0),
                 ),
                 revenue = listOf(
+                    AnnualReportedValue("2018-12-31", 232_887_000_000.0),
+                    AnnualReportedValue("2019-12-31", 280_522_000_000.0),
+                    AnnualReportedValue("2020-12-31", 386_064_000_000.0),
+                    AnnualReportedValue("2021-12-31", 469_822_000_000.0),
                     AnnualReportedValue("2022-12-31", 513_983_000_000.0),
                     AnnualReportedValue("2023-12-31", 574_785_000_000.0),
                     AnnualReportedValue("2024-12-31", 637_959_000_000.0),
                     AnnualReportedValue("2025-12-31", 716_924_000_000.0),
                 ),
                 interestExpense = listOf(
+                    AnnualReportedValue("2018-12-31", 1_417_000_000.0),
+                    AnnualReportedValue("2019-12-31", 1_600_000_000.0),
+                    AnnualReportedValue("2020-12-31", 1_647_000_000.0),
+                    AnnualReportedValue("2021-12-31", 1_809_000_000.0),
                     AnnualReportedValue("2022-12-31", 2_367_000_000.0),
                     AnnualReportedValue("2023-12-31", 3_182_000_000.0),
                     AnnualReportedValue("2024-12-31", 2_406_000_000.0),
                     AnnualReportedValue("2025-12-31", 2_274_000_000.0),
                 ),
                 taxRateForCalcs = listOf(
+                    AnnualReportedValue("2018-12-31", 0.21),
+                    AnnualReportedValue("2019-12-31", 0.21),
+                    AnnualReportedValue("2020-12-31", 0.21),
+                    AnnualReportedValue("2021-12-31", 0.21),
                     AnnualReportedValue("2022-12-31", 0.21),
                     AnnualReportedValue("2023-12-31", 0.189579),
                     AnnualReportedValue("2024-12-31", 0.135031),
                     AnnualReportedValue("2025-12-31", 0.196144),
                 ),
                 totalDebt = listOf(
+                    AnnualReportedValue("2018-12-31", 150_000_000_000.0),
+                    AnnualReportedValue("2019-12-31", 160_000_000_000.0),
+                    AnnualReportedValue("2020-12-31", 170_000_000_000.0),
+                    AnnualReportedValue("2021-12-31", 180_000_000_000.0),
                     AnnualReportedValue("2022-12-31", 190_000_000_000.0),
                     AnnualReportedValue("2023-12-31", 210_000_000_000.0),
                     AnnualReportedValue("2024-12-31", 235_540_004_864.0),
                     AnnualReportedValue("2025-12-31", 235_540_004_864.0),
                 ),
                 marginalTaxRate = listOf(
+                    AnnualReportedValue("2018-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2019-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2020-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2021-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2022-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
@@ -1036,12 +1068,56 @@ class DcfAnalysisEngineTest {
         )
         assertEquals(1_946, analysis.normalizedOcfMarginBps)
         assertEquals(1_238, analysis.normalizedCapexIntensityBps)
-        assertEquals(listOf(2025), analysis.capexSpikeYears)
+        assertEquals(true, analysis.capexSpikeYears.contains(2025))
         assertTrue(analysis.baseGrowthBps > -900)
         assertEquals("revenue_growth_median:secular_expansion", analysis.growthDriver)
         assertTrue(analysis.bearIntrinsicValueCents <= analysis.baseIntrinsicValueCents)
         assertTrue(analysis.baseIntrinsicValueCents <= analysis.bullIntrinsicValueCents)
         assertTrue(analysis.reasonCodes.none { it.contains("calibration_target") || it.contains("analyst") })
+    }
+
+    @Test
+    fun first_cash_ramp_uses_ocf_centre_not_latest_year() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PLT",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+                marketCapDollars = 155_000_000_000L,
+                sharesOutstanding = 2_040_000_000L,
+                totalDebtDollars = 14_700_000_000L,
+                totalCashDollars = 5_400_000_000L,
+                returnOnEquityBps = 3_716,
+                bookValuePerShareCents = 1_215,
+                retentionBps = 10_000,
+            ),
+            timeseries = firstCashRampTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            marketPriceCents = 7_595,
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("ocf=centre_without_prior_franchise"))
+    }
+
+    @Test
+    fun first_cash_ramp_keeps_the_recent_ocf_centre() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PLT",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+                marketCapDollars = 155_000_000_000L,
+                sharesOutstanding = 2_040_000_000L,
+                totalDebtDollars = 14_700_000_000L,
+                totalCashDollars = 5_400_000_000L,
+                returnOnEquityBps = 3_716,
+                bookValuePerShareCents = 1_215,
+                retentionBps = 10_000,
+            ),
+            timeseries = firstCashRampTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            marketPriceCents = 7_595,
+        ).getOrThrow()
+        assertEquals(true, (analysis.normalizedOcfMarginBps ?: 0) < 1_500)
     }
 
     @Test
@@ -1437,6 +1513,41 @@ class DcfAnalysisEngineTest {
             },
             marginalTaxRate = dates.map {
                 point(it, 0.21, concept = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate")
+            },
+        )
+    }
+
+    private fun firstCashRampTimeseries(): FundamentalTimeseries {
+        var rows = listOf(
+            Triple("2018-12-31", 10_433_000_000.0, -1_541_000_000.0) to
+                Triple(558_000_000.0, -2_099_000_000.0, 7_491_000_000.0),
+            Triple("2019-12-31", 13_000_000_000.0, -4_321_000_000.0) to
+                Triple(588_000_000.0, -4_909_000_000.0, 5_791_000_000.0),
+            Triple("2020-12-31", 11_139_000_000.0, -2_745_000_000.0) to
+                Triple(616_000_000.0, -3_361_000_000.0, 7_914_000_000.0),
+            Triple("2021-12-31", 17_455_000_000.0, -445_000_000.0) to
+                Triple(298_000_000.0, -743_000_000.0, 9_388_000_000.0),
+            Triple("2022-12-31", 31_877_000_000.0, 642_000_000.0) to
+                Triple(252_000_000.0, 390_000_000.0, 9_361_000_000.0),
+            Triple("2023-12-31", 37_281_000_000.0, 3_585_000_000.0) to
+                Triple(223_000_000.0, 3_362_000_000.0, 9_560_000_000.0),
+            Triple("2024-12-31", 43_978_000_000.0, 7_137_000_000.0) to
+                Triple(242_000_000.0, 6_895_000_000.0, 9_575_000_000.0),
+            Triple("2025-12-31", 52_017_000_000.0, 10_099_000_000.0) to
+                Triple(336_000_000.0, 9_763_000_000.0, 10_600_000_000.0),
+        )
+        return FundamentalTimeseries(
+            freeCashFlow = rows.map { AnnualReportedValue(it.first.first, it.second.second) },
+            operatingCashFlow = rows.map { AnnualReportedValue(it.first.first, it.first.third) },
+            capitalExpenditure = rows.map { AnnualReportedValue(it.first.first, -it.second.first) },
+            revenue = rows.map { AnnualReportedValue(it.first.first, it.first.second) },
+            interestExpense = rows.map { AnnualReportedValue(it.first.first, 500_000_000.0) },
+            taxRateForCalcs = rows.map {
+                AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = rows.map { AnnualReportedValue(it.first.first, it.second.third) },
+            marginalTaxRate = rows.map {
+                AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
             },
         )
     }

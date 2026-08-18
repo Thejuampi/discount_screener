@@ -251,13 +251,24 @@ class ValuationJudgmentAssemblerTest {
     }
 
     @Test
+    fun list_row_snapshot_skips_street_knob_inversion() {
+        assertEquals(
+            null,
+            impliedSnapshot(includeStreetImplied = false).streetImplied,
+        )
+    }
+
+    @Test
     fun snapshot_horizon_stays_honest_identity() {
         var analysis = pricedFcff()
         var snap = impliedSnapshot(analysis)
         assertEquals(analysis.baseIntrinsicValueCents, snap.horizonPriceCents)
     }
 
-    private fun impliedSnapshot(analysis: DcfAnalysis = pricedFcff()) =
+    private fun impliedSnapshot(
+        analysis: DcfAnalysis = pricedFcff(),
+        includeStreetImplied: Boolean = true,
+    ) =
         ValuationJudgmentAssembler.snapshot(
             ValuationJudgmentAssembler.assemble(
                 completeStreet(
@@ -273,6 +284,7 @@ class ValuationJudgmentAssemblerTest {
             ),
             lastPriceCents = 3_000L,
             sharesOutstanding = 100_000_000L,
+            includeStreetImplied = includeStreetImplied,
         )
 
     private fun pricedFcff(): DcfAnalysis {

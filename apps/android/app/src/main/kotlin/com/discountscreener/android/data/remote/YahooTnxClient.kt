@@ -1,6 +1,7 @@
 package com.discountscreener.android.data.remote
 
 import android.util.Log
+import kotlinx.coroutines.runBlocking
 import okhttp3.JavaNetCookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,7 +24,7 @@ class YahooTnxClient(
     private val session = YahooSession(httpClient = http, userAgent = USER_AGENT)
 
     fun chart(): String {
-        var crumb = session.ensureCrumb()
+        var crumb = runBlocking { session.ensureCrumb() }
         var request = Request.Builder()
             .url("$YAHOO_TNX_CHART_URL&crumb=$crumb")
             .header("User-Agent", USER_AGENT)

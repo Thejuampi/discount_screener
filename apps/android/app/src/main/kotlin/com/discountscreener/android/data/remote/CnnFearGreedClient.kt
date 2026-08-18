@@ -7,16 +7,20 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * CNN's Fear & Greed index, from the unofficial dataviz endpoint `cnn_fng.rs` reads.
@@ -38,24 +42,77 @@ open class CnnFearGreedClient(
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     /** Null on any failure — a missing sentiment reading degrades the market read, never fails it. */
-    open suspend fun fetch(today: LocalDate = LocalDate.now(ZoneOffset.UTC)): CnnFearGreed? =
-        withContext(Dispatchers.IO) {
-            val request = Request.Builder()
-                .url(GRAPHDATA_BASE + today.minusDays(HISTORY_WINDOW_DAYS))
-                .header("User-Agent", CNN_USER_AGENT)
-                .header("Accept", "application/json,text/plain,*/*")
-                .header("Referer", "https://www.cnn.com/markets/fear-and-greed")
-                .header("Origin", "https://www.cnn.com")
-                .build()
-            val body = try {
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@withContext null
-                    response.body?.string()
+    open suspend fun fetch(today: LocalDate = LocalDate.now(ZoneOffset.UTC)): CnnFearGreed? {
+        val request = Request.Builder()
+            .url(GRAPHDATA_BASE + today.minusDays(HISTORY_WINDOW_DAYS))
+            .header("User-Agent", CNN_USER_AGENT)
+            .header("Accept", "application/json,text/plain,*/*")
+            .header("Referer", "https://www.cnn.com/markets/fear-and-greed")
+            .header("Origin", "https://www.cnn.com")
+            .build()
+        val call = httpClient.newCall(request)
+        val body = try {
+            executeCancellable(call).use { response ->
+                if (!response.isSuccessful) return null
+                readBodyCancellable(call, response)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: IOException) {
+            null
+        } ?: return null
+        return parseFearGreed(body, json)
+    }
+
+    private suspend fun executeCancellable(call: Call): okhttp3.Response {
+        return suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (!continuation.isActive || call.isCanceled() || canceledIo(e)) {
+                        if (continuation.isActive) {
+                            continuation.cancel(CancellationException("CNN call cancelled", e))
+                        }
+                    } else {
+                        continuation.resumeWithException(e)
+                    }
                 }
-            } catch (error: IOException) {
-                null
-            } ?: return@withContext null
-            parseFearGreed(body, json)
+
+                override fun onResponse(call: Call, response: okhttp3.Response) {
+                    if (continuation.isActive) {
+                        continuation.resume(response) { _, _, _ -> response.close() }
+                    } else {
+                        response.close()
+                    }
+                }
+            })
+        }
+    }
+
+    private suspend fun readBodyCancellable(call: Call, response: okhttp3.Response): String =
+        suspendCancellableCoroutine { continuation ->
+            val reader = Thread({
+                try {
+                    val text = response.body?.string() ?: throw IOException("empty response body")
+                    if (continuation.isActive) {
+                        continuation.resume(text)
+                    }
+                } catch (error: IOException) {
+                    if (!continuation.isActive) {
+                        return@Thread
+                    }
+                    if (call.isCanceled() || canceledIo(error)) {
+                        continuation.cancel(CancellationException("CNN call cancelled", error))
+                    } else {
+                        continuation.resumeWithException(error)
+                    }
+                }
+            }, "cnn-body")
+            continuation.invokeOnCancellation {
+                call.cancel()
+                response.close()
+            }
+            reader.start()
         }
 
     private companion object {

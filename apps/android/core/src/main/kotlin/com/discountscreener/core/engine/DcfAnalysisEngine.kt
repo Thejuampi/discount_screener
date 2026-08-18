@@ -22,7 +22,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/35-weak-franchise-secular"
+const val MODEL_POLICY_VERSION = "business-class-policy/36-ocf-prior-franchise"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/2"
 
@@ -594,6 +594,7 @@ object DcfAnalysisEngine {
         val growthFadeExponent: Double,
         val taxDefaulted: Boolean,
         val ocfPersistentRecovery: Boolean = false,
+        val ocfCentreWithoutPriorFranchise: Boolean = false,
         val interestAssumedZeroYears: List<Int> = emptyList(),
         val interestMissingWithDebtPeriods: List<String> = emptyList(),
         val estimatedCoupons: List<CouponYear> = emptyList(),
@@ -761,7 +762,10 @@ object DcfAnalysisEngine {
             else -> recentGrowths
         }
 
-        val ocfPersistentRecovery = !useCycleBlend && isNonDecreasing(recentOcfMargins)
+        val priorOcfFranchise = hasPriorOcfFranchise(priorPoints.map { it.ocfMarginBps })
+        val recentOcfRising = !useCycleBlend && isNonDecreasing(recentOcfMargins)
+        val ocfPersistentRecovery = recentOcfRising && priorOcfFranchise
+        val ocfCentreWithoutPriorFranchise = recentOcfRising && !priorOcfFranchise
         val recentOcfMargin = if (ocfPersistentRecovery) {
             recentOcfMargins.last()
         } else {
@@ -873,6 +877,7 @@ object DcfAnalysisEngine {
             },
             taxDefaulted = raw.any { it.taxMissing },
             ocfPersistentRecovery = ocfPersistentRecovery,
+            ocfCentreWithoutPriorFranchise = ocfCentreWithoutPriorFranchise,
             interestAssumedZeroYears = raw.filter { it.interestAssumedZero }.map { it.year },
             interestMissingWithDebtPeriods = raw.filter { it.interestMissingWithDebt }.map { it.date },
             estimatedCoupons = raw.mapNotNull { it.estimatedCoupon },
@@ -1002,6 +1007,14 @@ object DcfAnalysisEngine {
         if (values.size < 3) return false
         return values.zipWithNext().all { (prior, next) -> next >= prior }
     }
+
+    /**
+     * Latest-year OCF is a restored run-rate only when the issuer already
+     * printed a positive OCF franchise before the recent window.
+     * A first-cash ramp has nothing to restore.
+     */
+    private fun hasPriorOcfFranchise(priorOcfMargins: List<Int>): Boolean =
+        priorOcfMargins.count { it > 0 } >= 2
 
     private fun medianBps(values: List<Int>): Int {
         if (values.isEmpty()) return 0
@@ -1215,6 +1228,9 @@ object DcfAnalysisEngine {
             add("growth=scenario_band_around_median:$SCENARIO_GROWTH_BAND_BPS")
             if (drivers.ocfPersistentRecovery) {
                 add("ocf=latest_on_persistent_recovery")
+            }
+            if (drivers.ocfCentreWithoutPriorFranchise) {
+                add("ocf=centre_without_prior_franchise")
             }
             if (usedBaseGrowth != drivers.baseGrowthBps) {
                 var tag = if (growthCap > matureCap) {

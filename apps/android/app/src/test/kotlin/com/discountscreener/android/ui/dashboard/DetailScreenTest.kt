@@ -2,6 +2,7 @@ package com.discountscreener.android.ui.dashboard
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
 import com.discountscreener.core.engine.ValuationJudgmentPolicy
@@ -59,6 +60,55 @@ class DetailScreenTest {
     fun chart_center_x_uses_slot_centers() {
         assertEquals(10f, chartCenterX(index = 0, pointCount = 5, width = 100f), 0.01f)
         assertEquals(90f, chartCenterX(index = 4, pointCount = 5, width = 100f), 0.01f)
+    }
+
+    @Test
+    fun time_axis_reserves_volume_profile_gutter_when_profile_is_present() {
+        assertEquals(VolumeProfilePaneWidth, timeAxisTrailingGutter(hasVolumeProfile = true))
+    }
+
+    @Test
+    fun time_axis_drops_volume_profile_gutter_when_profile_is_absent() {
+        assertEquals(0.dp, timeAxisTrailingGutter(hasVolumeProfile = false))
+    }
+
+    @Test
+    fun equal_slot_candle_width_ignores_volume() {
+        assertEquals(
+            6.5f,
+            candleBodyWidth(volume = 1L, maxVolume = 100L, slotWidth = 10f, volumeSized = false),
+            0.01f,
+        )
+    }
+
+    @Test
+    fun volume_sized_candle_width_grows_with_volume() {
+        var thin = candleBodyWidth(volume = 10L, maxVolume = 100L, slotWidth = 10f, volumeSized = true)
+        var thick = candleBodyWidth(volume = 100L, maxVolume = 100L, slotWidth = 10f, volumeSized = true)
+        assertTrue(thick > thin)
+    }
+
+    @Test
+    fun volume_sized_candle_width_stays_visible_when_slots_are_narrow() {
+        var thin = candleBodyWidth(volume = 0L, maxVolume = 100L, slotWidth = 1.2f, volumeSized = true)
+        var thick = candleBodyWidth(volume = 100L, maxVolume = 100L, slotWidth = 1.2f, volumeSized = true)
+        assertTrue(thick - thin >= VolumeSizedCandleMinContrastPx)
+    }
+
+    @Test
+    fun volume_candle_mode_hint_tells_user_to_tap_the_price_chart() {
+        assertEquals(
+            "Tap the price chart to size candles by volume.",
+            volumeCandleModeHint(volumeSized = false),
+        )
+    }
+
+    @Test
+    fun volume_candle_mode_hint_confirms_volume_size_is_on() {
+        assertEquals(
+            "Vol size on. Tap the price chart for equal width.",
+            volumeCandleModeHint(volumeSized = true),
+        )
     }
 
     @Test

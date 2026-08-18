@@ -216,7 +216,7 @@ class ScreenDataProjectionEngine {
         var detail = request.detailsBySymbol[symbol] ?: return null
         var dcfAnalysis = request.dcfBySymbol[symbol]
         var statistic = request.analystTargetStatisticBySymbol[symbol]
-        var named = namedRowValuation(detail, dcfAnalysis, statistic)
+        var named = namedRowValuation(detail, dcfAnalysis, statistic, includeStreetImplied = true)
         var anchor = named.anchor
         var key = SymbolRangeKey(symbol = symbol, range = request.route.selectedRange)
         var candles = request.chartCandles[key].orEmpty()
@@ -258,12 +258,7 @@ class ScreenDataProjectionEngine {
             driverRegime = dcfAnalysis?.driverRegime,
             growthDispersionBps = dcfAnalysis?.growthDispersionBps,
             growthDriver = dcfAnalysis?.growthDriver,
-            valuationJudgment = ValuationJudgmentAssembler.snapshot(
-                ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
-                detail.marketPriceCents,
-                detail.fundamentals?.sharesOutstanding,
-                dcfAnalysis,
-            ),
+            valuationJudgment = named.judgment,
         )
     }
 
@@ -356,6 +351,7 @@ class ScreenDataProjectionEngine {
         dcfAnalysis: DcfAnalysis?,
         analystTargetStatistic: ProjectedAnalystTargetStatistic?,
         fallbackIntrinsicValueCents: Long? = null,
+        includeStreetImplied: Boolean = false,
     ): NamedRowValuation {
         if (detail == null) {
             return NamedRowValuation(
@@ -368,6 +364,7 @@ class ScreenDataProjectionEngine {
             detail.marketPriceCents,
             detail.fundamentals?.sharesOutstanding,
             dcfAnalysis,
+            includeStreetImplied = includeStreetImplied,
         )
         var primary = judgment.primaryCents
         if (primary == null) {
