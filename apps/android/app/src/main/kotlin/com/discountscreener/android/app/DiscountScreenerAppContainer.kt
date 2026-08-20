@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import com.discountscreener.android.data.remote.YahooTnxClient
 import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
@@ -40,6 +41,7 @@ import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
+import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
@@ -50,6 +52,7 @@ import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
 import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SaveSymbolNoteUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
@@ -65,7 +68,7 @@ class DiscountScreenerAppContainer(context: Context) {
      * the endpoint requires, so a second instance would bootstrap its own — twice the handshakes,
      * and two independent things to get rate-limited. The market read shares this one.
      */
-    private val yahooClient by lazy { YahooFinanceClient() }
+    private val yahooClient by lazy { YahooFinanceClient(logger = AndroidAppLogger()) }
 
     /**
      * One store for the whole app. Two helpers over one database file is two write queues over one
@@ -91,7 +94,10 @@ class DiscountScreenerAppContainer(context: Context) {
                 cacheFile = File(marketParamsDir, "dgs10.csv").toPath(),
             ),
             tnx = CachedYahooTnxMarketParamsSource(
-                fetchJson = YahooTnxClient()::chart,
+                // `MarketParamsSource.current()` is blocking and is read from the engine, which is
+                // not a coroutine. This is the one place a suspending client meets it, so the
+                // bridge lives here rather than as a blocking door back inside the client.
+                fetchJson = { runBlocking { YahooTnxClient().chart() } },
                 cacheFile = File(marketParamsDir, "tnx.json").toPath(),
             ),
         )
@@ -123,6 +129,8 @@ class DiscountScreenerAppContainer(context: Context) {
             toggleDashboardWatchlist = ToggleDashboardWatchlistUseCase(repository),
             loadScoringPreferences = LoadScoringPreferencesUseCase(repository),
             persistScoringPreferences = PersistScoringPreferencesUseCase(repository),
+            loadSymbolNotes = LoadSymbolNotesUseCase(repository),
+            saveSymbolNote = SaveSymbolNoteUseCase(repository),
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllData = ClearAllDataUseCase(repository),
@@ -141,6 +149,16 @@ class DiscountScreenerAppContainer(context: Context) {
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
+    }
+
+    /**
+     * Holds the process up for as long as the repository says a load is running.
+     *
+     * Started once, from the activity, because the platform only lets a foreground service start
+     * while the app is in front. After that the load survives the user leaving.
+     */
+    fun keepLoadsRunningInBackground() {
+        ForegroundLoadKeeper(appContext).keep(repository.loadInFlight, backgroundScope)
     }
 
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =

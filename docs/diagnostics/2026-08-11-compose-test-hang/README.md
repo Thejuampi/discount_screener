@@ -1,6 +1,8 @@
 # The Android app suite hung for 27 minutes, once, and has not done it again
 
-**Status: open, cause unknown.** Bounded, not fixed. Escalation bar at the bottom of this file.
+**Status: closed 2026-08-17.** Cause: leaked Compose hosts shared across one JVM. Fix and
+measurements are in the last section. The sections below are kept in the order they were written, so
+two of their rulings are wrong; the closing section says which and why.
 
 ## What happened
 
@@ -143,3 +145,99 @@ full green run produces no dump.
 another round of bounding — has been met and is *not* discharged by this entry. Two hypotheses are
 dead, the cause is not found, and the next occurrence will finally arrive with a thread dump instead
 of a silence.
+
+---
+
+## Root cause found and fixed, 2026-08-17
+
+**Status: closed.** The cause is leaked Compose hosts shared across one JVM. The escalation bar is
+discharged by a fix, not by another round of bounding.
+
+### The third occurrence, and the first one that spoke
+
+`:app:testDebugUnitTest --tests "com.discountscreener.android.ui.*"` failed at the three-minute task
+timeout after 2m16s. This time the watchdog fired first and named the test.
+
+The dump was on the console in one sense and invisible in another: `StuckTestWatchdog` writes to
+`System.err`, and Gradle captures a test worker's `System.err` into `<system-err>` inside the JUnit
+XML instead of printing it. It was read from
+`app/build/test-results/testDebugUnitTest/TEST-*.xml`.
+
+```
+"SDK 35 Main Thread" RUNNABLE
+  androidx.compose.ui.test.ComposeIdlingResource.isIdleNow(ComposeIdlingResource.kt:73)
+  androidx.compose.ui.test.AbstractMainTestClock.advanceTimeByFrame
+  androidx.compose.ui.test.AbstractMainTestClock.advanceDispatcher
+  ... called from waitForIdle inside the test's own list-setting helper
+```
+
+Same spin as the two 2026-08-11 dumps, now with a test name attached to it.
+
+### The measurement that overturned the earlier ruling
+
+Adding `forkEvery = 1` — one JVM per test class, nothing else changed — turned the whole `ui.*`
+selection **green in 1m21s**, against 2m16s and a timeout without it.
+
+That is a direct measurement of cross-test JVM state, and it contradicts the ruling recorded above.
+
+**The "leaked compositions" entry in the 2026-08-11 section is wrong, and it is worth naming why.**
+Its evidence was that per-test cost *falls* through a run, so nothing accumulates. That statistic
+was computed over green runs only. A green run is by definition one where no leaked host ever
+spun, so it carries no information about the failure. The instrument could not fail on the
+population that would have falsified the claim.
+
+### The defect
+
+Eight test classes did not use a Compose rule that owns an activity. They built one by hand:
+
+```kotlin
+@get:Rule val composeRule = createEmptyComposeRule()
+private val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+...
+activity.setContent { ... }
+```
+
+`createEmptyComposeRule()` attaches to whatever host it finds and destroys nothing. The activity is
+never finished, so its composition, its recomposer, and its frame clock stay alive in the shared JVM
+after the class ends. A later `waitForIdle` polls every registered composition; one stale host that
+never reports idle makes `ComposeIdlingResource.isIdleNow` false forever, and the strategy advances
+the test clock a frame at a time until the task timeout kills the build.
+
+That explains every property of this bug: it needs a full run to appear, it lands on whichever test
+happens to call `waitForIdle` after enough hosts have piled up, it never reproduces in isolation,
+and one JVM per class makes it vanish.
+
+### The fix
+
+All eight classes now use `createAndroidComposeRule<ComponentActivity>()`, which launches the
+activity and finishes it when the rule's statement ends.
+
+```kotlin
+@get:Rule val composeRule = createAndroidComposeRule<ComponentActivity>()
+...
+composeRule.setContent { ... }
+```
+
+| Selection | Before | After |
+|---|---|---|
+| `ui.*`, one JVM | timeout at 2m16s | **green, 16s** |
+| `ui.*`, `forkEvery = 1` | green, 1m21s | not needed |
+| `:core:test` + both app variants, `--rerun` | 27 min hang / 3 min timeout | **green, 49s** |
+
+No `forkEvery` was kept. The 45-second watchdog and the three-minute task timeout stay: they are what
+turned the third occurrence into evidence, and they cost nothing on a healthy run.
+
+### Knock-on: the release unit-test variant
+
+`createAndroidComposeRule<ComponentActivity>()` starts a real activity, so
+`androidx.activity.ComponentActivity` has to be in the merged manifest. `ui-test-manifest` supplies
+that entry and is a `debugImplementation`; any configuration that reaches the release variant would
+put a test activity in the shipped APK. So `testReleaseUnitTest` began failing with
+"Unable to resolve activity for Intent … androidx.activity.ComponentActivity", while
+`testDebugUnitTest` passed. `make android-test` runs `gradlew test`, which runs both.
+
+Fixed from test source, with nothing added to any APK: `RobolectricTestApplication` registers the
+component through `ShadowPackageManager.addActivityIfNotPresent`, and
+`app/src/test/resources/robolectric.properties` applies it to every Robolectric class so no test can
+forget it. It is idempotent, so the debug variant, where the manifest entry already exists, is
+unchanged.

@@ -31,6 +31,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -68,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.focusable
 import com.discountscreener.android.domain.model.DashboardNotice
 import com.discountscreener.android.domain.model.DashboardNoticeSeverity
+import com.discountscreener.android.domain.model.decisionTagIsCurrent
 import com.discountscreener.android.domain.model.explainOpportunityDecision
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -92,6 +94,7 @@ import com.discountscreener.android.domain.model.preferredAnalystTargetFairValue
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.core.engine.ReplayWindow
 import com.discountscreener.core.engine.EXTERNAL_STATUS_HELP
+import com.discountscreener.core.engine.OUTCOME_CONFIDENCE_UNMEASURED_NOTE
 import com.discountscreener.core.engine.explainConfidence
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.engine.macdHistogramDerivatives
@@ -136,6 +139,8 @@ fun DetailScreen(
     scoreRow: OpportunityListRow? = null,
     scoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
     regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
+    /** What the reader wrote about this symbol. Empty when nothing was written. */
+    symbolNote: String = "",
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -198,12 +203,15 @@ fun DetailScreen(
                             var triageLabel = decisionStateLabel(scoreRow?.decisionState)
                             if (triageLabel != null && route.subtab != DetailSubtab.Score) {
                                 var (fg, bg) = decisionStateColors(scoreRow?.decisionState)
+                                // Faded when the numbers behind the tag are not from this refresh,
+                                // the same signal the list strip gives. See `decisionTagIsCurrent`.
+                                var fade = if (scoreRow != null && decisionTagIsCurrent(scoreRow.freshness)) 1f else FADED_DECISION_ALPHA
                                 Text(
                                     text = triageLabel,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = fg,
+                                    color = fg.copy(alpha = fg.alpha * fade),
                                     modifier = Modifier
-                                        .background(bg, RoundedCornerShape(4.dp))
+                                        .background(bg.copy(alpha = bg.alpha * fade), RoundedCornerShape(4.dp))
                                         .padding(horizontal = 4.dp, vertical = 1.dp),
                                 )
                             }
@@ -294,6 +302,7 @@ fun DetailScreen(
                     quantLens = quantLens,
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
+                    symbolNote = symbolNote,
                     onAction = onAction,
                 )
                 DetailSubtab.Score -> ScoreContent(
@@ -338,6 +347,8 @@ private fun DetailScoreHeader(
     scoreRow: OpportunityListRow?,
     scoringModel: OpportunityScoringModel,
     regimeScoringEnabled: Boolean,
+    quantLens: QuantLensUiState?,
+    symbolNote: String,
     onAction: (DashboardAction) -> Unit,
 ) {
     Column(
@@ -402,7 +413,81 @@ private fun DetailScoreHeader(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // The date marks the row and changes nothing above it. It sits here, under the buckets,
+            // so a reader sees the score first and then what could move it next week.
+            earningsMark(scoreRow.nextEarningsEpoch, System.currentTimeMillis() / 1_000L)?.let { mark ->
+                Text(
+                    text = mark.label,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (mark.soon) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                if (mark.soon) {
+                    Text(
+                        text = EARNINGS_SOON_NOTE,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            // How wide the answer is, next to how much the data can be trusted. The two used to be
+            // one word, and a name every source priced differently still read High.
+            var outcome = outcomeConfidenceUi(scoreRow.outcomeConfidence, scoreRow.outcomeWidthBps)
+            Text(
+                text = outcome.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The same rail the Lens tab draws, moved up to where the score is read. Nothing is
+            // recomputed: the section builds it, and this shows it or shows nothing.
+            headlineEvRail(quantLens)?.let { rail ->
+                EvRangeRail(model = rail, modifier = Modifier.fillMaxWidth().height(56.dp))
+            }
+            if (outcome.showCaveat) {
+                Text(
+                    text = OUTCOME_CONFIDENCE_UNMEASURED_NOTE,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             MarketContextSection(row = scoreRow, scoringModel = scoringModel)
+        }
+        // Outside the score block on purpose. A note belongs to the symbol, and a symbol that is
+        // not in the ranked set is exactly the one a reader has something to say about.
+        SymbolNoteField(symbol = route.symbol, note = symbolNote, onAction = onAction)
+    }
+}
+
+/**
+ * The one line on this screen the app did not derive.
+ *
+ * The typed text is held here until the reader saves it, so the store is written once and not once
+ * per keystroke. The button shows up only when the draft and the saved note differ, which is also
+ * the only signal a reader gets that something is unsaved.
+ */
+@Composable
+private fun SymbolNoteField(symbol: String, note: String, onAction: (DashboardAction) -> Unit) {
+    var draft by remember(symbol, note) { mutableStateOf(note) }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { typed -> draft = typed },
+            label = { Text(SYMBOL_NOTE_LABEL) },
+            singleLine = false,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            text = SYMBOL_NOTE_HINT,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (draft != note) {
+            TextButton(onClick = { onAction(DashboardAction.SaveSymbolNote(symbol, draft)) }) {
+                Text(SYMBOL_NOTE_SAVE_LABEL)
+            }
         }
     }
 }
@@ -654,6 +739,15 @@ private fun ScoreFactorBreakdown(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        // A term whose basis is unstated is a number the reader cannot check. These sentences are
+        // the only place the score tab says what Pulse actually measures.
+        scoreFactorNotes(groups).forEach { note ->
+            Text(
+                text = note,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -701,6 +795,7 @@ private fun SnapshotContent(
     quantLens: QuantLensUiState?,
     projectedDetail: ProjectedDetailData?,
     detailNotice: DashboardNotice? = null,
+    symbolNote: String = "",
     onAction: (DashboardAction) -> Unit,
 ) {
     var replayCandles = replayBackingCandles ?: candles
@@ -742,6 +837,8 @@ private fun SnapshotContent(
                 scoreRow = scoreRow,
                 scoringModel = scoringModel,
                 regimeScoringEnabled = regimeScoringEnabled,
+                quantLens = quantLens,
+                symbolNote = symbolNote,
                 onAction = onAction,
             )
         }

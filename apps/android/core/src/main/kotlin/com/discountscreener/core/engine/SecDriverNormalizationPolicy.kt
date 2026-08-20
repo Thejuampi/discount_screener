@@ -19,6 +19,10 @@ object SecDriverNormalizationPolicy {
         PretaxIncome,
         MarginalTaxReference,
         DilutedAverageShares,
+        OperatingIncome,
+        ImpairmentAggregate,
+        ImpairmentComponents,
+        RestructuringCharges,
     }
 
     enum class PeriodShape { Duration, Instant }
@@ -56,6 +60,13 @@ object SecDriverNormalizationPolicy {
     val materialAcquisitionRevenueBps: Int
         get() = GeneratedSecDriverNormalizationPolicy.materialAcquisitionRevenueBps
 
+    /**
+     * How large a year's impairment and restructuring must be, against that year's operating
+     * income, before the year's earnings stop standing for the business.
+     */
+    val nonRecurringChargeOperatingBps: Int
+        get() = GeneratedSecDriverNormalizationPolicy.nonRecurringChargeOperatingBps
+
     /** QNames the companyfacts sieve may keep. Everything else is skipped on the stream. */
     val retainedQnames: Set<String>
         get() = buildSet {
@@ -76,6 +87,10 @@ object SecDriverNormalizationPolicy {
             Driver.PretaxIncome -> generated.pretaxIncome
             Driver.MarginalTaxReference -> generated.marginalTaxReference
             Driver.DilutedAverageShares -> generated.dilutedAverageShares
+            Driver.OperatingIncome -> generated.operatingIncome
+            Driver.ImpairmentAggregate -> generated.impairmentAggregate
+            Driver.ImpairmentComponents -> generated.impairmentComponents
+            Driver.RestructuringCharges -> generated.restructuringCharges
         }
         DriverOperator(
             qnames = source.qnames.toList(),

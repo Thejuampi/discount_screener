@@ -1,9 +1,8 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -13,7 +12,6 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
@@ -22,7 +20,7 @@ class OpportunityListValuationStanceTest {
     val stuckTestWatchdog = StuckTestWatchdog()
 
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun disputed_row_does_not_name_a_single_discount() {
@@ -39,8 +37,7 @@ class OpportunityListValuationStanceTest {
     }
 
     private fun setList(gapBps: Int?, stance: String) {
-        var activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 OpportunityList(
                     rows = listOf(

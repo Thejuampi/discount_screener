@@ -11,6 +11,8 @@ data class DashboardUseCases(
     val toggleDashboardWatchlist: ToggleDashboardWatchlistUseCase,
     val loadScoringPreferences: LoadScoringPreferencesUseCase,
     val persistScoringPreferences: PersistScoringPreferencesUseCase,
+    val loadSymbolNotes: LoadSymbolNotesUseCase,
+    val saveSymbolNote: SaveSymbolNoteUseCase,
     val loadSystemStats: LoadSystemStatsUseCase,
     val pruneOldRevisions: PruneOldRevisionsUseCase,
     val clearAllData: ClearAllDataUseCase,

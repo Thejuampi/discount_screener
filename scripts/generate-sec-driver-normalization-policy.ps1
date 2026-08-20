@@ -18,6 +18,10 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $OutputRoot) { $OutputRoot = $root }
 $contract = Get-Content -Raw (Join-Path $root 'shared/contracts/sec-driver-normalization.json') | ConvertFrom-Json
 $categories = $contract.investmentCategories
+# Numbers only. The policy words next to them ("exclude_current_year_revenue_growth")
+# name a decision for a reader; neither platform dispatches on them, and emitting
+# them as constants would invite code that does.
+$policy = $contract.valuationPolicy
 $drivers = $contract.drivers
 function KotlinSet($values) {
     $quoted = @($values | ForEach-Object { '        "' + $_ + '"' }) -join ",`n"
@@ -53,7 +57,14 @@ internal object GeneratedSecDriverNormalizationPolicy {
     const val requiredUnit = "$($contract.scope.unit)"
     const val minimumDurationDays = $($contract.scope.durationDays[0])
     const val maximumDurationDays = $($contract.scope.durationDays[1])
-    const val materialAcquisitionRevenueBps = $($contract.valuationPolicy.materialAcquisitionRevenueBps)
+$(
+    $policyKotlin = @()
+    foreach ($property in $policy.psobject.Properties) {
+        if ($property.Value -is [string]) { continue }
+        $policyKotlin += "    const val $($property.Name) = $($property.Value)"
+    }
+    $policyKotlin -join "`n"
+)
     val acceptedForms = $(KotlinSet $contract.scope.forms)
 $(
     $categoryKotlin = @()
@@ -103,7 +114,14 @@ pub const POLICY_FINGERPRINT: &str = "$($contract.fingerprint)";
 pub const REQUIRED_UNIT: &str = "$($contract.scope.unit)";
 pub const MINIMUM_DURATION_DAYS: i64 = $($contract.scope.durationDays[0]);
 pub const MAXIMUM_DURATION_DAYS: i64 = $($contract.scope.durationDays[1]);
-pub const MATERIAL_ACQUISITION_REVENUE_BPS: i32 = $($contract.valuationPolicy.materialAcquisitionRevenueBps);
+$(
+    $policyRust = @()
+    foreach ($property in $policy.psobject.Properties) {
+        if ($property.Value -is [string]) { continue }
+        $policyRust += "pub const $(RustConstantName $property.Name): i32 = $($property.Value);"
+    }
+    $policyRust -join "`n"
+)
 pub const ACCEPTED_FORMS: &[&str] = $(RustSlice $contract.scope.forms);
 $(
     $categoryRust = @()

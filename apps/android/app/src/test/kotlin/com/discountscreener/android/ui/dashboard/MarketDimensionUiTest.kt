@@ -1,11 +1,10 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -29,7 +28,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 /**
@@ -43,7 +41,7 @@ class MarketDimensionUiTest {
     val stuckTestWatchdog = StuckTestWatchdog()
 
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     // ── The dense list row ───────────────────────────────────────────────────
 
@@ -85,7 +83,7 @@ class MarketDimensionUiTest {
     fun detail_decomposes_the_score_into_base_context_and_final() {
         setDetailContent(row = includedRow(base = 31, final = 39))
 
-        composeRule.onNodeWithText("Base 31 · Market +8 · Final 39").assertIsDisplayed()
+        composeRule.onNodeWithText("Base 31 · Market +8 · Final 39").performScrollTo().assertIsDisplayed()
     }
 
     /** A market that marked the name down must read as a subtraction, not an unsigned delta. */
@@ -93,7 +91,7 @@ class MarketDimensionUiTest {
     fun a_market_that_hurt_the_score_says_so_with_a_sign() {
         setDetailContent(row = includedRow(base = 39, final = 31))
 
-        composeRule.onNodeWithText("Base 39 · Market -8 · Final 31").assertIsDisplayed()
+        composeRule.onNodeWithText("Base 39 · Market -8 · Final 31").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -168,7 +166,7 @@ class MarketDimensionUiTest {
     fun a_disabled_dimension_says_it_was_switched_off() {
         setDetailContent(row = absentRow(RegimeScoreStatus.Disabled))
 
-        composeRule.onNodeWithText("Market context is switched off.").assertIsDisplayed()
+        composeRule.onNodeWithText("Market context is switched off.").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -180,7 +178,7 @@ class MarketDimensionUiTest {
             ),
         )
 
-        composeRule.onNodeWithText("No market reading yet — waiting on one.").assertIsDisplayed()
+        composeRule.onNodeWithText("No market reading yet — waiting on one.").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -194,6 +192,7 @@ class MarketDimensionUiTest {
 
         composeRule
             .onNodeWithText("Not enough data on this name to fit it to the market.")
+            .performScrollTo()
             .assertIsDisplayed()
     }
 
@@ -204,7 +203,7 @@ class MarketDimensionUiTest {
             scoringModel = OpportunityScoringModel.AggressiveV2,
         )
 
-        composeRule.onNodeWithText("Market context applies to Aggressive V3 and V4 only.").assertIsDisplayed()
+        composeRule.onNodeWithText("Market context applies to Aggressive V3 and V4 only.").performScrollTo().assertIsDisplayed()
     }
 
     /** Same status, different cause: an ETF on V3 must not be told to change model. */
@@ -212,7 +211,7 @@ class MarketDimensionUiTest {
     fun an_asset_the_dimension_does_not_cover_names_the_asset() {
         setDetailContent(row = absentRow(RegimeScoreStatus.NotApplicable))
 
-        composeRule.onNodeWithText("Market context is fitted to stocks; this is not one.").assertIsDisplayed()
+        composeRule.onNodeWithText("Market context is fitted to stocks; this is not one.").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -309,7 +308,7 @@ class MarketDimensionUiTest {
     fun v3_still_shows_the_market_impact_line() {
         setDetailContent(row = twoLineRow(), scoringModel = MODEL)
 
-        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").assertIsDisplayed()
+        composeRule.onNodeWithText("Base 30 · Market +15 · Final 45").performScrollTo().assertIsDisplayed()
     }
 
     /** One bucket also pays no bonus, and is a different fact: there is nobody to disagree with. */
@@ -385,8 +384,7 @@ class MarketDimensionUiTest {
         regimeScoringEnabled: Boolean = true,
         onAction: (DashboardAction) -> Unit = { },
     ) {
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DashboardScreen(
                     state = DashboardUiState(
@@ -410,8 +408,7 @@ class MarketDimensionUiTest {
         subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
     ) {
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = DetailRoute(

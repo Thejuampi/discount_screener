@@ -75,6 +75,22 @@ class AggressiveV4GrowthTest {
         assertEquals(listOf("Trend++", "Pulse--", "Pulse≠Trend"), evidence.signals)
     }
 
+    /**
+     * The flag has to be a factor and not only a signal. The score tab reads `factors` whenever
+     * that list is non-empty, and it always is here, so a flag that reached only `signals` would be
+     * invisible on every row that scored anything at all.
+     */
+    @Test
+    fun the_disagreement_is_a_factor_and_not_only_a_signal() {
+        var keys = OpportunityEngine.aggressiveV4FundamentalsScore(
+            detail(earningsGrowthBps = -1_100, trailingEpsCents = 500),
+            sectorBenchmarks = null,
+            timeseries = revenueSeries(100.0, 130.0, 169.0),
+        ).factors.map { it.key }
+
+        assertEquals(true, "Pulse≠Trend" in keys)
+    }
+
     @Test
     fun pulse_carries_the_yahoo_rate_it_scored() {
         var factor = OpportunityEngine.aggressiveV4FundamentalsScore(
@@ -160,6 +176,29 @@ class AggressiveV4GrowthTest {
 
         assertEquals(-3, OpportunityEngine.buildRows(engine, context).single().fundamentalsScore)
     }
+
+    /**
+     * Trend is read across the last filed year, so a write-down inside that year is part of the
+     * rate it reports. The mark costs no points and says the reading stands on a dirty year.
+     */
+    @Test
+    fun a_write_down_in_the_last_filed_year_marks_the_growth_reading() {
+        assertEquals(listOf("Trend-", "Charges"), chargeSignals(charge = 30.0))
+    }
+
+    @Test
+    fun a_year_whose_charge_is_small_leaves_the_growth_reading_unmarked() {
+        assertEquals(listOf("Trend-"), chargeSignals(charge = 5.0))
+    }
+
+    private fun chargeSignals(charge: Double) = OpportunityEngine.aggressiveV4FundamentalsScore(
+        detail(),
+        sectorBenchmarks = null,
+        timeseries = revenueSeries(100.0, 100.0, 100.0).copy(
+            operatingIncome = annual(80.0, 85.0, 90.0),
+            nonRecurringCharges = listOf(AnnualReportedValue("2022-12-31", charge)),
+        ),
+    ).signals
 
     private fun pulseScore(earningsGrowthBps: Int, trailingEpsCents: Long? = 500) =
         OpportunityEngine.aggressiveV4FundamentalsScore(

@@ -801,38 +801,10 @@ object DcfAnalysisEngine {
         )
     }
 
-    private enum class DriverRegime {
-        SecularExpansion,
-        StableOperating,
-        CyclicalOrTransition,
-        ;
-
-        fun asString(): String = when (this) {
-            SecularExpansion -> "secular_expansion"
-            StableOperating -> "stable_operating"
-            CyclicalOrTransition -> "cyclical_or_transition"
-        }
-    }
-
     private fun secularNearGrowthCapBps(regime: String, rawGrowthBps: Int, matureCapBps: Int): Int {
         if (regime != "secular_expansion" || rawGrowthBps < 1_000) return matureCapBps
         var halfDemonstrated = rawGrowthBps / 2
         return minOf(rawGrowthBps, maxOf(matureCapBps, halfDemonstrated), MAX_SECULAR_NEAR_GROWTH_BPS)
-    }
-
-    private fun classifyDriverRegime(recentGrowths: List<Int>, priorGrowths: List<Int>): DriverRegime {
-        val recentMedian = medianBps(recentGrowths)
-        val positiveShare = recentGrowths.count { it > 0 } * 10_000 / recentGrowths.size
-        val dispersion = quantileBps(recentGrowths, 0.75) - quantileBps(recentGrowths, 0.25)
-        val priorMedian = medianBps(priorGrowths)
-        return when {
-            recentMedian >= 500 && positiveShare >= 7_500 &&
-                (priorGrowths.isEmpty() || recentMedian >= priorMedian) &&
-                (dispersion <= 4_000 || recentMedian >= 1_000) ->
-                DriverRegime.SecularExpansion
-            dispersion >= 2_000 || positiveShare <= 5_000 -> DriverRegime.CyclicalOrTransition
-            else -> DriverRegime.StableOperating
-        }
     }
 
     private fun growthFadeExponent(regime: DriverRegime): Double = when (regime) {
@@ -920,17 +892,6 @@ object DcfAnalysisEngine {
         return values.zipWithNext().all { (prior, next) -> next >= prior }
     }
 
-    private fun medianBps(values: List<Int>): Int {
-        if (values.isEmpty()) return 0
-        val sorted = values.sorted()
-        val middle = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            ((sorted[middle - 1].toLong() + sorted[middle].toLong()) / 2L).toInt()
-        } else {
-            sorted[middle]
-        }
-    }
-
     /**
      * Sustaining CapEx intensity (bps of revenue) under the steady-state capital
      * identity `k = c*(d + g)`: a business reinvesting `k` of revenue while
@@ -961,14 +922,6 @@ object DcfAnalysisEngine {
         val bull = minOf(historicalBullBps, baseGrowthBps + SCENARIO_GROWTH_BAND_BPS)
             .coerceAtLeast(baseGrowthBps)
         return bear to bull
-    }
-
-    private fun quantileBps(values: List<Int>, quantile: Double): Int {
-        if (values.isEmpty()) return 0
-        val sorted = values.sorted()
-        val index = (((sorted.size - 1) * quantile).roundToInt())
-            .coerceIn(0, sorted.lastIndex)
-        return sorted[index]
     }
 
     private fun discountedDriverFcff(

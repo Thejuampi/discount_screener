@@ -1,5 +1,7 @@
 package com.discountscreener.android.data.remote
 
+import com.discountscreener.android.domain.logging.AppLogger
+import com.discountscreener.android.domain.logging.NoOpAppLogger
 import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
 import com.discountscreener.core.model.AnnualReportedValue
@@ -11,6 +13,9 @@ import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -23,13 +28,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.JavaNetCookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.IOException
-import java.net.CookieManager
-import java.net.CookiePolicy
-import java.time.Duration
 import kotlin.math.roundToLong
 
 enum class ProviderComponentState {
@@ -68,6 +70,22 @@ data class YahooSearchQuote(
     val quoteType: String,
 )
 
+/**
+ * One row of Yahoo's batch quote endpoint: a symbol's price and the little that travels with it.
+ *
+ * The endpoint carries no analyst target, no recommendation counts and no sector, so an entry can
+ * refresh the price of a row the app already knows and cannot create a row on its own; that is
+ * still `quoteSummary`'s job.
+ */
+data class QuoteBatchEntry(
+    val symbol: String,
+    val companyName: String?,
+    val marketPriceCents: Long,
+    /** Trailing twelve-month EPS above zero, the same test `quoteSummary` applies; null when absent. */
+    val profitable: Boolean?,
+    val nextEarningsEpoch: Long?,
+)
+
 internal data class QuoteContext(
     val snapshot: MarketSnapshot? = null,
     val externalSignal: ExternalValuationSignal? = null,
@@ -94,9 +112,12 @@ private data class RecommendationPeriod(
 private const val QUOTE_PAGE_URL = "https://finance.yahoo.com/quote/"
 private const val CHART_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 private const val QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
+private const val QUOTE_BATCH_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 private const val FUNDAMENTALS_TIMESERIES_URL =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
 private const val SEARCH_API_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+private const val LOG_TAG = "DiscountScreener"
+
 private const val USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 private const val QUOTE_PAGE_ACCEPT =
@@ -113,7 +134,21 @@ private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
  * - ROE: `financialData.returnOnEquity` only (reported; no synthesis)
  */
 internal const val QUOTE_SUMMARY_MODULES =
-    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend"
+    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents"
+
+/**
+ * Symbols a batch quote call asks for at once, and the size below which a failing batch is not
+ * split further.
+ *
+ * Measured with the live endpoint on 2026-08-18: it answered the whole Russell list, 1 937 symbols
+ * in one 9 KB URL, 4.6 MB, in 0.7 s; a hundred symbols is 240 KB. Two hundred and fifty keeps a
+ * call at ~600 KB, so the first rows land in the first second and a phone parses one answer while
+ * the next is on the wire. Yahoo has no published ceiling; if it rejects a batch outright the
+ * client halves it and asks again, down to [QUOTE_BATCH_MIN_SIZE], below which the symbols are left
+ * for the per-symbol path.
+ */
+internal const val QUOTE_BATCH_SIZE = 250
+internal const val QUOTE_BATCH_MIN_SIZE = 8
 
 private const val QUOTE_HTML_COMPONENT = "quoteHtml"
 internal const val QUOTE_SUMMARY_COMPONENT = "quoteSummary"
@@ -121,6 +156,10 @@ private const val CHART_COMPONENT = "chart"
 private const val CORE_COMPONENT = "core"
 private const val EXTERNAL_COMPONENT = "external"
 private const val FUNDAMENTALS_COMPONENT = "fundamentals"
+/** The one code that means "the provider, not this call, wants you to stop". */
+private const val RATE_LIMITED_CODE = 429
+private const val FIRST_SERVER_ERROR_CODE = 500
+
 private const val MISSING_KIND = "missing"
 private const val ERROR_KIND = "error"
 
@@ -148,29 +187,39 @@ internal val BROWSER_DEFAULT_HEADERS_INTERCEPTOR = Interceptor { chain ->
 }
 
 open class YahooFinanceClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .callTimeout(Duration.ofSeconds(20))
-        .cookieJar(
-            JavaNetCookieJar(
-                CookieManager().apply {
-                    setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-                },
-            ),
-        )
-        .addInterceptor(BROWSER_DEFAULT_HEADERS_INTERCEPTOR)
-        .build(),
+    private val httpClient: OkHttpClient = providerHttpClient(),
     private val json: Json = Json { ignoreUnknownKeys = true },
     /** When true, fall back to multi-MB HTML scrape if quoteSummary fails. Off by default. */
     private val htmlFallback: Boolean = false,
+    private val logger: AppLogger = NoOpAppLogger,
 ) {
     private val session = YahooSession(httpClient = httpClient, userAgent = USER_AGENT)
+
+    /**
+     * Everything this client asks of Yahoo passes here, one permit per request.
+     *
+     * It is built rather than injected because [RequestGovernor] is internal and this class is
+     * public. One governor per client instance is also the right unit: the limit belongs to Yahoo,
+     * and every call in the app goes through one client.
+     */
+    private val governor = RequestGovernor(
+        onPushBack = { retryAfterMillis, windowSize, cooldownMillis ->
+            logger.info(
+                LOG_TAG,
+                "yahoo push-back retryAfterMillis=$retryAfterMillis window=$windowSize cooldownMillis=$cooldownMillis",
+            )
+        },
+    )
+
+    /** How many symbols a caller may fan out before the governor is the only thing holding back. */
+    val requestCeiling: Int get() = governor.ceiling
 
     open suspend fun fetchSymbol(symbol: String): ProviderFetchResult = withContext(Dispatchers.IO) {
         val diagnostics = mutableListOf<ProviderDiagnostic>()
         val requestSymbol = yahooRequestSymbol(symbol)
 
         var chartProbe: ChartMetaProbe? = null
-        fun loadChartProbe(): ChartMetaProbe {
+        suspend fun loadChartProbe(): ChartMetaProbe {
             chartProbe?.let { return it }
             val probe = try {
                 fetchChartMetaProbe(requestSymbol, displaySymbol = symbol)
@@ -272,8 +321,84 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
-        fun once(): JsonObject {
+    /**
+     * The current price of many symbols in a few calls, from Yahoo's batch quote endpoint.
+     *
+     * Where the per-symbol `quoteSummary` costs one call a symbol, this costs one call per
+     * [QUOTE_BATCH_SIZE] symbols. What comes back is only what the endpoint carries (see
+     * [QuoteBatchEntry]); a symbol the endpoint does not answer, or answers without a price, is
+     * simply absent from the result and is the per-symbol path's to fetch. Measured on 2026-08-18,
+     * about three in a hundred live equities are absent that way (SATS, GTLS among them), and a
+     * symbol asked for under its app spelling (BF.B) comes back as an empty shell, which is why
+     * every symbol goes out under [yahooRequestSymbol] and is mapped back on return.
+     *
+     * A batch Yahoo refuses outright, a client error or a body it cannot parse, is split in two
+     * and each half asked for again, so one symbol the endpoint chokes on costs its own neighbours
+     * and no one else. Push-back and server errors are the governor's, as for every other call:
+     * a batch that is still refused after the governor's attempts is dropped and logged, never
+     * thrown, so a closed Yahoo costs the caller a slower load rather than a failed one.
+     */
+    open suspend fun fetchQuotes(symbols: List<String>): Map<String, QuoteBatchEntry> = withContext(Dispatchers.IO) {
+        if (symbols.isEmpty()) return@withContext emptyMap()
+        val batches = symbols.distinct().chunked(QUOTE_BATCH_SIZE)
+        coroutineScope {
+            batches
+                .map { batch -> async { fetchQuoteBatchSplitting(batch) } }
+                .awaitAll()
+                .fold(HashMap<String, QuoteBatchEntry>()) { all, part -> all.apply { putAll(part) } }
+        }
+    }
+
+    private suspend fun fetchQuoteBatchSplitting(symbols: List<String>): Map<String, QuoteBatchEntry> {
+        val refusal = try {
+            return fetchQuoteBatch(symbols)
+        } catch (error: IOException) {
+            if (isRetryable(error)) {
+                logger.info(LOG_TAG, "yahoo batch quote dropped ${symbols.size} symbols: ${error.message}")
+                return emptyMap()
+            }
+            error
+        } catch (error: IllegalArgumentException) {
+            error
+        }
+        if (symbols.size < QUOTE_BATCH_MIN_SIZE * 2) {
+            logger.info(LOG_TAG, "yahoo batch quote dropped ${symbols.size} symbols: ${refusal.message}")
+            return emptyMap()
+        }
+        val half = symbols.size / 2
+        return fetchQuoteBatchSplitting(symbols.subList(0, half)) +
+            fetchQuoteBatchSplitting(symbols.subList(half, symbols.size))
+    }
+
+    private suspend fun fetchQuoteBatch(symbols: List<String>): Map<String, QuoteBatchEntry> {
+        val appSymbolByRequestSymbol = symbols.associateBy(::yahooRequestSymbol)
+        suspend fun once(): JsonObject {
+            val crumb = session.ensureCrumb()
+            val url = QUOTE_BATCH_URL.toHttpUrl().newBuilder()
+                .addQueryParameter("symbols", appSymbolByRequestSymbol.keys.joinToString(","))
+                .addQueryParameter("crumb", crumb)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+                .build()
+            val body = executeText(request)
+            return json.parseToJsonElement(body).jsonObject
+        }
+        val root = try {
+            once()
+        } catch (error: IOException) {
+            if (!isAuthError(error)) throw error
+            session.clear()
+            once()
+        }
+        return parseQuoteBatch(root, appSymbolByRequestSymbol)
+    }
+
+    private suspend fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
+        suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
@@ -420,7 +545,7 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun fetchQuotePage(requestSymbol: String): String {
+    private suspend fun fetchQuotePage(requestSymbol: String): String {
         val url = QUOTE_PAGE_URL.toHttpUrl().newBuilder()
             .addPathSegment(requestSymbol)
             .build()
@@ -434,7 +559,7 @@ open class YahooFinanceClient(
         return executeText(request)
     }
 
-    private fun fetchChartMetaProbe(requestSymbol: String, displaySymbol: String): ChartMetaProbe {
+    private suspend fun fetchChartMetaProbe(requestSymbol: String, displaySymbol: String): ChartMetaProbe {
         val (rangeToken, interval) = chartRangeSpec(ChartRange.Day)
         val url = CHART_API_URL.toHttpUrl().newBuilder()
             .addPathSegment(requestSymbol)
@@ -451,46 +576,67 @@ open class YahooFinanceClient(
         )
     }
 
-    private fun executeText(request: Request, maxAttempts: Int = 4): String {
-        var attempt = 0
-        var lastError: IOException? = null
-        while (attempt < maxAttempts) {
-            attempt += 1
-            try {
-                httpClient.newCall(request).execute().use { response ->
-                    val code = response.code
-                    if (code == 429 || code >= 500) {
-                        val retryAfterSeconds = response.header("Retry-After")?.toLongOrNull()
-                        val delayMs = ((retryAfterSeconds?.times(1_000L))
-                            ?: (400L * (1L shl (attempt - 1).coerceAtMost(4))))
-                            .coerceAtMost(12_000L)
+    /**
+     * One request, governed. The retry, the wait and the `Retry-After` all live in
+     * [RequestGovernor] now; this only says what the answer was.
+     *
+     * A 429 is push-back and holds every other call as well, because the limit is Yahoo's and not
+     * this call's. A 5xx is this call's bad luck, so it retries alone. Anything else is an answer,
+     * even when it is a bad one, and retrying it only wastes the window.
+     */
+    private suspend fun executeText(request: Request): String = governor.request {
+        try {
+            httpClient.newCall(request).executeCancellable().use { response ->
+                val code = response.code
+                when {
+                    code == RATE_LIMITED_CODE -> {
                         response.body?.close()
-                        lastError = IOException("HTTP $code for ${request.url}")
-                        if (attempt >= maxAttempts) {
-                            throw lastError!!
-                        }
-                        Thread.sleep(delayMs)
-                        return@use
+                        RequestGovernor.Attempt.PushBack(
+                            retryAfterMillis = retryAfterMillis(response),
+                            error = IOException("HTTP $code for ${request.url}"),
+                        )
                     }
-                    if (!response.isSuccessful) {
+
+                    code >= FIRST_SERVER_ERROR_CODE -> {
+                        response.body?.close()
+                        RequestGovernor.Attempt.Failed(
+                            retryable = true,
+                            error = IOException("HTTP $code for ${request.url}"),
+                        )
+                    }
+
+                    !response.isSuccessful -> {
                         val body = response.body?.string().orEmpty()
-                        throw IOException("HTTP $code for ${request.url}: $body")
+                        RequestGovernor.Attempt.Failed(
+                            retryable = false,
+                            error = IOException("HTTP $code for ${request.url}: $body"),
+                        )
                     }
-                    return response.body?.string() ?: throw IOException("empty response body")
+
+                    else -> {
+                        val body = response.body?.string()
+                        if (body == null) {
+                            RequestGovernor.Attempt.Failed(false, IOException("empty response body"))
+                        } else {
+                            RequestGovernor.Attempt.Ok(body)
+                        }
+                    }
                 }
-            } catch (error: IOException) {
-                lastError = error
-                if (!isRetryable(error) || attempt >= maxAttempts) {
-                    throw error
-                }
-                Thread.sleep((400L * (1L shl (attempt - 1).coerceAtMost(4))).coerceAtMost(12_000L))
             }
+        } catch (error: IOException) {
+            RequestGovernor.Attempt.Failed(retryable = isRetryable(error), error = error)
         }
-        throw lastError ?: IOException("request failed")
     }
 
-    private fun fetchTimeseriesJson(requestSymbol: String, types: String): JsonObject {
-        fun once(): JsonObject {
+    /**
+     * What Yahoo asked for, in milliseconds. `Retry-After` carries seconds, and the app used to
+     * parse it and throw it away.
+     */
+    private fun retryAfterMillis(response: Response): Long? =
+        response.header("Retry-After")?.toLongOrNull()?.times(1_000L)
+
+    private suspend fun fetchTimeseriesJson(requestSymbol: String, types: String): JsonObject {
+        suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = FUNDAMENTALS_TIMESERIES_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
@@ -517,7 +663,7 @@ open class YahooFinanceClient(
         }
     }
 
-    private fun getJson(url: String): JsonObject {
+    private suspend fun getJson(url: String): JsonObject {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
@@ -621,6 +767,9 @@ internal fun parseQuotePage(
         assetProfile = assetProfile,
         companyName = companyName,
         chartMarketPriceCents = chartMarketPriceCents,
+        // The HTML scrape carries no calendar block. A row from this path shows no earnings mark
+        // rather than a guessed one.
+        nextEarningsEpoch = null,
         diagnostics = diagnostics,
     )
 }
@@ -634,6 +783,7 @@ internal fun parseQuoteSummary(
     symbol: String,
     chartMarketPriceCents: Long?,
     diagnostics: MutableList<ProviderDiagnostic>,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1_000L,
 ): QuoteContext {
     val result = root.child("quoteSummary").childArray("result").firstOrNull()?.jsonObject
     if (result == null) {
@@ -654,6 +804,7 @@ internal fun parseQuoteSummary(
     val recommendationTrend = result["recommendationTrend"]?.jsonObject
     val price = result.child("price")
     val assetProfile = result["assetProfile"]?.jsonObject
+    val calendarEvents = result["calendarEvents"]?.jsonObject
     val companyName = listOfNotNull(
         price.string("longName"),
         price.string("shortName"),
@@ -675,8 +826,81 @@ internal fun parseQuoteSummary(
         companyName = companyName,
         chartMarketPriceCents = chartMarketPriceCents
             ?: price.rawMoney("regularMarketPrice"),
+        nextEarningsEpoch = nextEarningsEpochOf(calendarEvents, nowEpochSeconds),
         diagnostics = diagnostics,
     )
+}
+
+/**
+ * The rows of a batch quote answer, keyed by app symbol. [appSymbolByRequestSymbol] maps what
+ * Yahoo was asked (BF-B) back to what the app calls it (BF.B). A row without a price is left out:
+ * that is how the endpoint answers a symbol it does not serve.
+ *
+ * Throws [IllegalArgumentException] when the body is not a quote answer at all (an error object,
+ * an empty document), so the caller can tell a refused batch from an answered one.
+ */
+internal fun parseQuoteBatch(
+    root: JsonObject,
+    appSymbolByRequestSymbol: Map<String, String>,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1_000L,
+): Map<String, QuoteBatchEntry> {
+    val response = root["quoteResponse"]?.jsonObject
+        ?: throw IllegalArgumentException(
+            root.child("finance").child("error").string("description") ?: "batch quote answer has no quoteResponse",
+        )
+    response["error"]?.takeUnless { it is JsonNull }?.jsonObject?.let { error ->
+        throw IllegalArgumentException(error.string("description") ?: "batch quote error")
+    }
+    val entries = HashMap<String, QuoteBatchEntry>()
+    response.childArray("result").forEach { element ->
+        val row = element.jsonObject
+        val requestSymbol = row.string("symbol") ?: return@forEach
+        val symbol = appSymbolByRequestSymbol[requestSymbol] ?: return@forEach
+        val marketPriceCents = row.plainMoney("regularMarketPrice") ?: return@forEach
+        if (marketPriceCents <= 0L) return@forEach
+        val companyName = listOfNotNull(row.string("longName"), row.string("shortName"))
+            .mapNotNull { candidate -> normalizeCompanyNameCandidate(candidate, symbol) }
+            .firstOrNull()
+        entries[symbol] = QuoteBatchEntry(
+            symbol = symbol,
+            companyName = companyName,
+            marketPriceCents = marketPriceCents,
+            profitable = row.plainDouble("epsTrailingTwelveMonths")?.let { eps -> eps > 0.0 },
+            nextEarningsEpoch = nextEarningsEpochOf(
+                epochs = listOfNotNull(
+                    row.plainLong("earningsTimestamp"),
+                    row.plainLong("earningsTimestampStart"),
+                    row.plainLong("earningsTimestampEnd"),
+                ),
+                nowEpochSeconds = nowEpochSeconds,
+            ),
+        )
+    }
+    return entries
+}
+
+/**
+ * The soonest earnings date Yahoo still has ahead of [nowEpochSeconds], or the latest one it knows
+ * about when every date has passed.
+ *
+ * Parity with Windows `quote_summary.rs:264-284`. The fallback to a past date is deliberate there
+ * and kept here: a stale date says "the last report was then", which the caller can still judge,
+ * while a null says nothing at all. Yahoo sends two entries when the date is an unconfirmed window,
+ * so the earliest future one is the near edge of that window.
+ */
+private fun nextEarningsEpochOf(calendarEvents: JsonObject?, nowEpochSeconds: Long): Long? {
+    var epochs = calendarEvents
+        ?.get("earnings")?.jsonObject
+        ?.get("earningsDate")?.jsonArray
+        .orEmpty()
+        .mapNotNull { entry -> entry.jsonObject["raw"]?.jsonPrimitive?.longOrNull }
+    return nextEarningsEpochOf(epochs, nowEpochSeconds)
+}
+
+/** The same choice over dates that arrive already unwrapped, as the batch quote endpoint sends them. */
+private fun nextEarningsEpochOf(epochs: List<Long>, nowEpochSeconds: Long): Long? {
+    if (epochs.isEmpty()) return null
+    return epochs.filter { it >= nowEpochSeconds }.minOrNull() ?: epochs.max()
 }
 
 private fun buildQuoteContext(
@@ -689,6 +913,7 @@ private fun buildQuoteContext(
     assetProfile: JsonObject?,
     companyName: String?,
     chartMarketPriceCents: Long?,
+    nextEarningsEpoch: Long?,
     diagnostics: MutableList<ProviderDiagnostic>,
 ): QuoteContext {
     val currentRecommendation = recommendationTrend
@@ -764,6 +989,7 @@ private fun buildQuoteContext(
             profitable = profitable,
             marketPriceCents = marketPriceCents,
             intrinsicValueCents = intrinsicValueCents,
+            nextEarningsEpoch = nextEarningsEpoch,
         )
     } else {
         val missingFields = buildList {
@@ -1172,6 +1398,16 @@ private fun JsonObject?.intValue(name: String): Int? =
 
 private fun JsonObject?.rawMoney(name: String): Long? =
     rawDouble(name)?.let(::dollarsToCents)
+
+/** The batch quote endpoint sends bare numbers where quoteSummary sends `{raw, fmt}` pairs. */
+private fun JsonObject?.plainDouble(name: String): Double? =
+    (this?.get(name) as? JsonPrimitive)?.plainDoubleOrNull()
+
+private fun JsonObject?.plainLong(name: String): Long? =
+    (this?.get(name) as? JsonPrimitive)?.longOrNull
+
+private fun JsonObject?.plainMoney(name: String): Long? =
+    plainDouble(name)?.let(::dollarsToCents)
 
 private val JsonPrimitive.intOrNull: Int?
     get() = contentOrNull?.toIntOrNull()

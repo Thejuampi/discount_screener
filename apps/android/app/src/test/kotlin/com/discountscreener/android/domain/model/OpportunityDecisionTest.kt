@@ -68,11 +68,24 @@ class OpportunityDecisionTest {
         )
     }
 
+    /**
+     * Freshness reports and does not decide. A row read back from the database is judged on the
+     * numbers it was filed with, so the screen can show what the app last decided about it.
+     */
     @Test
-    fun a_row_that_is_not_live_has_no_decision() {
+    fun a_row_that_is_not_live_is_still_judged_on_the_numbers_on_file() {
         assertEquals(
-            "No decision until the row is live.",
-            explain(score = 42, freshness = RowFreshness.Loading).why,
+            RowDecisionState.Act,
+            explain(score = 42, freshness = RowFreshness.Restored).state,
+        )
+    }
+
+    /** And the gate says so, so the detail screen names why the tag is drawn faded. */
+    @Test
+    fun a_row_that_is_not_live_blocks_the_freshness_gate() {
+        assertEquals(
+            OpportunityDecisionGate("Freshness", "Not live", true),
+            explain(score = 42, freshness = RowFreshness.Restored).gates.first(),
         )
     }
 

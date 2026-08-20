@@ -52,7 +52,7 @@ class WarmStartImpactBenchTest {
             }
             var sizeBefore = databaseBytes()
             var rawBefore = rawCaptureCount(store)
-            var deleted = store.reclaimRawCaptureSpace()
+            var deleted = store.reclaimPersistenceSpace()
             var sizeAfter = databaseBytes()
             var rawAfter = rawCaptureCount(store)
             writeReport(

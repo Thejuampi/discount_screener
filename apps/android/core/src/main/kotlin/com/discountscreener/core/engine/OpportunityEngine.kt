@@ -133,6 +133,56 @@ private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
 private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
 
 /**
+ * V4's leverage band, in hundredths of a turn of EBITDA. Zero is net cash; 300 is three turns of
+ * net debt.
+ *
+ * Three turns is the level at which a lender starts writing covenants, and it is a chosen line
+ * rather than a measured one. Below zero the company owes nothing on balance and the ramp is
+ * already at its top, which is correct: paying down the last of the net debt is not what makes the
+ * next dollar of return.
+ */
+private const val V4_FUND_LEVERAGE_LOW = 0.0
+private const val V4_FUND_LEVERAGE_HIGH = 300.0
+
+/**
+ * The sector band around the leverage centre, additive for the same reason return on equity's is:
+ * net debt crosses zero, and a multiplicative band around a negative centre inverts.
+ *
+ * Plus or minus one and a half turns. A pipeline at 3.5x is ordinary and a software company at
+ * 3.5x is in trouble, and this is the offset that lets one band say both.
+ */
+private const val V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET = -150.0
+private const val V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET = 150.0
+
+/**
+ * The fallback band, stated in the unit the ingestion actually produces.
+ *
+ * Yahoo reports `financialData.debtToEquity` as a percent — AMZN comes back as 40.46 for a ratio of
+ * 0.4046 — and every ingestion in this repo multiplies it by a hundred again. The stored number is
+ * therefore the ratio times ten thousand. V2 and V3 ramp that field against 30 to 200
+ * ([V3_FUND_BALANCE_DE_LOW]), so every real ticker saturates and their leverage component scores
+ * the same constant for the whole universe.
+ *
+ * Those two models are frozen and keep the behaviour. V4 reads the field against the band the
+ * field is in. Correcting the ingestion instead is not open: Windows's valuation runtime is
+ * calibrated to the inflated number (`operating_valuation_runtime.rs:771-778` divides by ten
+ * thousand), and rescaling under it would move hold-years and the leverage refusals with no test
+ * standing behind either.
+ *
+ * This is the second choice regardless. It is reached only when EBITDA is missing or non-positive,
+ * and it carries its own label so the weaker input is visible in the factor list.
+ */
+private const val V4_FUND_FALLBACK_DE_LOW = 3_000.0
+private const val V4_FUND_FALLBACK_DE_HIGH = 20_000.0
+
+/**
+ * Held equal to [V3_FUND_BALANCE_WEIGHT] on purpose. V4's budget is V3's plus the share-count
+ * weight ([V4_FUNDAMENTALS_FULL_WEIGHT]); changing the leverage weight alone would silently
+ * re-scale every other V4 factor.
+ */
+private const val V4_FUND_LEVERAGE_WEIGHT = V3_FUND_BALANCE_WEIGHT
+
+/**
  * The one character that says a metric was scored against its sector rather than an absolute band.
  *
  * Two rows in one list scored by different rules, with nothing saying which, is the same defect as
@@ -164,10 +214,10 @@ private const val V3_FORECAST_SKEW_WEIGHT = 12.0
 private const val V3_FORECAST_MIN_ANALYST_OPINIONS = 3
 private const val V3_FORECAST_FULL_ANALYST_OPINIONS = 15.0
 private const val V3_FORECAST_BREADTH_WEIGHT = 14.0
-private const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
+internal const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
 private const val V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT = 8.0
 private const val V3_FORECAST_DCF_UNCERTAINTY_WEIGHT = 8.0
-private const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
+internal const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
 private const val V3_FORECAST_DCF_WIDTH_UPPER = 1.0
 private const val V3_FORECAST_FRESHNESS_WEIGHT = 4.0
 private const val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
@@ -426,10 +476,11 @@ object OpportunityEngine {
             .filter { includeUnqualified || it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
+                var analysis = context.analysesBySymbol[detail.symbol]
                 val score = scoreWithModel(
                     detail = detail,
                     summary = preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
-                    analysis = context.analysesBySymbol[detail.symbol],
+                    analysis = analysis,
                     model = context.scoringModel,
                     regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
                     marketRegime = context.marketRegime,
@@ -437,6 +488,23 @@ object OpportunityEngine {
                     sectorBenchmarks = detail.fundamentals?.sectorName
                         ?.let { context.sectorBenchmarks[it] },
                     timeseries = context.timeseriesBySymbol[detail.symbol],
+                )
+                // Read from the same two spans the forecast bucket already measures, so a row cannot
+                // report a narrow range here while `Unc` penalises a wide one. It is stamped whether
+                // or not the model spread is admitted to the score.
+                var outcome = outcomeConfidenceFor(
+                    streetWidthBps = spanWidthBps(
+                        lowCents = detail.externalSignalLowFairValueCents,
+                        highCents = detail.externalSignalHighFairValueCents,
+                        centreCents = preferredForecastFairValueCents(detail),
+                    ),
+                    modelWidthBps = analysis?.let { dcf ->
+                        spanWidthBps(
+                            lowCents = dcf.bearIntrinsicValueCents,
+                            highCents = dcf.bullIntrinsicValueCents,
+                            centreCents = dcf.baseIntrinsicValueCents,
+                        )
+                    },
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -464,6 +532,9 @@ object OpportunityEngine {
                     regimeSignals = score.regimeSignals,
                     regimeUnavailableReason = score.regimeUnavailableReason,
                     companyName = detail.companyName,
+                    nextEarningsEpoch = detail.nextEarningsEpoch,
+                    outcomeConfidence = outcome.band,
+                    outcomeWidthBps = outcome.widthBps,
                 )
             }
             .toMutableList()
@@ -1336,12 +1407,33 @@ object OpportunityEngine {
         addCashFlowVote(acc, fundamentals)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
         addV4Growth(acc, fundamentals, timeseries)
-        addBalanceSheet(acc, fundamentals)
+        addV4BalanceSheet(acc, fundamentals, sectorBenchmarks?.netDebtToEbitdaHundredths)
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
         addCashConversion(acc, fundamentals)
         addShareCountChange(acc, timeseries)
+        addCyclePeak(acc, fundamentals, timeseries)
 
         return acc.toEvidence()
+    }
+
+    /**
+     * Marks a name whose latest earnings sit at the top of the only history there is, in an
+     * industry the beta policy already calls through-cycle.
+     *
+     * It subtracts and never adds. A margin at the bottom of its window is not evidence of a
+     * trough — over five points it is indistinguishable from a business getting worse — and paying
+     * a name for that would be the same extrapolation error in the other direction.
+     *
+     * See [cyclePeakReading] for why this is a penalty and not a weighted term.
+     */
+    private fun addCyclePeak(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var reading = cyclePeakReading(fundamentals, timeseries, V4_TREND_MAX_YEARS)
+        if (reading.penaltyPoints <= 0) return
+        acc.penalize(reading.penaltyPoints, CYCLE_PEAK_LABEL, reading.marginPercentileBps)
     }
 
     /**
@@ -1519,6 +1611,12 @@ object OpportunityEngine {
         if (trendRamp != null && pulseRamp != null && trendRamp * pulseRamp < 0.0) {
             acc.flag("Pulse≠Trend")
         }
+        // Both readings cross the last filed year, so a write-down inside it moves them both. The
+        // mark costs nothing: it says the growth above was read over a year that is not the
+        // business, and leaves the reader to weigh it.
+        if (earningsContamination(timeseries).latestYearContaminated) {
+            acc.flag(EARNINGS_CHARGE_LABEL)
+        }
     }
 
     private fun pulseGrowthBps(
@@ -1558,6 +1656,47 @@ object OpportunityEngine {
                     ?.roundToInt()
             }
         }.filterNotNull()
+    }
+
+    /**
+     * V4's leverage vote: net debt against a year of EBITDA, read against the sector when the
+     * sector can support a centre.
+     *
+     * V3 keeps [addBalanceSheet] and its book debt/equity. The split is the point — V4 is the model
+     * still in beta, and the two must be able to disagree about leverage without one dragging the
+     * other.
+     *
+     * Three inputs in order of strength, each labelled so the list says which one spoke:
+     * `ND/EBITDA` from dollars, `D/E` from the mis-scaled ratio, `Bal` from a bare cash-versus-debt
+     * comparison. A symbol with none of them adds nothing, which pulls the bucket toward zero
+     * rather than excusing it.
+     */
+    private fun addV4BalanceSheet(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+    ) {
+        var leverage = netDebtToEbitdaOf(fundamentals)
+        if (leverage != null) {
+            var centre = sectorNetDebtToEbitdaHundredths?.toDouble()
+            var lower = centre?.plus(V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET) ?: V4_FUND_LEVERAGE_LOW
+            var upper = centre?.plus(V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET) ?: V4_FUND_LEVERAGE_HIGH
+            var label = if (centre != null) "ND/EBITDA$SECTOR_ADJUSTED_MARKER" else "ND/EBITDA"
+            // Negated: more net debt is the worse reading, and the ramp climbs with its input.
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, -smoothRamp(leverage.toDouble(), lower, upper), label)
+            return
+        }
+        var deHundredths = fundamentals.debtToEquityHundredths
+        if (deHundredths != null) {
+            var ramp = -smoothRamp(deHundredths.toDouble(), V4_FUND_FALLBACK_DE_LOW, V4_FUND_FALLBACK_DE_HIGH)
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, ramp, "D/E")
+            return
+        }
+        var cash = fundamentals.totalCashDollars
+        var debt = fundamentals.totalDebtDollars
+        if (cash != null && debt != null) {
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+        }
     }
 
     private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
@@ -1997,6 +2136,7 @@ object OpportunityEngine {
     private class EvidenceAccumulator(private val normalizationWeight: Double) {
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
+        private var penaltyPoints = 0
         val signals = mutableListOf<String>()
         val factors = mutableListOf<ScoreFactor>()
 
@@ -2017,14 +2157,31 @@ object OpportunityEngine {
             }
         }
 
+        /**
+         * A subtraction in the bucket's own hundred points, applied after the terms are normalized.
+         *
+         * It is not a term and carries no weight in the divisor. A term's weight is charged to
+         * every symbol whether or not the term fires, which is right for an input a symbol could
+         * have had and wrong for one it could not: a software company has no commodity cycle, and
+         * scaling its whole bucket down for a reading that can never apply to it would be a defect,
+         * not a caution. A penalty only reaches the symbols it was measured on.
+         */
+        fun penalize(points: Int, label: String, inputBps: Int? = null) {
+            require(points > 0) { "EvidenceAccumulator penalty must be positive" }
+            penaltyPoints += points
+            signals += "$label-"
+            factors += ScoreFactor(key = label, token = "$label-", bucketPoints = -points, inputBps = inputBps)
+        }
+
         fun flag(label: String) {
             signals += label
             factors += ScoreFactor(key = label, token = label, bucketPoints = 0)
         }
 
+        /** A penalty alone never creates a score: with no term measured the bucket is still absent. */
         fun normalizedScore(): Int? {
             if (evidenceWeight == 0.0) return null
-            var normalized = (weightedSum / normalizationWeight) * 100.0
+            var normalized = (weightedSum / normalizationWeight) * 100.0 - penaltyPoints
             return normalized.coerceIn(-100.0, 100.0).roundToInt()
         }
 

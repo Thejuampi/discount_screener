@@ -12,6 +12,20 @@ enum class ConfidenceBand {
     High,
 }
 
+/**
+ * How wide the range of outcomes is. A different question from [ConfidenceBand], which asks whether
+ * the data can be trusted at all. See `outcomeConfidenceFor` for how a name gets one of these.
+ */
+@Serializable
+enum class OutcomeConfidence {
+    Narrow,
+    Moderate,
+    Wide,
+
+    /** No source gave a span. Not the same as a span that came back narrow. */
+    Unmeasured,
+}
+
 @Serializable
 enum class QualificationStatus {
     Qualified,
@@ -278,6 +292,14 @@ data class MarketSnapshot(
     val profitable: Boolean,
     val marketPriceCents: Long,
     val intrinsicValueCents: Long,
+    /**
+     * Unix seconds of the next scheduled earnings report, or the last one Yahoo knows about when
+     * every date it carries is already past.
+     *
+     * Yahoo gives a window rather than a date when the company has not confirmed one, so treat this
+     * as "around then". It marks a row and never decides one.
+     */
+    val nextEarningsEpoch: Long? = null,
 )
 
 @Serializable
@@ -418,6 +440,8 @@ data class SymbolDetail(
     val updateCount: Int,
     val isWatched: Boolean,
     val companyName: String? = null,
+    /** Carried from [MarketSnapshot.nextEarningsEpoch] so a row can mark the date without a second fetch. */
+    val nextEarningsEpoch: Long? = null,
 )
 
 @Serializable
@@ -475,6 +499,16 @@ data class FundamentalTimeseries(
     /** Rating-derived or interest-coverage synthetic spread over risk-free. */
     val ratedOrSyntheticSpreadBps: List<AnnualReportedValue> = emptyList(),
     val netIncome: List<AnnualReportedValue> = emptyList(),
+    /** GAAP operating income for the year, as filed. Empty for a source that does not report it. */
+    val operatingIncome: List<AnnualReportedValue> = emptyList(),
+    /**
+     * Impairment and restructuring booked in the year, as a positive charge.
+     *
+     * Kept beside the GAAP line and never subtracted from it. What a charge means is a judgment:
+     * a write-down every third year is the business, and one in a decade is an accident. The app
+     * shows the size and lets the reader decide.
+     */
+    val nonRecurringCharges: List<AnnualReportedValue> = emptyList(),
 )
 
 @Serializable
@@ -906,6 +940,12 @@ data class OpportunityRow(
     val regimeSignals: List<String> = emptyList(),
     val regimeUnavailableReason: MarketContextUnavailableReason? = null,
     val companyName: String? = null,
+    /** See [MarketSnapshot.nextEarningsEpoch]. Marks the row; no bucket and no decision read it. */
+    val nextEarningsEpoch: Long? = null,
+    /** How wide the outcome range is. Shown next to [confidence]; read by no bucket and no decision. */
+    val outcomeConfidence: OutcomeConfidence = OutcomeConfidence.Unmeasured,
+    /** The span behind [outcomeConfidence], in bps of its own centre. Null when nothing measured one. */
+    val outcomeWidthBps: Int? = null,
 )
 
 @Serializable

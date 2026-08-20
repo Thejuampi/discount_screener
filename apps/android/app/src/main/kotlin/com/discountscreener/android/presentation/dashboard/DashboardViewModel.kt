@@ -37,8 +37,10 @@ import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SaveSymbolNoteUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
+import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
@@ -71,12 +73,14 @@ import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlin.system.measureTimeMillis
 
 enum class DashboardTab {
     Opportunities,
@@ -162,6 +166,9 @@ sealed interface DashboardAction {
     data object StepReplayForward : DashboardAction
     data object ResetReplay : DashboardAction
     data class ToggleWatchlist(val symbol: String) : DashboardAction
+
+    /** Writes the reader's own note for one symbol. A blank note clears it. */
+    data class SaveSymbolNote(val symbol: String, val note: String) : DashboardAction
     data class AddSymbols(val rawInput: String) : DashboardAction
     data class SelectProfile(val profile: String) : DashboardAction
     data object ToggleOpportunityScoringModel : DashboardAction
@@ -199,6 +206,8 @@ data class DashboardUiState(
     val trackedSymbols: List<String> = emptyList(),
     val trackedRows: List<TrackedSymbolRow> = emptyList(),
     val watchlistSymbols: List<String> = emptyList(),
+    /** The reader's own notes, by symbol. A symbol with no note is absent. */
+    val symbolNotes: Map<String, String> = emptyMap(),
     val candidateRows: List<CandidateRow> = emptyList(),
     val opportunityRows: List<OpportunityListRow> = emptyList(),
     val opportunityScoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
@@ -275,6 +284,8 @@ class DashboardViewModel(
     private val toggleDashboardWatchlist: ToggleDashboardWatchlistUseCase,
     private val loadScoringPreferences: LoadScoringPreferencesUseCase,
     private val persistScoringPreferences: PersistScoringPreferencesUseCase,
+    private val loadSymbolNotes: LoadSymbolNotesUseCase,
+    private val saveSymbolNote: SaveSymbolNoteUseCase,
     private val loadSystemStats: LoadSystemStatsUseCase,
     private val pruneOldRevisions: PruneOldRevisionsUseCase,
     private val clearAllDataUseCase: ClearAllDataUseCase,
@@ -304,7 +315,7 @@ class DashboardViewModel(
     fun dispatch(action: DashboardAction) {
         when (action) {
             DashboardAction.Start -> start()
-            DashboardAction.Refresh -> refresh()
+            DashboardAction.Refresh -> refresh(force = true)
             is DashboardAction.SelectTab -> selectTab(action.tab)
             is DashboardAction.SelectPlanHunt -> _state.value = _state.value.copy(planHunt = action.hunt)
             is DashboardAction.SelectPlanDipUniverse -> selectPlanDipUniverse(action.universe)
@@ -336,6 +347,7 @@ class DashboardViewModel(
             DashboardAction.StepReplayForward -> stepReplayForward()
             DashboardAction.ResetReplay -> resetReplay()
             is DashboardAction.ToggleWatchlist -> toggleWatchlist(action.symbol)
+            is DashboardAction.SaveSymbolNote -> saveNote(action.symbol, action.note)
             is DashboardAction.AddSymbols -> addSymbols(action.rawInput)
             is DashboardAction.SelectProfile -> selectProfile(action.profile)
             DashboardAction.ToggleOpportunityScoringModel -> toggleOpportunityScoringModel()
@@ -360,23 +372,6 @@ class DashboardViewModel(
         if (started) return
         started = true
         viewModelScope.launch {
-            observeDashboardUpdates().collectLatest {
-                render(
-                    getDashboardSnapshot(
-                        currentFilter(),
-                        _state.value.detailRoute?.symbol,
-                        _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                        _state.value.opportunityScoringModel,
-                    ),
-                )
-            }
-        }
-        viewModelScope.launch {
-            observeDashboardUpdates()
-                .debounce(2_000L)
-                .collectLatest { loadEstimates() }
-        }
-        viewModelScope.launch {
             // Restored first: rendering the list under a model the user did not choose and then
             // re-ranking it a moment later is worse than waiting one database read.
             val preferences = loadScoringPreferences()
@@ -391,9 +386,45 @@ class DashboardViewModel(
                 _state.value.opportunityScoringModel,
             )
             render(initial)
+            // Collect after restore. A collector that starts on the default chip takes the
+            // snapshot mutex in front of bootstrap.
+            viewModelScope.launch {
+                observeDashboardUpdates().collect {
+                    val buildMillis = measureTimeMillis {
+                        render(
+                            getDashboardSnapshot(
+                                currentFilter(),
+                                _state.value.detailRoute?.symbol,
+                                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                                _state.value.opportunityScoringModel,
+                            ),
+                        )
+                    }
+                    // A rebuild reads every row of the profile under the repository's state
+                    // mutex, so on the 1 937-symbol universe it costs about a second of a
+                    // two-core device. The refresh signalled one every eight rows, and the
+                    // device spent 57.8 s of a 44 s round rebuilding, in front of the HTTP
+                    // that round was waiting on. So a rebuild now waits for what it cost
+                    // before the next one starts: at most a third of the time goes to the
+                    // screen, the rest to the refresh. The flow is a conflated StateFlow, so
+                    // the wait loses no update; the next build reads the newest state.
+                    delay(
+                        (buildMillis * SNAPSHOT_REBUILD_COOLDOWN_FACTOR)
+                            .coerceIn(MIN_SNAPSHOT_REBUILD_COOLDOWN_MS, MAX_SNAPSHOT_REBUILD_COOLDOWN_MS),
+                    )
+                }
+            }
+            viewModelScope.launch {
+                observeDashboardUpdates()
+                    .debounce(2_000L)
+                    .collectLatest { loadEstimates() }
+            }
+            refresh(force = false)
+            // After the list, never before it. A note changes no row, so the read of one small
+            // table has no business sitting in front of the first screen the user sees.
+            _state.value = _state.value.copy(symbolNotes = loadSymbolNotes())
             // Load discovery state from DB only — never auto recreate/refresh.
             applyDiscoverySnapshot(loadDiscoverySnapshot())
-            refresh()
             loadEstimates()
         }
         discoveryProgressJob?.cancel()
@@ -404,7 +435,7 @@ class DashboardViewModel(
         }
     }
 
-    private fun refresh() {
+    private fun refresh(force: Boolean) {
         viewModelScope.launch {
             // A throw here reaches the coroutine handler and takes the process with it, which is a
             // hard exit for a button whose worst honest outcome is "the data did not update".
@@ -415,6 +446,7 @@ class DashboardViewModel(
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                     _state.value.opportunityScoringModel,
+                    force,
                 )
                 render(snapshot)
             } catch (error: Throwable) {
@@ -828,6 +860,20 @@ class DashboardViewModel(
         _state.value = state.copy(detailRoute = route.copy(replayOffset = 0))
     }
 
+    /**
+     * Writes the note, then reads the table back.
+     *
+     * The store decides what a blank note means, and the screen must show what the next start will
+     * show. Reading back keeps that rule in one place. A note is written when the reader leaves the
+     * field, so the extra read costs nothing anybody can feel.
+     */
+    private fun saveNote(symbol: String, note: String) {
+        viewModelScope.launch {
+            saveSymbolNote(symbol, note)
+            _state.value = _state.value.copy(symbolNotes = loadSymbolNotes())
+        }
+    }
+
     private fun toggleWatchlist(symbol: String) {
         viewModelScope.launch {
             val snapshot = toggleDashboardWatchlist(
@@ -1084,11 +1130,16 @@ class DashboardViewModel(
 
     private fun render(snapshot: DashboardSnapshot) {
         var currentState = _state.value
+        var scoringMatches =
+            snapshot.opportunityScoringModel == currentState.opportunityScoringModel &&
+                snapshot.regimeScoringEnabled == currentState.regimeScoringEnabled
         var currentRoute = currentState.detailRoute
         var projectedDetail = snapshot.screenData.selectedDetail
         var selectedDetailMatchesRoute = currentRoute != null && snapshot.selectedDetail?.symbol == currentRoute.symbol
         var projectedDetailMatchesRoute = currentRoute != null && projectedDetail?.symbol == currentRoute.symbol
         var keepStaleDetail = currentRoute != null && currentState.detailData?.symbol == currentRoute.symbol
+        var scoreRow = if (scoringMatches) snapshot.selectedScoreRow else currentState.selectedScoreRow
+        var opportunityRows = if (scoringMatches) snapshot.opportunityRows else currentState.opportunityRows
         _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
@@ -1099,13 +1150,13 @@ class DashboardViewModel(
             trackedRows = snapshot.trackedRows,
             watchlistSymbols = snapshot.watchlistSymbols,
             candidateRows = snapshot.candidateRows,
-            opportunityRows = snapshot.opportunityRows,
-            selectedScoreRow = if (currentRoute != null && snapshot.selectedScoreRow?.symbol == currentRoute.symbol) {
-                snapshot.selectedScoreRow
+            opportunityRows = opportunityRows,
+            selectedScoreRow = if (currentRoute != null && scoreRow?.symbol == currentRoute.symbol) {
+                scoreRow
             } else {
                 null
             },
-            opportunityScoringModel = snapshot.opportunityScoringModel,
+            opportunityScoringModel = currentState.opportunityScoringModel,
             issues = snapshot.issues,
             detailData = if (selectedDetailMatchesRoute) {
                 snapshot.selectedDetail
@@ -1167,7 +1218,7 @@ class DashboardViewModel(
                 snapshot.trackedRows.forEach { row ->
                     put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
                 }
-                snapshot.opportunityRows.forEach { row ->
+                opportunityRows.forEach { row ->
                     put(row.symbol, mapRowQuantLensSummary(row.quantLensSummary))
                 }
             },
@@ -1189,6 +1240,13 @@ class DashboardViewModel(
     companion object {
         private const val TICKER_SEARCH_DEBOUNCE_MS = 300L
 
+        /** What a snapshot rebuild waits afterwards, as a multiple of what it cost. */
+        private const val SNAPSHOT_REBUILD_COOLDOWN_FACTOR = 2
+
+        /** Floor and ceiling of that wait: snappy on a small profile, bounded on a large one. */
+        private const val MIN_SNAPSHOT_REBUILD_COOLDOWN_MS = 250L
+        private const val MAX_SNAPSHOT_REBUILD_COOLDOWN_MS = 3_000L
+
         fun factory(useCases: DashboardUseCases): ViewModelProvider.Factory =
             viewModelFactory {
                 initializer {
@@ -1203,6 +1261,8 @@ class DashboardViewModel(
                         toggleDashboardWatchlist = useCases.toggleDashboardWatchlist,
                         loadScoringPreferences = useCases.loadScoringPreferences,
                         persistScoringPreferences = useCases.persistScoringPreferences,
+                        loadSymbolNotes = useCases.loadSymbolNotes,
+                        saveSymbolNote = useCases.saveSymbolNote,
                         loadSystemStats = useCases.loadSystemStats,
                         pruneOldRevisions = useCases.pruneOldRevisions,
                         clearAllDataUseCase = useCases.clearAllData,

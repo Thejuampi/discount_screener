@@ -25,10 +25,15 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeScoreStatus
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -54,6 +59,7 @@ import org.robolectric.RobolectricTestRunner
  * silently zero for everyone, [toggling_the_market_dimension_off_reorders_the_list] would fail
  * rather than pass on a coincidence.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class MarketDimensionRankingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
@@ -211,6 +217,53 @@ class MarketDimensionRankingTest {
         }
     }
 
+    /**
+     * Persist writes the flag. It must not tick the dashboard. A persist tick is what lets a
+     * snapshot started under the previous scoring control finish after the user changed it.
+     */
+    @Test
+    fun persisting_preferences_does_not_emit_a_dashboard_update() = runTest(dispatcher) {
+        withRepository { repository ->
+            val before = repository.observeUpdates().first()
+            repository.persistScoringPreferences(ScoringPreferences(regimeScoringEnabled = false))
+            assertEquals(before, repository.observeUpdates().first())
+        }
+    }
+
+    /**
+     * Persist is a preference write. It must not wait on [DefaultDashboardRepository] snapshot
+     * work. A persist that joins `stateMutex` freezes the scoring chip behind the load loop.
+     */
+    @Test
+    fun persist_returns_while_a_snapshot_is_in_flight() = runTest(dispatcher) {
+        var entered = CompletableDeferred<Unit>()
+        var release = CompletableDeferred<Unit>()
+        var pauseSnapshots = false
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store) {
+                if (pauseSnapshots) {
+                    entered.complete(Unit)
+                    release.await()
+                }
+            }
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV3)
+            advanceUntilIdle()
+            pauseSnapshots = true
+            var snapshot = async { rankedSymbols(repository) }
+            entered.await()
+            withTimeout(200) {
+                repository.persistScoringPreferences(ScoringPreferences(regimeScoringEnabled = false))
+            }
+            release.complete(Unit)
+            snapshot.await()
+            assertEquals(false, repository.loadScoringPreferences().regimeScoringEnabled)
+        } finally {
+            store.close()
+        }
+    }
+
     /** A preference that reached the ranking must also have reached the database. */
     @Test
     fun the_switch_is_written_where_a_cold_start_will_find_it() = runTest(dispatcher) {
@@ -262,7 +315,10 @@ class MarketDimensionRankingTest {
         }
     }
 
-    private fun buildRepository(store: SQLiteStateStore) = DefaultDashboardRepository(
+    private fun buildRepository(
+        store: SQLiteStateStore,
+        beforeSnapshotLocked: (suspend () -> Unit)? = null,
+    ) = DefaultDashboardRepository(
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
         yahooClient = FixtureYahooFinanceClient(),
@@ -271,6 +327,7 @@ class MarketDimensionRankingTest {
         ioDispatcher = dispatcher,
         defaultProfile = DefaultDashboardRepository.QA_PROFILE,
         marketDataRepository = StubMarketDataRepository(),
+        beforeSnapshotLocked = beforeSnapshotLocked,
     )
 
     /**
@@ -363,8 +420,14 @@ class MarketDimensionRankingTest {
          * What V4 scores [QA_SYMBOLS], read off a green run rather than predicted.
          *
          * Written out so that a change to the composite has to be looked at and re-recorded here on
-         * purpose, instead of passing under an assertion that only asked for "not V3". Three names
-         * qualify at 46 and one at 44; the flat middle is the fixture's doing, not the model's.
+         * purpose, instead of passing under an assertion that only asked for "not V3". The flat
+         * middle is the fixture's doing rather than the model's: every symbol carries identical
+         * fundamentals, so under V4 each one sits exactly on its own sector centre and every
+         * sector-relative factor — leverage included — scores zero for all twenty.
+         *
+         * V4 last moved when its leverage component changed from book debt/equity to net debt over
+         * EBITDA, which took the level from 46/45/44 down to 38/37/36. The eight points were being
+         * paid by a debt/equity reading of 40, a number the ingestion cannot produce.
          */
         val V3_LEVEL = listOf(
             "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
@@ -375,11 +438,11 @@ class MarketDimensionRankingTest {
         )
 
         val V4_LEVEL = listOf(
-            "MRK" to 46, "PG" to 46, "HD" to 46,
-            "TSLA" to 45, "META" to 45, "GOOGL" to 45, "WMT" to 45, "V" to 45,
-            "BAC" to 45, "XOM" to 45, "JNJ" to 45, "UNH" to 45, "NVDA" to 45,
-            "MSFT" to 45, "ACGL" to 45, "JPM" to 45,
-            "CI" to 44,
+            "MRK" to 38, "PG" to 38, "HD" to 38,
+            "TSLA" to 37, "META" to 37, "GOOGL" to 37, "WMT" to 37, "V" to 37,
+            "BAC" to 37, "XOM" to 37, "JNJ" to 37, "UNH" to 37, "NVDA" to 37,
+            "MSFT" to 37, "ACGL" to 37, "JPM" to 37,
+            "CI" to 36,
         )
 
         /**
@@ -411,6 +474,10 @@ class MarketDimensionRankingTest {
             operatingCashFlowDollars = 40_000_000_000L,
             totalCashDollars = 10_000_000_000L,
             totalDebtDollars = 50_000_000_000L,
+            // 40B of net debt over 40B of EBITDA is one turn. V4 reads leverage in dollars, so
+            // without this the golden level below would be recorded off V4's fallback path instead
+            // of the one production takes.
+            ebitdaDollars = 40_000_000_000L,
             sharesOutstanding = 4_800_000_000L,
             debtToEquityHundredths = 40,
             returnOnEquityBps = 1_800,
