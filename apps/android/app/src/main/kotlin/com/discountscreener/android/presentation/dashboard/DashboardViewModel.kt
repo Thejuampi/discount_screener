@@ -28,6 +28,7 @@ import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
@@ -180,6 +181,7 @@ sealed interface DashboardAction {
     data object ExportScores : DashboardAction
 
     data object RunRetrospective : DashboardAction
+    data object RunOutcomeReport : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
     data object ClearAllData : DashboardAction
     data object LoadDiscovery : DashboardAction
@@ -291,6 +293,7 @@ class DashboardViewModel(
     private val clearAllDataUseCase: ClearAllDataUseCase,
     private val exportScores: ExportScoresUseCase,
     private val runRetrospective: RunRetrospectiveUseCase,
+    private val runOutcomeReport: RunOutcomeReportUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -356,6 +359,7 @@ class DashboardViewModel(
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             DashboardAction.ExportScores -> exportScoreCsv()
             DashboardAction.RunRetrospective -> runRetrospectiveReport()
+            DashboardAction.RunOutcomeReport -> runOutcomeReportAction()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
             DashboardAction.ClearAllData -> performClearAllData()
             DashboardAction.LoadDiscovery -> loadDiscovery()
@@ -1135,6 +1139,23 @@ class DashboardViewModel(
         }
     }
 
+    /**
+     * The journal's reading half: joins every recorded scoring pass to the daily bars that
+     * followed and writes the per-model outcome report. Same failure discipline as the
+     * retrospective — a silent failure would read as a measurement that found nothing.
+     */
+    private fun runOutcomeReportAction() {
+        viewModelScope.launch {
+            var message = try {
+                var result = runOutcomeReport(_state.value.currentProfile)
+                "Outcome report over ${result.rowCount} journal rows written to ${result.path}"
+            } catch (error: Throwable) {
+                "Outcome report failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(systemStatusMessage = message)
+        }
+    }
+
     private fun pruneOldRevisions(retentionDays: Int) {
         viewModelScope.launch {
             val deleted = pruneOldRevisions(retentionDays)
@@ -1293,6 +1314,7 @@ class DashboardViewModel(
                         clearAllDataUseCase = useCases.clearAllData,
                         exportScores = useCases.exportScores,
                         runRetrospective = useCases.runRetrospective,
+                        runOutcomeReport = useCases.runOutcomeReport,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

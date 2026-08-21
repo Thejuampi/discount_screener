@@ -2588,6 +2588,24 @@ class DefaultDashboardRepository(
 
     internal fun peekSectorBenchmarkBuilds(): Int = sectorBenchmarkBuilds
 
+    /**
+     * Street upside per symbol, in bps, for the outcome report's context line.
+     *
+     * Diagnostic only, and the name says the quiet part out loud: this is the analyst anchor's
+     * distance from price, computed for display beside the outcome spreads and consumed by
+     * nothing. The weighted anchor is preferred, the plain one is the fallback, and a symbol with
+     * neither or an unpriced row is absent rather than zero.
+     */
+    internal suspend fun streetDiagnosticUpsideBps(): Map<String, Int> = stateMutex.withLock {
+        engine.trackedSymbols().mapNotNull { symbol ->
+            val detail = engine.detail(symbol) ?: return@mapNotNull null
+            val fair = detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents
+            val price = detail.marketPriceCents
+            if (fair == null || fair <= 0L || price <= 0L) return@mapNotNull null
+            symbol to (((fair.toDouble() / price) - 1.0) * 10_000.0).toInt()
+        }.toMap()
+    }
+
     private fun buildTrackedRowLocked(
         symbol: String,
         issueMessage: String?,
@@ -4675,7 +4693,7 @@ class DefaultDashboardRepository(
          * short enough that a five-hundred-symbol profile refreshed daily stays in the low
          * hundreds of thousands of rows.
          */
-        private const val SCORE_JOURNAL_RETENTION_SECONDS = 90L * 24L * 60L * 60L
+        internal const val SCORE_JOURNAL_RETENTION_SECONDS = 220L * 24L * 60L * 60L
 
         private fun retryBackoffMillis(round: Int): Long = when (round) {
             0 -> 1_500L

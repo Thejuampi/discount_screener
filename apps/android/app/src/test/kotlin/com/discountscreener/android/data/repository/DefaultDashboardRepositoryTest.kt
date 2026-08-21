@@ -103,6 +103,17 @@ class DefaultDashboardRepositoryTest {
 
     private val legacyModel = OpportunityScoringModel.Legacy
 
+    /**
+     * The journal is the outcome record the V5 foundation measures against, and its longest
+     * horizon is 126 trading bars — about 180 calendar days. A retention shorter than that would
+     * silently delete exactly the rows the half-year reading needs, so the constant is pinned
+     * here rather than left to drift with a refactor.
+     */
+    @Test
+    fun the_score_journal_outlives_the_longest_measured_horizon() {
+        assertEquals(220L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+    }
+
     @Test
     fun bootstrap_uses_qa_profile_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
@@ -271,18 +282,36 @@ class DefaultDashboardRepositoryTest {
     /**
      * The refused half of the same claim.
      *
-     * The test above runs on a seed whose rows all name a primary, so it cannot see a row printing
-     * a number the judgment withheld. This one drops NVDA's sector, which is the one input
-     * [ValuationJudgmentPolicy] refuses on before it reads any anchor, and asserts that the
-     * opportunity row goes quiet on the value while the analyst range behind it stays 18500/20000/
-     * 21500. A row that falls back to the cached 20000 here is showing a fair value that nothing
-     * stands behind.
+     * This drops NVDA's sector, which is the one input [ValuationJudgmentPolicy] refuses on before
+     * it reads any anchor. Our own model is out, and the analyst range 18500/20000/21500 is still
+     * there, so the row names 20000: the number stands on the analyst range, and our experimental
+     * model does not get to hide it.
      */
     @Test
-    fun bootstrap_opportunity_row_names_no_fair_value_when_the_judgment_refuses_the_class() = runTest(dispatcher) {
+    fun bootstrap_opportunity_row_keeps_the_analyst_value_when_our_model_refuses_the_class() = runTest(dispatcher) {
         var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             seedWarmState(store, nvdaFundamentals = null)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var row = snapshot.opportunityRows.first { it.symbol == "NVDA" }
+
+            assertEquals(20_000L, row.intrinsicValueCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * The hole the test above used to cover: with the class refused and no analyst range behind
+     * it, nothing stands behind a value, so the row prints none. A row that falls back to the
+     * cached 20000 here is showing a fair value nothing supports.
+     */
+    @Test
+    fun bootstrap_opportunity_row_names_no_fair_value_when_no_family_stands_behind_it() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store, nvdaFundamentals = null, nvdaHasExternalSignal = false)
             var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
             var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             var row = snapshot.opportunityRows.first { it.symbol == "NVDA" }

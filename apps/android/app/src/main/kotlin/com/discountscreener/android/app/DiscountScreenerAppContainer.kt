@@ -41,6 +41,7 @@ import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
@@ -155,6 +156,12 @@ class DiscountScreenerAppContainer(context: Context) {
             clearAllData = ClearAllDataUseCase(repository),
             exportScores = ExportScoresUseCase(repository, appContext.filesDir),
             runRetrospective = RunRetrospectiveUseCase(stateStore, appContext.filesDir),
+            runOutcomeReport = RunOutcomeReportUseCase(
+                journalSource = { stateStore.loadScoreJournal() },
+                candleSource = stateStore,
+                streetDiagnosticSource = { repository.streetDiagnosticUpsideBps() },
+                exportDirectory = appContext.filesDir,
+            ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),

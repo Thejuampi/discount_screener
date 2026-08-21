@@ -35,6 +35,7 @@ import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.data.market.DailyCandleSource
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
@@ -1094,6 +1095,13 @@ class DashboardViewModelTest {
                 NoBacktestCandles,
                 File(System.getProperty("java.io.tmpdir")!!),
                 dispatcher,
+            ),
+            runOutcomeReport = RunOutcomeReportUseCase(
+                journalSource = { emptyList() },
+                candleSource = NoBacktestCandles,
+                streetDiagnosticSource = { emptyMap() },
+                exportDirectory = File(System.getProperty("java.io.tmpdir")!!),
+                ioDispatcher = dispatcher,
             ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),

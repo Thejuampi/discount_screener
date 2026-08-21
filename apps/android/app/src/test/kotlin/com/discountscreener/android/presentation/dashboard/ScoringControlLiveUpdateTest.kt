@@ -35,6 +35,7 @@ import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
@@ -185,6 +186,13 @@ class ScoringControlLiveUpdateTest {
                 File(System.getProperty("java.io.tmpdir")!!),
                 dispatcher,
             ),
+            runOutcomeReport = RunOutcomeReportUseCase(
+                journalSource = { emptyList() },
+                candleSource = EmptyBacktestCandles,
+                streetDiagnosticSource = { emptyMap() },
+                exportDirectory = File(System.getProperty("java.io.tmpdir")!!),
+                ioDispatcher = dispatcher,
+            ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -267,12 +275,15 @@ class ScoringControlLiveUpdateTest {
             "XOM", "BAC", "V", "WMT", "GOOGL", "META", "TSLA", "HD", "PG", "MRK",
         )
 
+        // 38/37/36 became 33/32/31 when the cash-vote dedup retired the conversion term after an
+        // FCF-yield vote: the fixture's names share one conversion reading, so its uniform +5 came
+        // off every row at once.
         val V4_LEVEL = listOf(
-            "MRK" to 38, "PG" to 38, "HD" to 38,
-            "TSLA" to 37, "META" to 37, "GOOGL" to 37, "WMT" to 37, "V" to 37,
-            "BAC" to 37, "XOM" to 37, "JNJ" to 37, "UNH" to 37, "NVDA" to 37,
-            "MSFT" to 37, "ACGL" to 37, "JPM" to 37,
-            "CI" to 36,
+            "MRK" to 33, "PG" to 33, "HD" to 33,
+            "TSLA" to 32, "META" to 32, "GOOGL" to 32, "WMT" to 32, "V" to 32,
+            "BAC" to 32, "XOM" to 32, "JNJ" to 32, "UNH" to 32, "NVDA" to 32,
+            "MSFT" to 32, "ACGL" to 32, "JPM" to 32,
+            "CI" to 31,
         )
 
         val REGIME = MarketRegime(

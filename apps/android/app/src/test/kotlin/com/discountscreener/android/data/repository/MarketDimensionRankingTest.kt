@@ -428,6 +428,10 @@ class MarketDimensionRankingTest {
          * V4 last moved when its leverage component changed from book debt/equity to net debt over
          * EBITDA, which took the level from 46/45/44 down to 38/37/36. The eight points were being
          * paid by a debt/equity reading of 40, a number the ingestion cannot produce.
+         *
+         * It moved again when the cash-vote dedup retired the conversion term after an FCF-yield
+         * vote: the fixture's names share one conversion reading, so its uniform +5 came off every
+         * row at once — 38/37/36 down to 33/32/31.
          */
         val V3_LEVEL = listOf(
             "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
@@ -438,11 +442,11 @@ class MarketDimensionRankingTest {
         )
 
         val V4_LEVEL = listOf(
-            "MRK" to 38, "PG" to 38, "HD" to 38,
-            "TSLA" to 37, "META" to 37, "GOOGL" to 37, "WMT" to 37, "V" to 37,
-            "BAC" to 37, "XOM" to 37, "JNJ" to 37, "UNH" to 37, "NVDA" to 37,
-            "MSFT" to 37, "ACGL" to 37, "JPM" to 37,
-            "CI" to 36,
+            "MRK" to 33, "PG" to 33, "HD" to 33,
+            "TSLA" to 32, "META" to 32, "GOOGL" to 32, "WMT" to 32, "V" to 32,
+            "BAC" to 32, "XOM" to 32, "JNJ" to 32, "UNH" to 32, "NVDA" to 32,
+            "MSFT" to 32, "ACGL" to 32, "JPM" to 32,
+            "CI" to 31,
         )
 
         /**
