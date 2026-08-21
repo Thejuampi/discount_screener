@@ -309,15 +309,8 @@ object ValuationJudgmentPolicy {
             BusinessClass.Unclassified, BusinessClass.NotEligible -> false
         }
 
-    private fun isSoft(analysis: DcfAnalysis): Boolean {
-        var width = ValuationDecisionPolicy.scenarioWidthBps(
-            analysis.bearIntrinsicValueCents,
-            analysis.baseIntrinsicValueCents,
-            analysis.bullIntrinsicValueCents,
-        )
-        var wide = width == null || width > ValuationDecisionPolicy.WIDE_SCENARIO_BPS
-        return analysis.waccInputs.isProvisional() || analysis.pointEstimateUnreliable || wide
-    }
+    private fun isSoft(analysis: DcfAnalysis): Boolean =
+        ValuationDecisionPolicy.isSoftModel(analysis)
 
     private fun collectPresenceReasons(
         request: ValuationJudgmentRequest,
