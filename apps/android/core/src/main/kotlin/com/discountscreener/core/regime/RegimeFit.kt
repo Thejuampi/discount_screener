@@ -284,6 +284,7 @@ fun OpportunityScoringModel.marketFeatureSet(): MarketFeatureSet = when (this) {
     OpportunityScoringModel.AggressiveV3,
     -> MarketFeatureSet.Full
     OpportunityScoringModel.AggressiveV4,
+    OpportunityScoringModel.AggressiveV5,
     -> MarketFeatureSet.NonOverlapping
 }
 

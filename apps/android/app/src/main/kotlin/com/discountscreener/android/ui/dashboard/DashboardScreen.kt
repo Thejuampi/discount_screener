@@ -268,6 +268,7 @@ fun DashboardScreen(
 }
 
 internal val opportunityScoringModelChipOrder = listOf(
+    OpportunityScoringModel.AggressiveV5,
     OpportunityScoringModel.AggressiveV4,
     OpportunityScoringModel.AggressiveV3,
     OpportunityScoringModel.AggressiveV2,
@@ -276,6 +277,7 @@ internal val opportunityScoringModelChipOrder = listOf(
 )
 
 internal fun OpportunityScoringModel.chipLabel(): String = when (this) {
+    OpportunityScoringModel.AggressiveV5 -> "V5"
     OpportunityScoringModel.AggressiveV4 -> "V4"
     OpportunityScoringModel.AggressiveV3 -> "V3"
     OpportunityScoringModel.AggressiveV2 -> "V2"

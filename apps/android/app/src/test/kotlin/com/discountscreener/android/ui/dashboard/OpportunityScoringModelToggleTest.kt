@@ -109,7 +109,7 @@ class OpportunityScoringModelToggleTest {
     @Test
     fun the_chips_read_newest_model_first() {
         assertEquals(
-            listOf("V4", "V3", "V2", "V1", "Legacy"),
+            listOf("V5", "V4", "V3", "V2", "V1", "Legacy"),
             opportunityScoringModelChipOrder.map { it.chipLabel() },
         )
     }

@@ -20,10 +20,19 @@ import com.discountscreener.core.model.FundamentalSnapshot
  */
 internal object FinancialClassPolicy {
     fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+        classify(fundamentals) == BusinessClass.FinancialServices
+
+    /**
+     * The full closed-world class, for models that must tell "operating" from "unknown".
+     *
+     * V4 only ever needed the boolean above, and its fail-open reading of `Unclassified` — not
+     * financial services, therefore industrial — is exactly the guess V5 refuses.
+     */
+    fun classify(fundamentals: FundamentalSnapshot): BusinessClass =
         DcfAnalysisEngine.classifyBusiness(
             fundamentals.sectorName,
             fundamentals.industryName,
             fundamentals.sectorKey,
             fundamentals.industryKey,
-        ) == BusinessClass.FinancialServices
+        )
 }

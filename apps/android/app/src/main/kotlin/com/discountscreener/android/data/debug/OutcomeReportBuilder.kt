@@ -124,7 +124,9 @@ object OutcomeReportBuilder {
 
     /** Newest model first; anything unlisted keeps alphabetical order behind the known ones. */
     private fun modelOrder(model: String): Int =
-        listOf("AggressiveV4", "AggressiveV3", "AggressiveV2").indexOf(model).let { if (it < 0) Int.MAX_VALUE else it }
+        listOf("AggressiveV5", "AggressiveV4", "AggressiveV3", "AggressiveV2")
+            .indexOf(model)
+            .let { if (it < 0) Int.MAX_VALUE else it }
 
     private fun date(epochSeconds: Long): String =
         DateTimeFormatter.ISO_LOCAL_DATE.format(Instant.ofEpochSecond(epochSeconds).atOffset(ZoneOffset.UTC))

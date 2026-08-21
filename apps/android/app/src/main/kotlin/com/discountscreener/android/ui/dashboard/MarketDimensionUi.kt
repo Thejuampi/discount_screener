@@ -127,8 +127,15 @@ internal fun marketDimensionImpactLine(row: OpportunityListRow): String {
  * — the ones where the reader most needs to know how bad it is — the clamped term is exactly where
  * the information stops, so the unclamped spread is what gets printed there instead.
  */
+/**
+ * V4 and V5 share the agreement composite, so they share the line that decomposes it.
+ * Every other model reads the plain impact line instead.
+ */
+internal fun OpportunityScoringModel.showsAgreementLine(): Boolean =
+    this == OpportunityScoringModel.AggressiveV4 || this == OpportunityScoringModel.AggressiveV5
+
 internal fun v4AgreementLine(row: OpportunityListRow, model: OpportunityScoringModel): String? {
-    if (model != OpportunityScoringModel.AggressiveV4) return null
+    if (!model.showsAgreementLine()) return null
     var reading = OpportunityEngine.v4AgreementReading(
         fundamentals = row.fundamentalsScore,
         technical = row.technicalScore,

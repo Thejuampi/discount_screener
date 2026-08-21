@@ -3,6 +3,7 @@ package com.discountscreener.core.engine
 import com.discountscreener.core.math.isForeignTo
 import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.model.AnnualReportedValue
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
@@ -267,6 +268,11 @@ private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
  */
 private const val V4_GROWTH_CONFLICT_BPS = 1_000
 
+// AggressiveV5's two refusals. Both are labels as well as gates: the score journal reads them,
+// so the outcome report can later attribute a spread to the refusal instead of to noise.
+private const val V5_PULSE_REFUSED_LABEL = "Pulse∅ loss-year"
+private const val V5_CLASS_UNKNOWN_LABEL = "Class∅ unknown"
+
 /** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
 private const val V4_TREND_MAX_YEARS = 5
 private const val V4_TREND_MIN_TRANSITIONS = 2
@@ -454,6 +460,7 @@ object OpportunityEngine {
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
         OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
         -> CONTINUOUS_AVOID_BELOW_SCORE
     }
 
@@ -465,6 +472,7 @@ object OpportunityEngine {
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
         OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
         -> CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
     }
 
@@ -590,6 +598,7 @@ object OpportunityEngine {
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks, timeseries)
+            OpportunityScoringModel.AggressiveV5 -> aggressiveV5FundamentalsScore(detail, sectorBenchmarks, timeseries)
         }
         var technical = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary).toEvidence()
@@ -597,6 +606,7 @@ object OpportunityEngine {
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
             OpportunityScoringModel.AggressiveV3,
             OpportunityScoringModel.AggressiveV4,
+            OpportunityScoringModel.AggressiveV5,
             -> aggressiveV3TechnicalScore(summary)
         }
         var forecast = when (model) {
@@ -604,7 +614,10 @@ object OpportunityEngine {
             OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
-            OpportunityScoringModel.AggressiveV4 -> aggressiveV4ForecastScore(detail, analysis)
+            // V5 inherits V4's street forecast term untouched; its deltas live in fundamentals.
+            OpportunityScoringModel.AggressiveV4,
+            OpportunityScoringModel.AggressiveV5,
+            -> aggressiveV4ForecastScore(detail, analysis)
         }
         var fundamentalsScore = fundamentals.score
         var fundamentalsSignals = fundamentals.signals
@@ -767,7 +780,9 @@ object OpportunityEngine {
          * median rather than the mean — `present` holds two to four values, which is too few to name
          * an outlier in, and `sum / n` is not a centre this project computes.
          */
-        OpportunityScoringModel.AggressiveV4 -> {
+        OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
+        -> {
             var reading = v4AgreementReading(fundamentals, technical, forecast, regime)
             if (reading == null) {
                 0
@@ -1432,6 +1447,103 @@ object OpportunityEngine {
     }
 
     /**
+     * V5's fundamentals bucket: V4's terms with its two documented defects refused.
+     *
+     * Growth runs [addV5Growth] — same trend/pulse split, but a pulse whose latest filed annual
+     * year is a loss is refused rather than scored against stale profit-year pairs. The balance
+     * sheet runs [addV5BalanceSheet] — the industrial leverage vote only fires for a row the
+     * class policy actually classifies as operating; an unclassified row skips it and flags why.
+     * Every other term is V4's own, which the parity test pins.
+     */
+    internal fun aggressiveV5FundamentalsScore(
+        detail: SymbolDetail,
+        sectorBenchmarks: SectorBenchmarks?,
+        timeseries: FundamentalTimeseries? = null,
+    ): BucketEvidence {
+        var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
+        var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
+
+        val yieldVoted = addCashFlowVote(acc, fundamentals)
+        addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
+        addV5Growth(acc, fundamentals, timeseries)
+        addV5BalanceSheet(
+            acc,
+            fundamentals,
+            sectorBenchmarks?.netDebtToEbitdaHundredths,
+        )
+        addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
+        addShareCountChange(acc, timeseries)
+        addCyclePeak(acc, fundamentals, timeseries)
+
+        return acc.toEvidence()
+    }
+
+    /**
+     * V4's growth split plus one refusal.
+     *
+     * `pulseGrowthBps` already refuses tiny EPS and rates foreign to the annual net-income
+     * series — but that series loses its loss years to [positiveLevelTransitions], so a
+     * perpetual loss-maker can clear the foreign check against nothing or against stale profit
+     * pairs. V5 asks the extra question first: does the latest filed year itself show profit?
+     * A no refuses the pulse and names the reason in the signals.
+     */
+    private fun addV5Growth(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var trendBps = trendGrowthBps(timeseries)
+        var pulseBps = pulseGrowthBps(fundamentals, timeseries)
+        if (pulseBps != null && !latestAnnualNetIncomePositive(timeseries)) {
+            pulseBps = null
+            acc.flag(V5_PULSE_REFUSED_LABEL)
+        }
+        var trendRamp = trendBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        var pulseRamp = pulseBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        if (trendRamp != null && trendBps != null) {
+            acc.add(V4_FUND_TREND_WEIGHT, trendRamp, "Trend", trendBps)
+        }
+        if (pulseRamp != null && pulseBps != null) {
+            acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
+        }
+        if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
+            acc.flag("Pulse≠Trend")
+        }
+        if (earningsContamination(timeseries).latestYearContaminated) {
+            acc.flag(EARNINGS_CHARGE_LABEL)
+        }
+    }
+
+    /** The latest filed annual year must itself be profitable to corroborate a quarter rate. */
+    private fun latestAnnualNetIncomePositive(timeseries: FundamentalTimeseries?): Boolean {
+        var latest = timeseries?.netIncome?.maxByOrNull { it.asOfDate } ?: return false
+        return latest.value.isFinite() && latest.value > 0.0
+    }
+
+    /**
+     * V5's leverage gate: fail closed on an unknown class.
+     *
+     * Financial services skip exactly as V4 does — deposits and float are the wrong input. An
+     * operating row takes the same three-input vote. Anything the class policy cannot place gets
+     * no vote at all plus a flag, because industrial bands applied to an unknown balance sheet
+     * are a guess wearing a number.
+     */
+    private fun addV5BalanceSheet(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+    ) {
+        when (FinancialClassPolicy.classify(fundamentals)) {
+            BusinessClass.FinancialServices -> return
+            BusinessClass.OperatingNonFinancial ->
+                addIndustrialLeverageVote(acc, fundamentals, sectorNetDebtToEbitdaHundredths)
+            BusinessClass.Unclassified, BusinessClass.NotEligible ->
+                acc.flag(V5_CLASS_UNKNOWN_LABEL)
+        }
+    }
+
+    /**
      * Marks a name whose latest earnings sit at the top of the only history there is, in an
      * industry the beta policy already calls through-cycle.
      *
@@ -1708,6 +1820,15 @@ object OpportunityEngine {
         financialServices: Boolean = false,
     ) {
         if (financialServices) return
+        addIndustrialLeverageVote(acc, fundamentals, sectorNetDebtToEbitdaHundredths)
+    }
+
+    /** The three-input leverage vote V4 and V5's operating rows share. */
+    private fun addIndustrialLeverageVote(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+    ) {
         var leverage = netDebtToEbitdaOf(fundamentals)
         if (leverage != null) {
             var centre = sectorNetDebtToEbitdaHundredths?.toDouble()

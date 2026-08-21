@@ -321,11 +321,14 @@ class MarketDimensionUiTest {
 
     /** No other model measures agreement, so no other model may claim a reading of it. */
     @Test
-    fun only_v4_reports_an_agreement_line() {
+    fun the_agreement_models_report_an_agreement_line() {
         var row = agreementRow(20, 20, 20, 20, final = 45)
 
         assertEquals(
-            List(OpportunityScoringModel.entries.size) { OpportunityScoringModel.entries[it] == V4 },
+            List(OpportunityScoringModel.entries.size) { entries ->
+                val model = OpportunityScoringModel.entries[entries]
+                model == V4 || model == OpportunityScoringModel.AggressiveV5
+            },
             OpportunityScoringModel.entries.map { v4AgreementLine(row, it) != null },
         )
     }
