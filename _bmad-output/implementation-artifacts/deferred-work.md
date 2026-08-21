@@ -45,3 +45,9 @@ Source: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuati
   summary: Make legacy Windows cost-of-equity resolution return a typed refusal on extreme fixed-point rate inputs.
   status: resolved 2026-07-31
   evidence: `dcf_model::resolve_cost_of_equity` now uses checked integer arithmetic and returns typed invalid-market/arithmetic-overflow/out-of-range failures; `cost_of_equity_extremes_refuse_instead_of_saturating` covers the boundary.
+
+## Deferred from: code review (2026-08-21)
+
+- Pulse corroboration on thin/loss histories [medium] — positiveLevelTransitions drops loss years, so perpetual loss-makers now score an uncorroborated quarter EPS rate, stale profit-year pairs (2018-2020) can validate a current quarter, and isForeignTo is inert below three transitions. Old garbage math refused; new math accepts. Needs a stated corroboration policy (accept-unmarked vs refuse vs flag), which is a product call.
+- Fail-open unknown sectorKey in FinancialClassPolicy [medium] — a bank whose assetProfile fails to parse carries null sector key and scores as a levered industrial. KDoc documents the choice; repo canon prefers refuse-with-reason. Needs a policy decision before changing.
+- replayScreen task references untracked ScreenReplayKt sources [low] — pre-existing branch hunk that rode into the reviewed diff; the Gradle task fails on a clean checkout until core/src/main/kotlin/com/discountscreener/core/replay/ is committed.

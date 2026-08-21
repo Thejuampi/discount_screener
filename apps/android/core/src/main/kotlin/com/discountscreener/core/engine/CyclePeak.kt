@@ -125,8 +125,13 @@ private fun revenueRegime(timeseries: FundamentalTimeseries?, maxYears: Int): Dr
     return classifyDriverRegime(growths, emptyList())
 }
 
-private fun annualGrowthsBps(series: List<AnnualReportedValue>, maxYears: Int): List<Int> = series
-    .filter { it.value > 0.0 && it.value.isFinite() }
-    .sortedBy { it.asOfDate }
-    .takeLast(maxYears)
-    .zipWithNext { previous, latest -> ((latest.value / previous.value - 1.0) * 10_000.0).toInt() }
+/**
+ * Annual revenue moves in bps, one per adjacent pair of positive-level fiscal years.
+ *
+ * The population rules live in [positiveLevelTransitions]. A run whose every transition spans a
+ * gap has no annual rates, so it reports no regime rather than stamping one from multi-year moves
+ * wearing a year's label.
+ */
+private fun annualGrowthsBps(series: List<AnnualReportedValue>, maxYears: Int): List<Int> =
+    positiveLevelTransitions(series, maxYears)
+        .map { (previous, latest) -> ((latest / previous - 1.0) * 10_000.0).toInt() }

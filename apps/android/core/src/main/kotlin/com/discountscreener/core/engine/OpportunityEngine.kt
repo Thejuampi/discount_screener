@@ -257,6 +257,16 @@ private const val V4_FUND_GROWTH_UPPER_BPS = V3_FUND_GROWTH_UPPER_BPS
 /** Below this trailing EPS, Yahoo quarter YoY has no usable base. Ten cents is in. */
 private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
 
+/**
+ * The smallest gap between Trend and Pulse that this engine calls a conflict.
+ *
+ * The old test compared ramp signs, and the shared band's midpoint sits at +5% growth — so +6%
+ * revenue against +4% EPS flagged, while two readings of a collapsing business on the same side
+ * of the midpoint did not. Ten points of growth is the smallest disagreement that says the two
+ * series describe different businesses; anything under it is noise around the middle of the band.
+ */
+private const val V4_GROWTH_CONFLICT_BPS = 1_000
+
 /** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
 private const val V4_TREND_MAX_YEARS = 5
 private const val V4_TREND_MIN_TRANSITIONS = 2
@@ -1404,12 +1414,17 @@ object OpportunityEngine {
         var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
 
-        addCashFlowVote(acc, fundamentals)
+        val yieldVoted = addCashFlowVote(acc, fundamentals)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
         addV4Growth(acc, fundamentals, timeseries)
-        addV4BalanceSheet(acc, fundamentals, sectorBenchmarks?.netDebtToEbitdaHundredths)
+        addV4BalanceSheet(
+            acc,
+            fundamentals,
+            sectorBenchmarks?.netDebtToEbitdaHundredths,
+            financialServices = FinancialClassPolicy.isFinancialServices(fundamentals),
+        )
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
-        addCashConversion(acc, fundamentals)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
         addShareCountChange(acc, timeseries)
         addCyclePeak(acc, fundamentals, timeseries)
 
@@ -1446,14 +1461,21 @@ object OpportunityEngine {
      *
      * A single point is not a change and contributes nothing rather than zero: the pair is what
      * carries the fact, and one point cannot say which way it moved. Both providers sort ascending
-     * by `asOfDate`, so the last two entries are the most recent pair.
+     * by `asOfDate`, so the last two entries are the most recent pair — and the pair must be two
+     * adjacent fiscal years. A series with a missing year would otherwise print a multi-year move
+     * as one annual rate, and a stale pair would report a change that ended years ago as if it
+     * were current; the adjacency gate refuses both rather than misdating them.
      */
     private fun addShareCountChange(acc: EvidenceAccumulator, timeseries: FundamentalTimeseries?) {
-        var series = timeseries?.dilutedAverageShares?.filter { it.value > 0.0 } ?: return
+        var series = timeseries?.dilutedAverageShares
+            ?.filter { it.value.isFinite() && it.value > 0.0 }
+            ?.sortedBy { it.asOfDate }
+            ?: return
         if (series.size < 2) return
-        var previous = series[series.size - 2].value
-        var latest = series[series.size - 1].value
-        var changeBps = (latest - previous) / previous * BASIS_POINTS_PER_UNIT
+        var previous = series[series.size - 2]
+        var latest = series[series.size - 1]
+        if (!areConsecutiveFiscalYears(previous, latest)) return
+        var changeBps = (latest.value - previous.value) / previous.value * BASIS_POINTS_PER_UNIT
         acc.add(
             V4_FUND_SHARE_COUNT_WEIGHT,
             -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
@@ -1519,14 +1541,21 @@ object OpportunityEngine {
     // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
     // ----------------------------------------------------------------------------------
 
-    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF. */
-    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF.
+     *
+     * Returns true when the vote spoke through the FCF **yield** — FCF over a known market cap —
+     * because that is the one variant whose dollars [addCashConversion] would re-read. The single
+     * source of that condition lives here; a second hand-written copy beside the branch it mirrors
+     * is how the two drift apart.
+     */
+    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot): Boolean {
         val fcfDollars = fundamentals.freeCashFlowDollars
         val marketCapDollars = fundamentals.marketCapDollars
         when {
             fcfDollars != null && marketCapDollars != null && marketCapDollars > 0L -> {
                 val yieldFraction = fcfDollars.toDouble() / marketCapDollars.toDouble()
                 acc.add(V3_FUND_FCF_WEIGHT, smoothRamp(yieldFraction, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER), "FCFy")
+                return true
             }
             fcfDollars != null -> {
                 acc.add(V3_FUND_FCF_WEIGHT, if (fcfDollars > 0L) 1.0 else -1.0, "FCF")
@@ -1538,6 +1567,7 @@ object OpportunityEngine {
                 }
             }
         }
+        return false
     }
 
     /**
@@ -1608,7 +1638,7 @@ object OpportunityEngine {
         if (pulseRamp != null && pulseBps != null) {
             acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
         }
-        if (trendRamp != null && pulseRamp != null && trendRamp * pulseRamp < 0.0) {
+        if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
             acc.flag("Pulse≠Trend")
         }
         // Both readings cross the last filed year, so a write-down inside it moves them both. The
@@ -1626,37 +1656,33 @@ object OpportunityEngine {
         var growthBps = fundamentals.earningsGrowthBps ?: return null
         var epsCents = fundamentals.trailingEpsCents ?: return null
         if (abs(epsCents) < V4_PULSE_MIN_ABS_EPS_CENTS) return null
-        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty(), requirePositiveLevel = false)
+        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty())
         if (isForeignTo(growthBps.toDouble(), annualRates.map { it.toDouble() })) return null
         return growthBps
     }
 
     private fun trendGrowthBps(timeseries: FundamentalTimeseries?): Int? {
-        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty(), requirePositiveLevel = true)
+        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty())
         if (rates.size < V4_TREND_MIN_TRANSITIONS) return null
         return medianOf(rates.map { it.toDouble() })?.roundToInt()
     }
 
-    private fun recentGrowthRatesBps(
-        series: List<AnnualReportedValue>,
-        requirePositiveLevel: Boolean,
-    ): List<Int> {
-        var usable = series
-            .filter { it.value.isFinite() }
-            .filter { if (requirePositiveLevel) it.value > 0.0 else it.value != 0.0 }
-            .sortedBy { it.asOfDate }
-            .takeLast(V4_TREND_MAX_YEARS)
-        if (usable.size < V4_TREND_MIN_TRANSITIONS + 1) return emptyList()
-        return usable.zipWithNext { previous, latest ->
-            if (previous.value == 0.0) {
-                null
-            } else {
-                ((latest.value / previous.value - 1.0) * BASIS_POINTS_PER_UNIT)
+    /**
+     * Annual YoY rates in bps, one per adjacent pair of positive-level fiscal years.
+     *
+     * The population rules live in [positiveLevelTransitions]: a pair that skips a year is not an
+     * annual rate, a negative base inverts the ratio's sign, and a loss-to-profit crossing prints
+     * nonsense. Revenue and net income take the same path — revenue arrives positive-filtered
+     * anyway, and net income needs the sign rule more than it needs the old negative-base rates.
+     */
+    private fun recentGrowthRatesBps(series: List<AnnualReportedValue>): List<Int> =
+        positiveLevelTransitions(series, maxYears = V4_TREND_MAX_YEARS)
+            .map { (previous, latest) ->
+                ((latest / previous - 1.0) * BASIS_POINTS_PER_UNIT)
                     .takeIf { it.isFinite() }
                     ?.roundToInt()
             }
-        }.filterNotNull()
-    }
+            .filterNotNull()
 
     /**
      * V4's leverage vote: net debt against a year of EBITDA, read against the sector when the
@@ -1665,6 +1691,10 @@ object OpportunityEngine {
      * V3 keeps [addBalanceSheet] and its book debt/equity. The split is the point — V4 is the model
      * still in beta, and the two must be able to disagree about leverage without one dragging the
      * other.
+     *
+     * A financial-services row takes no vote at all. Its debt line is deposits or float — the raw
+     * material, not borrowed money — and EBITDA is not a capacity measure for it, so every input
+     * this term can read is the wrong input. See [FinancialClassPolicy].
      *
      * Three inputs in order of strength, each labelled so the list says which one spoke:
      * `ND/EBITDA` from dollars, `D/E` from the mis-scaled ratio, `Bal` from a bare cash-versus-debt
@@ -1675,7 +1705,9 @@ object OpportunityEngine {
         acc: EvidenceAccumulator,
         fundamentals: FundamentalSnapshot,
         sectorNetDebtToEbitdaHundredths: Int?,
+        financialServices: Boolean = false,
     ) {
+        if (financialServices) return
         var leverage = netDebtToEbitdaOf(fundamentals)
         if (leverage != null) {
             var centre = sectorNetDebtToEbitdaHundredths?.toDouble()
@@ -1713,7 +1745,14 @@ object OpportunityEngine {
     }
 
     /** Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign). */
-    private fun addCashConversion(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    private fun addCashConversion(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        yieldVoted: Boolean = false,
+    ) {
+        // One fact family, one vote. After a yield vote the conversion ratio re-reads the same
+        // free-cash-flow dollars; counting both would let one number speak twice in this bucket.
+        if (yieldVoted) return
         val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
