@@ -70,19 +70,19 @@ class ScreenDataProjectionEngineTest {
 
     @Test
     fun tracked_row_omits_gap_when_judgment_has_no_primary() {
-        var result = projectDisputedNamedValuation(includeCandidate = false)
+        var result = projectValuationWithoutPrimary(includeCandidate = false)
         assertEquals(null, result.trackedRows.single().gapBps)
     }
 
     @Test
     fun opportunity_row_omits_gap_when_judgment_has_no_primary() {
-        var result = projectDisputedNamedValuation(includeCandidate = true)
+        var result = projectValuationWithoutPrimary(includeCandidate = true)
         assertEquals(null, result.opportunityRows.single().gapBps)
     }
 
     @Test
     fun selected_detail_drops_named_anchor_when_judgment_has_no_primary() {
-        var result = projectDisputedNamedValuation(includeCandidate = false)
+        var result = projectValuationWithoutPrimary(includeCandidate = false)
         assertEquals(null, result.selectedDetail?.fairValueAnchor?.valueCents)
     }
 
@@ -584,25 +584,25 @@ class ScreenDataProjectionEngineTest {
         confidence = ConfidenceBand.High,
     )
 
-    private fun projectDisputedNamedValuation(includeCandidate: Boolean): ProjectedDashboardData {
+    /**
+     * No analyst covers this name and our own fan is too wide to be usable, so no family can
+     * name a primary. A wide gap between the two families is not this case: the street keeps
+     * the primary there.
+     */
+    private fun projectValuationWithoutPrimary(includeCandidate: Boolean): ProjectedDashboardData {
         var symbol = "DISP1"
         var detail = detail(
             symbol = symbol,
             marketPriceCents = 10_000L,
             intrinsicValueCents = 12_000L,
             confidence = ConfidenceBand.High,
-            weightedExternalSignalFairValueCents = 25_001L,
-            weightedAnalystCount = 8,
-            externalSignalLowFairValueCents = 20_000L,
-            externalSignalHighFairValueCents = 30_000L,
-            analystOpinionCount = 8,
         )
         var analysis = dcf(
             source = DcfSource.YahooFinance,
             resolverState = ResolverState.Selected,
-            bearIntrinsicValueCents = 14_000L,
-            baseIntrinsicValueCents = 14_999L,
-            bullIntrinsicValueCents = 16_000L,
+            bearIntrinsicValueCents = 1_330L,
+            baseIntrinsicValueCents = 52_400L,
+            bullIntrinsicValueCents = 382_000L,
         ).copy(
             businessClass = BusinessClass.OperatingNonFinancial,
             model = ValuationModel.FcffWacc,
@@ -793,18 +793,18 @@ class ScreenDataProjectionEngineTest {
         marketPriceCents = 10_000L,
         fairValueCents = 12_500L,
         upsideBps = 2_500,
-        displayLabel = ProjectedFairValueLabels.MODEL_FAIR_VALUE,
-        compactLabel = "FCFF DCF",
-        sourceLabel = "FCFF DCF base - Yahoo Finance",
-        role = ProjectedFairValueRole.DcfBaseModel,
+        displayLabel = ProjectedFairValueLabels.ANALYST_FAIR_VALUE,
+        compactLabel = "Analyst weighted",
+        sourceLabel = "Weighted target",
+        role = ProjectedFairValueRole.AnalystWeightedTarget,
         provenanceState = ProjectedProvenanceState.Live,
         confidence = ProjectedConfidence.High,
         freshness = ProjectedRowFreshness.Updated,
-        trustKind = ProjectedTrustSignalKind.ModelValue,
-        decision = ProjectedRowDecision.Watch,
-        canPopulateAnalystHistory = false,
+        trustKind = null,
+        decision = ProjectedRowDecision.Act,
+        canPopulateAnalystHistory = true,
         detailFairValueCents = 12_500L,
-        detailSourceLabel = "FCFF DCF base - Yahoo Finance",
+        detailSourceLabel = "Weighted target",
         evLowUpsideBps = 1_000,
         evHighUpsideBps = 6_000,
         providerCategory = ProjectedProviderCategory.Live,

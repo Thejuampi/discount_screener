@@ -46,6 +46,16 @@ class OurPriceIsSecondaryTest {
     }
 
     @Test
+    fun the_analyst_range_and_our_fan_both_stay_on_the_card() {
+        var ui = presentValuationJudgment(judgment(horizonPriceCents = 36_274L))
+
+        assertEquals(
+            listOf("FCFF DCF $326 / $363 / $399", "Analyst range $18.5 / $21.0 / $21.5"),
+            judgmentReferenceLines(ui),
+        )
+    }
+
+    @Test
     fun the_note_says_the_score_ignores_our_price() {
         assertEquals("Reference only. Not in the score.", HORIZON_PRICE_NOTE)
     }
@@ -63,8 +73,12 @@ class OurPriceIsSecondaryTest {
         reasonCodes = listOf(ValuationJudgmentReason.StreetPrimary),
         policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
         identityModelLabel = "FCFF DCF",
+        identityBearCents = horizonPriceCents?.let { it * 9L / 10L },
         identityBaseCents = horizonPriceCents,
+        identityBullCents = horizonPriceCents?.let { it * 11L / 10L },
+        streetLowCents = 1_850L,
         streetBaseCents = 2_100L,
+        streetHighCents = 2_150L,
         lastPriceCents = 1_252L,
         horizonPriceCents = horizonPriceCents,
         horizonDays = 90,

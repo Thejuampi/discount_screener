@@ -21,7 +21,7 @@ class ValuationJudgmentPolicyTest {
     }
 
     @Test
-    fun `unclassified with complete street stays unavailable and keeps street`() {
+    fun `a class our model refuses does not hide a complete street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = refused(BusinessClass.Unclassified, ValuationJudgmentReason.Unclassified),
@@ -29,20 +29,20 @@ class ValuationJudgmentPolicyTest {
             ),
         )
         assertEquals(
-            Stance(ValuationJudgmentStatus.Unavailable, null, streetPresent = true),
+            Stance(ValuationJudgmentStatus.Street, 90_000L, streetPresent = true),
             Stance(judgment.status, judgment.primaryCents, judgment.street != null),
         )
     }
 
     @Test
-    fun `not eligible with complete street stays unavailable`() {
+    fun `a class not eligible for our model still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = refused(BusinessClass.NotEligible, ValuationJudgmentReason.NotEligible),
                 street = street(baseCents = 90_000L),
             ),
         )
-        assertNull(judgment.primaryCents)
+        assertEquals(90_000L, judgment.primaryCents)
     }
 
     @Test
@@ -94,18 +94,18 @@ class ValuationJudgmentPolicyTest {
     }
 
     @Test
-    fun `solid identity aligned at 2500 stays identity`() {
+    fun `a solid model beside the street does not take the primary`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 700_000L)),
                 street = street(baseCents = 900_000L),
             ),
         )
-        assertEquals(ValuationJudgmentStatus.Identity, judgment.status)
+        assertEquals(ValuationJudgmentStatus.Street, judgment.status)
     }
 
     @Test
-    fun `solid pair at 2501 is tension without primary`() {
+    fun `a gap of 2501 bps still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 17_499L)),
@@ -113,35 +113,38 @@ class ValuationJudgmentPolicyTest {
             ),
         )
         assertEquals(
-            Stance(ValuationJudgmentStatus.Tension, null, streetPresent = true),
+            Stance(ValuationJudgmentStatus.Street, 22_501L, streetPresent = true),
             Stance(judgment.status, judgment.primaryCents, judgment.street != null),
         )
     }
 
     @Test
-    fun `solid pair at 5000 is tension not disputed`() {
+    fun `a gap of 5000 bps still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 15_000L)),
                 street = street(baseCents = 25_000L),
             ),
         )
-        assertEquals(ValuationJudgmentStatus.Tension, judgment.status)
+        assertEquals(ValuationJudgmentStatus.Street, judgment.status)
     }
 
     @Test
-    fun `solid pair at 5001 is disputed without primary`() {
+    fun `a gap above 5000 bps still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 14_999L)),
                 street = street(baseCents = 25_001L),
             ),
         )
-        assertEquals(ValuationJudgmentStatus.Disputed, judgment.status)
+        assertEquals(
+            Stance(ValuationJudgmentStatus.Street, 25_001L, streetPresent = true),
+            Stance(judgment.status, judgment.primaryCents, judgment.street != null),
+        )
     }
 
     @Test
-    fun `disputed keeps both series`() {
+    fun `a wide gap keeps both series`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 14_999L)),
@@ -198,14 +201,17 @@ class ValuationJudgmentPolicyTest {
     }
 
     @Test
-    fun `incomparable currency is not disputed`() {
+    fun `a currency our model cannot match still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(fcff(base = 100_000L), currencyCode = "USD"),
                 street = street(baseCents = 100_000L, currencyCode = "EUR"),
             ),
         )
-        assertTrue(judgment.status != ValuationJudgmentStatus.Disputed && judgment.primaryCents == null)
+        assertEquals(
+            Stance(ValuationJudgmentStatus.Street, 100_000L, streetPresent = true),
+            Stance(judgment.status, judgment.primaryCents, judgment.street != null),
+        )
     }
 
     @Test
@@ -264,7 +270,7 @@ class ValuationJudgmentPolicyTest {
     }
 
     @Test
-    fun `ci-like thin residual with street gap above 5000 stays disputed`() {
+    fun `a ci-like thin residual far from the street still names the street`() {
         var judgment = ValuationJudgmentPolicy.judge(
             request(
                 identity = computed(residualFan(16_622L, 17_768L, 18_651L)),
@@ -272,7 +278,7 @@ class ValuationJudgmentPolicyTest {
             ),
         )
         assertEquals(
-            Stance(ValuationJudgmentStatus.Disputed, null, streetPresent = true),
+            Stance(ValuationJudgmentStatus.Street, 34_300L, streetPresent = true),
             Stance(judgment.status, judgment.primaryCents, judgment.street != null),
         )
     }

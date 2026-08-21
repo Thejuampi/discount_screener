@@ -25,12 +25,12 @@ class ValuationJudgmentAssemblerTest {
     }
 
     @Test
-    fun `unclassified with complete street stays unavailable`() {
+    fun `an unclassified name still names its complete street`() {
         var judgment = ValuationJudgmentAssembler.assemble(
             completeStreet("ETF1"),
             dcfAnalysis = null,
         )
-        assertNull(judgment.primaryCents)
+        assertEquals(ValuationJudgmentStatus.Street, judgment.status)
     }
 
     @Test
