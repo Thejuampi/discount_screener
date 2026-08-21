@@ -32,6 +32,7 @@ import com.discountscreener.android.data.market.DailyCandleSink
 import com.discountscreener.android.data.market.DailyCandleSource
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import kotlin.math.abs
@@ -281,6 +282,20 @@ open class SQLiteStateStore(
         }
         if (oldVersion < 9 && newVersion >= 9) {
             createSymbolNoteSchema(db)
+        }
+        if (oldVersion < 10 && newVersion >= 10) {
+            // A database that reached v8 through the normal path carries score_journal, so the
+            // ALTER applies. A bare version-stamped file (crash recovery, partial creation) may
+            // not have the table at all — it gets the full current schema instead of a crash.
+            var hasJournal = db.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'score_journal'",
+                emptyArray(),
+            ).use { it.moveToFirst() }
+            if (hasJournal) {
+                db.execSQL("ALTER TABLE score_journal ADD COLUMN factors_json TEXT")
+            } else {
+                createScoreJournalSchema(db)
+            }
         }
     }
 
@@ -1072,6 +1087,7 @@ open class SQLiteStateStore(
                 composite_score INTEGER NOT NULL,
                 composite_score_base INTEGER NOT NULL,
                 market_price_cents INTEGER NOT NULL,
+                factors_json TEXT,
                 PRIMARY KEY (symbol, scoring_model, scored_at)
             )
             """.trimIndent(),
@@ -1997,6 +2013,7 @@ open class SQLiteStateStore(
                         put("composite_score", row.compositeScore)
                         put("composite_score_base", row.compositeScoreBase)
                         put("market_price_cents", row.marketPriceCents)
+                        put("factors_json", row.factors?.let(json::encodeToString))
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
@@ -2021,7 +2038,7 @@ open class SQLiteStateStore(
             """
             SELECT symbol, scoring_model, scored_at, fundamentals_score, technical_score,
                    forecast_score, regime_score, composite_score, composite_score_base,
-                   market_price_cents
+                   market_price_cents, factors_json
             FROM score_journal
             $where
             ORDER BY scored_at, scoring_model, symbol
@@ -2042,6 +2059,8 @@ open class SQLiteStateStore(
                             compositeScore = cursor.getInt(7),
                             compositeScoreBase = cursor.getInt(8),
                             marketPriceCents = cursor.getLong(9),
+                            factors = cursor.getString(10)
+                                ?.let { runCatching { json.decodeFromString<JournalFactors>(it) }.getOrNull() },
                         ),
                     )
                 }
@@ -2312,7 +2331,7 @@ open class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 9
+        private const val SQLITE_SCHEMA_VERSION = 10
 
         /**
          * The `chart_range` value the retrospective's daily bars are stored under.

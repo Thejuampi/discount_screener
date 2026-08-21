@@ -1,11 +1,17 @@
 package com.discountscreener.android.data.persistence
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import androidx.test.core.app.ApplicationProvider
+import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
+import com.discountscreener.core.model.ScoreFactor
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -85,6 +91,77 @@ class ScoreJournalStoreTest {
         append(listOf(row(regime = null)))
 
         assertEquals(listOf(null), load().map { it.regimeScore })
+    }
+
+    /**
+     * The terms are the point of the point: bucket scores say which model won, the terms say why,
+     * and only the terms can be put on trial one by one. They must survive a cold start with their
+     * rates intact.
+     */
+    @Test
+    fun factors_survive_a_cold_start_with_their_rates() = runTest {
+        var withFactors = row().copy(
+            factors = JournalFactors(
+                fundamentals = listOf(ScoreFactor("FCFy", "FCFy++", 8, inputBps = 610)),
+                technical = listOf(ScoreFactor("RSI", "RSI+", 4)),
+                forecast = listOf(ScoreFactor("Val", "Val-", -6, inputBps = -1_200)),
+            ),
+        )
+        append(listOf(withFactors))
+
+        assertEquals(withFactors.factors, load().single().factors)
+    }
+
+    /** Rows written before factor capture existed read as absent, never as an empty term list.
+     * Covered by [a_version_nine_journal_upgrades_and_keeps_its_rows], whose pre-upgrade AAPL row
+     * is exactly that legacy case. */
+
+    /**
+     * The upgrade path, exercised for real: a version-9 database whose journal lacks the column is
+     * opened by today's store, the ALTER runs, and both the migrated row and a fresh factor-bearing
+     * row read back correctly.
+     */
+    @Test
+    fun a_version_nine_journal_upgrades_and_keeps_its_rows() {
+        context.deleteDatabase(DB_NAME)
+        var v9 = object : SQLiteOpenHelper(context, DB_NAME, null, 9) {
+            override fun onCreate(db: SQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE score_journal (
+                        symbol TEXT NOT NULL, scoring_model TEXT NOT NULL, scored_at INTEGER NOT NULL,
+                        fundamentals_score INTEGER, technical_score INTEGER, forecast_score INTEGER,
+                        regime_score INTEGER, composite_score INTEGER NOT NULL,
+                        composite_score_base INTEGER NOT NULL, market_price_cents INTEGER NOT NULL,
+                        PRIMARY KEY (symbol, scoring_model, scored_at)
+                    )
+                    """.trimIndent(),
+                )
+            }
+
+            override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        }
+        v9.writableDatabase.execSQL(
+            """
+            INSERT INTO score_journal VALUES ('AAPL','AggressiveV4',1700000000,
+                20,22,19,18,45,40,10000)
+            """.trimIndent(),
+        )
+        v9.close()
+
+        runTest {
+            append(
+                listOf(
+                    row(symbol = "MSFT").copy(
+                        factors = JournalFactors(technical = listOf(ScoreFactor("RSI", "RSI+", 4))),
+                    ),
+                ),
+            )
+
+            var rows = load()
+            assertEquals(null, rows.first { it.symbol == "AAPL" }.factors)
+            assertNotNull(rows.first { it.symbol == "MSFT" }.factors)
+        }
     }
 
     private suspend fun append(

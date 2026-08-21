@@ -108,6 +108,7 @@ import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -634,6 +635,11 @@ class DefaultDashboardRepository(
                         compositeScore = row.compositeScore,
                         compositeScoreBase = row.compositeScoreBase,
                         marketPriceCents = row.marketPriceCents,
+                        factors = JournalFactors(
+                            fundamentals = row.fundamentalsFactors,
+                            technical = row.technicalFactors,
+                            forecast = row.forecastFactors,
+                        ),
                     )
                 },
                 retentionSeconds = SCORE_JOURNAL_RETENTION_SECONDS,
