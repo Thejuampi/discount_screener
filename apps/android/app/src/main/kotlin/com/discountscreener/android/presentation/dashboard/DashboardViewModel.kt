@@ -743,6 +743,7 @@ class DashboardViewModel(
         )
         viewModelScope.launch {
             try {
+                renderDetailOnFile(symbol)
                 val snapshot = selectDashboardSymbol(
                     symbol,
                     currentFilter(),
@@ -931,9 +932,33 @@ class DashboardViewModel(
             DetailSourceTab.Tracked -> visibleTrackedRows(state).map { it.symbol }
         }
 
+    /**
+     * Draws the symbol from what is already on file, before anything is fetched for it.
+     *
+     * [selectDashboardSymbol] reaches the provider, and a provider that is refusing calls holds
+     * every one of them: measured on a device on 2026-08-20, one refused call every eight seconds
+     * for eight minutes without a break, and the detail screen stayed empty for all of it. What
+     * the app filed for this symbol is on disk and costs no network, so the screen is drawn from
+     * that first and drawn again when the fetch lands. A symbol with nothing on file draws nothing
+     * and loses nothing, which is the screen this replaces.
+     */
+    private suspend fun renderDetailOnFile(symbol: String) {
+        var route = _state.value.detailRoute ?: return
+        if (route.symbol != symbol) return
+        render(
+            getDashboardSnapshot(
+                currentFilter(),
+                symbol,
+                route.chartRange,
+                _state.value.opportunityScoringModel,
+            ),
+        )
+    }
+
     private fun loadDetailData(symbol: String) {
         viewModelScope.launch {
             try {
+                renderDetailOnFile(symbol)
                 val snapshot = selectDashboardSymbol(
                     symbol,
                     currentFilter(),

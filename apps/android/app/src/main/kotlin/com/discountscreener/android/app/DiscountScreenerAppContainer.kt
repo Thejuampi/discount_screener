@@ -3,6 +3,7 @@ package com.discountscreener.android.app
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import java.io.File
+import com.discountscreener.android.data.capture.ScreenCaptureSink
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.data.profile.ProfileCatalog
@@ -114,6 +115,24 @@ class DiscountScreenerAppContainer(context: Context) {
             logger = AndroidAppLogger(),
             defaultProfile = startupProfile,
             marketParamsSource = marketParamsSource,
+            projectionCapture = screenCaptureSink::capture,
+        )
+    }
+
+    /**
+     * Writes the screen input to a place `adb pull` can reach, when it is armed.
+     *
+     * External files, because the app's private directory needs root to read on a release device
+     * and the whole point is to get the file onto a workstation. It stays idle until armed, so a
+     * user who never arms it pays one file check per snapshot.
+     */
+    private val screenCaptureSink by lazy {
+        ScreenCaptureSink(
+            directory = File(
+                appContext.getExternalFilesDir(null) ?: appContext.filesDir,
+                ScreenCaptureSink.DIRECTORY_NAME,
+            ).apply { mkdirs() },
+            logger = AndroidAppLogger(),
         )
     }
 

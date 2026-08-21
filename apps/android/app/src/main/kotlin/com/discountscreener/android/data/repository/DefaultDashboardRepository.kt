@@ -320,6 +320,13 @@ class DefaultDashboardRepository(
      * Production leaves this null.
      */
     private val beforeSnapshotLocked: (suspend () -> Unit)? = null,
+    /**
+     * Offered every screen input, so it can be replayed off the device.
+     *
+     * The repository does not know what the sink does with it. Production wires a file writer that
+     * stays asleep until it is armed; tests leave this null.
+     */
+    private val projectionCapture: ((ScreenDataProjectionRequest) -> Unit)? = null,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
@@ -1788,6 +1795,7 @@ class DefaultDashboardRepository(
             issues = issueRecords,
             issueMessagesBySymbol = trackedIssueMessages,
         ) }
+        projectionCapture?.invoke(projectionRequest)
         var detailNotice: DashboardNotice? = null
         var estimatesNotice: DashboardNotice? = null
         var screenDataResult = timedPart("snapshot.project") { screenDataProjectionEngine.project(

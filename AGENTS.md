@@ -174,6 +174,36 @@ Windows also accepts `$env:DS_UNIVERSE_PROFILE = "qa"` then `npm run tauri:dev`,
 
 Checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).
 
+### Screen replay — experiment without the emulator (Android)
+
+**Use this while tuning models.** Every number the Android dashboard draws comes out of one pure
+function, `ScreenDataProjectionEngine.project(request)`, over one serializable input. Capture the
+input once, then replay it on the JVM as many times as the experiment needs. No device, no network,
+no database, and about two seconds per reading instead of an emulator boot.
+
+1. **Capture** (needs a device, once per set of inputs). Arm the sink, let the app draw the screen,
+   pull the file:
+   ```
+   adb shell touch /sdcard/Android/data/com.discountscreener.android/files/screen-capture/arm
+   adb pull /sdcard/Android/data/com.discountscreener.android/files/screen-capture/request.json
+   ```
+   The sink writes one file and disarms itself, so a run nobody armed costs one `exists()` call.
+2. **Replay** (no device), from `apps/android`:
+   ```
+   ./gradlew :core:replayScreen --args="--request=request.json"
+   ./gradlew :core:replayScreen --args="--request=request.json --format=json --out=before.json"
+   ```
+   Two engine versions over one captured file differ only by the change under test, so `before.json`
+   against `after.json` is a clean A/B of a scoring or valuation change.
+
+**What it covers.** The projection: anchors, gaps, upside, confidence, tags, detail. **What it does
+not.** Loading — governor, caches, store and provider all sit upstream of the request. Test those
+through the Robolectric repository path (`ScreenCaptureReplaysTheScreenTest`), which also holds the
+claim this tool rests on: a captured file replays into the rows the app had on screen.
+
+Capture is the only step that touches a device, and it obeys the standing rule — no live provider
+calls from a test. Replay reads a file.
+
 ### Commands and gates
 
 - Strict TDD for behavior changes: failing test → smallest green → refactor while green.

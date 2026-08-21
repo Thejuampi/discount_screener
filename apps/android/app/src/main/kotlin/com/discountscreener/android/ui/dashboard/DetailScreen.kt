@@ -1305,7 +1305,7 @@ private fun JudgmentValuationSection(
     projectedDetail: ProjectedDetailData?,
 ) {
     Text("Valuation", fontWeight = FontWeight.Bold)
-    priceSpeechLines(detail, ui).forEach { line ->
+    priceLine(detail, ui)?.let { line ->
         Text(
             text = line,
             style = MaterialTheme.typography.titleSmall,
@@ -1377,6 +1377,21 @@ private fun JudgmentValuationSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+    var ownModel = ownModelLines(ui)
+    if (ownModel.isNotEmpty()) {
+        ownModel.forEach { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            text = ui.horizonPriceNote,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     WaccAssumptionsSection(projectedDetail = projectedDetail)
     FcfDiagnosticsSection(projectedDetail = projectedDetail)
@@ -3540,12 +3555,16 @@ private fun judgmentChartReferences(
     }
 }
 
-private fun priceSpeechLines(
+private fun priceLine(
     detail: SymbolDetail,
     ui: ValuationJudgmentUi,
-): List<String> = buildList {
-    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L }
-    last?.let { add("${ui.lastPriceLabel} ${money(it)}") }
+): String? {
+    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L } ?: return null
+    return "${ui.lastPriceLabel} ${money(last)}"
+}
+
+/** Our own model. It shows small, under the anchor, and the score never reads it. */
+internal fun ownModelLines(ui: ValuationJudgmentUi): List<String> = buildList {
     ui.horizonPriceCents?.let { add("${ui.horizonPriceLabel} ${money(it)}") }
     ui.cashIdentityCents?.takeIf { it != ui.horizonPriceCents }?.let { add("${ui.cashLabel} ${money(it)}") }
 }
@@ -3567,17 +3586,17 @@ private fun judgmentReferenceLines(ui: ValuationJudgmentUi): List<String> = buil
     }
 }
 
-private fun detailHeadline(
+/**
+ * The headline names the anchor the judgment names. Our own model stays out of it: the model is
+ * experimental, so it reads as a reference line further down the card.
+ */
+internal fun detailHeadline(
     detail: SymbolDetail,
     projectedDetail: ProjectedDetailData?,
 ): String {
     var ui = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
     if (ui != null) {
         var last = ui.lastPriceCents ?: detail.marketPriceCents
-        var horizon = ui.horizonPriceCents
-        if (horizon != null) {
-            return "Price ${money(last)}  Our price ${money(horizon)}"
-        }
         if (!ui.showPrimary || ui.primaryCents == null) {
             return "Price ${money(last)}  ${ui.stanceLabel}"
         }

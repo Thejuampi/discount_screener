@@ -5,16 +5,11 @@ import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
-import com.discountscreener.android.data.remote.ProviderComponentState
-import com.discountscreener.android.data.remote.ProviderCoverage
-import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.android.domain.model.decisionTagIsCurrent
 import com.discountscreener.core.model.ChartRange
-import com.discountscreener.core.model.ExternalValuationSignal
-import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.delay
@@ -125,7 +120,7 @@ class RestoredRowKeepsItsTagTest {
         var repository = DefaultDashboardRepository(
             stateStore = store,
             profileCatalog = ProfileCatalog(context.assets),
-            yahooClient = TaggableYahoo(),
+            yahooClient = WideGapYahooClient(),
             universeCatalog = UniverseCatalog(context.assets),
             secondaryTimeseriesProvider = CountingSecProvider(),
             nowProvider = { NOW_EPOCH },
@@ -153,48 +148,6 @@ class RestoredRowKeepsItsTagTest {
         listOf(base.path, base.path + "-wal", base.path + "-shm").forEach { path -> File(path).delete() }
     }
 
-    /**
-     * An offline Yahoo whose rows can earn a tag.
-     *
-     * The shared [OfflineYahooClient] prices every name 2.5 % under its fair value with no analyst
-     * behind it, which the engine reads as GapTooSmall on Low confidence and no named primary, so
-     * every row comes out untagged whatever this test does around it. A wide gap and a full analyst
-     * range give the judgment a primary to name and give the row something to be. It does not give
-     * every row one: the judgment still refuses the names whose DCF and analyst range disagree, and
-     * that refusal is why the first test above measures the filed screen rather than assuming it.
-     */
-    private class TaggableYahoo : OfflineYahooClient(candlesPerChart = CANDLES) {
-        override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
-            var base = super.fetchSymbol(symbol)
-            var price = base.snapshot?.marketPriceCents ?: return base
-            var fair = price * FAIR_VALUE_MULTIPLE
-            return base.copy(
-                snapshot = MarketSnapshot(
-                    symbol = symbol,
-                    companyName = "$symbol Holdings",
-                    profitable = true,
-                    marketPriceCents = price,
-                    intrinsicValueCents = fair,
-                ),
-                externalSignal = ExternalValuationSignal(
-                    symbol = symbol,
-                    fairValueCents = fair,
-                    ageSeconds = 0,
-                    lowFairValueCents = fair - price / 10,
-                    highFairValueCents = fair + price / 10,
-                    analystOpinionCount = ANALYSTS,
-                    weightedFairValueCents = fair,
-                    weightedAnalystCount = ANALYSTS,
-                ),
-                coverage = ProviderCoverage(
-                    core = ProviderComponentState.Fresh,
-                    external = ProviderComponentState.Fresh,
-                    fundamentals = ProviderComponentState.Fresh,
-                ),
-            )
-        }
-    }
-
     private data class Row(val symbol: String, val freshness: RowFreshness, val tag: RowDecisionState?)
 
     private data class Restart(val filed: List<Row>, val restored: List<Row>)
@@ -202,12 +155,7 @@ class RestoredRowKeepsItsTagTest {
     private companion object {
         const val DB_NAME = "restored_row_keeps_its_tag.sqlite3"
         const val PROFILE = "qa"
-        const val CANDLES = 5
         const val NOW_EPOCH = 1_700_000_000L
-
-        /** Priced at half of fair value, so the gap gate passes and the row is worth a call. */
-        const val FAIR_VALUE_MULTIPLE = 2L
-        const val ANALYSTS = 16
         const val POLL_MILLIS = 50L
         const val DEADLINE_MILLIS = 120_000L
         const val SETTLE_MILLIS = 300L

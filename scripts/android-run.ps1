@@ -299,6 +299,66 @@ function Wait-ForBootCompletion {
     return $false
 }
 
+<#
+.SYNOPSIS
+Turns the screen on, unlocks it, and keeps it on.
+
+.DESCRIPTION
+`am start` on a sleeping device starts the activity and leaves the display black. The device also
+sleeps on its own after the screen timeout, and comes back behind the keyguard.
+
+Reported on 2026-08-20: `make android-run` and a black screen for a long time. Everything the script
+was measuring was green — the build took 41 seconds, the app was installed, launched, and had
+finished loading half a minute later — and none of it was on screen. The screen is the product. A
+run that does not put the app in front of the user has not run.
+#>
+function Enable-DeviceScreen {
+    param(
+        [string]$AdbPath,
+        [string]$Serial
+    )
+
+    & $AdbPath -s $Serial shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null
+    & $AdbPath -s $Serial shell wm dismiss-keyguard 2>$null | Out-Null
+    & $AdbPath -s $Serial shell svc power stayon true 2>$null | Out-Null
+}
+
+<#
+.SYNOPSIS
+Waits until the app owns the focused window, so "Launched" means the user can see it.
+
+.DESCRIPTION
+Returns the reason it gave up, or an empty string once the app is on screen. `am start` returns as
+soon as the activity is starting, which is before anything is drawn, so the script used to claim a
+launch it had not seen.
+#>
+function Wait-ForAppWindow {
+    param(
+        [string]$AdbPath,
+        [string]$Serial,
+        [string]$PackageName,
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $focus = ''
+    do {
+        $focus = ((& $AdbPath -s $Serial shell dumpsys window 2>$null | Out-String) -split "`n" |
+            Where-Object { $_ -match 'mCurrentFocus=' } |
+            Select-Object -First 1)
+        if ($focus -match [regex]::Escape($PackageName)) {
+            return ''
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+
+    if (-not $focus) {
+        return "no focused window after $TimeoutSeconds s"
+    }
+
+    return "the focused window is not $PackageName after $TimeoutSeconds s: $($focus.Trim())"
+}
+
 try {
 $adb = Resolve-AdbPath
 $emulator = Resolve-EmulatorPath
@@ -396,14 +456,26 @@ if ($Qa) {
     Write-Host "Keeping app data. Profile qa comes from BuildConfig, not from wiping SQLite."
 }
 
+Enable-DeviceScreen -AdbPath $adb -Serial $selectedDevice.Serial
+
 & $adb -s $selectedDevice.Serial shell am start -n com.discountscreener.android/.app.MainActivity
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+
+$windowProblem = Wait-ForAppWindow `
+    -AdbPath $adb `
+    -Serial $selectedDevice.Serial `
+    -PackageName 'com.discountscreener.android' `
+    -TimeoutSeconds 60
+if ($windowProblem) {
+    throw "The app was installed and started, and it never reached the screen: $windowProblem"
+}
+
 if ($Qa) {
-    Write-Host "Launched. Confirm UI profile chip shows QA and membership stays ≤20. Database was not cleared."
+    Write-Host "Launched and on screen. Confirm UI profile chip shows QA and membership stays ≤20. Database was not cleared."
 } else {
-    Write-Host "Launched."
+    Write-Host "Launched and on screen."
 }
 } catch {
     $message = $_.Exception.Message

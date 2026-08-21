@@ -247,6 +247,31 @@ class DashboardViewModelTest {
         assertEquals(DetailSourceTab.Tracked, route?.sourceTab)
     }
 
+    /**
+     * The screen a ticker opens on is drawn from disk, and the provider is asked after that.
+     *
+     * Reported from the device on 2026-08-20: opening a ticker took about a minute. Yahoo was
+     * refusing every call and the app was holding the next one for eight seconds, over and over,
+     * for eight minutes without a break. The detail screen waited on that fetch with nothing drawn
+     * on it, and the numbers it needed were on disk the whole time.
+     *
+     * The fetch is held open here and never answers, so a detail on screen can only have come from
+     * the file. That is the whole property: the wait belongs to the fresh numbers, and the screen
+     * does not wait with it.
+     */
+    @Test
+    fun a_ticker_is_drawn_from_file_while_its_fetch_is_still_out() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.setDetailProjection(detail("AAPL"), null)
+        var viewModel = testViewModel(repository)
+        repository.holdDetailLoads()
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals("AAPL", viewModel.state.value.detailData?.symbol)
+    }
+
     @Test
     fun back_from_detail_clears_route() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
@@ -1233,6 +1258,17 @@ class DashboardViewModelTest {
             snapshotHold?.complete(Unit)
         }
 
+        private var detailHold: CompletableDeferred<Unit>? = null
+
+        /** Holds the fetch a detail open makes, so the screen can be read while it is still out. */
+        fun holdDetailLoads() {
+            detailHold = CompletableDeferred()
+        }
+
+        fun releaseDetailLoads() {
+            detailHold?.complete(Unit)
+        }
+
         fun emitUpdate() {
             updates.value = updates.value + 1
         }
@@ -1303,6 +1339,7 @@ class DashboardViewModelTest {
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
             lastOpenedSymbol = symbol
+            detailHold?.await()
             return emptySnapshot(opportunityScoringModel).copy(
                 selectedScoreRow = fetchedScoreRows[symbol],
             )
