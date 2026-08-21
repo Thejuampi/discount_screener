@@ -68,14 +68,16 @@ class OurPriceIsSecondaryTest {
 
     private fun judgment(horizonPriceCents: Long?) = ProjectedValuationJudgment(
         status = ValuationJudgmentStatus.Street,
-        relation = AnchorRelation.Aligned,
+        relation = AnchorRelation.SingleSource,
         primaryCents = 2_100L,
         reasonCodes = listOf(ValuationJudgmentReason.StreetPrimary),
         policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
         identityModelLabel = "FCFF DCF",
-        identityBearCents = horizonPriceCents?.let { it * 9L / 10L },
-        identityBaseCents = horizonPriceCents,
-        identityBullCents = horizonPriceCents?.let { it * 11L / 10L },
+        // Fixed series: a missing our-price must not delete the fan, or the null-price case
+        // could not catch a regression that drops the reference block.
+        identityBearCents = 32_646L,
+        identityBaseCents = 36_274L,
+        identityBullCents = 39_901L,
         streetLowCents = 1_850L,
         streetBaseCents = 2_100L,
         streetHighCents = 2_150L,

@@ -7,12 +7,13 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * The structural half of a design rule: the quant engine is absolutely independent from the street.
+ * A structural tripwire for a design rule: the quant engine is independent from the street.
  *
- * The engine's compute paths read the types scanned here and nothing else, so if none of those
- * types can carry a street-derived field, no street input can reach an intrinsic value by any
- * route — not as a term, not as a clamp, not as a quiet default. Adding such a field to one of
- * these types turns this red at compile-adjacent time instead of at review time.
+ * The engine computes from the types scanned here and publishes `DcfAnalysis`. If one of those
+ * types — or a direct component type such as `WaccInputProvenance` inside `DcfAnalysis` — grows a
+ * street-named field, this goes red at test time instead of surfacing at review time. A substring
+ * scan over field names cannot prove full independence by itself; it catches the obvious naming
+ * before it ships, and the second test proves the scan still fires.
  *
  * Scope note: the forecast bucket is a street family **by design** (`OpportunityEngine` reads
  * `SymbolDetail`'s analyst anchors there), so `SymbolDetail` is deliberately outside this scan.
@@ -33,27 +34,46 @@ class ValuationEngineStreetIndependenceTest {
         )
     }
 
+    /** An empty result above means clean only if the scanner itself fires on a known offender. */
     @Test
-    fun the_output_the_engine_publishes_carries_no_street_fields() {
+    fun the_tripwire_catches_a_smuggled_street_field() {
         assertEquals(
-            emptyList(),
-            streetViolations(DcfAnalysis::class.java),
+            listOf("Smuggled.analysttargetcents"),
+            streetViolations(Smuggled::class.java),
         )
     }
 
+    private class Smuggled(val analystTargetCents: Long? = null)
+
     private fun streetViolations(vararg types: Class<*>): List<String> =
         types.flatMap { type ->
-            type.declaredFields
-                .map { it.name.lowercase() }
-                .filter { field -> STREET_MARKERS.any { marker -> field.contains(marker) } }
-                .map { "${type.simpleName}.${it}" }
-        }
+            scanSet(type).flatMap { scanned ->
+                scanned.declaredFields
+                    .map { it.name.lowercase() }
+                    .filter { field -> STREET_MARKERS.any { marker -> field.contains(marker) } }
+                    .map { "${scanned.simpleName}.${it}" }
+            }
+        }.distinct()
+
+    /** The root, its ancestors, and its one-level component types from our own packages. */
+    private fun scanSet(root: Class<*>): List<Class<*>> =
+        generateSequence(root) { it.superclass }
+            .takeWhile { it != Any::class.java }
+            .toList() +
+            root.declaredFields
+                .map { it.type }
+                .filter { it.packageName.startsWith("com.discountscreener.core") }
+                .distinct()
 
     private companion object {
-        /** Anything matching these substrings on an engine type is street-derived until proven otherwise. */
+        /**
+         * Anything matching these substrings on an engine type is street-derived until proven
+         * otherwise. Bare `rating` is excluded on purpose: `operatingCashFlow` contains it.
+         */
         val STREET_MARKERS = listOf(
             "external", "analyst", "recommendation", "strongbuy", "strongsell",
-            "street", "tipranks", "targetprice",
+            "street", "tipranks", "targetprice", "pricetarget", "consensus",
+            "ratingbuy", "ratingsell",
         )
     }
 }

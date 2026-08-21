@@ -45,6 +45,55 @@ class ValuationJudgmentPolicyTest {
         assertEquals(90_000L, judgment.primaryCents)
     }
 
+    /** The street decides, and the card still says why our model is out (spec L112). */
+    @Test
+    fun `street primary carries the class refusal`() {
+        var judgment = ValuationJudgmentPolicy.judge(
+            request(
+                identity = refused(BusinessClass.Unclassified, ValuationJudgmentReason.Unclassified),
+                street = street(baseCents = 90_000L),
+            ),
+        )
+        assertEquals(
+            listOf(ValuationJudgmentReason.Unclassified, ValuationJudgmentReason.StreetPrimary),
+            judgment.reasonCodes,
+        )
+    }
+
+    @Test
+    fun `street primary carries the soft hint of a usable identity`() {
+        var judgment = ValuationJudgmentPolicy.judge(
+            request(
+                identity = computed(fcff(base = 700_000L, soft = true)),
+                street = street(baseCents = 900_000L),
+            ),
+        )
+        assertEquals(
+            listOf(ValuationJudgmentReason.SoftIdentity, ValuationJudgmentReason.StreetPrimary),
+            judgment.reasonCodes,
+        )
+    }
+
+    /** Mixed currencies keep the street anchor and flag the identity reference as incomparable. */
+    @Test
+    fun `incomparable anchors are flagged beside the street primary`() {
+        var judgment = ValuationJudgmentPolicy.judge(
+            request(
+                identity = computed(fcff(base = 100_000L)),
+                street = street(baseCents = 100_000L, currencyCode = "EUR"),
+            ),
+        )
+        assertEquals(
+            listOf(ValuationJudgmentReason.IncomparableAnchors, ValuationJudgmentReason.StreetPrimary),
+            judgment.reasonCodes,
+        )
+    }
+
+    @Test
+    fun `the policy version names the street-first generation`() {
+        assertEquals("valuation-judgment/3+valuation-decision-policy/1", ValuationJudgmentPolicy.POLICY_VERSION)
+    }
+
     @Test
     fun `solid fcff without street is identity primary`() {
         var analysis = fcff(base = 100_000L)

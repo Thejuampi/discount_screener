@@ -48,10 +48,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -348,7 +348,6 @@ private fun DetailScoreHeader(
     scoreRow: OpportunityListRow?,
     scoringModel: OpportunityScoringModel,
     regimeScoringEnabled: Boolean,
-    quantLens: QuantLensUiState?,
     symbolNote: String,
     onAction: (DashboardAction) -> Unit,
 ) {
@@ -833,7 +832,6 @@ private fun SnapshotContent(
                 scoreRow = scoreRow,
                 scoringModel = scoringModel,
                 regimeScoringEnabled = regimeScoringEnabled,
-                quantLens = quantLens,
                 symbolNote = symbolNote,
                 onAction = onAction,
             )
@@ -1376,15 +1374,16 @@ private fun JudgmentValuationSection(
             text = "Price ${money(detail.marketPriceCents)}",
             style = MaterialTheme.typography.labelMedium,
         )
-    }
-    // Every series the judgment holds, on every stance. The reader compares the analyst range
-    // against our model here; hiding either one leaves the card with a number and no context.
-    judgmentReferenceLines(ui).forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        // With no primary the card would otherwise be a stance token alone, so this is where the
+        // reader gets both series. When a primary exists they already render above; repeating
+        // them here printed the same numbers three times on one screen.
+        judgmentReferenceLines(ui).forEach { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
     var ownModel = ownModelLines(ui)
     if (ownModel.isNotEmpty()) {

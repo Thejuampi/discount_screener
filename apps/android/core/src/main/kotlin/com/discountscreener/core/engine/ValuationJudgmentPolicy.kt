@@ -114,7 +114,7 @@ data class ValuationJudgment(
 }
 
 object ValuationJudgmentPolicy {
-    const val POLICY_VERSION = "valuation-judgment/2+valuation-decision-policy/1"
+    const val POLICY_VERSION = "valuation-judgment/3+valuation-decision-policy/1"
 
     /** Thinkability cut. Distinct from WIDE_SCENARIO_BPS (soft quality), even when the number matches. */
     const val IDENTITY_USABLE_MAX_WIDTH_BPS = 12_000
@@ -137,6 +137,18 @@ object ValuationJudgmentPolicy {
         collectPresenceReasons(request, identityUsable, streetUsable, reasons)
 
         if (streetUsable) {
+            if (classRefuse != null) reasons += classRefuse
+            if (identityUsable) {
+                var analysis = requireNotNull(identityAnalysis)
+                var streetBook = requireNotNull(request.street)
+                var envelope = requireNotNull(request.identity)
+                if (isSoft(analysis)) reasons += ValuationJudgmentReason.SoftIdentity
+                if (envelope.currencyCode != streetBook.currencyCode ||
+                    envelope.minorUnitScale != streetBook.minorUnitScale
+                ) {
+                    reasons += ValuationJudgmentReason.IncomparableAnchors
+                }
+            }
             reasons += ValuationJudgmentReason.StreetPrimary
             return finish(
                 status = ValuationJudgmentStatus.Street,
