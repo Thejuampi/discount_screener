@@ -1,10 +1,12 @@
 // GENERATED FROM shared/contracts/sec-driver-normalization.json. DO NOT EDIT.
 
-pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/8";
+pub const POLICY_FINGERPRINT: &str = "sec-driver-normalization/9";
 pub const REQUIRED_UNIT: &str = "USD";
 pub const MINIMUM_DURATION_DAYS: i64 = 325;
 pub const MAXIMUM_DURATION_DAYS: i64 = 380;
 pub const MATERIAL_ACQUISITION_REVENUE_BPS: i32 = 1000;
+pub const MINIMUM_CLEAN_RECENT_GROWTH_TRANSITIONS: i32 = 2;
+pub const NON_RECURRING_CHARGE_OPERATING_BPS: i32 = 1500;
 pub const ACCEPTED_FORMS: &[&str] = &["10-K", "10-K/A"];
 pub const DEVELOPMENT: &[&str] = &[
     "PaymentsToAcquirePropertyPlantAndEquipment",
@@ -169,6 +171,40 @@ pub const MARGINAL_TAX_REFERENCE: DriverOperator = DriverOperator {
 pub const DILUTED_AVERAGE_SHARES: DriverOperator = DriverOperator {
     qnames: &["WeightedAverageNumberOfDilutedSharesOutstanding"],
     unit: "shares",
+    period_shape: "duration",
+    operation: "select_one_equivalent",
+};
+pub const OPERATING_INCOME: DriverOperator = DriverOperator {
+    qnames: &["OperatingIncomeLoss"],
+    unit: "USD",
+    period_shape: "duration",
+    operation: "select_one_equivalent",
+};
+pub const IMPAIRMENT_AGGREGATE: DriverOperator = DriverOperator {
+    qnames: &[
+        "AssetImpairmentCharges",
+        "GoodwillAndIntangibleAssetImpairment",
+    ],
+    unit: "USD",
+    period_shape: "duration",
+    operation: "aggregate_or_sum_of_components",
+};
+pub const IMPAIRMENT_COMPONENTS: DriverOperator = DriverOperator {
+    qnames: &[
+        "GoodwillImpairmentLoss",
+        "ImpairmentOfIntangibleAssetsExcludingGoodwill",
+        "TangibleAssetImpairmentCharges",
+    ],
+    unit: "USD",
+    period_shape: "duration",
+    operation: "aggregate_or_sum_of_components",
+};
+pub const RESTRUCTURING_CHARGES: DriverOperator = DriverOperator {
+    qnames: &[
+        "RestructuringCharges",
+        "RestructuringCosts",
+    ],
+    unit: "USD",
     period_shape: "duration",
     operation: "select_one_equivalent",
 };

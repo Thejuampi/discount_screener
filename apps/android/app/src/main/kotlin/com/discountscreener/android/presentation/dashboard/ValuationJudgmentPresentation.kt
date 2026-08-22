@@ -30,8 +30,15 @@ data class ValuationJudgmentUi(
     val upsideToHorizonBps: Int?,
     val lastPriceLabel: String,
     val horizonPriceLabel: String,
+    val horizonPriceNote: String,
     val cashLabel: String,
 )
+
+/**
+ * Our price comes from our own model. The model is experimental. The screen keeps it as a
+ * reference line under the anchor the judgment names, and the score never reads it.
+ */
+const val HORIZON_PRICE_NOTE: String = "Reference only. Not in the score."
 
 fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJudgmentUi {
     var showPrimary = snapshot.primaryCents != null
@@ -58,6 +65,7 @@ fun presentValuationJudgment(snapshot: ProjectedValuationJudgment): ValuationJud
         upsideToHorizonBps = snapshot.upsideToHorizonBps,
         lastPriceLabel = "Price now",
         horizonPriceLabel = "Our price",
+        horizonPriceNote = HORIZON_PRICE_NOTE,
         cashLabel = "Cash identity",
     )
 }

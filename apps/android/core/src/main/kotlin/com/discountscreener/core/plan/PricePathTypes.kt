@@ -2,6 +2,7 @@ package com.discountscreener.core.plan
 
 import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.DcfAnalysis
+import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.ValuationModel
 
 enum class ZoneConfidence {
@@ -121,7 +122,7 @@ data class PricePathInput(
     val analystLowCents: Long? = null,
     val gapBps: Int? = null,
     val daily: PricePathDaily? = null,
-    val candles: List<com.discountscreener.core.model.HistoricalCandle> = emptyList(),
+    val candles: List<HistoricalCandle> = emptyList(),
     val nextEarningsEpoch: Long? = null,
     val nowEpoch: Long = 0,
     val regimeRisk: Boolean = false,

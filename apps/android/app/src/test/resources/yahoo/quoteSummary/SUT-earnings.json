@@ -1,0 +1,27 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {
+          "longName": "Earnings Calendar Driver Pin",
+          "regularMarketPrice": { "raw": 100.0 }
+        },
+        "financialData": {
+          "currentPrice": { "raw": 100.0 },
+          "targetMeanPrice": { "raw": 120.0 }
+        },
+        "defaultKeyStatistics": {
+          "trailingEps": { "raw": 5.0 }
+        },
+        "calendarEvents": {
+          "earnings": {
+            "earningsDate": [
+              { "raw": 1760000000, "fmt": "2025-10-09" },
+              { "raw": 1790000000, "fmt": "2026-09-21" }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

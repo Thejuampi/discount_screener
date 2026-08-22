@@ -80,7 +80,7 @@ class WarmStartLoadTest {
                     "VALUES ('AAPL', 'snapshot', NULL, 50, '{}')",
             )
 
-            assertEquals(1, store.reclaimRawCaptureSpace())
+            assertEquals(1, store.reclaimPersistenceSpace())
         } finally {
             store.close()
         }
@@ -98,7 +98,7 @@ class WarmStartLoadTest {
                 "INSERT INTO raw_latest (symbol, capture_key, capture_id) VALUES ('AAPL', 'chart:Year', 1)",
             )
 
-            store.reclaimRawCaptureSpace()
+            store.reclaimPersistenceSpace()
 
             assertEquals(0, chartRawCount(store))
         } finally {
@@ -135,7 +135,7 @@ class WarmStartLoadTest {
                 },
             )
 
-            store.reclaimRawCaptureSpace()
+            store.reclaimPersistenceSpace()
 
             assertEquals(
                 10_050L,
@@ -146,12 +146,25 @@ class WarmStartLoadTest {
         }
     }
 
+    /**
+     * Each write here moves the price, so each one is a revision the history must file. A repeat
+     * of the payload before it is dropped instead of filed, and would never reach the cap.
+     */
     @Test
     fun persist_batch_caps_revision_history_at_max() = runTest {
         var store = SQLiteStateStore(context)
         try {
             repeat(SQLiteStateStore.MAX_REVISION_HISTORY + 1) { index ->
-                store.persistBatch(emptyList(), listOf(revision("AAPL", evaluatedAt = 1_700_000_000L + index)))
+                store.persistBatch(
+                    emptyList(),
+                    listOf(
+                        revision(
+                            "AAPL",
+                            evaluatedAt = 1_700_000_000L + index,
+                            marketPriceCents = 10_000L + index,
+                        ),
+                    ),
+                )
             }
 
             assertEquals(SQLiteStateStore.MAX_REVISION_HISTORY.toLong(), revisionCount(store))
@@ -253,17 +266,18 @@ class WarmStartLoadTest {
         symbol: String,
         chartSummaries: List<ChartRangeSummary> = emptyList(),
         evaluatedAt: Long = 1_700_000_000L,
+        marketPriceCents: Long = 10_000,
     ) = SymbolRevisionInput(
         symbol = symbol,
         evaluatedAt = evaluatedAt,
         lastSequence = 1,
         updateCount = 1,
-        priceHistory = listOf(PriceHistoryPoint(sequence = 1, marketPriceCents = 10_000)),
+        priceHistory = listOf(PriceHistoryPoint(sequence = 1, marketPriceCents = marketPriceCents)),
         payload = EvaluatedSymbolState(
             snapshot = MarketSnapshot(
                 symbol = symbol,
                 profitable = true,
-                marketPriceCents = 10_000,
+                marketPriceCents = marketPriceCents,
                 intrinsicValueCents = 12_000,
             ),
             chartSummaries = chartSummaries,

@@ -1,13 +1,14 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performTextInput
 import com.discountscreener.android.StuckTestWatchdog
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithText
@@ -19,9 +20,11 @@ import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
+import com.discountscreener.core.engine.OUTCOME_CONFIDENCE_UNMEASURED_NOTE
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.OutcomeConfidence
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
@@ -29,7 +32,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 /**
@@ -43,7 +45,7 @@ class DetailScoreHeaderTest {
     val stuckTestWatchdog = StuckTestWatchdog()
 
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun detail_header_shows_the_composite_score_for_the_open_symbol() {
@@ -367,6 +369,55 @@ class DetailScoreHeaderTest {
         composeRule.onNodeWithText(SCORE_READING_LEGEND).performScrollTo().assertIsDisplayed()
     }
 
+    /**
+     * The last hop. Everything before this is a list of strings that no screen has to draw, and the
+     * factor breakdown already drops a line whose points are zero from the points column.
+     */
+    @Test
+    fun the_score_tab_states_what_the_quarter_figure_measures() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(
+                    ScoreFactor("Pulse", "Pulse--", -5),
+                    ScoreFactor("Pulse≠Trend", "Pulse≠Trend", 0),
+                ),
+            ),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText(PULSE_BASIS_NOTE).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun the_score_tab_says_when_the_quarter_and_the_revenue_line_disagree() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(
+                    ScoreFactor("Pulse", "Pulse--", -5),
+                    ScoreFactor("Pulse≠Trend", "Pulse≠Trend", 0),
+                ),
+            ),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText(PULSE_TREND_DIVERGENCE_NOTE).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_row_that_scored_no_quarter_carries_no_basis_note() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                fundamentalsFactors = listOf(ScoreFactor("FCFy", "FCFy+", 8)),
+            ),
+            subtab = DetailSubtab.Score,
+        )
+
+        composeRule.onNodeWithText(PULSE_BASIS_NOTE).assertDoesNotExist()
+    }
+
     @Test
     fun snapshot_does_not_state_the_five_bands() {
         setDetailContent(scoreRow = scoreRow(composite = 42))
@@ -590,6 +641,146 @@ class DetailScoreHeaderTest {
         companyName = "Test Co",
     )
 
+    /**
+     * A report inside the window is the one fact that can beat the score in the next two weeks, so
+     * it has to reach the header and not only the model.
+     */
+    @Test
+    fun a_report_inside_the_window_warns_on_the_score_header() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, nextEarningsEpoch = daysFromNow(3)))
+
+        composeRule.onNodeWithText(EARNINGS_SOON_NOTE).performScrollTo().assertIsDisplayed()
+    }
+
+    /** The warning has to be able to stay silent, or it says nothing when it does appear. */
+    @Test
+    fun a_report_beyond_the_window_carries_no_warning() {
+        setDetailContent(scoreRow = scoreRow(composite = 42, nextEarningsEpoch = daysFromNow(60)))
+
+        composeRule.onNodeWithText(EARNINGS_SOON_NOTE).assertDoesNotExist()
+    }
+
+    @Test
+    fun a_symbol_with_no_earnings_date_shows_nothing_about_earnings() {
+        setDetailContent(scoreRow = scoreRow(composite = 42))
+
+        composeRule.onNodeWithText("Earnings", substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * The reading a name gets when every source prices it differently. It has to reach the header,
+     * because the confidence band next to it can read High on exactly that name.
+     */
+    @Test
+    fun a_wide_outcome_range_reaches_the_score_header() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                outcomeConfidence = OutcomeConfidence.Wide,
+                outcomeWidthBps = 9_000,
+            ),
+        )
+
+        composeRule.onNodeWithText("Outcome range · Wide · sources span 90% of the centre")
+            .performScrollTo().assertIsDisplayed()
+    }
+
+    /** Its companion. A header that hardcoded one line would keep the case above green. */
+    @Test
+    fun a_narrow_outcome_range_reads_narrow_on_the_score_header() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                outcomeConfidence = OutcomeConfidence.Narrow,
+                outcomeWidthBps = 1_800,
+            ),
+        )
+
+        composeRule.onNodeWithText("Outcome range · Narrow · sources span 18% of the centre")
+            .performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_narrow_outcome_range_says_what_it_did_not_read() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                outcomeConfidence = OutcomeConfidence.Narrow,
+                outcomeWidthBps = 1_800,
+            ),
+        )
+
+        composeRule.onNodeWithText(OUTCOME_CONFIDENCE_UNMEASURED_NOTE).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun a_wide_outcome_range_does_not_repeat_the_caveat() {
+        setDetailContent(
+            scoreRow = scoreRow(
+                composite = 42,
+                outcomeConfidence = OutcomeConfidence.Wide,
+                outcomeWidthBps = 9_000,
+            ),
+        )
+
+        composeRule.onNodeWithText(OUTCOME_CONFIDENCE_UNMEASURED_NOTE).assertDoesNotExist()
+    }
+
+    // ── The reader's own note ────────────────────────────────────────────────
+
+    @Test
+    fun a_saved_note_is_shown_on_the_symbol_it_belongs_to() {
+        setDetailContent(scoreRow = scoreRow(composite = 42), symbolNote = "Target partnership ends.")
+
+        composeRule.onNodeWithText("Target partnership ends.").performScrollTo().assertIsDisplayed()
+    }
+
+    /**
+     * A sentence under four scores reads as one of their inputs unless it says otherwise, and this
+     * one has no weight anywhere in the engine.
+     */
+    @Test
+    fun the_note_says_it_does_not_move_the_score() {
+        setDetailContent(scoreRow = scoreRow(composite = 42))
+
+        composeRule.onNodeWithText(SYMBOL_NOTE_HINT).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun editing_the_note_and_saving_it_carries_the_typed_text() {
+        var actions = mutableListOf<DashboardAction>()
+        setDetailContent(
+            scoreRow = scoreRow(composite = 42),
+            symbolNote = "old",
+            onAction = { action -> actions += action },
+        )
+
+        composeRule.onNodeWithText("old").performScrollTo().performTextClearance()
+        composeRule.onNodeWithText(SYMBOL_NOTE_LABEL).performScrollTo().performTextInput("plant fire")
+        composeRule.onNodeWithText(SYMBOL_NOTE_SAVE_LABEL).performScrollTo().performClick()
+
+        assertEquals(listOf(DashboardAction.SaveSymbolNote(SYMBOL, "plant fire")), actions)
+    }
+
+    /** No change, nothing to save. The button is the only sign that a draft is unsaved. */
+    @Test
+    fun an_untouched_note_offers_nothing_to_save() {
+        setDetailContent(scoreRow = scoreRow(composite = 42), symbolNote = "old")
+
+        composeRule.onNodeWithText(SYMBOL_NOTE_SAVE_LABEL).assertDoesNotExist()
+    }
+
+    /**
+     * A symbol outside the ranked set is the one a reader most likely has something to say about,
+     * so the field cannot live inside the block that only renders with a score.
+     */
+    @Test
+    fun a_symbol_with_no_score_still_takes_a_note() {
+        setDetailContent(scoreRow = null, symbolNote = "watching the spin-off")
+
+        composeRule.onNodeWithText("watching the spin-off").performScrollTo().assertIsDisplayed()
+    }
+
     private fun setDetailContent(
         scoreRow: OpportunityListRow?,
         scoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
@@ -597,9 +788,9 @@ class DetailScoreHeaderTest {
         subtab: DetailSubtab = DetailSubtab.Snapshot,
         onAction: (DashboardAction) -> Unit = { },
         detail: SymbolDetail? = null,
+        symbolNote: String = "",
     ) {
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = routeOf(sourceSymbols, subtab),
@@ -609,6 +800,7 @@ class DetailScoreHeaderTest {
                     alerts = emptyList(),
                     scoreRow = scoreRow,
                     scoringModel = scoringModel,
+                    symbolNote = symbolNote,
                     onAction = onAction,
                 )
             }
@@ -618,6 +810,9 @@ class DetailScoreHeaderTest {
 
     private fun scoreRow(
         composite: Int,
+        nextEarningsEpoch: Long? = null,
+        outcomeConfidence: OutcomeConfidence = OutcomeConfidence.Unmeasured,
+        outcomeWidthBps: Int? = null,
         fundamentals: Int? = 20,
         technical: Int? = 20,
         forecast: Int? = 20,
@@ -632,6 +827,9 @@ class DetailScoreHeaderTest {
         symbol = SYMBOL,
         marketPriceCents = 10_000L,
         intrinsicValueCents = 15_000L,
+        nextEarningsEpoch = nextEarningsEpoch,
+        outcomeConfidence = outcomeConfidence,
+        outcomeWidthBps = outcomeWidthBps,
         gapBps = 5_000,
         confidence = ConfidenceBand.High,
         isWatched = false,
@@ -651,5 +849,12 @@ class DetailScoreHeaderTest {
 
     private companion object {
         const val SYMBOL = "TGNO4.BA"
+
+        /**
+         * Offsets from the machine clock, because the header reads that clock and takes no
+         * override. Only the warning is asserted, never the day count: the count is what moves
+         * with the clock, and [EarningsMarkTest] pins it against two fixed instants instead.
+         */
+        fun daysFromNow(days: Long): Long = System.currentTimeMillis() / 1_000L + days * 86_400L
     }
 }

@@ -3,6 +3,7 @@ package com.discountscreener.android.domain.model
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.plan.DipRowInput
+import com.discountscreener.core.plan.DipSetup
 import com.discountscreener.core.plan.DipSignalEngine
 import com.discountscreener.core.plan.PlanBoard
 
@@ -21,7 +22,9 @@ object PlanBoardAssembler {
                     companyName = row.companyName,
                     fundamentalsScore = row.fundamentalsScore,
                     marketPriceCents = row.marketPriceCents,
-                    streetFairValueCents = row.intrinsicValueCents,
+                    // Zero is this field's own "no street anchor" value; every reader guards on
+                    // `> 0`. A row whose judgment named no primary carries no street anchor.
+                    streetFairValueCents = row.intrinsicValueCents ?: 0L,
                     analystCoverageCount = row.analystCoverageCount,
                     technicalSignals = row.technicalSignals,
                     candles = yearCandlesBySymbol[row.symbol].orEmpty(),
@@ -36,8 +39,9 @@ object PlanBoardAssembler {
     fun assemble(
         inputs: List<DipRowInput>,
         universeName: String,
+        evaluate: (DipRowInput) -> DipSetup = DipSignalEngine::evaluate,
     ): PlanBoard {
-        var setups = inputs.map { input -> DipSignalEngine.evaluate(input) }
+        var setups = inputs.map(evaluate)
         return DipSignalEngine.rank(setups, universeName)
     }
 }

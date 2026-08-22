@@ -12,5 +12,12 @@ class RefreshDashboardUseCase(private val repository: DashboardRepository) {
         selectedSymbol: String?,
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
-    ): DashboardSnapshot = repository.refreshAll(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+        force: Boolean = false,
+    ): DashboardSnapshot = repository.refreshAll(
+        filter,
+        selectedSymbol,
+        selectedRange,
+        opportunityScoringModel,
+        force,
+    )
 }

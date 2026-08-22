@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.database.sqlite.SQLiteStatement
 import java.io.File
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.model.ChartRange
@@ -31,6 +32,7 @@ import com.discountscreener.android.data.market.DailyCandleSink
 import com.discountscreener.android.data.market.DailyCandleSource
 import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
+import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import kotlin.math.abs
@@ -64,6 +66,26 @@ data class PersistedChartRecord(
     val range: ChartRange,
     val candles: List<HistoricalCandle>,
     val fetchedAt: Long,
+)
+
+/**
+ * When a symbol last got its own data, per the file: its `quoteSummary`, its year chart, its
+ * fundamental timeseries. Null when the file has none. A batch-quote price counts for none of
+ * these; it refreshes a price and nothing else, and it is filed under `snapshot:batch-quote` so
+ * it never stands in for the `snapshot` mark.
+ */
+data class RefreshMarks(
+    val quotedAtEpochSeconds: Long? = null,
+    val yearChartedAtEpochSeconds: Long? = null,
+    val timeseriesCapturedAtEpochSeconds: Long? = null,
+)
+
+/** The latest fundamental timeseries on file for a symbol, with the source it was resolved from. */
+data class PersistedFundamentalTimeseries(
+    val timeseries: CoreFundamentalTimeseries,
+    val sourceName: String,
+    val provenance: DataProvenance,
+    val capturedAt: Long,
 )
 
 data class PersistedIssueRecord(
@@ -258,6 +280,23 @@ open class SQLiteStateStore(
         if (oldVersion < 8 && newVersion >= 8) {
             createScoreJournalSchema(db)
         }
+        if (oldVersion < 9 && newVersion >= 9) {
+            createSymbolNoteSchema(db)
+        }
+        if (oldVersion < 10 && newVersion >= 10) {
+            // A database that reached v8 through the normal path carries score_journal, so the
+            // ALTER applies. A bare version-stamped file (crash recovery, partial creation) may
+            // not have the table at all — it gets the full current schema instead of a crash.
+            var hasJournal = db.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'score_journal'",
+                emptyArray(),
+            ).use { it.moveToFirst() }
+            if (hasJournal) {
+                db.execSQL("ALTER TABLE score_journal ADD COLUMN factors_json TEXT")
+            } else {
+                createScoreJournalSchema(db)
+            }
+        }
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -290,11 +329,13 @@ open class SQLiteStateStore(
             db.delete("raw_latest", null, null)
             // Every chart the user can scroll, and not the retrospective's own series. Clearing the
             // warm start asks for fresh data; it does not ask to destroy weeks of accumulated
-            // evidence, and `score_journal` is spared here for the same reason.
+            // evidence, and `score_journal` is spared here for the same reason. `symbol_note` is
+            // spared on a stronger one: the reader typed it, and no refresh can bring it back.
             db.delete("pricing_candle", "chart_range <> ?", arrayOf(BACKTEST_CHART_RANGE))
             db.delete("symbol_revision", null, null)
             db.delete("symbol_latest", null, null)
             db.delete("issue_state", null, null)
+            lastWrittenIssues = null
             db.delete("discovery_score", null, null)
             db.delete("discovery_symbol", null, null)
             db.delete("discovery_job", null, null)
@@ -404,7 +445,56 @@ open class SQLiteStateStore(
         }
     }
 
+    /** Every note on file, by symbol. Symbols without a note are absent. */
+    suspend fun loadSymbolNotes(): Map<String, String> = withContext(ioDispatcher) {
+        readableDatabase.rawQuery(
+            "SELECT symbol, note FROM symbol_note",
+            emptyArray(),
+        ).useRows { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    put(cursor.getString(0), cursor.getString(1))
+                }
+            }
+        }
+    }
+
+    /**
+     * Writes the note for one symbol. A blank note deletes the row, so clearing a note leaves no
+     * empty string behind for a later reader to show as a note.
+     */
+    suspend fun saveSymbolNote(symbol: String, note: String) = withContext(ioDispatcher) {
+        var db = writableDatabase
+        var trimmed = note.trim()
+        if (trimmed.isEmpty()) {
+            db.delete("symbol_note", "symbol = ?", arrayOf(symbol))
+        } else {
+            db.insertWithOnConflict(
+                "symbol_note",
+                null,
+                ContentValues().apply {
+                    put("symbol", symbol)
+                    put("note", trimmed)
+                    put("updated_at", nowEpochSeconds())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        }
+        Unit
+    }
+
+    /**
+     * The issue list as it was last written, so a round that changes no issue skips the rewrite.
+     *
+     * The list is whole and small, and the write is delete-all plus insert-each: two and a half
+     * milliseconds every time a batch lands, for a table that changes on a failure. Cleared where
+     * the table is, in [resetWarmStartState].
+     */
+    @Volatile
+    private var lastWrittenIssues: List<PersistedIssueRecord>? = null
+
     open suspend fun replaceIssues(issues: List<PersistedIssueRecord>) = withContext(ioDispatcher) {
+        if (issues == lastWrittenIssues) return@withContext
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -427,6 +517,7 @@ open class SQLiteStateStore(
                 )
             }
             db.setTransactionSuccessful()
+            lastWrittenIssues = issues
         } finally {
             db.endTransaction()
         }
@@ -444,6 +535,7 @@ open class SQLiteStateStore(
         db.beginTransaction()
         try {
             var latestTimestamp: Long? = null
+            val lastWritten = lastRevisionBySymbol(db, revisions.map { it.symbol })
 
             rawCaptures.forEach { capture ->
                 if (capture.captureKind == CaptureKind.ChartCandles) {
@@ -482,20 +574,25 @@ open class SQLiteStateStore(
                 val fundamentalsJson = revision.payload.fundamentals?.let(json::encodeToString)
                 val priceHistoryJson = json.encodeToString(revision.priceHistory)
 
-                val revisionId = db.insertOrThrow(
-                    "symbol_revision",
-                    null,
-                    ContentValues().apply {
-                        put("symbol", revision.symbol)
-                        put("evaluated_at", revision.evaluatedAt)
-                        put("last_sequence", revision.lastSequence)
-                        put("update_count", revision.updateCount)
-                        put("payload_json", payloadJson)
-                        put("snapshot_json", snapshotJson)
-                        put("external_json", externalJson)
-                        put("fundamentals_json", fundamentalsJson)
-                    },
-                )
+                val previous = lastWritten[revision.symbol]
+                val revisionId = if (previous != null && previous.payloadJson == payloadJson) {
+                    previous.revisionId
+                } else {
+                    db.insertOrThrow(
+                        "symbol_revision",
+                        null,
+                        ContentValues().apply {
+                            put("symbol", revision.symbol)
+                            put("evaluated_at", revision.evaluatedAt)
+                            put("last_sequence", revision.lastSequence)
+                            put("update_count", revision.updateCount)
+                            put("payload_json", payloadJson)
+                            put("snapshot_json", snapshotJson)
+                            put("external_json", externalJson)
+                            put("fundamentals_json", fundamentalsJson)
+                        },
+                    ).also { trimRevisionHistory(db, revision.symbol) }
+                }
 
                 db.insertWithOnConflict(
                     "symbol_latest",
@@ -514,7 +611,6 @@ open class SQLiteStateStore(
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
-                trimRevisionHistory(db, revision.symbol)
                 latestTimestamp = maxOf(latestTimestamp ?: 0L, revision.evaluatedAt)
             }
 
@@ -530,13 +626,14 @@ open class SQLiteStateStore(
     }
 
     /**
-     * Copy the latest chart JSON into `pricing_candle`, drop leftover chart blobs, then shrink
-     * the file. Call this after the list is on screen — VACUUM of a bloated file can take
-     * minutes and must not sit on the splash.
+     * Copy the latest chart JSON into `pricing_candle`, drop leftover chart blobs and repeated
+     * revisions, then shrink the file. Call this after the list is on screen — VACUUM of a
+     * bloated file can take minutes and must not sit on the splash.
      *
-     * The same file stays in place. Quotes, revisions, watchlist, and existing candles stay.
+     * The same file stays in place. Quotes, watchlist, existing candles, and every revision that
+     * records a change all stay.
      */
-    suspend fun reclaimRawCaptureSpace(): Int = withContext(ioDispatcher) {
+    suspend fun reclaimPersistenceSpace(): Int = withContext(ioDispatcher) {
         val db = writableDatabase
         var deleted = 0
         db.beginTransaction()
@@ -553,6 +650,10 @@ open class SQLiteStateStore(
                 "id NOT IN (SELECT capture_id FROM raw_latest)",
                 emptyArray(),
             )
+            if (loadMetaValue(db, META_KEY_REPEATED_REVISIONS_PRUNED) == null) {
+                deleted += pruneRepeatedRevisions(db)
+                setMetaValue(db, META_KEY_REPEATED_REVISIONS_PRUNED, "1")
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -561,6 +662,68 @@ open class SQLiteStateStore(
             db.execSQL("VACUUM")
         }
         deleted
+    }
+
+    /**
+     * Drop every revision that repeats the one before it.
+     *
+     * The write path refuses a repeat now, and the rows filed before it did not. On a two-week-old
+     * install 29 809 of 60 368 revisions were a byte copy of the row before them and held 109 MB
+     * of the 216 MB in that table. A repeat records no change, and the table exists to record
+     * change. The newest row of each repeated run stays, so `symbol_latest` keeps the revision it
+     * points at and the history reads "this state, last seen then".
+     *
+     * This runs once and is then marked done. The write path refuses a repeat now, so no later
+     * refresh can file one, and the walk over every symbol costs 1.6 s it would never earn back.
+     */
+    private fun pruneRepeatedRevisions(db: SQLiteDatabase): Int {
+        var deleted = 0
+        distinctRevisionSymbols(db).forEach { symbol ->
+            repeatedRevisionIds(db, symbol).chunked(PRUNE_DELETE_CHUNK).forEach { chunk ->
+                val placeholders = chunk.joinToString(",") { "?" }
+                deleted += db.delete(
+                    "symbol_revision",
+                    // A revision the latest row points at is never dropped, whatever this found.
+                    "revision_id IN ($placeholders) AND revision_id NOT IN (SELECT revision_id FROM symbol_latest)",
+                    chunk.map { it.toString() }.toTypedArray(),
+                )
+            }
+        }
+        return deleted
+    }
+
+    private fun distinctRevisionSymbols(db: SQLiteDatabase): List<String> =
+        db.rawQuery("SELECT DISTINCT symbol FROM symbol_revision", emptyArray()).useRows { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(cursor.getString(0))
+                }
+            }
+        }
+
+    /**
+     * The revisions of [symbol] that a later revision repeats, one symbol at a time so a table of
+     * hundreds of megabytes never lands in memory at once.
+     */
+    private fun repeatedRevisionIds(db: SQLiteDatabase, symbol: String): List<Long> {
+        val repeated = mutableListOf<Long>()
+        db.rawQuery(
+            "SELECT revision_id, payload_json FROM symbol_revision WHERE symbol = ? ORDER BY revision_id ASC",
+            arrayOf(symbol),
+        ).useRows { cursor ->
+            var previousId: Long? = null
+            var previousPayload: String? = null
+            while (cursor.moveToNext()) {
+                val revisionId = cursor.getLong(0)
+                val payload = cursor.getString(1)
+                if (payload == previousPayload) {
+                    previousId?.let(repeated::add)
+                }
+                previousId = revisionId
+                previousPayload = payload
+            }
+        }
+        return repeated
     }
 
     private fun migrateLatestChartCapturesIntoPricing(db: SQLiteDatabase) {
@@ -592,6 +755,33 @@ open class SQLiteStateStore(
                         payload = payload,
                     ),
                 )
+            }
+        }
+    }
+
+    /** What a symbol filed last: the row a new revision must differ from to be worth filing. */
+    private data class LastRevision(val revisionId: Long, val payloadJson: String)
+
+    /**
+     * The revision each of [symbols] wrote last.
+     *
+     * A refresh filed a revision per symbol whatever it found. On a two-week-old install 29 809 of
+     * the 60 308 rows in that table were a byte copy of the row before them, inside 216 MB of JSON
+     * that grew by 23 MB a day. A revision equal to the one before it records no change, and the
+     * table exists to record change, so an unchanged symbol now keeps the revision it already has.
+     */
+    private fun lastRevisionBySymbol(db: SQLiteDatabase, symbols: List<String>): Map<String, LastRevision> {
+        if (symbols.isEmpty()) return emptyMap()
+        val distinct = symbols.distinct()
+        val placeholders = distinct.joinToString(",") { "?" }
+        return db.rawQuery(
+            "SELECT symbol, revision_id, payload_json FROM symbol_latest WHERE symbol IN ($placeholders)",
+            distinct.toTypedArray(),
+        ).useRows { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    put(cursor.getString(0), LastRevision(cursor.getLong(1), cursor.getString(2)))
+                }
             }
         }
     }
@@ -850,6 +1040,26 @@ open class SQLiteStateStore(
         createDiscoverySchema(db)
         createTipRanksSchema(db)
         createScoreJournalSchema(db)
+        createSymbolNoteSchema(db)
+    }
+
+    /**
+     * What the reader wrote about a symbol.
+     *
+     * The only table in this file whose content no fetch can rebuild. Everything else is a copy of
+     * something a provider will send again; a note exists once. That is why it is written on its own
+     * and why the warm-start reset leaves it alone.
+     */
+    private fun createSymbolNoteSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE symbol_note (
+                symbol TEXT PRIMARY KEY,
+                note TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
     }
 
     /**
@@ -877,6 +1087,7 @@ open class SQLiteStateStore(
                 composite_score INTEGER NOT NULL,
                 composite_score_base INTEGER NOT NULL,
                 market_price_cents INTEGER NOT NULL,
+                factors_json TEXT,
                 PRIMARY KEY (symbol, scoring_model, scored_at)
             )
             """.trimIndent(),
@@ -958,12 +1169,18 @@ open class SQLiteStateStore(
         db: SQLiteDatabase,
         symbolFilter: String? = null,
         rangeFilter: ChartRange? = null,
+        symbolsFilter: Collection<String>? = null,
     ): List<PersistedChartRecord> {
         var clauses = mutableListOf<String>()
         var args = mutableListOf<String>()
         if (symbolFilter != null) {
             clauses += "symbol = ?"
             args += symbolFilter
+        }
+        if (symbolsFilter != null) {
+            if (symbolsFilter.isEmpty()) return emptyList()
+            clauses += "symbol IN (${symbolsFilter.joinToString(",") { "?" }})"
+            args += symbolsFilter
         }
         if (rangeFilter != null) {
             clauses += "chart_range = ?"
@@ -1105,6 +1322,14 @@ open class SQLiteStateStore(
      * every stored bar for that symbol is dropped and the incoming year stands alone. Dates outside
      * the incoming window are kept — that is how the series grows past a year — and they are exactly
      * what a rebase throws away, which is why the count is returned rather than swallowed.
+     *
+     * **A delta, in small transactions.** The market read brings the same year for every tracked
+     * symbol every time it runs, and writing all of it back through [ContentValues] in one
+     * transaction held the store's write connection for forty-three seconds on a phone with two
+     * thousand symbols, and every quote the refresh had to persist waited behind it. Only the bars
+     * that are new or changed are written, through one compiled statement, and the connection is
+     * given back every [BACKTEST_SYMBOLS_PER_TRANSACTION] symbols. The newest bar is always
+     * written, so `captured_at` says when the series was last fetched.
      */
     override suspend fun persistBacktestCandles(
         candlesBySymbol: Map<String, List<HistoricalCandle>>,
@@ -1112,42 +1337,75 @@ open class SQLiteStateStore(
     ): Int = withContext(ioDispatcher) {
         val db = writableDatabase
         var rebased = 0
-        db.beginTransaction()
-        try {
-            candlesBySymbol.forEach { (symbol, incoming) ->
-                if (incoming.isEmpty()) return@forEach
-                if (splitBasisChanged(db, symbol, incoming)) {
-                    db.delete(
-                        "pricing_candle",
-                        "symbol = ? AND chart_range = ?",
-                        arrayOf(symbol, BACKTEST_CHART_RANGE),
-                    )
-                    rebased++
-                }
-                incoming.forEach { candle ->
-                    db.insertWithOnConflict(
-                        "pricing_candle",
-                        null,
-                        ContentValues().apply {
-                            put("symbol", symbol)
-                            put("chart_range", BACKTEST_CHART_RANGE)
-                            put("captured_at", capturedAtEpochSeconds)
-                            put("epoch_seconds", candle.epochSeconds)
-                            put("open_cents", candle.openCents)
-                            put("high_cents", candle.highCents)
-                            put("low_cents", candle.lowCents)
-                            put("close_cents", candle.closeCents)
-                            put("volume", candle.volume)
-                        },
-                        SQLiteDatabase.CONFLICT_REPLACE,
-                    )
+        compileCandleUpsert(db).use { upsert ->
+            candlesBySymbol.entries.chunked(BACKTEST_SYMBOLS_PER_TRANSACTION).forEach { chunk ->
+                db.beginTransaction()
+                try {
+                    chunk.forEach { (symbol, incoming) ->
+                        if (incoming.isEmpty()) return@forEach
+                        if (writeBacktestSeries(db, upsert, symbol, incoming, capturedAtEpochSeconds)) {
+                            rebased++
+                        }
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
                 }
             }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
         }
         rebased
+    }
+
+    /** Writes one symbol's series as the difference against the rows on file. True when it rebased. */
+    private fun writeBacktestSeries(
+        db: SQLiteDatabase,
+        upsert: SQLiteStatement,
+        symbol: String,
+        incoming: List<HistoricalCandle>,
+        capturedAtEpochSeconds: Long,
+    ): Boolean {
+        val oldest = incoming.minBy { candle -> candle.epochSeconds }
+        val newest = incoming.maxBy { candle -> candle.epochSeconds }
+        val stored = loadBacktestBarsFrom(db, symbol, oldest.epochSeconds)
+        val rebase = splitBasisChanged(stored[oldest.epochSeconds]?.closeCents, oldest)
+        val toWrite = if (rebase) {
+            db.delete("pricing_candle", "symbol = ? AND chart_range = ?", arrayOf(symbol, BACKTEST_CHART_RANGE))
+            incoming
+        } else {
+            incoming.filter { candle -> candle === newest || stored[candle.epochSeconds] != candle }
+        }
+        toWrite.forEach { candle ->
+            bindCandle(upsert, symbol, BACKTEST_CHART_RANGE, capturedAtEpochSeconds, candle)
+            upsert.executeInsert()
+        }
+        return rebase
+    }
+
+    /** The stored daily bars of [symbol] from [fromEpochSeconds] on, by date. */
+    private fun loadBacktestBarsFrom(
+        db: SQLiteDatabase,
+        symbol: String,
+        fromEpochSeconds: Long,
+    ): Map<Long, HistoricalCandle> = db.rawQuery(
+        """
+            SELECT epoch_seconds, open_cents, high_cents, low_cents, close_cents, volume
+            FROM pricing_candle
+            WHERE symbol = ? AND chart_range = ? AND epoch_seconds >= ?
+        """.trimIndent(),
+        arrayOf(symbol, BACKTEST_CHART_RANGE, fromEpochSeconds.toString()),
+    ).useRows { cursor ->
+        val byEpoch = HashMap<Long, HistoricalCandle>()
+        while (cursor.moveToNext()) {
+            byEpoch[cursor.getLong(0)] = HistoricalCandle(
+                epochSeconds = cursor.getLong(0),
+                openCents = cursor.getLong(1),
+                highCents = cursor.getLong(2),
+                lowCents = cursor.getLong(3),
+                closeCents = cursor.getLong(4),
+                volume = cursor.getLong(5),
+            )
+        }
+        byEpoch
     }
 
     override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> =
@@ -1178,22 +1436,77 @@ open class SQLiteStateStore(
 
     /**
      * Asked of the oldest date the two series share, because that is the one furthest from the last
-     * adjustment and so the one most likely to disagree. A symbol with no stored overlap has nothing
-     * to contradict and is never rebased.
+     * adjustment and so the one most likely to disagree. [storedCents] is the close on file for the
+     * date of [oldestIncoming]; a symbol with no stored overlap has nothing to contradict and is
+     * never rebased.
      */
-    private fun splitBasisChanged(
-        db: SQLiteDatabase,
-        symbol: String,
-        incoming: List<HistoricalCandle>,
-    ): Boolean {
-        val oldestIncoming = incoming.minByOrNull { it.epochSeconds } ?: return false
-        val storedCents = db.rawQuery(
-            "SELECT close_cents FROM pricing_candle WHERE symbol = ? AND chart_range = ? AND epoch_seconds = ?",
-            arrayOf(symbol, BACKTEST_CHART_RANGE, oldestIncoming.epochSeconds.toString()),
-        ).useRows { cursor -> if (cursor.moveToNext()) cursor.getLong(0) else null } ?: return false
+    private fun splitBasisChanged(storedCents: Long?, oldestIncoming: HistoricalCandle): Boolean {
+        if (storedCents == null) return false
         if (storedCents <= 0L) return true
         val driftBps = abs(oldestIncoming.closeCents - storedCents) * 10_000L / storedCents
         return driftBps > REBASE_TOLERANCE_BPS
+    }
+
+    suspend fun loadRefreshMarks(): Map<String, RefreshMarks> = withContext(ioDispatcher) {
+        val db = readableDatabase
+        val marks = HashMap<String, RefreshMarks>()
+        fun latestCaptureAt(captureKey: String, apply: (RefreshMarks, Long) -> RefreshMarks) {
+            db.rawQuery(
+                """
+                    SELECT raw_latest.symbol, raw_capture.captured_at
+                    FROM raw_latest
+                    JOIN raw_capture ON raw_capture.id = raw_latest.capture_id
+                    WHERE raw_latest.capture_key = ?
+                """.trimIndent(),
+                arrayOf(captureKey),
+            ).useRows { cursor ->
+                while (cursor.moveToNext()) {
+                    val symbol = cursor.getString(0)
+                    marks[symbol] = apply(marks[symbol] ?: RefreshMarks(), cursor.getLong(1))
+                }
+            }
+        }
+        latestCaptureAt("snapshot") { mark, at -> mark.copy(quotedAtEpochSeconds = at) }
+        latestCaptureAt("fundamental-timeseries") { mark, at -> mark.copy(timeseriesCapturedAtEpochSeconds = at) }
+        db.rawQuery(
+            "SELECT symbol, MAX(captured_at) FROM pricing_candle WHERE chart_range = ? GROUP BY symbol",
+            arrayOf(ChartRange.Year.name),
+        ).useRows { cursor ->
+            while (cursor.moveToNext()) {
+                val symbol = cursor.getString(0)
+                marks[symbol] = (marks[symbol] ?: RefreshMarks()).copy(yearChartedAtEpochSeconds = cursor.getLong(1))
+            }
+        }
+        marks
+    }
+
+    /** The candles on file for one range of many symbols, in a few queries. */
+    suspend fun loadPricingCandles(range: ChartRange, symbols: Collection<String>): List<PersistedChartRecord> =
+        withContext(ioDispatcher) {
+            val db = readableDatabase
+            symbols.chunked(SQL_IN_CHUNK).flatMap { chunk -> loadPricingCandleCache(db, rangeFilter = range, symbolsFilter = chunk) }
+        }
+
+    suspend fun loadFundamentalTimeseries(symbol: String): PersistedFundamentalTimeseries? = withContext(ioDispatcher) {
+        readableDatabase.rawQuery(
+            """
+                SELECT raw_capture.scope_key, raw_capture.captured_at, raw_capture.payload_json
+                FROM raw_latest
+                JOIN raw_capture ON raw_capture.id = raw_latest.capture_id
+                WHERE raw_latest.symbol = ? AND raw_latest.capture_key = ?
+            """.trimIndent(),
+            arrayOf(symbol, "fundamental-timeseries"),
+        ).useRows { cursor ->
+            if (!cursor.moveToFirst()) return@useRows null
+            val payload = json.decodeFromString<RawCapturePayload>(cursor.getString(2))
+                as? RawCapturePayload.FundamentalTimeseries ?: return@useRows null
+            PersistedFundamentalTimeseries(
+                timeseries = payload.value,
+                sourceName = cursor.getString(0) ?: "unknown",
+                provenance = payload.provenance,
+                capturedAt = cursor.getLong(1),
+            )
+        }
     }
 
     suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
@@ -1205,6 +1518,15 @@ open class SQLiteStateStore(
         )
     }
 
+    /**
+     * Writes a chart as the difference against the rows on file.
+     *
+     * A refresh brings the same year of candles it brought an hour ago, plus one. Deleting the
+     * range and inserting every candle again through [ContentValues] was six of the eight
+     * milliseconds a symbol cost to persist. Only the candles that are new or changed are written,
+     * through one compiled statement; rows the merge dropped are deleted by key. The newest candle
+     * is always written, so the range's `captured_at` says when it was last fetched.
+     */
     private fun persistPricingCandles(db: SQLiteDatabase, capture: RawCapture) {
         if (capture.captureKind != CaptureKind.ChartCandles) return
         val payload = capture.payload as? RawCapturePayload.Chart ?: return
@@ -1217,29 +1539,60 @@ open class SQLiteStateStore(
             incoming = payload.candles.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
         ).map { candle -> candle.candle }
 
-        db.delete(
-            "pricing_candle",
-            "symbol = ? AND chart_range = ?",
-            arrayOf(capture.symbol, payload.range.name),
-        )
-        mergedCandles.forEach { candle ->
-            db.insertWithOnConflict(
-                "pricing_candle",
-                null,
-                ContentValues().apply {
-                    put("symbol", capture.symbol)
-                    put("chart_range", payload.range.name)
-                    put("captured_at", capture.capturedAt)
-                    put("epoch_seconds", candle.epochSeconds)
-                    put("open_cents", candle.openCents)
-                    put("high_cents", candle.highCents)
-                    put("low_cents", candle.lowCents)
-                    put("close_cents", candle.closeCents)
-                    put("volume", candle.volume)
-                },
-                SQLiteDatabase.CONFLICT_REPLACE,
-            )
+        var existingByEpoch = existingCandles.associateBy { candle -> candle.epochSeconds }
+        var mergedEpochs = mergedCandles.mapTo(HashSet()) { candle -> candle.epochSeconds }
+        var newest = mergedCandles.lastOrNull()
+        var toWrite = mergedCandles.filter { candle ->
+            candle === newest || existingByEpoch[candle.epochSeconds] != candle
         }
+        var toDelete = existingByEpoch.keys.filter { epoch -> epoch !in mergedEpochs }
+
+        if (toDelete.isNotEmpty()) {
+            db.compileStatement(
+                "DELETE FROM pricing_candle WHERE symbol = ? AND chart_range = ? AND epoch_seconds = ?",
+            ).use { delete ->
+                toDelete.forEach { epoch ->
+                    delete.bindString(1, capture.symbol)
+                    delete.bindString(2, payload.range.name)
+                    delete.bindLong(3, epoch)
+                    delete.executeUpdateDelete()
+                }
+            }
+        }
+        if (toWrite.isEmpty()) return
+        compileCandleUpsert(db).use { upsert ->
+            toWrite.forEach { candle ->
+                bindCandle(upsert, capture.symbol, payload.range.name, capture.capturedAt, candle)
+                upsert.executeInsert()
+            }
+        }
+    }
+
+    private fun compileCandleUpsert(db: SQLiteDatabase): SQLiteStatement = db.compileStatement(
+        """
+            INSERT OR REPLACE INTO pricing_candle
+                (symbol, chart_range, captured_at, epoch_seconds,
+                 open_cents, high_cents, low_cents, close_cents, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent(),
+    )
+
+    private fun bindCandle(
+        upsert: SQLiteStatement,
+        symbol: String,
+        chartRange: String,
+        capturedAtEpochSeconds: Long,
+        candle: HistoricalCandle,
+    ) {
+        upsert.bindString(1, symbol)
+        upsert.bindString(2, chartRange)
+        upsert.bindLong(3, capturedAtEpochSeconds)
+        upsert.bindLong(4, candle.epochSeconds)
+        upsert.bindLong(5, candle.openCents)
+        upsert.bindLong(6, candle.highCents)
+        upsert.bindLong(7, candle.lowCents)
+        upsert.bindLong(8, candle.closeCents)
+        upsert.bindLong(9, candle.volume)
     }
 
     private fun mergePersistedChartHistory(
@@ -1316,7 +1669,9 @@ open class SQLiteStateStore(
         }
 
     private fun rawCaptureKey(capture: RawCapture): String = when (capture.captureKind) {
-        CaptureKind.Snapshot -> "snapshot"
+        // A scoped snapshot (the batch-quote price) keeps its own row, so the plain `snapshot`
+        // row keeps saying when the symbol's own quoteSummary last landed.
+        CaptureKind.Snapshot -> capture.scopeKey?.let { scope -> "snapshot:$scope" } ?: "snapshot"
         CaptureKind.External -> "external"
         CaptureKind.Fundamentals -> "fundamentals"
         CaptureKind.ChartCandles -> "chart:${capture.scopeKey ?: "unknown"}"
@@ -1658,6 +2013,7 @@ open class SQLiteStateStore(
                         put("composite_score", row.compositeScore)
                         put("composite_score_base", row.compositeScoreBase)
                         put("market_price_cents", row.marketPriceCents)
+                        put("factors_json", row.factors?.let(json::encodeToString))
                     },
                     SQLiteDatabase.CONFLICT_REPLACE,
                 )
@@ -1682,7 +2038,7 @@ open class SQLiteStateStore(
             """
             SELECT symbol, scoring_model, scored_at, fundamentals_score, technical_score,
                    forecast_score, regime_score, composite_score, composite_score_base,
-                   market_price_cents
+                   market_price_cents, factors_json
             FROM score_journal
             $where
             ORDER BY scored_at, scoring_model, symbol
@@ -1703,6 +2059,8 @@ open class SQLiteStateStore(
                             compositeScore = cursor.getInt(7),
                             compositeScoreBase = cursor.getInt(8),
                             marketPriceCents = cursor.getLong(9),
+                            factors = cursor.getString(10)
+                                ?.let { runCatching { json.decodeFromString<JournalFactors>(it) }.getOrNull() },
                         ),
                     )
                 }
@@ -1973,7 +2331,7 @@ open class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 8
+        private const val SQLITE_SCHEMA_VERSION = 10
 
         /**
          * The `chart_range` value the retrospective's daily bars are stored under.
@@ -1987,12 +2345,25 @@ open class SQLiteStateStore(
         /** Hard cap on durable revision rows per symbol. Matches the in-memory History window. */
         const val MAX_REVISION_HISTORY = 240
 
+        /** Symbols per `IN (...)` clause; SQLite binds at most 999 variables in one statement. */
+        private const val SQL_IN_CHUNK = 500
+
         /**
          * Below this, a disagreement between a stored close and a re-fetched one is rounding. A
          * split is a factor, not a fraction of a percent, so there is no band to tune here.
          */
         private const val REBASE_TOLERANCE_BPS = 100L
+        /**
+         * Symbols written per transaction by [persistBacktestCandles]. A first fill writes a year
+         * of bars a symbol; a hundred symbols is a few thousand rows, a fraction of a second on a
+         * phone, and the longest any other write waits for the connection.
+         */
+        private const val BACKTEST_SYMBOLS_PER_TRANSACTION = 100
+        /** Revision ids per DELETE. Keeps the statement short of the SQLite variable limit. */
+        private const val PRUNE_DELETE_CHUNK = 400
         private const val DEFAULT_DB_FILE_NAME = "discount_screener_state.sqlite3"
+        /** Set once the one-time walk over pre-guard repeated revisions has run. */
+        private const val META_KEY_REPEATED_REVISIONS_PRUNED = "revisions.repeats_pruned"
         private const val META_KEY_LAST_STARTUP_AT = "last_startup_at"
         private const val META_KEY_LAST_PERSISTED_AT = "last_persisted_at"
         private const val META_KEY_DISCOVERY_MIN_SCORE = "discovery.min_score"
@@ -2009,7 +2380,7 @@ open class SQLiteStateStore(
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
             "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
-            "score_journal",
+            "score_journal", "symbol_note",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),

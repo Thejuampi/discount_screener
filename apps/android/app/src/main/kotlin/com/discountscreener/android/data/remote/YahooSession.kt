@@ -1,5 +1,9 @@
 package com.discountscreener.android.data.remote
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
@@ -12,6 +16,11 @@ import java.util.concurrent.atomic.AtomicReference
  * Bootstrap mirrors the Yahoo web app:
  * 1. Visit finance.yahoo.com to obtain A1/A3 cookies
  * 2. GET /v1/test/getcrumb with those cookies
+ *
+ * The two calls run once and everybody else waits for that one run. The wait used to be a
+ * `synchronized` block, which parks an operating-system thread rather than suspending a coroutine:
+ * at every twelve-minute expiry each symbol in flight took a thread out of the IO pool and held it
+ * across two network calls. A coroutine [Mutex] gives the thread back while the caller waits.
  */
 internal class YahooSession(
     private val httpClient: OkHttpClient,
@@ -24,7 +33,7 @@ internal class YahooSession(
         val obtainedAtEpochMs: Long,
     )
 
-    private val lock = Any()
+    private val lock = Mutex()
     private val state = AtomicReference<CrumbState?>(null)
 
     fun clear() {
@@ -37,14 +46,17 @@ internal class YahooSession(
         return current.crumb
     }
 
-    fun ensureCrumb(): String {
+    suspend fun ensureCrumb(): String {
         currentCrumbOrNull()?.let { return it }
-        synchronized(lock) {
-            currentCrumbOrNull()?.let { return it }
-            bootstrapCookies()
-            val crumb = fetchCrumb()
-            state.set(CrumbState(crumb = crumb, obtainedAtEpochMs = clock()))
-            return crumb
+        return lock.withLock {
+            // Checked again inside the lock: while this caller waited, the winner of the race
+            // already paid for the handshake, and a second one would only annoy Yahoo.
+            currentCrumbOrNull() ?: withContext(Dispatchers.IO) {
+                bootstrapCookies()
+                val crumb = fetchCrumb()
+                state.set(CrumbState(crumb = crumb, obtainedAtEpochMs = clock()))
+                crumb
+            }
         }
     }
 

@@ -1,5 +1,8 @@
 package com.discountscreener.android.domain.model
 
+import com.discountscreener.core.model.ScoreFactor
+import kotlinx.serialization.Serializable
+
 /**
  * One symbol, one model, one scoring pass — the row that will eventually say which model works.
  *
@@ -26,4 +29,24 @@ data class ScoreJournalRow(
     val compositeScore: Int,
     val compositeScoreBase: Int,
     val marketPriceCents: Long,
+    /**
+     * The terms that built the bucket scores, captured on the day they were scored.
+     *
+     * Bucket scores say which model won; only the terms say why, and only the terms can be put on
+     * trial one by one when that verdict arrives. Null for rows written before factor capture
+     * existed and for rows whose stored JSON cannot be read — an unreadable term list is a hole in
+     * the record, never a fabricated empty set.
+     */
+    val factors: JournalFactors? = null,
+)
+
+/**
+ * The per-bucket term lists behind one scoring pass. The regime bucket keeps causes and signals,
+ * not scored factors, so it has no column here by design rather than by omission.
+ */
+@Serializable
+data class JournalFactors(
+    val fundamentals: List<ScoreFactor> = emptyList(),
+    val technical: List<ScoreFactor> = emptyList(),
+    val forecast: List<ScoreFactor> = emptyList(),
 )

@@ -159,7 +159,6 @@ class ScreenDataProjectionEngine {
                 marketPriceCents = detail?.marketPriceCents,
                 anchor = anchor,
                 confidence = confidence,
-                freshness = freshness,
                 qualification = detail?.qualification,
                 trustSignal = currentTrustSignal,
             ),
@@ -199,7 +198,6 @@ class ScreenDataProjectionEngine {
                 marketPriceCents = row.marketPriceCents,
                 anchor = anchor,
                 confidence = confidence,
-                freshness = freshness,
                 trustSignal = currentTrustSignal,
                 opportunityDecisionFacts = decisionFacts,
                 scoringModel = request.route.opportunityScoringModel,
@@ -714,17 +712,25 @@ class ScreenDataProjectionEngine {
         return if (hasRowData) ProjectedRowFreshness.Updated else ProjectedRowFreshness.Loading
     }
 
+    /**
+     * Act, Watch or Avoid for a projected row, or null when the row has no upside to judge.
+     *
+     * Freshness is not read here. A row restored from the database carries the numbers its last
+     * refresh filed, and those are the numbers that made its tag, so the tag is still the last
+     * thing the app decided about that name. The screen fades it rather than dropping it: the app
+     * used to open on a full page of Stale rows with no call beside any of them, which said less
+     * than the old call did. `decisionTagIsCurrent` on the Android side reads the same freshness
+     * to decide the fade, so this rule and that one stay two halves of one behaviour.
+     */
     private fun rowDecision(
         marketPriceCents: Long?,
         anchor: ProjectedFairValueAnchor,
         confidence: ProjectedConfidence,
-        freshness: ProjectedRowFreshness,
         qualification: QualificationStatus? = null,
         trustSignal: ProjectedTrustSignal? = null,
         opportunityDecisionFacts: ProjectedOpportunityDecisionFacts? = null,
         scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
     ): ProjectedRowDecision? {
-        if (freshness != ProjectedRowFreshness.Updated) return null
         var upsideBps = projectedUpsideBps(marketPriceCents, anchor.valueCents) ?: return null
         if (opportunityDecisionFacts != null) {
             return opportunityDecision(

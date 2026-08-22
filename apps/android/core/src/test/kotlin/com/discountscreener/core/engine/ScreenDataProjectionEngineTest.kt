@@ -332,6 +332,40 @@ class ScreenDataProjectionEngineTest {
         assertEquals(ProjectedRowDecision.Watch, result.trackedRows.single().decision)
     }
 
+    /**
+     * A stale row is still judged, because the numbers it was filed with are the numbers on file.
+     *
+     * The projection used to return no decision at all for anything that was not Updated, so the
+     * app opened on a full page of Stale rows with no Act, Watch or Avoid beside any of them: it
+     * threw away the last call it made about each name and put nothing in its place. The screen now
+     * fades the tag instead, and the freshness chip beside it already says the row is not current.
+     *
+     * This row is the row of the test above with one field moved, so a decision here is the work of
+     * the stale flag and of nothing else around it.
+     */
+    @Test
+    fun a_stale_tracked_row_is_still_given_a_decision() {
+        var result = projectSingleSymbol(
+            symbol = "W13N",
+            detail = detail(
+                symbol = "W13N",
+                marketPriceCents = 10_000L,
+                intrinsicValueCents = 13_000L,
+                confidence = ConfidenceBand.High,
+            ),
+            dcfAnalysis = dcf(
+                source = DcfSource.YahooFinance,
+                resolverState = ResolverState.Selected,
+                bearIntrinsicValueCents = 11_500L,
+                baseIntrinsicValueCents = 13_000L,
+                bullIntrinsicValueCents = 15_000L,
+            ),
+            symbolState = liveState("W13N").copy(stale = true),
+        )
+
+        assertEquals(ProjectedRowDecision.Watch, result.trackedRows.single().decision)
+    }
+
     @Test
     fun opportunity_low_confidence_rows_project_avoid_decision() {
         var candidate = candidateRow().copy(confidence = ConfidenceBand.Low)
@@ -851,7 +885,9 @@ class ScreenDataProjectionEngineTest {
         confidence = ProjectedConfidence.Provisional,
         freshness = ProjectedRowFreshness.Restored,
         trustKind = ProjectedTrustSignalKind.SourceUnknown,
-        decision = null,
+        // Watch, because the saved value has no source behind it. The row used to read no decision
+        // at all, which was the Restored gate and not this trust signal. See `rowDecision`.
+        decision = ProjectedRowDecision.Watch,
         canPopulateAnalystHistory = false,
         detailFairValueCents = 12_000L,
         detailSourceLabel = "Source unknown - saved model",

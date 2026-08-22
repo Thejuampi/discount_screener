@@ -1,10 +1,9 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToNode
 import com.discountscreener.android.StuckTestWatchdog
@@ -18,7 +17,6 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 /**
@@ -32,7 +30,7 @@ class OpportunityListRankOrdinalTest {
     val stuckTestWatchdog = StuckTestWatchdog()
 
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun opportunity_rows_carry_their_placing() {
@@ -76,8 +74,7 @@ class OpportunityListRankOrdinalTest {
                 coverageCount = 3,
             )
         }
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DashboardScreen(
                     state = DashboardUiState(

@@ -20,7 +20,7 @@ class DcfSourceCoordinatorTest {
             secondaryTimeseriesProvider = FixedTimeseriesProvider(usableTimeseries()),
         )
 
-        var selection = coordinator.resolve("AAPL") { analysis() }
+        var selection = coordinator.resolve("AAPL") { analysis() }.selection
 
         assertEquals(DcfSource.SecEdgar to 0, selection.selectedSource to yahoo.timeseriesFetchCount)
     }
@@ -30,7 +30,7 @@ class DcfSourceCoordinatorTest {
         var yahoo = CountingYahooFinanceClient()
         var coordinator = DcfSourceCoordinator(yahooClient = yahoo)
 
-        var selection = coordinator.resolve("AAPL") { analysis() }
+        var selection = coordinator.resolve("AAPL") { analysis() }.selection
 
         assertEquals(DcfSource.YahooFinance to 1, selection.selectedSource to yahoo.timeseriesFetchCount)
     }
@@ -41,7 +41,7 @@ class DcfSourceCoordinatorTest {
         var coordinator = DcfSourceCoordinator(yahooClient = yahoo)
         var selection = coordinator.resolve("AAPL") {
             error("fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required")
-        }
+        }.selection
         assertEquals(
             "fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required",
             selection.reasons.firstOrNull()?.upstreamStatus,
@@ -57,12 +57,23 @@ class DcfSourceCoordinatorTest {
             secondaryTimeseriesProvider = secondary,
         )
 
-        var selection = coordinator.resolve("AAPL") { analysis() }
+        var selection = coordinator.resolve("AAPL") { analysis() }.selection
 
         assertEquals(
             Triple(DcfSource.YahooFinance, 1, 1),
             Triple(selection.selectedSource, yahoo.timeseriesFetchCount, secondary.fetchCount),
         )
+    }
+
+    /** The answer is the provider's whatever the engine makes of it; the file keeps it for the day. */
+    @Test
+    fun resolve_keeps_a_timeseries_the_engine_rejected() = runTest {
+        var yahoo = CountingYahooFinanceClient()
+        var coordinator = DcfSourceCoordinator(yahooClient = yahoo)
+
+        var resolution = coordinator.resolve("AAPL") { error("fcff unavailable: marginal tax is unavailable") }
+
+        assertEquals(mapOf(DcfSource.YahooFinance to usableTimeseries()), resolution.fetched)
     }
 
     private class CountingYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {

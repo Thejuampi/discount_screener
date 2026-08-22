@@ -422,6 +422,7 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
                 MeasurementCard(
                     onExport = { onAction(DashboardAction.ExportScores) },
                     onRetrospective = { onAction(DashboardAction.RunRetrospective) },
+                    onOutcome = { onAction(DashboardAction.RunOutcomeReport) },
                 )
             }
         }
@@ -601,7 +602,11 @@ private fun LogStatsCard(state: DashboardUiState) {
  * universe and cannot be answered from a screen.
  */
 @Composable
-private fun MeasurementCard(onExport: () -> Unit, onRetrospective: () -> Unit) {
+private fun MeasurementCard(
+    onExport: () -> Unit,
+    onRetrospective: () -> Unit,
+    onOutcome: () -> Unit,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
@@ -628,6 +633,15 @@ private fun MeasurementCard(onExport: () -> Unit, onRetrospective: () -> Unit) {
             )
             OutlinedButton(onClick = onRetrospective, modifier = Modifier.fillMaxWidth()) {
                 Text("Run Retrospective", maxLines = 1, textAlign = TextAlign.Center)
+            }
+            Text(
+                "Joins the score journal to the daily bars that followed and reports each model's " +
+                    "top-minus-bottom forward return. Street upside appears as context only.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onOutcome, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Outcome Report", maxLines = 1, textAlign = TextAlign.Center)
             }
         }
     }

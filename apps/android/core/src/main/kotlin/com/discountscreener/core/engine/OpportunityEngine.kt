@@ -133,6 +133,56 @@ private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
 private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
 
 /**
+ * V4's leverage band, in hundredths of a turn of EBITDA. Zero is net cash; 300 is three turns of
+ * net debt.
+ *
+ * Three turns is the level at which a lender starts writing covenants, and it is a chosen line
+ * rather than a measured one. Below zero the company owes nothing on balance and the ramp is
+ * already at its top, which is correct: paying down the last of the net debt is not what makes the
+ * next dollar of return.
+ */
+private const val V4_FUND_LEVERAGE_LOW = 0.0
+private const val V4_FUND_LEVERAGE_HIGH = 300.0
+
+/**
+ * The sector band around the leverage centre, additive for the same reason return on equity's is:
+ * net debt crosses zero, and a multiplicative band around a negative centre inverts.
+ *
+ * Plus or minus one and a half turns. A pipeline at 3.5x is ordinary and a software company at
+ * 3.5x is in trouble, and this is the offset that lets one band say both.
+ */
+private const val V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET = -150.0
+private const val V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET = 150.0
+
+/**
+ * The fallback band, stated in the unit the ingestion actually produces.
+ *
+ * Yahoo reports `financialData.debtToEquity` as a percent — AMZN comes back as 40.46 for a ratio of
+ * 0.4046 — and every ingestion in this repo multiplies it by a hundred again. The stored number is
+ * therefore the ratio times ten thousand. V2 and V3 ramp that field against 30 to 200
+ * ([V3_FUND_BALANCE_DE_LOW]), so every real ticker saturates and their leverage component scores
+ * the same constant for the whole universe.
+ *
+ * Those two models are frozen and keep the behaviour. V4 reads the field against the band the
+ * field is in. Correcting the ingestion instead is not open: Windows's valuation runtime is
+ * calibrated to the inflated number (`operating_valuation_runtime.rs:771-778` divides by ten
+ * thousand), and rescaling under it would move hold-years and the leverage refusals with no test
+ * standing behind either.
+ *
+ * This is the second choice regardless. It is reached only when EBITDA is missing or non-positive,
+ * and it carries its own label so the weaker input is visible in the factor list.
+ */
+private const val V4_FUND_FALLBACK_DE_LOW = 3_000.0
+private const val V4_FUND_FALLBACK_DE_HIGH = 20_000.0
+
+/**
+ * Held equal to [V3_FUND_BALANCE_WEIGHT] on purpose. V4's budget is V3's plus the share-count
+ * weight ([V4_FUNDAMENTALS_FULL_WEIGHT]); changing the leverage weight alone would silently
+ * re-scale every other V4 factor.
+ */
+private const val V4_FUND_LEVERAGE_WEIGHT = V3_FUND_BALANCE_WEIGHT
+
+/**
  * The one character that says a metric was scored against its sector rather than an absolute band.
  *
  * Two rows in one list scored by different rules, with nothing saying which, is the same defect as
@@ -164,10 +214,10 @@ private const val V3_FORECAST_SKEW_WEIGHT = 12.0
 private const val V3_FORECAST_MIN_ANALYST_OPINIONS = 3
 private const val V3_FORECAST_FULL_ANALYST_OPINIONS = 15.0
 private const val V3_FORECAST_BREADTH_WEIGHT = 14.0
-private const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
+internal const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
 private const val V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT = 8.0
 private const val V3_FORECAST_DCF_UNCERTAINTY_WEIGHT = 8.0
-private const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
+internal const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
 private const val V3_FORECAST_DCF_WIDTH_UPPER = 1.0
 private const val V3_FORECAST_FRESHNESS_WEIGHT = 4.0
 private const val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
@@ -206,6 +256,16 @@ private const val V4_FUND_GROWTH_UPPER_BPS = V3_FUND_GROWTH_UPPER_BPS
 
 /** Below this trailing EPS, Yahoo quarter YoY has no usable base. Ten cents is in. */
 private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
+
+/**
+ * The smallest gap between Trend and Pulse that this engine calls a conflict.
+ *
+ * The old test compared ramp signs, and the shared band's midpoint sits at +5% growth — so +6%
+ * revenue against +4% EPS flagged, while two readings of a collapsing business on the same side
+ * of the midpoint did not. Ten points of growth is the smallest disagreement that says the two
+ * series describe different businesses; anything under it is noise around the middle of the band.
+ */
+private const val V4_GROWTH_CONFLICT_BPS = 1_000
 
 /** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
 private const val V4_TREND_MAX_YEARS = 5
@@ -426,10 +486,11 @@ object OpportunityEngine {
             .filter { includeUnqualified || it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
+                var analysis = context.analysesBySymbol[detail.symbol]
                 val score = scoreWithModel(
                     detail = detail,
                     summary = preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
-                    analysis = context.analysesBySymbol[detail.symbol],
+                    analysis = analysis,
                     model = context.scoringModel,
                     regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
                     marketRegime = context.marketRegime,
@@ -437,6 +498,23 @@ object OpportunityEngine {
                     sectorBenchmarks = detail.fundamentals?.sectorName
                         ?.let { context.sectorBenchmarks[it] },
                     timeseries = context.timeseriesBySymbol[detail.symbol],
+                )
+                // Read from the same two spans the forecast bucket already measures, so a row cannot
+                // report a narrow range here while `Unc` penalises a wide one. It is stamped whether
+                // or not the model spread is admitted to the score.
+                var outcome = outcomeConfidenceFor(
+                    streetWidthBps = spanWidthBps(
+                        lowCents = detail.externalSignalLowFairValueCents,
+                        highCents = detail.externalSignalHighFairValueCents,
+                        centreCents = preferredForecastFairValueCents(detail),
+                    ),
+                    modelWidthBps = analysis?.let { dcf ->
+                        spanWidthBps(
+                            lowCents = dcf.bearIntrinsicValueCents,
+                            highCents = dcf.bullIntrinsicValueCents,
+                            centreCents = dcf.baseIntrinsicValueCents,
+                        )
+                    },
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -464,6 +542,9 @@ object OpportunityEngine {
                     regimeSignals = score.regimeSignals,
                     regimeUnavailableReason = score.regimeUnavailableReason,
                     companyName = detail.companyName,
+                    nextEarningsEpoch = detail.nextEarningsEpoch,
+                    outcomeConfidence = outcome.band,
+                    outcomeWidthBps = outcome.widthBps,
                 )
             }
             .toMutableList()
@@ -1333,15 +1414,41 @@ object OpportunityEngine {
         var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
 
-        addCashFlowVote(acc, fundamentals)
+        val yieldVoted = addCashFlowVote(acc, fundamentals)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
         addV4Growth(acc, fundamentals, timeseries)
-        addBalanceSheet(acc, fundamentals)
+        addV4BalanceSheet(
+            acc,
+            fundamentals,
+            sectorBenchmarks?.netDebtToEbitdaHundredths,
+            financialServices = FinancialClassPolicy.isFinancialServices(fundamentals),
+        )
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
-        addCashConversion(acc, fundamentals)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
         addShareCountChange(acc, timeseries)
+        addCyclePeak(acc, fundamentals, timeseries)
 
         return acc.toEvidence()
+    }
+
+    /**
+     * Marks a name whose latest earnings sit at the top of the only history there is, in an
+     * industry the beta policy already calls through-cycle.
+     *
+     * It subtracts and never adds. A margin at the bottom of its window is not evidence of a
+     * trough — over five points it is indistinguishable from a business getting worse — and paying
+     * a name for that would be the same extrapolation error in the other direction.
+     *
+     * See [cyclePeakReading] for why this is a penalty and not a weighted term.
+     */
+    private fun addCyclePeak(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var reading = cyclePeakReading(fundamentals, timeseries, V4_TREND_MAX_YEARS)
+        if (reading.penaltyPoints <= 0) return
+        acc.penalize(reading.penaltyPoints, CYCLE_PEAK_LABEL, reading.marginPercentileBps)
     }
 
     /**
@@ -1354,14 +1461,21 @@ object OpportunityEngine {
      *
      * A single point is not a change and contributes nothing rather than zero: the pair is what
      * carries the fact, and one point cannot say which way it moved. Both providers sort ascending
-     * by `asOfDate`, so the last two entries are the most recent pair.
+     * by `asOfDate`, so the last two entries are the most recent pair — and the pair must be two
+     * adjacent fiscal years. A series with a missing year would otherwise print a multi-year move
+     * as one annual rate, and a stale pair would report a change that ended years ago as if it
+     * were current; the adjacency gate refuses both rather than misdating them.
      */
     private fun addShareCountChange(acc: EvidenceAccumulator, timeseries: FundamentalTimeseries?) {
-        var series = timeseries?.dilutedAverageShares?.filter { it.value > 0.0 } ?: return
+        var series = timeseries?.dilutedAverageShares
+            ?.filter { it.value.isFinite() && it.value > 0.0 }
+            ?.sortedBy { it.asOfDate }
+            ?: return
         if (series.size < 2) return
-        var previous = series[series.size - 2].value
-        var latest = series[series.size - 1].value
-        var changeBps = (latest - previous) / previous * BASIS_POINTS_PER_UNIT
+        var previous = series[series.size - 2]
+        var latest = series[series.size - 1]
+        if (!areConsecutiveFiscalYears(previous, latest)) return
+        var changeBps = (latest.value - previous.value) / previous.value * BASIS_POINTS_PER_UNIT
         acc.add(
             V4_FUND_SHARE_COUNT_WEIGHT,
             -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
@@ -1427,14 +1541,21 @@ object OpportunityEngine {
     // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
     // ----------------------------------------------------------------------------------
 
-    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF. */
-    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF.
+     *
+     * Returns true when the vote spoke through the FCF **yield** — FCF over a known market cap —
+     * because that is the one variant whose dollars [addCashConversion] would re-read. The single
+     * source of that condition lives here; a second hand-written copy beside the branch it mirrors
+     * is how the two drift apart.
+     */
+    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot): Boolean {
         val fcfDollars = fundamentals.freeCashFlowDollars
         val marketCapDollars = fundamentals.marketCapDollars
         when {
             fcfDollars != null && marketCapDollars != null && marketCapDollars > 0L -> {
                 val yieldFraction = fcfDollars.toDouble() / marketCapDollars.toDouble()
                 acc.add(V3_FUND_FCF_WEIGHT, smoothRamp(yieldFraction, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER), "FCFy")
+                return true
             }
             fcfDollars != null -> {
                 acc.add(V3_FUND_FCF_WEIGHT, if (fcfDollars > 0L) 1.0 else -1.0, "FCF")
@@ -1446,6 +1567,7 @@ object OpportunityEngine {
                 }
             }
         }
+        return false
     }
 
     /**
@@ -1516,8 +1638,14 @@ object OpportunityEngine {
         if (pulseRamp != null && pulseBps != null) {
             acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
         }
-        if (trendRamp != null && pulseRamp != null && trendRamp * pulseRamp < 0.0) {
+        if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
             acc.flag("Pulse≠Trend")
+        }
+        // Both readings cross the last filed year, so a write-down inside it moves them both. The
+        // mark costs nothing: it says the growth above was read over a year that is not the
+        // business, and leaves the reader to weigh it.
+        if (earningsContamination(timeseries).latestYearContaminated) {
+            acc.flag(EARNINGS_CHARGE_LABEL)
         }
     }
 
@@ -1528,36 +1656,79 @@ object OpportunityEngine {
         var growthBps = fundamentals.earningsGrowthBps ?: return null
         var epsCents = fundamentals.trailingEpsCents ?: return null
         if (abs(epsCents) < V4_PULSE_MIN_ABS_EPS_CENTS) return null
-        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty(), requirePositiveLevel = false)
+        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty())
         if (isForeignTo(growthBps.toDouble(), annualRates.map { it.toDouble() })) return null
         return growthBps
     }
 
     private fun trendGrowthBps(timeseries: FundamentalTimeseries?): Int? {
-        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty(), requirePositiveLevel = true)
+        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty())
         if (rates.size < V4_TREND_MIN_TRANSITIONS) return null
         return medianOf(rates.map { it.toDouble() })?.roundToInt()
     }
 
-    private fun recentGrowthRatesBps(
-        series: List<AnnualReportedValue>,
-        requirePositiveLevel: Boolean,
-    ): List<Int> {
-        var usable = series
-            .filter { it.value.isFinite() }
-            .filter { if (requirePositiveLevel) it.value > 0.0 else it.value != 0.0 }
-            .sortedBy { it.asOfDate }
-            .takeLast(V4_TREND_MAX_YEARS)
-        if (usable.size < V4_TREND_MIN_TRANSITIONS + 1) return emptyList()
-        return usable.zipWithNext { previous, latest ->
-            if (previous.value == 0.0) {
-                null
-            } else {
-                ((latest.value / previous.value - 1.0) * BASIS_POINTS_PER_UNIT)
+    /**
+     * Annual YoY rates in bps, one per adjacent pair of positive-level fiscal years.
+     *
+     * The population rules live in [positiveLevelTransitions]: a pair that skips a year is not an
+     * annual rate, a negative base inverts the ratio's sign, and a loss-to-profit crossing prints
+     * nonsense. Revenue and net income take the same path — revenue arrives positive-filtered
+     * anyway, and net income needs the sign rule more than it needs the old negative-base rates.
+     */
+    private fun recentGrowthRatesBps(series: List<AnnualReportedValue>): List<Int> =
+        positiveLevelTransitions(series, maxYears = V4_TREND_MAX_YEARS)
+            .map { (previous, latest) ->
+                ((latest / previous - 1.0) * BASIS_POINTS_PER_UNIT)
                     .takeIf { it.isFinite() }
                     ?.roundToInt()
             }
-        }.filterNotNull()
+            .filterNotNull()
+
+    /**
+     * V4's leverage vote: net debt against a year of EBITDA, read against the sector when the
+     * sector can support a centre.
+     *
+     * V3 keeps [addBalanceSheet] and its book debt/equity. The split is the point — V4 is the model
+     * still in beta, and the two must be able to disagree about leverage without one dragging the
+     * other.
+     *
+     * A financial-services row takes no vote at all. Its debt line is deposits or float — the raw
+     * material, not borrowed money — and EBITDA is not a capacity measure for it, so every input
+     * this term can read is the wrong input. See [FinancialClassPolicy].
+     *
+     * Three inputs in order of strength, each labelled so the list says which one spoke:
+     * `ND/EBITDA` from dollars, `D/E` from the mis-scaled ratio, `Bal` from a bare cash-versus-debt
+     * comparison. A symbol with none of them adds nothing, which pulls the bucket toward zero
+     * rather than excusing it.
+     */
+    private fun addV4BalanceSheet(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+        financialServices: Boolean = false,
+    ) {
+        if (financialServices) return
+        var leverage = netDebtToEbitdaOf(fundamentals)
+        if (leverage != null) {
+            var centre = sectorNetDebtToEbitdaHundredths?.toDouble()
+            var lower = centre?.plus(V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET) ?: V4_FUND_LEVERAGE_LOW
+            var upper = centre?.plus(V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET) ?: V4_FUND_LEVERAGE_HIGH
+            var label = if (centre != null) "ND/EBITDA$SECTOR_ADJUSTED_MARKER" else "ND/EBITDA"
+            // Negated: more net debt is the worse reading, and the ramp climbs with its input.
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, -smoothRamp(leverage.toDouble(), lower, upper), label)
+            return
+        }
+        var deHundredths = fundamentals.debtToEquityHundredths
+        if (deHundredths != null) {
+            var ramp = -smoothRamp(deHundredths.toDouble(), V4_FUND_FALLBACK_DE_LOW, V4_FUND_FALLBACK_DE_HIGH)
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, ramp, "D/E")
+            return
+        }
+        var cash = fundamentals.totalCashDollars
+        var debt = fundamentals.totalDebtDollars
+        if (cash != null && debt != null) {
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+        }
     }
 
     private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
@@ -1574,7 +1745,14 @@ object OpportunityEngine {
     }
 
     /** Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign). */
-    private fun addCashConversion(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    private fun addCashConversion(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        yieldVoted: Boolean = false,
+    ) {
+        // One fact family, one vote. After a yield vote the conversion ratio re-reads the same
+        // free-cash-flow dollars; counting both would let one number speak twice in this bucket.
+        if (yieldVoted) return
         val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
@@ -1997,6 +2175,7 @@ object OpportunityEngine {
     private class EvidenceAccumulator(private val normalizationWeight: Double) {
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
+        private var penaltyPoints = 0
         val signals = mutableListOf<String>()
         val factors = mutableListOf<ScoreFactor>()
 
@@ -2017,14 +2196,31 @@ object OpportunityEngine {
             }
         }
 
+        /**
+         * A subtraction in the bucket's own hundred points, applied after the terms are normalized.
+         *
+         * It is not a term and carries no weight in the divisor. A term's weight is charged to
+         * every symbol whether or not the term fires, which is right for an input a symbol could
+         * have had and wrong for one it could not: a software company has no commodity cycle, and
+         * scaling its whole bucket down for a reading that can never apply to it would be a defect,
+         * not a caution. A penalty only reaches the symbols it was measured on.
+         */
+        fun penalize(points: Int, label: String, inputBps: Int? = null) {
+            require(points > 0) { "EvidenceAccumulator penalty must be positive" }
+            penaltyPoints += points
+            signals += "$label-"
+            factors += ScoreFactor(key = label, token = "$label-", bucketPoints = -points, inputBps = inputBps)
+        }
+
         fun flag(label: String) {
             signals += label
             factors += ScoreFactor(key = label, token = label, bucketPoints = 0)
         }
 
+        /** A penalty alone never creates a score: with no term measured the bucket is still absent. */
         fun normalizedScore(): Int? {
             if (evidenceWeight == 0.0) return null
-            var normalized = (weightedSum / normalizationWeight) * 100.0
+            var normalized = (weightedSum / normalizationWeight) * 100.0 - penaltyPoints
             return normalized.coerceIn(-100.0, 100.0).roundToInt()
         }
 

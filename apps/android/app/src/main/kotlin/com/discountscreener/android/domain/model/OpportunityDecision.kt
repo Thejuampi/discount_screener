@@ -21,6 +21,10 @@ data class OpportunityDecisionExplanation(
  *
  * The gates run in a fixed order. The first one that fails sets the state. Act is the residue
  * when every gate passes and the score meets the model cut with High confidence.
+ *
+ * Freshness reports and does not decide. A row restored from the database is judged on the numbers
+ * it was filed with, which is what the app last decided about it, and the Freshness gate says the
+ * decision is not from this refresh. The screen fades the tag to say the same thing without words.
  */
 fun explainOpportunityDecision(
     freshness: RowFreshness,
@@ -32,7 +36,7 @@ fun explainOpportunityDecision(
 ): OpportunityDecisionExplanation {
     var avoidBelow = OpportunityEngine.avoidBelowScore(scoringModel)
     var actAtOrAbove = OpportunityEngine.actAtOrAboveScore(scoringModel)
-    var live = freshness == RowFreshness.Updated
+    var live = decisionTagIsCurrent(freshness)
     var namedUpside = upsideBps != null
     var upsideOk = upsideBps != null && upsideBps > 0
     var scoreAvoids = compositeScore < avoidBelow
@@ -44,11 +48,6 @@ fun explainOpportunityDecision(
     var why: String
     var blocked: String?
     when {
-        !live -> {
-            state = null
-            why = "No decision until the row is live."
-            blocked = "Freshness"
-        }
         confidence == ConfidenceBand.Low -> {
             state = RowDecisionState.Avoid
             why = "Avoid because confidence is Low."
@@ -102,7 +101,7 @@ fun explainOpportunityDecision(
         else -> "$compositeScore < $actAtOrAbove"
     }
     var gates = listOf(
-        OpportunityDecisionGate("Freshness", if (live) "Live" else "Not live", blocked == "Freshness"),
+        OpportunityDecisionGate("Freshness", if (live) "Live" else "Not live", !live),
         OpportunityDecisionGate("Confidence", confidence.name, blocked == "Confidence"),
         OpportunityDecisionGate("Upside", formatDecisionUpside(upsideBps), blocked == "Upside"),
         OpportunityDecisionGate("Composite", scoreValue, blocked == "Composite"),

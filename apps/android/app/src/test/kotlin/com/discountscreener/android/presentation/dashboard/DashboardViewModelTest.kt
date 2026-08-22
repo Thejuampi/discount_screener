@@ -20,6 +20,7 @@ import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
+import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
@@ -34,9 +35,11 @@ import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.data.market.DailyCandleSource
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
+import com.discountscreener.android.domain.usecase.SaveSymbolNoteUseCase
 import com.discountscreener.android.domain.usecase.SearchTickersUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
 import com.discountscreener.core.model.CandidateRow
@@ -63,11 +66,15 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import java.io.File
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -239,6 +246,31 @@ class DashboardViewModelTest {
         assertNotNull(route)
         assertEquals("AAPL", route?.symbol)
         assertEquals(DetailSourceTab.Tracked, route?.sourceTab)
+    }
+
+    /**
+     * The screen a ticker opens on is drawn from disk, and the provider is asked after that.
+     *
+     * Reported from the device on 2026-08-20: opening a ticker took about a minute. Yahoo was
+     * refusing every call and the app was holding the next one for eight seconds, over and over,
+     * for eight minutes without a break. The detail screen waited on that fetch with nothing drawn
+     * on it, and the numbers it needed were on disk the whole time.
+     *
+     * The fetch is held open here and never answers, so a detail on screen can only have come from
+     * the file. That is the whole property: the wait belongs to the fresh numbers, and the screen
+     * does not wait with it.
+     */
+    @Test
+    fun a_ticker_is_drawn_from_file_while_its_fetch_is_still_out() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.setDetailProjection(detail("AAPL"), null)
+        var viewModel = testViewModel(repository)
+        repository.holdDetailLoads()
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals("AAPL", viewModel.state.value.detailData?.symbol)
     }
 
     @Test
@@ -794,6 +826,104 @@ class DashboardViewModelTest {
         assertEquals(listOf("LEGACY"), viewModel.state.value.opportunityRows.map { it.symbol })
     }
 
+    /**
+     * A load tick that started under the previous model must not keep that model's rows after
+     * the chip changes. A snapshot already in flight is not cancelled; [render] used to apply
+     * it and overwrite the new list.
+     */
+    @Test
+    fun a_stale_snapshot_must_not_keep_the_previous_model_rows() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            opportunityRows = listOf(listRow("LEGACY")),
+            aggressiveRows = listOf(listRow("AGGRO", compositeScore = 27)),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.holdSnapshots(model = OpportunityScoringModel.AggressiveV2)
+        repository.emitUpdate()
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
+        advanceUntilIdle()
+        repository.releaseSnapshots()
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("LEGACY"),
+            viewModel.state.value.opportunityRows.map { it.symbol },
+        )
+    }
+
+    /**
+     * The Market switch must change the scores the list shows, not only the flag. A snapshot
+     * that started while the dimension was on must not restore those scores after the user
+     * turns it off.
+     */
+    @Test
+    fun toggling_market_off_applies_base_scores_even_if_a_stale_on_snapshot_arrives() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            aggressiveRows = listOf(listRow("AGGRO", compositeScore = 40, compositeScoreBase = 34)),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.holdSnapshots(regimeEnabled = true)
+        repository.emitUpdate()
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.SetRegimeScoringEnabled(false))
+        advanceUntilIdle()
+        repository.releaseSnapshots()
+        advanceUntilIdle()
+
+        var row = viewModel.state.value.opportunityRows.single()
+        assertEquals(row.compositeScoreBase, row.compositeScore)
+    }
+
+    /**
+     * A load tick under the previous model must still move refresh progress. Dropping the whole
+     * snapshot is what froze the Opportunities tab after a chip change.
+     */
+    @Test
+    fun a_stale_model_snapshot_still_applies_refresh_progress() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(
+            opportunityRows = listOf(listRow("LEGACY")),
+            aggressiveRows = listOf(listRow("AGGRO", compositeScore = 27)),
+        )
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.holdSnapshots(model = OpportunityScoringModel.AggressiveV2)
+        repository.emitUpdate()
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.SetOpportunityScoringModel(OpportunityScoringModel.Legacy))
+        advanceUntilIdle()
+        repository.releaseSnapshots()
+        advanceUntilIdle()
+
+        assertEquals(7, viewModel.state.value.refreshCompletedSymbols)
+    }
+
+    @Test
+    fun start_snapshots_with_the_restored_model() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.persistedScoringPreferences = ScoringPreferences(
+            opportunityModel = OpportunityScoringModel.AggressiveV4,
+        )
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        assertEquals(
+            setOf(OpportunityScoringModel.AggressiveV4),
+            repository.requestedOpportunityModels.toSet(),
+        )
+    }
+
     @Test
     fun select_profile_clears_detail_and_shows_switching_state() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
@@ -899,6 +1029,44 @@ class DashboardViewModelTest {
         assertFalse(viewModel.state.value.indexEstimatesLoading)
     }
 
+    @Test
+    fun a_saved_note_reaches_the_state() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+
+        viewModel.dispatch(DashboardAction.SaveSymbolNote("ULTA", "Target partnership ends."))
+        advanceUntilIdle()
+
+        assertEquals(mapOf("ULTA" to "Target partnership ends."), viewModel.state.value.symbolNotes)
+    }
+
+    /**
+     * The screen must show what the next start will show. The store trims and deletes on a blank
+     * note; a view model that kept its own copy would leave an empty note on screen until restart.
+     */
+    @Test
+    fun clearing_a_note_removes_it_from_the_state() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+        viewModel.dispatch(DashboardAction.SaveSymbolNote("ULTA", "Target partnership ends."))
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.SaveSymbolNote("ULTA", "  "))
+        advanceUntilIdle()
+
+        assertEquals(emptyMap<String, String>(), viewModel.state.value.symbolNotes)
+    }
+
+    @Test
+    fun notes_written_before_are_restored_on_start() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.symbolNotes["ULTA"] = "Target partnership ends."
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(mapOf("ULTA" to "Target partnership ends."), viewModel.state.value.symbolNotes)
+    }
+
     private fun testViewModel(repository: DashboardRepository): DashboardViewModel {
         return DashboardViewModel(
             observeDashboardUpdates = ObserveDashboardUpdatesUseCase(repository),
@@ -911,6 +1079,8 @@ class DashboardViewModelTest {
             toggleDashboardWatchlist = ToggleDashboardWatchlistUseCase(repository),
             loadScoringPreferences = LoadScoringPreferencesUseCase(repository),
             persistScoringPreferences = PersistScoringPreferencesUseCase(repository),
+            loadSymbolNotes = LoadSymbolNotesUseCase(repository),
+            saveSymbolNote = SaveSymbolNoteUseCase(repository),
             loadSystemStats = LoadSystemStatsUseCase(repository),
             pruneOldRevisions = PruneOldRevisionsUseCase(repository),
             clearAllDataUseCase = ClearAllDataUseCase(repository),
@@ -925,6 +1095,13 @@ class DashboardViewModelTest {
                 NoBacktestCandles,
                 File(System.getProperty("java.io.tmpdir")!!),
                 dispatcher,
+            ),
+            runOutcomeReport = RunOutcomeReportUseCase(
+                journalSource = { emptyList() },
+                candleSource = NoBacktestCandles,
+                streetDiagnosticSource = { emptyMap() },
+                exportDirectory = File(System.getProperty("java.io.tmpdir")!!),
+                ioDispatcher = dispatcher,
             ),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
@@ -945,6 +1122,22 @@ class DashboardViewModelTest {
     private object NoBacktestCandles : DailyCandleSource {
         override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> = emptyMap()
     }
+
+    private fun listRow(
+        symbol: String,
+        compositeScore: Int = 15,
+        compositeScoreBase: Int = compositeScore,
+    ) = OpportunityListRow(
+        symbol = symbol,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 15_000L,
+        gapBps = 3_333,
+        confidence = ConfidenceBand.High,
+        isWatched = false,
+        compositeScore = compositeScore,
+        compositeScoreBase = compositeScoreBase,
+        coverageCount = 3,
+    )
 
     private fun trackedRow(symbol: String) = TrackedSymbolRow(
         symbol = symbol,
@@ -1014,6 +1207,7 @@ class DashboardViewModelTest {
         private val refreshAllError: Throwable? = null,
         private val fetchedScoreRows: Map<String, OpportunityListRow> = emptyMap(),
     ) : DashboardRepository {
+        val symbolNotes = mutableMapOf<String, String>()
         var saveSnapshotCallCount = 0
         var currentSnapshotCallCount = 0
         var currentIndexEstimatesCallCount = 0
@@ -1022,6 +1216,7 @@ class DashboardViewModelTest {
         val savedSnapshots = mutableListOf<IndexEstimatesReport>()
         var lastCurrentFilter: ViewFilter? = null
         var lastRequestedOpportunityModel: OpportunityScoringModel? = null
+        val requestedOpportunityModels = mutableListOf<OpportunityScoringModel>()
         var lastTickerSuggestionQuery: String? = null
         var searchTickersCallCount = 0
         var lastOpenedSymbol: String? = null
@@ -1043,12 +1238,58 @@ class DashboardViewModelTest {
 
         override fun observeUpdates(): Flow<Long> = updates
 
+        private var snapshotHold: CompletableDeferred<Unit>? = null
+        private var holdSnapshotModel: OpportunityScoringModel? = null
+        private var holdSnapshotRegimeEnabled: Boolean? = null
+        private var holdRefreshCompletedSymbols: Int? = null
+        private var holdRefreshTargetSymbols: Int = 0
+        private var holdStartupPhase: DashboardStartupPhase? = null
+        var regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED
+            private set
+
+        fun holdSnapshots(
+            model: OpportunityScoringModel? = null,
+            regimeEnabled: Boolean? = null,
+            refreshCompletedSymbols: Int = 7,
+            refreshTargetSymbols: Int = 20,
+            startupPhase: DashboardStartupPhase = DashboardStartupPhase.Refreshing,
+        ) {
+            snapshotHold = CompletableDeferred()
+            holdSnapshotModel = model
+            holdSnapshotRegimeEnabled = regimeEnabled
+            holdRefreshCompletedSymbols = refreshCompletedSymbols
+            holdRefreshTargetSymbols = refreshTargetSymbols
+            holdStartupPhase = startupPhase
+        }
+
+        fun releaseSnapshots() {
+            snapshotHold?.complete(Unit)
+        }
+
+        private var detailHold: CompletableDeferred<Unit>? = null
+
+        /** Holds the fetch a detail open makes, so the screen can be read while it is still out. */
+        fun holdDetailLoads() {
+            detailHold = CompletableDeferred()
+        }
+
+        fun releaseDetailLoads() {
+            detailHold?.complete(Unit)
+        }
+
+        fun emitUpdate() {
+            updates.value = updates.value + 1
+        }
+
         override suspend fun bootstrap(
             filter: ViewFilter,
             selectedSymbol: String?,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
-        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
+        ): DashboardSnapshot {
+            requestedOpportunityModels += opportunityScoringModel
+            return emptySnapshot(opportunityScoringModel)
+        }
 
         override suspend fun currentSnapshot(
             filter: ViewFilter,
@@ -1059,7 +1300,27 @@ class DashboardViewModelTest {
             currentSnapshotCallCount++
             lastCurrentFilter = filter
             lastRequestedOpportunityModel = opportunityScoringModel
-            return emptySnapshot(opportunityScoringModel)
+            requestedOpportunityModels += opportunityScoringModel
+            var capturedRegime = regimeScoringEnabled
+            var hold = snapshotHold
+            var held = hold != null &&
+                !hold.isCompleted &&
+                (holdSnapshotModel == null || holdSnapshotModel == opportunityScoringModel) &&
+                (holdSnapshotRegimeEnabled == null || holdSnapshotRegimeEnabled == capturedRegime)
+            if (held) {
+                // Production snapshots are CPU work under a mutex: cancel does not drop the
+                // result. A cancellable await would hide the race this test exists to lock.
+                withContext(NonCancellable) { hold!!.await() }
+            }
+            var snapshot = emptySnapshot(opportunityScoringModel, capturedRegime)
+            if (held) {
+                snapshot = snapshot.copy(
+                    refreshCompletedSymbols = holdRefreshCompletedSymbols ?: 0,
+                    refreshTargetSymbols = holdRefreshTargetSymbols,
+                    startupPhase = holdStartupPhase ?: snapshot.startupPhase,
+                )
+            }
+            return snapshot
         }
 
         override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> {
@@ -1072,7 +1333,9 @@ class DashboardViewModelTest {
             selectedSymbol: String?,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
+            force: Boolean,
         ): DashboardSnapshot {
+            requestedOpportunityModels += opportunityScoringModel
             refreshAllError?.let { throw it }
             return emptySnapshot(opportunityScoringModel)
         }
@@ -1084,6 +1347,7 @@ class DashboardViewModelTest {
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
             lastOpenedSymbol = symbol
+            detailHold?.await()
             return emptySnapshot(opportunityScoringModel).copy(
                 selectedScoreRow = fetchedScoreRows[symbol],
             )
@@ -1201,11 +1465,24 @@ class DashboardViewModelTest {
 
         var persistedScoringPreferences: ScoringPreferences? = null
 
-        override suspend fun loadScoringPreferences(): ScoringPreferences =
-            persistedScoringPreferences ?: ScoringPreferences()
+        override suspend fun loadScoringPreferences(): ScoringPreferences {
+            // A store read suspends. That gap is what lets the update collector snapshot
+            // under the default chip before restore.
+            yield()
+            return persistedScoringPreferences ?: ScoringPreferences()
+        }
 
         override suspend fun persistScoringPreferences(preferences: ScoringPreferences) {
             persistedScoringPreferences = preferences
+            regimeScoringEnabled = preferences.regimeScoringEnabled
+        }
+
+        /** Same rule as the store: a blank note deletes, and the trim happens on the way in. */
+        override suspend fun loadSymbolNotes(): Map<String, String> = symbolNotes.toMap()
+
+        override suspend fun saveSymbolNote(symbol: String, note: String) {
+            var trimmed = note.trim()
+            if (trimmed.isEmpty()) symbolNotes.remove(symbol) else symbolNotes[symbol] = trimmed
         }
 
         override suspend fun loadDiscoverySnapshot(): DiscoverySnapshot {
@@ -1236,33 +1513,48 @@ class DashboardViewModelTest {
 
         private fun emptySnapshot(
             opportunityScoringModel: OpportunityScoringModel = OpportunityScoringModel.AggressiveV2,
+            regimeScoringEnabled: Boolean = this.regimeScoringEnabled,
             startupPhase: DashboardStartupPhase = DashboardStartupPhase.Ready,
             statusMessage: String? = null,
-        ) = DashboardSnapshot(
-            availableProfiles = emptyList(),
-            currentProfile = currentProfile,
-            trackedSymbols = trackedRows.map { it.symbol },
-            trackedRows = trackedRows,
-            watchlistSymbols = emptyList(),
-            candidateRows = emptyList(),
-            opportunityRows = if (opportunityScoringModel == OpportunityScoringModel.Legacy) opportunityRows else aggressiveRows,
-            opportunityScoringModel = opportunityScoringModel,
-            issues = emptyList(),
-            selectedDetail = detailData,
-            selectedCharts = detailCharts,
-            selectedHistory = detailHistory,
-            selectedAlerts = emptyList(),
-            detailNotice = detailNotice,
-            lastUpdatedAtEpochSeconds = null,
-            startupPhase = startupPhase,
-            refreshCompletedSymbols = 0,
-            refreshTargetSymbols = 0,
-            statusMessage = statusMessage,
-            screenData = ProjectedDashboardData(
-                selectedDetail = projectedDetailData,
-                estimates = ProjectedEstimatesData(report = projectedEstimatesReport),
-            ),
-        )
+        ): DashboardSnapshot {
+            var source = if (opportunityScoringModel == OpportunityScoringModel.Legacy) {
+                opportunityRows
+            } else {
+                aggressiveRows
+            }
+            var rows = if (regimeScoringEnabled) {
+                source
+            } else {
+                source.map { row -> row.copy(compositeScore = row.compositeScoreBase) }
+            }
+            return DashboardSnapshot(
+                availableProfiles = emptyList(),
+                currentProfile = currentProfile,
+                trackedSymbols = trackedRows.map { it.symbol },
+                trackedRows = trackedRows,
+                watchlistSymbols = emptyList(),
+                candidateRows = emptyList(),
+                opportunityRows = rows,
+                opportunityScoringModel = opportunityScoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                issues = emptyList(),
+                selectedDetail = detailData,
+                selectedCharts = detailCharts,
+                selectedHistory = detailHistory,
+                selectedAlerts = emptyList(),
+                detailNotice = detailNotice,
+                lastUpdatedAtEpochSeconds = null,
+                startupPhase = startupPhase,
+                refreshCompletedSymbols = 0,
+                refreshTargetSymbols = 0,
+                statusMessage = statusMessage,
+                screenData = ProjectedDashboardData(
+                    selectedDetail = projectedDetailData,
+                    estimates = ProjectedEstimatesData(report = projectedEstimatesReport),
+                ),
+            )
+        }
+
     }
 
     private data class ProjectedDetailLifecycleExpectation(

@@ -3,6 +3,7 @@ package com.discountscreener.android.data.remote
 import com.discountscreener.core.engine.SecCompanyFactsSieve
 import com.discountscreener.core.engine.SecDriverNormalizationPolicy
 import com.discountscreener.core.model.AnnualReportedValue
+import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.FundamentalTimeseries
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -16,9 +17,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import kotlin.math.abs
 import java.io.File
-import java.io.OutputStream
+import java.io.IOException
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
@@ -27,7 +29,21 @@ private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_ticke
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
-internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-residual-1"
+/**
+ * Bumped whenever the sieve keeps a new concept. A slim cache written by an older version has the
+ * old concept set and no way to say so, so it would answer "this company reports no impairment"
+ * for a file that simply never looked. The name changes, and the old file is left to expire.
+ */
+internal const val COMPANY_FACTS_SIEVE_VERSION = "nonrecurring-1"
+private const val VALIDATOR_SUFFIX = ".etag"
+private const val NOT_MODIFIED = 304
+
+/** SEC answers an exceeded limit with 403 and a `Retry-After` header, not with 429. */
+private const val SEC_RATE_LIMITED_CODE = 403
+private const val TOO_MANY_REQUESTS = 429
+
+/** A companyfacts file is about 4 MB. Eight at once is 32 MB over a phone's connection. */
+private const val SEC_MAX_IN_FLIGHT = 4
 
 internal fun companyFactsSlimFileName(cikPadded: String): String =
     "CIK$cikPadded.sieve-$COMPANY_FACTS_SIEVE_VERSION.json"
@@ -43,6 +59,17 @@ class SecEdgarTimeseriesProvider(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * SEC's own governor, separate from Yahoo's.
+     *
+     * SEC publishes a limit of ten requests a second and answers over it with a 403 that carries
+     * `Retry-After`. Sharing Yahoo's governor would make one host's refusal close the other host's
+     * window, which is a limit invented by the client. The window is small because a companyfacts
+     * file is about four megabytes: eight of them at once is thirty-two megabytes over a phone's
+     * connection, and nothing on screen wants more than one.
+     */
+    private val governor = RequestGovernor(window = AdaptiveRequestWindow(maxWindow = SEC_MAX_IN_FLIGHT))
+
     @Volatile
     private var tickerToCik: Map<String, String>? = null
 
@@ -56,19 +83,19 @@ class SecEdgarTimeseriesProvider(
         loadSievedFacts(symbol)
     }
 
-    private fun resolveCik(symbol: String): String? {
+    private suspend fun resolveCik(symbol: String): String? {
         val map = tickerToCik ?: loadTickerMap()
         return map[symbol.uppercase()]
     }
 
-    private fun loadTickerMap(): Map<String, String> {
+    private suspend fun loadTickerMap(): Map<String, String> {
         return try {
             val body = cachedText("company_tickers.json") {
                 val request = Request.Builder()
                     .url(COMPANY_TICKERS_URL)
                     .header("User-Agent", SEC_USER_AGENT)
                     .build()
-                client.newCall(request).execute().use { it.body?.string() }
+                governedText(request)
             } ?: return emptyMap()
             val root = json.parseToJsonElement(body).jsonObject
             val map = mutableMapOf<String, String>()
@@ -85,7 +112,15 @@ class SecEdgarTimeseriesProvider(
         }
     }
 
-    private fun loadSievedFacts(symbol: String): String? {
+    /**
+     * The sieved facts for one symbol, from the cache when it is fresh and from SEC when it is not.
+     *
+     * Two costs decide the shape of this. A companyfacts file is about 4 MB and the sieve keeps
+     * about 12% of it, so the answer is never written whole: it is sieved as it arrives. And an
+     * expired cache does not mean a changed filing, so the refresh asks conditionally. A company
+     * that filed nothing new answers 304 with no body, and the file already on disk is kept.
+     */
+    private suspend fun loadSievedFacts(symbol: String): String? {
         return try {
             val cik = resolveCik(symbol) ?: return null
             val slimFile = cacheDir?.let { File(it, companyFactsSlimFileName(cik)) }
@@ -95,34 +130,76 @@ class SecEdgarTimeseriesProvider(
                     return slimFile.readText()
                 }
             }
-            val url = "${COMPANY_FACTS_URL}CIK$cik.json"
-            val full = workingFile("CIK$cik.full.json") { sink ->
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", SEC_USER_AGENT)
-                    .build()
+            val validatorFile = slimFile?.let { File(it.parentFile, it.name + VALIDATOR_SUFFIX) }
+            val request = Request.Builder()
+                .url("${COMPANY_FACTS_URL}CIK$cik.json")
+                .header("User-Agent", SEC_USER_AGENT)
+                .apply {
+                    val validator = validatorFile?.takeIf { it.isFile }?.readText()?.trim()
+                    if (!validator.isNullOrBlank() && slimFile?.isFile == true) {
+                        header("If-None-Match", validator)
+                    }
+                }
+                .build()
+            governor.request {
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@workingFile false
-                    response.body?.byteStream()?.use { input -> input.copyTo(sink) }
-                    true
+                    val refusal = refusalOf(response)
+                    if (refusal != null) return@use refusal
+                    if (response.code == NOT_MODIFIED && slimFile != null && slimFile.isFile) {
+                        slimFile.setLastModified(System.currentTimeMillis())
+                        return@use RequestGovernor.Attempt.Ok(slimFile.readText())
+                    }
+                    if (!response.isSuccessful) {
+                        return@use RequestGovernor.Attempt.Failed(
+                            retryable = false,
+                            error = IOException("SEC HTTP ${response.code} for ${request.url}"),
+                        )
+                    }
+                    val body = response.body
+                        ?: return@use RequestGovernor.Attempt.Failed(false, IOException("empty SEC body"))
+                    // Sieved as it arrives: the whole file is about 4 MB and 12% of it is kept, so
+                    // it is never held in memory whole and never written whole.
+                    val slim = body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
+                    if (slimFile != null) {
+                        slimFile.parentFile?.mkdirs()
+                        slimFile.writeText(slim)
+                        response.header("ETag")?.let { tag -> validatorFile?.writeText(tag) }
+                    }
+                    RequestGovernor.Attempt.Ok(slim)
                 }
-            } ?: return null
-            try {
-                var slim = full.bufferedReader().use { reader -> SecCompanyFactsSieve.sieve(reader) }
-                if (slimFile != null) {
-                    slimFile.parentFile?.mkdirs()
-                    slimFile.writeText(slim)
-                }
-                slim
-            } finally {
-                full.delete()
             }
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun cachedText(name: String, fetch: () -> String?): String? {
+    /**
+     * One governed request that only has to come back as text. Used for the ticker map, which is a
+     * small file asked for once a day.
+     */
+    private suspend fun governedText(request: Request): String? = governor.request {
+        client.newCall(request).execute().use { response ->
+            refusalOf(response)
+                ?: RequestGovernor.Attempt.Ok(response.takeIf { it.isSuccessful }?.body?.string())
+        }
+    }
+
+    /**
+     * SEC answers an exceeded limit with 403 and a `Retry-After`, not with 429. Reading only the
+     * code would make its clearest instruction look like a permanent refusal.
+     */
+    private fun refusalOf(response: Response): RequestGovernor.Attempt<Nothing>? {
+        val retryAfter = response.header("Retry-After")?.toLongOrNull()?.times(1_000L)
+        val overLimit = response.code == SEC_RATE_LIMITED_CODE || response.code == TOO_MANY_REQUESTS
+        if (!overLimit && retryAfter == null) return null
+        response.body?.close()
+        return RequestGovernor.Attempt.PushBack(
+            retryAfterMillis = retryAfter,
+            error = IOException("SEC asked for quiet: HTTP ${response.code}"),
+        )
+    }
+
+    private suspend fun cachedText(name: String, fetch: suspend () -> String?): String? {
         val file = cacheDir?.let { File(it, name) }
         if (file != null && file.isFile) {
             val age = System.currentTimeMillis() - file.lastModified()
@@ -136,28 +213,6 @@ class SecEdgarTimeseriesProvider(
             file.writeText(body)
         }
         return body
-    }
-
-    private fun workingFile(name: String, fetchTo: (OutputStream) -> Boolean): File? {
-        val dir = cacheDir
-        val file = if (dir != null) {
-            dir.mkdirs()
-            File(dir, name)
-        } else {
-            File.createTempFile("sec-", ".json").also { it.deleteOnExit() }
-        }
-        var tmp = File(file.parentFile, "${file.name}.part")
-        val ok = tmp.outputStream().use { fetchTo(it) }
-        if (!ok) {
-            tmp.delete()
-            return null
-        }
-        if (file.exists()) file.delete()
-        if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
-            tmp.delete()
-        }
-        return file
     }
 
     private fun buildTimeseries(facts: JsonObject): FundamentalTimeseries? = buildSecEdgarTimeseries(facts)
@@ -192,6 +247,11 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
         usGaap,
         SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.DilutedAverageShares),
     )
+    val operatingIncomeRecords = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.operator(SecDriverNormalizationPolicy.Driver.OperatingIncome),
+    )
+    val nonRecurringRecords = annualNonRecurringChargeRecords(usGaap)
     val debtRecords = annualDebtRecords(usGaap)
     val marginalTaxRecords = annualFyRecordsAny(
         usGaap,
@@ -238,7 +298,62 @@ internal fun buildSecEdgarTimeseries(facts: JsonObject): FundamentalTimeseries? 
         taxRateForCalcs = taxRateForCalcs,
         totalDebt = totalDebt,
         marginalTaxRate = marginalTaxRate,
+        operatingIncome = operatingIncomeRecords.filter { it.asOfDate in acceptedDates },
+        nonRecurringCharges = nonRecurringRecords.filter { it.asOfDate in acceptedDates },
     )
+}
+
+/**
+ * Impairment and restructuring for the year, as one positive charge.
+ *
+ * Impairment reaches the filing two ways, and one company can use both: a single aggregate line,
+ * or the goodwill, intangible and tangible lines on their own. Adding every concept found would
+ * count the same write-down twice for a filer that reports the aggregate and its parts. The larger
+ * of the two readings wins instead. An aggregate smaller than the parts it is supposed to hold is
+ * not an aggregate, and a filer that reports only parts is still counted.
+ *
+ * Restructuring stays a separate driver, and its qnames are the two pure ones. The combined
+ * concepts (`RestructuringCostsAndAssetImpairmentCharges`) already carry impairment, so reading
+ * them here would double the same dollars a second way.
+ */
+private fun annualNonRecurringChargeRecords(usGaap: JsonObject): List<AnnualReportedValue> {
+    val aggregate = annualChargesByDate(usGaap, SecDriverNormalizationPolicy.Driver.ImpairmentAggregate, ::maxOf)
+    val components = annualChargesByDate(usGaap, SecDriverNormalizationPolicy.Driver.ImpairmentComponents, Double::plus)
+    val restructuring = annualChargesByDate(usGaap, SecDriverNormalizationPolicy.Driver.RestructuringCharges, ::maxOf)
+    val dates = aggregate.keys + components.keys + restructuring.keys
+    return dates.sorted().map { date ->
+        val impairment = maxOf(aggregate[date] ?: 0.0, components[date] ?: 0.0)
+        AnnualReportedValue(
+            asOfDate = date,
+            value = impairment + (restructuring[date] ?: 0.0),
+            source = DcfSource.SecEdgar,
+            concept = "non_recurring_charges",
+            unit = "USD",
+        )
+    }
+}
+
+/**
+ * A charge per fiscal year end, as an absolute value.
+ *
+ * [combine] decides what two concepts reporting the same year mean: [maxOf] for concepts that
+ * describe the same dollars, [Double.plus] for concepts that describe different ones. Sign is
+ * dropped because filers book a write-down both ways and the size is what is being read.
+ */
+private fun annualChargesByDate(
+    usGaap: JsonObject,
+    driver: SecDriverNormalizationPolicy.Driver,
+    combine: (Double, Double) -> Double,
+): Map<String, Double> {
+    val operator = SecDriverNormalizationPolicy.operator(driver)
+    val byDate = mutableMapOf<String, Double>()
+    operator.qnames.forEach { concept ->
+        annualFyRecords(usGaap, concept, operator).forEach { record ->
+            val charge = abs(record.value)
+            byDate[record.asOfDate] = byDate[record.asOfDate]?.let { combine(it, charge) } ?: charge
+        }
+    }
+    return byDate
 }
 
 private fun annualFyRecordsAny(
@@ -347,7 +462,7 @@ private fun annualFyRecords(
             durationDays = durationDays,
             fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
                 ?: endDate.take(4).toIntOrNull(),
-            source = com.discountscreener.core.model.DcfSource.SecEdgar,
+            source = DcfSource.SecEdgar,
             concept = concept,
             unit = unit,
             filedAt = obj["filed"]?.jsonPrimitive?.content,

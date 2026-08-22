@@ -73,6 +73,112 @@ class ScoreFactorUiTest {
         assertEquals("Quarter EPS YoY · -11.0%", line.label)
     }
 
+    /**
+     * The engine has raised this flag since V4 shipped and nothing between it and the screen was
+     * ever tested. A flag carries zero points, so it survives only if the group keeps a line for a
+     * factor that contributes nothing — which is the exact thing a points-ordered list invites
+     * someone to drop.
+     */
+    @Test
+    fun the_growth_divergence_flag_reaches_the_breakdown() {
+        var labels = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor("Trend", "Trend++", 5),
+                    ScoreFactor("Pulse", "Pulse--", -5),
+                    ScoreFactor("Pulse≠Trend", "Pulse≠Trend", 0),
+                ),
+            ),
+        ).first().lines.map { it.label }
+
+        assertEquals(true, "Pulse and Trend disagree" in labels)
+    }
+
+    @Test
+    fun a_row_that_scored_a_quarter_says_where_the_quarter_comes_from() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(row(fundamentalsFactors = listOf(ScoreFactor("Pulse", "Pulse--", -5)))),
+        )
+
+        assertEquals(listOf(PULSE_BASIS_NOTE), notes)
+    }
+
+    /**
+     * `Pulse≠Trend` begins with `Pulse`, so a note matched on the token instead of the key would
+     * print the basis of a term this row never scored.
+     */
+    @Test
+    fun the_divergence_flag_alone_does_not_claim_a_quarter_was_scored() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(row(fundamentalsSignals = listOf("Pulse≠Trend"))),
+        )
+
+        assertEquals(listOf(PULSE_TREND_DIVERGENCE_NOTE), notes)
+    }
+
+    /** The real V4 case: the basis first, because the divergence note reads as nonsense without it. */
+    @Test
+    fun a_diverging_row_states_the_basis_before_the_disagreement() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(
+                row(
+                    fundamentalsFactors = listOf(
+                        ScoreFactor("Trend", "Trend++", 5),
+                        ScoreFactor("Pulse", "Pulse--", -5),
+                        ScoreFactor("Pulse≠Trend", "Pulse≠Trend", 0),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(listOf(PULSE_BASIS_NOTE, PULSE_TREND_DIVERGENCE_NOTE), notes)
+    }
+
+    /**
+     * The mark carries the size of its own claim. Without the sentence a reader could take
+     * "Earnings at a cycle peak" for a cycle-adjusted valuation, which is not what five annual
+     * points can say.
+     */
+    @Test
+    fun a_row_marked_at_a_cycle_peak_states_what_the_mark_measures() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(row(fundamentalsFactors = listOf(ScoreFactor("CyclePeak", "CyclePeak-", -4)))),
+        )
+
+        assertEquals(listOf(CYCLE_PEAK_NOTE), notes)
+    }
+
+    @Test
+    fun the_cycle_peak_factor_is_named_in_words() {
+        assertEquals("Earnings at a cycle peak", scoreFactorLabel("CyclePeak"))
+    }
+
+    /**
+     * The row shows a signal with no points. Without the sentence, "Impairment or restructuring
+     * charge" gives a size the reader has no way to judge against the year it landed in.
+     */
+    @Test
+    fun a_row_marked_for_charges_states_what_the_mark_measures() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(row(fundamentalsFactors = listOf(ScoreFactor("Charges", "Charges", 0)))),
+        )
+
+        assertEquals(listOf(EARNINGS_CHARGE_NOTE), notes)
+    }
+
+    @Test
+    fun the_charges_factor_is_named_in_words() {
+        assertEquals("Impairment or restructuring charge", scoreFactorLabel("Charges"))
+    }
+
+    @Test
+    fun a_row_with_neither_term_carries_no_notes() {
+        assertEquals(
+            emptyList<String>(),
+            scoreFactorNotes(scoreFactorGroups(row(fundamentalsFactors = listOf(ScoreFactor("FCFy", "FCFy+", 8))))),
+        )
+    }
+
     @Test
     fun a_positive_contribution_carries_its_sign() {
         assertEquals("+16", formatBucketPoints(16))
@@ -169,6 +275,7 @@ class ScoreFactorUiTest {
     }
 
     private fun row(
+        fundamentalsSignals: List<String> = emptyList(),
         fundamentalsFactors: List<ScoreFactor> = emptyList(),
         technicalFactors: List<ScoreFactor> = emptyList(),
         forecastFactors: List<ScoreFactor> = emptyList(),
@@ -189,6 +296,7 @@ class ScoreFactorUiTest {
         regimeScore = regimeScore,
         compositeScore = 52,
         coverageCount = 4,
+        fundamentalsSignals = fundamentalsSignals,
         fundamentalsFactors = fundamentalsFactors,
         technicalFactors = technicalFactors,
         forecastFactors = forecastFactors,
