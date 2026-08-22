@@ -6,6 +6,8 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.HonestPathInputs
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.WaccFieldSource
 import com.discountscreener.core.model.WaccInputProvenance
@@ -20,64 +22,58 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/33-path-refine"
+const val MODEL_POLICY_VERSION = "business-class-policy/36-ocf-prior-franchise"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/2"
 
-private const val BETA_COMPANY_WEIGHT_PCT = 67L
-private const val BETA_INDUSTRY_WEIGHT_PCT = 33L
-private const val DEFAULT_INDUSTRY_BETA_MILLIS = 1_000
-private const val PROJECTION_YEARS = 5
-private const val PROJECTION_YEARS_SECULAR = 10
-/**
- * Rate at which productive assets are consumed and must be replaced, as a share
- * of the capital stock (~10-year average asset life). Splits gross CapEx into
- * sustaining and growth spend; see [maintenanceCapexIntensityBps].
- */
-private const val ASSET_RENEWAL_RATE_BPS = 1_000
-private const val MAINTENANCE_CAPEX_MIN_REVENUE_BPS = 200
-/** Driver ratios use the same 4-year near-term window as growth. */
-private const val DRIVER_RECENT_WINDOW = 4
-private const val COE_SCENARIO_BAND_BPS = 75
-/** FCFF scenarios stress discount rate when rates are market-sourced. */
-private const val WACC_SCENARIO_BAND_BPS = 100
-/** After provisional base uplift, bear still stresses rates further (not symmetric). */
-private const val WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS = 150
-/** Bull does not further cheapen a known-soft base WACC. */
-private const val WACC_SCENARIO_BULL_BAND_UNRELIABLE_BPS = 0
-private const val PROVISIONAL_WACC_BASE_UPLIFT_BPS = 175
-private const val PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT = 0.40
-private const val ROE_BEAR_HAIRCUT_BPS = 300
-private const val ROE_BULL_BOOST_BPS = 200
-private const val GROWTH_RECENT_WINDOW = 4
-private const val GORDON_RATE_EPSILON_BPS = 50
-/** Require both a relative and economically material CapEx jump. */
-private const val CAPEX_SPIKE_RATIO = 1.40
-private const val CAPEX_SPIKE_MIN_ABS_BPS = 500
-/** Slower growth fade for statistically persistent expansion regimes. */
-private const val SECULAR_GROWTH_FADE_EXPONENT = 1.50
-/**
- * Bear/bull growth is a band around the median, not the raw year-to-year
- * IQR stacked for the whole projection (0% vs 126% over 10y secular).
- */
-private const val SCENARIO_GROWTH_BAND_BPS = 400
-/** Near-term driver growth stays within this band of g_stable. */
-private const val MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS = 1_200
-/**
- * A secular name may keep half of demonstrated recent growth, still
- * capped. 90% compounding stays refused. 15% on a 50% compounder is a starve.
- */
-private const val MAX_SECULAR_NEAR_GROWTH_BPS = 2_500
-/** Growth CapEx is earned only when revenue itself is compounding. */
-private const val INVESTMENT_WAVE_MIN_GROWTH_BPS = 300
-/**
- * Current shares may replace year-average diluted shares only inside this
- * band. A buyback year sits near 1.0. A dual-class quote (GOOGL Class A
- * vs A+C) sits near 0.5 and must keep the diluted count.
- */
-private const val SHARE_COUNT_MIN_CURRENT_OVER_WAS_BPS = 9_000
-private const val SHARE_COUNT_MAX_CURRENT_OVER_WAS_BPS = 11_500
-/** Soft-rate debt-weight cap (Windows parity). */
+private val BETA_COMPANY_WEIGHT_PCT: Long
+    get() = ValuationPolicy.current.dcf.betaCompanyWeightPct
+private val BETA_INDUSTRY_WEIGHT_PCT: Long
+    get() = ValuationPolicy.current.dcf.betaIndustryWeightPct
+private val PROJECTION_YEARS: Int
+    get() = ValuationPolicy.current.dcf.projectionYears
+private val PROJECTION_YEARS_SECULAR: Int
+    get() = ValuationPolicy.current.dcf.projectionYearsSecular
+private val DRIVER_RECENT_WINDOW: Int
+    get() = ValuationPolicy.current.dcf.driverRecentWindow
+private val COE_SCENARIO_BAND_BPS: Int
+    get() = ValuationPolicy.current.dcf.coeScenarioBandBps
+private val WACC_SCENARIO_BAND_BPS: Int
+    get() = ValuationPolicy.current.dcf.waccScenarioBandBps
+private val WACC_SCENARIO_BEAR_BAND_UNRELIABLE_BPS: Int
+    get() = ValuationPolicy.current.dcf.waccScenarioBearBandUnreliableBps
+private val WACC_SCENARIO_BULL_BAND_UNRELIABLE_BPS: Int
+    get() = ValuationPolicy.current.dcf.waccScenarioBullBandUnreliableBps
+private val PROVISIONAL_WACC_BASE_UPLIFT_BPS: Int
+    get() = ValuationPolicy.current.dcf.provisionalWaccBaseUpliftBps
+private val PROVISIONAL_UPLIFT_FULL_DEBT_WEIGHT: Double
+    get() = ValuationPolicy.current.dcf.provisionalUpliftFullDebtWeight
+private val ROE_BEAR_HAIRCUT_BPS: Int
+    get() = ValuationPolicy.current.dcf.roeBearHaircutBps
+private val ROE_BULL_BOOST_BPS: Int
+    get() = ValuationPolicy.current.dcf.roeBullBoostBps
+private val GROWTH_RECENT_WINDOW: Int
+    get() = ValuationPolicy.current.dcf.growthRecentWindow
+private val GORDON_RATE_EPSILON_BPS: Int
+    get() = ValuationPolicy.current.dcf.gordonRateEpsilonBps
+private val CAPEX_SPIKE_RATIO: Double
+    get() = ValuationPolicy.current.dcf.capexSpikeRatio
+private val CAPEX_SPIKE_MIN_ABS_BPS: Int
+    get() = ValuationPolicy.current.dcf.capexSpikeMinAbsBps
+private val SECULAR_GROWTH_FADE_EXPONENT: Double
+    get() = ValuationPolicy.current.dcf.secularGrowthFadeExponent
+private val SCENARIO_GROWTH_BAND_BPS: Int
+    get() = ValuationPolicy.current.dcf.scenarioGrowthBandBps
+private val MAX_NEAR_GROWTH_DISTANCE_FROM_STABLE_BPS: Int
+    get() = ValuationPolicy.current.dcf.maxNearGrowthDistanceFromStableBps
+private val MAX_SECULAR_NEAR_GROWTH_BPS: Int
+    get() = ValuationPolicy.current.dcf.maxSecularNearGrowthBps
+private val INVESTMENT_WAVE_MIN_GROWTH_BPS: Int
+    get() = ValuationPolicy.current.dcf.investmentWaveMinGrowthBps
+private val SHARE_COUNT_MIN_CURRENT_OVER_WAS_BPS: Int
+    get() = ValuationPolicy.current.dcf.shareCountMinCurrentOverWasBps
+private val SHARE_COUNT_MAX_CURRENT_OVER_WAS_BPS: Int
+    get() = ValuationPolicy.current.dcf.shareCountMaxCurrentOverWasBps
 
 private data class ResolvedWacc(
     val waccBps: Int,
@@ -119,8 +115,28 @@ object DcfAnalysisEngine {
         else -> null
     }
 
-    fun isCurrentPolicy(analysis: DcfAnalysis): Boolean =
-        analysis.engineVersion == ENGINE_VERSION && analysis.modelPolicyVersion == MODEL_POLICY_VERSION
+    fun isCurrentPolicy(analysis: DcfAnalysis): Boolean {
+        if (analysis.engineVersion != ENGINE_VERSION) return false
+        if (analysis.modelPolicyVersion != MODEL_POLICY_VERSION) return false
+        if (!analysis.reasonCodes.any { it == "valuation_policy=${ValuationPolicy.VERSION}" }) {
+            return false
+        }
+        if (analysis.model == ValuationModel.FcffWacc) {
+            return analysis.reasonCodes.any { it == "coupon=$COUPON_RESOLUTION_VERSION" } &&
+                analysis.reasonCodes.any { it == "debt=$DEBT_RESOLUTION_VERSION" } &&
+                analysis.reasonCodes.any { it == "issuer_yield=$ISSUER_MARKET_YIELD_VERSION" } &&
+                analysis.reasonCodes.any {
+                    it == "industry_operating_path=${IndustryOperatingPathPolicy.VERSION}"
+                }
+        }
+        if (analysis.model == ValuationModel.ComponentSum) {
+            return analysis.reasonCodes.any { it == "component_sotp=$COMPONENT_SOTP_VERSION" } &&
+                analysis.reasonCodes.any {
+                    it == "industry_operating_path=${IndustryOperatingPathPolicy.VERSION}"
+                }
+        }
+        return true
+    }
 
     fun compute(
         fundamentals: FundamentalSnapshot,
@@ -128,7 +144,11 @@ object DcfAnalysisEngine {
         marketPriceCents: Long? = null,
         marketParams: MarketParams = MarketParams(),
         assetNotEquity: Boolean = false,
+        peerCoupons: List<PeerCouponEvidence> = emptyList(),
+        issuerYield: IssuerYieldPoint? = null,
+        components: IssuerComponentSet? = null,
     ): Result<DcfAnalysis> = runCatching {
+        var timeseries = issuerYield?.let { attachMarketYield(timeseries, it) } ?: timeseries
         when (
             val class_ = classifyBusiness(
                 fundamentals.sectorName,
@@ -145,8 +165,24 @@ object DcfAnalysisEngine {
                 error(classificationUnavailableReason(BusinessClass.Unclassified)!!)
             BusinessClass.FinancialServices ->
                 residualIncome(fundamentals, marketPriceCents, marketParams)
-            BusinessClass.OperatingNonFinancial ->
-                fcffWacc(fundamentals, timeseries, marketPriceCents, marketParams)
+            BusinessClass.OperatingNonFinancial -> {
+                if (components?.missingLenderBook() == true) {
+                    error("fcff unavailable: lender book missing on a mixed issuer")
+                }
+                if (components?.isMixed() == true) {
+                    ComponentSumValuation.value(
+                        fundamentals = fundamentals,
+                        parentTimeseries = timeseries,
+                        marketPriceCents = marketPriceCents,
+                        marketParams = marketParams,
+                        peerCoupons = peerCoupons,
+                        issuerYield = issuerYield,
+                        components = components,
+                    )
+                } else {
+                    fcffWacc(fundamentals, timeseries, marketPriceCents, marketParams, peerCoupons)
+                }
+            }
         }
     }
 
@@ -263,7 +299,8 @@ object DcfAnalysisEngine {
             .coerceAtLeast(marketParams.rfBps + 50)
         val retention = retentionBps / 10_000.0
         val bearRe = reBase + COE_SCENARIO_BAND_BPS
-        val bullRe = (reBase - COE_SCENARIO_BAND_BPS).coerceAtLeast(marketParams.rfBps + 50)
+        val bullRe = (reBase - COE_SCENARIO_BAND_BPS)
+            .coerceAtLeast(marketParams.rfBps + ValuationPolicy.current.dcf.minEquitySpreadOverRfBps)
         val roeUsed = residualPath.startingRoeBps
         val stableGrowthBps = marketParams.stableGrowthBps()
         val bear = riScenario(
@@ -282,7 +319,7 @@ object DcfAnalysisEngine {
         ) ?: error("base residual income invalid")
         val bull = riScenario(
             book0, shares,
-            (roeUsed + ROE_BULL_BOOST_BPS).coerceAtMost(9_000),
+            (roeUsed + ROE_BULL_BOOST_BPS).coerceAtMost(ValuationPolicy.current.dcf.roeBullCapBps),
             bullRe,
             retention.coerceAtMost(0.85),
             stableGrowthBps,
@@ -300,6 +337,7 @@ object DcfAnalysisEngine {
         )
         val reasons = buildList {
             add("model=residual_income_equity")
+            add("valuation_policy=${ValuationPolicy.VERSION}")
             add("business_class=financial_services")
             add("retention_source=reported:${retentionBps}bps")
             add("terminal_roe_holds_franchise_spread")
@@ -339,6 +377,13 @@ object DcfAnalysisEngine {
             driverProvenance = listOf(
                 "source=provider_timeseries",
                 "model=residual_income_equity",
+                "honesty=honest",
+            ),
+            honesty = ValuationHonesty.Honest,
+            honestPath = HonestPathInputs(
+                residualFadeYears = residualPath.fadeYears,
+                residualFranchiseSpreadBps = residualPath.franchiseSpreadBps,
+                residualRetentionBps = retentionBps,
             ),
         )
     }
@@ -381,6 +426,7 @@ object DcfAnalysisEngine {
         timeseries: FundamentalTimeseries,
         marketPriceCents: Long?,
         marketParams: MarketParams,
+        peerCoupons: List<PeerCouponEvidence>,
     ): DcfAnalysis {
         require(timeseries.freeCashFlow.size >= 3) {
             "need at least 3 annual free cash flow points"
@@ -389,8 +435,12 @@ object DcfAnalysisEngine {
             ?: error("share count is missing")
         val resolvedWacc = deriveWacc(fundamentals, timeseries, marketPriceCents, marketParams)
         val netDebtDollars = (fundamentals.totalDebtDollars ?: 0L) - (fundamentals.totalCashDollars ?: 0L)
-        val drivers = driverModelInputs(timeseries)
-            ?: error("fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required")
+        val drivers = driverModelInputs(
+            timeseries,
+            peerCoupons,
+            fundamentals.industryName,
+            fundamentals.sectorName,
+        )
         return fcffDriverWacc(
             fundamentals = fundamentals,
             timeseries = timeseries,
@@ -452,6 +502,7 @@ object DcfAnalysisEngine {
         }
         val reasons = buildList {
             add("model=fcff_wacc")
+            add("valuation_policy=${ValuationPolicy.VERSION}")
             add("business_class=operating_non_financial")
             add("growth=recent_window_fade_to_stable")
             add("scenario_stress=growth_and_discount_rate")
@@ -543,6 +594,10 @@ object DcfAnalysisEngine {
         val growthFadeExponent: Double,
         val taxDefaulted: Boolean,
         val ocfPersistentRecovery: Boolean = false,
+        val ocfCentreWithoutPriorFranchise: Boolean = false,
+        val interestAssumedZeroYears: List<Int> = emptyList(),
+        val interestMissingWithDebtPeriods: List<String> = emptyList(),
+        val estimatedCoupons: List<CouponYear> = emptyList(),
     )
 
     /**
@@ -550,12 +605,18 @@ object DcfAnalysisEngine {
      * cash-flow level with the last reported FCF CAGR. This keeps a CapEx-cycle
      * recovery such as AMZN's internally consistent and auditable.
      */
-    private fun driverModelInputs(timeseries: FundamentalTimeseries): DriverModelInputs? {
+    private fun driverModelInputs(
+        timeseries: FundamentalTimeseries,
+        peerCoupons: List<PeerCouponEvidence> = emptyList(),
+        industry: String? = null,
+        sector: String? = null,
+    ): DriverModelInputs {
         val capexByPeriod = timeseries.capitalExpenditure.associateBy(::annualKey)
         val acquisitionByPeriod = timeseries.acquisitionInvestment.associateBy(::annualKey)
         val revenueByPeriod = timeseries.revenue.associateBy(::annualKey)
-        val interestByPeriod = timeseries.interestExpense.associateBy(::annualKey)
         val taxByPeriod = timeseries.taxRateForCalcs.associateBy(::annualKey)
+        var couponByPeriod = resolveDebt(timeseries, peerCoupons).coupons
+            .associateBy { it.period }
 
         val raw = timeseries.operatingCashFlow
             .asSequence()
@@ -570,23 +631,21 @@ object DcfAnalysisEngine {
                 if (revenue <= 0.0) {
                     return@mapNotNull null
                 }
-                val interest = interestByPeriod[period]?.value
-                    ?.takeIf { it.isFinite() }
-                    ?.let { kotlin.math.abs(it) }
+                var coupon = couponByPeriod[period]
+                var interest = coupon?.dollars
                 val tax = normalizedTaxBps(taxByPeriod[period]?.value)
-                // AAPL FY2024+ folded interest into other income. Keep the year
-                // for revenue, OCF, and CapEx; only the FCFF identity is absent.
-                val afterTaxInterest = if (interest != null && tax != null) {
-                    interest * (1.0 - tax / 10_000.0)
-                } else {
-                    null
+                val afterTaxInterest = when {
+                    interest == 0.0 -> 0.0
+                    interest != null && tax != null -> interest * (1.0 - tax / 10_000.0)
+                    else -> null
                 }
                 val fcff = afterTaxInterest?.let { addBack ->
                     operating.value + addBack - kotlin.math.abs(capex)
                 }?.takeIf { it.isFinite() }
                 DriverRow(
                     date = period,
-                    year = operating.fiscalYear ?: parseYmd(operating.asOfDate)?.year
+                    year = parseYmd(operating.asOfDate)?.year
+                        ?: operating.fiscalYear
                         ?: return@mapNotNull null,
                     revenueDollars = revenue,
                     fcffMarginBps = fcff?.let { ((it / revenue) * 10_000.0).roundToInt() },
@@ -597,10 +656,15 @@ object DcfAnalysisEngine {
                         ((it / revenue) * 10_000.0).roundToInt()
                     },
                     taxMissing = false,
+                    interestAssumedZero = coupon?.kind == CouponKind.Zero,
+                    interestMissingWithDebt = coupon?.kind == CouponKind.Absent,
+                    estimatedCoupon = coupon?.takeIf { it.kind == CouponKind.Estimated },
                 )
             }
             .toList()
-        if (raw.size < 3) return null
+        if (raw.size < 3) {
+            error(alignedDriverRefuseMessage(timeseries, raw.size))
+        }
 
         var previousWasSpike = false
         val driverPoints = buildList {
@@ -669,7 +733,9 @@ object DcfAnalysisEngine {
                 .filterNot(isAcquisitionContaminated)
                 .mapNotNull { it.revenueGrowthBps }
         }
-        if (recentBaseline.size < 2 || (recentGrowths.size < 2 && !acquisitionGrowthMustBeZero)) return null
+        if (recentBaseline.size < 2 || (recentGrowths.size < 2 && !acquisitionGrowthMustBeZero)) {
+            error(alignedDriverRefuseMessage(timeseries, raw.size))
+        }
         val priorGrowths = priorPoints
             .filterNot(isAcquisitionContaminated)
             .mapNotNull { it.revenueGrowthBps }
@@ -684,7 +750,9 @@ object DcfAnalysisEngine {
         // (including CapEx trough years). CapEx spike flags stay diagnostic.
         val alignedMarginPoints = if (useCycleBlend) recentPoints + priorPoints else recentPoints
         val margins = alignedMarginPoints.mapNotNull { it.fcffMarginBps }
-        if (margins.size < 2) return null
+        if (margins.size < 2) {
+            error(alignedDriverRefuseMessage(timeseries, raw.size, missingFcff = true))
+        }
         val recentOcfMargins = recentPoints.map { it.ocfMarginBps }
         val recentCapexIntensities = recentBaseline.map { it.capexIntensityBps }
         val recentInterestMargins = recentPoints.mapNotNull { it.afterTaxInterestMarginBps }
@@ -694,7 +762,18 @@ object DcfAnalysisEngine {
             else -> recentGrowths
         }
 
-        val ocfPersistentRecovery = !useCycleBlend && isNonDecreasing(recentOcfMargins)
+        val priorOcfFranchise = if (priorPoints.isNotEmpty()) {
+            hasPriorOcfFranchise(priorPoints.map { it.ocfMarginBps })
+        } else {
+            // No separate prior window exists (history <= DRIVER_RECENT_WINDOW years).
+            // Draw the franchise evidence from the earlier years inside the recent
+            // window itself, excluding the latest (recovery) year, instead of always
+            // failing closed on an empty prior window.
+            hasPriorOcfFranchise(recentPoints.dropLast(1).map { it.ocfMarginBps })
+        }
+        val recentOcfRising = !useCycleBlend && isNonDecreasing(recentOcfMargins)
+        val ocfPersistentRecovery = recentOcfRising && priorOcfFranchise
+        val ocfCentreWithoutPriorFranchise = recentOcfRising && !priorOcfFranchise
         val recentOcfMargin = if (ocfPersistentRecovery) {
             recentOcfMargins.last()
         } else {
@@ -746,7 +825,12 @@ object DcfAnalysisEngine {
             (baseGrowth >= INVESTMENT_WAVE_MIN_GROWTH_BPS &&
                 latestCapex != null &&
                 latestCapex > maintenanceCapex)
-        val ownerEarningsBase = investmentWave && ownerEarningsMargin > annualBaseMargin && ownerEarningsMargin > 0
+        var cyclicalAuto = regime == DriverRegime.CyclicalOrTransition &&
+            IndustryOperatingPathPolicy.resolve(industry, sector).id == "auto"
+        val ownerEarningsBase = !cyclicalAuto &&
+            investmentWave &&
+            ownerEarningsMargin > annualBaseMargin &&
+            ownerEarningsMargin > 0
         val baseMargin = if (ownerEarningsBase) ownerEarningsMargin else annualBaseMargin
         val bearMargin = quantileBps(margins, 0.25).coerceAtMost(baseMargin)
         val bullMargin = if (ownerEarningsBase) {
@@ -759,9 +843,12 @@ object DcfAnalysisEngine {
         } else {
             quantileBps(recentGrowths, 0.75) - quantileBps(recentGrowths, 0.25)
         }
-        val latestRevenue = driverPoints.lastOrNull()?.revenueDollars ?: return null
+        val latestRevenue = driverPoints.lastOrNull()?.revenueDollars
+            ?: error(alignedDriverRefuseMessage(timeseries, raw.size))
         val normalizedFcff = latestRevenue * baseMargin / 10_000.0
-        if (!normalizedFcff.isFinite()) return null
+        if (!normalizedFcff.isFinite()) {
+            error(alignedDriverRefuseMessage(timeseries, raw.size, missingFcff = true))
+        }
 
         var effectiveRegime = regime
         if (!acquisitionGrowthMustBeZero &&
@@ -798,6 +885,10 @@ object DcfAnalysisEngine {
             },
             taxDefaulted = raw.any { it.taxMissing },
             ocfPersistentRecovery = ocfPersistentRecovery,
+            ocfCentreWithoutPriorFranchise = ocfCentreWithoutPriorFranchise,
+            interestAssumedZeroYears = raw.filter { it.interestAssumedZero }.map { it.year },
+            interestMissingWithDebtPeriods = raw.filter { it.interestMissingWithDebt }.map { it.date },
+            estimatedCoupons = raw.mapNotNull { it.estimatedCoupon },
         )
     }
 
@@ -875,6 +966,9 @@ object DcfAnalysisEngine {
         val acquisitionInvestmentDollars: Double?,
         val afterTaxInterestMarginBps: Int?,
         val taxMissing: Boolean,
+        val interestAssumedZero: Boolean = false,
+        val interestMissingWithDebt: Boolean = false,
+        val estimatedCoupon: CouponYear? = null,
     )
 
     private fun normalizedTaxBps(value: Double?): Int? {
@@ -893,6 +987,14 @@ object DcfAnalysisEngine {
     }
 
     /**
+     * Latest-year OCF is a restored run-rate only when the issuer already
+     * printed a positive OCF franchise before the recent window.
+     * A first-cash ramp has nothing to restore.
+     */
+    private fun hasPriorOcfFranchise(priorOcfMargins: List<Int>): Boolean =
+        priorOcfMargins.count { it > 0 } >= 2
+
+    /**
      * Sustaining CapEx intensity (bps of revenue) under the steady-state capital
      * identity `k = c*(d + g)`: a business reinvesting `k` of revenue while
      * growing at `g` spends `k*d/(d+g)` holding its asset base and the remainder
@@ -904,13 +1006,8 @@ object DcfAnalysisEngine {
      * not earn negative maintenance: growth is floored at zero, so sustaining
      * CapEx never exceeds the capital intensity it comes from.
      */
-    private fun maintenanceCapexIntensityBps(capexIntensityBps: Int, revenueGrowthBps: Int): Int {
-        val capex = capexIntensityBps.coerceAtLeast(0)
-        val renewal = ASSET_RENEWAL_RATE_BPS.toLong()
-        val growth = revenueGrowthBps.coerceAtLeast(0).toLong()
-        val sustaining = (capex.toLong() * renewal / (renewal + growth)).toInt()
-        return sustaining.coerceIn(MAINTENANCE_CAPEX_MIN_REVENUE_BPS.coerceAtMost(capex), capex)
-    }
+    private fun maintenanceCapexIntensityBps(capexIntensityBps: Int, revenueGrowthBps: Int): Int =
+        SustainingCapex.intensityBps(capexIntensityBps, revenueGrowthBps)
 
     private fun scenarioGrowthAroundMedian(
         baseGrowthBps: Int,
@@ -997,6 +1094,7 @@ object DcfAnalysisEngine {
             sector = fundamentals.sectorName,
             fadeYearsDefault = fadeDefault,
             fadeExponentDefault = growthFadeDefault,
+            capexIntensityBps = drivers.normalizedCapexIntensityBps,
         )
         val usedBaseGrowth = path.usedGrowthBps
         val demonstratedStable = usedBaseGrowth.coerceAtLeast(MIN_STABLE_GROWTH_BPS)
@@ -1029,13 +1127,14 @@ object DcfAnalysisEngine {
             path.stableMarginBps, usedBearGrowth,
             currentShares, netDebtDollars, bearStableGrowth, bearWacc,
             growthFade, path.holdYears, path.fadeYears,
-        ) ?: error("bear driver scenario invalid")
+        ) ?: 0L
         val base = discountedDriverFcff(
             drivers.latestRevenueDollars, path.startMarginBps,
             path.stableMarginBps, usedBaseGrowth,
             currentShares, netDebtDollars, stableGrowthBase, pathDiscount,
             growthFade, path.holdYears, path.fadeYears,
-        ) ?: error("base driver scenario invalid")
+        ) ?: error("fcff unavailable: equity wiped after net debt")
+        require(base > 0L) { "fcff unavailable: equity wiped after net debt" }
         val bull = discountedDriverFcff(
             drivers.latestRevenueDollars, maxOf(drivers.bullFcffMarginBps, path.startMarginBps),
             path.stableMarginBps, usedBullGrowth,
@@ -1052,10 +1151,45 @@ object DcfAnalysisEngine {
             add("business_class=operating_non_financial")
             add("valuation_driver=driver_based_fcff")
             add("fcff=ocf_plus_after_tax_interest_minus_capex")
+            if (drivers.interestAssumedZeroYears.isNotEmpty()) {
+                add(
+                    "interest=unfiled_zero_when_no_period_debt:" +
+                        drivers.interestAssumedZeroYears.joinToString(","),
+                )
+            }
+            if (drivers.interestMissingWithDebtPeriods.isNotEmpty()) {
+                add(
+                    "interest=unfiled_with_period_debt:" +
+                        drivers.interestMissingWithDebtPeriods.joinToString(","),
+                )
+            }
+            add("coupon=$COUPON_RESOLUTION_VERSION")
+            add("debt=$DEBT_RESOLUTION_VERSION")
+            add("debt_stock=filed_year_end_instant")
+            add("issuer_yield=$ISSUER_MARKET_YIELD_VERSION")
+            if (drivers.estimatedCoupons.isNotEmpty()) {
+                drivers.estimatedCoupons
+                    .groupBy { it.method to it.confidence }
+                    .forEach { (key, group) ->
+                        var method = when (key.first) {
+                            CouponEstimateMethod.OwnEffectiveRate -> "own_effective_rate"
+                            CouponEstimateMethod.PeerEffectiveRate -> "peer_effective_rate"
+                            null -> "unknown"
+                        }
+                        var band = key.second.name.lowercase()
+                        add(
+                            "interest=estimated:$method:$band:" +
+                                group.joinToString(",") { it.period },
+                        )
+                    }
+            }
             add("growth=recent_driver_median:regime=${drivers.driverRegime}")
             add("growth=scenario_band_around_median:$SCENARIO_GROWTH_BAND_BPS")
             if (drivers.ocfPersistentRecovery) {
                 add("ocf=latest_on_persistent_recovery")
+            }
+            if (drivers.ocfCentreWithoutPriorFranchise) {
+                add("ocf=centre_without_prior_franchise")
             }
             if (usedBaseGrowth != drivers.baseGrowthBps) {
                 var tag = if (growthCap > matureCap) {
@@ -1070,6 +1204,8 @@ object DcfAnalysisEngine {
             }
             add("growth_fade=regime:${drivers.driverRegime}_exponent:${"%.2f".format(java.util.Locale.US, growthFade)}")
             addAll(path.reasons)
+            add("industry_operating_path=${IndustryOperatingPathPolicy.VERSION}")
+            add("valuation_policy=${ValuationPolicy.VERSION}")
             add("path=hold:${path.holdYears}:fade:${path.fadeYears}")
             if (drivers.ownerEarningsBase) {
                 add("fcff_margin=owner_earnings_ocf_minus_maintenance:${drivers.baseFcffMarginBps}")
@@ -1148,6 +1284,15 @@ object DcfAnalysisEngine {
                 "source=provider_timeseries",
                 "annual_aligned=ocf,capex,revenue,interest,debt,effective_tax,marginal_tax",
                 "fcff=ocf_plus_after_tax_interest_minus_capex",
+                "honesty=honest",
+            ),
+            honesty = ValuationHonesty.Honest,
+            honestPath = HonestPathInputs(
+                holdYears = path.holdYears,
+                fadeYears = path.fadeYears,
+                startMarginBps = path.startMarginBps,
+                stableMarginBps = path.stableMarginBps,
+                fadeExponentHundredths = (path.fadeExponent * 100.0).roundToInt(),
             ),
         )
     }
@@ -1253,10 +1398,40 @@ object DcfAnalysisEngine {
         return if (elapsedDays > 0) elapsedDays / 365.2425 else null
     }
 
+    private fun alignedDriverRefuseMessage(
+        timeseries: FundamentalTimeseries,
+        alignedRows: Int,
+        missingFcff: Boolean = false,
+    ): String {
+        val ocf = timeseries.operatingCashFlow.map(::annualKey).toSet()
+        val capex = timeseries.capitalExpenditure.map(::annualKey).toSet()
+        val revenue = timeseries.revenue.map(::annualKey).toSet()
+        val interest = timeseries.interestExpense.map(::annualKey).toSet()
+        val tax = timeseries.taxRateForCalcs.map(::annualKey).toSet()
+        val cashYears = ocf.intersect(capex).intersect(revenue).sorted()
+        val missingInterest = cashYears.filterNot(interest::contains)
+        val missingTax = cashYears.filterNot(tax::contains)
+        val parts = buildList {
+            add("fcff unavailable: at least three aligned annual OCF, CapEx, revenue, interest, and effective-tax driver rows are required")
+            add("aligned_cash_years=${cashYears.size}")
+            add("kept_rows=$alignedRows")
+            if (missingInterest.isNotEmpty()) {
+                add("interest is missing for ${missingInterest.joinToString(",")}")
+            }
+            if (missingTax.isNotEmpty()) {
+                add("effective tax is missing for ${missingTax.joinToString(",")}")
+            }
+            if (missingFcff) {
+                add("recent FCFF identity is empty")
+            }
+        }
+        return parts.joinToString("; ")
+    }
+
     private fun parseYmd(value: String): java.time.LocalDate? =
         runCatching { java.time.LocalDate.parse(value) }.getOrNull()
 
-    private fun costOfEquityBps(
+    internal fun costOfEquityBps(
         fundamentals: FundamentalSnapshot,
         marketParams: MarketParams,
     ): Triple<Int, WaccFieldSource, Boolean> {
@@ -1296,7 +1471,9 @@ object DcfAnalysisEngine {
         val equityPremium = divRoundHalfUp(betaMillis * marketParams.erpBps.toLong(), 1_000L)
             .toInt()
         val re = marketParams.rfBps + equityPremium
-        val costOfEquityBps = re.coerceAtLeast(marketParams.rfBps + 50)
+        val costOfEquityBps = re.coerceAtLeast(
+            marketParams.rfBps + ValuationPolicy.current.dcf.minEquitySpreadOverRfBps,
+        )
         val provisional = betaProvisional || marketParams.provisional
         // Match Windows `{:?}` Option debug: `None` / `Some(n)`.
         val asOfDebug = "None"
@@ -1334,7 +1511,9 @@ object DcfAnalysisEngine {
             companyBetaMillis.toLong() * marketParams.erpBps.toLong(),
             1_000L,
         ).toInt()
-        return (marketParams.rfBps + premium).coerceAtLeast(marketParams.rfBps + 50)
+        return (marketParams.rfBps + premium).coerceAtLeast(
+            marketParams.rfBps + ValuationPolicy.current.dcf.minEquitySpreadOverRfBps,
+        )
     }
 
     private fun resolveMarketCapDollars(

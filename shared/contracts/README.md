@@ -31,6 +31,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   golden resolver-state cases for selected, unavailable, disabled/absent, and uncertain DCF source decisions
 - `valuation-model-family.json`:
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
+- `valuation-policy.yaml`:
+  single Android engine policy book (`valuation-policy/1`); industry path, DCF bands, coupons, ranking, dip/leftover. Industry beta stays in `industry-beta-policy-v1.json`
 - `industry-beta-policy-v1.json`:
   versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:
@@ -55,8 +57,10 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   analyst-panel construction goldens — newest observation per eligible identity, canonical ordering, and the weighting/target units
 - `valuation-decision-policy.json`:
   aligned / tension / wide-scenario classification from integer basis-point arithmetic; fixes the exact half-up rounding so the two platforms cannot drift at a threshold
+- `street-implied-honesty.json`:
+  dual-mode honesty. Working identity stays `Honest`. Street-implied one-knob inversions are a parallel `NonHonest` signal with implied bps, delta, and stretch. Street is the scoreboard only.
 - `sec-driver-normalization.json`:
-  the SEC XBRL normalization policy itself — taxonomy scope, concept precedence, investment categories, and the rejection reasons; carries the `sec-driver-normalization/8` fingerprint
+  the SEC XBRL normalization policy itself — taxonomy scope, concept precedence, investment categories, and the rejection reasons; carries the `sec-driver-normalization/11` fingerprint
 - `sec-driver-normalization-fixtures.json`:
   captured `companyfacts` fixtures that exercise that policy, pinned to the same fingerprint so a policy change and its evidence cannot separate
 - `valuation-fcff-qa-2026-07-31.json`:

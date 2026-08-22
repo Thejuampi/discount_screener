@@ -1,5 +1,19 @@
 # Deferred Work
 
+## 2026-08-16 — Honest path and Street stretch
+
+Source: [`handover-honest-path-street-stretch-2026-08-16.md`](handover-honest-path-street-stretch-2026-08-16.md)
+
+- **P0 (done on Android 2026-08-16):** Live QA on profile `qa` after identity-visible CapEx/interest. AAPL remesure: SEC FCFF forms, red coupon caveat on Detail, Street primary on a 12361 bps fan. Note: [`live-qa-android-honest-path-2026-08-16.md`](live-qa-android-honest-path-2026-08-16.md). Debt-engine remesure the same day: [`live-qa-android-debt-engine-2026-08-16.md`](live-qa-android-debt-engine-2026-08-16.md). T/AMZN/AAPL show current instrument yield. CI/UNH/JPM stay residual. Windows live QA waits for the later port.
+- **P1:** Windows still lacks Android `persist_frac`, expand-without-franchise, residual-path `/4`, NonHonest stretch UI, `coupon-resolution/1`, and `debt-resolution/1`. **Juan deferred the port (2026-08-16).** Do not start it.
+- **P2:** NonHonest is a published diagnostic. Do not switch working mode, and do not build a multi-knob Street mix, unless Juan asks.
+- **Do not:** retune CMCSA / AMAT / DELL / CPAY / DASH honest knobs to this holdout’s Street numbers.
+- Honest extraction on this holdout is exhausted. Remaining gaps are Street vs identity.
+- **Coupon estimates (Android `coupon-resolution/1`, 2026-08-16):** Juan locked confidence-based fill. Own last effective rate first. Else similar-issuer median. Filed tags replace estimates. Windows still drops the hole year.
+- **Debt engine (Android `debt-resolution/1`, 2026-08-16):** Owns stock, coupon, and published k_d. Estimates stay in year-cash. `issuer-market-yield/2` attaches a current USD instrument yield from Markets Insider (median of remaining 4–15 year quotes). The yield sets k_d and keeps the tax-year window. Empty when the issuer or tenor has no quote. Windows port stays closed.
+- **Factory plus lender (`component-sotp/2`, Android 2026-08-16):** Mixed industrial + finance filings value each part and add them. Factory cash adds depreciation back. Windows port stays closed. Live Android QA on General Motors waits until Juan asks.
+- **Policy book (`valuation-policy/1`, Android 2026-08-16):** Engine knobs live in `shared/contracts/valuation-policy.yaml`. Windows and desktop still keep their own literals. Do not start that port.
+
 ## 2026-08-02 — Quant / valuation motor (handover)
 
 Source: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuation-engine-2026-08-02.md)

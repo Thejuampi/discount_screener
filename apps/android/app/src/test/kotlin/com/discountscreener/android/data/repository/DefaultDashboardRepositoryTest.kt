@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.android.data.persistence.CaptureKind
+import com.discountscreener.android.data.persistence.PersistenceBootstrap
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
 import com.discountscreener.android.data.persistence.MetricGroupStatus
 import com.discountscreener.android.data.persistence.RawCapture
@@ -13,6 +14,8 @@ import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
+import com.discountscreener.android.data.market.MarketDataRepository
+import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
@@ -25,6 +28,7 @@ import com.discountscreener.android.data.remote.YahooSearchQuote
 import com.discountscreener.android.data.remote.offlineHttpClient
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.domain.model.DashboardStartupPhase
+import com.discountscreener.android.domain.model.MarketReadStatus
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RowExplanationKind
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -57,6 +61,7 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.model.ValuationModel
+import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.model.getOrNull
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
@@ -64,6 +69,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -1160,6 +1166,213 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun stale_generation_does_not_fetch() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val client = FakeYahooFinanceClient(delayMs = 250)
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            advanceTimeBy(500)
+            advanceUntilIdle()
+            val fetchedWhenSwitching = client.fetchedSymbols.size
+
+            repository.selectProfile("qa", ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            assertEquals(
+                emptySet<String>(),
+                client.fetchedSymbols.drop(fetchedWhenSwitching).toSet() - QA_SYMBOLS,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun second_switch_does_not_cancel_new_refresh() = runTest(dispatcher) {
+        val store = DelayedFirstScoringStore(context, dispatcher)
+        try {
+            val client = FakeYahooFinanceClient(delayMs = 2_000)
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            launch { repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel) }
+            launch { repository.selectProfile("qa", ViewFilter(), ChartRange.Year, legacyModel) }
+            advanceUntilIdle()
+            advanceTimeBy(1_000)
+            advanceUntilIdle()
+            advanceTimeBy(2_000)
+            advanceUntilIdle()
+
+            val finished = awaitSnapshot(repository) { snapshot ->
+                snapshot.currentProfile == "qa" &&
+                    snapshot.trackedRows.any { row ->
+                        row.symbol == QA_EXCLUSIVE_LIVE_SYMBOL && row.state == TrackedRowState.Live
+                    }
+            }
+            assertEquals(
+                "qa/${TrackedRowState.Live}",
+                "${finished.currentProfile}/${finished.trackedRows.first { it.symbol == QA_EXCLUSIVE_LIVE_SYMBOL }.state}",
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun cancelled_refresh_does_not_journal() = runTest(dispatcher) {
+        val store = CountingJournalStore(context, dispatcher)
+        try {
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+            val journalsAfterLivePass = store.journalWrites
+
+            client.delayMs = 5_000
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            dispatcher.scheduler.runCurrent()
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(journalsAfterLivePass, store.journalWrites)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun stale_warm_start_adopt_does_not_wipe_new_profile() = runTest(dispatcher) {
+        var store = DelayedWarmStartStore(context, dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var boot = launch {
+                repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            }
+            dispatcher.scheduler.runCurrent()
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+            boot.join()
+
+            assertEquals(
+                "dow",
+                repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel).currentProfile,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun cancelled_market_read_does_not_complete_old_fetch() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var market = DelayedMarketRead()
+            var repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                marketDataRepository = market,
+            )
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            dispatcher.scheduler.runCurrent()
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            assertEquals(1, market.finished)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun stale_market_read_does_not_write_new_profile() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var market = DelayedMarketRead()
+            var repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                marketDataRepository = market,
+            )
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            advanceTimeBy(5_000)
+            advanceUntilIdle()
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            dispatcher.scheduler.runCurrent()
+
+            assertEquals(
+                MarketReadStatus.Pending,
+                repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel).marketReadStatus,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun stale_enrichment_does_not_steal_job() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var client = object : FakeYahooFinanceClient() {
+                val timeseriesSymbols = mutableListOf<String>()
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    timeseriesSymbols += symbol
+                    delay(5_000)
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+            var tFetchesAtSwitch = client.timeseriesSymbols.count { symbol -> symbol == QA_EXCLUSIVE_LIVE_SYMBOL }
+
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            assertEquals(
+                tFetchesAtSwitch,
+                client.timeseriesSymbols.count { symbol -> symbol == QA_EXCLUSIVE_LIVE_SYMBOL },
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    // The quote and the chart are two separate passes now (see [finishRefresh]): a row goes Live
+    // from its quote alone, so a chart that never lands must not hold it back in Loading.
+    @Test
+    fun chart_cancel_does_not_block_row_from_going_live() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchHistoricalCandles(
+                    symbol: String,
+                    range: ChartRange,
+                ): List<HistoricalCandle> {
+                    throw kotlinx.coroutines.CancellationException("chart cancelled")
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            val snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel)
+            assertEquals(
+                TrackedRowState.Live,
+                snapshot.trackedRows.first { row -> row.symbol == QA_EXCLUSIVE_LIVE_SYMBOL }.state,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun refresh_keeps_cached_symbol_live_when_quote_html_404s_but_chart_succeeds() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
@@ -1808,6 +2021,7 @@ class DefaultDashboardRepositoryTest {
         client: FakeYahooFinanceClient,
         secondaryTimeseriesProvider: FundamentalTimeseriesProvider? = null,
         defaultProfile: String = DefaultDashboardRepository.QA_PROFILE,
+        marketDataRepository: MarketDataRepository? = null,
     ) = DefaultDashboardRepository(
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
@@ -1817,7 +2031,21 @@ class DefaultDashboardRepositoryTest {
         nowProvider = { 1_700_000_000L },
         ioDispatcher = dispatcher,
         defaultProfile = defaultProfile,
+        marketDataRepository = marketDataRepository,
     )
+
+    private class DelayedMarketRead : MarketDataRepository(
+        yahooClient = YahooFinanceClient(),
+        fearGreedClient = CnnFearGreedClient(),
+    ) {
+        var finished = 0
+
+        override suspend fun refreshIfStale(symbols: List<String>): MarketRegime {
+            delay(5_000)
+            finished += 1
+            return MarketRegime(primaryRegime = "StaleBull", globalConfidenceBps = 8_000)
+        }
+    }
 
     private fun assertCandleFingerprintChanges(mutated: HistoricalCandle) {
         var original = baseQuantLensFingerprintCandle()
@@ -2414,6 +2642,132 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun warm_detail_skips_disk_and_network() = runTest(dispatcher) {
+        var store = CountingDetailStore(context, dispatcher)
+        try {
+            var client = FakeYahooFinanceClient(delayMs = 5)
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            var snapshot = awaitSnapshot(repository) { current ->
+                current.trackedRows.any { it.state == TrackedRowState.Live }
+            }
+            var symbol = snapshot.trackedSymbols.first()
+            awaitSnapshot(repository, selectedSymbol = symbol) { enriched ->
+                enriched.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty()
+            }
+
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+            var afterFirst = DetailOpenIo(
+                revisionHistoryLoads = store.revisionHistoryLoads,
+                pricingHistoryLoads = store.pricingHistoryLoads,
+                persistBatches = store.persistBatches,
+                timeseriesFetches = client.fundamentalTimeseriesFetches,
+            )
+
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            assertEquals(
+                afterFirst,
+                DetailOpenIo(
+                    revisionHistoryLoads = store.revisionHistoryLoads,
+                    pricingHistoryLoads = store.pricingHistoryLoads,
+                    persistBatches = store.persistBatches,
+                    timeseriesFetches = client.fundamentalTimeseriesFetches,
+                ),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun warm_replay_skips_network() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var client = FakeYahooFinanceClient()
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.ensureReplayBackingLoaded("EXPD", ChartRange.Year)
+            repository.ensureReplayBackingLoaded("EXPD", ChartRange.Year)
+
+            assertEquals(1, client.replayBackingFetches)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun snapshot_reuses_leftover_and_dip() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var first = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var second = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertEquals(
+                BoardReuse(
+                    leftoverSame = true,
+                    dipOppsSame = true,
+                    dipProfileSame = true,
+                ),
+                BoardReuse(
+                    leftoverSame = first.leftoverBoard === second.leftoverBoard,
+                    dipOppsSame = first.planBoard === second.planBoard,
+                    dipProfileSame = first.planBoardProfile === second.planBoardProfile,
+                ),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun warm_adhoc_skips_quote_fetch() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var client = FakeYahooFinanceClient()
+            var repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.ensureDetailLoaded("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+            var afterFirst = client.fetchSymbolCount
+
+            repository.ensureDetailLoaded("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(afterFirst, client.fetchSymbolCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun profile_switch_reloads_revision_history() = runTest(dispatcher) {
+        var store = CountingDetailStore(context, dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            var snapshot = awaitSnapshot(repository) { current ->
+                current.trackedRows.any { it.state == TrackedRowState.Live }
+            }
+            var symbol = snapshot.trackedSymbols.first()
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year, legacyModel)
+            var afterFirst = store.revisionHistoryLoads
+
+            repository.selectProfile("qa", ViewFilter(), ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            repository.ensureDetailLoaded(symbol, ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertTrue(store.revisionHistoryLoads > afterFirst)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun search_meli_returns_remote_suggestion() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
@@ -2638,6 +2992,88 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    private data class DetailOpenIo(
+        val revisionHistoryLoads: Int,
+        val pricingHistoryLoads: Int,
+        val persistBatches: Int,
+        val timeseriesFetches: Int,
+    )
+
+    private data class BoardReuse(
+        val leftoverSame: Boolean,
+        val dipOppsSame: Boolean,
+        val dipProfileSame: Boolean,
+    )
+
+    private class CountingJournalStore(
+        context: Context,
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
+        var journalWrites = 0
+
+        override suspend fun appendScoreJournal(
+            rows: List<com.discountscreener.android.domain.model.ScoreJournalRow>,
+            retentionSeconds: Long,
+            nowEpochSeconds: Long,
+        ): Int {
+            journalWrites += 1
+            return super.appendScoreJournal(rows, retentionSeconds, nowEpochSeconds)
+        }
+    }
+
+    private class DelayedWarmStartStore(
+        context: Context,
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
+        private var loads = 0
+
+        override suspend fun loadWarmStart(symbols: Collection<String>?): PersistenceBootstrap {
+            loads += 1
+            if (loads == 1) {
+                delay(1_000)
+            }
+            return super.loadWarmStart(symbols)
+        }
+    }
+
+    private class DelayedFirstScoringStore(
+        context: Context,
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
+        private var scoringLoads = 0
+
+        override suspend fun loadScoringPreferences(): com.discountscreener.android.domain.model.ScoringPreferences {
+            scoringLoads += 1
+            if (scoringLoads == 1) {
+                delay(1_000)
+            }
+            return super.loadScoringPreferences()
+        }
+    }
+
+    private class CountingDetailStore(
+        context: Context,
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
+        var revisionHistoryLoads = 0
+        var pricingHistoryLoads = 0
+        var persistBatches = 0
+
+        override suspend fun loadRevisionHistory(symbol: String) =
+            super.loadRevisionHistory(symbol).also { revisionHistoryLoads += 1 }
+
+        override suspend fun loadPricingHistory(symbol: String) =
+            super.loadPricingHistory(symbol).also { pricingHistoryLoads += 1 }
+
+        override suspend fun persistBatch(
+            rawCaptures: List<RawCapture>,
+            revisions: List<SymbolRevisionInput>,
+        ) {
+            persistBatches += 1
+            super.persistBatch(rawCaptures, revisions)
+        }
+    }
+
     /**
      * A Yahoo whose batch endpoint answers and whose quoteSummary never does, so a test can read
      * the rows between pass zero and the per-symbol pass, and see the order that pass asks in.
@@ -2654,9 +3090,13 @@ class DefaultDashboardRepositoryTest {
     }
 
     private open class FakeYahooFinanceClient(
-        private val delayMs: Long = 0,
+        var delayMs: Long = 0,
     ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
         var searchSymbolsCallCount = 0
+        var fundamentalTimeseriesFetches = 0
+        var fetchSymbolCount = 0
+        var replayBackingFetches = 0
+        val fetchedSymbols = mutableListOf<String>()
         private val searchResponses = linkedMapOf<String, List<YahooSearchQuote>>()
 
         fun registerSearch(query: String, quotes: List<YahooSearchQuote>) {
@@ -2682,6 +3122,8 @@ class DefaultDashboardRepositoryTest {
         }
 
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+            fetchSymbolCount++
+            fetchedSymbols += symbol
             delay(delayMs)
             val price = priceFor(symbol)
             val fair = price + 2_500L
@@ -2726,7 +3168,13 @@ class DefaultDashboardRepositoryTest {
             )
         }
 
+        override suspend fun fetchReplayBackingCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+            replayBackingFetches += 1
+            return fetchHistoricalCandles(symbol, range)
+        }
+
         override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+            fundamentalTimeseriesFetches += 1
             delay(delayMs)
             return FundamentalTimeseries(
                 freeCashFlow = listOf(com.discountscreener.core.model.AnnualReportedValue("2023-01-01", 50_000_000_000.0)),
@@ -2765,6 +3213,11 @@ class DefaultDashboardRepositoryTest {
 
     companion object {
         private const val DB_NAME = "discount_screener_state.sqlite3"
+        private const val QA_EXCLUSIVE_LIVE_SYMBOL = "T"
+        private val QA_SYMBOLS = setOf(
+            "T", "AMZN", "AAPL", "CI", "JPM", "ACGL", "MSFT", "NVDA", "UNH", "JNJ",
+            "XOM", "BAC", "V", "WMT", "GOOGL", "META", "TSLA", "HD", "PG", "MRK",
+        )
     }
 }
 

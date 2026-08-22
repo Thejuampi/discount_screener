@@ -1,6 +1,6 @@
 {
   "seed": 20260816,
-  "policy": "business-class-policy/33-path-refine",
+  "policy": "business-class-policy/35-weak-franchise-secular",
   "scoreboard": "street_median_target",
   "formula_reads_street": false,
   "fit_set_excluded": [

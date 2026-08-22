@@ -18,13 +18,15 @@ import kotlin.math.absoluteValue
  */
 object EstimatesHistoryPolicy {
     /** Minimum Base DCF move to justify rewriting the same-day snapshot (0.50%). */
-    const val MIN_BASE_MOVE_BPS: Int = 50
+    val MIN_BASE_MOVE_BPS: Int
+        get() = ValuationPolicy.current.estimatesHistory.minBaseMoveBps
 
     /** Absolute live-DCF coverage gain that counts as material. */
-    const val MIN_COVERAGE_GAIN: Int = 5
+    val MIN_COVERAGE_GAIN: Int
+        get() = ValuationPolicy.current.estimatesHistory.minCoverageGain
 
-    /** Keep roughly half a year of daily points. */
-    const val MAX_DAILY_POINTS: Int = 180
+    val MAX_DAILY_POINTS: Int
+        get() = ValuationPolicy.current.estimatesHistory.maxDailyPoints
 
     private val dayFormatter: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 

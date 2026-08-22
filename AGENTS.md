@@ -65,7 +65,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 | BusinessClass | Primary model | Discount rate | Cash / driver |
 | --- | --- | --- | --- |
-| `OperatingNonFinancial` | FCFF + WACC | WACC | Free cash flow series (source-resolved) |
+| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing |
 | `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, **lenders** such as COF) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path; long-run ROE = min(ROE0, CoE+500) |
 | Payment networks (`V`, `MA`) even if Yahoo says Credit Services | **FCFF + WACC** | WACC | Fee cash flow — residual on book prints ~book |
 | `NotEligible` (ETF, fund, crypto shell, REIT, …) | none | — | — |
@@ -79,7 +79,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 ### Dynamic parameters — no eternal magic constants
 
-Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC.
+Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Edit that file. Do not put a second copy in Kotlin.
 
 - **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
 - Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
@@ -94,6 +94,7 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Terminal ROE holds min(through-cycle ROE0, cost of equity + 500 bps); raw ROE0 does not run forever
 - Missing required drivers → `Unavailable` / `NotEligible` with reason codes
 - Beta missing → industry shrink
+- Latest OCF is the run-rate only when the prior window already printed two positive OCF years. A first-cash ramp keeps the recent OCF centre.
 
 **Forbidden**
 
@@ -104,6 +105,17 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Acceptance tests that only assert “value near price”
 
 Regression mindset: **ACGL must not emit FCFF-primary from float OCF**; use residual income (or unavailable if book/ROE missing).
+
+### Honesty modes
+
+Two typed modes. Street is the scoreboard only.
+
+| Mode | Role |
+| --- | --- |
+| `Honest` | Working identity. Every input is evidence or economics. Exhaust this first. |
+| `NonHonest` | Parallel signal. One-knob inversions that would match Street. Never a hidden mix. |
+
+Every non-honest input is `ValuationHonesty.NonHonest` in the class model. Detail prints both dollars in the Model block. The non-honest line names the bent input. The Snapshot forecast is the analyst range. Policy: `street-implied-honesty/3`. The scoreboard reports `ape_h`, `ape_nh`, implied bps, delta, and stretch. `ape_nh` near 0 is inversion, not a win.
 
 ### Provenance, parity, and engine versioning
 
@@ -118,8 +130,13 @@ Provider **source selection** (Yahoo vs SEC) is a separate layer: [`_bmad-output
 For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cross a canonical normalization boundary before FCFF:
 
 - Recurring development CapEx is consumed separately from the reviewed US-GAAP acquisition-cash set; acquisition facts stay visible as rejected evidence and are **never** added to FCFF.
+- Sum plant, capitalized software (`PaymentsForSoftware`, `PaymentsToDevelopSoftware`), purchased intangibles (`PaymentsToAcquireIntangibleAssets`), and the oil well program. Drop software and intangibles when the tangible tag is `PaymentsToAcquireProductiveAssets` (those components are already inside that aggregate).
+- `PaymentsToAcquireOilAndGasPropertyAndEquipment` is the well program. Sum it with other plant. `PaymentsToAcquireOilAndGasProperty` (no equipment) stays acreage acquisition.
 - Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition Y−1 → Y. Exclude that transition and retain clean recent observations when ≥2 exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance.
-- Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved consolidated USD annual evidence is **unavailable** — not zero, not an imputed cash flow.
+- `FinanceLeaseInterestExpense` is not an interest-expense equivalent. It is the lease subset. Signed net interest (`InterestIncomeExpenseNonoperatingNet`) uses the magnitude.
+- Missing coupon years: estimate when `coupon-resolution/1` confidence allows. Own last effective rate first. Else the median of similar issuers' filed rates. Label method and band. A later filed tag replaces the estimate. No own points and fewer than three peers stay Absent. Never invent a coupon from Other income, `InterestPaid*`, or a note rate range.
+- Android `debt-resolution/1` owns stock, coupon, and published k_d. Stock is the filed year-end instant. Estimated coupons enter year-cash only. k_d stays market yield, then rated/coverage synthetic, then the filed coupon over average debt. `InterestPaid*` is not a filed coupon. A current instrument yield attaches through `issuer-market-yield/2` onto `marketYieldBps`. The yield sets k_d. It does not shrink the tax-year window. Android reads Markets Insider issuer bond rows, keeps USD quotes, and takes the median of remaining 4–15 year yields. Missing yield leaves the rung empty.
+- Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved CapEx, OCF, or tax evidence is **unavailable** — not zero.
 - Financial services remain on residual income.
 
 ## Quant Lens (signal vs noise)
@@ -159,6 +176,10 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 
 ## Build And Test
 
+### Iterate on the harness first (mandatory while developing)
+
+Use `QuantHarness.hardcoded()` → `cached()` → `live()` (`DS_QUANT_LIVE=true` to refresh a pack). Do **not** run device `make android-run-qa` until Juan says the product is ready for live QA.
+
 ### Live QA = profile `qa` only (mandatory)
 
 **QA uses universe profile `qa` (≤20 symbols).** Silence is not permission for another universe.
@@ -173,6 +194,26 @@ Windows also accepts `$env:DS_UNIVERSE_PROFILE = "qa"` then `npm run tauri:dev`,
 `qa` is a **≤20 persistent feed symbol** sample (SP500 ∩ latest snapshot gap≥25% ∩ score DESC ∩ top 20; thin DB → priority fill), not the whole product. Checklist names use one-shot `ensure_symbol_loaded` and must not grow the feed. Restart only after a native rebuild. Attach the running process via `npm run ds-ui -- …` (CDP `127.0.0.1:9222`, DEV `window.__DS_AGENT__`); gate with `npm run ds-ui:self-check` then `npm run live-qa:checklist`.
 
 Checklist: [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md).
+
+### Live QA report (mandatory after a QA session)
+
+Write use-case scenarios (Sommerville / UML). Every executed path is one scenario. Paths not exercised are **Not run**.
+
+| Field | Content |
+| --- | --- |
+| ID | `UC-n` plus a letter for an extension (`UC-3a`) |
+| Use case | Goal the actor tries to complete |
+| Precondition | State before the first step |
+| Steps | Numbered actions the actor takes |
+| Expected | Observable result if the product is correct |
+| Actual | What the session showed |
+| Status | Pass, Fail, or Not run |
+
+Close with a count of Pass / Fail / Not run. List every **Not run** use case by name.
+
+### Specification by example (mandatory)
+
+Behaviour is a Gherkin `Scenario Outline` with an `Examples` table. Each row is one Case and one automated test. A bare `Scenario` is rejected. A table needs at least two Cases. Add a Case to an existing table before you write a new outline.
 
 ### Screen replay — experiment without the emulator (Android)
 
@@ -288,6 +329,7 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 - Temp work only under `.agents/workspace/tmp`.
 - User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments.
 - Demand-driven expensive work: history, valuation, and heavy fetches stay bounded and on-demand where practical.
+- Android Detail second open of a warm ticker paints from the session cache. Skip disk and network when memory already holds the chart and DCF. Leftover and dip boards reuse the last assemble when the input fingerprint is unchanged. Session flags (`revisionHistoryHydrated`, `pricingHistoryHydrated`, `liveDcfResolvedSymbols`, replay backing) clear in `resetInMemoryLocked`.
 - Sparse/unavailable/stale states must be explicit — never smooth missing valuation into a fake “Strong” story.
 
 ## Documentation Map

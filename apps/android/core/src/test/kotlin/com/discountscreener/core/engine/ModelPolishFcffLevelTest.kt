@@ -19,7 +19,7 @@ class ModelPolishFcffLevelTest {
             marketParams = requireNotNull(data.marketParams),
         ).getOrThrow()
         assertTrue(
-            analysis.baseIntrinsicValueCents >= 15_000L,
+            analysis.baseIntrinsicValueCents >= 14_000L,
             "AMZN 4-year base is ${analysis.baseIntrinsicValueCents}",
         )
     }

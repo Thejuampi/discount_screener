@@ -419,7 +419,7 @@ private fun disputedPrimaryLine(
     if (modelBase == null || analystBase == null) return "Model and analyst $relationLabel · no single estimate"
     val modelUpside = marketPriceCents?.let { upsideBps(modelBase, it) }
     val analystUpside = marketPriceCents?.let { upsideBps(analystBase, it) }
-    return "DCF ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) vs analyst ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}) · $relationLabel · no single estimate"
+    return "Forecast is the analyst range ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}). Identity model ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) is a check · $relationLabel · no single estimate"
 }
 
 private fun disputedRows(
@@ -431,17 +431,17 @@ private fun disputedRows(
     val analystLow = section.analystLowFairValueCents
     val analystHigh = section.analystHighFairValueCents
     return listOfNotNull(
-        section.modelBaseFairValueCents?.let { base ->
-            "DCF base" to "${money(base)} · ${marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"}"
-        },
         section.analystBaseFairValueCents?.let { base ->
             "Analyst base" to "${money(base)} · ${marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"}"
         },
-        if (modelLow != null && modelHigh != null) {
-            "DCF range" to "${money(modelLow)}–${money(modelHigh)}"
-        } else null,
+        section.modelBaseFairValueCents?.let { base ->
+            "Identity model" to "${money(base)} · ${marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"}"
+        },
         if (analystLow != null && analystHigh != null) {
             "Analyst range" to "${money(analystLow)}–${money(analystHigh)}"
+        } else null,
+        if (modelLow != null && modelHigh != null) {
+            "Identity range" to "${money(modelLow)}–${money(modelHigh)}"
         } else null,
     )
 }

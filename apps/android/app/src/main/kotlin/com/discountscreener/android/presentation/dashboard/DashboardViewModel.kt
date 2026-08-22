@@ -57,6 +57,7 @@ import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCa
 import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.TickerSearchEngine
 import com.discountscreener.core.engine.TickerSearchRank
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -314,6 +315,10 @@ class DashboardViewModel(
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
     private var tickerSearchJob: Job? = null
     private var discoveryProgressJob: Job? = null
+    private var selectProfileJob: Job? = null
+    private var detailLoadJob: Job? = null
+    private var refreshJob: Job? = null
+    private val detailSessions = linkedMapOf<String, CachedDetailSession>()
 
     fun dispatch(action: DashboardAction) {
         when (action) {
@@ -440,7 +445,8 @@ class DashboardViewModel(
     }
 
     private fun refresh(force: Boolean) {
-        viewModelScope.launch {
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
             // A throw here reaches the coroutine handler and takes the process with it, which is a
             // hard exit for a button whose worst honest outcome is "the data did not update".
             // `loadDetailData` already guards its own call this way.
@@ -453,6 +459,8 @@ class DashboardViewModel(
                     force,
                 )
                 render(snapshot)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
                     detailNotice = DashboardNotice(
@@ -734,18 +742,22 @@ class DashboardViewModel(
             sourceTab = sourceTab,
             sourceSymbols = sourceSymbols,
         )
-        _state.value = clearMismatchedDetail(
-            state.copy(
-                detailRoute = detailRoute,
-                detailNotice = null,
-                tickerSearchQuery = "",
-                tickerSearchExpanded = false,
-                tickerSearchSuggestions = emptyList(),
-                tickerSearchNotice = null,
+        _state.value = applyCachedDetailSession(
+            clearMismatchedDetail(
+                state.copy(
+                    detailRoute = detailRoute,
+                    detailNotice = null,
+                    tickerSearchQuery = "",
+                    tickerSearchExpanded = false,
+                    tickerSearchSuggestions = emptyList(),
+                    tickerSearchNotice = null,
+                ),
+                symbol,
             ),
             symbol,
         )
-        viewModelScope.launch {
+        detailLoadJob?.cancel()
+        detailLoadJob = viewModelScope.launch {
             try {
                 renderDetailOnFile(symbol)
                 val snapshot = selectDashboardSymbol(
@@ -755,6 +767,8 @@ class DashboardViewModel(
                     _state.value.opportunityScoringModel,
                 )
                 render(snapshot)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
                     detailRoute = null,
@@ -771,6 +785,7 @@ class DashboardViewModel(
     }
 
     private fun backFromDetail() {
+        rememberDetailSession(_state.value)
         _state.value = _state.value.copy(
             detailRoute = null,
             selectedScoreRow = null,
@@ -794,11 +809,14 @@ class DashboardViewModel(
         if (currentIndex < 0) return
         val newIndex = (currentIndex + direction).coerceIn(0, symbols.lastIndex)
         val newSymbol = symbols[newIndex]
-        _state.value = clearMismatchedDetail(
-            _state.value.copy(
-                detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
-                detailNotice = null,
-                tickerSearchQuery = newSymbol,
+        _state.value = applyCachedDetailSession(
+            clearMismatchedDetail(
+                _state.value.copy(
+                    detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
+                    detailNotice = null,
+                    tickerSearchQuery = newSymbol,
+                ),
+                newSymbol,
             ),
             newSymbol,
         )
@@ -907,6 +925,7 @@ class DashboardViewModel(
     }
 
     private fun selectProfile(profile: String) {
+        detailSessions.clear()
         _state.value = _state.value.copy(
             detailRoute = null,
             detailData = null,
@@ -919,7 +938,17 @@ class DashboardViewModel(
             detailNotice = null,
             estimatesNotice = null,
         )
-        viewModelScope.launch {
+        activeEstimatesJob?.cancel()
+        var previousSelect = selectProfileJob
+        var previousDetail = detailLoadJob
+        var previousRefresh = refreshJob
+        previousSelect?.cancel()
+        previousDetail?.cancel()
+        previousRefresh?.cancel()
+        selectProfileJob = viewModelScope.launch {
+            previousSelect?.join()
+            previousDetail?.join()
+            previousRefresh?.join()
             val snapshot = selectDashboardProfile(
                 profile,
                 currentFilter(),
@@ -960,7 +989,8 @@ class DashboardViewModel(
     }
 
     private fun loadDetailData(symbol: String) {
-        viewModelScope.launch {
+        detailLoadJob?.cancel()
+        detailLoadJob = viewModelScope.launch {
             try {
                 renderDetailOnFile(symbol)
                 val snapshot = selectDashboardSymbol(
@@ -970,6 +1000,8 @@ class DashboardViewModel(
                     _state.value.opportunityScoringModel,
                 )
                 render(snapshot)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
                     detailNotice = DashboardNotice(
@@ -1086,6 +1118,8 @@ class DashboardViewModel(
                         )
                     }
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
                     estimatesNotice = DashboardNotice(
@@ -1169,9 +1203,46 @@ class DashboardViewModel(
         viewModelScope.launch {
             clearAllDataUseCase()
             started = false
+            detailSessions.clear()
             _state.value = DashboardUiState()
             start()
         }
+    }
+
+    private fun rememberDetailSession(state: DashboardUiState) {
+        var route = state.detailRoute ?: return
+        var detail = state.detailData ?: return
+        if (detail.symbol != route.symbol) return
+        detailSessions.remove(route.symbol)
+        detailSessions[route.symbol] = CachedDetailSession(
+            symbol = route.symbol,
+            detailData = detail,
+            projectedDetailData = state.projectedDetailData,
+            selectedScoreRow = state.selectedScoreRow,
+            detailCharts = state.detailCharts,
+            replayBackingCharts = state.replayBackingCharts,
+            detailHistory = state.detailHistory,
+            detailAlerts = state.detailAlerts,
+            detailQuantLens = state.detailQuantLens,
+        )
+        while (detailSessions.size > MaxDetailSessions) {
+            detailSessions.remove(detailSessions.keys.first())
+        }
+    }
+
+    private fun applyCachedDetailSession(state: DashboardUiState, symbol: String): DashboardUiState {
+        var session = detailSessions[symbol] ?: return state
+        return state.copy(
+            detailData = session.detailData,
+            projectedDetailData = session.projectedDetailData,
+            selectedScoreRow = session.selectedScoreRow?.takeIf { row -> row.symbol == symbol },
+            detailCharts = session.detailCharts,
+            replayBackingCharts = session.replayBackingCharts,
+            detailHistory = session.detailHistory,
+            detailAlerts = session.detailAlerts,
+            detailQuantLens = session.detailQuantLens,
+            detailNotice = null,
+        )
     }
 
     private fun render(snapshot: DashboardSnapshot) {
@@ -1281,10 +1352,25 @@ class DashboardViewModel(
             planBoardProfile = presentPlanBoard(snapshot.planBoardProfile),
             leftoverBoard = presentLeftoverBoard(snapshot.leftoverBoard),
         )
+        rememberDetailSession(_state.value)
     }
+
+    private data class CachedDetailSession(
+        val symbol: String,
+        val detailData: SymbolDetail,
+        val projectedDetailData: ProjectedDetailData?,
+        val selectedScoreRow: OpportunityListRow?,
+        val detailCharts: Map<ChartRange, List<HistoricalCandle>>,
+        val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>>,
+        val detailHistory: List<SymbolRevision>,
+        val detailAlerts: List<AlertEvent>,
+        val detailQuantLens: QuantLensUiState?,
+    )
 
     companion object {
         private const val TICKER_SEARCH_DEBOUNCE_MS = 300L
+        internal const val DashboardSnapshotDebounceMs = 300L
+        private const val MaxDetailSessions = 12
 
         /** What a snapshot rebuild waits afterwards, as a multiple of what it cost. */
         private const val SNAPSHOT_REBUILD_COOLDOWN_FACTOR = 2

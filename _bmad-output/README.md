@@ -6,7 +6,8 @@ This folder contains planning and implementation artifacts generated through BMa
 
 - [Project Context](project-context.md) - critical implementation rules and technology versions. Agents should read this before implementation work.
 - [Agents.md](../Agents.md) - monorepo layout, **valuation model family** (dynamic params, no hard output caps), Quant Lens SNR, numerical conclusion protocol.
-- **[Handover — Quant Valuation Engine 2026-08-02](implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md)** - **next agent on quant/valuation motor starts here** (waterfall, CHTR FCFF blocker, open P0–P7).
+- **[Handover — Honest path and Street stretch 2026-08-16](implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md)** - **next agent on identity cash / holdout / Street stretch starts here** (PR #39).
+- [Handover — Quant Valuation Engine 2026-08-02](implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - older Windows motor brief (waterfall, CHTR, high-signal). Separate workstream.
 
 ## Current-State Documentation
 

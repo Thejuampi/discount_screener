@@ -34,7 +34,7 @@ private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
  * old concept set and no way to say so, so it would answer "this company reports no impairment"
  * for a file that simply never looked. The name changes, and the old file is left to expire.
  */
-internal const val COMPANY_FACTS_SIEVE_VERSION = "nonrecurring-1"
+internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-intangibles-nonrecurring-1"
 private const val VALIDATOR_SUFFIX = ".etag"
 private const val NOT_MODIFIED = 304
 
@@ -369,8 +369,8 @@ private fun annualFyRecordsAny(
     return byDate.values.sortedBy { it.asOfDate }
 }
 
-private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
-    annualFyRecordsAny(
+private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualReportedValue> {
+    var tangible = annualFyRecordsAny(
         usGaap,
         SecDriverNormalizationPolicy.DriverOperator(
             qnames = SecDriverNormalizationPolicy.recurringDevelopmentConcepts,
@@ -379,6 +379,54 @@ private fun annualRecurringDevelopmentRecords(usGaap: JsonObject): List<AnnualRe
             operation = "select_one_equivalent",
         ),
     )
+    var wells = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringWellsConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var software = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringSoftwareConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var intangibles = annualFyRecordsAny(
+        usGaap,
+        SecDriverNormalizationPolicy.DriverOperator(
+            qnames = SecDriverNormalizationPolicy.recurringIntangibleConcepts,
+            unit = "USD",
+            periodShape = SecDriverNormalizationPolicy.PeriodShape.Duration,
+            operation = "select_one_equivalent",
+        ),
+    )
+    var tangibleByDate = tangible.associateBy { it.asOfDate }
+    var wellsByDate = wells.associateBy { it.asOfDate }
+    var softwareByDate = software.associateBy { it.asOfDate }
+    var intangiblesByDate = intangibles.associateBy { it.asOfDate }
+    return (
+        tangibleByDate.keys + wellsByDate.keys + softwareByDate.keys + intangiblesByDate.keys
+    ).mapNotNull { date ->
+        var plant = tangibleByDate[date]
+        var wellProgram = wellsByDate[date]
+        var softwareProgram = softwareByDate[date]
+        var intangibleProgram = intangiblesByDate[date]
+        var total = SecDriverNormalizationPolicy.recurringDevelopmentTotal(
+            tangibleDollars = plant?.value,
+            wellsDollars = wellProgram?.value,
+            tangibleConcept = plant?.concept,
+            softwareDollars = softwareProgram?.value,
+            intangiblesDollars = intangibleProgram?.value,
+        ) ?: return@mapNotNull null
+        (plant ?: wellProgram ?: softwareProgram ?: intangibleProgram)?.copy(value = total)
+    }.sortedBy { it.asOfDate }
+}
 
 private fun annualAcquisitionInvestmentRecords(usGaap: JsonObject): List<AnnualReportedValue> =
     annualFyRecordsAny(
@@ -460,8 +508,9 @@ private fun annualFyRecords(
             periodStart = startDate,
             periodEnd = endDate,
             durationDays = durationDays,
-            fiscalYear = obj["fy"]?.jsonPrimitive?.content?.toIntOrNull()
-                ?: endDate.take(4).toIntOrNull(),
+            // Period-end year. SEC `fy` is the filing year, so a 2025 10-K
+            // stamps fy=2025 on the 2024 comparative and collapses two years.
+            fiscalYear = endDate.take(4).toIntOrNull(),
             source = DcfSource.SecEdgar,
             concept = concept,
             unit = unit,

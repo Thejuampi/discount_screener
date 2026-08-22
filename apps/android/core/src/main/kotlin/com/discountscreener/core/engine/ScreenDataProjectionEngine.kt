@@ -52,8 +52,10 @@ import com.discountscreener.core.model.lowerForProviderUncertainty
 import com.discountscreener.core.model.toProjectedConfidence
 
 
-private const val QUANT_LENS_ROW_UPSIDE_MIN_BPS = -100_000
-private const val QUANT_LENS_ROW_UPSIDE_MAX_BPS = 100_000
+private val QUANT_LENS_ROW_UPSIDE_MIN_BPS: Int
+    get() = ValuationPolicy.current.quantLens.rowUpsideMinBps
+private val QUANT_LENS_ROW_UPSIDE_MAX_BPS: Int
+    get() = ValuationPolicy.current.quantLens.rowUpsideMaxBps
 
 class ScreenDataProjectionEngine {
     fun project(request: ScreenDataProjectionRequest): ComputationResult<ProjectedDashboardData> = captureComputationResult(
@@ -212,7 +214,7 @@ class ScreenDataProjectionEngine {
         var detail = request.detailsBySymbol[symbol] ?: return null
         var dcfAnalysis = request.dcfBySymbol[symbol]
         var statistic = request.analystTargetStatisticBySymbol[symbol]
-        var named = namedRowValuation(detail, dcfAnalysis, statistic)
+        var named = namedRowValuation(detail, dcfAnalysis, statistic, includeStreetImplied = true)
         var anchor = named.anchor
         var key = SymbolRangeKey(symbol = symbol, range = request.route.selectedRange)
         var candles = request.chartCandles[key].orEmpty()
@@ -254,17 +256,14 @@ class ScreenDataProjectionEngine {
             driverRegime = dcfAnalysis?.driverRegime,
             growthDispersionBps = dcfAnalysis?.growthDispersionBps,
             growthDriver = dcfAnalysis?.growthDriver,
-            valuationJudgment = ValuationJudgmentAssembler.snapshot(
-                ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
-                detail.marketPriceCents,
-                detail.fundamentals?.sharesOutstanding,
-            ),
+            valuationJudgment = named.judgment,
         )
     }
 
     private fun valuationModelLabel(analysis: DcfAnalysis?): String? = when (analysis?.model) {
         com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
         com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
+        com.discountscreener.core.model.ValuationModel.ComponentSum -> "Factory plus lender"
         com.discountscreener.core.model.ValuationModel.None, null -> null
     }
 
@@ -350,6 +349,7 @@ class ScreenDataProjectionEngine {
         dcfAnalysis: DcfAnalysis?,
         analystTargetStatistic: ProjectedAnalystTargetStatistic?,
         fallbackIntrinsicValueCents: Long? = null,
+        includeStreetImplied: Boolean = false,
     ): NamedRowValuation {
         if (detail == null) {
             return NamedRowValuation(
@@ -361,6 +361,8 @@ class ScreenDataProjectionEngine {
             ValuationJudgmentAssembler.assemble(detail, dcfAnalysis),
             detail.marketPriceCents,
             detail.fundamentals?.sharesOutstanding,
+            dcfAnalysis,
+            includeStreetImplied = includeStreetImplied,
         )
         var primary = judgment.primaryCents
         if (primary == null) {
@@ -580,6 +582,7 @@ class ScreenDataProjectionEngine {
     private fun modelKindLabel(analysis: DcfAnalysis): String = when (analysis.model) {
         com.discountscreener.core.model.ValuationModel.ResidualIncomeEquity -> "Residual income"
         com.discountscreener.core.model.ValuationModel.FcffWacc -> "FCFF DCF"
+        com.discountscreener.core.model.ValuationModel.ComponentSum -> "Factory plus lender"
         com.discountscreener.core.model.ValuationModel.None -> "Model"
     }
 

@@ -14,8 +14,10 @@ enum class ScoreReading {
     Poor,
 }
 
-const val SCORE_READING_STRONG = 50
-const val SCORE_READING_GOOD = 15
+val SCORE_READING_STRONG: Int
+    get() = ValuationPolicy.current.score.strong
+val SCORE_READING_GOOD: Int
+    get() = ValuationPolicy.current.score.good
 
 fun scoreReading(score: Int): ScoreReading = when {
     score >= SCORE_READING_STRONG -> ScoreReading.Strong

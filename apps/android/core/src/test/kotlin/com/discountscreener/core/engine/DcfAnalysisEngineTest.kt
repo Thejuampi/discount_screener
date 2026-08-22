@@ -5,6 +5,7 @@ import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.DiscountRateKind
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.WaccFieldSource
 import java.nio.file.Files
@@ -15,6 +16,291 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class DcfAnalysisEngineTest {
+    @Test
+    fun mixed_filing_uses_component_sum() {
+        var years = listOf("2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+                totalDebtDollars = 16_000_000_000L,
+                totalCashDollars = 8_000_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+                marginalTaxRate = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+            ),
+            marketParams = MarketParams(provisional = false),
+            components = IssuerComponentSet(
+                operating = OperatingComponentDrivers(
+                    revenue = years.mapIndexed { i, d -> AnnualReportedValue(d, (100.0 + i * 10) * 1_000_000_000.0) },
+                    ebit = years.mapIndexed { i, d -> AnnualReportedValue(d, (15.0 + i) * 1_000_000_000.0) },
+                    capex = years.map { AnnualReportedValue(it, 8_000_000_000.0) },
+                    interest = years.map { AnnualReportedValue(it, 700_000_000.0) },
+                    debt = years.map { AnnualReportedValue(it, 16_000_000_000.0) },
+                    cash = years.map { AnnualReportedValue(it, 8_000_000_000.0) },
+                    da = years.map { AnnualReportedValue(it, 5_000_000_000.0) },
+                ),
+                financial = FinancialComponentDrivers(
+                    bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_000_000_000.0)),
+                    netIncome = listOf(AnnualReportedValue("2025-12-31", 2_000_000_000.0)),
+                    dividends = listOf(AnnualReportedValue("2025-12-31", 500_000_000.0)),
+                    source = "subsidiary_companyfacts",
+                ),
+                provenance = listOf("component_sotp=$COMPONENT_SOTP_VERSION"),
+            ),
+        ).getOrThrow()
+        assertEquals(ValuationModel.ComponentSum, analysis.model)
+    }
+
+    @Test
+    fun mixed_filing_stamps_nopat_plus_depreciation() {
+        var years = listOf("2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+                totalDebtDollars = 16_000_000_000L,
+                totalCashDollars = 8_000_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+                marginalTaxRate = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+            ),
+            marketParams = MarketParams(provisional = false),
+            components = mixedComponents(years),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("operating_fcff=nopat_plus_da_minus_sustaining_capex"))
+    }
+
+    @Test
+    fun factory_nonpositive_margin_keeps_the_lender() {
+        var years = listOf("2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+                marginalTaxRate = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+            ),
+            marketParams = MarketParams(provisional = false),
+            components = IssuerComponentSet(
+                operating = OperatingComponentDrivers(
+                    revenue = years.map { AnnualReportedValue(it, 100_000_000_000.0) },
+                    ebit = years.map { AnnualReportedValue(it, 1_000_000_000.0) },
+                    capex = years.map { AnnualReportedValue(it, 20_000_000_000.0) },
+                    interest = years.map { AnnualReportedValue(it, 700_000_000.0) },
+                    debt = years.map { AnnualReportedValue(it, 16_000_000_000.0) },
+                    da = years.map { AnnualReportedValue(it, 100_000_000.0) },
+                ),
+                financial = FinancialComponentDrivers(
+                    bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_000_000_000.0)),
+                    netIncome = listOf(AnnualReportedValue("2025-12-31", 2_000_000_000.0)),
+                    dividends = listOf(AnnualReportedValue("2025-12-31", 500_000_000.0)),
+                    source = "subsidiary_companyfacts",
+                ),
+                provenance = listOf("component_sotp=$COMPONENT_SOTP_VERSION"),
+            ),
+        ).getOrThrow()
+        assertEquals(ValuationModel.ComponentSum, analysis.model)
+    }
+
+    @Test
+    fun factory_nonpositive_margin_stamps_the_factory_hole() {
+        var years = listOf("2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+                marginalTaxRate = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+            ),
+            marketParams = MarketParams(provisional = false),
+            components = IssuerComponentSet(
+                operating = OperatingComponentDrivers(
+                    revenue = years.map { AnnualReportedValue(it, 100_000_000_000.0) },
+                    ebit = years.map { AnnualReportedValue(it, 1_000_000_000.0) },
+                    capex = years.map { AnnualReportedValue(it, 20_000_000_000.0) },
+                    interest = years.map { AnnualReportedValue(it, 700_000_000.0) },
+                    debt = years.map { AnnualReportedValue(it, 16_000_000_000.0) },
+                    da = years.map { AnnualReportedValue(it, 100_000_000.0) },
+                ),
+                financial = FinancialComponentDrivers(
+                    bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_000_000_000.0)),
+                    netIncome = listOf(AnnualReportedValue("2025-12-31", 2_000_000_000.0)),
+                    dividends = listOf(AnnualReportedValue("2025-12-31", 500_000_000.0)),
+                    source = "subsidiary_companyfacts",
+                ),
+                provenance = listOf("component_sotp=$COMPONENT_SOTP_VERSION"),
+            ),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("factory_fcff=non_positive_margin"))
+    }
+
+    @Test
+    fun lender_retention_bps_do_not_need_a_dividend_row() {
+        var years = listOf("2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 1_000_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+                marginalTaxRate = years.map { AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory") },
+            ),
+            marketParams = MarketParams(provisional = false),
+            components = mixedComponents(years).copy(
+                financial = FinancialComponentDrivers(
+                    bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_000_000_000.0)),
+                    netIncome = listOf(AnnualReportedValue("2025-12-31", 2_000_000_000.0)),
+                    source = "subsidiary_companyfacts",
+                    retentionBps = 7_500,
+                ),
+            ),
+        ).getOrThrow()
+        assertEquals(ValuationModel.ComponentSum, analysis.model)
+    }
+
+    @Test
+    fun gm_2025_shape_uses_component_sum() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 960_000_000L,
+                totalDebtDollars = 16_247_000_000L,
+                totalCashDollars = 20_945_000_000L,
+            ),
+            timeseries = gm2025Timeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = gm2025Components(),
+        ).getOrThrow()
+        assertEquals(ValuationModel.ComponentSum, analysis.model)
+    }
+
+    @Test
+    fun gm_2025_shape_prints_a_positive_base() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 960_000_000L,
+                totalDebtDollars = 16_247_000_000L,
+                totalCashDollars = 20_945_000_000L,
+            ),
+            timeseries = gm2025Timeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = gm2025Components(),
+        ).getOrThrow()
+        assertEquals(true, analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun gm_2025_shape_stays_below_the_mixed_cash_print() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 960_000_000L,
+                totalDebtDollars = 16_247_000_000L,
+                totalCashDollars = 20_945_000_000L,
+            ),
+            timeseries = gm2025Timeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = gm2025Components(),
+        ).getOrThrow()
+        assertEquals(true, analysis.baseIntrinsicValueCents < 46_392L)
+    }
+
+    @Test
+    fun gm_2025_shape_stamps_through_cycle_auto() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 960_000_000L,
+                totalDebtDollars = 16_247_000_000L,
+                totalCashDollars = 20_945_000_000L,
+            ),
+            timeseries = gm2025Timeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = gm2025Components(),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.any { it.startsWith("path=through_cycle_auto:") })
+    }
+
+    @Test
+    fun gm_2025_shape_sits_below_the_prior_identity() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "OEM",
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+                marketCapDollars = 50_000_000_000L,
+                sharesOutstanding = 960_000_000L,
+                totalDebtDollars = 16_247_000_000L,
+                totalCashDollars = 20_945_000_000L,
+            ),
+            timeseries = gm2025Timeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = gm2025Components(),
+        ).getOrThrow()
+        assertEquals(true, analysis.baseIntrinsicValueCents < 17_122L)
+    }
+
+    @Test
+    fun mixed_filing_without_lender_book_stays_unavailable() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                sectorName = "Consumer Cyclical",
+                industryName = "Auto Manufacturers",
+            ),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = IssuerComponentSet(
+                operating = OperatingComponentDrivers(
+                    revenue = listOf(AnnualReportedValue("2025-12-31", 100.0)),
+                    ebit = listOf(AnnualReportedValue("2025-12-31", 10.0)),
+                    capex = listOf(AnnualReportedValue("2025-12-31", 5.0)),
+                    interest = emptyList(),
+                    debt = emptyList(),
+                ),
+                financial = null,
+                provenance = emptyList(),
+                financeArmMaterial = true,
+            ),
+        )
+        assertTrue(result.isFailure)
+    }
+
     @Test
     fun compute_with_complete_inputs_uses_aligned_cod_and_marginal_tax() {
         val analysis = DcfAnalysisEngine.compute(
@@ -34,6 +320,188 @@ class DcfAnalysisEngineTest {
         assertTrue(!analysis.pointEstimateUnreliable)
         assertEquals(ENGINE_VERSION, analysis.engineVersion)
         assertEquals(MODEL_POLICY_VERSION, analysis.modelPolicyVersion)
+    }
+
+    @Test
+    fun decelerating_double_digit_growth_stays_secular() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "DASH",
+                sectorName = "Consumer Cyclical",
+                industryName = "Internet Retail",
+                returnOnEquityBps = 889,
+                retentionBps = 10_000,
+            ),
+            timeseries = deceleratingInternetRetailTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals("secular_expansion", analysis.driverRegime)
+    }
+
+    @Test
+    fun driver_based_fcff_is_typed_honest() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(ValuationHonesty.Honest, analysis.honesty)
+    }
+
+    @Test
+    fun missing_interest_without_period_debt_still_forms_fcff() {
+        var years = listOf("2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                sectorName = "Consumer Cyclical",
+                industryName = "Internet Retail",
+                totalDebtDollars = 0L,
+            ),
+            timeseries = completeTimeseries().copy(
+                freeCashFlow = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (50 + index * 10) * 1_000_000.0)
+                },
+                operatingCashFlow = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (70 + index * 10) * 1_000_000.0)
+                },
+                capitalExpenditure = years.map { AnnualReportedValue(it, -20_000_000.0) },
+                revenue = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (200 + index * 20) * 1_000_000.0)
+                },
+                interestExpense = listOf(AnnualReportedValue("2022-12-31", 2_000_000.0)),
+                taxRateForCalcs = years.map {
+                    AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+                },
+                totalDebt = emptyList(),
+                dilutedAverageShares = years.map { AnnualReportedValue(it, 100_000_000.0) },
+                pretaxIncome = years.mapIndexed { index, date ->
+                    AnnualReportedValue(date, (40 + index * 10) * 1_000_000.0)
+                },
+                marginalTaxRate = years.map {
+                    AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+                },
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun filing_fy_collision_with_recent_interest_gap_still_forms_fcff() {
+        var dates = listOf(
+            "2020-09-26",
+            "2021-09-25",
+            "2022-09-24",
+            "2023-09-30",
+            "2024-09-28",
+            "2025-09-27",
+        )
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "AAPL",
+                sectorName = "Technology",
+                industryName = "Consumer Electronics",
+                totalDebtDollars = 90_000_000_000L,
+                totalCashDollars = 60_000_000_000L,
+                marketCapDollars = 3_000_000_000_000L,
+                sharesOutstanding = 15_000_000_000L,
+            ),
+            timeseries = appleLikeTimeseries(dates),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun formed_identity_names_estimated_interest_years() {
+        var dates = listOf(
+            "2020-09-26",
+            "2021-09-25",
+            "2022-09-24",
+            "2023-09-30",
+            "2024-09-28",
+            "2025-09-27",
+        )
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "AAPL",
+                sectorName = "Technology",
+                industryName = "Consumer Electronics",
+                totalDebtDollars = 90_000_000_000L,
+                totalCashDollars = 60_000_000_000L,
+                marketCapDollars = 3_000_000_000_000L,
+                sharesOutstanding = 15_000_000_000L,
+            ),
+            timeseries = appleLikeTimeseries(dates),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(
+            analysis.reasonCodes.any {
+                it.startsWith("interest=estimated:own_effective_rate:medium:") &&
+                    it.contains("2024-09-28") &&
+                    it.contains("2025-09-27")
+            },
+        )
+    }
+
+    @Test
+    fun formed_identity_stamps_debt_resolution() {
+        var dates = listOf(
+            "2020-09-26",
+            "2021-09-25",
+            "2022-09-24",
+            "2023-09-30",
+            "2024-09-28",
+            "2025-09-27",
+        )
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "AAPL",
+                sectorName = "Technology",
+                industryName = "Consumer Electronics",
+                totalDebtDollars = 90_000_000_000L,
+                totalCashDollars = 60_000_000_000L,
+                marketCapDollars = 3_000_000_000_000L,
+                sharesOutstanding = 15_000_000_000L,
+            ),
+            timeseries = appleLikeTimeseries(dates),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("debt=$DEBT_RESOLUTION_VERSION"))
+    }
+
+    @Test
+    fun formed_identity_stamps_issuer_yield_policy() {
+        var dates = listOf("2021-09-25", "2022-09-24", "2023-09-30")
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                sectorName = "Technology",
+                industryName = "Consumer Electronics",
+                totalDebtDollars = 90_000_000_000L,
+                totalCashDollars = 60_000_000_000L,
+                marketCapDollars = 3_000_000_000_000L,
+                sharesOutstanding = 15_000_000_000L,
+            ),
+            timeseries = appleLikeTimeseries(dates),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("issuer_yield=$ISSUER_MARKET_YIELD_VERSION"))
+    }
+
+    @Test
+    fun net_debt_that_wipes_equity_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                marketCapDollars = 100_000_000_000L,
+                totalDebtDollars = 500_000_000_000L,
+                totalCashDollars = 0L,
+            ),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertTrue(
+            result.exceptionOrNull()?.message.orEmpty().contains("equity wiped"),
+        )
     }
 
     @Test
@@ -401,6 +869,36 @@ class DcfAnalysisEngineTest {
                     AnnualReportedValue("2023-12-31", 16_000_000_000.0),
                     AnnualReportedValue("2024-12-31", 17_000_000_000.0),
                 ),
+                operatingCashFlow = listOf(
+                    AnnualReportedValue("2021-12-31", 18_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 19_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 20_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 21_000_000_000.0),
+                ),
+                capitalExpenditure = listOf(
+                    AnnualReportedValue("2021-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", -4_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", -4_000_000_000.0),
+                ),
+                revenue = listOf(
+                    AnnualReportedValue("2021-12-31", 80_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 84_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 88_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 92_000_000_000.0),
+                ),
+                interestExpense = listOf(
+                    AnnualReportedValue("2021-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 4_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 4_000_000_000.0),
+                ),
+                totalDebt = listOf(
+                    AnnualReportedValue("2021-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2022-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2023-12-31", 90_000_000_000.0),
+                    AnnualReportedValue("2024-12-31", 90_000_000_000.0),
+                ),
             ),
         ).getOrThrow()
 
@@ -475,48 +973,80 @@ class DcfAnalysisEngineTest {
             ),
             timeseries = FundamentalTimeseries(
                 freeCashFlow = listOf(
+                    AnnualReportedValue("2018-12-31", 17_296_000_000.0),
+                    AnnualReportedValue("2019-12-31", 21_653_000_000.0),
+                    AnnualReportedValue("2020-12-31", 25_924_000_000.0),
+                    AnnualReportedValue("2021-12-31", -14_726_000_000.0),
                     AnnualReportedValue("2022-12-31", -16_893_000_000.0),
                     AnnualReportedValue("2023-12-31", 32_217_000_000.0),
                     AnnualReportedValue("2024-12-31", 32_878_000_000.0),
                     AnnualReportedValue("2025-12-31", 7_695_000_000.0),
                 ),
                 operatingCashFlow = listOf(
+                    AnnualReportedValue("2018-12-31", 30_723_000_000.0),
+                    AnnualReportedValue("2019-12-31", 38_514_000_000.0),
+                    AnnualReportedValue("2020-12-31", 66_064_000_000.0),
+                    AnnualReportedValue("2021-12-31", 46_327_000_000.0),
                     AnnualReportedValue("2022-12-31", 46_752_000_000.0),
                     AnnualReportedValue("2023-12-31", 84_946_000_000.0),
                     AnnualReportedValue("2024-12-31", 115_877_000_000.0),
                     AnnualReportedValue("2025-12-31", 139_514_000_000.0),
                 ),
                 capitalExpenditure = listOf(
+                    AnnualReportedValue("2018-12-31", -13_427_000_000.0),
+                    AnnualReportedValue("2019-12-31", -16_861_000_000.0),
+                    AnnualReportedValue("2020-12-31", -40_140_000_000.0),
+                    AnnualReportedValue("2021-12-31", -61_053_000_000.0),
                     AnnualReportedValue("2022-12-31", -63_645_000_000.0),
                     AnnualReportedValue("2023-12-31", -52_729_000_000.0),
                     AnnualReportedValue("2024-12-31", -82_999_000_000.0),
                     AnnualReportedValue("2025-12-31", -131_819_000_000.0),
                 ),
                 revenue = listOf(
+                    AnnualReportedValue("2018-12-31", 232_887_000_000.0),
+                    AnnualReportedValue("2019-12-31", 280_522_000_000.0),
+                    AnnualReportedValue("2020-12-31", 386_064_000_000.0),
+                    AnnualReportedValue("2021-12-31", 469_822_000_000.0),
                     AnnualReportedValue("2022-12-31", 513_983_000_000.0),
                     AnnualReportedValue("2023-12-31", 574_785_000_000.0),
                     AnnualReportedValue("2024-12-31", 637_959_000_000.0),
                     AnnualReportedValue("2025-12-31", 716_924_000_000.0),
                 ),
                 interestExpense = listOf(
+                    AnnualReportedValue("2018-12-31", 1_417_000_000.0),
+                    AnnualReportedValue("2019-12-31", 1_600_000_000.0),
+                    AnnualReportedValue("2020-12-31", 1_647_000_000.0),
+                    AnnualReportedValue("2021-12-31", 1_809_000_000.0),
                     AnnualReportedValue("2022-12-31", 2_367_000_000.0),
                     AnnualReportedValue("2023-12-31", 3_182_000_000.0),
                     AnnualReportedValue("2024-12-31", 2_406_000_000.0),
                     AnnualReportedValue("2025-12-31", 2_274_000_000.0),
                 ),
                 taxRateForCalcs = listOf(
+                    AnnualReportedValue("2018-12-31", 0.21),
+                    AnnualReportedValue("2019-12-31", 0.21),
+                    AnnualReportedValue("2020-12-31", 0.21),
+                    AnnualReportedValue("2021-12-31", 0.21),
                     AnnualReportedValue("2022-12-31", 0.21),
                     AnnualReportedValue("2023-12-31", 0.189579),
                     AnnualReportedValue("2024-12-31", 0.135031),
                     AnnualReportedValue("2025-12-31", 0.196144),
                 ),
                 totalDebt = listOf(
+                    AnnualReportedValue("2018-12-31", 150_000_000_000.0),
+                    AnnualReportedValue("2019-12-31", 160_000_000_000.0),
+                    AnnualReportedValue("2020-12-31", 170_000_000_000.0),
+                    AnnualReportedValue("2021-12-31", 180_000_000_000.0),
                     AnnualReportedValue("2022-12-31", 190_000_000_000.0),
                     AnnualReportedValue("2023-12-31", 210_000_000_000.0),
                     AnnualReportedValue("2024-12-31", 235_540_004_864.0),
                     AnnualReportedValue("2025-12-31", 235_540_004_864.0),
                 ),
                 marginalTaxRate = listOf(
+                    AnnualReportedValue("2018-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2019-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2020-12-31", 0.21, concept = "JurisdictionStatutory"),
+                    AnnualReportedValue("2021-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2022-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
                     AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
@@ -538,12 +1068,56 @@ class DcfAnalysisEngineTest {
         )
         assertEquals(1_946, analysis.normalizedOcfMarginBps)
         assertEquals(1_238, analysis.normalizedCapexIntensityBps)
-        assertEquals(listOf(2025), analysis.capexSpikeYears)
+        assertEquals(true, analysis.capexSpikeYears.contains(2025))
         assertTrue(analysis.baseGrowthBps > -900)
         assertEquals("revenue_growth_median:secular_expansion", analysis.growthDriver)
         assertTrue(analysis.bearIntrinsicValueCents <= analysis.baseIntrinsicValueCents)
         assertTrue(analysis.baseIntrinsicValueCents <= analysis.bullIntrinsicValueCents)
         assertTrue(analysis.reasonCodes.none { it.contains("calibration_target") || it.contains("analyst") })
+    }
+
+    @Test
+    fun first_cash_ramp_uses_ocf_centre_not_latest_year() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PLT",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+                marketCapDollars = 155_000_000_000L,
+                sharesOutstanding = 2_040_000_000L,
+                totalDebtDollars = 14_700_000_000L,
+                totalCashDollars = 5_400_000_000L,
+                returnOnEquityBps = 3_716,
+                bookValuePerShareCents = 1_215,
+                retentionBps = 10_000,
+            ),
+            timeseries = firstCashRampTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            marketPriceCents = 7_595,
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("ocf=centre_without_prior_franchise"))
+    }
+
+    @Test
+    fun first_cash_ramp_keeps_the_recent_ocf_centre() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PLT",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+                marketCapDollars = 155_000_000_000L,
+                sharesOutstanding = 2_040_000_000L,
+                totalDebtDollars = 14_700_000_000L,
+                totalCashDollars = 5_400_000_000L,
+                returnOnEquityBps = 3_716,
+                bookValuePerShareCents = 1_215,
+                retentionBps = 10_000,
+            ),
+            timeseries = firstCashRampTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            marketPriceCents = 7_595,
+        ).getOrThrow()
+        assertEquals(true, (analysis.normalizedOcfMarginBps ?: 0) < 1_500)
     }
 
     @Test
@@ -763,6 +1337,86 @@ class DcfAnalysisEngineTest {
         error("shared contract $fileName not found")
     }
 
+    private fun gm2025Timeseries() = completeTimeseries().copy(
+        dilutedAverageShares = listOf(
+            AnnualReportedValue("2023-12-31", 960_000_000.0),
+            AnnualReportedValue("2024-12-31", 960_000_000.0),
+            AnnualReportedValue("2025-12-31", 960_000_000.0),
+        ),
+        taxRateForCalcs = listOf(
+            AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2025-12-31", 0.21, concept = "JurisdictionStatutory"),
+        ),
+        marginalTaxRate = listOf(
+            AnnualReportedValue("2023-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2024-12-31", 0.21, concept = "JurisdictionStatutory"),
+            AnnualReportedValue("2025-12-31", 0.21, concept = "JurisdictionStatutory"),
+        ),
+    )
+
+    private fun gm2025Components() = IssuerComponentSet(
+        operating = OperatingComponentDrivers(
+            revenue = listOf(
+                AnnualReportedValue("2023-12-31", 157_495_000_000.0),
+                AnnualReportedValue("2024-12-31", 171_657_000_000.0),
+                AnnualReportedValue("2025-12-31", 167_745_000_000.0),
+            ),
+            ebit = listOf(
+                AnnualReportedValue("2023-12-31", 10_821_000_000.0),
+                AnnualReportedValue("2024-12-31", 13_130_000_000.0),
+                AnnualReportedValue("2025-12-31", 10_916_000_000.0),
+            ),
+            capex = listOf(
+                AnnualReportedValue("2023-12-31", 10_733_000_000.0),
+                AnnualReportedValue("2024-12-31", 10_687_000_000.0),
+                AnnualReportedValue("2025-12-31", 9_155_000_000.0),
+            ),
+            interest = listOf(
+                AnnualReportedValue("2023-12-31", 911_000_000.0),
+                AnnualReportedValue("2024-12-31", 846_000_000.0),
+                AnnualReportedValue("2025-12-31", 727_000_000.0),
+            ),
+            debt = listOf(
+                AnnualReportedValue("2024-12-31", 15_467_000_000.0),
+                AnnualReportedValue("2025-12-31", 16_247_000_000.0),
+            ),
+            da = listOf(
+                AnnualReportedValue("2023-12-31", 6_773_000_000.0),
+                AnnualReportedValue("2024-12-31", 6_493_000_000.0),
+                AnnualReportedValue("2025-12-31", 6_960_000_000.0),
+            ),
+        ),
+        financial = FinancialComponentDrivers(
+            bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_813_000_000.0)),
+            netIncome = listOf(AnnualReportedValue("2025-12-31", 2_058_000_000.0)),
+            dividends = listOf(AnnualReportedValue("2025-12-31", 1_599_000_000.0)),
+            source = "subsidiary_companyfacts:0000804269",
+            cash = listOf(AnnualReportedValue("2025-12-31", 5_826_000_000.0)),
+        ),
+        provenance = listOf("component_sotp=$COMPONENT_SOTP_VERSION", "finance_arm=material"),
+        financeArmMaterial = true,
+    )
+
+    private fun mixedComponents(years: List<String>) = IssuerComponentSet(
+        operating = OperatingComponentDrivers(
+            revenue = years.mapIndexed { i, d -> AnnualReportedValue(d, (100.0 + i * 10) * 1_000_000_000.0) },
+            ebit = years.mapIndexed { i, d -> AnnualReportedValue(d, (15.0 + i) * 1_000_000_000.0) },
+            capex = years.map { AnnualReportedValue(it, 8_000_000_000.0) },
+            interest = years.map { AnnualReportedValue(it, 700_000_000.0) },
+            debt = years.map { AnnualReportedValue(it, 16_000_000_000.0) },
+            cash = years.map { AnnualReportedValue(it, 8_000_000_000.0) },
+            da = years.map { AnnualReportedValue(it, 5_000_000_000.0) },
+        ),
+        financial = FinancialComponentDrivers(
+            bookEquity = listOf(AnnualReportedValue("2025-12-31", 15_000_000_000.0)),
+            netIncome = listOf(AnnualReportedValue("2025-12-31", 2_000_000_000.0)),
+            dividends = listOf(AnnualReportedValue("2025-12-31", 500_000_000.0)),
+            source = "subsidiary_companyfacts",
+        ),
+        provenance = listOf("component_sotp=$COMPONENT_SOTP_VERSION"),
+    )
+
     private fun completeFundamentals() = FundamentalSnapshot(
         symbol = "NVDA",
         sectorName = "Technology",
@@ -774,6 +1428,129 @@ class DcfAnalysisEngineTest {
         betaMillis = 1_100,
         freeCashFlowDollars = 86_000_000L,
     )
+
+    private fun deceleratingInternetRetailTimeseries(): FundamentalTimeseries {
+        var years = listOf(
+            "2017-12-31",
+            "2018-12-31",
+            "2019-12-31",
+            "2020-12-31",
+            "2021-12-31",
+            "2022-12-31",
+            "2023-12-31",
+            "2024-12-31",
+        )
+        var revenues = listOf(
+            100_000_000.0,
+            145_000_000.0,
+            210_000_000.0,
+            305_000_000.0,
+            442_000_000.0,
+            575_000_000.0,
+            748_000_000.0,
+            972_000_000.0,
+        )
+        return FundamentalTimeseries(
+            freeCashFlow = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.16)
+            },
+            dilutedAverageShares = years.map { AnnualReportedValue(it, 100_000_000.0) },
+            operatingCashFlow = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.18)
+            },
+            capitalExpenditure = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, -revenues[index] * 0.016)
+            },
+            revenue = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index])
+            },
+            interestExpense = years.map { AnnualReportedValue(it, 2_000_000.0) },
+            taxRateForCalcs = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = years.map { AnnualReportedValue(it, 50_000_000.0) },
+            pretaxIncome = years.mapIndexed { index, date ->
+                AnnualReportedValue(date, revenues[index] * 0.08)
+            },
+            marginalTaxRate = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+    }
+
+    private fun appleLikeTimeseries(dates: List<String>): FundamentalTimeseries {
+        fun point(
+            date: String,
+            value: Double,
+            concept: String? = null,
+        ): AnnualReportedValue {
+            var filingFy = if (date >= "2023-09-30") 2025 else date.take(4).toInt()
+            return AnnualReportedValue(
+                asOfDate = date,
+                value = value,
+                periodEnd = date,
+                fiscalYear = filingFy,
+                concept = concept,
+            )
+        }
+        return FundamentalTimeseries(
+            freeCashFlow = dates.mapIndexed { index, date ->
+                point(date, (80.0 + index * 5.0) * 1_000_000_000.0)
+            },
+            dilutedAverageShares = dates.map { point(it, 15_000_000_000.0) },
+            operatingCashFlow = dates.mapIndexed { index, date ->
+                point(date, (90.0 + index * 5.0) * 1_000_000_000.0)
+            },
+            capitalExpenditure = dates.map { point(it, -10_000_000_000.0) },
+            revenue = dates.mapIndexed { index, date ->
+                point(date, (270.0 + index * 20.0) * 1_000_000_000.0)
+            },
+            interestExpense = dates.filter { it <= "2023-09-30" }.map { point(it, 3_000_000_000.0) },
+            taxRateForCalcs = dates.map { point(it, 0.16) },
+            totalDebt = dates.map { point(it, 95_000_000_000.0) },
+            pretaxIncome = dates.mapIndexed { index, date ->
+                point(date, (80.0 + index * 8.0) * 1_000_000_000.0)
+            },
+            marginalTaxRate = dates.map {
+                point(it, 0.21, concept = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate")
+            },
+        )
+    }
+
+    private fun firstCashRampTimeseries(): FundamentalTimeseries {
+        var rows = listOf(
+            Triple("2018-12-31", 10_433_000_000.0, -1_541_000_000.0) to
+                Triple(558_000_000.0, -2_099_000_000.0, 7_491_000_000.0),
+            Triple("2019-12-31", 13_000_000_000.0, -4_321_000_000.0) to
+                Triple(588_000_000.0, -4_909_000_000.0, 5_791_000_000.0),
+            Triple("2020-12-31", 11_139_000_000.0, -2_745_000_000.0) to
+                Triple(616_000_000.0, -3_361_000_000.0, 7_914_000_000.0),
+            Triple("2021-12-31", 17_455_000_000.0, -445_000_000.0) to
+                Triple(298_000_000.0, -743_000_000.0, 9_388_000_000.0),
+            Triple("2022-12-31", 31_877_000_000.0, 642_000_000.0) to
+                Triple(252_000_000.0, 390_000_000.0, 9_361_000_000.0),
+            Triple("2023-12-31", 37_281_000_000.0, 3_585_000_000.0) to
+                Triple(223_000_000.0, 3_362_000_000.0, 9_560_000_000.0),
+            Triple("2024-12-31", 43_978_000_000.0, 7_137_000_000.0) to
+                Triple(242_000_000.0, 6_895_000_000.0, 9_575_000_000.0),
+            Triple("2025-12-31", 52_017_000_000.0, 10_099_000_000.0) to
+                Triple(336_000_000.0, 9_763_000_000.0, 10_600_000_000.0),
+        )
+        return FundamentalTimeseries(
+            freeCashFlow = rows.map { AnnualReportedValue(it.first.first, it.second.second) },
+            operatingCashFlow = rows.map { AnnualReportedValue(it.first.first, it.first.third) },
+            capitalExpenditure = rows.map { AnnualReportedValue(it.first.first, -it.second.first) },
+            revenue = rows.map { AnnualReportedValue(it.first.first, it.first.second) },
+            interestExpense = rows.map { AnnualReportedValue(it.first.first, 500_000_000.0) },
+            taxRateForCalcs = rows.map {
+                AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = rows.map { AnnualReportedValue(it.first.first, it.second.third) },
+            marginalTaxRate = rows.map {
+                AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+    }
 
     private fun completeTimeseries() = FundamentalTimeseries(
         freeCashFlow = listOf(

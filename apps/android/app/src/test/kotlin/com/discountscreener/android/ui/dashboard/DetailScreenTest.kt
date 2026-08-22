@@ -2,7 +2,19 @@ package com.discountscreener.android.ui.dashboard
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
+import com.discountscreener.core.engine.ValuationJudgmentPolicy
+import com.discountscreener.core.engine.ValuationJudgmentReason
+import com.discountscreener.core.engine.ValuationJudgmentStatus
+import com.discountscreener.core.model.AnchorRelation
+import com.discountscreener.core.model.HonestyKnob
+import com.discountscreener.core.model.HonestyTaggedKnob
+import com.discountscreener.core.model.ImpliedStretch
+import com.discountscreener.core.model.ProjectedValuationJudgment
+import com.discountscreener.core.model.StreetImpliedView
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
@@ -48,6 +60,55 @@ class DetailScreenTest {
     fun chart_center_x_uses_slot_centers() {
         assertEquals(10f, chartCenterX(index = 0, pointCount = 5, width = 100f), 0.01f)
         assertEquals(90f, chartCenterX(index = 4, pointCount = 5, width = 100f), 0.01f)
+    }
+
+    @Test
+    fun time_axis_reserves_volume_profile_gutter_when_profile_is_present() {
+        assertEquals(VolumeProfilePaneWidth, timeAxisTrailingGutter(hasVolumeProfile = true))
+    }
+
+    @Test
+    fun time_axis_drops_volume_profile_gutter_when_profile_is_absent() {
+        assertEquals(0.dp, timeAxisTrailingGutter(hasVolumeProfile = false))
+    }
+
+    @Test
+    fun equal_slot_candle_width_ignores_volume() {
+        assertEquals(
+            6.5f,
+            candleBodyWidth(volume = 1L, maxVolume = 100L, slotWidth = 10f, volumeSized = false),
+            0.01f,
+        )
+    }
+
+    @Test
+    fun volume_sized_candle_width_grows_with_volume() {
+        var thin = candleBodyWidth(volume = 10L, maxVolume = 100L, slotWidth = 10f, volumeSized = true)
+        var thick = candleBodyWidth(volume = 100L, maxVolume = 100L, slotWidth = 10f, volumeSized = true)
+        assertTrue(thick > thin)
+    }
+
+    @Test
+    fun volume_sized_candle_width_stays_visible_when_slots_are_narrow() {
+        var thin = candleBodyWidth(volume = 0L, maxVolume = 100L, slotWidth = 1.2f, volumeSized = true)
+        var thick = candleBodyWidth(volume = 100L, maxVolume = 100L, slotWidth = 1.2f, volumeSized = true)
+        assertTrue(thick - thin >= VolumeSizedCandleMinContrastPx)
+    }
+
+    @Test
+    fun volume_candle_mode_hint_tells_user_to_tap_the_price_chart() {
+        assertEquals(
+            "Tap the price chart to size candles by volume.",
+            volumeCandleModeHint(volumeSized = false),
+        )
+    }
+
+    @Test
+    fun volume_candle_mode_hint_confirms_volume_size_is_on() {
+        assertEquals(
+            "Vol size on. Tap the price chart for equal width.",
+            volumeCandleModeHint(volumeSized = true),
+        )
     }
 
     @Test
@@ -735,6 +796,76 @@ class DetailScreenTest {
         assertEquals(AnalystTargetHistoryState.Changed, overview?.state)
         assertEquals("Median", overview?.sourceLabel)
         assertEquals(2, overview?.changeCount)
+    }
+
+    @Test
+    fun detail_headline_leads_with_analyst() {
+        var detail = detailWithValuationAnchors().copy(marketPriceCents = 97_166L)
+        var projected = ProjectedDetailData(
+            symbol = detail.symbol,
+            detail = detail,
+            valuationJudgment = ProjectedValuationJudgment(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                primaryCents = 155_000L,
+                reasonCodes = listOf(ValuationJudgmentReason.StreetPrimary),
+                policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
+                streetBaseCents = 155_000L,
+                lastPriceCents = 97_166L,
+                horizonPriceCents = 63_437L,
+            ),
+        )
+        assertEquals(
+            "Price $971.66  Fair $1550.00  Analyst range",
+            detailHeadline(detail, projected),
+        )
+    }
+
+    @Test
+    fun honesty_pair_lines_print_both_dollars_and_the_reason() {
+        var ui = presentValuationJudgment(
+            ProjectedValuationJudgment(
+                status = ValuationJudgmentStatus.Identity,
+                relation = AnchorRelation.Aligned,
+                primaryCents = 7_800L,
+                reasonCodes = listOf(ValuationJudgmentReason.IdentityPrimary),
+                policyVersion = ValuationJudgmentPolicy.POLICY_VERSION,
+                identityBaseCents = 7_800L,
+                streetBaseCents = 2_900L,
+                honestyMode = ValuationHonesty.Honest,
+                streetImplied = StreetImpliedView(
+                    streetBaseCents = 2_900L,
+                    honestBaseCents = 7_800L,
+                    impliedBaseCents = 2_900L,
+                    winningKnob = HonestyKnob.StableMargin,
+                    winningHonestBps = 1_560,
+                    winningImpliedBps = 580,
+                    winningDeltaBps = -980,
+                    winningStretch = ImpliedStretch.Absurd,
+                    aligned = false,
+                    knobs = listOf(
+                        HonestyTaggedKnob(
+                            knob = HonestyKnob.StableMargin,
+                            honesty = ValuationHonesty.NonHonest,
+                            honestBps = 1_560,
+                            impliedBps = 580,
+                            impliedCents = 2_900L,
+                            reachable = true,
+                            note = "stable FCFF margin 1560 bps honest. Street needs 580 bps. This input is not honest.",
+                        ),
+                    ),
+                    policyVersion = "street-implied-honesty/3",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(
+                "Honest $78.00",
+                "Non-honest $29.00",
+                "This number bends the stable cash margin from 15.60% to 5.80% so it matches Street.",
+            ),
+            honestyPairLines(ui),
+        )
     }
 
     @Test

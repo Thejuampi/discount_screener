@@ -21,8 +21,10 @@ import kotlin.math.roundToLong
 object SecResidualFacts {
     private const val USD = "USD"
     private const val DEI_SHARES_OUT = "EntityCommonStockSharesOutstanding"
-    private const val MIN_DURATION_DAYS = 325
-    private const val MAX_DURATION_DAYS = 380
+    private val MIN_DURATION_DAYS: Int
+        get() = ValuationPolicy.current.secNormalization.minimumDurationDays
+    private val MAX_DURATION_DAYS: Int
+        get() = ValuationPolicy.current.secNormalization.maximumDurationDays
     private val ACCEPTED_FORMS = setOf("10-K", "10-K/A")
     private val BOOK_QNAMES = listOf(
         "StockholdersEquity",
@@ -51,11 +53,16 @@ object SecResidualFacts {
         "WeightedAverageNumberOfSharesOutstandingBasic",
         "CommonStockSharesOutstanding",
     )
+    private val CASH_QNAMES = listOf(
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments",
+    )
 
     val retainedQnames: Set<String> = BOOK_QNAMES.toSet() +
         NI_QNAMES +
         DIVIDEND_QNAMES +
         SHARE_QNAMES +
+        CASH_QNAMES +
         setOf(DEI_SHARES_OUT, MINORITY_INTEREST)
 
     data class Drivers(
@@ -69,6 +76,7 @@ object SecResidualFacts {
         val returnOnEquityBps: Int,
         val retentionBps: Int?,
         val provenance: List<String>,
+        val cashDollars: Double? = null,
     )
 
     fun extract(companyFactsJson: String): Drivers? {
@@ -86,6 +94,8 @@ object SecResidualFacts {
         var shares = selectShares(gaap, dei, ni.latest.end)
         var dividendSeries = latestSeries(gaap, DIVIDEND_QNAMES, USD, PeriodKind.Duration)
         var latestDividend = dividendSeries?.byEnd?.get(ni.latest.end)
+        var cashSeries = latestSeries(gaap, CASH_QNAMES, USD, PeriodKind.Instant)
+        var latestCash = cashSeries?.byEnd?.get(ni.latest.end)
         var recentRoes = recentRoeBps(ni.sorted, book.sorted)
         var roeBps = medianOf(recentRoes.map { it.toDouble() })?.roundToInt() ?: return null
         var shareCount = shares?.obs?.value?.takeIf { it > 0.0 }
@@ -111,6 +121,8 @@ object SecResidualFacts {
             add(roeProvenance)
             if (dividendSeries != null && latestDividend != null) add("dividends=${dividendSeries.qname}")
             else add("dividends=missing")
+            if (latestCash != null) add("cash=${cashSeries?.qname}:${latestCash.end}")
+            else add("cash=missing")
             add(
                 when {
                     recentRetention.size >= 2 ->
@@ -131,6 +143,7 @@ object SecResidualFacts {
             returnOnEquityBps = roeBps,
             retentionBps = retention,
             provenance = provenance,
+            cashDollars = latestCash?.value,
         )
     }
 
@@ -303,7 +316,8 @@ object SecResidualFacts {
         return Series(qname, byEnd.values.sortedBy { it.end })
     }
 
-    private const val RECENT_ROE_YEARS = 4
+    private val RECENT_ROE_YEARS: Int
+        get() = ValuationPolicy.current.residualIncome.recentRoeYears
 
     private fun recentRoeBps(niSorted: List<Observation>, bookSorted: List<Observation>): List<Int> {
         return niSorted.takeLast(RECENT_ROE_YEARS).mapNotNull { observation ->

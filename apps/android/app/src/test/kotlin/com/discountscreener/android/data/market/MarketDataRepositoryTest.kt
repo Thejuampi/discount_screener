@@ -104,6 +104,22 @@ class MarketDataRepositoryTest {
     }
 
     @Test
+    fun invalidate_clears_a_fresh_cache() = runTest {
+        var yahoo = RecordingYahooClient()
+        var clock = MutableClock(START_EPOCH)
+        var repository = repository(yahoo, clock = clock)
+        repository.refreshIfStale(tickers())
+        var afterFirst = yahoo.requests.size
+        clock.epochSeconds = START_EPOCH + 100L
+        repository.refreshIfStale(tickers())
+
+        repository.invalidate()
+        repository.refreshIfStale(tickers())
+
+        assertEquals(true, yahoo.requests.size > afterFirst)
+    }
+
+    @Test
     fun a_refresh_past_the_freshness_window_fetches_again() = runTest {
         var yahoo = RecordingYahooClient()
         var clock = MutableClock(START_EPOCH)

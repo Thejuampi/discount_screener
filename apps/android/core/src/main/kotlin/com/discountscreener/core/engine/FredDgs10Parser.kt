@@ -8,8 +8,10 @@ data class FredDgs10Observation(
 )
 
 object FredDgs10Parser {
-    const val MIN_YIELD_BPS = 50
-    const val MAX_YIELD_BPS = 2_000
+    val MIN_YIELD_BPS: Int
+        get() = ValuationPolicy.current.market.rfMinYieldBps
+    val MAX_YIELD_BPS: Int
+        get() = ValuationPolicy.current.market.rfMaxYieldBps
 
     fun latest(csv: String): FredDgs10Observation {
         var last: FredDgs10Observation? = null

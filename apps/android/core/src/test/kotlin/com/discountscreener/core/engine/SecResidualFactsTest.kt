@@ -29,6 +29,32 @@ class SecResidualFactsTest {
     }
 
     @Test
+    fun same_year_cash_stays_on_the_lender() {
+        var json = """
+            {"facts":{"us-gaap":{
+              "StockholdersEquity":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","end":"2023-12-31","val":100000000000,"filed":"2024-02-20"},
+                {"fp":"FY","form":"10-K","end":"2024-12-31","val":110000000000,"filed":"2025-02-20"}
+              ]}},
+              "NetIncomeLoss":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","start":"2024-01-01","end":"2024-12-31","val":15000000000,"filed":"2025-02-20"}
+              ]}},
+              "PaymentsOfDividendsCommonStock":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","start":"2024-01-01","end":"2024-12-31","val":5000000000,"filed":"2025-02-20"}
+              ]}},
+              "CashAndCashEquivalentsAtCarryingValue":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","end":"2024-12-31","val":6200000000,"filed":"2025-02-20"}
+              ]}},
+              "WeightedAverageNumberOfDilutedSharesOutstanding":{"units":{"shares":[
+                {"fp":"FY","form":"10-K","start":"2024-01-01","end":"2024-12-31","val":3000000000,"filed":"2025-02-20"}
+              ]}}
+            }}}
+        """.trimIndent()
+        var drivers = SecResidualFacts.extract(json)
+        assertEquals(6_200_000_000.0, drivers?.cashDollars)
+    }
+
+    @Test
     fun roe_uses_median_of_recent_years_not_the_trough_year() {
         var json = """
             {"facts":{"us-gaap":{

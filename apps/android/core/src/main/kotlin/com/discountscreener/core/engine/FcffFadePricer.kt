@@ -53,7 +53,7 @@ object FcffFadePricer {
         var terminalValue = terminalFcff / (rate - stableGrowth)
         var enterpriseValue = presentValue + terminalValue / (1.0 + rate).pow(projectionYears)
         var equityValue = enterpriseValue - netDebtDollars
-        if (!equityValue.isFinite()) return null
-        return ((equityValue.coerceAtLeast(0.0) / currentShares) * 100.0).roundToLong()
+        if (!equityValue.isFinite() || equityValue <= 0.0) return null
+        return ((equityValue / currentShares) * 100.0).roundToLong()
     }
 }

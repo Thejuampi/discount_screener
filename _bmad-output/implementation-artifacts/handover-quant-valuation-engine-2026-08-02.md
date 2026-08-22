@@ -1,5 +1,7 @@
 # Handover — Quant / Valuation Engine (2026-08-02)
 
+> **Not the current identity/Street-stretch brief.** Start at [`handover-honest-path-street-stretch-2026-08-16.md`](handover-honest-path-street-stretch-2026-08-16.md) for PR #39. This file is the older Windows motor brief (CHTR / high-signal / Shapley).
+
 **Audience:** next agent continuing quant/valuation motor work  
 **Owner (product):** Juan (single analyst workstation)  
 **Handoff type:** BMAD implementation-artifact + project-context update (no sprint ceremony)  

@@ -45,6 +45,15 @@ class YahooInterestSeriesTest {
 
         assertEquals(listOf("2023-09-30"), merged.map { it.asOfDate })
     }
+
+    @Test
+    fun interest_paid_is_not_a_filed_coupon() {
+        var merged = YahooInterestSeries.mergeByYear(
+            listOf(point("2023-09-30", 3_933_000_000.0, "annualInterestExpense")),
+            listOf(point("2024-09-30", 4_000_000_000.0, "annualInterestPaid")),
+        )
+        assertEquals(listOf("2023-09-30"), merged.map { it.asOfDate })
+    }
 }
 
 private fun point(asOfDate: String, value: Double, concept: String) = AnnualReportedValue(

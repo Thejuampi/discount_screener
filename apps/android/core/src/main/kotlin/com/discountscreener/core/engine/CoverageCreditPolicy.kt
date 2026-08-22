@@ -15,23 +15,11 @@ object CoverageCreditPolicy {
     const val VERSION = "coverage-credit-policy/1"
 
     fun spreadBps(coverage: Double): Int {
-        if (!coverage.isFinite()) return 1_157
-        return when {
-            coverage >= 12.50 -> 59
-            coverage >= 9.50 -> 70
-            coverage >= 7.50 -> 92
-            coverage >= 6.00 -> 107
-            coverage >= 4.50 -> 121
-            coverage >= 3.50 -> 147
-            coverage >= 3.00 -> 178
-            coverage >= 2.50 -> 221
-            coverage >= 2.00 -> 304
-            coverage >= 1.75 -> 359
-            coverage >= 1.50 -> 418
-            coverage >= 1.25 -> 519
-            coverage >= 0.80 -> 798
-            coverage >= 0.50 -> 895
-            else -> 1_157
+        var policy = ValuationPolicy.current.coverageCredit
+        if (!coverage.isFinite()) return policy.defaultSpreadBps
+        for (bucket in policy.buckets) {
+            if (coverage >= bucket.minCoverage) return bucket.spreadBps
         }
+        return policy.defaultSpreadBps
     }
 }

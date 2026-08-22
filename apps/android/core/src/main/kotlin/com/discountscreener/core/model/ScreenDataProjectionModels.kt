@@ -399,6 +399,11 @@ data class ProjectedValuationJudgment(
     val upsideToHorizonBps: Int? = null,
     val priceSpeechReasons: List<String> = emptyList(),
     val priceSpeechPolicyVersion: String? = null,
+    val honestyMode: ValuationHonesty = ValuationHonesty.Honest,
+    val streetImplied: StreetImpliedView? = null,
+    val identityUnavailableReason: String? = null,
+    val providerRefuseLines: List<String> = emptyList(),
+    val identityCaveatLines: List<String> = emptyList(),
 )
 
 object ProjectedFairValueLabels {

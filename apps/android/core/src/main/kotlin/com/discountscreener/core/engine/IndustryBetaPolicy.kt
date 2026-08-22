@@ -171,7 +171,7 @@ fun resolveIndustryBetaPrior(
         )
     } else {
         IndustryBetaPrior(
-            betaMillis = 1_000,
+            betaMillis = ValuationPolicy.current.dcf.defaultIndustryBetaMillis,
             entryId = "default",
             throughCycle = false,
             provisional = true,

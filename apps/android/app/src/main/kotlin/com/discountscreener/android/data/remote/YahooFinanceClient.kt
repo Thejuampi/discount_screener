@@ -16,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -32,6 +34,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
+import java.net.SocketTimeoutException
 import kotlin.math.roundToLong
 
 enum class ProviderComponentState {
@@ -236,6 +239,7 @@ open class YahooFinanceClient(
             return probe
         }
 
+        currentCoroutineContext().ensureActive()
         // Primary path: JSON quoteSummary (same modules Yahoo's web JS uses).
         var quoteContext = try {
             val root = fetchQuoteSummaryJson(requestSymbol)
@@ -1417,3 +1421,13 @@ private val JsonPrimitive.longOrNull: Long?
 
 private val JsonPrimitive.contentOrNull: String?
     get() = runCatching { content }.getOrNull()
+
+internal fun canceledIo(error: IOException): Boolean {
+    if (error is SocketTimeoutException) {
+        return false
+    }
+    val message = error.message.orEmpty()
+    return error is java.io.InterruptedIOException ||
+        message.contains("Canceled", ignoreCase = true) ||
+        message.contains("Cancelled", ignoreCase = true)
+}

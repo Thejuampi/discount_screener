@@ -1,6 +1,7 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.harness.HttpYahooTransport
+import com.discountscreener.core.harness.MarketsInsiderYieldLiveClient
 import com.discountscreener.core.harness.parseQuoteSummary
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.BusinessClass
@@ -148,44 +149,7 @@ class ThinkableIdentityWave1bMeasureTest {
             }
         }
         Files.writeString(out, body)
-        var csv = buildString {
-            appendLine(
-                "sym,street,ident,ape,wacc,g,gstab,regime,revB,fcffB,ocfM,capexI,book,roe,ret,netDebtB,sharesB,engineReasons",
-            )
-            for (row in rows) {
-                var street = row.streetBaseCents?.toDouble() ?: 0.0
-                var ident = row.identityBaseCents?.toDouble() ?: 0.0
-                var ape = if (street > 0.0) kotlin.math.abs(ident - street) / street else Double.NaN
-                appendLine(
-                    listOf(
-                        row.symbol,
-                        street / 100.0,
-                        ident / 100.0,
-                        "%.3f".format(ape),
-                        row.waccOrCoeBps,
-                        row.growthBps,
-                        row.stableGrowthBps,
-                        row.regime,
-                        row.revenueDollars?.let { it / 1e9 },
-                        row.fcffDollars?.let { it / 1e9 },
-                        row.ocfMarginBps,
-                        row.capexIntensityBps,
-                        row.bookValuePerShareCents?.let { it / 100.0 },
-                        row.roe0Bps,
-                        row.retentionBps,
-                        row.netDebtDollars?.let { it / 1e9 },
-                        row.shares?.let { it / 1e9 },
-                        row.engineReasons.joinToString("|"),
-                    ).joinToString(","),
-                )
-            }
-            var apes = rows.mapNotNull { row ->
-                var street = row.streetBaseCents?.toDouble() ?: return@mapNotNull null
-                var ident = row.identityBaseCents?.toDouble() ?: return@mapNotNull null
-                if (street <= 0.0) null else kotlin.math.abs(ident - street) / street
-            }
-            appendLine("MEAN_APE,${apes.average()},n=${apes.size}")
-        }
+        var csv = scoreboardCsv(rows, extraHoldout = false)
         Files.writeString(WAVE1B_ROOT.resolve("driver-dump.csv"), csv)
         println(csv)
         var jpm = rows.first { it.symbol == "JPM" }
@@ -232,38 +196,7 @@ class ThinkableIdentityWave1bMeasureTest {
         var rows = HOLDOUT_SYMBOLS.map {
             measure(it, marketParams, root = HOLDOUT_ROOT, ciks = HOLDOUT_CIK)
         }
-        var csv = buildString {
-            appendLine("sym,street,ident,ape,class,model,wacc,g,regime,error")
-            for (row in rows) {
-                var street = row.streetBaseCents?.toDouble() ?: 0.0
-                var ident = row.identityBaseCents?.toDouble() ?: 0.0
-                var ape = if (street > 0.0 && ident > 0.0) {
-                    kotlin.math.abs(ident - street) / street
-                } else {
-                    Double.NaN
-                }
-                appendLine(
-                    listOf(
-                        row.symbol,
-                        street / 100.0,
-                        ident / 100.0,
-                        if (ape.isNaN()) "" else "%.3f".format(ape),
-                        row.businessClass,
-                        row.model,
-                        row.waccOrCoeBps,
-                        row.growthBps,
-                        row.regime,
-                        row.computeError?.replace(",", ";"),
-                    ).joinToString(","),
-                )
-            }
-            var apes = rows.mapNotNull { row ->
-                var street = row.streetBaseCents?.toDouble() ?: return@mapNotNull null
-                var ident = row.identityBaseCents?.toDouble() ?: return@mapNotNull null
-                if (street <= 0.0 || ident <= 0.0) null else kotlin.math.abs(ident - street) / street
-            }
-            appendLine("MEAN_APE,${if (apes.isEmpty()) "" else apes.average().toString()},n=${apes.size}")
-        }
+        var csv = scoreboardCsv(rows, extraHoldout = true)
         Files.createDirectories(HOLDOUT_ROOT)
         Files.writeString(HOLDOUT_ROOT.resolve("driver-dump.csv"), csv)
         println(csv)
@@ -271,11 +204,192 @@ class ThinkableIdentityWave1bMeasureTest {
         assertTrue(priced >= 1, "holdout must price at least one name")
     }
 
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DS_DEBT_MEASURE", matches = "true")
+    fun ab_fit_debt_engine() {
+        writeDebtAb(
+            symbols = QA_SYMBOLS,
+            root = WAVE1B_ROOT,
+            ciks = SYMBOL_CIK,
+            outName = "debt-engine-c.csv",
+        )
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DS_DEBT_MEASURE", matches = "true")
+    fun ab_holdout_debt_engine() {
+        writeDebtAb(
+            symbols = HOLDOUT_SYMBOLS,
+            root = HOLDOUT_ROOT,
+            ciks = HOLDOUT_CIK,
+            outName = "debt-engine-c.csv",
+        )
+    }
+
+    private fun writeDebtAb(
+        symbols: List<String>,
+        root: Path,
+        ciks: Map<String, String>,
+        outName: String,
+    ) {
+        var marketParams = MarketParams(
+            rfBps = 470,
+            erpBps = 442,
+            provisional = false,
+            erpSchool = ErpSchool.ImpliedIndex,
+            rfSource = RF_SOURCE_YAHOO_TNX,
+            macroStableGrowthBps = 380,
+        )
+        var yields = MarketsInsiderYieldLiveClient(root.resolve("issuer-yield"))
+        var rows = symbols.map { symbol ->
+            debtAbRow(symbol, marketParams, root, ciks, yields)
+        }
+        var csv = debtAbCsv(rows)
+        Files.createDirectories(root)
+        Files.writeString(root.resolve(outName), csv)
+        println(csv)
+        assertTrue(rows.isNotEmpty(), "debt A/B must write at least one row")
+    }
+
+    private fun debtAbRow(
+        symbol: String,
+        marketParams: MarketParams,
+        root: Path,
+        ciks: Map<String, String>,
+        yields: MarketsInsiderYieldLiveClient,
+    ): DebtAbRow {
+        var off = measure(symbol, marketParams, root, ciks)
+        var quotePath = root.resolve("yahoo").resolve("$symbol-quote.json")
+        var companyName = if (Files.exists(quotePath)) {
+            companyNameFromQuote(Files.readString(quotePath))
+        } else {
+            null
+        }
+        var operating = off.businessClass == BusinessClass.OperatingNonFinancial.name
+        var point = if (operating) yields.lookup(symbol, companyName) else null
+        var on = if (point != null) {
+            measure(symbol, marketParams, root, ciks, issuerYield = point)
+        } else {
+            off
+        }
+        return DebtAbRow(
+            symbol = symbol,
+            businessClass = off.businessClass,
+            model = off.model,
+            companyName = companyName,
+            yieldBps = point?.yieldBps,
+            yieldConcept = point?.concept,
+            kdOff = kdSource(off.engineReasons),
+            kdOn = kdSource(on.engineReasons),
+            kdBpsOff = kdBps(off.engineReasons),
+            kdBpsOn = kdBps(on.engineReasons),
+            qualityOff = reasonValue(off.engineReasons, "rate_quality="),
+            qualityOn = reasonValue(on.engineReasons, "rate_quality="),
+            taxYearsOff = reasonValue(off.engineReasons, "period_intersection=common_fiscal_years:"),
+            taxYearsOn = reasonValue(on.engineReasons, "period_intersection=common_fiscal_years:"),
+            waccOff = off.waccOrCoeBps,
+            waccOn = on.waccOrCoeBps,
+            identOffCents = off.identityBaseCents,
+            identOnCents = on.identityBaseCents,
+            error = on.computeError ?: off.computeError,
+        )
+    }
+
+    private fun debtAbCsv(rows: List<DebtAbRow>): String = buildString {
+        appendLine(
+            "sym,class,model,name,yield_bps,yield_concept,kd_off,kd_on,kd_bps_off,kd_bps_on," +
+                "q_off,q_on,tax_n_off,tax_n_on,wacc_off,wacc_on,ident_off,ident_on,ident_delta,error",
+        )
+        for (row in rows) {
+            var identOff = row.identOffCents?.toDouble()?.div(100.0)
+            var identOn = row.identOnCents?.toDouble()?.div(100.0)
+            var delta = if (identOff != null && identOn != null) identOn - identOff else null
+            appendLine(
+                listOf(
+                    row.symbol,
+                    row.businessClass,
+                    row.model,
+                    row.companyName?.replace(",", " "),
+                    row.yieldBps,
+                    row.yieldConcept,
+                    row.kdOff,
+                    row.kdOn,
+                    row.kdBpsOff,
+                    row.kdBpsOn,
+                    row.qualityOff,
+                    row.qualityOn,
+                    row.taxYearsOff,
+                    row.taxYearsOn,
+                    row.waccOff,
+                    row.waccOn,
+                    identOff,
+                    identOn,
+                    delta,
+                    row.error?.replace(",", ";"),
+                ).joinToString(","),
+            )
+        }
+        var operating = rows.filter { it.businessClass == BusinessClass.OperatingNonFinancial.name }
+        var withYield = operating.count { it.yieldBps != null }
+        var switched = operating.count { it.kdOff != it.kdOn }
+        var solidOnHits = operating.count { it.yieldBps != null && it.qualityOn == "solid" }
+        appendLine("OPERATING,${operating.size}")
+        appendLine("YIELD_HITS,$withYield")
+        appendLine("KD_SOURCE_SWITCHES,$switched")
+        appendLine("QUALITY_SOLID_ON_HITS,$solidOnHits")
+    }
+
+    private fun kdSource(codes: List<String>): String? =
+        reasonValue(codes, "cost_of_debt_source=")
+
+    private fun kdBps(codes: List<String>): Int? =
+        reasonValue(codes, "cost_of_debt_bps=")?.toIntOrNull()
+
+    private fun reasonValue(codes: List<String>, prefix: String): String? =
+        codes.firstOrNull { it.startsWith(prefix) }?.removePrefix(prefix)
+
+    private fun companyNameFromQuote(body: String): String? {
+        var root = Json.parseToJsonElement(body).jsonObject
+        var result = root["quoteSummary"]?.jsonObject
+            ?.get("result")
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+        var price = result?.get("price")?.jsonObject
+        var longName = price?.get("longName")
+        var shortName = price?.get("shortName")
+        return longName?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: shortName?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    }
+
+    private data class DebtAbRow(
+        val symbol: String,
+        val businessClass: String?,
+        val model: String?,
+        val companyName: String?,
+        val yieldBps: Int?,
+        val yieldConcept: String?,
+        val kdOff: String?,
+        val kdOn: String?,
+        val kdBpsOff: Int?,
+        val kdBpsOn: Int?,
+        val qualityOff: String?,
+        val qualityOn: String?,
+        val taxYearsOff: String?,
+        val taxYearsOn: String?,
+        val waccOff: Int?,
+        val waccOn: Int?,
+        val identOffCents: Long?,
+        val identOnCents: Long?,
+        val error: String?,
+    )
+
     private fun measure(
         symbol: String,
         marketParams: MarketParams,
         root: Path = WAVE1B_ROOT,
         ciks: Map<String, String> = SYMBOL_CIK,
+        issuerYield: IssuerYieldPoint? = null,
     ): MeasureRow {
         var sources = mutableListOf("sec:companyfacts", "yahoo:quoteSummary")
         var cik = ciks[symbol]
@@ -334,9 +448,17 @@ class ThinkableIdentityWave1bMeasureTest {
             timeseries = timeseries,
             marketPriceCents = street.priceCents,
             marketParams = marketParams,
+            issuerYield = issuerYield,
         )
         var analysis = computed.getOrNull()
         var error = computed.exceptionOrNull()?.message
+        var shareCount = fund.sharesOutstanding?.toDouble()
+            ?: timeseries.dilutedAverageShares.lastOrNull()?.value
+        var implied = if (analysis != null && street.baseCents != null) {
+            StreetImpliedHonesty.reconcile(analysis, street.baseCents, shareCount)
+        } else {
+            null
+        }
         var judgment = ValuationJudgmentAssembler.assemble(
             detail(symbol, fund, street),
             analysis,
@@ -392,6 +514,79 @@ class ThinkableIdentityWave1bMeasureTest {
             predictedWave2 = predicted,
             sourcesTried = sources,
             engineReasons = analysis?.reasonCodes.orEmpty(),
+            nonHonestCents = implied?.impliedBaseCents,
+            nonHonestKnob = implied?.winningKnob?.name,
+            nonHonestHonestBps = implied?.winningHonestBps,
+            nonHonestImpliedBps = implied?.winningImpliedBps,
+            nonHonestDeltaBps = implied?.winningDeltaBps,
+            nonHonestStretch = implied?.winningStretch?.name,
+        )
+    }
+
+    private fun scoreboardCsv(rows: List<MeasureRow>, extraHoldout: Boolean): String = buildString {
+        var head = "sym,street,ident,ape_h,nonhonest,ape_nh,nh_knob,nh_honest,nh_implied,nh_delta,nh_stretch"
+        if (extraHoldout) head += ",class,model"
+        head += ",wacc,g,gstab,regime,revB,fcffB,ocfM,capexI,book,roe,ret,netDebtB,sharesB"
+        if (extraHoldout) head += ",error"
+        head += ",engineReasons"
+        appendLine(head)
+        for (row in rows) {
+            var street = row.streetBaseCents?.toDouble() ?: 0.0
+            var ident = row.identityBaseCents?.toDouble() ?: 0.0
+            var apeH = StreetScoreboard.ape(row.identityBaseCents, row.streetBaseCents)
+            var apeNh = StreetScoreboard.ape(row.nonHonestCents, row.streetBaseCents)
+            var cells = mutableListOf<Any?>(
+                row.symbol,
+                street / 100.0,
+                ident / 100.0,
+                StreetScoreboard.formatApe(apeH),
+                row.nonHonestCents?.let { it / 100.0 },
+                StreetScoreboard.formatApe(apeNh),
+                row.nonHonestKnob,
+                row.nonHonestHonestBps,
+                row.nonHonestImpliedBps,
+                row.nonHonestDeltaBps,
+                row.nonHonestStretch,
+            )
+            if (extraHoldout) {
+                cells += row.businessClass
+                cells += row.model
+            }
+            cells.addAll(
+                listOf(
+                    row.waccOrCoeBps,
+                    row.growthBps,
+                    row.stableGrowthBps,
+                    row.regime,
+                    row.revenueDollars?.let { it / 1e9 },
+                    row.fcffDollars?.let { it / 1e9 },
+                    row.ocfMarginBps,
+                    row.capexIntensityBps,
+                    row.bookValuePerShareCents?.let { it / 100.0 },
+                    row.roe0Bps,
+                    row.retentionBps,
+                    row.netDebtDollars?.let { it / 1e9 },
+                    row.shares?.let { it / 1e9 },
+                ),
+            )
+            if (extraHoldout) cells += row.computeError?.replace(",", ";")
+            cells += row.engineReasons.joinToString("|")
+            appendLine(cells.joinToString(","))
+        }
+        var honest = rows.mapNotNull { StreetScoreboard.ape(it.identityBaseCents, it.streetBaseCents) }
+        var nonHonest = rows.mapNotNull { StreetScoreboard.ape(it.nonHonestCents, it.streetBaseCents) }
+        appendLine(
+            "MEAN_APE_HONEST,${if (honest.isEmpty()) "" else honest.average().toString()},n=${honest.size}",
+        )
+        appendLine(
+            "MEAN_APE_NONHONEST,${if (nonHonest.isEmpty()) "" else nonHonest.average().toString()},n=${nonHonest.size}",
+        )
+        var stretchCounts = rows.mapNotNull { it.nonHonestStretch }.groupingBy { it }.eachCount()
+        appendLine(
+            "STRETCH," +
+                listOf("Modest", "Stretched", "Absurd", "Unreachable").joinToString(",") { token ->
+                    "$token=${stretchCounts[token] ?: 0}"
+                },
         )
     }
 
@@ -513,6 +708,12 @@ class ThinkableIdentityWave1bMeasureTest {
         val predictedWave2: String? = null,
         val sourcesTried: List<String> = emptyList(),
         val engineReasons: List<String> = emptyList(),
+        val nonHonestCents: Long? = null,
+        val nonHonestKnob: String? = null,
+        val nonHonestHonestBps: Int? = null,
+        val nonHonestImpliedBps: Int? = null,
+        val nonHonestDeltaBps: Int? = null,
+        val nonHonestStretch: String? = null,
     ) {
         fun toJson(): Map<String, String?> = mapOf(
             "symbol" to symbol,
@@ -541,6 +742,12 @@ class ThinkableIdentityWave1bMeasureTest {
             "marketParams" to marketParams,
             "predictedWave2" to predictedWave2,
             "sourcesTried" to sourcesTried.joinToString(","),
+            "nonHonestCents" to nonHonestCents?.toString(),
+            "nonHonestKnob" to nonHonestKnob,
+            "nonHonestHonestBps" to nonHonestHonestBps?.toString(),
+            "nonHonestImpliedBps" to nonHonestImpliedBps?.toString(),
+            "nonHonestDeltaBps" to nonHonestDeltaBps?.toString(),
+            "nonHonestStretch" to nonHonestStretch,
         )
     }
 }
@@ -550,14 +757,50 @@ private object Wave1bSecTimeseries {
         var facts = Json.parseToJsonElement(slimJson).jsonObject
         var usGaap = facts["facts"]?.jsonObject?.get("us-gaap")?.jsonObject ?: return null
         var opCf = annualAny(usGaap, SecDriverNormalizationPolicy.Driver.OperatingCashFlow)
-        var capex = annualAny(
+        var tangible = annualAny(
             usGaap,
             SecDriverNormalizationPolicy.recurringDevelopmentConcepts,
             "USD",
             SecDriverNormalizationPolicy.PeriodShape.Duration,
         )
+        var wells = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringWellsConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var software = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringSoftwareConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var intangibles = annualAny(
+            usGaap,
+            SecDriverNormalizationPolicy.recurringIntangibleConcepts,
+            "USD",
+            SecDriverNormalizationPolicy.PeriodShape.Duration,
+        )
+        var tangibleByDate = tangible.associateBy { it.asOfDate }
+        var wellsByDate = wells.associateBy { it.asOfDate }
+        var softwareByDate = software.associateBy { it.asOfDate }
+        var intangiblesByDate = intangibles.associateBy { it.asOfDate }
+        var capexByDate = (
+            tangibleByDate.keys + wellsByDate.keys + softwareByDate.keys + intangiblesByDate.keys
+        ).mapNotNull { date ->
+            var total = SecDriverNormalizationPolicy.recurringDevelopmentTotal(
+                tangibleDollars = tangibleByDate[date]?.value,
+                wellsDollars = wellsByDate[date]?.value,
+                tangibleConcept = tangibleByDate[date]?.concept,
+                softwareDollars = softwareByDate[date]?.value,
+                intangiblesDollars = intangiblesByDate[date]?.value,
+            ) ?: return@mapNotNull null
+            date to total
+        }.toMap()
+        var capex = capexByDate.map { (date, value) ->
+            AnnualReportedValue(date, value, source = DcfSource.SecEdgar)
+        }
         if (opCf.isEmpty() || capex.isEmpty()) return null
-        var capexByDate = capex.associate { it.asOfDate to it.value }
         var acceptedOp = opCf.filter { capexByDate.containsKey(it.asOfDate) }
         if (acceptedOp.isEmpty()) return null
         var dates = acceptedOp.map { it.asOfDate }.toSet()

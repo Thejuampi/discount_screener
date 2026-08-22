@@ -3,11 +3,16 @@ package com.discountscreener.core.engine
 import java.nio.file.Path
 import java.time.Duration
 
-const val DEFAULT_RF_BPS = 430
-const val DEFAULT_ERP_BPS = 450
-const val STABLE_GROWTH_RF_BUFFER_BPS = 100
-const val BOOTSTRAP_MACRO_STABLE_GROWTH_BPS = 300
-const val MIN_STABLE_GROWTH_BPS = 50
+val DEFAULT_RF_BPS: Int
+    get() = ValuationPolicy.current.market.defaultRfBps
+val DEFAULT_ERP_BPS: Int
+    get() = ValuationPolicy.current.market.defaultErpBps
+val STABLE_GROWTH_RF_BUFFER_BPS: Int
+    get() = ValuationPolicy.current.market.stableGrowthRfBufferBps
+val BOOTSTRAP_MACRO_STABLE_GROWTH_BPS: Int
+    get() = ValuationPolicy.current.market.bootstrapMacroStableGrowthBps
+val MIN_STABLE_GROWTH_BPS: Int
+    get() = ValuationPolicy.current.market.minStableGrowthBps
 const val RF_SOURCE_BOOTSTRAP = "bootstrap"
 const val RF_SOURCE_FRED_DGS10 = "fred_dgs10"
 const val RF_SOURCE_YAHOO_TNX = "yahoo_tnx"

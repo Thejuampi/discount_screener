@@ -250,6 +250,7 @@ class ModelPolishFcffFanTest {
                 betaMillis = 1_000,
                 totalDebtDollars = 10_000_000L,
                 totalCashDollars = 0L,
+                returnOnEquityBps = 15_000,
             ),
             timeseries = FundamentalTimeseries(
                 freeCashFlow = oneSoftYearCompounder(0.32),

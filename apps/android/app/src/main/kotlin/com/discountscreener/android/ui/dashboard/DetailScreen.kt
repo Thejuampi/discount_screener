@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +54,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -824,6 +826,8 @@ private fun SnapshotContent(
         volumeChartModel?.axisLabels,
         macdChartModel?.axisLabels,
     )
+    var volumeSizedCandles by rememberSaveable { mutableStateOf(false) }
+    var timeAxisGutter = timeAxisTrailingGutter(volumeProfileModel != null)
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
@@ -864,18 +868,23 @@ private fun SnapshotContent(
                 }
                 return@item
             }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    detailHeadline(currentDetail, projectedDetail),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    "Qual ${currentDetail.qualification.name.lowercase()}  Conf ${currentDetail.confidence.name.lowercase()}  External ${currentDetail.externalStatus.name.lowercase()}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
-            }
+            ForecastSection(
+                detail = currentDetail,
+                projectedDetail = projectedDetail,
+                quantLens = quantLens,
+                onAction = onAction,
+            )
+        }
+
+        item {
+            DetailScoreHeader(
+                route = route,
+                scoreRow = scoreRow,
+                scoringModel = scoringModel,
+                regimeScoringEnabled = regimeScoringEnabled,
+                symbolNote = symbolNote,
+                onAction = onAction,
+            )
         }
 
         item {
@@ -908,7 +917,10 @@ private fun SnapshotContent(
                 model = priceChartModel,
                 volumeProfileModel = volumeProfileModel,
                 axisWidth = axisWidth,
+                trailingGutter = timeAxisGutter,
                 dateTicks = if (macdChartModel == null && volumeChartModel == null) dateTicks else emptyList(),
+                volumeSizedCandles = volumeSizedCandles,
+                onToggleVolumeSizedCandles = { volumeSizedCandles = !volumeSizedCandles },
             )
         }
 
@@ -917,6 +929,7 @@ private fun SnapshotContent(
                 candles = visibleCandles,
                 model = volumeChartModel,
                 axisWidth = axisWidth,
+                trailingGutter = timeAxisGutter,
                 dateTicks = if (macdChartModel == null) dateTicks else emptyList(),
             )
         }
@@ -926,6 +939,7 @@ private fun SnapshotContent(
                 candles = visibleCandles,
                 model = macdChartModel,
                 axisWidth = axisWidth,
+                trailingGutter = timeAxisGutter,
                 dateTicks = dateTicks,
             )
         }
@@ -933,6 +947,8 @@ private fun SnapshotContent(
         item {
             RsiChartSection(
                 model = rsiChartModel,
+                axisWidth = axisWidth,
+                trailingGutter = timeAxisGutter,
                 dateTicks = dateTicks,
             )
         }
@@ -1247,13 +1263,71 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+private fun ForecastSection(
+    detail: SymbolDetail,
+    projectedDetail: ProjectedDetailData?,
+    quantLens: QuantLensUiState?,
+    onAction: (DashboardAction) -> Unit,
+) {
+    var ui = projectedDetail?.valuationJudgment?.let { snapshot ->
+        var priced = if (snapshot.lastPriceCents == null && detail.marketPriceCents > 0L) {
+            snapshot.copy(lastPriceCents = detail.marketPriceCents)
+        } else {
+            snapshot
+        }
+        presentValuationJudgment(priced)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = detailHeadline(detail, projectedDetail),
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        if (ui != null) {
+            Text(
+                text = ui.forecastSourceLine,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            var model = forecastRangeModel(detail, ui)
+            if (model != null) {
+                ValuationHeadline(model = model)
+                ValuationRangeChart(
+                    model = model,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(132.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+            }
+        } else {
+            var model = valuationRangeModel(detail, projectedDetail)
+            ValuationHeadline(model = model)
+            ValuationRangeChart(
+                model = model,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(132.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+        }
+        Text(
+            text = "Qual ${detail.qualification.name.lowercase()}  Conf ${detail.confidence.name.lowercase()}  External ${detail.externalStatus.name.lowercase()}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        QuantLensMiniStrip(quantLens?.headerChips.orEmpty(), onAction)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun ValuationSection(
     detail: SymbolDetail,
     projectedDetail: ProjectedDetailData? = null,
 ) {
     var judgmentUi = projectedDetail?.valuationJudgment?.let(::presentValuationJudgment)
     if (judgmentUi != null) {
-        JudgmentValuationSection(
+        ModelValuationSection(
             detail = detail,
             ui = judgmentUi,
             projectedDetail = projectedDetail,
@@ -1303,7 +1377,7 @@ private fun ValuationSection(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun JudgmentValuationSection(
+private fun ModelValuationSection(
     detail: SymbolDetail,
     ui: ValuationJudgmentUi,
     projectedDetail: ProjectedDetailData?,
@@ -1312,23 +1386,18 @@ private fun JudgmentValuationSection(
     priceLine(detail, ui)?.let { line ->
         Text(
             text = line,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
         )
     }
-    Text(
-        text = ui.stanceLabel,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-    )
-    if (ui.relationLabel.isNotBlank()) {
+    ui.caveatLines.forEach { line ->
         Text(
-            text = ui.relationLabel,
-            style = MaterialTheme.typography.labelMedium,
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    ui.reasonLines.forEach { line ->
+    modelReasonLines(ui).forEach { line ->
         Text(
             text = line,
             style = MaterialTheme.typography.bodySmall,
@@ -1338,36 +1407,32 @@ private fun JudgmentValuationSection(
     var officialGapBps = ui.officialGapBps
     if (officialGapBps != null) {
         Text(
-            text = "Official gap $officialGapBps bps",
+            text = "Identity vs analyst $officialGapBps bps",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    if (ui.showPrimary && ui.primaryCents != null) {
-        var model = valuationRangeModelFromJudgment(detail, ui)
-        ValuationHeadline(model = model)
-        ValuationRangeChart(
-            model = model,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(132.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        )
-        if (model.referenceValues.isNotEmpty()) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                model.referenceValues.forEach { reference ->
-                    Text(
-                        text = "${reference.label} ${compactMoney(reference.valueCents)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    } else {
+    honestyPairLines(ui).forEach { line ->
+        var bent = line != ui.honestValueLine
         Text(
-            text = "No single primary",
-            style = MaterialTheme.typography.labelMedium,
+            text = line,
+            style = if (line == ui.nonHonestReason) {
+                MaterialTheme.typography.bodySmall
+            } else {
+                MaterialTheme.typography.titleSmall
+            },
+            fontWeight = if (bent) FontWeight.Normal else FontWeight.SemiBold,
+            color = if (bent) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+        )
+    }
+    ui.nonHonestLines.forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.tertiary,
         )
         Text(
@@ -2727,32 +2792,38 @@ private fun PriceChartSection(
     model: PriceChartModel?,
     volumeProfileModel: VolumeProfileModel?,
     axisWidth: Dp,
+    trailingGutter: Dp,
     dateTicks: List<ChartDateTick>,
+    volumeSizedCandles: Boolean,
+    onToggleVolumeSizedCandles: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         PriceOverlayLegend(model = model)
+        Text(
+            text = volumeCandleModeHint(volumeSizedCandles),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         ChartPane(
             axisLabels = model?.axisLabels,
             axisWidth = axisWidth,
             chartHeight = 200.dp,
             bottomTicks = dateTicks,
+            trailingGutter = trailingGutter,
+            trailingContent = {
+                VolumeProfileChart(
+                    model = volumeProfileModel,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            },
         ) { chartModifier ->
             if (model != null) {
-                Row(modifier = chartModifier) {
-                    OhlcChart(
-                        candles = candles,
-                        model = model,
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                    )
-                    VolumeProfileChart(
-                        model = volumeProfileModel,
-                        modifier = Modifier
-                            .width(56.dp)
-                            .fillMaxHeight(),
-                    )
-                }
+                OhlcChart(
+                    candles = candles,
+                    model = model,
+                    volumeSized = volumeSizedCandles,
+                    modifier = chartModifier.clickable(onClick = onToggleVolumeSizedCandles),
+                )
             } else {
                 Box(modifier = chartModifier, contentAlignment = Alignment.Center) {
                     Text("No chart data", style = MaterialTheme.typography.bodySmall)
@@ -2802,6 +2873,7 @@ private fun VolumeChartSection(
     candles: List<HistoricalCandle>,
     model: VolumeChartModel?,
     axisWidth: Dp,
+    trailingGutter: Dp,
     dateTicks: List<ChartDateTick>,
 ) {
     ChartPane(
@@ -2809,6 +2881,7 @@ private fun VolumeChartSection(
         axisWidth = axisWidth,
         chartHeight = 60.dp,
         bottomTicks = dateTicks,
+        trailingGutter = trailingGutter,
     ) { chartModifier ->
         VolumeChart(candles = candles, model = model, modifier = chartModifier)
     }
@@ -2819,6 +2892,7 @@ private fun MacdChartSection(
     candles: List<HistoricalCandle>,
     model: MacdChartModel?,
     axisWidth: Dp,
+    trailingGutter: Dp,
     dateTicks: List<ChartDateTick>,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2841,6 +2915,7 @@ private fun MacdChartSection(
             axisWidth = axisWidth,
             chartHeight = 80.dp,
             bottomTicks = dateTicks,
+            trailingGutter = trailingGutter,
         ) { chartModifier ->
             MacdChart(candles = candles, model = model, modifier = chartModifier)
         }
@@ -2850,6 +2925,8 @@ private fun MacdChartSection(
 @Composable
 private fun RsiChartSection(
     model: RsiChartModel?,
+    axisWidth: Dp,
+    trailingGutter: Dp,
     dateTicks: List<ChartDateTick>,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2873,9 +2950,10 @@ private fun RsiChartSection(
         }
         ChartPane(
             axisLabels = ChartAxisLabels(top = "100", middle = "50", bottom = "0"),
-            axisWidth = 36.dp,
+            axisWidth = axisWidth,
             chartHeight = 100.dp,
             bottomTicks = dateTicks,
+            trailingGutter = trailingGutter,
         ) { chartModifier ->
             RsiChart(model = model, modifier = chartModifier)
         }
@@ -2888,6 +2966,8 @@ private fun ChartPane(
     axisWidth: Dp,
     chartHeight: androidx.compose.ui.unit.Dp,
     bottomTicks: List<ChartDateTick>,
+    trailingGutter: Dp = 0.dp,
+    trailingContent: (@Composable () -> Unit)? = null,
     content: @Composable (Modifier) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2901,12 +2981,27 @@ private fun ChartPane(
                     .width(axisWidth)
                     .height(chartHeight),
             )
-            content(
-                Modifier
-                    .fillMaxWidth()
+            Row(
+                modifier = Modifier
+                    .weight(1f)
                     .height(chartHeight)
                     .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
+            ) {
+                content(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+                if (trailingGutter > 0.dp) {
+                    Box(
+                        modifier = Modifier
+                            .width(trailingGutter)
+                            .fillMaxHeight(),
+                    ) {
+                        trailingContent?.invoke()
+                    }
+                }
+            }
         }
         if (bottomTicks.isNotEmpty()) {
             Row(
@@ -2914,10 +3009,15 @@ private fun ChartPane(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Spacer(modifier = Modifier.width(axisWidth))
-                ChartDateAxis(
-                    ticks = bottomTicks,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Row(modifier = Modifier.weight(1f)) {
+                    ChartDateAxis(
+                        ticks = bottomTicks,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (trailingGutter > 0.dp) {
+                        Spacer(modifier = Modifier.width(trailingGutter))
+                    }
+                }
             }
         }
     }
@@ -3065,36 +3165,30 @@ internal fun OhlcChart(
     candles: List<HistoricalCandle>,
     model: PriceChartModel,
     modifier: Modifier = Modifier,
+    volumeSized: Boolean = false,
 ) {
     if (candles.isEmpty()) return
-    val closes = candles.map { it.closeCents.toFloat() }
-    val opens = candles.map { it.openCents.toFloat() }
-    val highs = candles.map { it.highCents.toFloat() }
-    val lows = candles.map { it.lowCents.toFloat() }
-    val wicks = closes.zip(opens).map { (close, open) -> close >= open }
 
     Canvas(modifier = modifier.padding(4.dp)) {
-        val slotWidth = chartSlotWidth(candles.size, size.width)
-        val bodyWidth = maxOf(3f, slotWidth * 0.65f)
-        candles.forEachIndexed { index, _ ->
-            val x = chartCenterX(index, candles.size, size.width)
-            val isGreen = wicks[index]
-            val color = if (isGreen) BullishChartColor else BearishChartColor
-            val yHigh = size.height - ((highs[index] - model.minValue) / model.span * size.height)
-            val yLow = size.height - ((lows[index] - model.minValue) / model.span * size.height)
-            val yOpen = size.height - ((opens[index] - model.minValue) / model.span * size.height)
-            val yClose = size.height - ((closes[index] - model.minValue) / model.span * size.height)
-
-            drawLine(color = color, start = Offset(x, yHigh), end = Offset(x, yLow), strokeWidth = 1f)
-            val bodyTop = minOf(yOpen, yClose)
-            val bodyBottom = maxOf(yOpen, yClose)
-            val rawBodyHeight = bodyBottom - bodyTop
-            val bodyHeight = maxOf(rawBodyHeight, 2f)
-            val bodyY = if (rawBodyHeight >= 2f) bodyTop else (bodyTop - 1f).coerceAtLeast(0f)
+        var layout = layoutOhlcCandles(
+            candles = candles,
+            model = model,
+            width = size.width,
+            height = size.height,
+            volumeSized = volumeSized,
+        )
+        layout.forEach { candle ->
+            var color = Color(candle.colorArgb)
+            drawLine(
+                color = color,
+                start = Offset(candle.centerX, candle.wickTop),
+                end = Offset(candle.centerX, candle.wickBottom),
+                strokeWidth = candle.wickWidth,
+            )
             drawRect(
                 color = color,
-                topLeft = Offset(x - bodyWidth / 2, bodyY),
-                size = Size(bodyWidth, bodyHeight),
+                topLeft = Offset(candle.bodyLeft, candle.bodyTop),
+                size = Size(candle.bodyWidth, candle.bodyHeight),
             )
         }
 
@@ -3562,6 +3656,17 @@ private fun judgmentChartReferences(
     }
 }
 
+internal fun honestyPairLines(ui: ValuationJudgmentUi): List<String> = listOfNotNull(
+    ui.honestValueLine,
+    ui.nonHonestValueLine,
+    ui.nonHonestReason,
+)
+
+internal fun modelReasonLines(ui: ValuationJudgmentUi): List<String> =
+    ui.reasonLines.filterNot { line ->
+        line == "Primary is the analyst range." || line == "Primary is the identity model."
+    }
+
 private fun priceLine(
     detail: SymbolDetail,
     ui: ValuationJudgmentUi,
@@ -3610,7 +3715,46 @@ internal fun detailHeadline(
         }
         return "Price ${money(last)}  Fair ${money(ui.primaryCents)}  ${ui.primarySourceLabel}"
     }
-    return "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}  Disc ${formatPct(detail.gapBps)}  Upside ${formatPct(detail.upsideBps)}"
+    return "Price ${money(detail.marketPriceCents)}  Fair ${money(detail.intrinsicValueCents)}"
+}
+
+internal fun forecastRangeModel(
+    detail: SymbolDetail,
+    ui: ValuationJudgmentUi,
+): ValuationRangeModel? {
+    var street = ui.streetBaseCents?.takeIf { it > 0L } ?: return null
+    var price = ui.lastPriceCents?.takeIf { it > 0L } ?: detail.marketPriceCents
+    var priceMarker = VisualAnchor("Price", price, valuationReferenceColor("Price"))
+    var fairValueMarker = VisualAnchor("Analyst range", street, valuationReferenceColor("Analyst range"))
+    var low = ui.streetLowCents
+    var high = ui.streetHighCents
+    var targetBand =
+        if (low != null && high != null && low > 0L && high > 0L) low to high else null
+    var references = buildList {
+        ui.identityBaseCents?.takeIf { it > 0L && it != street }?.let { cents ->
+            add(ValuationAnchor(ui.identityModelLabel ?: "Identity model", cents))
+        }
+    }
+    return ValuationRangeModel(
+        priceMarker = priceMarker,
+        fairValueMarker = fairValueMarker,
+        fairValueSourceLabel = "Analyst range",
+        upsideBps = checkedUpsideBps(price, street),
+        targetBandCents = targetBand,
+        referenceValues = references,
+        axisLabels = valuationAxisLabels(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+        domain = valuationRangeDomain(
+            priceMarker = priceMarker,
+            fairValueMarker = fairValueMarker,
+            targetBand = targetBand,
+            references = references,
+        ),
+    )
 }
 
 internal fun valuationRangeModel(
@@ -3903,6 +4047,212 @@ internal fun chartSlotWidth(pointCount: Int, width: Float): Float = if (pointCou
 internal fun chartCenterX(index: Int, pointCount: Int, width: Float): Float {
     val slotWidth = chartSlotWidth(pointCount, width)
     return (slotWidth * index) + (slotWidth / 2f)
+}
+
+internal val VolumeProfilePaneWidth = 56.dp
+
+internal fun timeAxisTrailingGutter(hasVolumeProfile: Boolean): Dp =
+    if (hasVolumeProfile) VolumeProfilePaneWidth else 0.dp
+
+internal fun volumeCandleModeHint(volumeSized: Boolean): String =
+    if (volumeSized) {
+        "Vol size on. Tap the price chart for equal width."
+    } else {
+        "Tap the price chart to size candles by volume."
+    }
+
+internal const val VolumeSizedCandleMinContrastPx = 6f
+
+internal data class DrawnOhlcCandle(
+    val centerX: Float,
+    val bodyLeft: Float,
+    val bodyWidth: Float,
+    val bodyTop: Float,
+    val bodyHeight: Float,
+    val wickTop: Float,
+    val wickBottom: Float,
+    val wickWidth: Float,
+    val colorArgb: Int,
+)
+
+internal data class OhlcChartPixels(
+    val width: Int,
+    val height: Int,
+    val argb: IntArray,
+)
+
+internal fun layoutOhlcCandles(
+    candles: List<HistoricalCandle>,
+    model: PriceChartModel,
+    width: Float,
+    height: Float,
+    volumeSized: Boolean,
+): List<DrawnOhlcCandle> {
+    if (candles.isEmpty() || width <= 0f || height <= 0f) return emptyList()
+    var maxVolume = candles.maxOf { candle -> candle.volume.coerceAtLeast(0L) }
+    var slotWidth = chartSlotWidth(candles.size, width)
+    return candles.mapIndexed { index, candle ->
+        var centerX = chartCenterX(index, candles.size, width)
+        var bodyWidth = candleBodyWidth(
+            volume = candle.volume,
+            maxVolume = maxVolume,
+            slotWidth = slotWidth,
+            volumeSized = volumeSized,
+        )
+        var isGreen = candle.closeCents >= candle.openCents
+        var color = if (isGreen) BullishChartColor else BearishChartColor
+        var yHigh = height - ((candle.highCents.toFloat() - model.minValue) / model.span * height)
+        var yLow = height - ((candle.lowCents.toFloat() - model.minValue) / model.span * height)
+        var yOpen = height - ((candle.openCents.toFloat() - model.minValue) / model.span * height)
+        var yClose = height - ((candle.closeCents.toFloat() - model.minValue) / model.span * height)
+        var bodyTopRaw = minOf(yOpen, yClose)
+        var bodyBottom = maxOf(yOpen, yClose)
+        var rawBodyHeight = bodyBottom - bodyTopRaw
+        var bodyHeight = maxOf(rawBodyHeight, 2f)
+        var bodyTop = if (rawBodyHeight >= 2f) bodyTopRaw else (bodyTopRaw - 1f).coerceAtLeast(0f)
+        var wickWidth = if (volumeSized) maxOf(1f, bodyWidth * 0.18f) else 1f
+        DrawnOhlcCandle(
+            centerX = centerX,
+            bodyLeft = centerX - (bodyWidth / 2f),
+            bodyWidth = bodyWidth,
+            bodyTop = bodyTop,
+            bodyHeight = bodyHeight,
+            wickTop = yHigh,
+            wickBottom = yLow,
+            wickWidth = wickWidth,
+            colorArgb = color.toArgb(),
+        )
+    }
+}
+
+internal fun renderOhlcChartPixels(
+    candles: List<HistoricalCandle>,
+    model: PriceChartModel,
+    width: Int,
+    height: Int,
+    volumeSized: Boolean,
+    backgroundArgb: Int = 0xFFFFFFFF.toInt(),
+): OhlcChartPixels {
+    var pixels = IntArray(width * height) { backgroundArgb }
+    var layout = layoutOhlcCandles(
+        candles = candles,
+        model = model,
+        width = width.toFloat(),
+        height = height.toFloat(),
+        volumeSized = volumeSized,
+    )
+    layout.forEach { candle ->
+        fillVerticalStrip(
+            pixels = pixels,
+            width = width,
+            height = height,
+            centerX = candle.centerX,
+            top = candle.wickTop,
+            bottom = candle.wickBottom,
+            thickness = candle.wickWidth,
+            colorArgb = candle.colorArgb,
+        )
+        fillRect(
+            pixels = pixels,
+            width = width,
+            height = height,
+            left = candle.bodyLeft,
+            top = candle.bodyTop,
+            rectWidth = candle.bodyWidth,
+            rectHeight = candle.bodyHeight,
+            colorArgb = candle.colorArgb,
+        )
+    }
+    return OhlcChartPixels(width = width, height = height, argb = pixels)
+}
+
+internal fun measurePaintedBodyWidth(
+    graph: OhlcChartPixels,
+    centerX: Int,
+    rowY: Int,
+    colorArgb: Int,
+): Int {
+    if (rowY !in 0 until graph.height || centerX !in 0 until graph.width) return 0
+    var rowStart = rowY * graph.width
+    if (graph.argb[rowStart + centerX] != colorArgb) return 0
+    var left = centerX
+    while (left > 0 && graph.argb[rowStart + left - 1] == colorArgb) {
+        left -= 1
+    }
+    var right = centerX
+    while (right + 1 < graph.width && graph.argb[rowStart + right + 1] == colorArgb) {
+        right += 1
+    }
+    return right - left + 1
+}
+
+internal fun rasterSpan(start: Float, length: Float): Int {
+    var x0 = start.roundToInt()
+    var x1 = (start + length).roundToInt()
+    return (x1 - x0).coerceAtLeast(0)
+}
+
+private fun fillRect(
+    pixels: IntArray,
+    width: Int,
+    height: Int,
+    left: Float,
+    top: Float,
+    rectWidth: Float,
+    rectHeight: Float,
+    colorArgb: Int,
+) {
+    var x0 = left.roundToInt().coerceAtLeast(0)
+    var x1 = (left + rectWidth).roundToInt().coerceAtMost(width)
+    var y0 = top.roundToInt().coerceAtLeast(0)
+    var y1 = (top + rectHeight).roundToInt().coerceAtMost(height)
+    var y = y0
+    while (y < y1) {
+        var rowStart = y * width
+        var x = x0
+        while (x < x1) {
+            pixels[rowStart + x] = colorArgb
+            x += 1
+        }
+        y += 1
+    }
+}
+
+private fun fillVerticalStrip(
+    pixels: IntArray,
+    width: Int,
+    height: Int,
+    centerX: Float,
+    top: Float,
+    bottom: Float,
+    thickness: Float,
+    colorArgb: Int,
+) {
+    fillRect(
+        pixels = pixels,
+        width = width,
+        height = height,
+        left = centerX - (thickness / 2f),
+        top = minOf(top, bottom),
+        rectWidth = thickness,
+        rectHeight = abs(bottom - top).coerceAtLeast(1f),
+        colorArgb = colorArgb,
+    )
+}
+
+internal fun candleBodyWidth(
+    volume: Long,
+    maxVolume: Long,
+    slotWidth: Float,
+    volumeSized: Boolean,
+): Float {
+    if (!volumeSized || maxVolume <= 0L) {
+        return maxOf(3f, slotWidth * 0.65f)
+    }
+    var ratio = (volume.toFloat() / maxVolume.toFloat()).coerceIn(0f, 1f)
+    var minWidth = maxOf(1.5f, slotWidth * 0.18f)
+    var maxWidth = maxOf(minWidth + VolumeSizedCandleMinContrastPx, slotWidth * 0.95f)
+    return minWidth + ((maxWidth - minWidth) * ratio)
 }
 
 internal fun macdChartScale(

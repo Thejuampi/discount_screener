@@ -41,7 +41,8 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Analyst-method lifecycle](analyst-method-lifecycle.md) - proof obligations for evidence-ledger / analyst-import / model-run closure.
 - [Valuation live QA checklist](valuation-live-qa-checklist.md) - **Windows live QA = profile `qa` only** (`npm run tauri:dev:qa`); checklist T/AMZN/CI/bank/industrial + merge-bar tests.
 - [Multi-name valuation baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar; quarantine ≠ success.
-- [Handover — Quant Valuation Engine (2026-08-02)](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - continuity brief for the next agent on the quant/valuation motor (waterfall, CHTR FCFF blocker, P0+).
+- [Handover — Honest path and Street stretch (2026-08-16)](../_bmad-output/implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md) - **current** continuity for identity cash, holdout measure, and Street-implied stretch (PR #39).
+- [Handover — Quant Valuation Engine (2026-08-02)](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - older Windows motor brief (waterfall, CHTR, high-signal). Separate workstream.
 - [Gap attribution contract](../shared/contracts/valuation-gap-attribution-v1.json) - Shapley policy-delta telemetry; Street diagnostic only.
 - [High-signal screener cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json) - 26-name recompute goal gate.
 - [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules, numerical conclusion protocol.

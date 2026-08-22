@@ -115,13 +115,14 @@ pub fn resolve_rate_inputs_for_source(
         .filter_map(|point| {
             let debt = point.total_debt_dollars?;
             let interest = point.interest_expense_dollars?;
-            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 || interest < 0.0 {
+            if !debt.is_finite() || !interest.is_finite() || debt < 0.0 {
                 return None;
             }
-            if debt == 0.0 && interest > 0.0 {
+            let coupon = interest.abs();
+            if debt == 0.0 && coupon > 0.0 {
                 return None;
             }
-            (debt > 0.0 && interest > 0.0).then_some((point.year, debt, interest))
+            (debt > 0.0 && coupon > 0.0).then_some((point.year, debt, coupon))
         })
         .collect();
 
@@ -177,10 +178,11 @@ pub fn resolve_rate_inputs_for_source(
             }
             let interest = point.interest_expense_dollars?;
             let pretax = point.pretax_income_dollars?;
-            if !interest.is_finite() || interest <= 0.0 || !pretax.is_finite() {
+            let coupon = interest.abs();
+            if !interest.is_finite() || coupon <= 0.0 || !pretax.is_finite() {
                 return None;
             }
-            Some((point.year, (pretax + interest) / interest))
+            Some((point.year, (pretax + coupon) / coupon))
         })
         .collect();
     coverage_by_period.sort_by_key(|(year, _)| *year);

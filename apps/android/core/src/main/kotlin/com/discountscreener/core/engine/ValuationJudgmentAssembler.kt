@@ -9,6 +9,7 @@ import com.discountscreener.core.model.ValuationAnchorSource
 import com.discountscreener.core.model.ValuationAvailability
 import com.discountscreener.core.model.ValuationCoverage
 import com.discountscreener.core.model.ValuationFreshness
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 
 object ValuationJudgmentAssembler {
@@ -29,8 +30,11 @@ object ValuationJudgmentAssembler {
         judgment: ValuationJudgment,
         lastPriceCents: Long? = null,
         sharesOutstanding: Long? = null,
+        dcfAnalysis: DcfAnalysis? = null,
+        includeStreetImplied: Boolean = true,
     ): ProjectedValuationJudgment {
         var analysis = judgment.identity
+        var refuseSource = dcfAnalysis ?: analysis
         var street = judgment.street
         var femCents = when (val fem = judgment.justifiedMultiple) {
             is ForwardEarningsMultiple.Result.AvailableResult -> fem.value.targetValueCents
@@ -42,6 +46,20 @@ object ValuationJudgmentAssembler {
             analysis = analysis,
             sharesOutstanding = sharesOutstanding,
         )
+        var implied = if (
+            includeStreetImplied &&
+            analysis != null &&
+            street != null &&
+            street.baseCents > 0L
+        ) {
+            StreetImpliedHonesty.reconcile(
+                analysis = analysis,
+                streetBaseCents = street.baseCents,
+                shares = sharesOutstanding?.toDouble(),
+            )
+        } else {
+            null
+        }
         return ProjectedValuationJudgment(
             status = judgment.status,
             relation = judgment.relation,
@@ -63,8 +81,80 @@ object ValuationJudgmentAssembler {
             upsideToHorizonBps = price.upsideToHorizonBps,
             priceSpeechReasons = price.reasonCodes,
             priceSpeechPolicyVersion = price.policyVersion,
+            honestyMode = analysis?.honesty ?: ValuationHonesty.Honest,
+            streetImplied = implied,
+            identityUnavailableReason = refuseSource?.valuationUnavailableReason,
+            providerRefuseLines = refuseSource?.providerReasons.orEmpty().mapNotNull { reason ->
+                reason.upstreamStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                    "${reason.provider.name}: $status"
+                }
+            },
+            identityCaveatLines = identityCaveatLines(analysis),
         )
     }
+
+    internal fun identityCaveatLines(analysis: DcfAnalysis?): List<String> {
+        if (analysis == null || analysis.baseIntrinsicValueCents <= 0L) return emptyList()
+        return buildList {
+            analysis.reasonCodes.mapNotNull { code ->
+                when {
+                    code.startsWith("interest=estimated:") -> estimatedInterestCaveat(code)
+                    code.startsWith("interest=unfiled_with_period_debt:") -> {
+                        var years = yearList(code.removePrefix("interest=unfiled_with_period_debt:"))
+                        if (years.isBlank()) null
+                        else "Interest expense is missing for $years. Confidence is too thin to estimate."
+                    }
+                    else -> null
+                }
+            }.forEach(::add)
+            if (analysis.reasonCodes.any { it == "debt_stock=filed_year_end_instant" }) {
+                add("Debt stock is the filed year-end instant.")
+            }
+            if (analysis.model == ValuationModel.ComponentSum) {
+                add("Value is factory cash plus the lender book.")
+            }
+            costOfDebtCaveat(analysis.reasonCodes)?.let(::add)
+        }
+    }
+
+    private fun costOfDebtCaveat(codes: List<String>): String? {
+        var source = codes.firstOrNull { it.startsWith("cost_of_debt_source=") } ?: return null
+        var token = source.removePrefix("cost_of_debt_source=")
+        var coverage = codes.any { it.startsWith("coverage_synthetic=") }
+        var current = codes.any { it == "market_yield=current_instrument" }
+        var bps = codes.firstOrNull { it.startsWith("cost_of_debt_bps=") }
+            ?.removePrefix("cost_of_debt_bps=")
+            ?.toIntOrNull()
+        var named = when {
+            coverage -> "Cost of debt is a coverage synthetic from filed interest"
+            token == "market_yield" && current -> "Cost of debt is the current instrument yield"
+            token == "market_yield" -> "Cost of debt is the market yield"
+            token == "rated_or_synthetic_spread" -> "Cost of debt is a rated or synthetic spread"
+            token == "interest_over_average_debt" ||
+                token == "yahoo_aligned_interest_over_debt" ->
+                "Cost of debt is the filed coupon over average debt"
+            else -> return null
+        }
+        return if (bps != null) "$named, $bps bps." else "$named."
+    }
+
+    private fun estimatedInterestCaveat(code: String): String? {
+        var parts = code.removePrefix("interest=estimated:").split(":")
+        if (parts.size < 3) return null
+        var method = parts[0]
+        var band = parts[1].replaceFirstChar { it.uppercase() }
+        var years = yearList(parts.drop(2).joinToString(":"))
+        if (years.isBlank()) return null
+        var source = when (method) {
+            "own_effective_rate" -> "this issuer's last filed coupon and debt"
+            "peer_effective_rate" -> "similar issuers' filed coupon and debt"
+            else -> "available coupon evidence"
+        }
+        return "Interest for $years is an estimate from $source. Confidence is $band. A later filed tag replaces the estimate."
+    }
+
+    private fun yearList(raw: String): String =
+        raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ")
 
     private fun identityEnvelope(
         detail: SymbolDetail,
@@ -147,6 +237,7 @@ object ValuationJudgmentAssembler {
     private fun identityModelLabel(analysis: DcfAnalysis?): String? = when (analysis?.model) {
         ValuationModel.FcffWacc -> "FCFF DCF"
         ValuationModel.ResidualIncomeEquity -> "Residual income"
+        ValuationModel.ComponentSum -> "Factory plus lender"
         ValuationModel.None, null -> null
     }
 }

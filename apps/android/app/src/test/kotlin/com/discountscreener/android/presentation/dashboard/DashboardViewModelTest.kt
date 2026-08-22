@@ -66,10 +66,12 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -274,6 +276,76 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun leftover_reopen_paints_session() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(detailData = detail("JPM"))
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Plans))
+        viewModel.dispatch(DashboardAction.SelectPlanHunt(PlanHunt.Leftover))
+        viewModel.dispatch(DashboardAction.OpenDetail("JPM"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.BackFromDetail)
+        viewModel.dispatch(DashboardAction.OpenDetail("JPM"))
+
+        assertEquals(
+            SessionPaint(symbol = "JPM", tab = DashboardTab.Plans),
+            SessionPaint(
+                symbol = viewModel.state.value.detailData?.symbol,
+                tab = viewModel.state.value.currentTab,
+            ),
+        )
+    }
+
+    @Test
+    fun oneshot_reopen_paints_session() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(detailData = detail("EXPD"))
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("EXPD"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.BackFromDetail)
+        viewModel.dispatch(DashboardAction.OpenDetail("EXPD"))
+
+        assertEquals("EXPD", viewModel.state.value.detailData?.symbol)
+    }
+
+    @Test
+    fun cold_oneshot_has_no_session_paint() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("EXPD"))
+
+        assertEquals(null, viewModel.state.value.detailData?.symbol)
+    }
+
+    @Test
+    fun profile_switch_drops_session() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(detailData = detail("EXPD"))
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("EXPD"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.BackFromDetail)
+        viewModel.dispatch(DashboardAction.SelectProfile("merval"))
+        viewModel.dispatch(DashboardAction.OpenDetail("EXPD"))
+
+        assertEquals(null, viewModel.state.value.detailData?.symbol)
+    }
+
+    @Test
+    fun profile_switch_replaces_in_flight_select() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(selectProfileDelayMs = 1_000)
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectProfile("dow"))
+        viewModel.dispatch(DashboardAction.SelectProfile("qa"))
+        advanceUntilIdle()
+
+        assertEquals(listOf("qa"), repository.finishedProfileSelects)
+    }
+
+    @Test
     fun back_from_detail_clears_route() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
         val viewModel = testViewModel(repository)
@@ -462,6 +534,57 @@ class DashboardViewModelTest {
         assertEquals("MS", repository.lastTickerSuggestionQuery)
         assertEquals(listOf("MSFT", "MSTR"), viewModel.state.value.tickerSearchSuggestions.map { it.symbol })
         assertFalse(viewModel.state.value.tickerSearchLoading)
+    }
+
+    @Test
+    fun dashboard_snapshot_rebuilds_once_for_a_burst_of_sync_updates() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        var afterStart = repository.currentSnapshotCallCount
+
+        repository.emitUpdate()
+        repository.emitUpdate()
+        repository.emitUpdate()
+        advanceTimeBy(DashboardViewModel.DashboardSnapshotDebounceMs)
+        advanceUntilIdle()
+
+        assertEquals(afterStart + 1, repository.currentSnapshotCallCount)
+    }
+
+    @Test
+    fun live_refresh_paints_without_silence_gate() = runTest(dispatcher) {
+        var cacheRow = opportunityRow("CACHE")
+        var repository = RecordingDashboardRepository(opportunityRows = listOf(cacheRow))
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.replaceOpportunityRows(listOf(cacheRow.copy(symbol = "LIVE")))
+        repository.emitUpdate()
+        dispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("LIVE"), viewModel.state.value.opportunityRows.map { it.symbol })
+    }
+
+    @Test
+    fun cancelled_detail_open_is_not_ticker_unavailable() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(
+            detailLoadError = CancellationException("switch abort"),
+        )
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals(
+            null,
+            listOfNotNull(
+                viewModel.state.value.tickerSearchNotice?.title,
+                viewModel.state.value.detailNotice?.title,
+            ).firstOrNull { title -> title == "Ticker unavailable" },
+        )
     }
 
     @Test
@@ -1123,6 +1246,17 @@ class DashboardViewModelTest {
         override suspend fun loadBacktestCandles(): Map<String, List<HistoricalCandle>> = emptyMap()
     }
 
+    private fun opportunityRow(symbol: String) = OpportunityListRow(
+        symbol = symbol,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 15_000L,
+        gapBps = 3_333,
+        confidence = ConfidenceBand.High,
+        isWatched = false,
+        compositeScore = 15,
+        coverageCount = 3,
+    )
+
     private fun listRow(
         symbol: String,
         compositeScore: Int = 15,
@@ -1206,9 +1340,12 @@ class DashboardViewModelTest {
         private val tickerSuggestions: List<TickerSearchSuggestion> = emptyList(),
         private val refreshAllError: Throwable? = null,
         private val fetchedScoreRows: Map<String, OpportunityListRow> = emptyMap(),
+        private val selectProfileDelayMs: Long = 0,
+        private val detailLoadError: Throwable? = null,
     ) : DashboardRepository {
         val symbolNotes = mutableMapOf<String, String>()
         var saveSnapshotCallCount = 0
+        val finishedProfileSelects = mutableListOf<String>()
         var currentSnapshotCallCount = 0
         var currentIndexEstimatesCallCount = 0
         var dcfSnapshotCallCount = 0
@@ -1225,6 +1362,13 @@ class DashboardViewModelTest {
         var refreshDiscoveryCallCount = 0
         private val updates = MutableStateFlow(0L)
         private var currentProfile = "dow"
+        private var liveOpportunityRows = opportunityRows
+        private var liveAggressiveRows = aggressiveRows
+
+        fun replaceOpportunityRows(rows: List<OpportunityListRow>) {
+            liveOpportunityRows = rows
+            liveAggressiveRows = rows
+        }
 
         fun setDetailProjection(
             detail: SymbolDetail?,
@@ -1234,6 +1378,10 @@ class DashboardViewModelTest {
             detailData = detail
             projectedDetailData = projectedDetail
             detailNotice = notice
+        }
+
+        fun emitUpdate() {
+            updates.value = updates.value + 1
         }
 
         override fun observeUpdates(): Flow<Long> = updates
@@ -1275,10 +1423,6 @@ class DashboardViewModelTest {
 
         fun releaseDetailLoads() {
             detailHold?.complete(Unit)
-        }
-
-        fun emitUpdate() {
-            updates.value = updates.value + 1
         }
 
         override suspend fun bootstrap(
@@ -1347,6 +1491,7 @@ class DashboardViewModelTest {
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
             lastOpenedSymbol = symbol
+            detailLoadError?.let { error -> throw error }
             detailHold?.await()
             return emptySnapshot(opportunityScoringModel).copy(
                 selectedScoreRow = fetchedScoreRows[symbol],
@@ -1377,7 +1522,11 @@ class DashboardViewModelTest {
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
+            if (selectProfileDelayMs > 0) {
+                delay(selectProfileDelayMs)
+            }
             currentProfile = profile
+            finishedProfileSelects += profile
             return emptySnapshot(
                 opportunityScoringModel = opportunityScoringModel,
                 startupPhase = DashboardStartupPhase.SwitchingProfile,
@@ -1518,9 +1667,9 @@ class DashboardViewModelTest {
             statusMessage: String? = null,
         ): DashboardSnapshot {
             var source = if (opportunityScoringModel == OpportunityScoringModel.Legacy) {
-                opportunityRows
+                liveOpportunityRows
             } else {
-                aggressiveRows
+                liveAggressiveRows
             }
             var rows = if (regimeScoringEnabled) {
                 source
@@ -1554,8 +1703,12 @@ class DashboardViewModelTest {
                 ),
             )
         }
-
     }
+
+    private data class SessionPaint(
+        val symbol: String?,
+        val tab: DashboardTab,
+    )
 
     private data class ProjectedDetailLifecycleExpectation(
         val afterBack: ProjectedDetailData?,

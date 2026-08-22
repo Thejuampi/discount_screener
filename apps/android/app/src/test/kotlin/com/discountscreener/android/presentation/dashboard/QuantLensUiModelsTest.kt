@@ -315,10 +315,30 @@ class QuantLensUiModelsTest {
 
         assertEquals("Disputed", section.chip.label)
         assertTrue(section.primaryLine.contains("no single estimate"))
-        assertTrue(section.rows.any { it.first == "DCF base" })
+        assertTrue(section.rows.any { it.first == "Identity model" })
         assertTrue(section.rows.any { it.first == "Analyst base" })
         assertEquals(null, section.evRailModel)
         assertTrue(section.footerChips.contains("Sources disagree"))
+    }
+
+    @Test
+    fun ev_section_disputed_lists_analyst_before_the_identity_model() {
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Disputed,
+            band = ExpectedValueRangeBand.Disputed,
+            modelLowFairValueCents = 1_152L,
+            modelBaseFairValueCents = 1_708L,
+            modelHighFairValueCents = 1_913L,
+            analystLowFairValueCents = 20_700L,
+            analystBaseFairValueCents = 31_500L,
+            analystHighFairValueCents = 37_000L,
+            disagreementBps = 15_000,
+            reasonCodes = listOf(QuantLensReasonCode.ModelAnalystDisagreement),
+        )
+        val section = mapQuantLensReport(report(expectedValueRange = ev), 23_977L)!!
+            .sections
+            .first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertEquals("Analyst base", section.rows.first().first)
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.discountscreener.core.plan
 
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.ValuationDecisionPolicy
+import com.discountscreener.core.engine.ValuationPolicy
 import com.discountscreener.core.engine.checkedUpsideBps
 import com.discountscreener.core.model.AnchorRelation
 import com.discountscreener.core.model.BusinessClass
@@ -16,19 +17,32 @@ import com.discountscreener.core.model.ValuationModel
 import kotlin.math.abs
 
 object DipSignalEngine {
-    const val DIP_ATR_MIN = 1.0
-    const val ATR_PERIOD = 14
-    const val DIP_RANGE = 20
-    const val MACD_N = 3
-    const val IMMINENT_HIST_ATR = 0.25
-    const val RSI_NOW_LOW = 25.0
-    const val RSI_NOW_HIGH = 45.0
-    const val RSI_HOT = 55.0
-    const val STREET_NOW_BPS = 2_000
-    const val STREET_ALMOST_BPS = 1_500
-    const val F_FLOOR = 0
-    const val NOW_CAP = 120
-    const val LATER_CAP = 80
+    val DIP_ATR_MIN: Double
+        get() = ValuationPolicy.current.dip.dipAtrMin
+    val ATR_PERIOD: Int
+        get() = ValuationPolicy.current.dip.atrPeriod
+    val DIP_RANGE: Int
+        get() = ValuationPolicy.current.dip.dipRange
+    val MACD_N: Int
+        get() = ValuationPolicy.current.dip.macdN
+    val IMMINENT_HIST_ATR: Double
+        get() = ValuationPolicy.current.dip.imminentHistAtr
+    val RSI_NOW_LOW: Double
+        get() = ValuationPolicy.current.dip.rsiNowLow
+    val RSI_NOW_HIGH: Double
+        get() = ValuationPolicy.current.dip.rsiNowHigh
+    val RSI_HOT: Double
+        get() = ValuationPolicy.current.dip.rsiHot
+    val STREET_NOW_BPS: Int
+        get() = ValuationPolicy.current.dip.streetNowBps
+    val STREET_ALMOST_BPS: Int
+        get() = ValuationPolicy.current.dip.streetAlmostBps
+    val F_FLOOR: Int
+        get() = ValuationPolicy.current.dip.fFloor
+    val NOW_CAP: Int
+        get() = ValuationPolicy.current.dip.nowCap
+    val LATER_CAP: Int
+        get() = ValuationPolicy.current.dip.laterCap
     const val UNIVERSE_OPPORTUNITIES = "opportunities"
     const val DEATH_CROSS = "50/200-"
 
@@ -311,6 +325,7 @@ object DipSignalEngine {
         if (analysis == null || modelCents == null) return null
         return when (analysis.model) {
             ValuationModel.ResidualIncomeEquity -> "Residual income"
+            ValuationModel.ComponentSum -> "Factory plus lender"
             ValuationModel.FcffWacc ->
                 if (analysis.businessClass == BusinessClass.OperatingNonFinancial) "FCFF DCF" else null
             ValuationModel.None -> null

@@ -1,0 +1,481 @@
+# Single source for Android engine policy numbers.
+# Edit this file to change a knob. Do not put a second copy in Kotlin.
+# Industry beta priors stay in industry-beta-policy-v1.json (Windows parity).
+version: valuation-policy/1
+
+market:
+  default_rf_bps: 430
+  default_erp_bps: 450
+  stable_growth_rf_buffer_bps: 100
+  bootstrap_macro_stable_growth_bps: 300
+  min_stable_growth_bps: 50
+  rf_min_yield_bps: 50
+  rf_max_yield_bps: 2000
+
+macro:
+  rows:
+    - as_of_date: "2026-01-01"
+      nominal_growth_ceiling_bps: 380
+      source: cbo_long_run_nominal_2026
+
+erp:
+  fresh_days: 180
+  implied_index:
+    - as_of_date: "2026-07-01"
+      erp_bps: 442
+      source: damodaran_implied_spx_2026-07
+  kroll:
+    - as_of_date: "2025-09-02"
+      erp_bps: 500
+      source: kroll_recommended_us_2025-09-02
+
+dcf:
+  beta_company_weight_pct: 67
+  beta_industry_weight_pct: 33
+  default_industry_beta_millis: 1000
+  projection_years: 5
+  projection_years_secular: 10
+  driver_recent_window: 4
+  growth_recent_window: 4
+  coe_scenario_band_bps: 75
+  wacc_scenario_band_bps: 100
+  wacc_scenario_bear_band_unreliable_bps: 150
+  wacc_scenario_bull_band_unreliable_bps: 0
+  provisional_wacc_base_uplift_bps: 175
+  provisional_uplift_full_debt_weight: 0.40
+  roe_bear_haircut_bps: 300
+  roe_bull_boost_bps: 200
+  roe_bull_cap_bps: 9000
+  gordon_rate_epsilon_bps: 50
+  min_equity_spread_over_rf_bps: 50
+  capex_spike_ratio: 1.40
+  capex_spike_min_abs_bps: 500
+  secular_growth_fade_exponent: 1.50
+  scenario_growth_band_bps: 400
+  max_near_growth_distance_from_stable_bps: 1200
+  max_secular_near_growth_bps: 2500
+  investment_wave_min_growth_bps: 300
+  share_count_min_current_over_was_bps: 9000
+  share_count_max_current_over_was_bps: 11500
+
+fcff_path:
+  reinvestment_hold_years: 18
+  reinvestment_margin_bps: 2800
+  reinvestment_erp_weight_pct: 80
+  reinvestment_retention_min_bps: 9000
+  reinvestment_min_capex_bps: 500
+  max_secular_growth_bps: 2500
+  quality_roe_bps: 8000
+  quality_growth_max_bps: 800
+  quality_wacc_gap_min_bps: 250
+  quality_rf_premium_bps: 150
+  margin_fade_buffer_bps: 1200
+  secular_hold_excess_step_bps: 650
+  secular_hold_max_years: 8
+  faded_margin_hold_cap_years: 2
+  internet_retail_hold_min_years: 6
+  discount_store_hold_min_years: 5
+  internet_content_extreme_stable_bps: 1950
+  weak_franchise_excess_roe_bps: 300
+  persist_frac_base_bps: 5000
+  persist_frac_min_bps: 4500
+  persist_frac_max_bps: 8500
+  industry_fade_overshoot_ratio_bps: 12000
+  internet_content_extreme_start_bps: 4800
+  pharma_low_roe_bps: 800
+  pharma_low_roe_margin_cap_bps: 1400
+  commodity_floor_growth_bps: 300
+  cyclical_fade_years: 5
+  secular_fade_exponent_floor: 1.50
+  high_turnover_margin_max_bps: 800
+  high_turnover_roe_min_bps: 2000
+  high_roe_shrink_growth_max_bps: 1500
+  high_roe_shrink_bps: 80
+  high_roe_shrink_rf_floor_bps: 200
+  default_path_erp_bps: 442
+  default_fade_years: 10
+  default_fade_exponent: 1.0
+
+residual_path:
+  bank_through_cycle_roe_bps: 1300
+  bank_through_cycle_max_lift_bps: 400
+  bank_spread_bps: 600
+  bank_high_roe_bps: 1400
+  bank_high_roe_discount_adjust_bps: -70
+  pc_spread_bps: 120
+  care_spread_bps: 2000
+  care_modest_roe_max_bps: 2000
+  care_modest_spread_bps: 350
+  care_fade_years: 1
+  default_fade_years: 5
+
+industry_operating_path:
+  version: industry-operating-path/4
+  entries:
+    - id: semiconductors
+      industry_contains: [semiconductor]
+      target_fcff_margin_bps: 4500
+    - id: software
+      industry_contains: [software]
+      target_fcff_margin_bps: 3200
+    - id: internet_content
+      industry_contains: ["internet content", "interactive media"]
+      target_fcff_margin_bps: 3750
+    - id: internet_retail
+      industry_contains: ["internet retail"]
+      target_fcff_margin_bps: 2000
+    - id: consumer_electronics
+      industry_contains: ["consumer electronics"]
+      target_fcff_margin_bps: 2400
+    - id: payments
+      industry_contains: ["credit services", payment]
+      target_fcff_margin_bps: 4500
+    - id: telecom
+      industry_contains: [telecom]
+      target_fcff_margin_bps: 1500
+    - id: pharma
+      industry_contains: ["drug manufacturer", pharma]
+      target_fcff_margin_bps: 1600
+    - id: oil_integrated
+      industry_contains: ["oil & gas integrated", "oil and gas integrated"]
+      target_fcff_margin_bps: 900
+    - id: oil_ep
+      industry_contains:
+        - "oil & gas e&p"
+        - "oil and gas e&p"
+        - "oil & gas exploration"
+        - "oil and gas exploration"
+      target_fcff_margin_bps: 900
+    - id: discount_store
+      industry_contains: ["discount store"]
+      target_fcff_margin_bps: 400
+    - id: home_improvement
+      industry_contains: ["home improvement"]
+      target_fcff_margin_bps: 1000
+    - id: household
+      industry_contains: [household, "personal products"]
+      target_fcff_margin_bps: 1800
+    - id: auto
+      industry_contains: ["auto manufacturer"]
+      target_fcff_margin_bps: 300
+
+sustaining_capex:
+  asset_renewal_rate_bps: 1000
+  min_revenue_bps: 200
+
+component:
+  material_revenue_bps: 500
+  financial_tokens: [financial, finance, credit]
+  instrument_tokens: [facility, revolving, allowance, receivable, line]
+  operating_tokens:
+    - automotive
+    - industrial
+    - manufacturing
+    - vehicles
+    - northamerica
+    - international
+  slice_tokens:
+    - country
+    - fairvalue
+    - portfolio
+    - elimination
+    - intersegment
+    - foreign
+    - hedging
+    - secured
+    - unsecured
+    - consumer
+    - commercial
+    - performing
+    - nonperforming
+    - swap
+    - lease
+    - pension
+    - plan
+    - us
+    - nonus
+    - geographic
+    - region
+    - domestic
+    - area
+  structural_local:
+    - operatingsegments
+    - corporatenonsegment
+    - eliminationsandreconcilingitems
+  finance_arm_tokens: [financial, finance, credit, capital]
+  legal_tokens: [inc, corp, corporation, ltd, llc, co, company, plc, sa, ag, the, and]
+
+issuer_yield:
+  min_remaining_years: 4.0
+  max_remaining_years: 15.0
+  min_yield_bps: 0
+  max_yield_bps: 5000
+
+residual_income:
+  franchise_persist_spread_bps: 500
+  gordon_epsilon_bps: 50
+  recent_roe_years: 4
+
+street_implied:
+  aligned_ape_bps: 200
+  discount_modest_bps: 200
+  discount_stretch_bps: 500
+  margin_modest_bps: 400
+  margin_stretch_bps: 1000
+  growth_modest_bps: 400
+  growth_stretch_bps: 1200
+  roe_modest_bps: 300
+  roe_stretch_bps: 800
+
+coverage_credit:
+  default_spread_bps: 1157
+  buckets:
+    - min_coverage: 12.50
+      spread_bps: 59
+    - min_coverage: 9.50
+      spread_bps: 70
+    - min_coverage: 7.50
+      spread_bps: 92
+    - min_coverage: 6.00
+      spread_bps: 107
+    - min_coverage: 4.50
+      spread_bps: 121
+    - min_coverage: 3.50
+      spread_bps: 147
+    - min_coverage: 3.00
+      spread_bps: 178
+    - min_coverage: 2.50
+      spread_bps: 221
+    - min_coverage: 2.00
+      spread_bps: 304
+    - min_coverage: 1.75
+      spread_bps: 359
+    - min_coverage: 1.50
+      spread_bps: 418
+    - min_coverage: 1.25
+      spread_bps: 519
+    - min_coverage: 0.80
+      spread_bps: 798
+    - min_coverage: 0.50
+      spread_bps: 895
+
+valuation_decision:
+  aligned_max_bps: 2500
+  tension_max_bps: 5000
+  wide_scenario_bps: 12000
+
+judgment:
+  identity_usable_max_width_bps: 12000
+
+operating:
+  disputed_difference_bps: 5000
+  hard_max_projection_years: 100
+  min_terminal_roic_spread_bps: 100
+
+source_continuity:
+  default_scale_ratio_threshold: 5
+  default_materiality_floor_dollars: 10000000
+  default_min_confident_series_length: 4
+
+sec_normalization:
+  minimum_duration_days: 325
+  maximum_duration_days: 380
+  material_acquisition_revenue_bps: 1000
+
+estimates_history:
+  min_base_move_bps: 50
+  min_coverage_gain: 5
+  max_daily_points: 180
+
+dcf_source:
+  min_annual_fcf_points: 3
+
+quant_lens:
+  min_horizon_windows: 10
+  row_upside_min_bps: -100000
+  row_upside_max_bps: 100000
+
+sector_benchmarks:
+  min_sector_members: 5
+
+score:
+  strong: 50
+  good: 15
+  high_confidence_analyst_count: 3
+
+robust_centre:
+  mad_to_deviation: 1.482602218505602
+  max_absolute_z: 3.0
+  min_observations: 3
+
+dip:
+  dip_atr_min: 1.0
+  atr_period: 14
+  dip_range: 20
+  macd_n: 3
+  imminent_hist_atr: 0.25
+  rsi_now_low: 25.0
+  rsi_now_high: 45.0
+  rsi_hot: 55.0
+  street_now_bps: 2000
+  street_almost_bps: 1500
+  f_floor: 0
+  now_cap: 120
+  later_cap: 80
+
+leftover:
+  street_door_bps: 500
+  stretch_primary_max: 1.0
+  stretch_out: 2.0
+  rsi_hot: 55.0
+  now_cap: 120
+  later_cap: 80
+
+macd_horizon:
+  align: 3
+  flat: 0
+  drag: -1
+
+price_path:
+  cluster_atr_frac: 0.50
+  min_zone_atr_frac: 0.30
+  max_zone_atr_frac: 1.50
+  atr_band_mult: 1.0
+  near_zone_atr: 0.35
+  in_zone_eps_atr: 0.05
+  max_motives: 3
+  sessions_cap: 120
+  bootstrap_paths: 200
+  bootstrap_min_returns: 40
+
+opportunity:
+  ranking_includes_quant_engine: false
+  dcf_opportunity_threshold_bps: 2000
+  dcf_expensive_threshold_bps: -1000
+  basis_points_per_unit: 10000.0
+  sector_adjusted_marker: "§"
+  valuation_panel_multiple_count: 3.0
+  legacy_avoid_below_score: 8
+  legacy_act_at_or_above_score: 10
+  continuous_avoid_below_score: 0
+  continuous_act_at_or_above_score: 30
+  v2:
+    fund_fcf_yield_lower: -0.02
+    fund_fcf_yield_upper: 0.08
+    fund_fcf_weight: 25.0
+    fund_ocf_fallback_weight: 10.0
+    fund_roe_lower_bps: 0.0
+    fund_roe_upper_bps: 2000.0
+    fund_roe_weight: 20.0
+    fund_growth_lower_bps: -500.0
+    fund_growth_upper_bps: 1500.0
+    fund_growth_weight: 15.0
+    fund_balance_de_low: 30.0
+    fund_balance_de_high: 200.0
+    fund_balance_weight: 20.0
+    fund_pe_low: 800.0
+    fund_pe_high: 3500.0
+    fund_pe_weight: 20.0
+    tech_trend_delta_bound: 0.10
+    tech_trend_20_50_weight: 24.0
+    tech_trend_50_200_weight: 21.0
+    tech_trend_price_20_weight: 15.0
+    tech_histogram_bound: 0.005
+    tech_histogram_weight: 25.0
+    tech_macd_direction_weight: 15.0
+    forecast_upside_lower_bps: -2000.0
+    forecast_upside_upper_bps: 5000.0
+    forecast_valuation_weight: 50.0
+    forecast_rec_low_hundredths: 150.0
+    forecast_rec_high_hundredths: 300.0
+    forecast_rec_weight: 15.0
+    forecast_min_analyst_opinions: 3
+    forecast_full_analyst_opinions: 15.0
+    forecast_breadth_weight: 20.0
+    forecast_uncertainty_bound: 0.6
+    forecast_uncertainty_weight: 10.0
+    forecast_freshness_weight: 5.0
+    forecast_freshness_half_life_seconds: 1209600.0
+    forecast_dcf_reliability: 0.75
+    forecast_min_reliable_evidence_weight: 25.0
+    fundamentals_full_weight: 100.0
+    technicals_full_weight: 100.0
+    composite_coverage_bonus: 5
+    composite_bound: 110
+  v3:
+    fund_fcf_yield_lower: -0.02
+    fund_fcf_yield_upper: 0.08
+    fund_fcf_weight: 22.0
+    fund_ocf_fallback_weight: 10.0
+    fund_roe_lower_bps: 0.0
+    fund_roe_upper_bps: 2000.0
+    fund_roe_weight: 16.0
+    fund_growth_lower_bps: -500.0
+    fund_growth_upper_bps: 1500.0
+    fund_growth_weight: 12.0
+    fund_balance_de_low: 30.0
+    fund_balance_de_high: 200.0
+    fund_balance_weight: 16.0
+    fund_valuation_weight: 24.0
+    fund_pe_low: 800.0
+    fund_pe_high: 3500.0
+    fund_ev_ebitda_low: 600.0
+    fund_ev_ebitda_high: 2000.0
+    fund_pb_low: 100.0
+    fund_pb_high: 500.0
+    fund_cash_quality_weight: 10.0
+    tech_trend_delta_bound: 0.10
+    tech_trend_price_20_weight: 12.0
+    tech_trend_20_50_weight: 18.0
+    tech_trend_50_200_weight: 15.0
+    tech_histogram_bound: 0.005
+    tech_histogram_weight: 12.0
+    tech_macd_direction_weight: 8.0
+    tech_rsi_weight: 25.0
+    tech_volume_weight: 10.0
+    tech_rsi_slope_bound: 2.0
+    tech_volume_ratio_low: 70.0
+    tech_volume_ratio_high: 150.0
+    forecast_upside_lower_bps: -2000.0
+    forecast_upside_upper_bps: 5000.0
+    forecast_valuation_weight: 42.0
+    forecast_rec_low_hundredths: 150.0
+    forecast_rec_high_hundredths: 300.0
+    forecast_rec_weight: 12.0
+    forecast_skew_weight: 12.0
+    forecast_min_analyst_opinions: 3
+    forecast_full_analyst_opinions: 15.0
+    forecast_breadth_weight: 14.0
+    forecast_uncertainty_bound: 0.6
+    forecast_analyst_uncertainty_weight: 8.0
+    forecast_dcf_uncertainty_weight: 8.0
+    forecast_dcf_width_lower: 0.2
+    forecast_dcf_width_upper: 1.0
+    forecast_freshness_weight: 4.0
+    forecast_freshness_half_life_seconds: 1209600.0
+    forecast_dcf_reliability: 0.75
+    forecast_min_reliable_evidence_weight: 25.0
+    fundamentals_full_weight: 100.0
+    technicals_full_weight: 100.0
+    composite_coverage_bonus: 5
+    composite_bound: 110
+    beta_haircut_max: 10.0
+    beta_haircut_mult_max: 2.5
+    beta_low_millis: 800.0
+    beta_high_millis: 1600.0
+  v4:
+    fund_sector_cheap_mult: 0.7
+    fund_sector_rich_mult: 1.5
+    fund_sector_roe_lower_offset_bps: -500.0
+    fund_sector_roe_upper_offset_bps: 1500.0
+    fund_share_count_weight: 10.0
+    fund_trend_weight: 6.0
+    fund_pulse_weight: 6.0
+    pulse_min_abs_eps_cents: 10
+    trend_max_years: 5
+    trend_min_transitions: 2
+    fund_share_count_shrink_bps: -300.0
+    fund_share_count_dilute_bps: 300.0
+    composite_agreement_bonus: 5
+    composite_bound: 110
+    spread_full: 38.5

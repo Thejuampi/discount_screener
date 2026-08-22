@@ -117,7 +117,8 @@ object ValuationJudgmentPolicy {
     const val POLICY_VERSION = "valuation-judgment/3+valuation-decision-policy/1"
 
     /** Thinkability cut. Distinct from WIDE_SCENARIO_BPS (soft quality), even when the number matches. */
-    const val IDENTITY_USABLE_MAX_WIDTH_BPS = 12_000
+    val IDENTITY_USABLE_MAX_WIDTH_BPS: Int
+        get() = ValuationPolicy.current.judgment.identityUsableMaxWidthBps
 
     /**
      * The analyst range decides. Our model is a reference number.
@@ -316,7 +317,8 @@ object ValuationJudgmentPolicy {
 
     private fun legalPair(analysis: DcfAnalysis): Boolean =
         when (analysis.businessClass) {
-            BusinessClass.OperatingNonFinancial -> analysis.model == ValuationModel.FcffWacc
+            BusinessClass.OperatingNonFinancial ->
+                analysis.model == ValuationModel.FcffWacc || analysis.model == ValuationModel.ComponentSum
             BusinessClass.FinancialServices -> analysis.model == ValuationModel.ResidualIncomeEquity
             BusinessClass.Unclassified, BusinessClass.NotEligible -> false
         }

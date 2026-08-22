@@ -37,6 +37,8 @@ import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.ScreenDataProjectionRequest
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRangeKey
+import com.discountscreener.core.model.HonestPathInputs
+import com.discountscreener.core.model.ValuationHonesty
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.model.WaccFieldSource
@@ -625,6 +627,60 @@ class ScreenDataProjectionEngineTest {
         ).requireSuccess()
     }
 
+    private fun projectInvertibleStreetSymbol(): ProjectedDashboardData {
+        var symbol = "INV1"
+        var analysis = dcf(
+            source = DcfSource.YahooFinance,
+            resolverState = ResolverState.Selected,
+            bearIntrinsicValueCents = 4_900L,
+            baseIntrinsicValueCents = 5_000L,
+            bullIntrinsicValueCents = 5_100L,
+        ).copy(
+            businessClass = BusinessClass.OperatingNonFinancial,
+            model = ValuationModel.FcffWacc,
+            honesty = ValuationHonesty.Honest,
+            latestRevenueDollars = 10_000_000_000L,
+            stableGrowthBps = 300,
+            honestPath = HonestPathInputs(
+                holdYears = 0,
+                fadeYears = 5,
+                startMarginBps = 1_500,
+                stableMarginBps = 1_500,
+                fadeExponentHundredths = 100,
+            ),
+        )
+        var streetDetail = detail(
+            symbol = symbol,
+            marketPriceCents = 3_000L,
+            intrinsicValueCents = 5_000L,
+            confidence = ConfidenceBand.High,
+            weightedExternalSignalFairValueCents = 9_000L,
+            weightedAnalystCount = 8,
+            externalSignalLowFairValueCents = 8_000L,
+            externalSignalHighFairValueCents = 10_000L,
+            analystOpinionCount = 8,
+        ).copy(
+            fundamentals = FundamentalSnapshot(
+                symbol = symbol,
+                sectorName = "Communication Services",
+                industryName = "Entertainment",
+                sharesOutstanding = 100_000_000L,
+            ),
+        )
+        return ScreenDataProjectionEngine().project(
+            ScreenDataProjectionRequest(
+                profile = ProjectionProfileFacts(currentProfile = "test"),
+                route = ProjectionRoute(selectedSymbol = symbol, selectedRange = ChartRange.Month),
+                nowEpochSeconds = 42L,
+                trackedSymbols = listOf(symbol),
+                detailsBySymbol = mapOf(symbol to streetDetail),
+                dcfBySymbol = mapOf(symbol to analysis),
+                symbolStateBySymbol = mapOf(symbol to liveState(symbol)),
+                candidateRows = listOf(candidateRow().copy(symbol = symbol)),
+            ),
+        ).requireSuccess()
+    }
+
     private fun projectSingleSymbol(
         symbol: String,
         detail: SymbolDetail,
@@ -700,6 +756,18 @@ class ScreenDataProjectionEngineTest {
         assertEquals(true, selected?.waccProvisional)
         assertTrue(selected?.waccAssumptionLabels?.contains("beta=default") == true)
         assertTrue(selected?.waccAssumptionLabels?.contains("market cap=price×shares") == true)
+    }
+
+    @Test
+    fun list_rows_skip_street_knob_inversion() {
+        var result = projectInvertibleStreetSymbol()
+        assertEquals(null, result.trackedRows.single().valuationJudgment?.streetImplied)
+    }
+
+    @Test
+    fun selected_detail_keeps_street_knob_inversion() {
+        var result = projectInvertibleStreetSymbol()
+        assertEquals(true, result.selectedDetail?.valuationJudgment?.streetImplied != null)
     }
 
     @Test

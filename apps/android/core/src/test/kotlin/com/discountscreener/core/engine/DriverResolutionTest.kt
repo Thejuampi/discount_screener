@@ -20,8 +20,38 @@ class DriverResolutionTest {
 
         assertEquals(700, resolved.costOfDebtBps)
         assertEquals(WaccFieldSource.MarketYield, resolved.costOfDebtSource)
-        assertEquals(listOf("2023"), resolved.validDebtPeriods)
+        assertEquals(listOf("2023-12-31"), resolved.validDebtPeriods)
         assertEquals(DriverEvidenceQuality.Provisional, resolved.quality)
+    }
+
+    @Test
+    fun current_instrument_yield_keeps_solid_rate_quality() {
+        var timeseries = financingTimeseries().copy(
+            marketYieldBps = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2023-12-31",
+                    value = 700.0,
+                    concept = "IssuerInstrumentYield:usd_4_15y_median",
+                ),
+            ),
+        )
+        var resolved = resolveRateInputs(timeseries, 120L, 430).getOrThrow()!!
+        assertEquals(DriverEvidenceQuality.Solid, resolved.quality)
+    }
+
+    @Test
+    fun current_instrument_yield_sets_published_kd() {
+        var timeseries = financingTimeseries().copy(
+            marketYieldBps = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2023-12-31",
+                    value = 700.0,
+                    concept = "IssuerInstrumentYield:usd_4_15y_median",
+                ),
+            ),
+        )
+        var resolved = resolveRateInputs(timeseries, 120L, 430).getOrThrow()!!
+        assertEquals(700, resolved.costOfDebtBps)
     }
 
     @Test
@@ -126,6 +156,30 @@ class DriverResolutionTest {
         )
         var resolved = resolveRateInputs(thin, 120L, 430).getOrThrow()!!
         assertEquals(WaccFieldSource.RatedOrSyntheticSpread, resolved.costOfDebtSource)
+    }
+
+    @Test
+    fun signed_net_interest_still_forms_a_coverage_coupon() {
+        var series = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2026-01-30",
+                    value = -1_406_000_000.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                ),
+            ),
+            totalDebt = listOf(AnnualReportedValue("2026-01-30", 39_820_000_000.0)),
+            pretaxIncome = listOf(AnnualReportedValue("2026-01-30", 8_747_000_000.0)),
+            marginalTaxRate = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2026-01-30",
+                    value = 0.21,
+                    concept = "IncomeTaxReconciliationAtFederalStatutoryIncomeTaxRate",
+                ),
+            ),
+        )
+        var resolved = resolveRateInputs(series, 39_820_000_000L, 470).getOrThrow()!!
+        assertTrue(resolved.validDebtPeriods.contains("2026-01-30"))
     }
 
     @Test

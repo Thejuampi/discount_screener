@@ -1,5 +1,6 @@
 package com.discountscreener.core.plan
 
+import com.discountscreener.core.engine.ValuationPolicy
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.HistoricalCandle
 import kotlin.math.abs
@@ -9,16 +10,26 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-private const val CLUSTER_ATR_FRAC = 0.50
-private const val MIN_ZONE_ATR_FRAC = 0.30
-private const val MAX_ZONE_ATR_FRAC = 1.50
-private const val ATR_BAND_MULT = 1.0
-private const val NEAR_ZONE_ATR = 0.35
-private const val IN_ZONE_EPS_ATR = 0.05
-const val MAX_MOTIVES = 3
-private const val SESSIONS_CAP = 120
-private const val BOOTSTRAP_PATHS = 200
-private const val BOOTSTRAP_MIN_RETURNS = 40
+private val CLUSTER_ATR_FRAC: Double
+    get() = ValuationPolicy.current.pricePath.clusterAtrFrac
+private val MIN_ZONE_ATR_FRAC: Double
+    get() = ValuationPolicy.current.pricePath.minZoneAtrFrac
+private val MAX_ZONE_ATR_FRAC: Double
+    get() = ValuationPolicy.current.pricePath.maxZoneAtrFrac
+private val ATR_BAND_MULT: Double
+    get() = ValuationPolicy.current.pricePath.atrBandMult
+private val NEAR_ZONE_ATR: Double
+    get() = ValuationPolicy.current.pricePath.nearZoneAtr
+private val IN_ZONE_EPS_ATR: Double
+    get() = ValuationPolicy.current.pricePath.inZoneEpsAtr
+val MAX_MOTIVES: Int
+    get() = ValuationPolicy.current.pricePath.maxMotives
+private val SESSIONS_CAP: Int
+    get() = ValuationPolicy.current.pricePath.sessionsCap
+private val BOOTSTRAP_PATHS: Int
+    get() = ValuationPolicy.current.pricePath.bootstrapPaths
+private val BOOTSTRAP_MIN_RETURNS: Int
+    get() = ValuationPolicy.current.pricePath.bootstrapMinReturns
 
 private data class Anchor(
     val kind: ZoneComponentKind,

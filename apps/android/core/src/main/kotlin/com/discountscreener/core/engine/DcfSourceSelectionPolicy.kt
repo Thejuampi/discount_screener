@@ -308,5 +308,6 @@ object DcfSourceSelectionPolicy {
             "${annualKey(point)}:${point.asOfDate}:${point.value}:${point.periodStart.orEmpty()}:${point.durationDays ?: "-"}:${point.source.name}:${point.concept.orEmpty()}"
         }
 
-    private const val MIN_ANNUAL_FCF_POINTS = 3
+    private val MIN_ANNUAL_FCF_POINTS: Int
+        get() = ValuationPolicy.current.dcfSource.minAnnualFcfPoints
 }

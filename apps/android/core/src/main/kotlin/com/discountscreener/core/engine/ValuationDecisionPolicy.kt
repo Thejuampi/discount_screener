@@ -13,9 +13,12 @@ import java.math.BigInteger
 
 /** Shared, presentation-independent valuation-anchor relation policy. */
 object ValuationDecisionPolicy {
-    const val ALIGNED_MAX_BPS = 2_500
-    const val TENSION_MAX_BPS = 5_000
-    const val WIDE_SCENARIO_BPS = 12_000
+    val ALIGNED_MAX_BPS: Int
+        get() = ValuationPolicy.current.valuationDecision.alignedMaxBps
+    val TENSION_MAX_BPS: Int
+        get() = ValuationPolicy.current.valuationDecision.tensionMaxBps
+    val WIDE_SCENARIO_BPS: Int
+        get() = ValuationPolicy.current.valuationDecision.wideScenarioBps
 
     /**
      * round(abs(a-b) / ((a+b)/2) * 10_000) using integer half-up rounding.

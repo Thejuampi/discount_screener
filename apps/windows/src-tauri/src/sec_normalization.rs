@@ -17,6 +17,12 @@ pub enum InvestmentCategory {
     /// issuer that invests through software files both, and reading only the
     /// tangible one understates reinvestment by whatever software costs.
     DevelopmentSoftware,
+    /// Cash paid for the oil and gas well program. Disjoint from office/plant
+    /// PPE on the same statement; not acreage acquisition.
+    DevelopmentWells,
+    /// Cash paid to buy intangibles (spectrum, licenses, purchased software).
+    /// Disjoint from PPE on the same statement; not a business acquisition.
+    DevelopmentIntangibles,
     PropertyAcquisition,
     BusinessAcquisition,
     UnclassifiedInvestment,
@@ -80,6 +86,10 @@ pub fn investment_category(qname: &str) -> InvestmentCategory {
         InvestmentCategory::Development
     } else if policy::DEVELOPMENT_SOFTWARE.contains(&qname) {
         InvestmentCategory::DevelopmentSoftware
+    } else if policy::DEVELOPMENT_WELLS.contains(&qname) {
+        InvestmentCategory::DevelopmentWells
+    } else if policy::DEVELOPMENT_INTANGIBLES.contains(&qname) {
+        InvestmentCategory::DevelopmentIntangibles
     } else if policy::PROPERTY_ACQUISITION.contains(&qname) {
         InvestmentCategory::PropertyAcquisition
     } else if policy::BUSINESS_ACQUISITION.contains(&qname) {
@@ -161,6 +171,8 @@ pub fn normalize_investments(
     let mut ledger = Vec::new();
     let mut approved_tangible = Vec::new();
     let mut approved_software = Vec::new();
+    let mut approved_wells = Vec::new();
+    let mut approved_intangibles = Vec::new();
     for fact in facts {
         let category = investment_category(&fact.qname);
         let state = match category {
@@ -168,25 +180,36 @@ pub fn normalize_investments(
                 EvidenceState::RejectedAcquisition
             }
             InvestmentCategory::UnclassifiedInvestment => EvidenceState::NoApprovedConcept,
-            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware
+            InvestmentCategory::Development
+            | InvestmentCategory::DevelopmentSoftware
+            | InvestmentCategory::DevelopmentWells
+            | InvestmentCategory::DevelopmentIntangibles
                 if fact.unit != "USD" =>
             {
                 EvidenceState::InvalidUnit
             }
-            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware
+            InvestmentCategory::Development
+            | InvestmentCategory::DevelopmentSoftware
+            | InvestmentCategory::DevelopmentWells
+            | InvestmentCategory::DevelopmentIntangibles
                 if !is_annual_duration(&fact) =>
             {
                 EvidenceState::MisalignedPeriod
             }
-            InvestmentCategory::Development | InvestmentCategory::DevelopmentSoftware => {
-                EvidenceState::Selected
-            }
+            InvestmentCategory::Development
+            | InvestmentCategory::DevelopmentSoftware
+            | InvestmentCategory::DevelopmentWells
+            | InvestmentCategory::DevelopmentIntangibles => EvidenceState::Selected,
         };
         let index = ledger.len();
         if state == EvidenceState::Selected {
             match category {
                 InvestmentCategory::DevelopmentSoftware => {
                     approved_software.push((index, fact.clone()))
+                }
+                InvestmentCategory::DevelopmentWells => approved_wells.push((index, fact.clone())),
+                InvestmentCategory::DevelopmentIntangibles => {
+                    approved_intangibles.push((index, fact.clone()))
                 }
                 _ => approved_tangible.push((index, fact.clone())),
             }
@@ -198,37 +221,54 @@ pub fn normalize_investments(
         });
     }
 
-    // Each component class resolves its own equivalents first; the two classes
+    // Each component class resolves its own equivalents first; the classes
     // are then summed, because they are different lines on the same statement.
     let recurring_development_by_end =
         select_one_equivalent_per_end(approved_tangible, &mut ledger);
     let software_development_by_end = select_one_equivalent_per_end(approved_software, &mut ledger);
+    let wells_development_by_end = select_one_equivalent_per_end(approved_wells, &mut ledger);
+    let intangible_development_by_end =
+        select_one_equivalent_per_end(approved_intangibles, &mut ledger);
 
     let mut development_total_by_end = BTreeMap::<String, i64>::new();
     for end in recurring_development_by_end
         .keys()
         .chain(software_development_by_end.keys())
+        .chain(wells_development_by_end.keys())
+        .chain(intangible_development_by_end.keys())
     {
         if development_total_by_end.contains_key(end) {
             continue;
         }
         let tangible = recurring_development_by_end.get(end);
         let software = software_development_by_end.get(end);
+        let wells = wells_development_by_end.get(end);
+        let intangibles = intangible_development_by_end.get(end);
         // `PaymentsToAcquireProductiveAssets` is defined by us-gaap as the cash
-        // outflow for PP&E, software and other intangibles — the software
-        // component is already inside it, so adding it would count that spend
-        // twice. `PaymentsToAcquirePropertyPlantAndEquipment` is tangible by
+        // outflow for PP&E, software and other intangibles — those components
+        // are already inside it, so adding them would count that spend twice.
+        // `PaymentsToAcquirePropertyPlantAndEquipment` is tangible by
         // definition and carries no such overlap.
         let aggregate_tangible = tangible
             .is_some_and(|fact| policy::DEVELOPMENT_AGGREGATE.contains(&fact.qname.as_str()));
+        let explore_is_the_well_program = tangible
+            .is_some_and(|fact| fact.qname == "PaymentsToExploreAndDevelopOilAndGasProperties");
         let magnitude = tangible.map_or(0, |fact| fact.value_dollars.abs())
             + software
+                .filter(|_| !aggregate_tangible)
+                .map_or(0, |fact| fact.value_dollars.abs())
+            + wells
+                .filter(|_| !explore_is_the_well_program)
+                .map_or(0, |fact| fact.value_dollars.abs())
+            + intangibles
                 .filter(|_| !aggregate_tangible)
                 .map_or(0, |fact| fact.value_dollars.abs());
         // Issuers file these outflows with either sign. Preserve whichever the
         // dominant component used so downstream sign handling is unchanged.
         let negative = tangible
             .or(software)
+            .or(wells)
+            .or(intangibles)
             .is_some_and(|fact| fact.value_dollars < 0);
         development_total_by_end.insert(end.clone(), if negative { -magnitude } else { magnitude });
     }
@@ -282,6 +322,20 @@ mod tests {
         assert_eq!(
             normalized.ledger[1].state,
             EvidenceState::RejectedAcquisition
+        );
+    }
+
+    /// Comcast FY2025 as filed: $11.750B of PPE and $2.658B of intangible
+    /// purchases (spectrum, licenses). The intangible line is not M&A.
+    #[test]
+    fn intangible_purchases_are_summed_with_plant() {
+        let normalized = normalize_investments([
+            fact("PaymentsToAcquirePropertyPlantAndEquipment", 11_750_000_000),
+            fact("PaymentsToAcquireIntangibleAssets", 2_658_000_000),
+        ]);
+        assert_eq!(
+            normalized.development_total_by_end["2024-12-31"],
+            14_408_000_000
         );
     }
 
@@ -341,10 +395,14 @@ mod tests {
 
     #[test]
     fn generated_contract_policy_is_the_category_source() {
-        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/8");
+        assert_eq!(POLICY_FINGERPRINT, "sec-driver-normalization/11");
         assert_eq!(
             investment_category("PaymentsToExploreAndDevelopOilAndGasProperties"),
             InvestmentCategory::Development
+        );
+        assert_eq!(
+            investment_category("PaymentsToAcquireOilAndGasPropertyAndEquipment"),
+            InvestmentCategory::DevelopmentWells
         );
         assert_eq!(
             investment_category("PaymentsToAcquireOilAndGasProperty"),

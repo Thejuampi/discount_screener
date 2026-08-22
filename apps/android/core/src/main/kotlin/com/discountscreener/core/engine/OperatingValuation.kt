@@ -12,8 +12,10 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import java.math.BigInteger
 
-const val DISPUTED_DIFFERENCE_BPS = 5_000L
-private const val HARD_MAX_PROJECTION_YEARS = 100
+val DISPUTED_DIFFERENCE_BPS: Long
+    get() = ValuationPolicy.current.operating.disputedDifferenceBps
+private val HARD_MAX_PROJECTION_YEARS: Int
+    get() = ValuationPolicy.current.operating.hardMaxProjectionYears
 
 object OperatingValuation {
     const val ENGINE_VERSION = "operating-valuation-router/2"
@@ -500,7 +502,8 @@ private fun projectionYears(policy: ProjectionPolicy): Int? = try {
  * and it deliberately sits just above `g` rather than at the cost of capital. Mirrors the FCFF
  * lane's `minimumTerminalSpreadBps`.
  */
-const val MIN_TERMINAL_ROIC_SPREAD_BPS: Int = 100
+val MIN_TERMINAL_ROIC_SPREAD_BPS: Int
+    get() = ValuationPolicy.current.operating.minTerminalRoicSpreadBps
 
 /**
  * Share of terminal earnings that is actually distributable (bps of earnings).

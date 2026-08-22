@@ -303,7 +303,7 @@ open class SQLiteStateStore(
         throw IllegalStateException("sqlite schema version $oldVersion is newer than supported version $newVersion")
     }
 
-    suspend fun loadWarmStart(symbols: Collection<String>? = null): PersistenceBootstrap = withContext(ioDispatcher) {
+    open suspend fun loadWarmStart(symbols: Collection<String>? = null): PersistenceBootstrap = withContext(ioDispatcher) {
         val db = readableDatabase
         setMetaValue(db, META_KEY_LAST_STARTUP_AT, nowEpochSeconds().toString())
         PersistenceBootstrap(
@@ -815,7 +815,7 @@ open class SQLiteStateStore(
         }
     }
 
-    suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(ioDispatcher) {
+    open suspend fun loadRevisionHistory(symbol: String): List<PersistedRevisionRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         db.rawQuery(
             """
@@ -1509,7 +1509,7 @@ open class SQLiteStateStore(
         }
     }
 
-    suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
+    open suspend fun loadPricingHistory(symbol: String): List<PersistedChartRecord> = withContext(ioDispatcher) {
         val db = readableDatabase
         mergePersistedChartHistory(
             symbol = symbol,
@@ -1845,7 +1845,7 @@ open class SQLiteStateStore(
         }
     }
 
-    suspend fun loadScoringPreferences(): ScoringPreferences = withContext(ioDispatcher) {
+    open suspend fun loadScoringPreferences(): ScoringPreferences = withContext(ioDispatcher) {
         val db = readableDatabase
         ScoringPreferences(
             opportunityModel = loadMetaValue(db, META_KEY_SCORING_OPPORTUNITY_MODEL)
@@ -1989,7 +1989,7 @@ open class SQLiteStateStore(
      *
      * The whole pass is one transaction, so a journal can never hold half of a day's scores.
      */
-    suspend fun appendScoreJournal(
+    open suspend fun appendScoreJournal(
         rows: List<ScoreJournalRow>,
         retentionSeconds: Long,
         nowEpochSeconds: Long = nowEpochSeconds(),

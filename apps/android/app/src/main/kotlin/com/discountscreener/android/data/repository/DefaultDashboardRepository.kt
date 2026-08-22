@@ -25,6 +25,8 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.QUOTE_BATCH_SIZE
 import com.discountscreener.android.data.remote.QuoteBatchEntry
 import com.discountscreener.android.data.remote.ResidualCompanyFactsProvider
+import com.discountscreener.android.data.remote.IssuerComponentLookup
+import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
@@ -40,8 +42,7 @@ import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
 import com.discountscreener.android.domain.model.DipSetupMemo
-import com.discountscreener.android.domain.model.LeftoverBoardAssembler
-import com.discountscreener.android.domain.model.PlanBoardAssembler
+import com.discountscreener.android.domain.model.PlanBoardMemo
 import com.discountscreener.core.plan.DipRowInput
 import com.discountscreener.core.plan.DipSignalEngine
 import com.discountscreener.core.plan.LeftoverSignalEngine
@@ -66,6 +67,11 @@ import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.IssuerYieldLookup
+import com.discountscreener.core.engine.IssuerYieldPoint
+import com.discountscreener.core.engine.PeerCouponEvidence
+import com.discountscreener.core.engine.lastFiledIssuerSample
+import com.discountscreener.core.engine.similarIssuerCoupons
 import com.discountscreener.core.engine.MarketParams
 import com.discountscreener.core.engine.MarketParamsSource
 import com.discountscreener.core.engine.ENGINE_VERSION
@@ -157,9 +163,9 @@ import com.discountscreener.core.regime.regimeFitTerms
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.job
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -317,6 +323,12 @@ class DefaultDashboardRepository(
      */
     private val marketParamsSource: MarketParamsSource = BootstrapMarketParamsSource,
     /**
+     * Current issuer-instrument yield for k_d. Empty when the source has no USD quote.
+     * Tests keep the default so the market-yield rung stays empty.
+     */
+    private val issuerYieldLookup: IssuerYieldLookup? = null,
+    private val componentLookup: IssuerComponentLookup? = null,
+    /**
      * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
      * Production leaves this null.
      */
@@ -332,6 +344,7 @@ class DefaultDashboardRepository(
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
+    private val adoptPersistMutex = Mutex()
     private val updates = MutableStateFlow(0L)
 
     private val loadsInFlight = AtomicInteger(0)
@@ -349,6 +362,9 @@ class DefaultDashboardRepository(
     private val residualFactsProvider: ResidualCompanyFactsProvider? =
         secondaryTimeseriesProvider as? ResidualCompanyFactsProvider
     private val residualChainRan = ConcurrentHashMap.newKeySet<String>()
+    private val liveDcfResolvedSymbols = ConcurrentHashMap.newKeySet<String>()
+    private val revisionHistoryHydrated = ConcurrentHashMap.newKeySet<String>()
+    private val pricingHistoryHydrated = ConcurrentHashMap.newKeySet<String>()
     private val screenDataProjectionEngine = ScreenDataProjectionEngine()
     private val discoveryCoordinator = DiscoveryCoordinator(
         stateStore = stateStore,
@@ -366,7 +382,10 @@ class DefaultDashboardRepository(
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dipSetups = DipSetupMemo(DipSignalEngine::evaluate)
     private val leftoverSetups = DipSetupMemo(LeftoverSignalEngine::evaluate)
+    private val planBoardMemo = PlanBoardMemo()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
+    private val issuerYieldBySymbol = linkedMapOf<String, IssuerYieldPoint>()
+    private val componentsBySymbol = linkedMapOf<String, IssuerComponentSet>()
 
     /**
      * Symbols the audited source was already asked for, so it is asked once and not once per open.
@@ -389,7 +408,10 @@ class DefaultDashboardRepository(
             var stale = dcfCache.filterValues { analysis ->
                 !analysis.reasonCodes.contains(params.fingerprint())
             }.keys.toList()
-            stale.forEach { symbol -> dcfCache.remove(symbol) }
+            stale.forEach { symbol ->
+                dcfCache.remove(symbol)
+                liveDcfResolvedSymbols.remove(symbol)
+            }
             evicted = stale.isNotEmpty()
         }
         if (evicted) {
@@ -399,6 +421,7 @@ class DefaultDashboardRepository(
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
     private val quantLensCache = linkedMapOf<String, QuantLensCacheEntry>()
     private val issues = linkedMapOf<String, PersistedIssueRecord>()
+    private var lastPersistedIssueFingerprint: Int? = null
     private val staleSymbols = linkedSetOf<String>()
     private val placeholderSymbols = linkedSetOf<String>()
     private val refreshedSymbols = linkedSetOf<String>()
@@ -422,7 +445,6 @@ class DefaultDashboardRepository(
 
     private var marketRegime: MarketRegime? = null
     private var marketReadAttempted = false
-    private var activeMarketReadJob: Job? = null
     private var regimeDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
     @Volatile
     private var regimeScoringEnabled = ScoringPreferences.DEFAULT_REGIME_ENABLED
@@ -439,6 +461,7 @@ class DefaultDashboardRepository(
     private var activeProfileSwitchJob: Job? = null
     private var activeRefreshJob: Job? = null
     private var activeEnrichmentJob: Job? = null
+    private var activeMarketReadJob: Job? = null
 
     /**
      * Held for the whole of [startRefresh], so a refresh replaces the one before it.
@@ -543,43 +566,78 @@ class DefaultDashboardRepository(
      * same governor and the same store as the refresh. Started beside the refresh it doubled the
      * calls on the wire while the list was still filling, and its write of two thousand years of
      * bars held the store's connection for forty-three seconds with the quotes waiting behind it.
-     * So it starts when the refresh has ended, from [finishRefresh], and is launched and forgotten:
-     * when a reading arrives it bumps [updates], the snapshot is rebuilt, and the fourth dimension
-     * appears. Until then every row reports it `Pending`, which is the truth.
+     * So it starts when the refresh has ended, from [finishRefresh]. A profile switch cancels this
+     * job and the generation gate drops a late write so the new universe does not inherit the old
+     * Yahoo pass.
      */
-    private suspend fun startMarketReadForCurrentProfile() {
-        val market = marketDataRepository
+    private suspend fun startMarketReadForCurrentProfile(generation: Long) {
+        var market = marketDataRepository
         if (market == null) {
-            repositoryScope.launch {
-                stateMutex.withLock { marketReadAttempted = true }
+            var published = stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    false
+                } else {
+                    marketReadAttempted = true
+                    true
+                }
+            }
+            if (published) {
                 updates.value = updates.value + 1
             }
             return
         }
-        // Tracked so a profile switch can stop it with the rest of the profile's work. It is one
-        // daily chart per tracked symbol through the same governor as the refresh, and left alone
-        // it kept a switched-away profile on the wire beside the new one.
-        val job = repositoryScope.launch(start = CoroutineStart.LAZY) {
-            val symbols = stateMutex.withLock { trackedSymbols.toList() }
-            val regime = runCatching { market.refreshIfStale(symbols) }.getOrNull()
-            val usable = regime != null && RegimeScoringPolicy.fromRegime(regime) != null
-            val dailySummaries = if (usable) market.cachedDailySummaries() else emptyMap()
-            stateMutex.withLock {
-                marketReadAttempted = true
-                if (regime != null) {
-                    marketRegime = regime
-                    if (usable) {
-                        regimeDailySummaries = dailySummaries
+        val previousJob = stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
+            val existing = activeMarketReadJob
+            activeMarketReadJob = null
+            existing
+        }
+        previousJob?.cancelAndJoin()
+        stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
+            activeMarketReadJob = repositoryScope.launch {
+                val thisJob = coroutineContext.job
+                try {
+                    var symbols = stateMutex.withLock { trackedSymbols.toList() }
+                    var regime = try {
+                        market.refreshIfStale(symbols)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    var usable = regime != null && RegimeScoringPolicy.fromRegime(regime) != null
+                    var dailySummaries = if (usable) market.cachedDailySummaries() else emptyMap()
+                    var shouldPublish = stateMutex.withLock {
+                        if (generation != activeProfileGeneration || activeMarketReadJob !== thisJob) {
+                            false
+                        } else {
+                            marketReadAttempted = true
+                            if (regime != null) {
+                                marketRegime = regime
+                                if (usable) {
+                                    regimeDailySummaries = dailySummaries
+                                }
+                            }
+                            true
+                        }
+                    }
+                    if (shouldPublish) {
+                        updates.value = updates.value + 1
+                    }
+                } finally {
+                    stateMutex.withLock {
+                        if (activeMarketReadJob === thisJob) {
+                            activeMarketReadJob = null
+                        }
                     }
                 }
             }
-            updates.value = updates.value + 1
         }
-        stateMutex.withLock {
-            activeMarketReadJob?.cancel()
-            activeMarketReadJob = job
-        }
-        job.start()
     }
 
     override suspend fun refreshAll(
@@ -676,15 +734,26 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
+        val generation = stateMutex.withLock { activeProfileGeneration }
         ensureAdHocSymbolLoaded(symbol)
+        if (stateMutex.withLock { generation != activeProfileGeneration }) {
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+        }
+        if (stateMutex.withLock { isDetailWarmLocked(symbol, selectedRange) }) {
+            ensureRevisionHistoryLoaded(symbol)
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+        }
         ensureRevisionHistoryLoaded(symbol)
         hydratePricingHistoryForDetail(symbol)
 
         var captures = mutableListOf<RawCapture>()
+        var wroteDcf = false
         var range = selectedRange
         var key = chartKey(symbol, range)
         if (stateMutex.withLock { chartCache[key] } == null) {
-            var candles = runCatching { yahooClient.fetchHistoricalCandles(symbol, range) }.getOrNull()
+            var candles = runCatching { yahooClient.fetchHistoricalCandles(symbol, range) }
+                .onFailure { error -> if (error is CancellationException) throw error }
+                .getOrNull()
             if (!candles.isNullOrEmpty()) {
                 stateMutex.withLock {
                     chartCache[key] = candles
@@ -715,8 +784,13 @@ class DefaultDashboardRepository(
                 secondaryAsked.add(symbol)
                 engine.ingestFundamentals(outcome.fundamentals)
                 putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+                liveDcfResolvedSymbols += symbol
             }
+            wroteDcf = true
         } else if (fundamentals != null && needsDcfResolve) {
+            var peers = peerCouponsFor(symbol, fundamentals)
+            var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
+            var components = resolveComponents(symbol, detailForDcf?.companyName)
             // The audited file is paid once per symbol. A symbol SEC has nothing for keeps its
             // Yahoo-sourced analysis, so it still needs resolving, and it must not pay again.
             val askSecondary = stateMutex.withLock { secondaryAsked.add(symbol) }
@@ -726,9 +800,19 @@ class DefaultDashboardRepository(
                     timeseries,
                     marketPriceCents,
                     marketParams(),
+                    peerCoupons = peers,
+                    issuerYield = issuerYield,
+                    components = components,
                 ).getOrThrow()
             }
             val resolvedAnalysis = analysisFromSelection(resolution.selection, fundamentals)
+            resolution.selection.timeseries?.let {
+                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
+                wroteDcf = true
+            } ?: run {
+                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
+                wroteDcf = resolvedAnalysis != null
+            }
             stateMutex.withLock {
                 resolution.selection.timeseries?.let { timeseries -> timeseriesCache[symbol] = timeseries }
                 // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
@@ -737,12 +821,20 @@ class DefaultDashboardRepository(
             captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
         }
 
-        val persistenceDelta = stateMutex.withLock {
-            appendRevisionLocked(symbol)
-            snapshotPersistenceDeltaLocked(captures, symbol)
+        if (captures.isNotEmpty() || wroteDcf) {
+            val persistenceDelta = stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    null
+                } else {
+                    appendRevisionLocked(symbol)
+                    snapshotPersistenceDeltaLocked(captures, symbol)
+                }
+            }
+            if (persistenceDelta != null) {
+                persistDelta(persistenceDelta, generation)
+                emitUpdate()
+            }
         }
-        persistDelta(persistenceDelta)
-        emitUpdate()
         return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
     }
 
@@ -868,8 +960,9 @@ class DefaultDashboardRepository(
             activeProfileGeneration
         }
         timedStage("switch.cancel-active-work") { cancelActiveProfileWork() }
+        marketDataRepository?.invalidate()
         val bootstrap = timedStage("switch.load-warm-start") { loadWarmStartOrReset(symbols) }
-        timedStage("switch.adopt-profile") { adoptProfileFromStore(profile, symbols, bootstrap) }
+        timedStage("switch.adopt-profile") { adoptProfileFromStore(profile, symbols, generation, bootstrap) }
         emitUpdate()
         logStageMillis("switch.to-first-emit", millisSince(switchStartedNanos), " symbols=${symbols.size}")
         val request = ProfileSwitchRequest(
@@ -877,24 +970,25 @@ class DefaultDashboardRepository(
             profile = profile,
             symbols = symbols,
         )
-        // The new load starts now. The load being left was cancelled above and is not waited for:
-        // its calls end as their sockets are cancelled, its results are dropped by the generation
-        // guard, and joining it here held the new profile off the wire for as long as the slowest
-        // of its twenty-four calls took.
-        val job = repositoryScope.launch {
-            try {
-                hydrateProfileSwitch(request)
-            } finally {
-                stateMutex.withLock {
-                    if (activeProfileGeneration == request.generation) {
-                        activeProfileSwitchJob = null
+        stateMutex.withLock {
+            if (activeProfileGeneration != generation) {
+                return request
+            }
+            // The new load starts now. The load being left was cancelled above and is not waited
+            // for: its calls end as their sockets are cancelled, its results are dropped by the
+            // generation guard, and joining it here held the new profile off the wire for as long
+            // as the slowest of its twenty-four calls took.
+            activeProfileSwitchJob = repositoryScope.launch {
+                val thisJob = coroutineContext.job
+                try {
+                    hydrateProfileSwitch(request)
+                } finally {
+                    stateMutex.withLock {
+                        if (activeProfileSwitchJob === thisJob) {
+                            activeProfileSwitchJob = null
+                        }
                     }
                 }
-            }
-        }
-        stateMutex.withLock {
-            if (activeProfileGeneration == generation) {
-                activeProfileSwitchJob = job
             }
         }
         return request
@@ -934,7 +1028,12 @@ class DefaultDashboardRepository(
 
     private suspend fun loadUniverse(profile: String) {
         var symbols = resolveProfileSymbols(profile)
-        adoptProfileFromStore(profile, symbols, loadWarmStartOrReset(symbols))
+        adoptProfileFromStore(
+            profile,
+            symbols,
+            stateMutex.withLock { activeProfileGeneration },
+            loadWarmStartOrReset(symbols),
+        )
         emitUpdate()
     }
 
@@ -962,9 +1061,13 @@ class DefaultDashboardRepository(
     private suspend fun adoptProfileFromStore(
         profile: String,
         symbols: List<String>,
+        generation: Long,
         bootstrap: PersistenceBootstrap,
     ) {
         stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
             resetInMemoryLocked()
             currentProfile = profile
             trackedSymbols = symbols.toMutableList()
@@ -983,9 +1086,14 @@ class DefaultDashboardRepository(
             )
         }
 
-        stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
-        stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
-        stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
+        adoptPersistMutex.withLock {
+            if (stateMutex.withLock { generation != activeProfileGeneration }) {
+                return@withLock
+            }
+            stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
+            stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
+            stateStore.replaceIssues(stateMutex.withLock { issues.values.toList() })
+        }
     }
 
     private suspend fun ensureAdHocSymbolLoaded(symbol: String) {
@@ -1000,6 +1108,8 @@ class DefaultDashboardRepository(
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
         var yearCandles = runCatching {
             yahooClient.fetchHistoricalCandles(normalizedSymbol, ChartRange.Year)
+        }.onFailure { error ->
+            if (error is CancellationException) throw error
         }.getOrDefault(emptyList())
         if (yearCandles.isNotEmpty()) {
             chartCaptures += ChartRange.Year to yearCandles
@@ -1063,6 +1173,9 @@ class DefaultDashboardRepository(
      * top of them.
      */
     private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
+        if (stateMutex.withLock { request.generation != activeProfileGeneration }) {
+            return
+        }
         // A profile switch carries no model of its own — the caller is changing the universe, not
         // the scoring — so the journal records the model the user is actually looking at.
         startRefresh(
@@ -1071,6 +1184,9 @@ class DefaultDashboardRepository(
             stateStore.loadScoringPreferences().opportunityModel,
             force = false,
         )
+        if (stateMutex.withLock { request.generation == activeProfileGeneration }) {
+            startMarketReadForCurrentProfile(request.generation)
+        }
     }
 
     private suspend fun startRefreshForCurrentProfile(
@@ -1098,6 +1214,9 @@ class DefaultDashboardRepository(
             refreshFirstSymbolLogged = false
 
             val (previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    return
+                }
                 val existingRefresh = activeRefreshJob
                 activeRefreshJob = null
                 val existingEnrichment = activeEnrichmentJob
@@ -1111,6 +1230,10 @@ class DefaultDashboardRepository(
             val skip = if (force) FreshCaptureSkip() else freshCaptureSkip(symbols, stateStore.loadRefreshMarks())
 
             stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    return
+                }
+                symbols.forEach { symbol -> liveDcfResolvedSymbols.remove(symbol) }
                 captureRefreshComparisonBaselineLocked()
                 refreshedSymbols.clear()
                 refreshAttemptedSymbols.clear()
@@ -1196,7 +1319,7 @@ class DefaultDashboardRepository(
         )
         emitUpdate()
         startEnrichment(symbolsToEnrich, generation, skip)
-        startMarketReadForCurrentProfile()
+        startMarketReadForCurrentProfile(generation)
     }
 
     private fun loadStarted() {
@@ -1551,6 +1674,9 @@ class DefaultDashboardRepository(
             runCatching { yahooClient.fetchHistoricalCandles(symbol, ChartRange.Year) }
         } else {
             null
+        }
+        chartResult?.exceptionOrNull()?.let { error ->
+            if (error is CancellationException) throw error
         }
         val chartCandles = chartResult?.getOrNull()
         val hasCachedDcfInputs = stateMutex.withLock {
@@ -1948,7 +2074,7 @@ class DefaultDashboardRepository(
             planBoard = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.planBoard") { PlanBoardAssembler.assemble(
+                timedPart("snapshot.planBoard") { planBoardMemo.dipOpportunities(
                     rows = opportunityRows,
                     yearCandlesBySymbol = opportunityRows.associate { row ->
                         row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
@@ -1962,7 +2088,7 @@ class DefaultDashboardRepository(
             planBoardProfile = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.planBoardProfile") { PlanBoardAssembler.assemble(
+                timedPart("snapshot.planBoardProfile") { planBoardMemo.dipProfile(
                     inputs = profileMemberInputsLocked(
                         opportunityRows = opportunityRows,
                         scoringModel = opportunityScoringModel,
@@ -1975,7 +2101,7 @@ class DefaultDashboardRepository(
             leftoverBoard = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.leftoverBoard") { LeftoverBoardAssembler.assemble(
+                timedPart("snapshot.leftoverBoard") { planBoardMemo.leftover(
                     inputs = leftoverInputsLocked(opportunityRows),
                     universeName = currentProfile,
                     evaluate = leftoverSetups::setup,
@@ -3187,6 +3313,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        planBoardMemo.clear()
         hydratedStates.forEach { state ->
             if (state.chartSummaries.isNotEmpty()) {
                 chartSummaries.getOrPut(state.symbol) { linkedMapOf() }.putAll(
@@ -3214,6 +3341,7 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun ensureRevisionHistoryLoaded(symbol: String) {
+        if (!revisionHistoryHydrated.add(symbol)) return
         val loaded = stateStore.loadRevisionHistory(symbol)
         stateMutex.withLock {
             val persistedHistory = loaded.mapNotNull { persisted ->
@@ -3241,6 +3369,7 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun hydratePricingHistoryForDetail(symbol: String) {
+        if (!pricingHistoryHydrated.add(symbol)) return
         val loaded = stateStore.loadPricingHistory(symbol)
         if (loaded.isEmpty()) return
         stateMutex.withLock { hydrateChartRecordsLocked(loaded) }
@@ -3332,11 +3461,18 @@ class DefaultDashboardRepository(
      * being issued, and the refresh runs at the speed the disk can absorb rather than the speed the
      * network can produce. Slower by the cost of the writes, and bounded.
      */
-    private suspend fun persistDelta(delta: PersistenceDelta) {
+    private suspend fun persistDelta(delta: PersistenceDelta, generation: Long? = null) {
+        if (generation != null && stateMutex.withLock { generation != activeProfileGeneration }) {
+            return
+        }
         if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
             stateStore.persistBatch(delta.rawCaptures, delta.revisions)
         }
-        stateStore.replaceIssues(delta.issues)
+        var issueFingerprint = delta.issues.hashCode()
+        if (issueFingerprint != lastPersistedIssueFingerprint) {
+            stateStore.replaceIssues(delta.issues)
+            lastPersistedIssueFingerprint = issueFingerprint
+        }
     }
 
     /** Writes what a round has gathered since its last write, in one transaction. */
@@ -3621,6 +3757,8 @@ class DefaultDashboardRepository(
             timeseries = timeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            issuerYield = cachedIssuerYield(symbol),
+            components = cachedComponents(symbol),
         ).getOrNull() ?: return null
         return TimeseriesFallback(
             snapshot = MarketSnapshot(
@@ -3642,6 +3780,9 @@ class DefaultDashboardRepository(
         providerFundamentals: FundamentalSnapshot?,
         chartCandles: List<HistoricalCandle>?,
     ): TimeseriesFallback? {
+        if (providerFundamentals == null || !isFinancialServices(providerFundamentals)) {
+            resolveIssuerYield(symbol, companyName)
+        }
         val selection = dcfSourceCoordinator.resolve(symbol, allowSecondary = false) { timeseries ->
             dcfFallbackFromTimeseries(
                 symbol = symbol,
@@ -3766,7 +3907,19 @@ class DefaultDashboardRepository(
         skip: FreshCaptureSkip = FreshCaptureSkip(),
     ) {
         if (symbols.isEmpty()) return
+        val previous = stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
+            val existing = activeEnrichmentJob
+            activeEnrichmentJob = null
+            existing
+        }
+        previous?.cancelAndJoin()
         stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
             // Re-open NotEligible once per enrichment cycle (FCF may have improved upstream).
             clearNotEligibleTimeseriesLocked(symbols)
             activeEnrichmentJob = repositoryScope.launch {
@@ -3777,7 +3930,7 @@ class DefaultDashboardRepository(
                 } finally {
                     withContext(NonCancellable) {
                         stateMutex.withLock {
-                            if (activeEnrichmentJob === thisJob) {
+                            if (generation == activeProfileGeneration && activeEnrichmentJob === thisJob) {
                                 activeEnrichmentJob = null
                             }
                         }
@@ -3935,12 +4088,18 @@ class DefaultDashboardRepository(
                     residualFundamentals = outcome.fundamentals
                     dcfAnalysis = outcome.analysis
                 } else if (fundamentals != null) {
+                    var peers = peerCouponsFor(symbol, fundamentals)
+                    var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
+                    var components = resolveComponents(symbol, detailForDcf?.companyName)
                     val evaluate: (FundamentalTimeseries) -> DcfAnalysis? = { selectedTimeseries ->
                         DcfAnalysisEngine.compute(
                             fundamentals,
                             selectedTimeseries,
                             marketPriceCents,
                             marketParams(),
+                            peerCoupons = peers,
+                            issuerYield = issuerYield,
+                            components = components,
                         ).getOrThrow()
                     }
                     // A DCF most often needs resolving because the market parameters moved, and a
@@ -4032,6 +4191,7 @@ class DefaultDashboardRepository(
                 analysis,
                 result.residualFundamentals ?: engine.detail(result.symbol)?.fundamentals,
             )
+            liveDcfResolvedSymbols += result.symbol
         }
 
         // Clear prior enrichment issues when this pass recovered chart/DCF data.
@@ -4071,6 +4231,10 @@ class DefaultDashboardRepository(
             dcfCache.remove(symbol)
             return
         }
+        if (cachedAnalysis.model == ValuationModel.ComponentSum && cachedComponents(symbol) == null) {
+            dcfCache.remove(symbol)
+            return
+        }
         val selectedTimeseries = timeseriesCache[symbol]
             ?: if (cachedAnalysis.model == ValuationModel.ResidualIncomeEquity) {
                 FundamentalTimeseries()
@@ -4083,6 +4247,9 @@ class DefaultDashboardRepository(
             timeseries = selectedTimeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            peerCoupons = peerCouponsLocked(symbol, fundamentals),
+            issuerYield = cachedIssuerYieldLocked(symbol),
+            components = cachedComponents(symbol),
         ).getOrNull()
         if (recomputed == null) {
             dcfCache.remove(symbol)
@@ -4104,6 +4271,64 @@ class DefaultDashboardRepository(
         )
     }
 
+    private suspend fun resolveIssuerYield(
+        symbol: String,
+        companyName: String?,
+    ): IssuerYieldPoint? {
+        var key = symbol.uppercase()
+        stateMutex.withLock { issuerYieldBySymbol[key] }?.let { return it }
+        var lookup = issuerYieldLookup ?: return null
+        var name = companyName?.trim()?.takeIf { it.isNotBlank() }
+            ?: stateMutex.withLock { companyNameBySymbol[symbol] ?: companyNameBySymbol[key] }
+        var point = withContext(ioDispatcher) {
+            runCatching { lookup.lookup(symbol, name) }.getOrNull()
+        } ?: return null
+        stateMutex.withLock { issuerYieldBySymbol[key] = point }
+        return point
+    }
+
+    private fun cachedIssuerYield(symbol: String): IssuerYieldPoint? =
+        issuerYieldBySymbol[symbol.uppercase()]
+
+    private fun cachedIssuerYieldLocked(symbol: String): IssuerYieldPoint? =
+        cachedIssuerYield(symbol)
+
+    private suspend fun resolveComponents(
+        symbol: String,
+        companyName: String?,
+    ): com.discountscreener.core.engine.IssuerComponentSet? {
+        var key = symbol.uppercase()
+        stateMutex.withLock { componentsBySymbol[key] }?.let { return it }
+        var lookup = componentLookup ?: return null
+        var name = companyName?.trim()?.takeIf { it.isNotBlank() }
+            ?: stateMutex.withLock { companyNameBySymbol[symbol] ?: companyNameBySymbol[key] }
+        var set = withContext(ioDispatcher) {
+            runCatching { lookup.lookup(symbol, name) }.getOrNull()
+        } ?: return null
+        stateMutex.withLock { componentsBySymbol[key] = set }
+        return set
+    }
+
+    private fun cachedComponents(symbol: String): com.discountscreener.core.engine.IssuerComponentSet? =
+        componentsBySymbol[symbol.uppercase()]
+
+    private suspend fun peerCouponsFor(
+        symbol: String,
+        subject: FundamentalSnapshot,
+    ): List<PeerCouponEvidence> = stateMutex.withLock { peerCouponsLocked(symbol, subject) }
+
+    private fun peerCouponsLocked(
+        symbol: String,
+        subject: FundamentalSnapshot,
+    ): List<PeerCouponEvidence> {
+        var samples = timeseriesCache.mapNotNull { (other, ts) ->
+            if (other.equals(symbol, ignoreCase = true)) return@mapNotNull null
+            var fund = engine.detail(other)?.fundamentals ?: return@mapNotNull null
+            lastFiledIssuerSample(other, fund.sectorName, fund.industryName, ts)
+        }
+        return similarIssuerCoupons(subject.sectorName, subject.industryName, samples)
+    }
+
     /**
      * Windows `ensure_model_routed_valuation` / `ingest_dcf_analysis` parity:
      * drop stale engine/policy, refuse Unclassified/NotEligible caches, and
@@ -4114,7 +4339,9 @@ class DefaultDashboardRepository(
         analysis: DcfAnalysis,
         fundamentals: FundamentalSnapshot? = null,
     ) {
-        if (!admitDcfAnalysisLocked(symbol, analysis, fundamentals)) return
+        if (!admitDcfAnalysisLocked(symbol, analysis, fundamentals)) {
+            return
+        }
         dcfCache[symbol] = analysis
     }
 
@@ -4123,13 +4350,23 @@ class DefaultDashboardRepository(
         analysis: DcfAnalysis,
         fundamentals: FundamentalSnapshot? = null,
     ): Boolean {
+        // Terminal NotEligible/Unavailable/ProviderUncertain markers are intentional coverage states
+        // built directly by the repository, not by DcfAnalysisEngine.compute(). RestoredOnly analyses
+        // (no live source) are recovered data that recompute never promotes back to Selected — see
+        // recomputeCachedDcfLocked. None of these carry fresh model reason codes, so policy-version
+        // admission does not apply to them — check this before isCurrentPolicy, or every analysis of
+        // this kind is refused on arrival.
+        if (
+            analysis.resolverState == ResolverState.NotEligible ||
+            analysis.resolverState == ResolverState.Unavailable ||
+            analysis.resolverState == ResolverState.ProviderUncertain ||
+            analysis.resolverState == ResolverState.RestoredOnly
+        ) {
+            return true
+        }
         if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
             dcfCache.remove(symbol)
             return false
-        }
-        // Terminal NotEligible markers are intentional coverage states (missing FCF), not model-family refuse.
-        if (analysis.resolverState == ResolverState.NotEligible) {
-            return true
         }
         val fund = fundamentals ?: engine.detail(symbol)?.fundamentals
         if (fund != null) {
@@ -4186,7 +4423,7 @@ class DefaultDashboardRepository(
         val current = dcfCache[symbol]
         val needsReplace = when (current?.model) {
             null -> true
-            ValuationModel.FcffWacc, ValuationModel.None -> true
+            ValuationModel.FcffWacc, ValuationModel.ComponentSum, ValuationModel.None -> true
             ValuationModel.ResidualIncomeEquity -> !DcfAnalysisEngine.isCurrentPolicy(current)
         }
         if (!needsReplace) return
@@ -4256,15 +4493,24 @@ class DefaultDashboardRepository(
 
     internal fun peekMarketParams(): MarketParams = lastMarketParams
 
+    private fun isDetailWarmLocked(symbol: String, range: ChartRange): Boolean {
+        if (engine.detail(symbol) == null) return false
+        if (chartCache[chartKey(symbol, range)] == null) return false
+        var fund = engine.detail(symbol)?.fundamentals
+        return fund == null || !needsDcfResolutionLocked(symbol)
+    }
+
     private fun needsDcfResolutionLocked(symbol: String): Boolean {
-        val analysis = dcfCache[symbol] ?: return true
-        if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
+        val analysis = dcfCache[symbol]
+        if (analysis != null && !DcfAnalysisEngine.isCurrentPolicy(analysis)) {
             dcfCache.remove(symbol)
+            liveDcfResolvedSymbols.remove(symbol)
             return true
         }
         var params = marketParams()
-        if (!analysis.reasonCodes.contains(params.fingerprint())) {
+        if (analysis != null && !analysis.reasonCodes.contains(params.fingerprint())) {
             dcfCache.remove(symbol)
+            liveDcfResolvedSymbols.remove(symbol)
             return true
         }
         val fund = engine.detail(symbol)?.fundamentals
@@ -4285,24 +4531,22 @@ class DefaultDashboardRepository(
             }
             if (
                 businessClass == BusinessClass.FinancialServices &&
-                analysis.model == ValuationModel.FcffWacc
+                analysis?.model == ValuationModel.FcffWacc
             ) {
                 return true
             }
         }
+        if (analysis == null) return symbol !in liveDcfResolvedSymbols
         return when (analysis.resolverState) {
             ResolverState.Selected ->
                 analysis.bearIntrinsicValueCents <= 0L ||
                     analysis.baseIntrinsicValueCents <= 0L ||
                     analysis.bullIntrinsicValueCents <= 0L
-            // Terminal until inputs change: re-open when fundamentals fingerprint moves or
-            // timeseries was cleared (e.g. start of enrichment after a full refresh).
             ResolverState.NotEligible -> shouldReevaluateNotEligibleLocked(symbol, analysis)
-            // Restored / unavailable / uncertain still need a live resolve pass.
-            ResolverState.RestoredOnly,
+            ResolverState.RestoredOnly -> symbol !in liveDcfResolvedSymbols
             ResolverState.Unavailable,
             ResolverState.ProviderUncertain,
-            ResolverState.Cancelled -> true
+            ResolverState.Cancelled -> symbol !in liveDcfResolvedSymbols
         }
     }
 
@@ -4464,9 +4708,14 @@ class DefaultDashboardRepository(
         trackedSymbols.clear()
         revisions.clear()
         chartCache.clear()
+        replayBackingCache.clear()
+        liveDcfResolvedSymbols.clear()
+        revisionHistoryHydrated.clear()
+        pricingHistoryHydrated.clear()
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        planBoardMemo.clear()
         dcfCache.clear()
         secondaryAsked.clear()
         timeseriesCache.clear()
@@ -4486,6 +4735,10 @@ class DefaultDashboardRepository(
         activeProfileSwitchJob = null
         activeRefreshJob = null
         activeEnrichmentJob = null
+        activeMarketReadJob = null
+        marketRegime = null
+        marketReadAttempted = false
+        regimeDailySummaries = emptyMap()
         refreshCompletedSymbols = 0
         refreshTargetSymbols = 0
         lastUpdatedAtEpochSeconds = null

@@ -80,6 +80,8 @@ The normalizer is a source adapter, not a second valuation engine. Its output is
 
 Post-QA valuation amendment (policy/12): acquisition evidence remains unchanged at the normalization boundary, but the valuation consumer no longer blanket-zeroes an entire recent window. Material acquisition cash in year Y excludes only growth Y−1→Y. At least two clean recent transitions with a clean latest transition retain their observed growth; otherwise near-term growth is zero with explicit provenance. Base FCFF margin is calculated from aligned annual FCFF identities, retaining negative and CapEx-expansion years.
 
+Policy/9: `PaymentsToAcquireOilAndGasPropertyAndEquipment` is a disjoint well-program development component. EOG-class issuers file it as the recurring CapEx line beside a smaller other-plant tag. `PaymentsToAcquireOilAndGasProperty` (no equipment) remains rejected acreage acquisition. When `PaymentsToExploreAndDevelopOilAndGasProperties` is the selected tangible tag, the well component is dropped so the wells are not counted twice.
+
 ## Verification
 
 **Commands:**

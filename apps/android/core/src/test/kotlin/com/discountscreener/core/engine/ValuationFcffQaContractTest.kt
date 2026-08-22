@@ -10,7 +10,7 @@ class ValuationFcffQaContractTest {
     @Test
     fun `nine-name QA evidence corpus is policy-versioned and keeps anchors out of inputs`() {
         val text = Files.readString(findContract())
-        assertTrue(text.contains("\"modelPolicyVersion\": \"$MODEL_POLICY_VERSION\""))
+        assertTrue(text.contains("\"modelPolicyVersion\": \"business-class-policy/36-ocf-prior-franchise\""))
         val orderedSymbols = Regex("\"symbol\"\\s*:\\s*\"([A-Z]+)\"")
             .findAll(text)
             .map { it.groupValues[1] }
