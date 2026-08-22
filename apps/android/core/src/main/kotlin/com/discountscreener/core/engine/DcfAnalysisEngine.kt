@@ -762,7 +762,15 @@ object DcfAnalysisEngine {
             else -> recentGrowths
         }
 
-        val priorOcfFranchise = hasPriorOcfFranchise(priorPoints.map { it.ocfMarginBps })
+        val priorOcfFranchise = if (priorPoints.isNotEmpty()) {
+            hasPriorOcfFranchise(priorPoints.map { it.ocfMarginBps })
+        } else {
+            // No separate prior window exists (history <= DRIVER_RECENT_WINDOW years).
+            // Draw the franchise evidence from the earlier years inside the recent
+            // window itself, excluding the latest (recovery) year, instead of always
+            // failing closed on an empty prior window.
+            hasPriorOcfFranchise(recentPoints.dropLast(1).map { it.ocfMarginBps })
+        }
         val recentOcfRising = !useCycleBlend && isNonDecreasing(recentOcfMargins)
         val ocfPersistentRecovery = recentOcfRising && priorOcfFranchise
         val ocfCentreWithoutPriorFranchise = recentOcfRising && !priorOcfFranchise

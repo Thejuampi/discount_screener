@@ -11,12 +11,9 @@ internal data class GeneratedSecDriverOperator(
 internal object GeneratedSecDriverNormalizationPolicy {
     const val fingerprint = "sec-driver-normalization/11"
     const val requiredUnit = "USD"
-    val minimumDurationDays: Int
-        get() = ValuationPolicy.current.secNormalization.minimumDurationDays
-    val maximumDurationDays: Int
-        get() = ValuationPolicy.current.secNormalization.maximumDurationDays
-    val materialAcquisitionRevenueBps: Int
-        get() = ValuationPolicy.current.secNormalization.materialAcquisitionRevenueBps
+    const val minimumDurationDays = 325
+    const val maximumDurationDays = 380
+    const val materialAcquisitionRevenueBps = 1000
     val acceptedForms = setOf(
         "10-K",
         "10-K/A",
