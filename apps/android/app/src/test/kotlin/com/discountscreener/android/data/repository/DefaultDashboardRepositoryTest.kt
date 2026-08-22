@@ -1343,8 +1343,10 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    // The quote and the chart are two separate passes now (see [finishRefresh]): a row goes Live
+    // from its quote alone, so a chart that never lands must not hold it back in Loading.
     @Test
-    fun chart_cancel_aborts_symbol() = runTest(dispatcher) {
+    fun chart_cancel_does_not_block_row_from_going_live() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
             val client = object : FakeYahooFinanceClient() {
@@ -1362,7 +1364,7 @@ class DefaultDashboardRepositoryTest {
 
             val snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, legacyModel)
             assertEquals(
-                TrackedRowState.Loading,
+                TrackedRowState.Live,
                 snapshot.trackedRows.first { row -> row.symbol == QA_EXCLUSIVE_LIVE_SYMBOL }.state,
             )
         } finally {

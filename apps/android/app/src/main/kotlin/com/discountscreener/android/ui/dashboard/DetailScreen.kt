@@ -882,6 +882,7 @@ private fun SnapshotContent(
                 scoreRow = scoreRow,
                 scoringModel = scoringModel,
                 regimeScoringEnabled = regimeScoringEnabled,
+                symbolNote = symbolNote,
                 onAction = onAction,
             )
         }

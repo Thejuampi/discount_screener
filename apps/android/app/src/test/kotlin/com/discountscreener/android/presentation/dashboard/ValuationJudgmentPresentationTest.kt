@@ -80,7 +80,7 @@ class ValuationJudgmentPresentationTest {
                 streetBaseCents = 28_000L,
             ).copy(horizonDays = 90, horizonPriceCents = 28_000L),
         )
-        assertEquals("Identity model", ui.horizonPriceLabel)
+        assertEquals("Our price", ui.horizonPriceLabel)
     }
 
     @Test

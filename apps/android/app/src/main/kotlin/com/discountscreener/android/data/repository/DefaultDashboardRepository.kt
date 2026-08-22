@@ -42,8 +42,7 @@ import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
 import com.discountscreener.android.domain.model.DipSetupMemo
-import com.discountscreener.android.domain.model.LeftoverBoardAssembler
-import com.discountscreener.android.domain.model.PlanBoardAssembler
+import com.discountscreener.android.domain.model.PlanBoardMemo
 import com.discountscreener.core.plan.DipRowInput
 import com.discountscreener.core.plan.DipSignalEngine
 import com.discountscreener.core.plan.LeftoverSignalEngine
@@ -383,6 +382,7 @@ class DefaultDashboardRepository(
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dipSetups = DipSetupMemo(DipSignalEngine::evaluate)
     private val leftoverSetups = DipSetupMemo(LeftoverSignalEngine::evaluate)
+    private val planBoardMemo = PlanBoardMemo()
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val issuerYieldBySymbol = linkedMapOf<String, IssuerYieldPoint>()
     private val componentsBySymbol = linkedMapOf<String, IssuerComponentSet>()
@@ -445,7 +445,6 @@ class DefaultDashboardRepository(
 
     private var marketRegime: MarketRegime? = null
     private var marketReadAttempted = false
-    private var activeMarketReadJob: Job? = null
     private var regimeDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
     @Volatile
     private var regimeScoringEnabled = ScoringPreferences.DEFAULT_REGIME_ENABLED
@@ -2075,7 +2074,7 @@ class DefaultDashboardRepository(
             planBoard = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.planBoard") { PlanBoardAssembler.assemble(
+                timedPart("snapshot.planBoard") { planBoardMemo.dipOpportunities(
                     rows = opportunityRows,
                     yearCandlesBySymbol = opportunityRows.associate { row ->
                         row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
@@ -2089,7 +2088,7 @@ class DefaultDashboardRepository(
             planBoardProfile = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.planBoardProfile") { PlanBoardAssembler.assemble(
+                timedPart("snapshot.planBoardProfile") { planBoardMemo.dipProfile(
                     inputs = profileMemberInputsLocked(
                         opportunityRows = opportunityRows,
                         scoringModel = opportunityScoringModel,
@@ -2102,7 +2101,7 @@ class DefaultDashboardRepository(
             leftoverBoard = if (skipBoardsDuringLoadLocked()) {
                 PlanBoard.EMPTY
             } else {
-                timedPart("snapshot.leftoverBoard") { LeftoverBoardAssembler.assemble(
+                timedPart("snapshot.leftoverBoard") { planBoardMemo.leftover(
                     inputs = leftoverInputsLocked(opportunityRows),
                     universeName = currentProfile,
                     evaluate = leftoverSetups::setup,
@@ -3314,6 +3313,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        planBoardMemo.clear()
         hydratedStates.forEach { state ->
             if (state.chartSummaries.isNotEmpty()) {
                 chartSummaries.getOrPut(state.symbol) { linkedMapOf() }.putAll(
@@ -3504,6 +3504,15 @@ class DefaultDashboardRepository(
      */
     private suspend fun cancelActiveProfileWork() {
         takeActiveProfileJobs().forEach { job -> job.cancel() }
+    }
+
+    private suspend fun takeActiveProfileJobs(): List<Job> = stateMutex.withLock {
+        val jobs = listOfNotNull(activeProfileSwitchJob, activeRefreshJob, activeEnrichmentJob, activeMarketReadJob)
+        activeProfileSwitchJob = null
+        activeRefreshJob = null
+        activeEnrichmentJob = null
+        activeMarketReadJob = null
+        jobs
     }
 
     private fun applyTransitionLocked(feedback: ProfileTransitionFeedback) {
@@ -4330,7 +4339,9 @@ class DefaultDashboardRepository(
         analysis: DcfAnalysis,
         fundamentals: FundamentalSnapshot? = null,
     ) {
-        if (!admitDcfAnalysisLocked(symbol, analysis, fundamentals)) return
+        if (!admitDcfAnalysisLocked(symbol, analysis, fundamentals)) {
+            return
+        }
         dcfCache[symbol] = analysis
     }
 
@@ -4339,13 +4350,23 @@ class DefaultDashboardRepository(
         analysis: DcfAnalysis,
         fundamentals: FundamentalSnapshot? = null,
     ): Boolean {
+        // Terminal NotEligible/Unavailable/ProviderUncertain markers are intentional coverage states
+        // built directly by the repository, not by DcfAnalysisEngine.compute(). RestoredOnly analyses
+        // (no live source) are recovered data that recompute never promotes back to Selected — see
+        // recomputeCachedDcfLocked. None of these carry fresh model reason codes, so policy-version
+        // admission does not apply to them — check this before isCurrentPolicy, or every analysis of
+        // this kind is refused on arrival.
+        if (
+            analysis.resolverState == ResolverState.NotEligible ||
+            analysis.resolverState == ResolverState.Unavailable ||
+            analysis.resolverState == ResolverState.ProviderUncertain ||
+            analysis.resolverState == ResolverState.RestoredOnly
+        ) {
+            return true
+        }
         if (!DcfAnalysisEngine.isCurrentPolicy(analysis)) {
             dcfCache.remove(symbol)
             return false
-        }
-        // Terminal NotEligible markers are intentional coverage states (missing FCF), not model-family refuse.
-        if (analysis.resolverState == ResolverState.NotEligible) {
-            return true
         }
         val fund = fundamentals ?: engine.detail(symbol)?.fundamentals
         if (fund != null) {
@@ -4694,6 +4715,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        planBoardMemo.clear()
         dcfCache.clear()
         secondaryAsked.clear()
         timeseriesCache.clear()

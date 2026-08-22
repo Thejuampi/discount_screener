@@ -1425,10 +1425,6 @@ class DashboardViewModelTest {
             detailHold?.complete(Unit)
         }
 
-        fun emitUpdate() {
-            updates.value = updates.value + 1
-        }
-
         override suspend fun bootstrap(
             filter: ViewFilter,
             selectedSymbol: String?,

@@ -8,7 +8,7 @@ import kotlin.math.roundToInt
  * Lifted out of [DcfAnalysisEngine], where it was written, so the scoring bucket can ask the same
  * question the valuation already asks. Two detectors that both answer "is this cyclical?" would
  * drift apart, and the screen would then show a name the DCF treats as cyclical and the score does
- * not. Nothing about the classification changed in the move.
+ * not.
  */
 internal enum class DriverRegime {
     SecularExpansion,
@@ -37,9 +37,11 @@ internal fun classifyDriverRegime(recentGrowths: List<Int>, priorGrowths: List<I
     val dispersion = quantileBps(recentGrowths, 0.75) - quantileBps(recentGrowths, 0.25)
     val priorMedian = medianBps(priorGrowths)
     return when {
+        recentMedian >= 1_000 && positiveShare >= 7_500 ->
+            DriverRegime.SecularExpansion
         recentMedian >= 500 && positiveShare >= 7_500 &&
             (priorGrowths.isEmpty() || recentMedian >= priorMedian) &&
-            (dispersion <= 4_000 || recentMedian >= 1_000) ->
+            dispersion <= 4_000 ->
             DriverRegime.SecularExpansion
         dispersion >= 2_000 || positiveShare <= 5_000 -> DriverRegime.CyclicalOrTransition
         else -> DriverRegime.StableOperating

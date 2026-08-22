@@ -3,6 +3,9 @@ package com.discountscreener.android.domain.model
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.plan.DipRowInput
+import com.discountscreener.core.plan.DipSetup
+import com.discountscreener.core.plan.DipSignalEngine
+import com.discountscreener.core.plan.LeftoverSignalEngine
 import com.discountscreener.core.plan.PlanBoard
 
 /**
@@ -17,12 +20,16 @@ class PlanBoardMemo {
     private var dipProfileKey: String? = null
     private var dipProfileBoard: PlanBoard? = null
 
-    fun leftover(inputs: List<DipRowInput>, universeName: String): PlanBoard {
+    fun leftover(
+        inputs: List<DipRowInput>,
+        universeName: String,
+        evaluate: (DipRowInput) -> DipSetup = LeftoverSignalEngine::evaluate,
+    ): PlanBoard {
         var key = fingerprint(universeName, inputs)
         leftoverBoard?.let { cached ->
             if (leftoverKey == key) return cached
         }
-        var board = LeftoverBoardAssembler.assemble(inputs, universeName)
+        var board = LeftoverBoardAssembler.assemble(inputs, universeName, evaluate)
         leftoverKey = key
         leftoverBoard = board
         return board
@@ -55,12 +62,16 @@ class PlanBoardMemo {
         return board
     }
 
-    fun dipProfile(inputs: List<DipRowInput>, universeName: String): PlanBoard {
+    fun dipProfile(
+        inputs: List<DipRowInput>,
+        universeName: String,
+        evaluate: (DipRowInput) -> DipSetup = DipSignalEngine::evaluate,
+    ): PlanBoard {
         var key = fingerprint(universeName, inputs)
         dipProfileBoard?.let { cached ->
             if (dipProfileKey == key) return cached
         }
-        var board = PlanBoardAssembler.assemble(inputs = inputs, universeName = universeName)
+        var board = PlanBoardAssembler.assemble(inputs = inputs, universeName = universeName, evaluate = evaluate)
         dipProfileKey = key
         dipProfileBoard = board
         return board
