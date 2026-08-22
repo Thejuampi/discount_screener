@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.remote
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Response
@@ -34,3 +35,37 @@ internal suspend fun Call.executeCancellable(): Response = suspendCancellableCor
     }
     continuation.resume(response) { response.close() }
 }
+
+/**
+ * [Response.body]'s `.string()`, with the body read ended when the coroutine is cancelled.
+ *
+ * The read runs on a dedicated thread because okio's blocking [okio.Source.read] has no
+ * suspension point of its own: a coroutine cancellation can't reach it just by marking the job
+ * cancelled. Closing the response body is what does — okio's slow reader sees the source close
+ * and unblocks, instead of running to its own read timeout or worse.
+ */
+internal suspend fun Call.readTextCancellable(response: Response): String =
+    suspendCancellableCoroutine { continuation ->
+        val reader = Thread({
+            try {
+                val text = response.body?.string().orEmpty()
+                if (continuation.isActive) {
+                    continuation.resume(text)
+                }
+            } catch (error: IOException) {
+                if (!continuation.isActive) {
+                    return@Thread
+                }
+                if (isCanceled() || canceledIo(error)) {
+                    continuation.cancel(CancellationException("call cancelled", error))
+                } else {
+                    continuation.resumeWithException(error)
+                }
+            }
+        }, "yahoo-body-reader")
+        continuation.invokeOnCancellation {
+            cancel()
+            response.close()
+        }
+        reader.start()
+    }

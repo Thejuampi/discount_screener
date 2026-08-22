@@ -590,7 +590,8 @@ open class YahooFinanceClient(
      */
     private suspend fun executeText(request: Request): String = governor.request {
         try {
-            httpClient.newCall(request).executeCancellable().use { response ->
+            val call = httpClient.newCall(request)
+            call.executeCancellable().use { response ->
                 val code = response.code
                 when {
                     code == RATE_LIMITED_CODE -> {
@@ -610,20 +611,19 @@ open class YahooFinanceClient(
                     }
 
                     !response.isSuccessful -> {
-                        val body = response.body?.string().orEmpty()
+                        val body = call.readTextCancellable(response)
                         RequestGovernor.Attempt.Failed(
                             retryable = false,
                             error = IOException("HTTP $code for ${request.url}: $body"),
                         )
                     }
 
+                    response.body == null -> {
+                        RequestGovernor.Attempt.Failed(false, IOException("empty response body"))
+                    }
+
                     else -> {
-                        val body = response.body?.string()
-                        if (body == null) {
-                            RequestGovernor.Attempt.Failed(false, IOException("empty response body"))
-                        } else {
-                            RequestGovernor.Attempt.Ok(body)
-                        }
+                        RequestGovernor.Attempt.Ok(call.readTextCancellable(response))
                     }
                 }
             }
