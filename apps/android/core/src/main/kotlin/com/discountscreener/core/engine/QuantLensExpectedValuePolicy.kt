@@ -182,9 +182,7 @@ object QuantLensExpectedValuePolicy {
         if (dcf == null || dcf.model == ValuationModel.None || anchors.size != 3) {
             return ModelQuality.Unusable
         }
-        val base = anchors[1]
-        val widthBps = ValuationDecisionPolicy.scenarioWidthBps(anchors[0], base, anchors[2]) ?: Int.MAX_VALUE
-        return if (dcf.waccInputs.isProvisional() || dcf.pointEstimateUnreliable || widthBps > ValuationDecisionPolicy.WIDE_SCENARIO_BPS) {
+        return if (ValuationDecisionPolicy.isSoftModel(dcf)) {
             ModelQuality.Soft
         } else {
             ModelQuality.Solid

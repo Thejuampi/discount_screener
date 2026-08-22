@@ -2,7 +2,7 @@
 title: Valuation judgment core object
 type: spec
 created: 2026-08-15
-status: ready-to-implement
+status: done (superseded by street-first /3, 2026-08-21)
 surface: Android core only
 sotp: out of scope
 review: sensei+advisor 2026-08-15; Tension no primary; class-refuse no Street primary
@@ -83,11 +83,19 @@ Inverted or non-positive Street is incomplete.
 
 ## Status rules
 
+> **Superseded 2026-08-21 (product call, Juan): the analyst range decides.** When a usable
+> Street book exists it is the primary and the stance is `Street`, whatever our model says.
+> Our model speaks alone only when no usable Street book exists. `Tension` and `Disputed`
+> stances are retired from production (`valuation-judgment/3`); the enum values stay for
+> parity and replay. The rows below describe the retired `/2` behavior.
+
 Reuse `ValuationDecisionPolicy` thresholds. Do not invent new bps gates.
 
-**Pair set (pinned):** identity **base** vs Street **base** only. Same ISO currency and same minor-unit scale. Call `ValuationDecisionPolicy.decide` on those two anchors. Do not invent a subset of other pairs.
+**Pair set (retired with `/2`):** identity **base** vs Street **base** only. Same ISO currency and same minor-unit scale. Call `ValuationDecisionPolicy.decide` on those two anchors. Do not invent a subset of other pairs.
 
 `Aligned` ≤ 2500. `Tension` 2501–5000. `Disputed` > 5000.
+
+Retired pair table (kept for history):
 
 | Condition | `relation` | `status` | `primaryCents` |
 | --- | --- | --- | --- |
@@ -109,7 +117,7 @@ Market price is not an input to status or `primaryCents`.
 
 Closed catalog. `Unavailable`, `Tension`, and `Disputed` always have ≥ 1 code.
 
-Copy class-refuse and soft codes onto the judgment even when Street is the primary.
+Copy class-refuse and soft codes onto the judgment even when Street is the primary. Under street-first (`/3`) this is load-bearing: a class-refused or soft identity beside a complete Street still carries its code beside `StreetPrimary`, and an incomparable currency/scale flags `IncomparableAnchors` without dethroning the Street primary.
 
 | Code | When |
 | --- | --- |
@@ -213,3 +221,27 @@ Goldens for bps cases use `ValuationDecisionPolicy.differenceBps` and the contra
 - ADR FR-2: `_bmad-output/planning-artifacts/android-valuation-decision-adr-2026-07-30.md`
 - FEM: `valuation-forward-earnings-multiple-v1.json` (diagnostic)
 - Operating FCFF vs earnings-power router: `spec-evidence-routed-operating-valuation-core.md` (separate; do not merge)
+
+## Review Findings
+
+Code review 2026-08-21, full PR #41 stack (`644e0cc4..6477c722`), four layers (blind hunter, edge-case hunter, verification gap, acceptance auditor). The diff deliberately reverses the status table below (L84–112) per an in-session product call; the decision items ratify that reversal.
+
+### Decision needed
+
+- [x] [Review][Decision] Ratify the street-first reversal in its artifacts — the code matches the in-session product call (analyst range decides; our price never primary while street exists; no manufactured Tension/Disputed), but spec rows L99–102 and L112, FR-2 intent, ACs 8–12/18, and `project-context.md` rule "Valuation judgment is a core object above identity" still state the old semantics, and `POLICY_VERSION` still pins them. Open sub-question: under street-first, does the relation layer stay hardcoded `SingleSource` even when both families are complete (current code), or does it keep geometry (`Aligned`/`Tension`/`Disputed` as relation-only display)? Options: (1) amend spec + context rule + bump version, relation stays SingleSource; (2) same doc updates but restore geometry relation; (3) revert code to the old status table.
+- [x] [Review][Decision] Reference-line placement on primary stances — `judgmentReferenceLines` now renders under every stance (`DetailScreen.kt:1379`). One layer counts triple rendering of the same two series on Identity/Street stances (headline block, range chart, reference FlowRow); another notes no compose-level test would catch a regression that hides them again. Choose: keep always-on and add a DOM-scoped test, or deduplicate the rendering.
+
+### Patch
+
+- [x] [Review][Patch] Copy class-refuse, soft, and incomparable codes onto Street-primary judgments [`ValuationJudgmentPolicy.kt:139`] — spec L112 requires it; refusal reasons must surface even when Street is primary.
+- [x] [Review][Patch] Bump `POLICY_VERSION` to `valuation-judgment/3` [`ValuationJudgmentPolicy.kt:117`]
+- [x] [Review][Patch] Harden street-independence tripwire: add pricetarget/consensus/rating markers, walk superclasses, drop duplicate DcfAnalysis rescan, soften KDoc overclaim [`ValuationEngineStreetIndependenceTest.kt`]
+- [x] [Review][Patch] Remove dead `quantLens` parameter from `DetailScoreHeader` after the header rail moved [`DetailScreen.kt:351`]
+- [x] [Review][Patch] Fix impossible fixture `Street` + `Aligned` and decouple fan fields from `horizonPriceCents = null` [`OurPriceIsSecondaryTest.kt:70`]
+- [x] [Review][Patch] Restore alphabetical import order for `Offset` [`DetailScreen.kt:9`]
+- [x] [Review][Patch] Compose test: both reference lines render while a primary shows [`DetailScreen` test scope] — resolved by decision 2: after the dedupe, reference lines belong to the no-primary branch only. Placement restored there and pinned by the pure-function tests in `OurPriceIsSecondaryTest`; a compose-level assert was judged disproportionate for a six-line `else` branch and stays available via the `RangeRailBelongsToTheLensTabTest` pattern if the card grows again.
+
+### Deferred
+
+- [x] [Review][Defer] Dip and Leftover keep their own quality rule without the provisional-WACC term [`LeftoverSignalEngine.kt:156`] — deferred, pre-existing
+- [x] [Review][Defer] `scenarioWidthBps` can throw on pathological fans via `intValueExact` [`ValuationDecisionPolicy.kt:36`] — deferred, pre-existing

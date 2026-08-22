@@ -59,6 +59,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -347,7 +348,6 @@ private fun DetailScoreHeader(
     scoreRow: OpportunityListRow?,
     scoringModel: OpportunityScoringModel,
     regimeScoringEnabled: Boolean,
-    quantLens: QuantLensUiState?,
     symbolNote: String,
     onAction: (DashboardAction) -> Unit,
 ) {
@@ -441,11 +441,6 @@ private fun DetailScoreHeader(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // The same rail the Lens tab draws, moved up to where the score is read. Nothing is
-            // recomputed: the section builds it, and this shows it or shows nothing.
-            headlineEvRail(quantLens)?.let { rail ->
-                EvRangeRail(model = rail, modifier = Modifier.fillMaxWidth().height(56.dp))
-            }
             if (outcome.showCaveat) {
                 Text(
                     text = OUTCOME_CONFIDENCE_UNMEASURED_NOTE,
@@ -837,7 +832,6 @@ private fun SnapshotContent(
                 scoreRow = scoreRow,
                 scoringModel = scoringModel,
                 regimeScoringEnabled = regimeScoringEnabled,
-                quantLens = quantLens,
                 symbolNote = symbolNote,
                 onAction = onAction,
             )
@@ -1168,6 +1162,16 @@ private fun QuantLensSection(section: QuantLensSectionUi, onAction: (DashboardAc
     }
 }
 
+/** Marks the one rail on the screen, so a test can prove no second one is drawn elsewhere. */
+internal const val EV_RANGE_RAIL_TAG: String = "ev-range-rail"
+
+/**
+ * The upside interval, drawn where the reader went to look at valuation.
+ *
+ * It lives in the Lens tab alone. On the Snapshot header it drew for a scenario-weighted name and
+ * drew nothing for a name whose sources were in tension, so two tickers side by side showed two
+ * different screens for the same question.
+ */
 @Composable
 private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) {
     val trackColor = MaterialTheme.colorScheme.outlineVariant
@@ -1176,7 +1180,7 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
     val baseColor = MaterialTheme.colorScheme.primary
     val muteAlpha = 0.4f
 
-    Canvas(modifier = modifier) {
+    Canvas(modifier = modifier.testTag(EV_RANGE_RAIL_TAG)) {
         val padding = 24.dp.toPx()
         val availableWidth = size.width - 2 * padding
         val midY = size.height / 2f
@@ -1194,8 +1198,8 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
         // track
         drawLine(
             color = trackColor.copy(alpha = trackAlpha),
-            start = androidx.compose.ui.geometry.Offset(xLow, midY),
-            end = androidx.compose.ui.geometry.Offset(xHigh, midY),
+            start = Offset(xLow, midY),
+            end = Offset(xHigh, midY),
             strokeWidth = 1.5.dp.toPx(),
         )
 
@@ -1204,8 +1208,8 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
             val xZero = xFor(0)
             drawLine(
                 color = trackColor.copy(alpha = trackAlpha),
-                start = androidx.compose.ui.geometry.Offset(xZero, midY - 10.dp.toPx()),
-                end = androidx.compose.ui.geometry.Offset(xZero, midY + 10.dp.toPx()),
+                start = Offset(xZero, midY - 10.dp.toPx()),
+                end = Offset(xZero, midY + 10.dp.toPx()),
                 strokeWidth = 1.dp.toPx(),
             )
         }
@@ -1216,7 +1220,7 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
         drawCircle(
             color = bearColor.copy(alpha = markerAlpha),
             radius = markerRadius,
-            center = androidx.compose.ui.geometry.Offset(xLow, midY),
+            center = Offset(xLow, midY),
             style = Stroke(width = 1.5.dp.toPx()),
         )
 
@@ -1224,7 +1228,7 @@ private fun EvRangeRail(model: EvRangeRailModel, modifier: Modifier = Modifier) 
         drawCircle(
             color = bullColor.copy(alpha = markerAlpha),
             radius = markerRadius,
-            center = androidx.compose.ui.geometry.Offset(xHigh, midY),
+            center = Offset(xHigh, midY),
             style = Stroke(width = 1.5.dp.toPx()),
         )
 
@@ -1370,6 +1374,9 @@ private fun JudgmentValuationSection(
             text = "Price ${money(detail.marketPriceCents)}",
             style = MaterialTheme.typography.labelMedium,
         )
+        // With no primary the card would otherwise be a stance token alone, so this is where the
+        // reader gets both series. When a primary exists they already render above; repeating
+        // them here printed the same numbers three times on one screen.
         judgmentReferenceLines(ui).forEach { line ->
             Text(
                 text = line,
@@ -3569,7 +3576,8 @@ internal fun ownModelLines(ui: ValuationJudgmentUi): List<String> = buildList {
     ui.cashIdentityCents?.takeIf { it != ui.horizonPriceCents }?.let { add("${ui.cashLabel} ${money(it)}") }
 }
 
-private fun judgmentReferenceLines(ui: ValuationJudgmentUi): List<String> = buildList {
+/** Every series the judgment holds: our fan, the analyst range, the justified multiple. */
+internal fun judgmentReferenceLines(ui: ValuationJudgmentUi): List<String> = buildList {
     ui.identityBaseCents?.let { base ->
         var label = ui.identityModelLabel ?: "Identity"
         add(

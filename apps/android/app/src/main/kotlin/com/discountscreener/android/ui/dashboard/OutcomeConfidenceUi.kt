@@ -1,9 +1,6 @@
 package com.discountscreener.android.ui.dashboard
 
-import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
-import com.discountscreener.android.presentation.dashboard.QuantLensUiState
 import com.discountscreener.core.model.OutcomeConfidence
-import com.discountscreener.core.model.QuantLensLensId
 
 /**
  * The outcome range, as one line the reader can act on.
@@ -34,14 +31,3 @@ internal fun outcomeConfidenceUi(band: OutcomeConfidence, widthBps: Int?): Outco
         OutcomeConfidence.Wide -> OutcomeConfidenceUi("Outcome range · Wide · $span", showCaveat = false)
     }
 }
-
-/**
- * The upside interval the Lens tab already draws, lifted to the header.
- *
- * Nothing new is computed. The section builds the rail only when all three points exist and the
- * range is scenario-weighted, so a header rail means the same thing there as it does here.
- */
-internal fun headlineEvRail(quantLens: QuantLensUiState?): EvRangeRailModel? = quantLens
-    ?.sections
-    ?.firstOrNull { section -> section.lensId == QuantLensLensId.ExpectedValueRange }
-    ?.evRailModel

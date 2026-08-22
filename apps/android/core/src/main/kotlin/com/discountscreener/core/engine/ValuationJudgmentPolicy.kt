@@ -6,7 +6,6 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ValuationAnchor
 import com.discountscreener.core.model.ValuationAnchorSource
 import com.discountscreener.core.model.ValuationAvailability
-import com.discountscreener.core.model.ValuationConfidence
 import com.discountscreener.core.model.ValuationCoverage
 import com.discountscreener.core.model.ValuationFreshness
 import com.discountscreener.core.model.ValuationModel
@@ -115,11 +114,19 @@ data class ValuationJudgment(
 }
 
 object ValuationJudgmentPolicy {
-    const val POLICY_VERSION = "valuation-judgment/2+valuation-decision-policy/1"
+    const val POLICY_VERSION = "valuation-judgment/3+valuation-decision-policy/1"
 
     /** Thinkability cut. Distinct from WIDE_SCENARIO_BPS (soft quality), even when the number matches. */
     const val IDENTITY_USABLE_MAX_WIDTH_BPS = 12_000
 
+    /**
+     * The analyst range decides. Our model is a reference number.
+     *
+     * The model is experimental, so it never names the primary while a usable analyst range
+     * exists, and it never turns the screen into Tension or Disputed by disagreeing with that
+     * range. Both series stay on the card; only one of them is the anchor to act on. The model
+     * speaks alone only when no usable analyst range exists, and the card says so.
+     */
     fun judge(request: ValuationJudgmentRequest): ValuationJudgment {
         var fem = attachedFem(request)
         var identityAnalysis = analysisOf(request.identity)
@@ -128,6 +135,31 @@ object ValuationJudgmentPolicy {
         var streetUsable = streetComplete(request)
         var reasons = ArrayList<ValuationJudgmentReason>()
         collectPresenceReasons(request, identityUsable, streetUsable, reasons)
+
+        if (streetUsable) {
+            if (classRefuse != null) reasons += classRefuse
+            if (identityUsable) {
+                var analysis = requireNotNull(identityAnalysis)
+                var streetBook = requireNotNull(request.street)
+                var envelope = requireNotNull(request.identity)
+                if (isSoft(analysis)) reasons += ValuationJudgmentReason.SoftIdentity
+                if (envelope.currencyCode != streetBook.currencyCode ||
+                    envelope.minorUnitScale != streetBook.minorUnitScale
+                ) {
+                    reasons += ValuationJudgmentReason.IncomparableAnchors
+                }
+            }
+            reasons += ValuationJudgmentReason.StreetPrimary
+            return finish(
+                status = ValuationJudgmentStatus.Street,
+                relation = AnchorRelation.SingleSource,
+                request = request,
+                fem = fem,
+                identityAnalysis = identityAnalysis,
+                primaryCents = requireNotNull(request.street).baseCents,
+                reasons = reasons,
+            )
+        }
 
         if (classRefuse != null) {
             reasons += classRefuse
@@ -142,27 +174,7 @@ object ValuationJudgmentPolicy {
             )
         }
 
-        if (!identityUsable && !streetUsable) {
-            if (fem != null) reasons += ValuationJudgmentReason.FemOnly
-            if (reasons.none {
-                    it == ValuationJudgmentReason.FemOnly ||
-                        it == ValuationJudgmentReason.NoCompleteFamily
-                }
-            ) {
-                reasons += ValuationJudgmentReason.NoCompleteFamily
-            }
-            return finish(
-                status = ValuationJudgmentStatus.Unavailable,
-                relation = AnchorRelation.Unavailable,
-                request = request,
-                fem = fem,
-                identityAnalysis = identityAnalysis,
-                primaryCents = null,
-                reasons = reasons,
-            )
-        }
-
-        if (identityUsable && !streetUsable) {
+        if (identityUsable) {
             var analysis = requireNotNull(identityAnalysis)
             reasons += ValuationJudgmentReason.IdentityPrimary
             if (isSoft(analysis)) reasons += ValuationJudgmentReason.SoftIdentity
@@ -177,104 +189,23 @@ object ValuationJudgmentPolicy {
             )
         }
 
-        if (!identityUsable && streetUsable) {
-            reasons += ValuationJudgmentReason.StreetPrimary
-            return finish(
-                status = ValuationJudgmentStatus.Street,
-                relation = AnchorRelation.SingleSource,
-                request = request,
-                fem = fem,
-                identityAnalysis = identityAnalysis,
-                primaryCents = requireNotNull(request.street).baseCents,
-                reasons = reasons,
-            )
-        }
-
-        var analysis = requireNotNull(identityAnalysis)
-        var street = requireNotNull(request.street)
-        var envelope = requireNotNull(request.identity)
-        if (envelope.currencyCode != street.currencyCode ||
-            envelope.minorUnitScale != street.minorUnitScale
+        if (fem != null) reasons += ValuationJudgmentReason.FemOnly
+        if (reasons.none {
+                it == ValuationJudgmentReason.FemOnly ||
+                    it == ValuationJudgmentReason.NoCompleteFamily
+            }
         ) {
-            reasons += ValuationJudgmentReason.IncomparableAnchors
-            return finish(
-                status = ValuationJudgmentStatus.Unavailable,
-                relation = AnchorRelation.Unavailable,
-                request = request,
-                fem = fem,
-                identityAnalysis = analysis,
-                primaryCents = null,
-                reasons = reasons,
-            )
+            reasons += ValuationJudgmentReason.NoCompleteFamily
         }
-
-        var decision = ValuationDecisionPolicy.decide(
-            listOf(modelAnchor(analysis, envelope), streetAnchor(street)),
+        return finish(
+            status = ValuationJudgmentStatus.Unavailable,
+            relation = AnchorRelation.Unavailable,
+            request = request,
+            fem = fem,
+            identityAnalysis = identityAnalysis,
+            primaryCents = null,
+            reasons = reasons,
         )
-        var soft = isSoft(analysis)
-        if (soft) reasons += ValuationJudgmentReason.SoftIdentity
-        return when (decision.relation) {
-            AnchorRelation.Aligned ->
-                if (soft) {
-                    reasons += ValuationJudgmentReason.StreetPrimary
-                    finish(
-                        status = ValuationJudgmentStatus.Street,
-                        relation = AnchorRelation.Aligned,
-                        request = request,
-                        fem = fem,
-                        identityAnalysis = analysis,
-                        primaryCents = street.baseCents,
-                        reasons = reasons,
-                    )
-                } else {
-                    reasons += ValuationJudgmentReason.IdentityPrimary
-                    finish(
-                        status = ValuationJudgmentStatus.Identity,
-                        relation = AnchorRelation.Aligned,
-                        request = request,
-                        fem = fem,
-                        identityAnalysis = analysis,
-                        primaryCents = analysis.baseIntrinsicValueCents,
-                        reasons = reasons,
-                    )
-                }
-            AnchorRelation.Tension -> {
-                reasons += ValuationJudgmentReason.TensionNoPrimary
-                finish(
-                    status = ValuationJudgmentStatus.Tension,
-                    relation = AnchorRelation.Tension,
-                    request = request,
-                    fem = fem,
-                    identityAnalysis = analysis,
-                    primaryCents = null,
-                    reasons = reasons,
-                )
-            }
-            AnchorRelation.Disputed -> {
-                reasons += ValuationJudgmentReason.DisputedGap
-                finish(
-                    status = ValuationJudgmentStatus.Disputed,
-                    relation = AnchorRelation.Disputed,
-                    request = request,
-                    fem = fem,
-                    identityAnalysis = analysis,
-                    primaryCents = null,
-                    reasons = reasons,
-                )
-            }
-            else -> {
-                reasons += ValuationJudgmentReason.IncomparableAnchors
-                finish(
-                    status = ValuationJudgmentStatus.Unavailable,
-                    relation = AnchorRelation.Unavailable,
-                    request = request,
-                    fem = fem,
-                    identityAnalysis = analysis,
-                    primaryCents = null,
-                    reasons = reasons,
-                )
-            }
-        }
     }
 
     private fun finish(
@@ -390,15 +321,8 @@ object ValuationJudgmentPolicy {
             BusinessClass.Unclassified, BusinessClass.NotEligible -> false
         }
 
-    private fun isSoft(analysis: DcfAnalysis): Boolean {
-        var width = ValuationDecisionPolicy.scenarioWidthBps(
-            analysis.bearIntrinsicValueCents,
-            analysis.baseIntrinsicValueCents,
-            analysis.bullIntrinsicValueCents,
-        )
-        var wide = width == null || width > ValuationDecisionPolicy.WIDE_SCENARIO_BPS
-        return analysis.waccInputs.isProvisional() || analysis.pointEstimateUnreliable || wide
-    }
+    private fun isSoft(analysis: DcfAnalysis): Boolean =
+        ValuationDecisionPolicy.isSoftModel(analysis)
 
     private fun collectPresenceReasons(
         request: ValuationJudgmentRequest,
@@ -440,21 +364,6 @@ object ValuationJudgmentPolicy {
         if (street != null && !streetUsable) {
             reasons += ValuationJudgmentReason.IncompleteStreet
         }
-    }
-
-    private fun modelAnchor(analysis: DcfAnalysis, envelope: IdentityEnvelope): ValuationAnchor {
-        var confidence =
-            if (isSoft(analysis)) ValuationConfidence.Soft else ValuationConfidence.Solid
-        return ValuationAnchor(
-            source = ValuationAnchorSource.Model,
-            valueMinorUnits = analysis.baseIntrinsicValueCents,
-            currencyCode = envelope.currencyCode,
-            minorUnitScale = envelope.minorUnitScale,
-            availability = ValuationAvailability.Available,
-            coverage = ValuationCoverage.Sufficient,
-            freshness = ValuationFreshness.Fresh,
-            confidence = confidence,
-        )
     }
 
     private fun streetAnchor(street: StreetBook): ValuationAnchor =
