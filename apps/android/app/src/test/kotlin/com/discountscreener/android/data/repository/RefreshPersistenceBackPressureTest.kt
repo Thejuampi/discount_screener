@@ -126,6 +126,9 @@ class RefreshPersistenceBackPressureTest {
      */
     private class UnreachableYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
         override suspend fun fetchSymbol(symbol: String): Nothing = throw IOException("offline")
+
+        override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): Nothing =
+            throw IOException("offline")
     }
 
     private companion object {

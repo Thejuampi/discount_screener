@@ -799,7 +799,7 @@ class DetailScreenTest {
     }
 
     @Test
-    fun snapshot_forecast_headline_leads_with_analyst() {
+    fun detail_headline_leads_with_analyst() {
         var detail = detailWithValuationAnchors().copy(marketPriceCents = 97_166L)
         var projected = ProjectedDetailData(
             symbol = detail.symbol,
@@ -816,8 +816,8 @@ class DetailScreenTest {
             ),
         )
         assertEquals(
-            "Price $971.66  Analyst $1550.00",
-            snapshotForecastHeadline(detail, projected),
+            "Price $971.66  Fair $1550.00  Analyst range",
+            detailHeadline(detail, projected),
         )
     }
 

@@ -9,11 +9,13 @@ internal data class GeneratedSecDriverOperator(
 )
 
 internal object GeneratedSecDriverNormalizationPolicy {
-    const val fingerprint = "sec-driver-normalization/11"
+    const val fingerprint = "sec-driver-normalization/12"
     const val requiredUnit = "USD"
     const val minimumDurationDays = 325
     const val maximumDurationDays = 380
     const val materialAcquisitionRevenueBps = 1000
+    const val minimumCleanRecentGrowthTransitions = 2
+    const val nonRecurringChargeOperatingBps = 1500
     val acceptedForms = setOf(
         "10-K",
         "10-K/A",
@@ -187,6 +189,42 @@ internal object GeneratedSecDriverNormalizationPolicy {
         "WeightedAverageNumberOfDilutedSharesOutstanding",
     ),
         unit = "shares",
+        periodShape = "duration",
+        operation = "select_one_equivalent",
+    )
+    val operatingIncome =     GeneratedSecDriverOperator(
+        qnames = listOf(
+        "OperatingIncomeLoss",
+    ),
+        unit = "USD",
+        periodShape = "duration",
+        operation = "select_one_equivalent",
+    )
+    val impairmentAggregate =     GeneratedSecDriverOperator(
+        qnames = listOf(
+        "AssetImpairmentCharges",
+        "GoodwillAndIntangibleAssetImpairment",
+    ),
+        unit = "USD",
+        periodShape = "duration",
+        operation = "aggregate_or_sum_of_components",
+    )
+    val impairmentComponents =     GeneratedSecDriverOperator(
+        qnames = listOf(
+        "GoodwillImpairmentLoss",
+        "ImpairmentOfIntangibleAssetsExcludingGoodwill",
+        "TangibleAssetImpairmentCharges",
+    ),
+        unit = "USD",
+        periodShape = "duration",
+        operation = "aggregate_or_sum_of_components",
+    )
+    val restructuringCharges =     GeneratedSecDriverOperator(
+        qnames = listOf(
+        "RestructuringCharges",
+        "RestructuringCosts",
+    ),
+        unit = "USD",
         periodShape = "duration",
         operation = "select_one_equivalent",
     )

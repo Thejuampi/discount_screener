@@ -19,8 +19,10 @@ import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.ProviderCoverage
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
+import com.discountscreener.android.data.remote.QuoteBatchEntry
 import com.discountscreener.android.data.remote.ProviderComponentState
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
+import com.discountscreener.android.data.remote.ResidualCompanyFactsProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.YahooSearchQuote
 import com.discountscreener.android.data.remote.offlineHttpClient
@@ -64,6 +66,7 @@ import com.discountscreener.core.model.getOrNull
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -85,6 +88,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -103,6 +108,17 @@ class DefaultDashboardRepositoryTest {
     }
 
     private val legacyModel = OpportunityScoringModel.Legacy
+
+    /**
+     * The journal is the outcome record the V5 foundation measures against, and its longest
+     * horizon is 126 trading bars — about 180 calendar days. A retention shorter than that would
+     * silently delete exactly the rows the half-year reading needs, so the constant is pinned
+     * here rather than left to drift with a refactor.
+     */
+    @Test
+    fun the_score_journal_outlives_the_longest_measured_horizon() {
+        assertEquals(220L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+    }
 
     @Test
     fun bootstrap_uses_qa_profile_even_when_db_remembers_single_symbol() = runTest(dispatcher) {
@@ -264,6 +280,49 @@ class DefaultDashboardRepositoryTest {
             var legacyRow = snapshot.opportunityRows.first { it.symbol == "NVDA" }
 
             assertEquals(projectedOpportunitySemantics(projectedRow), legacyOpportunitySemantics(legacyRow))
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * The refused half of the same claim.
+     *
+     * This drops NVDA's sector, which is the one input [ValuationJudgmentPolicy] refuses on before
+     * it reads any anchor. Our own model is out, and the analyst range 18500/20000/21500 is still
+     * there, so the row names 20000: the number stands on the analyst range, and our experimental
+     * model does not get to hide it.
+     */
+    @Test
+    fun bootstrap_opportunity_row_keeps_the_analyst_value_when_our_model_refuses_the_class() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store, nvdaFundamentals = null)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var row = snapshot.opportunityRows.first { it.symbol == "NVDA" }
+
+            assertEquals(20_000L, row.intrinsicValueCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * The hole the test above used to cover: with the class refused and no analyst range behind
+     * it, nothing stands behind a value, so the row prints none. A row that falls back to the
+     * cached 20000 here is showing a fair value nothing supports.
+     */
+    @Test
+    fun bootstrap_opportunity_row_names_no_fair_value_when_no_family_stands_behind_it() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store, nvdaFundamentals = null, nvdaHasExternalSignal = false)
+            var repository = buildRepository(store = store, client = FakeYahooFinanceClient())
+            var snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var row = snapshot.opportunityRows.first { it.symbol == "NVDA" }
+
+            assertNull(row.intrinsicValueCents)
         } finally {
             store.close()
         }
@@ -844,7 +903,6 @@ class DefaultDashboardRepositoryTest {
             RowDecisionState.Act,
             trackedDecisionStateFor(
                 state = TrackedRowState.Live,
-                freshness = RowFreshness.Updated,
                 qualification = QualificationStatus.Qualified,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
@@ -859,7 +917,6 @@ class DefaultDashboardRepositoryTest {
             RowDecisionState.Avoid,
             trackedDecisionStateFor(
                 state = TrackedRowState.Live,
-                freshness = RowFreshness.Updated,
                 qualification = QualificationStatus.Unprofitable,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
@@ -874,7 +931,6 @@ class DefaultDashboardRepositoryTest {
             RowDecisionState.Act,
             trackedDecisionStateFor(
                 state = TrackedRowState.Live,
-                freshness = RowFreshness.Updated,
                 qualification = QualificationStatus.Qualified,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
@@ -889,7 +945,6 @@ class DefaultDashboardRepositoryTest {
             RowDecisionState.Watch,
             trackedDecisionStateFor(
                 state = TrackedRowState.Live,
-                freshness = RowFreshness.Updated,
                 qualification = QualificationStatus.Qualified,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
@@ -898,22 +953,44 @@ class DefaultDashboardRepositoryTest {
         )
     }
 
+    /**
+     * A row restored from the database keeps the tag its last refresh gave it. It used to lose it,
+     * so a snapshot read back on a cold start showed a whole screen of rows with nothing to do.
+     */
     @Test
-    fun tracked_decision_state_hides_non_live_rows() {
-        assertNull(
+    fun tracked_decision_state_keeps_the_tag_a_cached_row_was_filed_with() {
+        assertEquals(
+            RowDecisionState.Act,
             trackedDecisionStateFor(
                 state = TrackedRowState.Cached,
-                freshness = RowFreshness.Restored,
                 qualification = QualificationStatus.Qualified,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
                 trustNote = null,
             ),
         )
+    }
+
+    /** Loading means no detail on file, so a tag would be built out of nulls. */
+    @Test
+    fun tracked_decision_state_hides_the_tag_on_a_row_still_loading() {
         assertNull(
             trackedDecisionStateFor(
-                state = TrackedRowState.Live,
-                freshness = RowFreshness.Issue,
+                state = TrackedRowState.Loading,
+                qualification = QualificationStatus.Qualified,
+                confidence = ConfidenceBand.High,
+                upsideBps = 2_500,
+                trustNote = null,
+            ),
+        )
+    }
+
+    /** The other state with no detail on file. */
+    @Test
+    fun tracked_decision_state_hides_the_tag_on_a_row_that_failed() {
+        assertNull(
+            trackedDecisionStateFor(
+                state = TrackedRowState.Failed,
                 qualification = QualificationStatus.Qualified,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
@@ -964,20 +1041,13 @@ class DefaultDashboardRepositoryTest {
         )
     }
 
+    /** Same rule on the opportunity side: the numbers on file still say what they said. */
     @Test
-    fun opportunity_decision_state_hides_non_live_rows() {
-        assertNull(
+    fun opportunity_decision_state_keeps_the_tag_a_restored_row_was_filed_with() {
+        assertEquals(
+            RowDecisionState.Act,
             opportunityDecisionStateFor(
                 freshness = RowFreshness.Restored,
-                confidence = ConfidenceBand.High,
-                upsideBps = 2_500,
-                compositeScore = 12,
-                trustNote = null,
-            ),
-        )
-        assertNull(
-            opportunityDecisionStateFor(
-                freshness = RowFreshness.Issue,
                 confidence = ConfidenceBand.High,
                 upsideBps = 2_500,
                 compositeScore = 12,
@@ -1356,7 +1426,7 @@ class DefaultDashboardRepositoryTest {
             }
 
             quoteHtml404Mode = true
-            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel, force = true)
             val row = awaitSnapshot(repository) { snapshot ->
                 snapshot.trackedRows.any {
                     it.symbol == "AAPL" &&
@@ -1598,7 +1668,7 @@ class DefaultDashboardRepositoryTest {
                 sharesOutstanding = 4_000_000_000L,
             )
             omitAaplSnapshot = true
-            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel, force = true)
             val after = awaitDcfAnalysis(repository, "AAPL") { analysis ->
                 analysis.waccBps != before.waccBps && analysis.baseIntrinsicValueCents != before.baseIntrinsicValueCents
             }
@@ -1615,9 +1685,10 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun refresh_fallback_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
+    fun refresh_fallback_never_downloads_a_companyfacts_file() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
+            val yahooTimeseriesAsked = ConcurrentHashMap.newKeySet<String>()
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
                     if (symbol == "AAPL") {
@@ -1638,19 +1709,20 @@ class DefaultDashboardRepositoryTest {
                 }
 
                 override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    yahooTimeseriesAsked.add(symbol)
                     return if (symbol == "AAPL") unusableTimeseries() else super.fetchFundamentalTimeseries(symbol)
                 }
             }
-            val repository = buildRepository(
-                store = store,
-                client = client,
-                secondaryTimeseriesProvider = FakeTimeseriesProvider(richTimeseries()),
-            )
+            val secondary = FakeTimeseriesProvider(richTimeseries())
+            val repository = buildRepository(store = store, client = client, secondaryTimeseriesProvider = secondary)
 
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            // The fallback asks Yahoo first. Waiting for that call puts the reading after the exact
+            // point the old code went on to SEC, so an empty set means the step was dropped.
+            awaitTimeseriesAsked(yahooTimeseriesAsked, "AAPL")
 
-            assertEquals(DcfSource.SecEdgar, awaitDcfSource(repository, "AAPL"))
+            assertEquals(emptySet<String>(), secondary.asked)
         } finally {
             store.close()
         }
@@ -1692,10 +1764,52 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * The residual-income chain is the second door to SEC, and it opens for every bank and insurer
+     * in the profile. `allowSecondary` on the DCF coordinator alone left it wide open.
+     */
     @Test
-    fun enrichment_uses_sec_when_yahoo_timeseries_is_not_dcf_usable() = runTest(dispatcher) {
+    fun a_financial_services_symbol_in_the_load_downloads_no_companyfacts_file() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
+            val yahooTimeseriesAsked = ConcurrentHashMap.newKeySet<String>()
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = bankFundamentals(symbol),
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    yahooTimeseriesAsked.add(symbol)
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val secondary = FakeTimeseriesProvider(richTimeseries())
+            val repository = buildRepository(store = store, client = client, secondaryTimeseriesProvider = secondary)
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            // V is a payment network, so it takes the Yahoo timeseries branch while every other
+            // symbol takes the residual chain. Its call says the enrichment round is running.
+            awaitTimeseriesAsked(yahooTimeseriesAsked, "V")
+
+            assertEquals(emptySet<String>(), secondary.asked)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun enrichment_never_downloads_a_companyfacts_file() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val yahooTimeseriesAsked = ConcurrentHashMap.newKeySet<String>()
             val client = object : FakeYahooFinanceClient() {
                 override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
                     return super.fetchSymbol(symbol).copy(
@@ -1709,19 +1823,19 @@ class DefaultDashboardRepositoryTest {
                 }
 
                 override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    yahooTimeseriesAsked.add(symbol)
                     return if (symbol == "AAPL") unusableTimeseries() else super.fetchFundamentalTimeseries(symbol)
                 }
             }
-            val repository = buildRepository(
-                store = store,
-                client = client,
-                secondaryTimeseriesProvider = FakeTimeseriesProvider(richTimeseries()),
-            )
+            val secondary = FakeTimeseriesProvider(richTimeseries())
+            val repository = buildRepository(store = store, client = client, secondaryTimeseriesProvider = secondary)
 
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            // Enrichment asks Yahoo first, and the old code went on to SEC right here.
+            awaitTimeseriesAsked(yahooTimeseriesAsked, "AAPL")
 
-            assertEquals(DcfSource.SecEdgar, awaitDcfSource(repository, "AAPL"))
+            assertEquals(emptySet<String>(), secondary.asked)
         } finally {
             store.close()
         }
@@ -1881,13 +1995,15 @@ class DefaultDashboardRepositoryTest {
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
             awaitDcfAnalysis(repository, "AAPL") { it.resolverState == ResolverState.NotEligible }
 
-            // Recover: FCF becomes usable and fundamentals fingerprint moves.
+            // Recover: FCF becomes usable and fundamentals fingerprint moves. Inside the day the
+            // rejected timeseries is on file and a plain refresh judges the file's copy, so only
+            // a forced refresh (the Refresh button) asks the provider again.
             useUnusable = false
             fundamentals = dcfFundamentals("AAPL").copy(
                 betaMillis = 1_500,
                 marketCapDollars = 650_000_000_000L,
             )
-            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel, force = true)
             val recovered = awaitDcfAnalysis(repository, "AAPL") { analysis ->
                 analysis.resolverState == ResolverState.Selected && analysis.baseIntrinsicValueCents > 0L
             }
@@ -2064,6 +2180,21 @@ class DefaultDashboardRepositoryTest {
         return snapshot
     }
 
+    /**
+     * Waits until the round asked Yahoo for [symbol]'s timeseries, so a reading of "SEC was never
+     * asked" is taken after the load reached that decision and not before it started.
+     */
+    private fun awaitTimeseriesAsked(asked: Set<String>, symbol: String, timeoutMs: Long = 5_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!asked.contains(symbol)) {
+            if (System.currentTimeMillis() >= deadline) {
+                fail("Timed out waiting for the round to ask Yahoo for $symbol; asked=$asked")
+            }
+            Thread.sleep(10)
+            dispatcher.scheduler.advanceUntilIdle()
+        }
+    }
+
     private suspend fun awaitDcfSource(
         repository: DefaultDashboardRepository,
         symbol: String,
@@ -2101,6 +2232,15 @@ class DefaultDashboardRepositoryTest {
         return analysis
     }
 
+    /**
+     * A warm cache as it comes back from disk: three symbols with a price, an analyst range, and a
+     * sector.
+     *
+     * The sector is what makes these rows judgeable. [ValuationJudgmentPolicy] refuses a symbol it
+     * cannot classify before it looks at any anchor, so a seed with no fundamentals produces three
+     * rows that name no fair value, carry a null upside, and sort alphabetically. Tests written on
+     * that seed measure the tiebreak instead of the thing they claim to measure.
+     */
     private suspend fun seedWarmState(
         store: SQLiteStateStore,
         nvdaDcfAnalysis: DcfAnalysis? = null,
@@ -2108,6 +2248,7 @@ class DefaultDashboardRepositoryTest {
         nvdaWeightedFairValueCents: Long? = 20_000L,
         nvdaAnalystLowFairValueCents: Long? = nvdaWeightedFairValueCents?.minus(1_500L),
         nvdaAnalystHighFairValueCents: Long? = nvdaWeightedFairValueCents?.plus(1_500L),
+        nvdaFundamentals: FundamentalSnapshot? = classifiableFundamentals("NVDA"),
     ) {
         store.persistBatch(
             rawCaptures = listOf(
@@ -2124,15 +2265,38 @@ class DefaultDashboardRepositoryTest {
                     weightedFairValueCents = nvdaWeightedFairValueCents,
                     analystLowFairValueCents = nvdaAnalystLowFairValueCents,
                     analystHighFairValueCents = nvdaAnalystHighFairValueCents,
+                    fundamentals = nvdaFundamentals,
                     dcfAnalysis = nvdaDcfAnalysis,
                     hasExternalSignal = nvdaHasExternalSignal,
                 ),
-                revision("AAPL", marketPriceCents = 10_000, intrinsicValueCents = 15_000, gapBps = 3_333),
-                revision("MSFT", marketPriceCents = 10_000, intrinsicValueCents = 12_000, gapBps = 1_666),
+                revision(
+                    "AAPL",
+                    marketPriceCents = 10_000,
+                    intrinsicValueCents = 15_000,
+                    gapBps = 3_333,
+                    fundamentals = classifiableFundamentals("AAPL"),
+                ),
+                revision(
+                    "MSFT",
+                    marketPriceCents = 10_000,
+                    intrinsicValueCents = 12_000,
+                    gapBps = 1_666,
+                    fundamentals = classifiableFundamentals("MSFT"),
+                ),
             ),
         )
         store.replaceWatchlist(listOf("AAPL"))
     }
+
+    /**
+     * The sector is the whole payload. Nothing here feeds a multiple or a score; it exists so
+     * `classifyBusiness` returns [BusinessClass.OperatingNonFinancial] and the judgment is allowed
+     * to reach the street book instead of refusing on the class.
+     */
+    private fun classifiableFundamentals(symbol: String) = FundamentalSnapshot(
+        symbol = symbol,
+        sectorName = "Technology",
+    )
 
     private fun chartCapture(symbol: String, closeCents: Long) = RawCapture(
         symbol = symbol,
@@ -2246,7 +2410,7 @@ class DefaultDashboardRepositoryTest {
             qualification = QualificationStatus.Qualified,
             externalStatus = if (hasExternalSignal) ExternalSignalStatus.Supportive else ExternalSignalStatus.Missing,
             coreStatus = MetricGroupStatus(available = true, stale = false),
-            fundamentalsStatus = MetricGroupStatus(available = false, stale = false),
+            fundamentalsStatus = MetricGroupStatus(available = fundamentals != null, stale = false),
             relativeStatus = MetricGroupStatus(available = false, stale = false),
             dcfStatus = MetricGroupStatus(available = dcfAnalysis != null, stale = false),
             chartStatus = MetricGroupStatus(available = true, stale = false),
@@ -2347,6 +2511,57 @@ class DefaultDashboardRepositoryTest {
             advanceUntilIdle()
 
             assertEquals(1, monthFetches)
+        } finally {
+            store.close()
+        }
+    }
+
+    /**
+     * Pass zero of a refresh prices every restored row from the batch endpoint before the
+     * per-symbol pass starts. The row shows today's price and still reads as cached, because its
+     * target and fundamentals are the restored ones until its own quoteSummary lands; here that
+     * quote never lands, so the reading is the one the user sees while the per-symbol pass runs.
+     */
+    @Test
+    fun a_refresh_prices_restored_rows_from_the_batch_endpoint_while_they_still_read_as_cached() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store)
+            val client = QuoteHangingYahooFinanceClient()
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val snapshot = awaitSnapshot(repository) { refreshed ->
+                refreshed.trackedRows.first { it.symbol == "AAPL" }.marketPriceCents == client.batchPriceOf("AAPL")
+            }
+
+            assertEquals(TrackedRowState.Cached, snapshot.trackedRows.first { it.symbol == "AAPL" }.state)
+        } finally {
+            store.close()
+        }
+    }
+
+    /** The per-symbol pass serves the rows the batch could not price first; those have nothing to show until it does. */
+    @Test
+    fun the_quote_pass_asks_for_the_rows_the_batch_did_not_price_first() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store)
+            val client = QuoteHangingYahooFinanceClient()
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            var snapshot = awaitSnapshot(repository) { refreshed -> client.asked.isNotEmpty() }
+            var restored = setOf("NVDA", "AAPL", "MSFT")
+            var coldCount = snapshot.trackedSymbols.size - restored.size
+
+            var restoredPositions = client.asked.withIndex().filter { it.value in restored }.map { it.index }
+
+            assertTrue(
+                "restored rows were asked at ${restoredPositions} before the $coldCount cold rows: ${client.asked}",
+                restoredPositions.all { position -> position >= coldCount },
+            )
         } finally {
             store.close()
         }
@@ -2857,6 +3072,21 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * A Yahoo whose batch endpoint answers and whose quoteSummary never does, so a test can read
+     * the rows between pass zero and the per-symbol pass, and see the order that pass asks in.
+     */
+    private class QuoteHangingYahooFinanceClient : FakeYahooFinanceClient() {
+        val asked = CopyOnWriteArrayList<String>()
+
+        fun batchPriceOf(symbol: String): Long = priceFor(symbol)
+
+        override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+            asked += symbol
+            awaitCancellation()
+        }
+    }
+
     private open class FakeYahooFinanceClient(
         var delayMs: Long = 0,
     ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
@@ -2876,11 +3106,24 @@ class DefaultDashboardRepositoryTest {
             return searchResponses[query.trim().lowercase()].orEmpty().take(limit)
         }
 
+        /** The price this Yahoo quotes for [symbol], the same from the batch endpoint and from quoteSummary. */
+        protected open fun priceFor(symbol: String): Long = 10_000L + symbol.sumOf { it.code }.toLong()
+
+        override suspend fun fetchQuotes(symbols: List<String>): Map<String, QuoteBatchEntry> = symbols.associateWith { symbol ->
+            QuoteBatchEntry(
+                symbol = symbol,
+                companyName = companyNameFor(symbol),
+                marketPriceCents = priceFor(symbol),
+                profitable = true,
+                nextEarningsEpoch = null,
+            )
+        }
+
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
             fetchSymbolCount++
             fetchedSymbols += symbol
             delay(delayMs)
-            val price = 10_000L + symbol.sumOf { it.code }.toLong()
+            val price = priceFor(symbol)
             val fair = price + 2_500L
             val companyName = companyNameFor(symbol)
             return ProviderFetchResult(
@@ -2944,10 +3187,26 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * Stands for SEC EDGAR, and writes down every symbol that would pay for a companyfacts file.
+     *
+     * It serves both interfaces the real provider serves. A counter that watched only the timeseries
+     * one reported zero while the residual-income chain downloaded a file for every bank in the load.
+     */
     private class FakeTimeseriesProvider(
         private val timeseries: FundamentalTimeseries?,
-    ) : FundamentalTimeseriesProvider {
-        override suspend fun fetch(symbol: String): FundamentalTimeseries? = timeseries
+    ) : FundamentalTimeseriesProvider, ResidualCompanyFactsProvider {
+        val asked = ConcurrentHashMap.newKeySet<String>()
+
+        override suspend fun fetch(symbol: String): FundamentalTimeseries? {
+            asked.add(symbol)
+            return timeseries
+        }
+
+        override suspend fun fetchSievedCompanyFacts(symbol: String): String? {
+            asked.add(symbol)
+            return null
+        }
     }
 
     companion object {
@@ -3020,7 +3279,19 @@ private fun companyNameFor(symbol: String): String = when (symbol) {
     else -> "$symbol Holdings"
 }
 
-private fun dcfFundamentals(symbol: String) = FundamentalSnapshot(
+/** A bank, so `classifyBusiness` returns [BusinessClass.FinancialServices] and the residual chain runs. */
+private fun bankFundamentals(symbol: String) = FundamentalSnapshot(
+    symbol = symbol,
+    sectorName = "Financial Services",
+    industryName = "Banks - Diversified",
+    marketCapDollars = 400_000_000_000L,
+    totalDebtDollars = 300_000_000_000L,
+    totalCashDollars = 500_000_000_000L,
+    sharesOutstanding = 2_900_000_000L,
+    betaMillis = 1_100,
+)
+
+internal fun dcfFundamentals(symbol: String) = FundamentalSnapshot(
     symbol = symbol,
     sectorName = "Technology",
     industryName = "Semiconductors",
@@ -3031,7 +3302,7 @@ private fun dcfFundamentals(symbol: String) = FundamentalSnapshot(
     betaMillis = 1_000,
 )
 
-private fun unusableTimeseries() = FundamentalTimeseries(
+internal fun unusableTimeseries() = FundamentalTimeseries(
     freeCashFlow = listOf(
         com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 30_000_000_000.0),
         com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 34_000_000_000.0),
@@ -3044,7 +3315,7 @@ private fun unusableTimeseries() = FundamentalTimeseries(
     ),
 )
 
-private fun richTimeseries() = FundamentalTimeseries(
+internal fun richTimeseries() = FundamentalTimeseries(
     freeCashFlow = listOf(
         com.discountscreener.core.model.AnnualReportedValue("2020-01-01", 30_000_000_000.0),
         com.discountscreener.core.model.AnnualReportedValue("2021-01-01", 34_000_000_000.0),

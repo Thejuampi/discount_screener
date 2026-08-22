@@ -163,12 +163,17 @@ class OpportunityV4ContractTest {
         fundamentals = FundamentalSnapshot(
             symbol = SYMBOL,
             sectorName = SECTOR,
+            industryKey = input.industryKey,
             forwardPeHundredths = input.forwardPeHundredths,
             enterpriseToEbitdaHundredths = input.enterpriseToEbitdaHundredths,
             priceToBookHundredths = input.priceToBookHundredths,
             returnOnEquityBps = input.returnOnEquityBps,
             earningsGrowthBps = input.earningsGrowthBps,
             trailingEpsCents = input.trailingEpsCents,
+            totalDebtDollars = input.totalDebtDollars,
+            totalCashDollars = input.totalCashDollars,
+            ebitdaDollars = input.ebitdaDollars,
+            debtToEquityHundredths = input.debtToEquityHundredths,
         ),
     )
 
@@ -280,6 +285,12 @@ private data class FundamentalsInput(
     @SerialName("return_on_equity_bps") val returnOnEquityBps: Int? = null,
     @SerialName("earnings_growth_bps") val earningsGrowthBps: Int? = null,
     @SerialName("trailing_eps_cents") val trailingEpsCents: Long? = null,
+    @SerialName("total_debt_dollars") val totalDebtDollars: Long? = null,
+    @SerialName("total_cash_dollars") val totalCashDollars: Long? = null,
+    @SerialName("ebitda_dollars") val ebitdaDollars: Long? = null,
+    @SerialName("debt_to_equity_hundredths") val debtToEquityHundredths: Int? = null,
+    /** Read before the sector name, so a case can put a cyclical industry inside any sector. */
+    @SerialName("industry_key") val industryKey: String? = null,
 )
 
 @Serializable
@@ -288,12 +299,14 @@ private data class BenchmarksInput(
     @SerialName("enterprise_to_ebitda_hundredths") val enterpriseToEbitdaHundredths: Int? = null,
     @SerialName("price_to_book_hundredths") val priceToBookHundredths: Int? = null,
     @SerialName("return_on_equity_bps") val returnOnEquityBps: Int? = null,
+    @SerialName("net_debt_to_ebitda_hundredths") val netDebtToEbitdaHundredths: Int? = null,
 ) {
     fun toBenchmarks() = SectorBenchmarks(
         forwardPeHundredths = forwardPeHundredths,
         enterpriseToEbitdaHundredths = enterpriseToEbitdaHundredths,
         priceToBookHundredths = priceToBookHundredths,
         returnOnEquityBps = returnOnEquityBps,
+        netDebtToEbitdaHundredths = netDebtToEbitdaHundredths,
     )
 }
 

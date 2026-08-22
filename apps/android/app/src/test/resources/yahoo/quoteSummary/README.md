@@ -24,6 +24,13 @@ book and ROE. Keep Windows and Android copies byte-identical.
 | `ACGL-retention.json` | insurer / insurance-property-casualty | yes |
 | `COF-retention.json` | consumer finance / credit-services | yes |
 
+## Earnings calendar driver pin
+
+`SUT-earnings.json` carries two `calendarEvents.earnings.earningsDate` entries, which is what Yahoo
+sends when the date is an unconfirmed window. One is in the past and one in the future, so the same
+fixture pins both branches of the selection: the earliest future date, and the fallback to the
+latest known date once every entry has passed. Read at two fixed clocks, never at the machine clock.
+
 Field precedence (parser + Android client):
 
 1. **Payout → retention:** `financialData.payoutRatio` then `summaryDetail.payoutRatio`

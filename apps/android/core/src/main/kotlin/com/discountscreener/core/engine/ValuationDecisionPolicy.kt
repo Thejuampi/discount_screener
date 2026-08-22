@@ -2,6 +2,7 @@ package com.discountscreener.core.engine
 
 import com.discountscreener.core.model.AnchorComparison
 import com.discountscreener.core.model.AnchorRelation
+import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ValuationAnchor
 import com.discountscreener.core.model.ValuationAnchorSource
 import com.discountscreener.core.model.ValuationAvailability
@@ -42,6 +43,25 @@ object ValuationDecisionPolicy {
         return numerator.add(denominator / BigInteger.TWO)
             .divide(denominator)
             .intValueExact()
+    }
+
+    /**
+     * Whether this analysis is too weak to act on, however it reads.
+     *
+     * One definition, formerly two private copies (judgment's `isSoft`, Quant Lens's quality
+     * check) that could drift apart and let the card call a model solid while the lens called it
+     * soft. Soft when the WACC inputs are provisional, when the point estimate is flagged
+     * unreliable, or when the scenario fan is missing or wider than [WIDE_SCENARIO_BPS] — a null
+     * width counts as wide, because an unfanable analysis has no width to trust.
+     */
+    fun isSoftModel(analysis: DcfAnalysis): Boolean {
+        var width = scenarioWidthBps(
+            analysis.bearIntrinsicValueCents,
+            analysis.baseIntrinsicValueCents,
+            analysis.bullIntrinsicValueCents,
+        )
+        var wide = width == null || width > WIDE_SCENARIO_BPS
+        return analysis.waccInputs.isProvisional() || analysis.pointEstimateUnreliable || wide
     }
 
     fun decide(anchors: List<ValuationAnchor>): ValuationDecision {

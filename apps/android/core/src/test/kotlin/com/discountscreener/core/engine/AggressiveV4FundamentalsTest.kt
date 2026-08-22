@@ -1,8 +1,10 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
+import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QualificationStatus
@@ -153,6 +155,52 @@ class AggressiveV4FundamentalsTest {
         assertEquals(22, OpportunityEngine.buildRows(engine, context).single().fundamentalsScore)
     }
 
+    /**
+     * The cycle-peak penalty reaches the bucket, and it reaches it as a subtraction.
+     *
+     * Both arms hold the same company: the same five years of revenue, the same five years of net
+     * income, the same return on equity. Only the industry key differs, so the gap between the two
+     * scores is the penalty and nothing else.
+     */
+    @Test
+    fun a_peak_margin_in_a_through_cycle_industry_scores_below_the_same_company_outside_one() {
+        var throughCycle = cycleScore(industryKey = "oil-gas-integrated").first
+        var elsewhere = cycleScore(industryKey = "software-infrastructure").first
+
+        assertEquals(4, elsewhere!! - throughCycle!!)
+    }
+
+    /** And the list says why, in points, so a reader can see what the mark cost. */
+    @Test
+    fun the_penalty_names_itself_in_the_factors() {
+        var factor = cycleScore(industryKey = "oil-gas-integrated")
+            .factors
+            .single { it.key == CYCLE_PEAK_LABEL }
+
+        assertEquals(-4, factor.bucketPoints)
+    }
+
+    private fun cycleScore(industryKey: String) = OpportunityEngine.aggressiveV4FundamentalsScore(
+        detail("SUT", returnOnEquityBps = 2_000).let { base ->
+            base.copy(
+                fundamentals = base.fundamentals!!.copy(sectorKey = "energy", industryKey = industryKey),
+            )
+        },
+        null,
+        FundamentalTimeseries(
+            revenue = CYCLE_YEARS.zip(listOf(285.0, 413.0, 344.0, 320.0, 420.0)) { year, value ->
+                AnnualReportedValue(year, value)
+            },
+            netIncome = CYCLE_YEARS.zip(listOf(23.0, 55.7, 36.0, 33.7, 50.0)) { year, value ->
+                AnnualReportedValue(year, value)
+            },
+        ),
+    )
+
+    private companion object {
+        val CYCLE_YEARS = listOf("2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31")
+    }
+
     /** Score the three multiples alone, so the panel is the only term the bucket holds. */
     private fun score(sectorBenchmarks: SectorBenchmarks?) = OpportunityEngine
         .aggressiveV4FundamentalsScore(
@@ -177,11 +225,13 @@ class AggressiveV4FundamentalsTest {
         evEbitda: Int? = null,
         priceToBook: Int? = null,
         returnOnEquityBps: Int? = null,
+        netDebtToEbitdaHundredths: Int? = null,
     ) = SectorBenchmarks(
         forwardPeHundredths = forwardPe,
         enterpriseToEbitdaHundredths = evEbitda,
         priceToBookHundredths = priceToBook,
         returnOnEquityBps = returnOnEquityBps,
+        netDebtToEbitdaHundredths = netDebtToEbitdaHundredths,
     )
 
     private fun detail(

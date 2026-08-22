@@ -175,19 +175,26 @@ class ReportingEngine(
         watchlist.addAll(state.watchlist)
     }
 
-    fun persistedState(): List<PersistedSymbolState> = symbols
-        .map { (symbol, state) ->
-            PersistedSymbolState(
-                symbol = symbol,
-                snapshot = state.snapshot,
-                externalSignal = state.externalSignal,
-                fundamentals = state.fundamentals,
-                lastSequence = state.lastSequence,
-                updateCount = state.updateCount,
-                priceHistory = state.priceHistory.toList(),
-            )
-        }
-        .sortedBy { it.symbol }
+    /**
+     * What one symbol writes to file.
+     *
+     * This used to be a list of every symbol, and its one caller scanned that list for the symbol
+     * it wanted. A refresh calls it once per row, so on the 1 937-symbol universe one refresh
+     * built about four million state objects, copied a price history for each, and sorted the
+     * whole set two thousand times, to read two thousand entries. The map already keys by symbol.
+     */
+    fun persistedState(symbol: String): PersistedSymbolState? {
+        val state = symbols[symbol] ?: return null
+        return PersistedSymbolState(
+            symbol = symbol,
+            snapshot = state.snapshot,
+            externalSignal = state.externalSignal,
+            fundamentals = state.fundamentals,
+            lastSequence = state.lastSequence,
+            updateCount = state.updateCount,
+            priceHistory = state.priceHistory.toList(),
+        )
+    }
 
     private fun buildCandidate(state: SymbolState): CandidateRow? {
         val detail = buildDetail(state) ?: return null
@@ -343,6 +350,7 @@ fun buildSymbolDetail(
         updateCount = updateCount,
         isWatched = isWatched,
         companyName = snapshot.companyName,
+        nextEarningsEpoch = snapshot.nextEarningsEpoch,
     )
 }
 

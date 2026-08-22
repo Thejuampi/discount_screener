@@ -32,180 +32,311 @@ import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private val DCF_OPPORTUNITY_THRESHOLD_BPS: Int
-    get() = ValuationPolicy.current.opportunity.dcfOpportunityThresholdBps
-private val DCF_EXPENSIVE_THRESHOLD_BPS: Int
-    get() = ValuationPolicy.current.opportunity.dcfExpensiveThresholdBps
-private val RANKING_INCLUDES_QUANT_ENGINE: Boolean
-    get() = ValuationPolicy.current.opportunity.rankingIncludesQuantEngine
+private const val DCF_OPPORTUNITY_THRESHOLD_BPS = 2_000
+private const val DCF_EXPENSIVE_THRESHOLD_BPS = -1_000
 
-private val V2 get() = ValuationPolicy.current.opportunity.v2
-private val V3 get() = ValuationPolicy.current.opportunity.v3
-private val V4 get() = ValuationPolicy.current.opportunity.v4
+/**
+ * Quant Engine (FCFF / residual income / DCF scenarios) is diagnostic-only for ranking
+ * until model quality is trustworthy. Detail / Quant Lens still compute and display it.
+ * Flip only after an explicit product decision to re-enable.
+ */
+private const val RANKING_INCLUDES_QUANT_ENGINE = false
 
-private val V2_FUND_FCF_YIELD_LOWER get() = V2.fundFcfYieldLower
-private val V2_FUND_FCF_YIELD_UPPER get() = V2.fundFcfYieldUpper
-private val V2_FUND_FCF_WEIGHT get() = V2.fundFcfWeight
-private val V2_FUND_OCF_FALLBACK_WEIGHT get() = V2.fundOcfFallbackWeight
-private val V2_FUND_ROE_LOWER_BPS get() = V2.fundRoeLowerBps
-private val V2_FUND_ROE_UPPER_BPS get() = V2.fundRoeUpperBps
-private val V2_FUND_ROE_WEIGHT get() = V2.fundRoeWeight
-private val V2_FUND_GROWTH_LOWER_BPS get() = V2.fundGrowthLowerBps
-private val V2_FUND_GROWTH_UPPER_BPS get() = V2.fundGrowthUpperBps
-private val V2_FUND_GROWTH_WEIGHT get() = V2.fundGrowthWeight
-private val V2_FUND_BALANCE_DE_LOW get() = V2.fundBalanceDeLow
-private val V2_FUND_BALANCE_DE_HIGH get() = V2.fundBalanceDeHigh
-private val V2_FUND_BALANCE_WEIGHT get() = V2.fundBalanceWeight
-private val V2_FUND_PE_LOW get() = V2.fundPeLow
-private val V2_FUND_PE_HIGH get() = V2.fundPeHigh
-private val V2_FUND_PE_WEIGHT get() = V2.fundPeWeight
-private val V2_TECH_TREND_DELTA_BOUND get() = V2.techTrendDeltaBound
-private val V2_TECH_TREND_20_50_WEIGHT get() = V2.techTrend2050Weight
-private val V2_TECH_TREND_50_200_WEIGHT get() = V2.techTrend50200Weight
-private val V2_TECH_TREND_PRICE_20_WEIGHT get() = V2.techTrendPrice20Weight
-private val V2_TECH_HISTOGRAM_BOUND get() = V2.techHistogramBound
-private val V2_TECH_HISTOGRAM_WEIGHT get() = V2.techHistogramWeight
-private val V2_TECH_MACD_DIRECTION_WEIGHT get() = V2.techMacdDirectionWeight
-private val V2_FORECAST_UPSIDE_LOWER_BPS get() = V2.forecastUpsideLowerBps
-private val V2_FORECAST_UPSIDE_UPPER_BPS get() = V2.forecastUpsideUpperBps
-private val V2_FORECAST_VALUATION_WEIGHT get() = V2.forecastValuationWeight
-private val V2_FORECAST_REC_LOW_HUNDREDTHS get() = V2.forecastRecLowHundredths
-private val V2_FORECAST_REC_HIGH_HUNDREDTHS get() = V2.forecastRecHighHundredths
-private val V2_FORECAST_REC_WEIGHT get() = V2.forecastRecWeight
-private val V2_FORECAST_MIN_ANALYST_OPINIONS get() = V2.forecastMinAnalystOpinions
-private val V2_FORECAST_FULL_ANALYST_OPINIONS get() = V2.forecastFullAnalystOpinions
-private val V2_FORECAST_BREADTH_WEIGHT get() = V2.forecastBreadthWeight
-private val V2_FORECAST_UNCERTAINTY_BOUND get() = V2.forecastUncertaintyBound
-private val V2_FORECAST_UNCERTAINTY_WEIGHT get() = V2.forecastUncertaintyWeight
-private val V2_FORECAST_FRESHNESS_WEIGHT get() = V2.forecastFreshnessWeight
-private val V2_FORECAST_FRESHNESS_HALF_LIFE_SECONDS get() = V2.forecastFreshnessHalfLifeSeconds
-private val V2_FORECAST_DCF_RELIABILITY get() = V2.forecastDcfReliability
-private val V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT get() = V2.forecastMinReliableEvidenceWeight
-private val V2_FUNDAMENTALS_FULL_WEIGHT get() = V2.fundamentalsFullWeight
-private val V2_TECHNICALS_FULL_WEIGHT get() = V2.technicalsFullWeight
-private val V2_FORECAST_FULL_WEIGHT
-    get() = V2_FORECAST_VALUATION_WEIGHT +
+// AggressiveV2 tuning constants. Centralised so future calibration changes one place.
+private const val V2_FUND_FCF_YIELD_LOWER = -0.02
+private const val V2_FUND_FCF_YIELD_UPPER = 0.08
+private const val V2_FUND_FCF_WEIGHT = 25.0
+private const val V2_FUND_OCF_FALLBACK_WEIGHT = 10.0
+private const val V2_FUND_ROE_LOWER_BPS = 0.0
+private const val V2_FUND_ROE_UPPER_BPS = 2_000.0
+private const val V2_FUND_ROE_WEIGHT = 20.0
+private const val V2_FUND_GROWTH_LOWER_BPS = -500.0
+private const val V2_FUND_GROWTH_UPPER_BPS = 1_500.0
+private const val V2_FUND_GROWTH_WEIGHT = 15.0
+private const val V2_FUND_BALANCE_DE_LOW = 30.0
+private const val V2_FUND_BALANCE_DE_HIGH = 200.0
+private const val V2_FUND_BALANCE_WEIGHT = 20.0
+private const val V2_FUND_PE_LOW = 800.0
+private const val V2_FUND_PE_HIGH = 3_500.0
+private const val V2_FUND_PE_WEIGHT = 20.0
+
+private const val V2_TECH_TREND_DELTA_BOUND = 0.10
+private const val V2_TECH_TREND_20_50_WEIGHT = 24.0
+private const val V2_TECH_TREND_50_200_WEIGHT = 21.0
+private const val V2_TECH_TREND_PRICE_20_WEIGHT = 15.0
+private const val V2_TECH_HISTOGRAM_BOUND = 0.005
+private const val V2_TECH_HISTOGRAM_WEIGHT = 25.0
+private const val V2_TECH_MACD_DIRECTION_WEIGHT = 15.0
+
+private const val V2_FORECAST_UPSIDE_LOWER_BPS = -2_000.0
+private const val V2_FORECAST_UPSIDE_UPPER_BPS = 5_000.0
+private const val V2_FORECAST_VALUATION_WEIGHT = 50.0
+private const val V2_FORECAST_REC_LOW_HUNDREDTHS = 150.0
+private const val V2_FORECAST_REC_HIGH_HUNDREDTHS = 300.0
+private const val V2_FORECAST_REC_WEIGHT = 15.0
+private const val V2_FORECAST_MIN_ANALYST_OPINIONS = 3
+private const val V2_FORECAST_FULL_ANALYST_OPINIONS = 15.0
+private const val V2_FORECAST_BREADTH_WEIGHT = 20.0
+private const val V2_FORECAST_UNCERTAINTY_BOUND = 0.6
+private const val V2_FORECAST_UNCERTAINTY_WEIGHT = 10.0
+private const val V2_FORECAST_FRESHNESS_WEIGHT = 5.0
+private const val V2_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
+private const val V2_FORECAST_DCF_RELIABILITY = 0.75
+private const val V2_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
+
+private const val V2_FUNDAMENTALS_FULL_WEIGHT = 100.0
+private const val V2_TECHNICALS_FULL_WEIGHT = 100.0
+private const val V2_FORECAST_FULL_WEIGHT =
+    V2_FORECAST_VALUATION_WEIGHT +
         V2_FORECAST_REC_WEIGHT +
         V2_FORECAST_BREADTH_WEIGHT +
         V2_FORECAST_UNCERTAINTY_WEIGHT +
         V2_FORECAST_FRESHNESS_WEIGHT
-private val V2_COMPOSITE_COVERAGE_BONUS get() = V2.compositeCoverageBonus
-private val V2_COMPOSITE_BOUND get() = V2.compositeBound
 
-private val V3_FUND_FCF_YIELD_LOWER get() = V3.fundFcfYieldLower
-private val V3_FUND_FCF_YIELD_UPPER get() = V3.fundFcfYieldUpper
-private val V3_FUND_FCF_WEIGHT get() = V3.fundFcfWeight
-private val V3_FUND_OCF_FALLBACK_WEIGHT get() = V3.fundOcfFallbackWeight
-private val V3_FUND_ROE_LOWER_BPS get() = V3.fundRoeLowerBps
-private val V3_FUND_ROE_UPPER_BPS get() = V3.fundRoeUpperBps
-private val V3_FUND_ROE_WEIGHT get() = V3.fundRoeWeight
-private val V3_FUND_GROWTH_LOWER_BPS get() = V3.fundGrowthLowerBps
-private val V3_FUND_GROWTH_UPPER_BPS get() = V3.fundGrowthUpperBps
-private val V3_FUND_GROWTH_WEIGHT get() = V3.fundGrowthWeight
-private val V3_FUND_BALANCE_DE_LOW get() = V3.fundBalanceDeLow
-private val V3_FUND_BALANCE_DE_HIGH get() = V3.fundBalanceDeHigh
-private val V3_FUND_BALANCE_WEIGHT get() = V3.fundBalanceWeight
-private val V3_FUND_VALUATION_WEIGHT get() = V3.fundValuationWeight
-private val V3_FUND_PE_LOW get() = V3.fundPeLow
-private val V3_FUND_PE_HIGH get() = V3.fundPeHigh
-private val V3_FUND_EV_EBITDA_LOW get() = V3.fundEvEbitdaLow
-private val V3_FUND_EV_EBITDA_HIGH get() = V3.fundEvEbitdaHigh
-private val V3_FUND_PB_LOW get() = V3.fundPbLow
-private val V3_FUND_PB_HIGH get() = V3.fundPbHigh
-private val VALUATION_PANEL_MULTIPLE_COUNT
-    get() = ValuationPolicy.current.opportunity.valuationPanelMultipleCount
-private val V3_FUND_CASH_QUALITY_WEIGHT get() = V3.fundCashQualityWeight
-private val V4_FUND_SECTOR_CHEAP_MULT get() = V4.fundSectorCheapMult
-private val V4_FUND_SECTOR_RICH_MULT get() = V4.fundSectorRichMult
-private val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS get() = V4.fundSectorRoeLowerOffsetBps
-private val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS get() = V4.fundSectorRoeUpperOffsetBps
-private val SECTOR_ADJUSTED_MARKER
-    get() = ValuationPolicy.current.opportunity.sectorAdjustedMarker
-private val V3_TECH_TREND_DELTA_BOUND get() = V3.techTrendDeltaBound
-private val V3_TECH_TREND_PRICE_20_WEIGHT get() = V3.techTrendPrice20Weight
-private val V3_TECH_TREND_20_50_WEIGHT get() = V3.techTrend2050Weight
-private val V3_TECH_TREND_50_200_WEIGHT get() = V3.techTrend50200Weight
-private val V3_TECH_HISTOGRAM_BOUND get() = V3.techHistogramBound
-private val V3_TECH_HISTOGRAM_WEIGHT get() = V3.techHistogramWeight
-private val V3_TECH_MACD_DIRECTION_WEIGHT get() = V3.techMacdDirectionWeight
-private val V3_TECH_RSI_WEIGHT get() = V3.techRsiWeight
-private val V3_TECH_VOLUME_WEIGHT get() = V3.techVolumeWeight
-private val V3_TECH_RSI_SLOPE_BOUND get() = V3.techRsiSlopeBound
-private val V3_TECH_VOLUME_RATIO_LOW get() = V3.techVolumeRatioLow
-private val V3_TECH_VOLUME_RATIO_HIGH get() = V3.techVolumeRatioHigh
-private val V3_FORECAST_UPSIDE_LOWER_BPS get() = V3.forecastUpsideLowerBps
-private val V3_FORECAST_UPSIDE_UPPER_BPS get() = V3.forecastUpsideUpperBps
-private val V3_FORECAST_VALUATION_WEIGHT get() = V3.forecastValuationWeight
-private val V3_FORECAST_REC_LOW_HUNDREDTHS get() = V3.forecastRecLowHundredths
-private val V3_FORECAST_REC_HIGH_HUNDREDTHS get() = V3.forecastRecHighHundredths
-private val V3_FORECAST_REC_WEIGHT get() = V3.forecastRecWeight
-private val V3_FORECAST_SKEW_WEIGHT get() = V3.forecastSkewWeight
-private val V3_FORECAST_MIN_ANALYST_OPINIONS get() = V3.forecastMinAnalystOpinions
-private val V3_FORECAST_FULL_ANALYST_OPINIONS get() = V3.forecastFullAnalystOpinions
-private val V3_FORECAST_BREADTH_WEIGHT get() = V3.forecastBreadthWeight
-private val V3_FORECAST_UNCERTAINTY_BOUND get() = V3.forecastUncertaintyBound
-private val V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT get() = V3.forecastAnalystUncertaintyWeight
-private val V3_FORECAST_DCF_UNCERTAINTY_WEIGHT get() = V3.forecastDcfUncertaintyWeight
-private val V3_FORECAST_DCF_WIDTH_LOWER get() = V3.forecastDcfWidthLower
-private val V3_FORECAST_DCF_WIDTH_UPPER get() = V3.forecastDcfWidthUpper
-private val V3_FORECAST_FRESHNESS_WEIGHT get() = V3.forecastFreshnessWeight
-private val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS get() = V3.forecastFreshnessHalfLifeSeconds
-private val V3_FORECAST_DCF_RELIABILITY get() = V3.forecastDcfReliability
-private val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT get() = V3.forecastMinReliableEvidenceWeight
-private val V4_FORECAST_VALUATION_WEIGHT get() = V3_FORECAST_VALUATION_WEIGHT
-private val V4_FORECAST_REC_WEIGHT get() = V3_FORECAST_REC_WEIGHT
-private val V4_FORECAST_SKEW_WEIGHT get() = V3_FORECAST_SKEW_WEIGHT
-private val V4_FORECAST_UNCERTAINTY_WEIGHT
-    get() = V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT +
-        V3_FORECAST_BREADTH_WEIGHT +
-        V3_FORECAST_FRESHNESS_WEIGHT
-private val V4_FORECAST_FULL_WEIGHT
-    get() = V4_FORECAST_VALUATION_WEIGHT +
+private const val V2_COMPOSITE_COVERAGE_BONUS = 5
+private const val V2_COMPOSITE_BOUND = 110
+
+// AggressiveV3 tuning constants. Extends V2 evidence math with multi-multiple valuation,
+// RSI/volume technicals, recommendation skew, DCF scenario width, and a beta risk haircut.
+private const val V3_FUND_FCF_YIELD_LOWER = -0.02
+private const val V3_FUND_FCF_YIELD_UPPER = 0.08
+private const val V3_FUND_FCF_WEIGHT = 22.0
+private const val V3_FUND_OCF_FALLBACK_WEIGHT = 10.0
+private const val V3_FUND_ROE_LOWER_BPS = 0.0
+private const val V3_FUND_ROE_UPPER_BPS = 2_000.0
+private const val V3_FUND_ROE_WEIGHT = 16.0
+private const val V3_FUND_GROWTH_LOWER_BPS = -500.0
+private const val V3_FUND_GROWTH_UPPER_BPS = 1_500.0
+private const val V3_FUND_GROWTH_WEIGHT = 12.0
+private const val V3_FUND_BALANCE_DE_LOW = 30.0
+private const val V3_FUND_BALANCE_DE_HIGH = 200.0
+private const val V3_FUND_BALANCE_WEIGHT = 16.0
+private const val V3_FUND_VALUATION_WEIGHT = 24.0
+private const val V3_FUND_PE_LOW = 800.0
+private const val V3_FUND_PE_HIGH = 3_500.0
+private const val V3_FUND_EV_EBITDA_LOW = 600.0
+private const val V3_FUND_EV_EBITDA_HIGH = 2_000.0
+private const val V3_FUND_PB_LOW = 100.0
+private const val V3_FUND_PB_HIGH = 500.0
+
+/** Forward P/E, EV/EBITDA and P/B — the divisor that stops one multiple saturating the panel. */
+private const val VALUATION_PANEL_MULTIPLE_COUNT = 3.0
+private const val V3_FUND_CASH_QUALITY_WEIGHT = 10.0
+
+// V4's sector bands. The three price multiples get a multiplicative ramp around the sector centre
+// and return on equity gets an additive one, because return on equity crosses zero and a
+// percentage band does not survive that. Both shapes and all four numbers are Windows's
+// (`engine.rs:1299-1305`), so the later Rust port has one set of constants to agree with.
+private const val V4_FUND_SECTOR_CHEAP_MULT = 0.7
+private const val V4_FUND_SECTOR_RICH_MULT = 1.5
+private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
+private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
+
+/**
+ * V4's leverage band, in hundredths of a turn of EBITDA. Zero is net cash; 300 is three turns of
+ * net debt.
+ *
+ * Three turns is the level at which a lender starts writing covenants, and it is a chosen line
+ * rather than a measured one. Below zero the company owes nothing on balance and the ramp is
+ * already at its top, which is correct: paying down the last of the net debt is not what makes the
+ * next dollar of return.
+ */
+private const val V4_FUND_LEVERAGE_LOW = 0.0
+private const val V4_FUND_LEVERAGE_HIGH = 300.0
+
+/**
+ * The sector band around the leverage centre, additive for the same reason return on equity's is:
+ * net debt crosses zero, and a multiplicative band around a negative centre inverts.
+ *
+ * Plus or minus one and a half turns. A pipeline at 3.5x is ordinary and a software company at
+ * 3.5x is in trouble, and this is the offset that lets one band say both.
+ */
+private const val V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET = -150.0
+private const val V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET = 150.0
+
+/**
+ * The fallback band, stated in the unit the ingestion actually produces.
+ *
+ * Yahoo reports `financialData.debtToEquity` as a percent — AMZN comes back as 40.46 for a ratio of
+ * 0.4046 — and every ingestion in this repo multiplies it by a hundred again. The stored number is
+ * therefore the ratio times ten thousand. V2 and V3 ramp that field against 30 to 200
+ * ([V3_FUND_BALANCE_DE_LOW]), so every real ticker saturates and their leverage component scores
+ * the same constant for the whole universe.
+ *
+ * Those two models are frozen and keep the behaviour. V4 reads the field against the band the
+ * field is in. Correcting the ingestion instead is not open: Windows's valuation runtime is
+ * calibrated to the inflated number (`operating_valuation_runtime.rs:771-778` divides by ten
+ * thousand), and rescaling under it would move hold-years and the leverage refusals with no test
+ * standing behind either.
+ *
+ * This is the second choice regardless. It is reached only when EBITDA is missing or non-positive,
+ * and it carries its own label so the weaker input is visible in the factor list.
+ */
+private const val V4_FUND_FALLBACK_DE_LOW = 3_000.0
+private const val V4_FUND_FALLBACK_DE_HIGH = 20_000.0
+
+/**
+ * Held equal to [V3_FUND_BALANCE_WEIGHT] on purpose. V4's budget is V3's plus the share-count
+ * weight ([V4_FUNDAMENTALS_FULL_WEIGHT]); changing the leverage weight alone would silently
+ * re-scale every other V4 factor.
+ */
+private const val V4_FUND_LEVERAGE_WEIGHT = V3_FUND_BALANCE_WEIGHT
+
+/**
+ * The one character that says a metric was scored against its sector rather than an absolute band.
+ *
+ * Two rows in one list scored by different rules, with nothing saying which, is the same defect as
+ * a refusal drawn as a mute dash. Windows spends the same character for the same reason
+ * (`engine.rs:1303`).
+ */
+private const val SECTOR_ADJUSTED_MARKER = "§"
+
+private const val V3_TECH_TREND_DELTA_BOUND = 0.10
+private const val V3_TECH_TREND_PRICE_20_WEIGHT = 12.0
+private const val V3_TECH_TREND_20_50_WEIGHT = 18.0
+private const val V3_TECH_TREND_50_200_WEIGHT = 15.0
+private const val V3_TECH_HISTOGRAM_BOUND = 0.005
+private const val V3_TECH_HISTOGRAM_WEIGHT = 12.0
+private const val V3_TECH_MACD_DIRECTION_WEIGHT = 8.0
+private const val V3_TECH_RSI_WEIGHT = 25.0
+private const val V3_TECH_VOLUME_WEIGHT = 10.0
+private const val V3_TECH_RSI_SLOPE_BOUND = 2.0
+private const val V3_TECH_VOLUME_RATIO_LOW = 70.0
+private const val V3_TECH_VOLUME_RATIO_HIGH = 150.0
+
+private const val V3_FORECAST_UPSIDE_LOWER_BPS = -2_000.0
+private const val V3_FORECAST_UPSIDE_UPPER_BPS = 5_000.0
+private const val V3_FORECAST_VALUATION_WEIGHT = 42.0
+private const val V3_FORECAST_REC_LOW_HUNDREDTHS = 150.0
+private const val V3_FORECAST_REC_HIGH_HUNDREDTHS = 300.0
+private const val V3_FORECAST_REC_WEIGHT = 12.0
+private const val V3_FORECAST_SKEW_WEIGHT = 12.0
+private const val V3_FORECAST_MIN_ANALYST_OPINIONS = 3
+private const val V3_FORECAST_FULL_ANALYST_OPINIONS = 15.0
+private const val V3_FORECAST_BREADTH_WEIGHT = 14.0
+internal const val V3_FORECAST_UNCERTAINTY_BOUND = 0.6
+private const val V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT = 8.0
+private const val V3_FORECAST_DCF_UNCERTAINTY_WEIGHT = 8.0
+internal const val V3_FORECAST_DCF_WIDTH_LOWER = 0.2
+private const val V3_FORECAST_DCF_WIDTH_UPPER = 1.0
+private const val V3_FORECAST_FRESHNESS_WEIGHT = 4.0
+private const val V3_FORECAST_FRESHNESS_HALF_LIFE_SECONDS = 14.0 * 86_400.0
+private const val V3_FORECAST_DCF_RELIABILITY = 0.75
+private const val V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = 25.0
+
+/**
+ * V4 forecast keeps V3's Street centre and rating terms. It does not pay points
+ * for coverage or freshness — those already scale reliability. The leftover
+ * budget goes to target-range disagreement, which V3 underweighted.
+ */
+private const val V4_FORECAST_VALUATION_WEIGHT = V3_FORECAST_VALUATION_WEIGHT
+private const val V4_FORECAST_REC_WEIGHT = V3_FORECAST_REC_WEIGHT
+private const val V4_FORECAST_SKEW_WEIGHT = V3_FORECAST_SKEW_WEIGHT
+private const val V4_FORECAST_UNCERTAINTY_WEIGHT =
+    V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT + V3_FORECAST_BREADTH_WEIGHT + V3_FORECAST_FRESHNESS_WEIGHT
+private const val V4_FORECAST_FULL_WEIGHT =
+    V4_FORECAST_VALUATION_WEIGHT +
         V4_FORECAST_REC_WEIGHT +
         V4_FORECAST_SKEW_WEIGHT +
         V4_FORECAST_UNCERTAINTY_WEIGHT
-private val V4_FORECAST_UNCERTAINTY_BOUND get() = V3_FORECAST_UNCERTAINTY_BOUND
-private val V4_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT get() = V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT
-private val V3_FUNDAMENTALS_FULL_WEIGHT get() = V3.fundamentalsFullWeight
-private val BASIS_POINTS_PER_UNIT
-    get() = ValuationPolicy.current.opportunity.basisPointsPerUnit
-private val V4_FUND_SHARE_COUNT_WEIGHT get() = V4.fundShareCountWeight
-private val V4_FUND_TREND_WEIGHT get() = V4.fundTrendWeight
-private val V4_FUND_PULSE_WEIGHT get() = V4.fundPulseWeight
-private val V4_FUND_GROWTH_LOWER_BPS get() = V3_FUND_GROWTH_LOWER_BPS
-private val V4_FUND_GROWTH_UPPER_BPS get() = V3_FUND_GROWTH_UPPER_BPS
-private val V4_PULSE_MIN_ABS_EPS_CENTS get() = V4.pulseMinAbsEpsCents
-private val V4_TREND_MAX_YEARS get() = V4.trendMaxYears
-private val V4_TREND_MIN_TRANSITIONS get() = V4.trendMinTransitions
-private val V4_FUND_SHARE_COUNT_SHRINK_BPS get() = V4.fundShareCountShrinkBps
-private val V4_FUND_SHARE_COUNT_DILUTE_BPS get() = V4.fundShareCountDiluteBps
-private val V4_FUNDAMENTALS_FULL_WEIGHT get() = V3_FUNDAMENTALS_FULL_WEIGHT + V4_FUND_SHARE_COUNT_WEIGHT
-private val V3_TECHNICALS_FULL_WEIGHT get() = V3.technicalsFullWeight
-private val V3_FORECAST_FULL_WEIGHT
-    get() = V3_FORECAST_VALUATION_WEIGHT +
+private const val V4_FORECAST_UNCERTAINTY_BOUND = V3_FORECAST_UNCERTAINTY_BOUND
+private const val V4_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT = V3_FORECAST_MIN_RELIABLE_EVIDENCE_WEIGHT
+
+private const val V3_FUNDAMENTALS_FULL_WEIGHT = 100.0
+
+private const val BASIS_POINTS_PER_UNIT = 10_000.0
+
+private const val V4_FUND_SHARE_COUNT_WEIGHT = 10.0
+
+/** Half the old V3 Growth weight of 12. Pulse and Trend share that budget. */
+private const val V4_FUND_TREND_WEIGHT = 6.0
+private const val V4_FUND_PULSE_WEIGHT = 6.0
+private const val V4_FUND_GROWTH_LOWER_BPS = V3_FUND_GROWTH_LOWER_BPS
+private const val V4_FUND_GROWTH_UPPER_BPS = V3_FUND_GROWTH_UPPER_BPS
+
+/** Below this trailing EPS, Yahoo quarter YoY has no usable base. Ten cents is in. */
+private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
+
+/**
+ * The smallest gap between Trend and Pulse that this engine calls a conflict.
+ *
+ * The old test compared ramp signs, and the shared band's midpoint sits at +5% growth — so +6%
+ * revenue against +4% EPS flagged, while two readings of a collapsing business on the same side
+ * of the midpoint did not. Ten points of growth is the smallest disagreement that says the two
+ * series describe different businesses; anything under it is noise around the middle of the band.
+ */
+private const val V4_GROWTH_CONFLICT_BPS = 1_000
+
+/** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
+private const val V4_TREND_MAX_YEARS = 5
+private const val V4_TREND_MIN_TRANSITIONS = 2
+
+/**
+ * The share-count band: a three per cent annual move either way is the whole ramp.
+ *
+ * A chosen band, not a measured one, and it is worth saying so. Three per cent a year is roughly
+ * where a buyback stops being housekeeping and starts being a return of capital, and where
+ * dilution stops being option grants and starts being the shareholder paying for growth. Nothing
+ * in this repository has measured that boundary; the score journal is what could later challenge
+ * it, and the band is deliberately narrow enough that most companies land inside the ramp rather
+ * than pinned at an end.
+ */
+private const val V4_FUND_SHARE_COUNT_SHRINK_BPS = -300.0
+private const val V4_FUND_SHARE_COUNT_DILUTE_BPS = 300.0
+
+/**
+ * V4 inherits V3's term weights and adds the ones V3 does not have.
+ *
+ * The divisor is the **full** budget, not the weight observed, so a symbol with no share history
+ * scores its other terms against a total that includes the share term. That is deliberate: a
+ * missing input pulls the bucket toward zero rather than being silently excused, which is what
+ * "the term contributes nothing" has to mean if it is not to mean "the term scored zero".
+ */
+private const val V4_FUNDAMENTALS_FULL_WEIGHT = V3_FUNDAMENTALS_FULL_WEIGHT + V4_FUND_SHARE_COUNT_WEIGHT
+private const val V3_TECHNICALS_FULL_WEIGHT = 100.0
+private const val V3_FORECAST_FULL_WEIGHT =
+    V3_FORECAST_VALUATION_WEIGHT +
         V3_FORECAST_REC_WEIGHT +
         V3_FORECAST_SKEW_WEIGHT +
         V3_FORECAST_BREADTH_WEIGHT +
         V3_FORECAST_ANALYST_UNCERTAINTY_WEIGHT +
         V3_FORECAST_DCF_UNCERTAINTY_WEIGHT +
         V3_FORECAST_FRESHNESS_WEIGHT
-private val V3_COMPOSITE_COVERAGE_BONUS get() = V3.compositeCoverageBonus
-private val V3_COMPOSITE_BOUND get() = V3.compositeBound
-private val V3_BETA_HAIRCUT_MAX get() = V3.betaHaircutMax
-private val V3_BETA_HAIRCUT_MULT_MAX get() = V3.betaHaircutMultMax
-private val V3_BETA_LOW_MILLIS get() = V3.betaLowMillis
-private val V3_BETA_HIGH_MILLIS get() = V3.betaHighMillis
-private val V4_COMPOSITE_AGREEMENT_BONUS get() = V4.compositeAgreementBonus
-private val V4_COMPOSITE_BOUND get() = V4.compositeBound
-private val V4_SPREAD_FULL get() = V4.spreadFull
-private val LEGACY_AVOID_BELOW_SCORE
-    get() = ValuationPolicy.current.opportunity.legacyAvoidBelowScore
-private val LEGACY_ACT_AT_OR_ABOVE_SCORE
-    get() = ValuationPolicy.current.opportunity.legacyActAtOrAboveScore
-private val CONTINUOUS_AVOID_BELOW_SCORE
-    get() = ValuationPolicy.current.opportunity.continuousAvoidBelowScore
-private val CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
-    get() = ValuationPolicy.current.opportunity.continuousActAtOrAboveScore
+
+private const val V3_COMPOSITE_COVERAGE_BONUS = 5
+private const val V3_COMPOSITE_BOUND = 110
+private const val V3_BETA_HAIRCUT_MAX = 10.0
+
+/** `beta_haircut_mult.clamp(0.0, 2.5)` in `composite_score_v3_ext`. */
+private const val V3_BETA_HAIRCUT_MULT_MAX = 2.5
+private const val V3_BETA_LOW_MILLIS = 800.0
+private const val V3_BETA_HIGH_MILLIS = 1_600.0
+
+// AggressiveV4 tuning constants. Fundamentals keep V3's term weights except Growth,
+// which splits into Trend (revenue 3–5y) and Pulse (quarter EPS YoY). The composite
+// pays for agreement, not presence.
+private const val V4_COMPOSITE_AGREEMENT_BONUS = 5
+private const val V4_COMPOSITE_BOUND = 110
+
+/**
+ * The bucket spread at which the agreement bonus reaches zero.
+ *
+ * Measured, not chosen: the p90 of the mean absolute deviation across the buckets, over the 61
+ * **qualified** rows of a live S&P 500 reading on 2026-08-11, taken around the median — the same
+ * centre this function computes. Recorded in `lab/data/overlap-spread-median-2026-08-11.txt`.
+ *
+ * Both halves of that sentence are load-bearing. The cohort's p90 is 29.0, but the cohort is not
+ * what this constant grades: the Opportunities list is markedly more divided, and its median row's
+ * spread of 22.5 is near the *cohort's* p75. A cohort-fit constant would have paid nothing to about
+ * a third of the list while claiming to zero only its most divided tenth.
+ */
+private const val V4_SPREAD_FULL = 38.5
+
+// Act/Avoid cutoffs. Legacy/Aggressive use the original 0–15-ish point scale; V2/V3 use ±100 means.
+private const val LEGACY_AVOID_BELOW_SCORE = 8
+private const val LEGACY_ACT_AT_OR_ABOVE_SCORE = 10
+private const val CONTINUOUS_AVOID_BELOW_SCORE = 0
+private const val CONTINUOUS_ACT_AT_OR_ABOVE_SCORE = 30
 
 data class OpportunityContext(
     val filter: ViewFilter = ViewFilter(),
@@ -355,10 +486,11 @@ object OpportunityEngine {
             .filter { includeUnqualified || it.isQualified }
             .mapNotNull { candidate ->
                 val detail = reportingEngine.detail(candidate.symbol) ?: return@mapNotNull null
+                var analysis = context.analysesBySymbol[detail.symbol]
                 val score = scoreWithModel(
                     detail = detail,
                     summary = preferredChartSummary(context.chartSummariesBySymbol[detail.symbol]),
-                    analysis = context.analysesBySymbol[detail.symbol],
+                    analysis = analysis,
                     model = context.scoringModel,
                     regimeSummary = context.regimeSummariesBySymbol[detail.symbol],
                     marketRegime = context.marketRegime,
@@ -366,6 +498,23 @@ object OpportunityEngine {
                     sectorBenchmarks = detail.fundamentals?.sectorName
                         ?.let { context.sectorBenchmarks[it] },
                     timeseries = context.timeseriesBySymbol[detail.symbol],
+                )
+                // Read from the same two spans the forecast bucket already measures, so a row cannot
+                // report a narrow range here while `Unc` penalises a wide one. It is stamped whether
+                // or not the model spread is admitted to the score.
+                var outcome = outcomeConfidenceFor(
+                    streetWidthBps = spanWidthBps(
+                        lowCents = detail.externalSignalLowFairValueCents,
+                        highCents = detail.externalSignalHighFairValueCents,
+                        centreCents = preferredForecastFairValueCents(detail),
+                    ),
+                    modelWidthBps = analysis?.let { dcf ->
+                        spanWidthBps(
+                            lowCents = dcf.bearIntrinsicValueCents,
+                            highCents = dcf.bullIntrinsicValueCents,
+                            centreCents = dcf.baseIntrinsicValueCents,
+                        )
+                    },
                 )
                 OpportunityRow(
                     symbol = detail.symbol,
@@ -393,6 +542,9 @@ object OpportunityEngine {
                     regimeSignals = score.regimeSignals,
                     regimeUnavailableReason = score.regimeUnavailableReason,
                     companyName = detail.companyName,
+                    nextEarningsEpoch = detail.nextEarningsEpoch,
+                    outcomeConfidence = outcome.band,
+                    outcomeWidthBps = outcome.widthBps,
                 )
             }
             .toMutableList()
@@ -1262,15 +1414,41 @@ object OpportunityEngine {
         var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
 
-        addCashFlowVote(acc, fundamentals)
+        val yieldVoted = addCashFlowVote(acc, fundamentals)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
         addV4Growth(acc, fundamentals, timeseries)
-        addBalanceSheet(acc, fundamentals)
+        addV4BalanceSheet(
+            acc,
+            fundamentals,
+            sectorBenchmarks?.netDebtToEbitdaHundredths,
+            financialServices = FinancialClassPolicy.isFinancialServices(fundamentals),
+        )
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
-        addCashConversion(acc, fundamentals)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
         addShareCountChange(acc, timeseries)
+        addCyclePeak(acc, fundamentals, timeseries)
 
         return acc.toEvidence()
+    }
+
+    /**
+     * Marks a name whose latest earnings sit at the top of the only history there is, in an
+     * industry the beta policy already calls through-cycle.
+     *
+     * It subtracts and never adds. A margin at the bottom of its window is not evidence of a
+     * trough — over five points it is indistinguishable from a business getting worse — and paying
+     * a name for that would be the same extrapolation error in the other direction.
+     *
+     * See [cyclePeakReading] for why this is a penalty and not a weighted term.
+     */
+    private fun addCyclePeak(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var reading = cyclePeakReading(fundamentals, timeseries, V4_TREND_MAX_YEARS)
+        if (reading.penaltyPoints <= 0) return
+        acc.penalize(reading.penaltyPoints, CYCLE_PEAK_LABEL, reading.marginPercentileBps)
     }
 
     /**
@@ -1283,14 +1461,21 @@ object OpportunityEngine {
      *
      * A single point is not a change and contributes nothing rather than zero: the pair is what
      * carries the fact, and one point cannot say which way it moved. Both providers sort ascending
-     * by `asOfDate`, so the last two entries are the most recent pair.
+     * by `asOfDate`, so the last two entries are the most recent pair — and the pair must be two
+     * adjacent fiscal years. A series with a missing year would otherwise print a multi-year move
+     * as one annual rate, and a stale pair would report a change that ended years ago as if it
+     * were current; the adjacency gate refuses both rather than misdating them.
      */
     private fun addShareCountChange(acc: EvidenceAccumulator, timeseries: FundamentalTimeseries?) {
-        var series = timeseries?.dilutedAverageShares?.filter { it.value > 0.0 } ?: return
+        var series = timeseries?.dilutedAverageShares
+            ?.filter { it.value.isFinite() && it.value > 0.0 }
+            ?.sortedBy { it.asOfDate }
+            ?: return
         if (series.size < 2) return
-        var previous = series[series.size - 2].value
-        var latest = series[series.size - 1].value
-        var changeBps = (latest - previous) / previous * BASIS_POINTS_PER_UNIT
+        var previous = series[series.size - 2]
+        var latest = series[series.size - 1]
+        if (!areConsecutiveFiscalYears(previous, latest)) return
+        var changeBps = (latest.value - previous.value) / previous.value * BASIS_POINTS_PER_UNIT
         acc.add(
             V4_FUND_SHARE_COUNT_WEIGHT,
             -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
@@ -1356,14 +1541,21 @@ object OpportunityEngine {
     // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
     // ----------------------------------------------------------------------------------
 
-    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF. */
-    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF.
+     *
+     * Returns true when the vote spoke through the FCF **yield** — FCF over a known market cap —
+     * because that is the one variant whose dollars [addCashConversion] would re-read. The single
+     * source of that condition lives here; a second hand-written copy beside the branch it mirrors
+     * is how the two drift apart.
+     */
+    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot): Boolean {
         val fcfDollars = fundamentals.freeCashFlowDollars
         val marketCapDollars = fundamentals.marketCapDollars
         when {
             fcfDollars != null && marketCapDollars != null && marketCapDollars > 0L -> {
                 val yieldFraction = fcfDollars.toDouble() / marketCapDollars.toDouble()
                 acc.add(V3_FUND_FCF_WEIGHT, smoothRamp(yieldFraction, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER), "FCFy")
+                return true
             }
             fcfDollars != null -> {
                 acc.add(V3_FUND_FCF_WEIGHT, if (fcfDollars > 0L) 1.0 else -1.0, "FCF")
@@ -1375,6 +1567,7 @@ object OpportunityEngine {
                 }
             }
         }
+        return false
     }
 
     /**
@@ -1445,8 +1638,14 @@ object OpportunityEngine {
         if (pulseRamp != null && pulseBps != null) {
             acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
         }
-        if (trendRamp != null && pulseRamp != null && trendRamp * pulseRamp < 0.0) {
+        if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
             acc.flag("Pulse≠Trend")
+        }
+        // Both readings cross the last filed year, so a write-down inside it moves them both. The
+        // mark costs nothing: it says the growth above was read over a year that is not the
+        // business, and leaves the reader to weigh it.
+        if (earningsContamination(timeseries).latestYearContaminated) {
+            acc.flag(EARNINGS_CHARGE_LABEL)
         }
     }
 
@@ -1457,36 +1656,79 @@ object OpportunityEngine {
         var growthBps = fundamentals.earningsGrowthBps ?: return null
         var epsCents = fundamentals.trailingEpsCents ?: return null
         if (abs(epsCents) < V4_PULSE_MIN_ABS_EPS_CENTS) return null
-        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty(), requirePositiveLevel = false)
+        var annualRates = recentGrowthRatesBps(timeseries?.netIncome.orEmpty())
         if (isForeignTo(growthBps.toDouble(), annualRates.map { it.toDouble() })) return null
         return growthBps
     }
 
     private fun trendGrowthBps(timeseries: FundamentalTimeseries?): Int? {
-        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty(), requirePositiveLevel = true)
+        var rates = recentGrowthRatesBps(timeseries?.revenue.orEmpty())
         if (rates.size < V4_TREND_MIN_TRANSITIONS) return null
         return medianOf(rates.map { it.toDouble() })?.roundToInt()
     }
 
-    private fun recentGrowthRatesBps(
-        series: List<AnnualReportedValue>,
-        requirePositiveLevel: Boolean,
-    ): List<Int> {
-        var usable = series
-            .filter { it.value.isFinite() }
-            .filter { if (requirePositiveLevel) it.value > 0.0 else it.value != 0.0 }
-            .sortedBy { it.asOfDate }
-            .takeLast(V4_TREND_MAX_YEARS)
-        if (usable.size < V4_TREND_MIN_TRANSITIONS + 1) return emptyList()
-        return usable.zipWithNext { previous, latest ->
-            if (previous.value == 0.0) {
-                null
-            } else {
-                ((latest.value / previous.value - 1.0) * BASIS_POINTS_PER_UNIT)
+    /**
+     * Annual YoY rates in bps, one per adjacent pair of positive-level fiscal years.
+     *
+     * The population rules live in [positiveLevelTransitions]: a pair that skips a year is not an
+     * annual rate, a negative base inverts the ratio's sign, and a loss-to-profit crossing prints
+     * nonsense. Revenue and net income take the same path — revenue arrives positive-filtered
+     * anyway, and net income needs the sign rule more than it needs the old negative-base rates.
+     */
+    private fun recentGrowthRatesBps(series: List<AnnualReportedValue>): List<Int> =
+        positiveLevelTransitions(series, maxYears = V4_TREND_MAX_YEARS)
+            .map { (previous, latest) ->
+                ((latest / previous - 1.0) * BASIS_POINTS_PER_UNIT)
                     .takeIf { it.isFinite() }
                     ?.roundToInt()
             }
-        }.filterNotNull()
+            .filterNotNull()
+
+    /**
+     * V4's leverage vote: net debt against a year of EBITDA, read against the sector when the
+     * sector can support a centre.
+     *
+     * V3 keeps [addBalanceSheet] and its book debt/equity. The split is the point — V4 is the model
+     * still in beta, and the two must be able to disagree about leverage without one dragging the
+     * other.
+     *
+     * A financial-services row takes no vote at all. Its debt line is deposits or float — the raw
+     * material, not borrowed money — and EBITDA is not a capacity measure for it, so every input
+     * this term can read is the wrong input. See [FinancialClassPolicy].
+     *
+     * Three inputs in order of strength, each labelled so the list says which one spoke:
+     * `ND/EBITDA` from dollars, `D/E` from the mis-scaled ratio, `Bal` from a bare cash-versus-debt
+     * comparison. A symbol with none of them adds nothing, which pulls the bucket toward zero
+     * rather than excusing it.
+     */
+    private fun addV4BalanceSheet(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+        financialServices: Boolean = false,
+    ) {
+        if (financialServices) return
+        var leverage = netDebtToEbitdaOf(fundamentals)
+        if (leverage != null) {
+            var centre = sectorNetDebtToEbitdaHundredths?.toDouble()
+            var lower = centre?.plus(V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET) ?: V4_FUND_LEVERAGE_LOW
+            var upper = centre?.plus(V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET) ?: V4_FUND_LEVERAGE_HIGH
+            var label = if (centre != null) "ND/EBITDA$SECTOR_ADJUSTED_MARKER" else "ND/EBITDA"
+            // Negated: more net debt is the worse reading, and the ramp climbs with its input.
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, -smoothRamp(leverage.toDouble(), lower, upper), label)
+            return
+        }
+        var deHundredths = fundamentals.debtToEquityHundredths
+        if (deHundredths != null) {
+            var ramp = -smoothRamp(deHundredths.toDouble(), V4_FUND_FALLBACK_DE_LOW, V4_FUND_FALLBACK_DE_HIGH)
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, ramp, "D/E")
+            return
+        }
+        var cash = fundamentals.totalCashDollars
+        var debt = fundamentals.totalDebtDollars
+        if (cash != null && debt != null) {
+            acc.add(V4_FUND_LEVERAGE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+        }
     }
 
     private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
@@ -1503,7 +1745,14 @@ object OpportunityEngine {
     }
 
     /** Cash conversion quality when both FCF and OCF are present (does not re-score OCF sign). */
-    private fun addCashConversion(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
+    private fun addCashConversion(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        yieldVoted: Boolean = false,
+    ) {
+        // One fact family, one vote. After a yield vote the conversion ratio re-reads the same
+        // free-cash-flow dollars; counting both would let one number speak twice in this bucket.
+        if (yieldVoted) return
         val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
@@ -1926,6 +2175,7 @@ object OpportunityEngine {
     private class EvidenceAccumulator(private val normalizationWeight: Double) {
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
+        private var penaltyPoints = 0
         val signals = mutableListOf<String>()
         val factors = mutableListOf<ScoreFactor>()
 
@@ -1946,14 +2196,31 @@ object OpportunityEngine {
             }
         }
 
+        /**
+         * A subtraction in the bucket's own hundred points, applied after the terms are normalized.
+         *
+         * It is not a term and carries no weight in the divisor. A term's weight is charged to
+         * every symbol whether or not the term fires, which is right for an input a symbol could
+         * have had and wrong for one it could not: a software company has no commodity cycle, and
+         * scaling its whole bucket down for a reading that can never apply to it would be a defect,
+         * not a caution. A penalty only reaches the symbols it was measured on.
+         */
+        fun penalize(points: Int, label: String, inputBps: Int? = null) {
+            require(points > 0) { "EvidenceAccumulator penalty must be positive" }
+            penaltyPoints += points
+            signals += "$label-"
+            factors += ScoreFactor(key = label, token = "$label-", bucketPoints = -points, inputBps = inputBps)
+        }
+
         fun flag(label: String) {
             signals += label
             factors += ScoreFactor(key = label, token = label, bucketPoints = 0)
         }
 
+        /** A penalty alone never creates a score: with no term measured the bucket is still absent. */
         fun normalizedScore(): Int? {
             if (evidenceWeight == 0.0) return null
-            var normalized = (weightedSum / normalizationWeight) * 100.0
+            var normalized = (weightedSum / normalizationWeight) * 100.0 - penaltyPoints
             return normalized.coerceIn(-100.0, 100.0).roundToInt()
         }
 

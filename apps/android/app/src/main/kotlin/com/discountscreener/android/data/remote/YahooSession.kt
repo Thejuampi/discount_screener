@@ -20,6 +20,11 @@ import kotlin.coroutines.resumeWithException
  * Bootstrap mirrors the Yahoo web app:
  * 1. Visit finance.yahoo.com to obtain A1/A3 cookies
  * 2. GET /v1/test/getcrumb with those cookies
+ *
+ * The two calls run once and everybody else waits for that one run. The wait used to be a
+ * `synchronized` block, which parks an operating-system thread rather than suspending a coroutine:
+ * at every twelve-minute expiry each symbol in flight took a thread out of the IO pool and held it
+ * across two network calls. A coroutine [Mutex] gives the thread back while the caller waits.
  */
 internal class YahooSession(
     private val httpClient: OkHttpClient,
@@ -48,6 +53,8 @@ internal class YahooSession(
     suspend fun ensureCrumb(): String {
         currentCrumbOrNull()?.let { return it }
         mutex.withLock {
+            // Checked again inside the lock: while this caller waited, the winner of the race
+            // already paid for the handshake, and a second one would only annoy Yahoo.
             currentCrumbOrNull()?.let { return it }
             bootstrapCookies()
             val crumb = fetchCrumb()

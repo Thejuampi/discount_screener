@@ -7,20 +7,26 @@ import com.discountscreener.android.data.persistence.MetricGroupStatus
 import com.discountscreener.android.data.persistence.PersistenceBootstrap
 import com.discountscreener.android.data.persistence.PersistenceIssueSeverity
 import com.discountscreener.android.data.persistence.PersistenceIssueSource
+import com.discountscreener.android.data.persistence.PersistedChartRecord
 import com.discountscreener.android.data.persistence.PersistedIssueRecord
 import com.discountscreener.android.data.persistence.RawCapture
 import com.discountscreener.android.data.persistence.RawCapturePayload
+import com.discountscreener.android.data.persistence.RefreshMarks
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.persistence.SymbolRevisionInput
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.profile.UniverseSeedResolver
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
+import com.discountscreener.android.data.remote.InteractiveRequest
 import com.discountscreener.android.data.remote.NasdaqTraderSymbolDirectoryClient
 import com.discountscreener.android.data.remote.ProviderDiagnostic
 import com.discountscreener.android.data.remote.ProviderFetchResult
+import com.discountscreener.android.data.remote.QUOTE_BATCH_SIZE
+import com.discountscreener.android.data.remote.QuoteBatchEntry
 import com.discountscreener.android.data.remote.ResidualCompanyFactsProvider
 import com.discountscreener.android.data.remote.IssuerComponentLookup
+import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.isRateLimitDetail
 import com.discountscreener.android.data.remote.isUsableCompanyName
@@ -35,8 +41,13 @@ import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.DiscoverySnapshot
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.presentation.dashboard.presentValuationJudgment
-import com.discountscreener.android.domain.model.PlanBoardMemo
+import com.discountscreener.android.domain.model.DipSetupMemo
+import com.discountscreener.android.domain.model.LeftoverBoardAssembler
+import com.discountscreener.android.domain.model.PlanBoardAssembler
 import com.discountscreener.core.plan.DipRowInput
+import com.discountscreener.core.plan.DipSignalEngine
+import com.discountscreener.core.plan.LeftoverSignalEngine
+import com.discountscreener.core.plan.PlanBoard
 import com.discountscreener.android.domain.model.ProfileTransitionEvent
 import com.discountscreener.android.domain.model.ProfileTransitionFeedback
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -104,11 +115,13 @@ import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
+import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.readsSectorBenchmarks
 import com.discountscreener.core.model.OpportunityRow
+import com.discountscreener.core.model.OutcomeConfidence
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.PersistedReportState
 import com.discountscreener.core.model.PricingCandle
@@ -157,16 +170,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -174,6 +191,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToLong
 
 private data class SymbolRefreshResult(
@@ -195,10 +213,15 @@ private data class EnrichmentResult(
     val generation: Long,
     val symbol: String,
     val chartCaptures: List<Pair<ChartRange, List<HistoricalCandle>>>,
+    /** The timeseries the DCF was chosen from, for the cache. */
     val timeseries: FundamentalTimeseries?,
     val dcfAnalysis: DcfAnalysis?,
     val residualFundamentals: FundamentalSnapshot? = null,
     val errors: List<ProviderDiagnostic>,
+    /** Every timeseries a provider sent this round, usable or not, for the file. */
+    val fetchedTimeseries: Map<DcfSource, FundamentalTimeseries> = emptyMap(),
+    /** A timeseries read back from the file, for the cache only: it is already captured there. */
+    val timeseriesFromFile: FundamentalTimeseries? = null,
 )
 
 private data class PersistenceDelta(
@@ -206,6 +229,34 @@ private data class PersistenceDelta(
     val revisions: List<SymbolRevisionInput>,
     val issues: List<PersistedIssueRecord>,
 )
+
+/**
+ * The deltas of a round since the last write, so a batch of rows costs one transaction.
+ *
+ * A write per symbol was the round: on the largest profile the persist took 5.3 s of a 7.7 s
+ * round, at nine milliseconds a symbol, all of it in front of the next row. Captures and revisions
+ * add up; the issue list is whole each time, so the last one is the one to write.
+ */
+private class PendingDeltas {
+    private val rawCaptures = mutableListOf<RawCapture>()
+    private val revisions = mutableListOf<SymbolRevisionInput>()
+    private var issues: List<PersistedIssueRecord>? = null
+
+    fun add(delta: PersistenceDelta) {
+        rawCaptures += delta.rawCaptures
+        revisions += delta.revisions
+        issues = delta.issues
+    }
+
+    /** Hands back everything added since the last take, or null when nothing was. */
+    fun take(): PersistenceDelta? {
+        var taken = issues?.let { PersistenceDelta(rawCaptures.toList(), revisions.toList(), it) }
+        rawCaptures.clear()
+        revisions.clear()
+        issues = null
+        return taken
+    }
+}
 
 private data class QuantLensCacheEntry(
     val fingerprint: String,
@@ -222,6 +273,21 @@ private data class RemoteSearchCacheEntry(
     val results: List<TickerSearchCandidate>,
     val cachedAtEpochSeconds: Long,
 )
+
+/**
+ * What a refresh leaves on file because the file's copy is less than a day old. [quotedAt] is the
+ * symbols whose `quoteSummary` is fresh, with the time of that capture; [chart] the symbols whose
+ * year chart is fresh; [timeseries] the symbols whose fundamental timeseries is fresh, so a DCF
+ * that needs one reads it from the file instead of the wire. A forced refresh leaves all three
+ * empty and buys everything again.
+ */
+private data class FreshCaptureSkip(
+    val quotedAt: Map<String, Long> = emptyMap(),
+    val chart: Set<String> = emptySet(),
+    val timeseries: Set<String> = emptySet(),
+) {
+    val quote: Set<String> get() = quotedAt.keys
+}
 
 private const val REMOTE_SEARCH_CACHE_MAX_ENTRIES = 50
 private const val REMOTE_SEARCH_CACHE_TTL_SECONDS = 300L
@@ -263,12 +329,36 @@ class DefaultDashboardRepository(
      */
     private val issuerYieldLookup: IssuerYieldLookup? = null,
     private val componentLookup: IssuerComponentLookup? = null,
+    /**
+     * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
+     * Production leaves this null.
+     */
+    private val beforeSnapshotLocked: (suspend () -> Unit)? = null,
+    /**
+     * Offered every screen input, so it can be replayed off the device.
+     *
+     * The repository does not know what the sink does with it. Production wires a file writer that
+     * stays asleep until it is armed; tests leave this null.
+     */
+    private val projectionCapture: ((ScreenDataProjectionRequest) -> Unit)? = null,
 ) : DashboardRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
     private val adoptPersistMutex = Mutex()
     private val updates = MutableStateFlow(0L)
+
+    private val loadsInFlight = AtomicInteger(0)
+    private val loadRunning = MutableStateFlow(false)
+
+    /**
+     * True while a refresh or an enrichment still has symbols to load.
+     *
+     * Android freezes a process it believes is idle, and a load that stops when the user leaves the
+     * screen is the thing Juan asked to fix. The app layer reads this and holds the process up for
+     * as long as it says true. Nothing in the repository acts on it.
+     */
+    val loadInFlight: StateFlow<Boolean> = loadRunning.asStateFlow()
     private val dcfSourceCoordinator = DcfSourceCoordinator(yahooClient, secondaryTimeseriesProvider)
     private val residualFactsProvider: ResidualCompanyFactsProvider? =
         secondaryTimeseriesProvider as? ResidualCompanyFactsProvider
@@ -290,11 +380,20 @@ class DefaultDashboardRepository(
     private val revisions = linkedMapOf<String, MutableList<SymbolRevision>>()
     private val chartCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
-    private val planBoardMemo = PlanBoardMemo()
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
+    private val dipSetups = DipSetupMemo(DipSignalEngine::evaluate)
+    private val leftoverSetups = DipSetupMemo(LeftoverSignalEngine::evaluate)
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val issuerYieldBySymbol = linkedMapOf<String, IssuerYieldPoint>()
-    private val componentsBySymbol = linkedMapOf<String, com.discountscreener.core.engine.IssuerComponentSet>()
+    private val componentsBySymbol = linkedMapOf<String, IssuerComponentSet>()
+
+    /**
+     * Symbols the audited source was already asked for, so it is asked once and not once per open.
+     *
+     * A symbol SEC has nothing for (a foreign issuer, a fund) would otherwise pay the whole
+     * companyfacts round trip again every time the user opens it.
+     */
+    private val secondaryAsked = linkedSetOf<String>()
     @Volatile
     private var lastMarketParams: MarketParams = MarketParams()
     private val marketParamsPrefetch = repositoryScope.launch {
@@ -326,6 +425,14 @@ class DefaultDashboardRepository(
     private val staleSymbols = linkedSetOf<String>()
     private val placeholderSymbols = linkedSetOf<String>()
     private val refreshedSymbols = linkedSetOf<String>()
+
+    /**
+     * Rows this refresh priced in the batch pass and otherwise left as the file had them, because
+     * their own `quoteSummary` is less than a day old. They read Restored, with the time of that
+     * quote, not Live: the price is today's and the valuation around it is yesterday's at best.
+     * Cleared when a refresh starts; a symbol leaves when its own quote lands.
+     */
+    private val keptSymbols = linkedSetOf<String>()
     private val refreshAttemptedSymbols = linkedSetOf<String>()
     private val comparisonBaselineRankBySymbol = linkedMapOf<String, Int>()
     private val comparisonBaselineOpportunityRankByModel =
@@ -338,7 +445,9 @@ class DefaultDashboardRepository(
 
     private var marketRegime: MarketRegime? = null
     private var marketReadAttempted = false
+    private var activeMarketReadJob: Job? = null
     private var regimeDailySummaries: Map<String, ChartRangeSummary> = emptyMap()
+    @Volatile
     private var regimeScoringEnabled = ScoringPreferences.DEFAULT_REGIME_ENABLED
 
     private var currentProfile = defaultProfile
@@ -354,6 +463,52 @@ class DefaultDashboardRepository(
     private var activeRefreshJob: Job? = null
     private var activeEnrichmentJob: Job? = null
     private var activeMarketReadJob: Job? = null
+
+    /**
+     * Held for the whole of [startRefresh], so a refresh replaces the one before it.
+     *
+     * [startRefresh] reads [activeRefreshJob], clears it, cancels it, and only then launches the
+     * new one. The cancel has to happen with [stateMutex] free, because the job being cancelled
+     * takes that lock to clean up. So there was a gap where [activeRefreshJob] was already null
+     * and no new job had been put there yet, and a second [startRefresh] landing in that gap found
+     * nothing to cancel and launched a second refresh beside the first.
+     *
+     * Measured on the device: open the app on sp500 and press Refresh while the opening refresh is
+     * still running. Two passes ran, both asked Yahoo for the same batch of prices, and the log
+     * read `refresh.prices.first-batch rows=0` twice and `refresh.prices.done priced=0 of 497`.
+     * The forced refresh then bought all 497 quotes one at a time, which is the pass the batch was
+     * there to avoid, and the user saw a button that changed nothing.
+     *
+     * A lock of its own rather than [stateMutex]: no refresh job ever takes this one, so holding it
+     * across `cancelAndJoin` cannot wait on the job being joined.
+     */
+    private val refreshStartMutex = Mutex()
+
+    /**
+     * Refresh passes alive at once, and the most there have ever been. Read by a test.
+     *
+     * A second pass is invisible from outside: it asks the same provider for the same symbols and
+     * writes the same rows, so it reads as one slow refresh rather than as two. It is counted
+     * because nothing in the shape of the code says two passes cannot overlap.
+     */
+    private var refreshPassesRunning = 0
+    private var peakRefreshPassesRunning = 0
+
+    internal fun peekPeakRefreshPasses(): Int = peakRefreshPassesRunning
+
+    /**
+     * When the running refresh was asked for.
+     *
+     * Read by the round to time the first symbol that reaches the screen, which is the number a
+     * user feels as "the refresh does not start". Written by [startRefresh] and read by the job it
+     * starts, so it is volatile; a stale read costs one wrong timing line and nothing else.
+     */
+    @Volatile
+    private var refreshRequestedNanos = 0L
+
+    /** Whether this refresh has logged its first symbol yet; the retry rounds must not log it again. */
+    @Volatile
+    private var refreshFirstSymbolLogged = false
 
     override fun observeUpdates(): Flow<Long> = updates.asStateFlow()
 
@@ -377,7 +532,10 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot = withContext(computeDispatcher) {
         stateMutex.withLock {
-            snapshotLocked(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+            beforeSnapshotLocked?.invoke()
+            timedStage("snapshot.build") {
+                snapshotLocked(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+            }
         }
     }
 
@@ -393,22 +551,25 @@ class DefaultDashboardRepository(
 
     override suspend fun loadScoringPreferences(): ScoringPreferences {
         val preferences = stateStore.loadScoringPreferences()
-        stateMutex.withLock { regimeScoringEnabled = preferences.regimeScoringEnabled }
+        regimeScoringEnabled = preferences.regimeScoringEnabled
         return preferences
     }
 
     override suspend fun persistScoringPreferences(preferences: ScoringPreferences) {
+        regimeScoringEnabled = preferences.regimeScoringEnabled
         stateStore.saveScoringPreferences(preferences)
-        stateMutex.withLock { regimeScoringEnabled = preferences.regimeScoringEnabled }
-        updates.value = updates.value + 1
     }
 
     /**
-     * Read the market alongside the symbol refresh, never in front of it.
+     * Read the market after the symbol refresh, never beside it.
      *
-     * A market read is one request per tracked symbol plus a dozen index series, and the dashboard
-     * has to render before any of that lands. A profile switch cancels this job and the generation
-     * gate drops a late write so the new universe does not inherit the old Yahoo pass.
+     * A market read is one daily chart per tracked symbol plus a dozen index series, through the
+     * same governor and the same store as the refresh. Started beside the refresh it doubled the
+     * calls on the wire while the list was still filling, and its write of two thousand years of
+     * bars held the store's connection for forty-three seconds with the quotes waiting behind it.
+     * So it starts when the refresh has ended, from [finishRefresh]. A profile switch cancels this
+     * job and the generation gate drops a late write so the new universe does not inherit the old
+     * Yahoo pass.
      */
     private suspend fun startMarketReadForCurrentProfile(generation: Long) {
         var market = marketDataRepository
@@ -485,13 +646,14 @@ class DefaultDashboardRepository(
         selectedSymbol: String?,
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
+        force: Boolean,
     ): DashboardSnapshot {
         reclaimPersistenceSpaceIfNeeded()
-        val (symbols, generation) = stateMutex.withLock {
-            Pair(trackedSymbols.toList(), activeProfileGeneration)
-        }
-        startRefresh(symbols, generation, opportunityScoringModel)
-        startMarketReadForCurrentProfile(generation)
+        startRefreshForCurrentProfile(
+            stateMutex.withLock { trackedSymbols.toList() },
+            opportunityScoringModel,
+            force = force,
+        )
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
@@ -532,6 +694,11 @@ class DefaultDashboardRepository(
                         compositeScore = row.compositeScore,
                         compositeScoreBase = row.compositeScoreBase,
                         marketPriceCents = row.marketPriceCents,
+                        factors = JournalFactors(
+                            fundamentals = row.fundamentalsFactors,
+                            technical = row.technicalFactors,
+                            forecast = row.forecastFactors,
+                        ),
                     )
                 },
                 retentionSeconds = SCORE_JOURNAL_RETENTION_SECONDS,
@@ -551,6 +718,18 @@ class DefaultDashboardRepository(
     }
 
     override suspend fun ensureDetailLoaded(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot = withContext(InteractiveRequest) {
+        // The user is looking at this symbol. Every call it makes goes to the front of the
+        // providers' lines, ahead of the bulk load: measured at 13.5 s behind a load of five
+        // hundred without this, for two calls.
+        loadDetail(symbol, filter, selectedRange, opportunityScoringModel)
+    }
+
+    private suspend fun loadDetail(
         symbol: String,
         filter: ViewFilter,
         selectedRange: ChartRange,
@@ -595,12 +774,15 @@ class DefaultDashboardRepository(
         val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
         val fundamentals = detailForDcf?.fundamentals
         val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
+        // Opening a symbol is where the audited filing is worth its 4 MB: the list resolved from
+        // Yahoo so it could load at all, and this is the first moment one symbol is worth one file.
         val needsDcfResolve = stateMutex.withLock {
-            fundamentals != null && needsDcfResolutionLocked(symbol)
+            fundamentals != null && (needsDcfResolutionLocked(symbol) || !secondaryAsked.contains(symbol))
         }
         if (fundamentals != null && needsDcfResolve && isFinancialServices(fundamentals)) {
             val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
             stateMutex.withLock {
+                secondaryAsked.add(symbol)
                 engine.ingestFundamentals(outcome.fundamentals)
                 putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
                 liveDcfResolvedSymbols += symbol
@@ -610,7 +792,10 @@ class DefaultDashboardRepository(
             var peers = peerCouponsFor(symbol, fundamentals)
             var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
             var components = resolveComponents(symbol, detailForDcf?.companyName)
-            val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
+            // The audited file is paid once per symbol. A symbol SEC has nothing for keeps its
+            // Yahoo-sourced analysis, so it still needs resolving, and it must not pay again.
+            val askSecondary = stateMutex.withLock { secondaryAsked.add(symbol) }
+            val resolution = dcfSourceCoordinator.resolve(symbol, allowSecondary = askSecondary) { timeseries ->
                 DcfAnalysisEngine.compute(
                     fundamentals,
                     timeseries,
@@ -621,30 +806,20 @@ class DefaultDashboardRepository(
                     components = components,
                 ).getOrThrow()
             }
-            val resolvedAnalysis = analysisFromSelection(selection, fundamentals)
-            selection.timeseries?.let { timeseries ->
-                stateMutex.withLock {
-                    timeseriesCache[symbol] = timeseries
-                    resolvedAnalysis?.let { analysis ->
-                        putDcfAnalysisLocked(symbol, analysis, fundamentals)
-                    }
-                    liveDcfResolvedSymbols += symbol
-                }
+            val resolvedAnalysis = analysisFromSelection(resolution.selection, fundamentals)
+            resolution.selection.timeseries?.let {
+                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
                 wroteDcf = true
-                captures += fundamentalTimeseriesCapture(
-                    symbol = symbol,
-                    timeseries = timeseries,
-                    analysis = resolvedAnalysis,
-                    capturedAt = now(),
-                )
             } ?: run {
-                // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
-                resolvedAnalysis?.let { analysis ->
-                    stateMutex.withLock { putDcfAnalysisLocked(symbol, analysis, fundamentals) }
-                }
-                liveDcfResolvedSymbols += symbol
+                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
                 wroteDcf = resolvedAnalysis != null
             }
+            stateMutex.withLock {
+                resolution.selection.timeseries?.let { timeseries -> timeseriesCache[symbol] = timeseries }
+                // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
+                resolvedAnalysis?.let { analysis -> putDcfAnalysisLocked(symbol, analysis, fundamentals) }
+            }
+            captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
         }
 
         if (captures.isNotEmpty() || wroteDcf) {
@@ -757,7 +932,7 @@ class DefaultDashboardRepository(
         if (newSymbols.isNotEmpty()) {
             stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
             emitUpdate()
-            startRefreshForCurrentProfile(newSymbols, opportunityScoringModel)
+            startRefreshForCurrentProfile(newSymbols, opportunityScoringModel, force = false)
         }
 
         return currentSnapshot(
@@ -779,15 +954,18 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun beginProfileSwitch(profile: String): ProfileSwitchRequest {
-        val symbols = resolveProfileSymbols(profile)
+        val switchStartedNanos = System.nanoTime()
+        val symbols = timedStage("switch.resolve-symbols") { resolveProfileSymbols(profile) }
         val generation = stateMutex.withLock {
             activeProfileGeneration += 1
             activeProfileGeneration
         }
-        cancelActiveProfileWork()
+        timedStage("switch.cancel-active-work") { cancelActiveProfileWork() }
         marketDataRepository?.invalidate()
-        adoptProfileFromStore(profile, symbols, generation, loadWarmStartOrReset(symbols))
+        val bootstrap = timedStage("switch.load-warm-start") { loadWarmStartOrReset(symbols) }
+        timedStage("switch.adopt-profile") { adoptProfileFromStore(profile, symbols, generation, bootstrap) }
         emitUpdate()
+        logStageMillis("switch.to-first-emit", millisSince(switchStartedNanos), " symbols=${symbols.size}")
         val request = ProfileSwitchRequest(
             generation = generation,
             profile = profile,
@@ -797,6 +975,10 @@ class DefaultDashboardRepository(
             if (activeProfileGeneration != generation) {
                 return request
             }
+            // The new load starts now. The load being left was cancelled above and is not waited
+            // for: its calls end as their sockets are cancelled, its results are dropped by the
+            // generation guard, and joining it here held the new profile off the wire for as long
+            // as the slowest of its twenty-four calls took.
             activeProfileSwitchJob = repositoryScope.launch {
                 val thisJob = coroutineContext.job
                 try {
@@ -940,6 +1122,7 @@ class DefaultDashboardRepository(
                     normalizedSymbol,
                     fund,
                     providerResult.snapshot?.marketPriceCents,
+                    allowSecondary = false,
                 )
             }
 
@@ -1000,6 +1183,7 @@ class DefaultDashboardRepository(
             request.symbols,
             request.generation,
             stateStore.loadScoringPreferences().opportunityModel,
+            force = false,
         )
         if (stateMutex.withLock { request.generation == activeProfileGeneration }) {
             startMarketReadForCurrentProfile(request.generation)
@@ -1009,85 +1193,98 @@ class DefaultDashboardRepository(
     private suspend fun startRefreshForCurrentProfile(
         symbols: List<String>,
         scoringModel: OpportunityScoringModel,
+        force: Boolean,
     ) {
         val generation = stateMutex.withLock { activeProfileGeneration }
-        startRefresh(symbols, generation, scoringModel)
+        startRefresh(symbols, generation, scoringModel, force)
     }
 
     private suspend fun startRefresh(
         symbols: List<String>,
         generation: Long,
         scoringModel: OpportunityScoringModel,
+        force: Boolean,
     ) {
         if (symbols.isEmpty()) {
             return
         }
+        // One start at a time, from here to the launch. See [refreshStartMutex]: the read, the
+        // cancel and the launch are one swap, and splitting them let two refreshes run at once.
+        refreshStartMutex.withLock {
+            refreshRequestedNanos = System.nanoTime()
+            refreshFirstSymbolLogged = false
 
-        val (previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
-            if (generation != activeProfileGeneration) {
-                return
+            val (previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    return
+                }
+                val existingRefresh = activeRefreshJob
+                activeRefreshJob = null
+                val existingEnrichment = activeEnrichmentJob
+                activeEnrichmentJob = null
+                Pair(existingRefresh, existingEnrichment)
             }
-            val existingRefresh = activeRefreshJob
-            activeRefreshJob = null
-            val existingEnrichment = activeEnrichmentJob
-            activeEnrichmentJob = null
-            Pair(existingRefresh, existingEnrichment)
-        }
-        previousRefreshJob?.cancelAndJoin()
-        previousEnrichmentJob?.cancelAndJoin()
+            timedStage("refresh.cancel-previous") {
+                previousRefreshJob?.cancelAndJoin()
+                previousEnrichmentJob?.cancelAndJoin()
+            }
+            val skip = if (force) FreshCaptureSkip() else freshCaptureSkip(symbols, stateStore.loadRefreshMarks())
 
-        stateMutex.withLock {
-            if (generation != activeProfileGeneration) {
-                return
-            }
-            symbols.forEach { symbol -> liveDcfResolvedSymbols.remove(symbol) }
-            captureRefreshComparisonBaselineLocked()
-            refreshedSymbols.clear()
-            refreshAttemptedSymbols.clear()
-            applyTransitionLocked(
-                reduceProfileTransition(
-                    ProfileTransitionEvent.RefreshStarted(
-                        profile = currentProfile,
-                        symbolCount = symbols.size,
+            stateMutex.withLock {
+                if (generation != activeProfileGeneration) {
+                    return
+                }
+                symbols.forEach { symbol -> liveDcfResolvedSymbols.remove(symbol) }
+                captureRefreshComparisonBaselineLocked()
+                refreshedSymbols.clear()
+                refreshAttemptedSymbols.clear()
+                keptSymbols.clear()
+                applyTransitionLocked(
+                    reduceProfileTransition(
+                        ProfileTransitionEvent.RefreshStarted(
+                            profile = currentProfile,
+                            // Every row of the profile, for the whole refresh. The banner used to
+                            // count only the rows this refresh would buy, and it counted them twice
+                            // by two different rules: the stale ones here, then the stale ones plus
+                            // whatever the batch price pass missed. The total moved under the user
+                            // mid-refresh and read as a number picked at random. A row already fresh
+                            // on file is reported done, which it is.
+                            symbolCount = symbols.size,
+                        ),
                     ),
-                ),
-            )
-            activeRefreshJob = repositoryScope.launch {
-                val thisJob = coroutineContext.job
-                try {
-                    runRefresh(symbols, generation)
-                } finally {
-                    val symbolsToEnrich = stateMutex.withLock {
-                        if (
-                            thisJob.isCancelled ||
-                            generation != activeProfileGeneration ||
-                            activeRefreshJob !== thisJob
-                        ) {
-                            return@withLock null
-                        }
-                        applyTransitionLocked(
-                            reduceProfileTransition(
-                                ProfileTransitionEvent.RefreshFinished(
-                                    activeIssueCount = issues.values.count { it.active },
-                                ),
-                            ),
-                        )
-                        trackedSymbols.filter { engine.detail(it) != null }
-                    }
-                    if (symbolsToEnrich != null &&
-                        !thisJob.isCancelled &&
-                        stateMutex.withLock { generation == activeProfileGeneration }
-                    ) {
-                        journalScores(
-                            stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
-                            scoringModel,
-                        )
-                        emitUpdate()
-                        startEnrichment(symbolsToEnrich, generation)
-                    }
+                )
+                activeRefreshJob = repositoryScope.launch {
+                    val thisJob = coroutineContext.job
+                    loadStarted()
                     stateMutex.withLock {
-                        if (activeRefreshJob === thisJob) {
-                            activeRefreshJob = null
+                        refreshPassesRunning += 1
+                        peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
+                    }
+                    try {
+                        runRefresh(symbols, generation, skip)
+                        finishRefresh(generation, scoringModel, skip)
+                    } finally {
+                        // A cancelled refresh used to skip this: the first suspension in a cancelled
+                        // coroutine throws, so the load stayed counted in and the process was held in
+                        // the foreground for a load that had ended. The bookkeeping runs whatever
+                        // ended the refresh; only the enrichment above needs the refresh to be whole.
+                        withContext(NonCancellable) {
+                            stateMutex.withLock {
+                                refreshPassesRunning -= 1
+                                if (activeRefreshJob === thisJob) {
+                                    activeRefreshJob = null
+                                }
+                                if (generation == activeProfileGeneration) {
+                                    applyTransitionLocked(
+                                        reduceProfileTransition(
+                                            ProfileTransitionEvent.RefreshFinished(
+                                                activeIssueCount = issues.values.count { it.active },
+                                            ),
+                                        ),
+                                    )
+                                }
+                            }
+                            loadFinished()
                         }
                     }
                 }
@@ -1096,14 +1293,268 @@ class DefaultDashboardRepository(
         emitUpdate()
     }
 
-    private suspend fun runRefresh(symbols: List<String>, generation: Long) {
-        val retryQueue = ArrayDeque<String>()
-        processRefreshRound(
-            symbols = symbols,
-            retryQueue = retryQueue,
-            generation = generation,
-            recordTerminalIssues = false,
+    /**
+     * What a refresh that ran to its end does next: journal what it scored, publish, and start the
+     * enrichment on the rows it brought and the market read. A refresh that was cancelled does none
+     * of this, because a switch or a new refresh is already on its way and would run beside them.
+     *
+     * The enrichment is counted in before the refresh is counted out, so the two halves of one load
+     * read as one load and the process is never let go between them. The market read is free while
+     * its reading is fresh, so starting it after every refresh costs nothing on the wire between
+     * readings; a switch stops the read of the profile it left, and this brings it for the new one.
+     */
+    private suspend fun finishRefresh(
+        generation: Long,
+        scoringModel: OpportunityScoringModel,
+        skip: FreshCaptureSkip,
+    ) {
+        val symbolsToEnrich = stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                return
+            }
+            trackedSymbols.filter { engine.detail(it) != null }
+        }
+        journalScores(
+            stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
+            scoringModel,
         )
+        emitUpdate()
+        startEnrichment(symbolsToEnrich, generation, skip)
+        startMarketReadForCurrentProfile(generation)
+    }
+
+    private fun loadStarted() {
+        if (loadsInFlight.incrementAndGet() == 1) {
+            loadRunning.value = true
+        }
+    }
+
+    private fun loadFinished() {
+        if (loadsInFlight.decrementAndGet() == 0) {
+            loadRunning.value = false
+            repositoryScope.launch { emitUpdate() }
+        }
+    }
+
+    /**
+     * A refresh in two passes: every quote, then every chart.
+     *
+     * A symbol used to cost its quote and its year chart back to back, so the list was fully quoted
+     * only when the last chart had landed: two round trips a symbol on the one path the user watches.
+     * The quotes go first now, alone on the wire, and the list is whole in half the time. The charts
+     * follow for every symbol the first pass did not chart, which is all of them on a normal day. A
+     * warm start hydrates the chart cache from disk, so the cache being full says nothing about
+     * whether a chart is from this refresh; the pass keeps its own account.
+     *
+     * The first pass still charts a symbol whose quote came back empty, because the fallback that
+     * stands in for the quote is built from the chart's last close.
+     *
+     * The charts start when the first quote round is done, beside the retry rounds of whatever that
+     * round could not quote. They used to start after the retry rounds, and one symbol the server
+     * would not answer held every chart back for the four backoffs of its rounds: measured on a
+     * device on 2026-08-18 at twenty-four seconds of idle wire behind one symbol. A straggler whose
+     * quote comes back empty in a retry round charts itself again; one chart twice is the price.
+     *
+     * Before either pass, [primeWarmPrices] puts today's price on every row the store already
+     * knows, a few calls for the whole list; the quote pass then serves the rows it could not
+     * price first, since those have nothing to show until it does.
+     *
+     * A capture less than a day old is left on file, per [skip]. Start asks for this path. The
+     * Refresh button forces, and [skip] is empty: a new quoteSummary and year chart for every row.
+     */
+    private suspend fun runRefresh(
+        symbols: List<String>,
+        generation: Long,
+        skip: FreshCaptureSkip,
+    ) = coroutineScope {
+        if (skip.chart.isNotEmpty()) {
+            launch { timedStage("refresh.charts.restore") { restoreYearChartsFromFile(skip.chart, generation) } }
+        }
+        val charted = HashSet<String>()
+        val retryQueue = ArrayDeque<String>()
+        // The batch price pass used to run to completion before the first quoteSummary was asked
+        // for. On the 1 937-symbol universe the last price batch landed 8.0 s after the switch and
+        // the first quote result 8.1 s, so eight of those seconds bought nothing but prices. A row
+        // whose own quote is not fresh needs a quoteSummary whatever the batch returns, so its
+        // round starts now and the prices land beside it.
+        val pricing = async { timedStage("refresh.prices") { primeWarmPrices(symbols, generation) } }
+        val keeping = async {
+            val priced = pricing.await()
+            val kept = symbols.filter { symbol -> symbol in skip.quote && symbol in priced }
+            stateMutex.withLock {
+                if (generation == activeProfileGeneration) {
+                    keepRowsLocked(kept, skip.quotedAt)
+                    applyTransitionLocked(
+                        reduceProfileTransition(
+                            ProfileTransitionEvent.RefreshProgress(
+                                profile = currentProfile,
+                                // The kept rows are done: this refresh read them off file and
+                                // asked nothing for them. They count against the same total as
+                                // the rest.
+                                completedSymbols = refreshCompletedSymbols + kept.size,
+                                totalSymbols = symbols.size,
+                            ),
+                        ),
+                    )
+                }
+            }
+            emitUpdate()
+            priced
+        }
+        // A row with no state on file gets no batch price at all, so it has nothing to show until
+        // its own quote lands. Those go first, as they did when this pass waited for the prices.
+        val warmOnFile = stateMutex.withLock { symbols.filter { symbol -> engine.detail(symbol) != null }.toSet() }
+        val stale = symbols.filter { symbol -> symbol !in skip.quote }
+        val staleQuote = stale.filter { symbol -> symbol !in warmOnFile } +
+            stale.filter { symbol -> symbol in warmOnFile }
+        if (staleQuote.isNotEmpty()) {
+            processRefreshRound(
+                symbols = staleQuote,
+                retryQueue = retryQueue,
+                charted = charted,
+                generation = generation,
+                recordTerminalIssues = false,
+            )
+        }
+        val priced = keeping.await()
+        // What is left is a row the day calls fresh that the batch could not price. It carries no
+        // price at all, so it is asked for the full quote after all.
+        val lateQuote = symbols.filter { symbol -> symbol in skip.quote && symbol !in priced }
+        if (lateQuote.isNotEmpty()) {
+            processRefreshRound(
+                symbols = lateQuote,
+                retryQueue = retryQueue,
+                charted = charted,
+                generation = generation,
+                recordTerminalIssues = false,
+            )
+        }
+        val uncharted = symbols.filter { symbol -> symbol !in charted && symbol !in skip.chart }
+        if (uncharted.isNotEmpty()) {
+            launch {
+                timedStage("refresh.charts") {
+                    runEnrichmentRounds(uncharted, generation, ::fetchYearChart)
+                }
+            }
+        }
+        retryUnquotedSymbols(retryQueue, generation, charted)
+    }
+
+    /** What [marks] say is fresh enough to keep, for the symbols of this refresh. */
+    private fun freshCaptureSkip(symbols: List<String>, marks: Map<String, RefreshMarks>): FreshCaptureSkip {
+        val nowEpoch = now()
+        fun fresh(at: (RefreshMarks) -> Long?): Map<String, Long> = symbols
+            .mapNotNull { symbol -> marks[symbol]?.let(at)?.let { capturedAt -> symbol to capturedAt } }
+            .filter { (_, capturedAt) -> isFreshCapture(capturedAt, nowEpoch) }
+            .toMap()
+        return FreshCaptureSkip(
+            quotedAt = fresh { it.quotedAtEpochSeconds },
+            chart = fresh { it.yearChartedAtEpochSeconds }.keys,
+            timeseries = fresh { it.timeseriesCapturedAtEpochSeconds }.keys,
+        )
+    }
+
+    /** The rows kept as the file had them, stamped with the time of the quote they keep. */
+    private fun keepRowsLocked(kept: List<String>, quotedAt: Map<String, Long>) {
+        keptSymbols += kept
+        kept.forEach { symbol -> quotedAt[symbol]?.let { at -> freshnessTimestampBySymbol[symbol] = at } }
+    }
+
+    /**
+     * The year charts a refresh leaves on file, read back into memory so the plan board and the
+     * detail see candles and not only the summaries the revisions carry.
+     */
+    private suspend fun restoreYearChartsFromFile(symbols: Set<String>, generation: Long) {
+        val records = stateStore.loadPricingCandles(ChartRange.Year, symbols)
+        stateMutex.withLock {
+            if (generation != activeProfileGeneration) return
+            hydrateChartRecordsLocked(records)
+        }
+        emitUpdate()
+    }
+
+    private fun isFreshCapture(capturedAtEpochSeconds: Long?, nowEpochSeconds: Long): Boolean {
+        if (capturedAtEpochSeconds == null) return false
+        return nowEpochSeconds - capturedAtEpochSeconds < FRESH_CAPTURE_SECONDS
+    }
+
+    /**
+     * Pass zero of a refresh: today's price on every row the store already knows.
+     *
+     * Yahoo's batch quote endpoint prices hundreds of symbols in one call where `quoteSummary`
+     * costs one call a symbol, so on a warm start every row shows today's price seconds in, while
+     * the per-symbol pass that used to be the only source of it takes minutes on a large list.
+     * The endpoint carries no analyst target and no fundamentals, so a row it prices keeps the
+     * target, the signal and the fundamentals it was restored with, and keeps reading as restored
+     * until its own `quoteSummary` lands: the price is fresh, the valuation around it is not, and
+     * the label says the latter. A symbol the store does not know is left for the quote pass; the
+     * endpoint cannot make a row from nothing.
+     *
+     * Returns the symbols it priced.
+     */
+    private suspend fun primeWarmPrices(symbols: List<String>, generation: Long): Set<String> {
+        val warm = stateMutex.withLock { symbols.filter { symbol -> engine.detail(symbol) != null } }
+        if (warm.isEmpty()) return emptySet()
+        val priced = HashSet<String>()
+        val unwritten = PendingDeltas()
+        warm.chunked(QUOTE_BATCH_SIZE)
+            .asFlow()
+            .flatMapMerge(concurrency = yahooClient.requestCeiling) { batch ->
+                flow { emit(yahooClient.fetchQuotes(batch)) }
+            }
+            .collect { quotes ->
+                val refreshedAt = now()
+                val applied = stateMutex.withLock {
+                    if (generation != activeProfileGeneration) return@collect
+                    quotes.values.mapNotNull { entry -> applyWarmPriceLocked(entry, refreshedAt) }
+                }
+                applied.forEach(unwritten::add)
+                if (priced.isEmpty()) {
+                    logStageMillis("refresh.prices.first-batch", millisSince(refreshRequestedNanos), " rows=${quotes.size}")
+                }
+                priced += quotes.keys
+                emitUpdate()
+                timedStage("refresh.persist") { persistPending(unwritten) }
+            }
+        logStageMillis("refresh.prices.done", millisSince(refreshRequestedNanos), " priced=${priced.size} of ${warm.size}")
+        return priced
+    }
+
+    /** Today's price on a restored row: the snapshot is the one on file with the price replaced. */
+    private fun applyWarmPriceLocked(entry: QuoteBatchEntry, refreshedAt: Long): PersistenceDelta? {
+        // The batch price stands in until the row's own quote lands. Now that the two passes run
+        // side by side a batch can answer after the quote did, and this used to put the batch
+        // price back over it: a row whose quoteSummary 404s takes its price from the chart, and a
+        // late batch overwrote that with the placeholder. What the quote settled, the batch leaves.
+        if (entry.symbol in refreshedSymbols) return null
+        val detail = engine.detail(entry.symbol) ?: return null
+        val snapshot = MarketSnapshot(
+            symbol = entry.symbol,
+            companyName = entry.companyName ?: detail.companyName,
+            profitable = entry.profitable ?: detail.profitable,
+            marketPriceCents = entry.marketPriceCents,
+            intrinsicValueCents = detail.intrinsicValueCents,
+            nextEarningsEpoch = entry.nextEarningsEpoch ?: detail.nextEarningsEpoch,
+        )
+        engine.ingestSnapshot(snapshot)
+        snapshot.companyName?.takeIf(::isUsableCompanyName)?.let { name -> companyNameBySymbol[entry.symbol] = name }
+        // Its own key on file, so a batch price never reads as a quoteSummary of today.
+        val capture = RawCapture(
+            symbol = entry.symbol,
+            captureKind = CaptureKind.Snapshot,
+            scopeKey = BATCH_QUOTE_SCOPE,
+            capturedAt = refreshedAt,
+            payload = RawCapturePayload.Snapshot(snapshot),
+        )
+        return snapshotPersistenceDeltaLocked(listOf(capture), entry.symbol)
+    }
+
+    /** The retry rounds of the quote pass, for what the first round could not quote. */
+    private suspend fun retryUnquotedSymbols(
+        retryQueue: ArrayDeque<String>,
+        generation: Long,
+        charted: MutableSet<String>,
+    ) {
         repeat(MAX_RETRY_ROUNDS) { round ->
             if (retryQueue.isEmpty()) return
             delay(retryBackoffMillis(round))
@@ -1116,6 +1567,7 @@ class DefaultDashboardRepository(
             processRefreshRound(
                 symbols = batch,
                 retryQueue = retryQueue,
+                charted = charted,
                 generation = generation,
                 recordTerminalIssues = isFinalRound,
             )
@@ -1125,6 +1577,7 @@ class DefaultDashboardRepository(
             processRefreshRound(
                 symbols = retryQueue.toList(),
                 retryQueue = ArrayDeque(),
+                charted = charted,
                 generation = generation,
                 recordTerminalIssues = true,
             )
@@ -1134,14 +1587,20 @@ class DefaultDashboardRepository(
     private suspend fun processRefreshRound(
         symbols: List<String>,
         retryQueue: ArrayDeque<String>,
+        charted: MutableSet<String>,
         generation: Long,
         recordTerminalIssues: Boolean,
     ) = coroutineScope {
+        val roundStartedNanos = System.nanoTime()
         var applied = 0
+        val unwritten = PendingDeltas()
         symbols
             .asFlow()
-            .flatMapMerge(concurrency = REFRESH_CONCURRENCY) { symbol ->
-                flow { emit(fetchRefreshResult(symbol, generation)) }
+            // Fan-out only. What Yahoo is asked, and how fast, is the client's governor: one
+            // permit per request. A permit here covered a whole symbol, which is two or three
+            // round trips, so the controller was steering by a number it never measured.
+            .flatMapMerge(concurrency = yahooClient.requestCeiling) { symbol ->
+                flow { emit(timedStage("refresh.symbol") { fetchRefreshResult(symbol, generation) }) }
             }
             .collect { result ->
                 val isActiveGeneration = stateMutex.withLock { result.generation == activeProfileGeneration }
@@ -1152,22 +1611,40 @@ class DefaultDashboardRepository(
                 if (needsRecovery && !recordTerminalIssues && result.symbol !in retryQueue) {
                     retryQueue.add(result.symbol)
                 }
-                val persistenceDelta = stateMutex.withLock {
-                    applyRefreshResultLocked(
-                        result = result,
-                        suppressTransientRateLimits = !recordTerminalIssues,
-                        recordTerminalFailure = recordTerminalIssues || !needsRecovery,
-                    )
+                if (result.chartCandles != null) {
+                    charted += result.symbol
                 }
-                persistDelta(persistenceDelta, generation)
+                unwritten.add(
+                    timedStage("refresh.apply") {
+                        stateMutex.withLock {
+                            applyRefreshResultLocked(
+                                result = result,
+                                suppressTransientRateLimits = !recordTerminalIssues,
+                                recordTerminalFailure = recordTerminalIssues || !needsRecovery,
+                            )
+                        }
+                    },
+                )
                 applied += 1
-                if (applied % EMIT_UPDATE_BATCH == 0) {
+                if (!refreshFirstSymbolLogged) {
+                    refreshFirstSymbolLogged = true
+                    logStageMillis("refresh.first-symbol", millisSince(refreshRequestedNanos))
+                }
+                // The first row is published on its own. A batch of eight is right for the middle
+                // of a round and wrong at its start: it holds the first result until seven more
+                // land, and over a network that is seconds of a screen that shows nothing new.
+                if (applied == 1 || applied % EMIT_UPDATE_BATCH == 0) {
                     emitUpdate()
                 }
+                if (applied % PERSIST_BATCH == 0) {
+                    timedStage("refresh.persist") { persistPending(unwritten) }
+                }
             }
-        if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
+        if (applied > 1 && applied % EMIT_UPDATE_BATCH != 0) {
             emitUpdate()
         }
+        timedStage("refresh.persist") { persistPending(unwritten) }
+        logStageMillis("refresh.round", millisSince(roundStartedNanos), " symbols=$applied")
     }
 
     private fun isRefreshResultIncomplete(result: SymbolRefreshResult): Boolean {
@@ -1192,11 +1669,17 @@ class DefaultDashboardRepository(
             )
         }
 
-        val chartResult = runCatching { yahooClient.fetchHistoricalCandles(symbol, ChartRange.Year) }
-        chartResult.exceptionOrNull()?.let { error ->
+        // The chart is the second pass's job; here it is fetched only when the quote came back
+        // empty, because the fallback for a missing quote is built from the chart's last close.
+        val chartResult = if (providerResult.snapshot == null) {
+            runCatching { yahooClient.fetchHistoricalCandles(symbol, ChartRange.Year) }
+        } else {
+            null
+        }
+        chartResult?.exceptionOrNull()?.let { error ->
             if (error is CancellationException) throw error
         }
-        val chartCandles = chartResult.getOrNull()
+        val chartCandles = chartResult?.getOrNull()
         val hasCachedDcfInputs = stateMutex.withLock {
             dcfCache[symbol] != null && timeseriesCache[symbol] != null
         }
@@ -1218,6 +1701,7 @@ class DefaultDashboardRepository(
                     fund,
                     providerResult.snapshot?.marketPriceCents
                         ?: chartCandles?.lastOrNull()?.closeCents,
+                    allowSecondary = false,
                 )
             }
         return SymbolRefreshResult(
@@ -1230,9 +1714,9 @@ class DefaultDashboardRepository(
             fallbackTimeseries = dcfFallback?.timeseries,
             fallbackDcfAnalysis = dcfFallback?.analysis,
             residualOutcome = residualOutcome,
-            chartError = chartResult.exceptionOrNull(),
+            chartError = chartResult?.exceptionOrNull(),
             retryable = providerResult.diagnostics.any { it.retryable } ||
-                chartResult.exceptionOrNull()?.let(::isRetryable) == true,
+                chartResult?.exceptionOrNull()?.let(::isRetryable) == true,
             refreshedAtEpochSeconds = refreshedAt,
         )
     }
@@ -1399,6 +1883,7 @@ class DefaultDashboardRepository(
         if (engine.detail(result.symbol) != null) {
             staleSymbols.remove(result.symbol)
             placeholderSymbols.remove(result.symbol)
+            keptSymbols.remove(result.symbol)
             freshnessTimestampBySymbol[result.symbol] = result.refreshedAtEpochSeconds
             appendRevisionLocked(result.symbol)
             lastUpdatedAtEpochSeconds = result.refreshedAtEpochSeconds
@@ -1430,10 +1915,10 @@ class DefaultDashboardRepository(
         var trackedIssueMessages = issues.values
             .filter { it.active }
             .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
-        var dashboardCandidateRows = engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter)
-        var scoredOpportunityRows = filteredScoredOpportunityRowsLocked(normalizedFilter, opportunityScoringModel)
+        var dashboardCandidateRows = timedPart("snapshot.candidates") { engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter) }
+        var scoredOpportunityRows = timedPart("snapshot.score") { filteredScoredOpportunityRowsLocked(normalizedFilter, opportunityScoringModel) }
         var projectionCandidateRows = scoredOpportunityRows.map(::candidateRowFromOpportunityRow)
-        var projectionRequest = screenDataProjectionRequestLocked(
+        var projectionRequest = timedPart("snapshot.request") { screenDataProjectionRequestLocked(
             filter = normalizedFilter,
             selectedSymbol = normalizedSelectedSymbol,
             selectedRange = selectedRange,
@@ -1442,25 +1927,26 @@ class DefaultDashboardRepository(
             opportunityDecisionFactsBySymbol = projectedOpportunityDecisionFactsBySymbol(scoredOpportunityRows),
             issues = issueRecords,
             issueMessagesBySymbol = trackedIssueMessages,
-        )
+        ) }
+        projectionCapture?.invoke(projectionRequest)
         var detailNotice: DashboardNotice? = null
         var estimatesNotice: DashboardNotice? = null
-        var screenDataResult = screenDataProjectionEngine.project(
+        var screenDataResult = timedPart("snapshot.project") { screenDataProjectionEngine.project(
             projectionRequest,
-        )
+        ) }
         var screenData: com.discountscreener.core.model.ProjectedDashboardData
         var trackedRows: List<TrackedSymbolRow>
         var opportunityRows: List<OpportunityListRow>
         when (screenDataResult) {
             is ComputationResult.Success -> {
                 screenData = screenDataResult.value
-                trackedRows = trackedRowsFromProjectionLocked(screenData.trackedRows, trackedIssueMessages)
-                opportunityRows = opportunityRowsFromProjectionLocked(
+                trackedRows = timedPart("snapshot.trackedRows") { trackedRowsFromProjectionLocked(screenData.trackedRows, trackedIssueMessages) }
+                opportunityRows = timedPart("snapshot.opportunityRows") { opportunityRowsFromProjectionLocked(
                     projectedRows = screenData.opportunityRows,
                     scoredRows = scoredOpportunityRows,
                     issueMessagesBySymbol = trackedIssueMessages,
                     scoringModel = opportunityScoringModel,
-                )
+                ) }
             }
             is ComputationResult.Error -> {
                 var failure = screenDataResult.failure
@@ -1553,6 +2039,7 @@ class DefaultDashboardRepository(
             candidateRows = dashboardCandidateRows,
             opportunityRows = opportunityRows,
             opportunityScoringModel = opportunityScoringModel,
+            regimeScoringEnabled = regimeScoringEnabled,
             issues = issueRecords,
             selectedDetail = selectedDetail,
             selectedScoreRow = selectedScoreRowLocked(
@@ -1585,30 +2072,52 @@ class DefaultDashboardRepository(
                 marketDataRepository == null || marketReadAttempted -> MarketReadStatus.Unavailable
                 else -> MarketReadStatus.Pending
             },
-            planBoard = planBoardMemo.dipOpportunities(
-                rows = opportunityRows,
-                yearCandlesBySymbol = opportunityRows.associate { row ->
-                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
-                },
-                fiveYearCandlesBySymbol = opportunityRows.associate { row ->
-                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
-                },
-                dcfBySymbol = dcfCache.toMap(),
-            ),
-            planBoardProfile = planBoardMemo.dipProfile(
-                inputs = profileMemberInputsLocked(
-                    opportunityRows = opportunityRows,
-                    scoringModel = opportunityScoringModel,
-                    fillMissingFundamentals = true,
-                ),
-                universeName = currentProfile,
-            ),
-            leftoverBoard = planBoardMemo.leftover(
-                inputs = leftoverInputsLocked(opportunityRows),
-                universeName = currentProfile,
-            ),
+            planBoard = if (skipBoardsDuringLoadLocked()) {
+                PlanBoard.EMPTY
+            } else {
+                timedPart("snapshot.planBoard") { PlanBoardAssembler.assemble(
+                    rows = opportunityRows,
+                    yearCandlesBySymbol = opportunityRows.associate { row ->
+                        row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
+                    },
+                    fiveYearCandlesBySymbol = opportunityRows.associate { row ->
+                        row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
+                    },
+                    dcfBySymbol = dcfCache.toMap(),
+                ) }
+            },
+            planBoardProfile = if (skipBoardsDuringLoadLocked()) {
+                PlanBoard.EMPTY
+            } else {
+                timedPart("snapshot.planBoardProfile") { PlanBoardAssembler.assemble(
+                    inputs = profileMemberInputsLocked(
+                        opportunityRows = opportunityRows,
+                        scoringModel = opportunityScoringModel,
+                        fillMissingFundamentals = true,
+                    ),
+                    universeName = currentProfile,
+                    evaluate = dipSetups::setup,
+                ) }
+            },
+            leftoverBoard = if (skipBoardsDuringLoadLocked()) {
+                PlanBoard.EMPTY
+            } else {
+                timedPart("snapshot.leftoverBoard") { LeftoverBoardAssembler.assemble(
+                    inputs = leftoverInputsLocked(opportunityRows),
+                    universeName = currentProfile,
+                    evaluate = leftoverSetups::setup,
+                ) }
+            },
         )
     }
+
+    /**
+     * The profile plan board scores every name the list dropped. Under a load that is 1.4 s of
+     * CPU on the same mutex the refresh needs, every eight rows. The Opportunities list does not
+     * read those boards, so they wait until the first refresh has ended ([DashboardStartupPhase.Ready]).
+     */
+    private fun skipBoardsDuringLoadLocked(): Boolean =
+        loadRunning.value || startupPhase != DashboardStartupPhase.Ready
 
     private fun leftoverInputsLocked(opportunityRows: List<OpportunityListRow>): List<DipRowInput> {
         return profileMemberInputsLocked(
@@ -1624,12 +2133,19 @@ class DefaultDashboardRepository(
         fillMissingFundamentals: Boolean,
     ): List<DipRowInput> {
         var scoredBySymbol = opportunityRows.associateBy { row -> row.symbol }
+        // The benchmark table reads a detail for every tracked symbol, and scoring one symbol
+        // used to rebuild it. This loop scores each symbol the Opportunities list dropped, so on
+        // the 1 937-symbol universe one profile plan board built the table about 1 900 times:
+        // 3.7 million detail reads, 18 s of a two-core device, on the mutex the refresh needs.
+        // Engine state cannot change while this holds the state mutex, so one table serves the
+        // whole loop.
+        var benchmarks = scoringModel?.let(::sectorBenchmarksLocked).orEmpty()
         return trackedSymbols.map { symbol ->
             var detail = engine.detail(symbol)
             var scored = scoredBySymbol[symbol]
             var fundamentalsScore = scored?.fundamentalsScore
             if (fundamentalsScore == null && fillMissingFundamentals && scoringModel != null) {
-                fundamentalsScore = scoreSymbolLocked(symbol, scoringModel)?.fundamentalsScore
+                fundamentalsScore = scoreSymbolLocked(symbol, scoringModel, benchmarks)?.fundamentalsScore
             }
             DipRowInput(
                 symbol = symbol,
@@ -1809,6 +2325,7 @@ class DefaultDashboardRepository(
         }
         var category = when {
             detail == null && issueMessage != null -> ProjectedProviderCategory.Unavailable
+            detail != null && symbol in keptSymbols -> ProjectedProviderCategory.Restored
             symbol in refreshedSymbols -> ProjectedProviderCategory.Live
             detail != null && symbol in staleSymbols && startupPhase == DashboardStartupPhase.ShowingCached -> ProjectedProviderCategory.Restored
             detail != null && symbol in staleSymbols -> ProjectedProviderCategory.Stale
@@ -1952,7 +2469,6 @@ class DefaultDashboardRepository(
             } else {
                 null
             }
-            var fairValueCents = namedFairValueCents ?: projectedRow.candidateRow.intrinsicValueCents
             var gapBps = if (namesPrimary) projectedRow.gapBps else null
             var upsideBps = if (namesPrimary) projectedRow.upsideBps else null
             var freshness = projectedRow.freshness.toRowFreshness()
@@ -1961,7 +2477,10 @@ class DefaultDashboardRepository(
             OpportunityListRow(
                 symbol = projectedRow.symbol,
                 marketPriceCents = projectedRow.candidateRow.marketPriceCents,
-                intrinsicValueCents = fairValueCents,
+                intrinsicValueCents = namedFairValueCents,
+                nextEarningsEpoch = detail?.nextEarningsEpoch,
+                outcomeConfidence = scoredRow?.outcomeConfidence ?: OutcomeConfidence.Unmeasured,
+                outcomeWidthBps = scoredRow?.outcomeWidthBps,
                 gapBps = gapBps,
                 upsideBps = upsideBps,
                 confidence = confidence,
@@ -2104,7 +2623,6 @@ class DefaultDashboardRepository(
                 explanation = currentExplanation,
                 decisionState = trackedDecisionStateFor(
                     state = row.state,
-                    freshness = row.freshness,
                     qualification = row.qualification,
                     confidence = row.confidence,
                     upsideBps = row.upsideBps,
@@ -2186,7 +2704,39 @@ class DefaultDashboardRepository(
         scoringModel: OpportunityScoringModel,
     ): Map<String, SectorBenchmarks> {
         if (!scoringModel.readsSectorBenchmarks()) return emptyMap()
+        sectorBenchmarkBuilds += 1
         return computeSectorBenchmarks(engine.trackedSymbols().mapNotNull { engine.detail(it) })
+    }
+
+    /**
+     * How many sector tables this repository has built. Read by a test; nothing else reads it.
+     *
+     * The table is one walk over every ingested detail, so it belongs above a loop over rows. A
+     * call inside that loop turns one board into a walk of the universe per row: on the
+     * 1 937-symbol universe that was 3.7 million detail reads and 18 s of a two-core device, and
+     * all of it under [stateMutex], which is the lock the refresh needs to apply its next result.
+     * Nothing in the shape of the code says which side of a loop a call sits on, so it is counted.
+     */
+    private var sectorBenchmarkBuilds = 0
+
+    internal fun peekSectorBenchmarkBuilds(): Int = sectorBenchmarkBuilds
+
+    /**
+     * Street upside per symbol, in bps, for the outcome report's context line.
+     *
+     * Diagnostic only, and the name says the quiet part out loud: this is the analyst anchor's
+     * distance from price, computed for display beside the outcome spreads and consumed by
+     * nothing. The weighted anchor is preferred, the plain one is the fallback, and a symbol with
+     * neither or an unpriced row is absent rather than zero.
+     */
+    internal suspend fun streetDiagnosticUpsideBps(): Map<String, Int> = stateMutex.withLock {
+        engine.trackedSymbols().mapNotNull { symbol ->
+            val detail = engine.detail(symbol) ?: return@mapNotNull null
+            val fair = detail.weightedExternalSignalFairValueCents ?: detail.externalSignalFairValueCents
+            val price = detail.marketPriceCents
+            if (fair == null || fair <= 0L || price <= 0L) return@mapNotNull null
+            symbol to (((fair.toDouble() / price) - 1.0) * 10_000.0).toInt()
+        }.toMap()
     }
 
     private fun buildTrackedRowLocked(
@@ -2208,6 +2758,7 @@ class DefaultDashboardRepository(
             isRefreshed = symbol in refreshedSymbols,
             stale = detail != null && symbol in staleSymbols,
             startupPhase = startupPhase,
+            kept = symbol in keptSymbols,
         )
 
         return TrackedSymbolRow(
@@ -2251,7 +2802,8 @@ class DefaultDashboardRepository(
             return null
         }
         rankedRows.firstOrNull { row -> row.symbol == symbol }?.let { return it }
-        var scored = scoreSymbolLocked(symbol, scoringModel) ?: return null
+        var scored = scoreSymbolLocked(symbol, scoringModel, sectorBenchmarksLocked(scoringModel))
+            ?: return null
         return buildOpportunityRowLocked(
             row = scored,
             currentIndex = rankedRows.size,
@@ -2260,9 +2812,17 @@ class DefaultDashboardRepository(
         )
     }
 
+    /**
+     * @param sectorBenchmarks the table to score against. It has no default on purpose: building
+     * it reads a detail for every tracked symbol, so a caller in a loop must build it once above
+     * the loop. A default hid that cost inside this call and made one plan board over the
+     * 1 937-symbol universe do 3.7 million detail reads, 18 s of a two-core device, on the mutex
+     * the refresh needs.
+     */
     private fun scoreSymbolLocked(
         symbol: String,
         scoringModel: OpportunityScoringModel,
+        sectorBenchmarks: Map<String, SectorBenchmarks>,
     ): OpportunityRow? {
         var detail = engine.detail(symbol) ?: return null
         var score = OpportunityEngine.scoreWithModel(
@@ -2274,7 +2834,7 @@ class DefaultDashboardRepository(
             marketRegime = marketRegime,
             regimeScoringEnabled = regimeScoringEnabled,
             sectorBenchmarks = detail.fundamentals?.sectorName
-                ?.let { sectorName -> sectorBenchmarksLocked(scoringModel)[sectorName] },
+                ?.let { sectorName -> sectorBenchmarks[sectorName] },
             timeseries = timeseriesCache[symbol],
         )
         return OpportunityRow(
@@ -2326,6 +2886,7 @@ class DefaultDashboardRepository(
             isRefreshed = row.symbol in refreshedSymbols,
             stale = detail != null && row.symbol in staleSymbols,
             startupPhase = startupPhase,
+            kept = row.symbol in keptSymbols,
         )
         var currentRankMovement = rankMovement(baselineRank, currentIndex)
         var currentValuationChange = significantValuationChange(
@@ -2351,6 +2912,9 @@ class DefaultDashboardRepository(
             symbol = row.symbol,
             marketPriceCents = row.marketPriceCents,
             intrinsicValueCents = row.intrinsicValueCents,
+            nextEarningsEpoch = row.nextEarningsEpoch,
+            outcomeConfidence = row.outcomeConfidence,
+            outcomeWidthBps = row.outcomeWidthBps,
             gapBps = row.gapBps,
             upsideBps = row.upsideBps,
             confidence = row.confidence,
@@ -2748,6 +3312,8 @@ class DefaultDashboardRepository(
 
         chartCache.clear()
         chartSummaries.clear()
+        dipSetups.clear()
+        leftoverSetups.clear()
         hydratedStates.forEach { state ->
             if (state.chartSummaries.isNotEmpty()) {
                 chartSummaries.getOrPut(state.symbol) { linkedMapOf() }.putAll(
@@ -2806,19 +3372,21 @@ class DefaultDashboardRepository(
         if (!pricingHistoryHydrated.add(symbol)) return
         val loaded = stateStore.loadPricingHistory(symbol)
         if (loaded.isEmpty()) return
-        stateMutex.withLock {
-            loaded.forEach { chart ->
-                val key = chartKey(chart.symbol, chart.range)
-                val mergedCandles = mergeHistoricalCandles(
-                    symbol = chart.symbol,
-                    range = chart.range,
-                    persistedCandles = chartCache[key].orEmpty(),
-                    incomingCandles = chart.candles,
-                )
-                chartCache[key] = mergedCandles
-                chartSummaries.getOrPut(chart.symbol) { linkedMapOf() }[chart.range] =
-                    ChartAnalysis.buildSummary(chart.range, mergedCandles, chart.fetchedAt)
-            }
+        stateMutex.withLock { hydrateChartRecordsLocked(loaded) }
+    }
+
+    private fun hydrateChartRecordsLocked(records: List<PersistedChartRecord>) {
+        records.forEach { chart ->
+            val key = chartKey(chart.symbol, chart.range)
+            val mergedCandles = mergeHistoricalCandles(
+                symbol = chart.symbol,
+                range = chart.range,
+                persistedCandles = chartCache[key].orEmpty(),
+                incomingCandles = chart.candles,
+            )
+            chartCache[key] = mergedCandles
+            chartSummaries.getOrPut(chart.symbol) { linkedMapOf() }[chart.range] =
+                ChartAnalysis.buildSummary(chart.range, mergedCandles, chart.fetchedAt)
         }
     }
 
@@ -2850,7 +3418,7 @@ class DefaultDashboardRepository(
     }
 
     private fun buildRevisionInputLocked(symbol: String): SymbolRevisionInput? {
-        val persisted = engine.persistedState().firstOrNull { it.symbol == symbol } ?: return null
+        val persisted = engine.persistedState(symbol) ?: return null
         val detail = engine.detail(symbol) ?: return null
         return SymbolRevisionInput(
             symbol = symbol,
@@ -2907,22 +3475,35 @@ class DefaultDashboardRepository(
         }
     }
 
+    /** Writes what a round has gathered since its last write, in one transaction. */
+    private suspend fun persistPending(pending: PendingDeltas) {
+        pending.take()?.let { delta -> persistDelta(delta) }
+    }
 
+
+    /**
+     * Stops the work of the profile being left and waits for it to end.
+     *
+     * For [clearAllData], where the wait is the point: the database is about to be emptied, and a
+     * write still in flight would refill it.
+     */
+    private suspend fun stopActiveProfileWork() {
+        takeActiveProfileJobs().forEach { job -> job.cancelAndJoin() }
+    }
+
+    /**
+     * Stops that same work without waiting for it.
+     *
+     * `cancel` returns at once; `join` does not. A fetch inside a socket read used to end when the
+     * read ended, so joining held the new profile off the screen for a whole network call: measured
+     * at 1 185 ms against 44 ms idle, with a fetch of 600 ms. Nobody waits for the cancelled work.
+     * The socket calls are cancellable, so it unwinds in a few milliseconds on its own.
+     *
+     * Nothing it still holds can land in the new profile. The generation is bumped before this
+     * call, and every refresh result is dropped unless its generation is the active one.
+     */
     private suspend fun cancelActiveProfileWork() {
-        var previousJobs = stateMutex.withLock {
-            var existing = listOfNotNull(
-                activeProfileSwitchJob,
-                activeRefreshJob,
-                activeEnrichmentJob,
-                activeMarketReadJob,
-            )
-            activeProfileSwitchJob = null
-            activeRefreshJob = null
-            activeEnrichmentJob = null
-            activeMarketReadJob = null
-            existing
-        }
-        previousJobs.forEach { job -> job.cancelAndJoin() }
+        takeActiveProfileJobs().forEach { job -> job.cancel() }
     }
 
     private fun applyTransitionLocked(feedback: ProfileTransitionFeedback) {
@@ -3088,7 +3669,7 @@ class DefaultDashboardRepository(
             .filter { result -> result.companyName.isNullOrBlank() && !result.isRemote }
             .forEach { result ->
                 runCatching {
-                    yahooClient.fetchSymbol(result.symbol).companyName
+                    withContext(InteractiveRequest) { yahooClient.fetchSymbol(result.symbol).companyName }
                 }.getOrNull()?.takeIf(String::isNotBlank)?.let { companyName ->
                     stateMutex.withLock {
                         companyNameBySymbol[result.symbol] = companyName
@@ -3193,7 +3774,7 @@ class DefaultDashboardRepository(
         if (providerFundamentals == null || !isFinancialServices(providerFundamentals)) {
             resolveIssuerYield(symbol, companyName)
         }
-        val selection = dcfSourceCoordinator.resolve(symbol) { timeseries ->
+        val selection = dcfSourceCoordinator.resolve(symbol, allowSecondary = false) { timeseries ->
             dcfFallbackFromTimeseries(
                 symbol = symbol,
                 companyName = companyName,
@@ -3201,7 +3782,7 @@ class DefaultDashboardRepository(
                 chartCandles = chartCandles,
                 timeseries = timeseries,
             )?.analysis
-        }
+        }.selection
         val selectedTimeseries = selection.timeseries ?: return null
         val fallback = dcfFallbackFromTimeseries(
             symbol = symbol,
@@ -3263,6 +3844,39 @@ class DefaultDashboardRepository(
         return rankedSymbols
     }
 
+    /**
+     * Times one stage and writes the reading to the log.
+     *
+     * The reading goes through [logger] because that seam already exists and a bench can read it
+     * back. [nowProvider] cannot serve here: it gives seconds, and every stage below is expected to
+     * land under one. The `finally` keeps the line honest when the stage throws or is cancelled,
+     * which is exactly the case the refresh path is suspected of.
+     */
+    private suspend fun <T> timedStage(stage: String, block: suspend () -> T): T {
+        val startedNanos = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            logStageMillis(stage, millisSince(startedNanos))
+        }
+    }
+
+    private fun millisSince(startedNanos: Long): Long = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
+
+    /** [timedStage] for a block that does not suspend. */
+    private inline fun <T> timedPart(stage: String, block: () -> T): T {
+        val startedNanos = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            logStageMillis(stage, millisSince(startedNanos))
+        }
+    }
+
+    private fun logStageMillis(stage: String, millis: Long, detail: String = "") {
+        logger.info(TAG, "$STAGE_TIMING_PREFIX stage=$stage ms=$millis$detail")
+    }
+
     private suspend fun emitUpdate() {
         updates.emit(updates.value + 1)
     }
@@ -3278,7 +3892,11 @@ class DefaultDashboardRepository(
             lastSeenEpochSeconds = issue.lastSeenEvent.toLong(),
         )
 
-    private suspend fun startEnrichment(symbols: List<String>, generation: Long) {
+    private suspend fun startEnrichment(
+        symbols: List<String>,
+        generation: Long,
+        skip: FreshCaptureSkip = FreshCaptureSkip(),
+    ) {
         if (symbols.isEmpty()) return
         val previous = stateMutex.withLock {
             if (generation != activeProfileGeneration) {
@@ -3297,20 +3915,43 @@ class DefaultDashboardRepository(
             clearNotEligibleTimeseriesLocked(symbols)
             activeEnrichmentJob = repositoryScope.launch {
                 val thisJob = coroutineContext.job
+                loadStarted()
                 try {
-                    runEnrichment(symbols, generation)
+                    runEnrichment(symbols, generation, skip)
                 } finally {
-                    stateMutex.withLock {
-                        if (generation == activeProfileGeneration && activeEnrichmentJob === thisJob) {
-                            activeEnrichmentJob = null
+                    withContext(NonCancellable) {
+                        stateMutex.withLock {
+                            if (generation == activeProfileGeneration && activeEnrichmentJob === thisJob) {
+                                activeEnrichmentJob = null
+                            }
                         }
+                        loadFinished()
                     }
                 }
             }
         }
     }
 
-    private suspend fun runEnrichment(symbols: List<String>, generation: Long) = coroutineScope {
+    private suspend fun runEnrichment(
+        symbols: List<String>,
+        generation: Long,
+        skip: FreshCaptureSkip,
+    ) {
+        runEnrichmentRounds(symbols, generation) { symbol, gen, recordErrors ->
+            enrichSymbol(symbol, gen, recordErrors, skip)
+        }
+    }
+
+    /**
+     * Fans [fetch] over [symbols] and applies what comes back, retrying what failed in a retryable
+     * way for [MAX_RETRY_ROUNDS] more rounds. The chart pass of a refresh and the enrichment are
+     * the same shape with a different fetch.
+     */
+    private suspend fun runEnrichmentRounds(
+        symbols: List<String>,
+        generation: Long,
+        fetch: suspend (symbol: String, generation: Long, recordErrors: Boolean) -> EnrichmentResult,
+    ) = coroutineScope {
         val pending = symbols.toMutableList()
         var round = 0
         while (pending.isNotEmpty() && round <= MAX_RETRY_ROUNDS) {
@@ -3321,10 +3962,11 @@ class DefaultDashboardRepository(
             pending.clear()
             val finalRound = round == MAX_RETRY_ROUNDS
             var applied = 0
+            val unwritten = PendingDeltas()
             batch
                 .asFlow()
-                .flatMapMerge(concurrency = ENRICHMENT_CONCURRENCY) { symbol ->
-                    flow { emit(enrichSymbol(symbol, generation, recordErrors = finalRound)) }
+                .flatMapMerge(concurrency = yahooClient.requestCeiling) { symbol ->
+                    flow { emit(fetch(symbol, generation, finalRound)) }
                 }
                 .collect { result ->
                     val isActiveGeneration = stateMutex.withLock { result.generation == activeProfileGeneration }
@@ -3338,17 +3980,62 @@ class DefaultDashboardRepository(
                     val toApply = if (finalRound) result else result.copy(errors = emptyList())
                     val delta = stateMutex.withLock { applyEnrichmentResultLocked(toApply) }
                     if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-                        persistDelta(delta, generation)
+                        unwritten.add(delta)
                     }
                     applied += 1
                     if (applied % EMIT_UPDATE_BATCH == 0) {
                         emitUpdate()
                     }
+                    if (applied % PERSIST_BATCH == 0) {
+                        persistPending(unwritten)
+                    }
                 }
             if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
                 emitUpdate()
             }
+            persistPending(unwritten)
             round += 1
+        }
+    }
+
+    /** The second pass of a refresh, one symbol: its year chart, whatever the cache holds. */
+    private suspend fun fetchYearChart(
+        symbol: String,
+        generation: Long,
+        recordErrors: Boolean,
+    ): EnrichmentResult {
+        val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
+        val errors = mutableListOf<ProviderDiagnostic>()
+        fetchChartInto(symbol, ChartRange.Year, chartCaptures, errors)
+        return EnrichmentResult(
+            generation = generation,
+            symbol = symbol,
+            chartCaptures = chartCaptures,
+            timeseries = null,
+            dcfAnalysis = null,
+            errors = if (recordErrors) errors else errors.filter { it.retryable },
+        )
+    }
+
+    private suspend fun fetchChartInto(
+        symbol: String,
+        range: ChartRange,
+        chartCaptures: MutableList<Pair<ChartRange, List<HistoricalCandle>>>,
+        errors: MutableList<ProviderDiagnostic>,
+    ) {
+        try {
+            val candles = yahooClient.fetchHistoricalCandles(symbol, range)
+            if (candles.isNotEmpty()) {
+                chartCaptures += range to candles
+            }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            errors += ProviderDiagnostic(
+                component = "enrichment",
+                kind = "error",
+                detail = "chart ${range.name} for $symbol: ${error.message ?: "failed"}",
+                retryable = isRetryable(error),
+            )
         }
     }
 
@@ -3356,34 +4043,28 @@ class DefaultDashboardRepository(
         symbol: String,
         generation: Long,
         recordErrors: Boolean,
+        skip: FreshCaptureSkip = FreshCaptureSkip(),
     ): EnrichmentResult {
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
         val errors = mutableListOf<ProviderDiagnostic>()
 
-        val missingRanges = stateMutex.withLock {
-            listOf(ChartRange.Year).filter { range ->
-                chartCache[chartKey(symbol, range)] == null
+        val missingRanges = if (symbol in skip.chart) {
+            emptyList()
+        } else {
+            stateMutex.withLock {
+                listOf(ChartRange.Year).filter { range ->
+                    chartCache[chartKey(symbol, range)] == null
+                }
             }
         }
 
         for (range in missingRanges) {
-            try {
-                val candles = yahooClient.fetchHistoricalCandles(symbol, range)
-                if (candles.isNotEmpty()) {
-                    chartCaptures += range to candles
-                }
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                errors += ProviderDiagnostic(
-                    component = "enrichment",
-                    kind = "error",
-                    detail = "chart ${range.name} for $symbol: ${error.message ?: "failed"}",
-                    retryable = isRetryable(error),
-                )
-            }
+            fetchChartInto(symbol, range, chartCaptures, errors)
         }
 
         var timeseries: FundamentalTimeseries? = null
+        var fetchedTimeseries: Map<DcfSource, FundamentalTimeseries> = emptyMap()
+        var timeseriesFromFile: FundamentalTimeseries? = null
         var dcfAnalysis: DcfAnalysis? = null
 
         val needsDcfResolve = stateMutex.withLock { needsDcfResolutionLocked(symbol) }
@@ -3394,14 +4075,14 @@ class DefaultDashboardRepository(
                 val fundamentals = detailForDcf?.fundamentals
                 val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
                 if (fundamentals != null && isFinancialServices(fundamentals)) {
-                    val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
+                    val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, allowSecondary = false)
                     residualFundamentals = outcome.fundamentals
                     dcfAnalysis = outcome.analysis
                 } else if (fundamentals != null) {
                     var peers = peerCouponsFor(symbol, fundamentals)
                     var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
                     var components = resolveComponents(symbol, detailForDcf?.companyName)
-                    val selection = dcfSourceCoordinator.resolve(symbol) { selectedTimeseries ->
+                    val evaluate: (FundamentalTimeseries) -> DcfAnalysis? = { selectedTimeseries ->
                         DcfAnalysisEngine.compute(
                             fundamentals,
                             selectedTimeseries,
@@ -3412,8 +4093,22 @@ class DefaultDashboardRepository(
                             components = components,
                         ).getOrThrow()
                     }
-                    timeseries = selection.timeseries
-                    dcfAnalysis = analysisFromSelection(selection, fundamentals)
+                    // A DCF most often needs resolving because the market parameters moved, and a
+                    // one-basis-point move in the risk-free rate evicts every DCF. The timeseries
+                    // it is computed from is a day's worth of data, and when the file's copy is
+                    // younger than that the DCF is recomputed from it. Measured 2026-08-19: this
+                    // was one Yahoo timeseries call per symbol on every launch.
+                    val onFile = if (symbol in skip.timeseries) timeseriesOnFile(symbol) else null
+                    if (onFile != null) {
+                        val selection = dcfSourceCoordinator.resolveFromFile(onFile.first, onFile.second, evaluate)
+                        timeseriesFromFile = selection.timeseries
+                        dcfAnalysis = analysisFromSelection(selection, fundamentals)
+                    } else {
+                        val resolution = dcfSourceCoordinator.resolve(symbol, allowSecondary = false, evaluate)
+                        timeseries = resolution.selection.timeseries
+                        fetchedTimeseries = resolution.fetched
+                        dcfAnalysis = analysisFromSelection(resolution.selection, fundamentals)
+                    }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -3431,6 +4126,8 @@ class DefaultDashboardRepository(
             symbol = symbol,
             chartCaptures = chartCaptures,
             timeseries = timeseries,
+            fetchedTimeseries = fetchedTimeseries,
+            timeseriesFromFile = timeseriesFromFile,
             dcfAnalysis = dcfAnalysis,
             residualFundamentals = residualFundamentals,
             // Caller drops errors on non-final rounds; keep retryable markers for queue detection.
@@ -3440,6 +4137,13 @@ class DefaultDashboardRepository(
                 errors.filter { it.retryable }
             },
         )
+    }
+
+    /** The file's timeseries for [symbol] and the source it came from, or null when either is unknown. */
+    private suspend fun timeseriesOnFile(symbol: String): Pair<DcfSource, FundamentalTimeseries>? {
+        val persisted = stateStore.loadFundamentalTimeseries(symbol) ?: return null
+        val source = DcfSource.entries.firstOrNull { it.name == persisted.sourceName } ?: return null
+        return source to persisted.timeseries
     }
 
     private fun applyEnrichmentResultLocked(result: EnrichmentResult): PersistenceDelta {
@@ -3466,15 +4170,9 @@ class DefaultDashboardRepository(
             )
         }
 
-        result.timeseries?.let { ts ->
-            timeseriesCache[result.symbol] = ts
-            rawCaptures += fundamentalTimeseriesCapture(
-                symbol = result.symbol,
-                timeseries = ts,
-                analysis = result.dcfAnalysis,
-                capturedAt = capturedAt,
-            )
-        }
+        result.timeseriesFromFile?.let { ts -> timeseriesCache[result.symbol] = ts }
+        result.timeseries?.let { ts -> timeseriesCache[result.symbol] = ts }
+        rawCaptures += fundamentalTimeseriesCaptures(result.symbol, result.fetchedTimeseries, result.dcfAnalysis, capturedAt)
         result.residualFundamentals?.let { fund ->
             engine.ingestFundamentals(fund)
         }
@@ -3742,17 +4440,29 @@ class DefaultDashboardRepository(
             symbol = fundamentals.symbol,
         ) == BusinessClass.FinancialServices
 
+    /**
+     * The residual-income chain for one financial-services symbol.
+     *
+     * [allowSecondary] is the same rule the DCF coordinator follows: SEC EDGAR costs a whole
+     * companyfacts file per symbol, so a bulk load never asks for one. A run without SEC is not
+     * recorded in [residualChainRan], because that set means "SEC was tried and gave nothing", and
+     * the locked path turns it into a terminal answer.
+     */
     private suspend fun residualFromDrivers(
         symbol: String,
         yahoo: FundamentalSnapshot,
         marketPriceCents: Long?,
+        allowSecondary: Boolean = true,
     ): ResidualFromDrivers.Outcome {
-        var slim = residualFactsProvider?.fetchSievedCompanyFacts(symbol)
-        residualChainRan.add(symbol)
+        var provider = residualFactsProvider?.takeIf { allowSecondary }
+        var slim = provider?.fetchSievedCompanyFacts(symbol)
+        if (provider != null) {
+            residualChainRan.add(symbol)
+        }
         return ResidualFromDrivers.compute(
             yahoo = yahoo,
             secFactsJson = slim,
-            secFetchAttempted = residualFactsProvider != null,
+            secFetchAttempted = provider != null,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
             instrumentId = symbol,
@@ -3978,12 +4688,14 @@ class DefaultDashboardRepository(
         revisions.clear()
         chartCache.clear()
         replayBackingCache.clear()
-        planBoardMemo.clear()
         liveDcfResolvedSymbols.clear()
         revisionHistoryHydrated.clear()
         pricingHistoryHydrated.clear()
         chartSummaries.clear()
+        dipSetups.clear()
+        leftoverSetups.clear()
         dcfCache.clear()
+        secondaryAsked.clear()
         timeseriesCache.clear()
         residualChainRan.clear()
         quantLensCache.clear()
@@ -3991,6 +4703,7 @@ class DefaultDashboardRepository(
         staleSymbols.clear()
         placeholderSymbols.clear()
         refreshedSymbols.clear()
+        keptSymbols.clear()
         refreshAttemptedSymbols.clear()
         comparisonBaselineRankBySymbol.clear()
         comparisonBaselineOpportunityRankByModel.values.forEach { it.clear() }
@@ -4019,13 +4732,23 @@ class DefaultDashboardRepository(
         return error is IOException || message.contains("HTTP 429") || message.contains("HTTP 5")
     }
 
+    override suspend fun loadSymbolNotes(): Map<String, String> = stateStore.loadSymbolNotes()
+
+    /**
+     * Straight to disk, and no `emitUpdate`. A note changes no score and no row, so a snapshot
+     * rebuild here would cost the whole list to publish a sentence the caller already has.
+     */
+    override suspend fun saveSymbolNote(symbol: String, note: String) = stateStore.saveSymbolNote(symbol, note)
+
     override suspend fun loadSystemStats(): SystemStats = stateStore.getSystemStats()
 
     private suspend fun reclaimPersistenceSpaceIfNeeded() {
-        val deleted = runCatching { stateStore.reclaimRawCaptureSpace() }.getOrDefault(0)
+        val deleted = timedStage("refresh.reclaim") {
+            runCatching { stateStore.reclaimPersistenceSpace() }.getOrDefault(0)
+        }
         if (deleted > 0) {
             stateMutex.withLock {
-                statusMessage = "Compacted $deleted leftover Yahoo capture row(s)"
+                statusMessage = "Compacted $deleted stale database row(s)"
             }
             emitUpdate()
         }
@@ -4035,7 +4758,7 @@ class DefaultDashboardRepository(
         stateStore.pruneOldRevisions(retentionDays)
 
     override suspend fun clearAllData() {
-        cancelActiveProfileWork()
+        stopActiveProfileWork()
         discoveryCoordinator.cancelActiveJob()
         stateStore.resetWarmStartState()
         stateMutex.withLock { resetInMemoryLocked() }
@@ -4153,7 +4876,7 @@ class DefaultDashboardRepository(
         var key = chartKey(symbol, range)
         if (stateMutex.withLock { replayBackingCache[key] } != null) return
         try {
-            var candles = yahooClient.fetchReplayBackingCandles(symbol, range)
+            var candles = withContext(InteractiveRequest) { yahooClient.fetchReplayBackingCandles(symbol, range) }
             stateMutex.withLock {
                 replayBackingCache[key] = candles
             }
@@ -4174,12 +4897,31 @@ class DefaultDashboardRepository(
         const val QA_PROFILE = "qa"
         const val QA_MAX_SYMBOLS = 20
 
-        private const val REFRESH_CONCURRENCY = 4
-        private const val ENRICHMENT_CONCURRENCY = 2
         private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
         private const val EMIT_UPDATE_BATCH = 8
+
+        /**
+         * How many applied symbols a round gathers before it writes.
+         *
+         * The write used to ride on [EMIT_UPDATE_BATCH], so a round of the largest universe took
+         * forty-one transactions against a 298 MB file and spent 18.6 s inside `persistPending`,
+         * all of it in front of the next result the round wanted to apply. The rows written are
+         * the same either way; what drops is the transaction count. A round always flushes what
+         * is left when it ends, so nothing waits past the round that produced it.
+         */
+        private const val PERSIST_BATCH = 32
+        /** A quoteSummary or year chart younger than this is left on file at start. */
+        private const val FRESH_CAPTURE_SECONDS = 86_400L
+        private const val BATCH_QUOTE_SCOPE = "batch-quote"
         private const val TAG = "DiscountScreener"
+        private const val NANOS_PER_MILLI = 1_000_000L
+
+        /**
+         * First word of every timing line. A bench matches on it to pull the readings out of the
+         * log; nothing in the app reads them.
+         */
+        internal const val STAGE_TIMING_PREFIX = "stage-timing"
 
         /**
          * How long a journalled score is kept: ninety days.
@@ -4188,7 +4930,7 @@ class DefaultDashboardRepository(
          * short enough that a five-hundred-symbol profile refreshed daily stays in the low
          * hundreds of thousands of rows.
          */
-        private const val SCORE_JOURNAL_RETENTION_SECONDS = 90L * 24L * 60L * 60L
+        internal const val SCORE_JOURNAL_RETENTION_SECONDS = 220L * 24L * 60L * 60L
 
         private fun retryBackoffMillis(round: Int): Long = when (round) {
             0 -> 1_500L
@@ -4198,21 +4940,27 @@ class DefaultDashboardRepository(
     }
 }
 
-private fun fundamentalTimeseriesCapture(
+/**
+ * One capture per provider answer, filed under the provider that sent it. The file is read back
+ * by source inside the day, so the key must be who sent it and never what was made of it.
+ */
+private fun fundamentalTimeseriesCaptures(
     symbol: String,
-    timeseries: FundamentalTimeseries,
+    fetched: Map<DcfSource, FundamentalTimeseries>,
     analysis: DcfAnalysis?,
     capturedAt: Long,
-) = RawCapture(
-    symbol = symbol,
-    captureKind = CaptureKind.FundamentalTimeseries,
-    scopeKey = analysis?.source?.name ?: "unknown",
-    capturedAt = capturedAt,
-    payload = RawCapturePayload.FundamentalTimeseries(
-        value = timeseries,
-        provenance = analysis?.provenance ?: DataProvenance(),
-    ),
-)
+): List<RawCapture> = fetched.map { (source, timeseries) ->
+    RawCapture(
+        symbol = symbol,
+        captureKind = CaptureKind.FundamentalTimeseries,
+        scopeKey = source.name,
+        capturedAt = capturedAt,
+        payload = RawCapturePayload.FundamentalTimeseries(
+            value = timeseries,
+            provenance = analysis?.takeIf { it.source == source }?.provenance ?: DataProvenance(),
+        ),
+    )
+}
 
 private const val QUANT_LENS_ROW_MIN_UPSIDE_BPS = -100_000
 private const val QUANT_LENS_ROW_MAX_UPSIDE_BPS = 100_000
@@ -4241,9 +4989,12 @@ internal fun rowFreshnessFor(
     isRefreshed: Boolean,
     stale: Boolean,
     startupPhase: DashboardStartupPhase,
+    /** Priced today, valued from a quote of the day before. Reads Restored through the refresh. */
+    kept: Boolean = false,
 ): RowFreshness = when {
     !hasDetail && issueMessage != null -> RowFreshness.Issue
     !hasDetail -> RowFreshness.Loading
+    kept -> RowFreshness.Restored
     startupPhase in setOf(DashboardStartupPhase.SwitchingProfile, DashboardStartupPhase.Refreshing) && !isRefreshed ->
         RowFreshness.Updating
     stale && startupPhase == DashboardStartupPhase.ShowingCached -> RowFreshness.Restored
@@ -4342,16 +5093,25 @@ internal fun quantLensEvSpreadBps(detail: SymbolDetail, dcfAnalysis: DcfAnalysis
         ?.coerceAtMost(QUANT_LENS_ROW_MAX_UPSIDE_BPS)
 }
 
+/**
+ * Act, Watch or Avoid for a tracked row, or null when the row has nothing on file to judge.
+ *
+ * Freshness is not read here. A row restored from the database carries the qualification, the
+ * confidence and the upside of the refresh that filed it, and those are the same numbers that made
+ * its tag, so the tag is still what the app last decided about it. The screen fades it instead of
+ * dropping it, and `decisionTagIsCurrent` is the one place that says which of the two it is.
+ *
+ * [TrackedRowState.Loading] and [TrackedRowState.Failed] are the two states with no detail on file.
+ * A tag there would be built out of nulls and would read as a judgment on a row nobody has valued.
+ */
 internal fun trackedDecisionStateFor(
     state: TrackedRowState,
-    freshness: RowFreshness,
     qualification: QualificationStatus?,
     confidence: ConfidenceBand?,
     upsideBps: Int?,
     trustNote: String?,
 ): RowDecisionState? = when {
-    state != TrackedRowState.Live -> null
-    freshness != RowFreshness.Updated -> null
+    state == TrackedRowState.Loading || state == TrackedRowState.Failed -> null
     qualification == QualificationStatus.Unprofitable -> RowDecisionState.Avoid
     upsideBps != null && upsideBps <= 0 -> RowDecisionState.Avoid
     trustNote != null -> RowDecisionState.Watch

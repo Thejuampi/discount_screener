@@ -1,6 +1,7 @@
 package com.discountscreener.android.data.persistence
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.discountscreener.core.model.HistoricalCandle
 import kotlinx.coroutines.test.runTest
@@ -113,7 +114,45 @@ class BacktestCandleStoreTest {
         assertEquals(series(1..3, PRICE_CENTS), load()[SYMBOL])
     }
 
+    /**
+     * The market read brings the same year for every tracked symbol each time it runs. Writing all
+     * of it back held the store's write connection for forty-three seconds on a phone with two
+     * thousand symbols, and every quote of the refresh waited behind it. A refetch writes only what
+     * changed; `captured_at` is the mark that shows which rows a persist touched.
+     */
+    @Test
+    fun a_refetch_does_not_rewrite_a_bar_it_did_not_change() = runTest {
+        store { it.persistBacktestCandles(mapOf(SYMBOL to series(1..3, PRICE_CENTS)), NOW) }
+        store { it.persistBacktestCandles(mapOf(SYMBOL to series(1..3, PRICE_CENTS)), NOW + 60) }
+
+        assertEquals(NOW, capturedAt(day(1)))
+    }
+
+    /** The newest bar is written every time, so the series says when it was last fetched. */
+    @Test
+    fun a_refetch_stamps_the_newest_bar_with_its_own_time() = runTest {
+        store { it.persistBacktestCandles(mapOf(SYMBOL to series(1..3, PRICE_CENTS)), NOW) }
+        store { it.persistBacktestCandles(mapOf(SYMBOL to series(1..3, PRICE_CENTS)), NOW + 60) }
+
+        assertEquals(NOW + 60, capturedAt(day(3)))
+    }
+
     private suspend fun load(): Map<String, List<HistoricalCandle>> = store { it.loadBacktestCandles() }
+
+    private fun capturedAt(epochSeconds: Long): Long {
+        var db = SQLiteDatabase.openDatabase(context.getDatabasePath(DB_NAME).path, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            db.rawQuery(
+                "SELECT captured_at FROM pricing_candle WHERE symbol = ? AND epoch_seconds = ?",
+                arrayOf(SYMBOL, epochSeconds.toString()),
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "no bar at $epochSeconds" }
+                return cursor.getLong(0)
+            }
+        } finally {
+            db.close()
+        }
+    }
 
     /** Every read reopens the store, because these rows exist to be read after the process is gone. */
     private suspend fun <T> store(block: suspend (SQLiteStateStore) -> T): T {

@@ -28,7 +28,17 @@
       "V4_FUND_SECTOR_CHEAP_MULT": 0.7,
       "V4_FUND_SECTOR_RICH_MULT": 1.5,
       "V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS": -500.0,
-      "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS": 1500.0
+      "V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS": 1500.0,
+      "V4_FUND_LEVERAGE_WEIGHT": 16.0,
+      "V4_FUND_LEVERAGE_LOW": 0.0,
+      "V4_FUND_LEVERAGE_HIGH": 300.0,
+      "V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET": -150.0,
+      "V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET": 150.0,
+      "V4_FUND_FALLBACK_DE_LOW": 3000.0,
+      "V4_FUND_FALLBACK_DE_HIGH": 20000.0,
+      "V4_CYCLE_PEAK_LOWER_BPS": 5000.0,
+      "V4_CYCLE_PEAK_UPPER_BPS": 10000.0,
+      "V4_CYCLE_PEAK_MAX_PENALTY_POINTS": 8.0
     }
   },
   "units": {
@@ -337,6 +347,125 @@
       "binds_no_constant": "nothing. The floor is a step. Nine cents and ten cents are the pair that bind it.",
       "fundamentals": { "earnings_growth_bps": -1100, "trailing_eps_cents": 9 },
       "expected": { "score": null, "signals": [] }
+    },
+    {
+      "name": "leverage read against a sector that carries 3.0 turns of net debt",
+      "field": "net_debt_to_ebitda_hundredths",
+      "binds": "V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET and V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET, both, in both directions. Net debt is 20e9 against 10e9 of EBITDA, so the reading is 2.00 turns, and 200 sits strictly inside 300-150 .. 300+150. The pair of expectations also binds the sign: the same 2.00 turns is a positive vote among peers at 3.0 turns and a negative one against the absolute band.",
+      "mutants": [
+        { "constant": "V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET", "value": -50.0, "score": 15 },
+        { "constant": "V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET", "value": -250.0, "score": 4 },
+        { "constant": "V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET", "value": 50.0, "score": 7 },
+        { "constant": "V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET", "value": 250.0, "score": 11 }
+      ],
+      "fundamentals": { "total_debt_dollars": 30000000000, "total_cash_dollars": 10000000000, "ebitda_dollars": 10000000000 },
+      "sector_benchmarks": { "net_debt_to_ebitda_hundredths": 300 },
+      "expected": { "score": 10, "signals": ["ND/EBITDA§++"] },
+      "expected_without_benchmarks": { "score": -5, "signals": ["ND/EBITDA-"] }
+    },
+    {
+      "name": "leverage on the absolute band, part way between net cash and three turns",
+      "field": "net_debt_to_ebitda_hundredths",
+      "binds": "V4_FUND_LEVERAGE_LOW and V4_FUND_LEVERAGE_HIGH. Net debt is 7.5e9 against 10e9 of EBITDA, so 0.75 turns sits strictly inside 0 .. 300 and every one of the four edge errors moves the score.",
+      "mutants": [
+        { "constant": "V4_FUND_LEVERAGE_LOW", "value": -100.0, "score": 2 },
+        { "constant": "V4_FUND_LEVERAGE_LOW", "value": 100.0, "score": 15 },
+        { "constant": "V4_FUND_LEVERAGE_HIGH", "value": 200.0, "score": 4 },
+        { "constant": "V4_FUND_LEVERAGE_HIGH", "value": 500.0, "score": 10 }
+      ],
+      "fundamentals": { "total_debt_dollars": 12000000000, "total_cash_dollars": 4500000000, "ebitda_dollars": 10000000000 },
+      "expected": { "score": 7, "signals": ["ND/EBITDA++"] }
+    },
+    {
+      "name": "a company holding more cash than debt scores the top of the leverage band",
+      "field": "net_debt_to_ebitda_hundredths",
+      "binds": "V4_FUND_LEVERAGE_WEIGHT, and the direction of the ramp. Net debt is -10e9, so the reading is -1.00 turns, below V4_FUND_LEVERAGE_LOW and pinned at the far end. A port that forgets to negate the ramp scores -15 here with every constant correct, which is why this case is written at a clamp.",
+      "mutants": [
+        { "constant": "V4_FUND_LEVERAGE_WEIGHT", "value": 10.0, "score": 9 },
+        { "constant": "V4_FUND_LEVERAGE_WEIGHT", "value": 24.0, "score": 22 }
+      ],
+      "fundamentals": { "total_debt_dollars": 2000000000, "total_cash_dollars": 12000000000, "ebitda_dollars": 10000000000 },
+      "expected": { "score": 15, "signals": ["ND/EBITDA++"] }
+    },
+    {
+      "name": "the debt-to-equity fallback at the magnitude the ingestion really produces",
+      "field": "debt_to_equity_hundredths",
+      "binds": "V4_FUND_FALLBACK_DE_LOW and V4_FUND_FALLBACK_DE_HIGH. 4046 is AMZN as every ingestion in this repo stores it: Yahoo reports the ratio as a percent and the ingestion multiplies by a hundred again. V2 and V3 ramp that number against 30 .. 200, so every real ticker saturates and their leverage vote is the same constant for the whole universe. Against 3000 .. 20000 the same input scores +13 instead of -15.",
+      "mutants": [
+        { "constant": "V4_FUND_FALLBACK_DE_LOW", "value": 1000.0, "score": 10 },
+        { "constant": "V4_FUND_FALLBACK_DE_LOW", "value": 4000.0, "score": 14 },
+        { "constant": "V4_FUND_FALLBACK_DE_HIGH", "value": 10000.0, "score": 10 },
+        { "constant": "V4_FUND_FALLBACK_DE_HIGH", "value": 40000.0, "score": 14 }
+      ],
+      "fundamentals": { "debt_to_equity_hundredths": 4046 },
+      "expected": { "score": 13, "signals": ["D/E++"] }
+    },
+    {
+      "name": "dollars beat the ratio when a symbol carries both",
+      "field": "net_debt_to_ebitda_hundredths",
+      "binds": "the order of the three leverage inputs. The same fundamentals carry 1.00 turn of net debt and the mis-scaled 4046. Reading the dollars gives +5 and the label ND/EBITDA; falling to the ratio would give +13 and the label D/E.",
+      "binds_no_constant": "nothing. Precedence is an order of tests, not a number, and every band edge in it is bound by the two cases above.",
+      "fundamentals": { "total_debt_dollars": 15000000000, "total_cash_dollars": 5000000000, "ebitda_dollars": 10000000000, "debt_to_equity_hundredths": 4046 },
+      "expected": { "score": 5, "signals": ["ND/EBITDA+"] }
+    },
+    {
+      "name": "non-positive EBITDA is not a leverage reading, so the ratio speaks instead",
+      "field": "ebitda_dollars",
+      "binds": "the `> 0` guard on EBITDA. Net debt is 20e9 and EBITDA is -5e9; dividing them would report -4.00 turns and score this loss maker as if it held net cash.",
+      "binds_no_constant": "nothing. A sign test has no band to move.",
+      "fundamentals": { "total_debt_dollars": 30000000000, "total_cash_dollars": 10000000000, "ebitda_dollars": -5000000000, "debt_to_equity_hundredths": 4046 },
+      "expected": { "score": 13, "signals": ["D/E++"] }
+    },
+    {
+      "name": "cash against debt is the last resort and it is a coarse one",
+      "field": "total_cash_dollars",
+      "binds": "the third input. With no EBITDA and no ratio, holding more cash than debt is the full positive vote and the reverse is half a negative one. The asymmetry is deliberate: net cash is a fact, and more debt than cash is a question this input cannot size.",
+      "binds_no_constant": "nothing. Both votes are fixed values, not ramps.",
+      "fundamentals": { "total_debt_dollars": 2000000000, "total_cash_dollars": 12000000000 },
+      "expected": { "score": 15, "signals": ["Bal++"] }
+    },
+    {
+      "name": "the coarse comparison the other way round",
+      "field": "total_debt_dollars",
+      "binds": "the negative half of the same vote, which the case above cannot see.",
+      "binds_no_constant": "nothing, for the same reason.",
+      "fundamentals": { "total_debt_dollars": 12000000000, "total_cash_dollars": 2000000000 },
+      "expected": { "score": -7, "signals": ["Bal-"] }
+    },
+    {
+      "name": "unknown cash is not zero cash, so the leverage vote stays silent",
+      "field": "total_cash_dollars",
+      "binds": "the refusal. Debt and EBITDA are both present and only cash is missing. Treating the gap as zero would report 3.00 turns and pin this symbol at the bottom of the band on a number nobody measured.",
+      "binds_no_constant": "nothing. A missing term does not read the band.",
+      "fundamentals": { "total_debt_dollars": 30000000000, "ebitda_dollars": 10000000000 },
+      "expected": { "score": null, "signals": [] }
+    },
+    {
+      "name": "an integrated oil producer at the top of its own five years",
+      "field": "industry_key",
+      "binds": "V4_CYCLE_PEAK_LOWER_BPS, V4_CYCLE_PEAK_UPPER_BPS and V4_CYCLE_PEAK_MAX_PENALTY_POINTS. Revenue 285 / 413 / 344 / 320 / 420 gives annual moves of 4491 / -1671 / -698 / 3125 bps: two of four are down, so the run classifies as cyclical, and the median 1214 puts the Trend term at +0.714 of six weights. Net income 23 / 55.7 / 36 / 33.7 / 50 gives margins of 807 / 1348 / 1046 / 1053 / 1190 bps, and the last year beats three of the four before it, a percentile of 7500 and half the ramp. Return on equity at 2000 bps pins the ROE term at the top of its absolute band. So (16.0 + 4.284) / 110 x 100 = 18.44, less four points of penalty, is 14. The industry key is read before the sector name, which here says Technology: a sector-keyed lookup would answer for software and charge nothing.",
+      "mutants": [
+        { "constant": "V4_CYCLE_PEAK_MAX_PENALTY_POINTS", "value": 4.0, "score": 16 },
+        { "constant": "V4_CYCLE_PEAK_MAX_PENALTY_POINTS", "value": 16.0, "score": 10 },
+        { "constant": "V4_CYCLE_PEAK_LOWER_BPS", "value": 2500.0, "score": 13 },
+        { "constant": "V4_CYCLE_PEAK_LOWER_BPS", "value": 7500.0, "score": 18 },
+        { "constant": "V4_CYCLE_PEAK_UPPER_BPS", "value": 7500.0, "score": 10 },
+        { "constant": "V4_CYCLE_PEAK_UPPER_BPS", "value": 20000.0, "score": 17 }
+      ],
+      "fundamentals": { "industry_key": "oil-gas-integrated", "return_on_equity_bps": 2000 },
+      "revenue": [285.0, 413.0, 344.0, 320.0, 420.0],
+      "net_income": [23.0, 55.7, 36.0, 33.7, 50.0],
+      "expected": { "score": 14, "signals": ["ROE++", "Trend++", "CyclePeak-"] }
+    },
+    {
+      "name": "the same five years in an industry the beta policy does not call through-cycle",
+      "field": "industry_key",
+      "binds": "the first half of the conjunction, which the case above cannot see on its own. Nothing about the company changes: the same revenue, the same net income, the same return on equity, the same peak margin. Only the industry key moves, and the penalty disappears, so the four points are the industry reading and not an artefact of the series.",
+      "binds_no_constant": "nothing. No penalty fires here, so no band and no size is read.",
+      "fundamentals": { "industry_key": "software-infrastructure", "return_on_equity_bps": 2000 },
+      "revenue": [285.0, 413.0, 344.0, 320.0, 420.0],
+      "net_income": [23.0, 55.7, 36.0, 33.7, 50.0],
+      "expected": { "score": 18, "signals": ["ROE++", "Trend++"] }
     }
   ]
 }

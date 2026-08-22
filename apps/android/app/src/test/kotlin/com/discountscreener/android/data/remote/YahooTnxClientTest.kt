@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.remote
 
+import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -10,7 +11,7 @@ import org.junit.Test
 
 class YahooTnxClientTest {
     @Test
-    fun chart_request_sends_the_yahoo_crumb() {
+    fun chart_request_sends_the_yahoo_crumb() = runBlocking {
         var seen = mutableListOf<String>()
         var http = OkHttpClient.Builder()
             .addInterceptor { chain ->

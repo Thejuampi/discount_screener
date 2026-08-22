@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.discountscreener.android.domain.model.ChangeDirection
+import com.discountscreener.android.domain.model.decisionTagIsCurrent
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.RankMovement
 import com.discountscreener.android.domain.model.RowDecisionState
@@ -257,16 +258,9 @@ private fun DiscoveryRowSignals(
         DiscoveryTriage.Watch -> RowDecisionState.Watch
         DiscoveryTriage.Avoid -> RowDecisionState.Avoid
     }
-    val decisionLabel = decisionStateLabel(decisionState)
-    val decisionColors = decisionStateColors(decisionState)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        if (decisionLabel != null) {
-            ChangeBadge(
-                label = decisionLabel,
-                contentColor = decisionColors.first,
-                backgroundColor = decisionColors.second,
-            )
-        }
+        // Scored in this pass by the engine above, so the tag is never faded here.
+        DecisionBadge(decisionState = decisionState, current = true)
         ChangeBadge(
             label = "Discovery",
             contentColor = MaterialTheme.colorScheme.tertiary,
@@ -302,19 +296,11 @@ private fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<Quant
     val freshness = freshnessColors(row.freshness)
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
-    val decisionLabel = decisionStateLabel(row.decisionState)
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        decisionLabel?.let {
-            val colors = decisionStateColors(row.decisionState)
-            ChangeBadge(
-                label = it,
-                contentColor = colors.first,
-                backgroundColor = colors.second,
-            )
-        }
+        DecisionBadge(decisionState = row.decisionState, current = decisionTagIsCurrent(row.freshness))
         valuationLabel?.let {
             val colors = valuationChangeColors(row.valuationChange)
             ChangeBadge(
@@ -420,19 +406,11 @@ private fun TrackedRowSignals(row: TrackedSymbolRow, lensChips: List<QuantLensCh
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)
     val freshness = freshnessColors(row.freshness)
-    val decisionLabel = decisionStateLabel(row.decisionState)
     val explanationLabel = explanationLabel(row.explanation)
     val freshnessTime = freshnessTimeLabel(row.freshness, row.freshnessAsOfEpochSeconds)
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        decisionLabel?.let {
-            val colors = decisionStateColors(row.decisionState)
-            ChangeBadge(
-                label = it,
-                contentColor = colors.first,
-                backgroundColor = colors.second,
-            )
-        }
+        DecisionBadge(decisionState = row.decisionState, current = decisionTagIsCurrent(row.freshness))
         valuationLabel?.let {
             val colors = valuationChangeColors(row.valuationChange)
             ChangeBadge(
@@ -501,6 +479,29 @@ private fun explanationLabel(explanation: RowExplanationKind?): String? = when (
     RowExplanationKind.NoBaseline -> "No baseline"
     RowExplanationKind.NoMeaningfulChange, null -> null
 }
+
+/**
+ * The Act, Watch or Avoid chip.
+ *
+ * A tag whose numbers are not from this refresh is drawn faded: the same word in the same hue with
+ * less ink. The row keeps saying what the app last decided about it, which a row restored from the
+ * database used to hide altogether, and the eye still reads at a glance which rows are current.
+ * Flat grey would cost the other half of that, because Act, Watch and Avoid would all look alike.
+ */
+@Composable
+private fun DecisionBadge(decisionState: RowDecisionState?, current: Boolean) {
+    var label = decisionStateLabel(decisionState) ?: return
+    var colors = decisionStateColors(decisionState)
+    var fade = if (current) 1f else FADED_DECISION_ALPHA
+    ChangeBadge(
+        label = label,
+        contentColor = colors.first.copy(alpha = colors.first.alpha * fade),
+        backgroundColor = colors.second.copy(alpha = colors.second.alpha * fade),
+    )
+}
+
+/** Enough ink left to read the word and the hue, little enough to read as last time's answer. */
+internal const val FADED_DECISION_ALPHA = 0.45f
 
 internal fun decisionStateLabel(decisionState: RowDecisionState?): String? = when (decisionState) {
     RowDecisionState.Act -> "Act"

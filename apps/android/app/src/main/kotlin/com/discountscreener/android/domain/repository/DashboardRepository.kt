@@ -19,7 +19,18 @@ interface DashboardRepository {
     fun observeUpdates(): Flow<Long>
     suspend fun bootstrap(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
     suspend fun currentSnapshot(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
-    suspend fun refreshAll(filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
+    /**
+     * Starts a refresh and returns the snapshot as it is now. [force] buys a new quoteSummary
+     * and year chart even when those captures are less than a day old. Start leaves [force]
+     * false. The Refresh button sets it true.
+     */
+    suspend fun refreshAll(
+        filter: ViewFilter,
+        selectedSymbol: String?,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+        force: Boolean = false,
+    ): DashboardSnapshot
     suspend fun ensureDetailLoaded(symbol: String, filter: ViewFilter, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
     suspend fun addSymbols(rawInput: String, filter: ViewFilter, selectedSymbol: String?, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
     suspend fun selectProfile(profile: String, filter: ViewFilter, selectedRange: ChartRange, opportunityScoringModel: OpportunityScoringModel): DashboardSnapshot
@@ -27,8 +38,23 @@ interface DashboardRepository {
     /** Restores the persisted scoring model and market-dimension switch, and applies the latter. */
     suspend fun loadScoringPreferences(): ScoringPreferences
 
-    /** Writes both, and re-renders — the switch changes every V3 row's score. */
+    /**
+     * Writes both and applies the market-dimension flag. Does not emit a dashboard update.
+     * The caller rebuilds the list after persist so a load tick cannot apply the previous scores.
+     */
     suspend fun persistScoringPreferences(preferences: ScoringPreferences)
+
+    /**
+     * The reader's own notes, by symbol.
+     *
+     * Deliberately not part of [DashboardSnapshot]. A note has no weight in any score, and every
+     * snapshot method above rebuilds the whole list; carrying notes there would rebuild that list
+     * every time someone types a sentence.
+     */
+    suspend fun loadSymbolNotes(): Map<String, String>
+
+    /** Writes one note. A blank note clears it. */
+    suspend fun saveSymbolNote(symbol: String, note: String)
 
     suspend fun loadSystemStats(): SystemStats
     suspend fun pruneOldRevisions(retentionDays: Int): Int

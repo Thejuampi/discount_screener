@@ -9,6 +9,7 @@ import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.OutcomeConfidence
 import com.discountscreener.core.model.ProjectedDashboardData
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.QuantLensReport
@@ -51,6 +52,16 @@ enum class RowFreshness {
     Stale,
     Issue,
 }
+
+/**
+ * Whether the decision tag on a row was decided together with the price on that row.
+ *
+ * A row read back from the database keeps the tag its last refresh gave it. The numbers behind that
+ * tag are on file and are the honest thing to show: the row said Act yesterday, and hiding it says
+ * nothing at all. It is drawn faded, so the tag never reads as a call on a price the app has not
+ * fetched yet. Only [RowFreshness.Updated] means the two were taken in the same pass.
+ */
+fun decisionTagIsCurrent(freshness: RowFreshness): Boolean = freshness == RowFreshness.Updated
 
 enum class RowExplanationKind {
     PriceMoved,
@@ -157,7 +168,31 @@ data class TrackedSymbolRow(
 data class OpportunityListRow(
     val symbol: String,
     val marketPriceCents: Long,
-    val intrinsicValueCents: Long,
+    /**
+     * Null when the valuation judgment named no primary. The row still exists, still scores, and
+     * still shows [valuationStanceLabel]; what it must not do is print a number the judgment
+     * refused. [TrackedSymbolRow] has always allowed null here for the same reason.
+     *
+     * Only rows built from the projection carry that meaning. The legacy path
+     * (`opportunityRowsLocked`) copies a non-null intrinsic value straight off `OpportunityRow`, so
+     * a row from there is never null and a non-null value from there says nothing about what the
+     * judgment decided. Read the stance, not the nullability, if the caller can see both paths.
+     */
+    val intrinsicValueCents: Long?,
+    /**
+     * Unix seconds of the next scheduled earnings report. Marks the row and nothing more: no
+     * bucket, no composite and no decision reads it, by the decision that this gate only marks.
+     */
+    val nextEarningsEpoch: Long? = null,
+    /**
+     * How wide the range of outcomes is, which is a different question from [confidence].
+     *
+     * [confidence] says whether the data can be trusted. This says how far apart the sources put
+     * the answer. A name can be High and Wide at once, and both readings are true.
+     */
+    val outcomeConfidence: OutcomeConfidence = OutcomeConfidence.Unmeasured,
+    /** The span behind [outcomeConfidence], in bps of its own centre. */
+    val outcomeWidthBps: Int? = null,
     val gapBps: Int? = null,
     val upsideBps: Int? = gapBps,
     val confidence: ConfidenceBand,
@@ -206,6 +241,8 @@ data class DashboardSnapshot(
     val candidateRows: List<CandidateRow>,
     val opportunityRows: List<OpportunityListRow>,
     val opportunityScoringModel: OpportunityScoringModel,
+    /** How these rows were scored. A later snapshot with a different flag is stale. */
+    val regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
     val issues: List<IssueRecord>,
     val selectedDetail: SymbolDetail?,
     /**

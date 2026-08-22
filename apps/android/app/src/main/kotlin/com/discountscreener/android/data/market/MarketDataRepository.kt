@@ -14,6 +14,7 @@ import com.discountscreener.core.regime.SymbolDailyView
 import com.discountscreener.core.regime.computeMarketRegime
 import java.io.IOException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.flatMapMerge
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * The market reading for the fourth scoring dimension: fetches what `:core` cannot, then hands it
@@ -145,7 +147,11 @@ open class MarketDataRepository(
                 dailyCandleSink?.persistBacktestCandles(fetched.candlesBySymbol, now)
             }
         } finally {
-            mutex.withLock { refreshing = false }
+            // A cancelled read must still let the next one in; a cancelled coroutine cannot take
+            // the mutex without this.
+            withContext(NonCancellable) {
+                mutex.withLock { refreshing = false }
+            }
         }
         return mutex.withLock { cached ?: lastComputed }
     }

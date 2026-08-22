@@ -2,7 +2,7 @@ package com.discountscreener.android.ui
 
 import android.os.Looper
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
@@ -17,20 +17,21 @@ import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class DiscountScreenerAppBackNavigationTest {
+    @get:Rule
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
+
     @Test
     fun system_back_from_detail_dispatches_existing_back_action() {
         val actions = mutableListOf<DashboardAction>()
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = DetailRoute(
@@ -51,18 +52,16 @@ class DiscountScreenerAppBackNavigationTest {
         }
         shadowOf(Looper.getMainLooper()).idle()
 
-        activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.activity.onBackPressedDispatcher.onBackPressed()
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(listOf(DashboardAction.BackFromDetail), actions)
-        assertFalse(activity.isFinishing)
+        assertFalse(composeRule.activity.isFinishing)
     }
 
     @Test
     fun dashboard_root_back_keeps_default_activity_finish_behavior() {
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DashboardScreen(
                     state = DashboardUiState(
@@ -75,18 +74,16 @@ class DiscountScreenerAppBackNavigationTest {
         }
         shadowOf(Looper.getMainLooper()).idle()
 
-        activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.activity.onBackPressedDispatcher.onBackPressed()
         shadowOf(Looper.getMainLooper()).idle()
 
-        assertTrue(activity.isFinishing)
+        assertTrue(composeRule.activity.isFinishing)
     }
 
     @Test
     fun system_back_from_detail_clears_search_before_leaving_detail() {
         val actions = mutableListOf<DashboardAction>()
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
                     route = DetailRoute(
@@ -107,19 +104,17 @@ class DiscountScreenerAppBackNavigationTest {
         }
         shadowOf(Looper.getMainLooper()).idle()
 
-        activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.activity.onBackPressedDispatcher.onBackPressed()
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(listOf(DashboardAction.ClearTickerSearch), actions)
-        assertFalse(activity.isFinishing)
+        assertFalse(composeRule.activity.isFinishing)
     }
 
     @Test
     fun dashboard_back_clears_search_before_finishing_activity() {
         val actions = mutableListOf<DashboardAction>()
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-
-        activity.setContent {
+        composeRule.setContent {
             DiscountScreenerTheme {
                 DashboardScreen(
                     state = DashboardUiState(
@@ -135,10 +130,10 @@ class DiscountScreenerAppBackNavigationTest {
         }
         shadowOf(Looper.getMainLooper()).idle()
 
-        activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.activity.onBackPressedDispatcher.onBackPressed()
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(listOf(DashboardAction.ClearTickerSearch), actions)
-        assertFalse(activity.isFinishing)
+        assertFalse(composeRule.activity.isFinishing)
     }
 }

@@ -72,6 +72,8 @@ internal data class ScoreFactorGroupUi(
 )
 
 internal data class ScoreFactorLineUi(
+    /** The engine's own name for the term, before [scoreFactorLabel] turns it into English. */
+    val key: String,
     val label: String,
     val pointsText: String?,
     val token: String,
@@ -79,6 +81,62 @@ internal data class ScoreFactorLineUi(
 )
 
 internal const val SCORE_FACTOR_CAPTION = "Points add inside F, T and Fc. Market shows fit weight."
+
+/** The engine keys the notes below are attached to. */
+internal const val PULSE_KEY = "Pulse"
+internal const val PULSE_TREND_DIVERGENCE_KEY = "Pulse≠Trend"
+
+/**
+ * What `Pulse` is, in the source's own terms.
+ *
+ * The number is Yahoo's `financialData.earningsGrowth`. Yahoo does not say whether it is reported
+ * or adjusted earnings, and the difference is large: a single impairment year prints here as a
+ * collapse in growth and costs the symbol real points. Naming the hole is the honest half of this;
+ * closing it needs the XBRL series that does not exist in this repo yet.
+ */
+internal const val PULSE_BASIS_NOTE =
+    "Quarter EPS YoY is Yahoo's own figure: one quarter against the same quarter a year before. " +
+        "Yahoo does not declare the accounting basis, so a one-off charge reads here as lost growth."
+
+/**
+ * The engine has flagged this disagreement since V4 shipped and nothing showed it.
+ *
+ * A quarter that falls while a five-year revenue line climbs is the signature of a charge, a
+ * currency move, or a cycle — three different things, none of them visible in one number. The row
+ * cannot say which, so it says the two halves disagree and leaves the reading to the person.
+ */
+internal const val PULSE_TREND_DIVERGENCE_NOTE =
+    "Pulse and Trend point opposite ways. Each holds half the growth weight, so the two cancel " +
+        "instead of one deciding the bucket."
+
+internal const val CYCLE_PEAK_KEY = "CyclePeak"
+
+/**
+ * The size of the claim, said on screen and not only in the source.
+ *
+ * A mid-cycle earnings figure needs seven to ten years of an operating line. This app holds five
+ * annual points and no operating income at all, so the mark says where the latest year sits inside
+ * the only history there is. A reader who takes it for a cycle-adjusted valuation would be reading
+ * more into it than it measures.
+ */
+internal const val CYCLE_PEAK_NOTE =
+    "Earnings sit at the top of the five years on file, in an industry that moves with a " +
+        "commodity cycle. Five annual points cannot place a cycle; this marks the peak inside " +
+        "the window, not a mid-cycle level."
+
+internal const val EARNINGS_CHARGE_KEY = "Charges"
+
+/**
+ * What the mark is, and what it is not.
+ *
+ * The charge is read from the SEC filing, so a name with no filing on file is never marked. Saying
+ * "one-off" would be a claim this app cannot make: whether a write-down repeats is a judgment about
+ * the business. The wording states the measurement, which is the size against the year it landed in.
+ */
+internal const val EARNINGS_CHARGE_NOTE =
+    "The last filed year carries impairment or restructuring worth 15% or more of its operating " +
+        "income, so growth read across it is partly the charge. Whether such a charge repeats is " +
+        "not measured here."
 
 internal const val SCORE_READING_LEGEND =
     "−100…+100 · Strong ≥50 · Good ≥15 · Neutral · Weak ≤−15 · Poor ≤−50"
@@ -116,6 +174,22 @@ internal fun scoreFactorGroups(row: OpportunityListRow): List<ScoreFactorGroupUi
 
 internal fun scoreFactorCaption(groups: List<ScoreFactorGroupUi>): String? =
     SCORE_FACTOR_CAPTION.takeIf { groups.any { group -> group.lines.any { line -> line.pointsText != null } } }
+
+/**
+ * The sentences a term needs before its number means anything, in reading order.
+ *
+ * Matched on [ScoreFactorLineUi.key] and not on the token, because `Pulse≠Trend` starts with
+ * `Pulse` and a prefix match would print the basis note for a row that never scored a quarter.
+ */
+internal fun scoreFactorNotes(groups: List<ScoreFactorGroupUi>): List<String> {
+    var keys = groups.flatMap { group -> group.lines.map { line -> line.key } }.toSet()
+    return listOfNotNull(
+        PULSE_BASIS_NOTE.takeIf { PULSE_KEY in keys },
+        PULSE_TREND_DIVERGENCE_NOTE.takeIf { PULSE_TREND_DIVERGENCE_KEY in keys },
+        CYCLE_PEAK_NOTE.takeIf { CYCLE_PEAK_KEY in keys },
+        EARNINGS_CHARGE_NOTE.takeIf { EARNINGS_CHARGE_KEY in keys },
+    )
+}
 
 internal fun scoreFactorLabel(key: String): String {
     var sectorAdjusted = key.endsWith("§")
@@ -165,6 +239,7 @@ private fun marketGroup(row: OpportunityListRow): ScoreFactorGroupUi {
         causes.map { cause ->
             var points = marketCausePoints(cause)
             ScoreFactorLineUi(
+                key = cause.factor.name,
                 label = regimeFactorLabel(cause.factor),
                 pointsText = points.takeIf { it != 0 }?.let(::formatBucketPoints),
                 token = regimeCauseLabel(cause),
@@ -182,6 +257,7 @@ private fun marketGroup(row: OpportunityListRow): ScoreFactorGroupUi {
 }
 
 private fun lineFromFactor(factor: ScoreFactor) = ScoreFactorLineUi(
+    key = factor.key,
     label = scoreFactorLineLabel(factor),
     pointsText = factor.bucketPoints.takeIf { it != 0 }?.let(::formatBucketPoints),
     token = factor.token,
@@ -194,7 +270,9 @@ internal fun scoreFactorLineLabel(factor: ScoreFactor): String {
     return "$name · $rate"
 }
 
+// A signal token carries its strength in trailing `+`/`-` characters; the key is what is left.
 private fun lineFromToken(token: String) = ScoreFactorLineUi(
+    key = token.trimEnd('+', '-'),
     label = token,
     pointsText = null,
     token = token,
@@ -215,13 +293,16 @@ private val FACTOR_NAMES = mapOf(
     "Growth" to "Quarter EPS YoY",
     "Pulse" to "Quarter EPS YoY",
     "Trend" to "Revenue 3–5y",
-    "Pulse≠Trend" to "Pulse vs Trend",
+    "Pulse≠Trend" to "Pulse and Trend disagree",
+    "ND/EBITDA" to "Net debt / EBITDA",
     "D/E" to "Debt / equity",
     "Bal" to "Cash vs debt",
     "FwdPE" to "Forward P/E",
     "Mult" to "Multiples",
     "Conv" to "Cash conversion",
     "Shares" to "Share count",
+    "CyclePeak" to "Earnings at a cycle peak",
+    "Charges" to "Impairment or restructuring charge",
     "Px/20" to "Price vs EMA 20",
     "20/50" to "EMA 20 / 50",
     "50/200" to "EMA 50 / 200",

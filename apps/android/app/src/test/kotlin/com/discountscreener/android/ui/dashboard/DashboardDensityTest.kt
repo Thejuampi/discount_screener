@@ -1,9 +1,8 @@
 package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import com.discountscreener.android.StuckTestWatchdog
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -20,7 +19,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -44,7 +42,7 @@ class DashboardDensityTest {
     val stuckTestWatchdog = StuckTestWatchdog()
 
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun the_model_chips_and_the_market_switch_share_one_line() {
@@ -134,8 +132,7 @@ class DashboardDensityTest {
     }
 
     private fun setContent(content: @androidx.compose.runtime.Composable () -> Unit) {
-        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        activity.setContent { DiscountScreenerTheme { content() } }
+        composeRule.setContent { DiscountScreenerTheme { content() } }
         composeRule.waitForIdle()
     }
 

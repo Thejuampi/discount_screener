@@ -476,6 +476,62 @@ class YahooFinanceClientTest {
         assertEquals("Berkshire Hathaway Inc.", parsed.companyName)
     }
 
+    /**
+     * The module has to be asked for. Everything below parses a fixture, which would keep passing
+     * with the module dropped from the live request and the field empty on every real symbol.
+     */
+    @Test
+    fun the_quote_summary_request_asks_for_the_earnings_calendar() {
+        assertEquals(true, QUOTE_SUMMARY_MODULES.split(',').contains("calendarEvents"))
+    }
+
+    /**
+     * Yahoo sends two dates for an unconfirmed window. The near edge is what a reader can act on,
+     * so with both dates ahead the answer is the earlier one and not the later.
+     */
+    @Test
+    fun with_two_dates_ahead_the_earnings_date_is_the_earlier_one() {
+        val root = loadQuoteSummaryFixture("SUT-earnings")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "SUT", null, diagnostics, nowEpochSeconds = 1_750_000_000L)
+
+        assertEquals(1_760_000_000L, parsed.snapshot?.nextEarningsEpoch)
+    }
+
+    /** With the first date behind us, taking the minimum of the whole list would report a report
+     * that already happened. The filter is what this pins. */
+    @Test
+    fun a_date_that_already_passed_is_skipped_for_the_one_still_ahead() {
+        val root = loadQuoteSummaryFixture("SUT-earnings")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "SUT", null, diagnostics, nowEpochSeconds = 1_770_000_000L)
+
+        assertEquals(1_790_000_000L, parsed.snapshot?.nextEarningsEpoch)
+    }
+
+    /**
+     * Parity with Windows `quote_summary.rs:264-284`, where the fallback to a past date is
+     * deliberate. A stale date still says when the last report was; a null says nothing.
+     */
+    @Test
+    fun every_date_in_the_past_falls_back_to_the_latest_one() {
+        val root = loadQuoteSummaryFixture("SUT-earnings")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "SUT", null, diagnostics, nowEpochSeconds = 1_800_000_000L)
+
+        assertEquals(1_790_000_000L, parsed.snapshot?.nextEarningsEpoch)
+    }
+
+    /** A fixture captured before the module was requested must not invent a date. */
+    @Test
+    fun a_payload_without_the_calendar_module_carries_no_earnings_date() {
+        val root = loadQuoteSummaryFixture("AAPL")
+        val diagnostics = mutableListOf<ProviderDiagnostic>()
+        val parsed = parseQuoteSummary(root, "AAPL", null, diagnostics)
+
+        assertNull(parsed.snapshot?.nextEarningsEpoch)
+    }
+
     @Test
     fun cof_reads_reported_payout_from_summary_detail_for_residual_income() {
         assertEquals(true, QUOTE_SUMMARY_MODULES.split(',').contains("summaryDetail"))

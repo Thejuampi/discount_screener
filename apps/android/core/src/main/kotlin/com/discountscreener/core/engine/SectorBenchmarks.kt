@@ -1,6 +1,7 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.math.robustCentre
+import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.math.roundToInt
 
@@ -19,7 +20,41 @@ data class SectorBenchmarks(
     val enterpriseToEbitdaHundredths: Int?,
     val priceToBookHundredths: Int?,
     val returnOnEquityBps: Int?,
+    val netDebtToEbitdaHundredths: Int?,
 )
+
+/**
+ * Net debt against a year of EBITDA, in hundredths of a turn. 176 is 1.76x; a negative number is
+ * net cash.
+ *
+ * This replaces book debt/equity as V4's leverage input, and the reason is that book equity is a
+ * poor denominator rather than a hard one to fetch. Buybacks shrink it, so the same balance sheet
+ * scores worse after a repurchase than before it. Lease liabilities under ASC 842 inflate the
+ * numerator for every retailer that rents its stores. Neither moves what the company can actually
+ * service, and EBITDA turns do.
+ *
+ * All three inputs are dollars, which is the second reason. `debtToEquityHundredths` arrives from
+ * Yahoo in a unit the scoring bands never agreed with (see [V4 fallback band][OpportunityEngine]);
+ * dollars have no such ambiguity.
+ *
+ * Null when EBITDA is absent or non-positive, and when either side of net debt is missing. A
+ * company with unknown cash is not a company with no cash, and scoring it as though it were would
+ * invent leverage it may not carry.
+ */
+internal fun netDebtToEbitdaOf(fundamentals: FundamentalSnapshot): Int? {
+    var ebitda = fundamentals.ebitdaDollars?.takeIf { it > 0L } ?: return null
+    var debt = fundamentals.totalDebtDollars ?: return null
+    var cash = fundamentals.totalCashDollars ?: return null
+    var turns = (debt - cash).toDouble() / ebitda.toDouble() * 100.0
+    if (!turns.isFinite()) return null
+    return turns.coerceIn(-MAX_LEVERAGE_HUNDREDTHS, MAX_LEVERAGE_HUNDREDTHS).roundToInt()
+}
+
+/**
+ * A thousand turns either way. The clamp exists so a near-zero EBITDA cannot overflow the Int, and
+ * it sits far outside any band that scores, so it never decides a score itself.
+ */
+private const val MAX_LEVERAGE_HUNDREDTHS = 100_000.0
 
 /**
  * The population floor. Below five members the centre is an anecdote about whoever happened to be
@@ -65,6 +100,9 @@ fun computeSectorBenchmarks(details: Collection<SymbolDetail>): Map<String, Sect
             // Return on equity legitimately crosses zero, so nothing is filtered out of it. A
             // sector of loss makers has a negative level and that level is the truth about it.
             returnOnEquityBps = centreOf(members.map { it.returnOnEquityBps }),
+            // Leverage crosses zero for the same kind of reason: a company holding more cash than
+            // debt has negative net debt, and that is a fact about it rather than a bad reading.
+            netDebtToEbitdaHundredths = centreOf(members.map { netDebtToEbitdaOf(it) }),
         )
     }
 }
