@@ -381,19 +381,11 @@ class ScoreFactorUiTest {
     }
 
     @Test
-    fun group_headers_use_the_snapshot_tokens() {
-        assertEquals(
-            listOf("F", "T", "Fc", "Market"),
-            listOf("Fundamentals", "Technicals", "Forecast", "Market").map(::scoreFactorGroupToken),
-        )
-    }
-
-    @Test
     fun a_bucket_header_names_its_reading() {
         var group = ScoreFactorGroupUi("Fundamentals", -22, emptyList())
 
         assertEquals(
-            "F -22 · Weak",
+            "Fundamentals -22 · Weak",
             scoreFactorGroupTitle(group, OpportunityScoringModel.AggressiveV3),
         )
     }
@@ -403,7 +395,7 @@ class ScoreFactorUiTest {
         var group = ScoreFactorGroupUi("Fundamentals", 3, emptyList())
 
         assertEquals(
-            "F 3/5",
+            "Fundamentals 3/5",
             scoreFactorGroupTitle(group, OpportunityScoringModel.Legacy),
         )
     }

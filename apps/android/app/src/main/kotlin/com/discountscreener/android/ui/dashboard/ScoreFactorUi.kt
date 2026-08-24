@@ -83,7 +83,8 @@ internal data class ScoreFactorLineUi(
     val points: Int,
 )
 
-internal const val SCORE_FACTOR_CAPTION = "Points add inside F, T and Fc. Market shows fit weight."
+internal const val SCORE_FACTOR_CAPTION =
+    "Points add inside Fundamentals, Technicals and Forecast. Market shows fit weight."
 
 /** The engine keys the notes below are attached to. */
 internal const val PULSE_KEY = "Pulse"
@@ -167,15 +168,8 @@ internal const val FUND_COVERAGE_GAP_NOTE =
 internal const val SCORE_READING_LEGEND =
     "−100…+100 · Strong ≥50 · Good ≥15 · Neutral · Weak ≤−15 · Poor ≤−50"
 
-internal fun scoreFactorGroupToken(title: String): String = when (title) {
-    "Fundamentals" -> "F"
-    "Technicals" -> "T"
-    "Forecast" -> "Fc"
-    else -> title
-}
-
 internal fun scoreFactorGroupTitle(group: ScoreFactorGroupUi, scoringModel: OpportunityScoringModel): String {
-    var heading = scoreFactorGroupToken(group.title)
+    var heading = group.title
     var score = formatOpportunityBucket(group.bucketScore, scoringModel)
     var reading = group.bucketScore
         ?.takeIf { scoringModel != OpportunityScoringModel.Legacy }
