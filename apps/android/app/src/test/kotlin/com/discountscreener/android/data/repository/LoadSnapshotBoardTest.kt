@@ -10,9 +10,13 @@ import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -93,6 +97,70 @@ class LoadSnapshotBoardTest {
             delay(SETTLE_MILLIS)
             store.close()
         }
+    }
+
+    /**
+     * The enrichment emits a snapshot every few rows and runs for minutes. A board build costs
+     * about 1.4 s on `sp500`, under the mutex the refresh needs, so one build per emit added about
+     * 2 s to the load and pushed `LoadCostProbeTest` past its twenty seconds.
+     *
+     * The readout carries both facts. `snapshots` says the refresh built many snapshots, so a
+     * single board build is a held build. Without it the test would pass on a load that ticked once.
+     */
+    @Test
+    fun the_enrichment_builds_the_profile_board_once() = runBlocking {
+        var store = SQLiteStateStore(context, databaseFileName = DB_NAME)
+        var logger = StageRecordingLogger()
+        var repository = DefaultDashboardRepository(
+            stateStore = store,
+            profileCatalog = ProfileCatalog(context.assets),
+            yahooClient = LimitedYahooClient(latencyMillis = ENRICHMENT_MILLIS),
+            universeCatalog = UniverseCatalog(context.assets),
+            nowProvider = { 1_700_000_000L },
+            defaultProfile = PROFILE,
+            logger = logger,
+        )
+        var collector: Job? = null
+        try {
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, model)
+            collector = launch {
+                repository.observeUpdates().collectLatest {
+                    if (repository.loadInFlight.value) {
+                        repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
+                    }
+                }
+            }
+            logger.clear()
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, model)
+
+            assertEquals("snapshots=true boardBuildsAtMostOne=true", duringLoad(repository, logger))
+        } finally {
+            collector?.cancel()
+            runCatching { repository.clearAllData() }
+            delay(SETTLE_MILLIS)
+            store.close()
+        }
+    }
+
+    /**
+     * What the load paid for, read while it still runs. A build that lands after the load ends is
+     * a build the screen waited for nothing, so only the readings taken in flight are counted.
+     */
+    private suspend fun duringLoad(
+        repository: DefaultDashboardRepository,
+        logger: StageRecordingLogger,
+    ): String {
+        var readout = ""
+        var waited = 0L
+        while (waited < WINDOW_TIMEOUT_MILLIS && repository.loadInFlight.value) {
+            var samples = logger.stageSamples()
+            var snapshots = samples["snapshot.build"].orEmpty().size
+            var boards = samples["snapshot.planBoardProfile"].orEmpty().size
+            readout = "snapshots=${snapshots > 1} boardBuildsAtMostOne=${boards <= 1}"
+            delay(POLL_MILLIS)
+            waited += POLL_MILLIS
+        }
+        return readout
     }
 
     /**
