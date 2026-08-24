@@ -1968,6 +1968,17 @@ class DefaultDashboardRepository(
                 opportunityRows = opportunityRowsLocked(normalizedFilter, opportunityScoringModel)
             }
         }
+        // The profile dip board and the leftover board read the same scored universe. Scoring it
+        // is the expensive part, so both boards share one build.
+        var memberInputs: List<DipRowInput>? = null
+        fun profileMemberInputs(): List<DipRowInput> {
+            var built = memberInputs ?: profileMemberInputsLocked(
+                opportunityRows = opportunityRows,
+                scoringModel = opportunityScoringModel,
+            )
+            memberInputs = built
+            return built
+        }
         var projectedSelectedDetail = screenData.selectedDetail
         selectedDetail = projectedSelectedDetail?.detail ?: selectedDetail
         if (projectedSelectedDetail != null && normalizedSelectedSymbol != null) {
@@ -2089,11 +2100,7 @@ class DefaultDashboardRepository(
                 PlanBoard.EMPTY
             } else {
                 timedPart("snapshot.planBoardProfile") { planBoardMemo.dipProfile(
-                    inputs = profileMemberInputsLocked(
-                        opportunityRows = opportunityRows,
-                        scoringModel = opportunityScoringModel,
-                        fillMissingFundamentals = true,
-                    ),
+                    inputs = profileMemberInputs(),
                     universeName = currentProfile,
                     evaluate = dipSetups::setup,
                 ) }
@@ -2102,7 +2109,7 @@ class DefaultDashboardRepository(
                 PlanBoard.EMPTY
             } else {
                 timedPart("snapshot.leftoverBoard") { planBoardMemo.leftover(
-                    inputs = leftoverInputsLocked(opportunityRows),
+                    inputs = profileMemberInputs(),
                     universeName = currentProfile,
                     evaluate = leftoverSetups::setup,
                 ) }
@@ -2118,18 +2125,9 @@ class DefaultDashboardRepository(
     private fun skipBoardsDuringLoadLocked(): Boolean =
         loadRunning.value || startupPhase != DashboardStartupPhase.Ready
 
-    private fun leftoverInputsLocked(opportunityRows: List<OpportunityListRow>): List<DipRowInput> {
-        return profileMemberInputsLocked(
-            opportunityRows = opportunityRows,
-            scoringModel = null,
-            fillMissingFundamentals = false,
-        )
-    }
-
     private fun profileMemberInputsLocked(
         opportunityRows: List<OpportunityListRow>,
         scoringModel: OpportunityScoringModel?,
-        fillMissingFundamentals: Boolean,
     ): List<DipRowInput> {
         var scoredBySymbol = opportunityRows.associateBy { row -> row.symbol }
         // The benchmark table reads a detail for every tracked symbol, and scoring one symbol
@@ -2143,7 +2141,7 @@ class DefaultDashboardRepository(
             var detail = engine.detail(symbol)
             var scored = scoredBySymbol[symbol]
             var fundamentalsScore = scored?.fundamentalsScore
-            if (fundamentalsScore == null && fillMissingFundamentals && scoringModel != null) {
+            if (fundamentalsScore == null && scoringModel != null) {
                 fundamentalsScore = scoreSymbolLocked(symbol, scoringModel, benchmarks)?.fundamentalsScore
             }
             DipRowInput(
