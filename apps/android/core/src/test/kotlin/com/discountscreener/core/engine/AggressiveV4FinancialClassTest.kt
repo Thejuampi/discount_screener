@@ -86,8 +86,12 @@ class AggressiveV4FinancialClassTest {
     }
 
     /**
-     * The gate removes one term and only that term. Return on equity — the ratio that actually
-     * ranks banks — still scores, here pinned at the top of its absolute band for +15.
+     * The gate removes the terms a bank cannot answer and leaves the rest. Return on equity — the
+     * ratio that actually ranks banks — still scores, here pinned at the top of its absolute band.
+     *
+     * 26, not the 15 of the days before the class exemption. A bank now has the FCF (22), cash
+     * quality (10) and leverage (16) weights taken off its budget, so V4's 110 becomes 62 and the
+     * ROE weight of 16 is a larger share of what is left: 16 / 62 × 100 rather than 16 / 110 × 100.
      */
     @Test
     fun a_bank_still_scores_its_return_on_equity() {
@@ -99,7 +103,7 @@ class AggressiveV4FinancialClassTest {
             sectorBenchmarks = null,
         ).score
 
-        assertEquals(15, score)
+        assertEquals(26, score)
     }
 
     /** An operating company with the same balance sheet keeps the vote — the gate is not a haircut on everyone. */

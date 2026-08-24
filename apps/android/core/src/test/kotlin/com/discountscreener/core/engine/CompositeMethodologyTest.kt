@@ -27,6 +27,13 @@ import kotlin.test.assertNotEquals
  * and verified equal on both trees. To regenerate after a *deliberate* scoring change: run this
  * test, take the `ACTUAL` block it prints on failure, and paste it in — reviewing every moved line,
  * because each one is a score somebody sees.
+ *
+ * Regenerated once, for the commit that made the cash-flow term a yield. Twenty lines moved and all
+ * twenty are AggressiveV3 with `fund=true`: `f` went 30 -> 23. The fixture below files no sector, so
+ * the class policy reads it as `Unclassified` and the industrial FCF vote is refused for it, as is
+ * cash conversion. The two weights leave both the numerator and the budget, and the terms that
+ * remain report a lower level. Legacy, Aggressive and AggressiveV2 do not run that path and did not
+ * move; no `fund=false` row moved.
  */
 class CompositeMethodologyTest {
 
@@ -133,19 +140,19 @@ class CompositeMethodologyTest {
             beta=null fund=true sum=true dcf=true Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=null fund=true sum=true dcf=true Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=null fund=true sum=true dcf=true AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=null fund=true sum=true dcf=true AggressiveV3 comp=53 f=30 t=46 fc=53 cov=3
+            beta=null fund=true sum=true dcf=true AggressiveV3 comp=51 f=23 t=46 fc=53 cov=3
             beta=null fund=true sum=true dcf=false Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=null fund=true sum=true dcf=false Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=null fund=true sum=true dcf=false AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=null fund=true sum=true dcf=false AggressiveV3 comp=53 f=30 t=46 fc=53 cov=3
+            beta=null fund=true sum=true dcf=false AggressiveV3 comp=51 f=23 t=46 fc=53 cov=3
             beta=null fund=true sum=false dcf=true Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=null fund=true sum=false dcf=true Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=null fund=true sum=false dcf=true AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=null fund=true sum=false dcf=true AggressiveV3 comp=47 f=30 t=null fc=53 cov=2
+            beta=null fund=true sum=false dcf=true AggressiveV3 comp=43 f=23 t=null fc=53 cov=2
             beta=null fund=true sum=false dcf=false Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=null fund=true sum=false dcf=false Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=null fund=true sum=false dcf=false AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=null fund=true sum=false dcf=false AggressiveV3 comp=47 f=30 t=null fc=53 cov=2
+            beta=null fund=true sum=false dcf=false AggressiveV3 comp=43 f=23 t=null fc=53 cov=2
             beta=null fund=false sum=true dcf=true Legacy comp=7 f=null t=3 fc=4 cov=2
             beta=null fund=false sum=true dcf=true Aggressive comp=9 f=null t=1 fc=8 cov=2
             beta=null fund=false sum=true dcf=true AggressiveV2 comp=61 f=null t=45 fc=66 cov=2
@@ -165,19 +172,19 @@ class CompositeMethodologyTest {
             beta=700 fund=true sum=true dcf=true Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=700 fund=true sum=true dcf=true Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=700 fund=true sum=true dcf=true AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=700 fund=true sum=true dcf=true AggressiveV3 comp=53 f=30 t=46 fc=53 cov=3
+            beta=700 fund=true sum=true dcf=true AggressiveV3 comp=51 f=23 t=46 fc=53 cov=3
             beta=700 fund=true sum=true dcf=false Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=700 fund=true sum=true dcf=false Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=700 fund=true sum=true dcf=false AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=700 fund=true sum=true dcf=false AggressiveV3 comp=53 f=30 t=46 fc=53 cov=3
+            beta=700 fund=true sum=true dcf=false AggressiveV3 comp=51 f=23 t=46 fc=53 cov=3
             beta=700 fund=true sum=false dcf=true Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=700 fund=true sum=false dcf=true Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=700 fund=true sum=false dcf=true AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=700 fund=true sum=false dcf=true AggressiveV3 comp=47 f=30 t=null fc=53 cov=2
+            beta=700 fund=true sum=false dcf=true AggressiveV3 comp=43 f=23 t=null fc=53 cov=2
             beta=700 fund=true sum=false dcf=false Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=700 fund=true sum=false dcf=false Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=700 fund=true sum=false dcf=false AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=700 fund=true sum=false dcf=false AggressiveV3 comp=47 f=30 t=null fc=53 cov=2
+            beta=700 fund=true sum=false dcf=false AggressiveV3 comp=43 f=23 t=null fc=53 cov=2
             beta=700 fund=false sum=true dcf=true Legacy comp=7 f=0 t=3 fc=4 cov=3
             beta=700 fund=false sum=true dcf=true Aggressive comp=4 f=-5 t=1 fc=8 cov=3
             beta=700 fund=false sum=true dcf=true AggressiveV2 comp=61 f=null t=45 fc=66 cov=2
@@ -197,19 +204,19 @@ class CompositeMethodologyTest {
             beta=1200 fund=true sum=true dcf=true Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=1200 fund=true sum=true dcf=true Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=1200 fund=true sum=true dcf=true AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=1200 fund=true sum=true dcf=true AggressiveV3 comp=48 f=30 t=46 fc=53 cov=3
+            beta=1200 fund=true sum=true dcf=true AggressiveV3 comp=46 f=23 t=46 fc=53 cov=3
             beta=1200 fund=true sum=true dcf=false Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=1200 fund=true sum=true dcf=false Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=1200 fund=true sum=true dcf=false AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=1200 fund=true sum=true dcf=false AggressiveV3 comp=48 f=30 t=46 fc=53 cov=3
+            beta=1200 fund=true sum=true dcf=false AggressiveV3 comp=46 f=23 t=46 fc=53 cov=3
             beta=1200 fund=true sum=false dcf=true Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=1200 fund=true sum=false dcf=true Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=1200 fund=true sum=false dcf=true AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=1200 fund=true sum=false dcf=true AggressiveV3 comp=42 f=30 t=null fc=53 cov=2
+            beta=1200 fund=true sum=false dcf=true AggressiveV3 comp=38 f=23 t=null fc=53 cov=2
             beta=1200 fund=true sum=false dcf=false Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=1200 fund=true sum=false dcf=false Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=1200 fund=true sum=false dcf=false AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=1200 fund=true sum=false dcf=false AggressiveV3 comp=42 f=30 t=null fc=53 cov=2
+            beta=1200 fund=true sum=false dcf=false AggressiveV3 comp=38 f=23 t=null fc=53 cov=2
             beta=1200 fund=false sum=true dcf=true Legacy comp=7 f=0 t=3 fc=4 cov=3
             beta=1200 fund=false sum=true dcf=true Aggressive comp=4 f=-5 t=1 fc=8 cov=3
             beta=1200 fund=false sum=true dcf=true AggressiveV2 comp=61 f=null t=45 fc=66 cov=2
@@ -229,19 +236,19 @@ class CompositeMethodologyTest {
             beta=1800 fund=true sum=true dcf=true Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=1800 fund=true sum=true dcf=true Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=1800 fund=true sum=true dcf=true AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=1800 fund=true sum=true dcf=true AggressiveV3 comp=43 f=30 t=46 fc=53 cov=3
+            beta=1800 fund=true sum=true dcf=true AggressiveV3 comp=41 f=23 t=46 fc=53 cov=3
             beta=1800 fund=true sum=true dcf=false Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=1800 fund=true sum=true dcf=false Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=1800 fund=true sum=true dcf=false AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=1800 fund=true sum=true dcf=false AggressiveV3 comp=43 f=30 t=46 fc=53 cov=3
+            beta=1800 fund=true sum=true dcf=false AggressiveV3 comp=41 f=23 t=46 fc=53 cov=3
             beta=1800 fund=true sum=false dcf=true Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=1800 fund=true sum=false dcf=true Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=1800 fund=true sum=false dcf=true AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=1800 fund=true sum=false dcf=true AggressiveV3 comp=37 f=30 t=null fc=53 cov=2
+            beta=1800 fund=true sum=false dcf=true AggressiveV3 comp=33 f=23 t=null fc=53 cov=2
             beta=1800 fund=true sum=false dcf=false Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=1800 fund=true sum=false dcf=false Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=1800 fund=true sum=false dcf=false AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=1800 fund=true sum=false dcf=false AggressiveV3 comp=37 f=30 t=null fc=53 cov=2
+            beta=1800 fund=true sum=false dcf=false AggressiveV3 comp=33 f=23 t=null fc=53 cov=2
             beta=1800 fund=false sum=true dcf=true Legacy comp=7 f=0 t=3 fc=4 cov=3
             beta=1800 fund=false sum=true dcf=true Aggressive comp=4 f=-5 t=1 fc=8 cov=3
             beta=1800 fund=false sum=true dcf=true AggressiveV2 comp=61 f=null t=45 fc=66 cov=2
@@ -261,19 +268,19 @@ class CompositeMethodologyTest {
             beta=2500 fund=true sum=true dcf=true Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=2500 fund=true sum=true dcf=true Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=2500 fund=true sum=true dcf=true AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=2500 fund=true sum=true dcf=true AggressiveV3 comp=43 f=30 t=46 fc=53 cov=3
+            beta=2500 fund=true sum=true dcf=true AggressiveV3 comp=41 f=23 t=46 fc=53 cov=3
             beta=2500 fund=true sum=true dcf=false Legacy comp=11 f=4 t=3 fc=4 cov=3
             beta=2500 fund=true sum=true dcf=false Aggressive comp=12 f=3 t=1 fc=8 cov=3
             beta=2500 fund=true sum=true dcf=false AggressiveV2 comp=56 f=26 t=45 fc=66 cov=3
-            beta=2500 fund=true sum=true dcf=false AggressiveV3 comp=43 f=30 t=46 fc=53 cov=3
+            beta=2500 fund=true sum=true dcf=false AggressiveV3 comp=41 f=23 t=46 fc=53 cov=3
             beta=2500 fund=true sum=false dcf=true Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=2500 fund=true sum=false dcf=true Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=2500 fund=true sum=false dcf=true AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=2500 fund=true sum=false dcf=true AggressiveV3 comp=37 f=30 t=null fc=53 cov=2
+            beta=2500 fund=true sum=false dcf=true AggressiveV3 comp=33 f=23 t=null fc=53 cov=2
             beta=2500 fund=true sum=false dcf=false Legacy comp=8 f=4 t=null fc=4 cov=2
             beta=2500 fund=true sum=false dcf=false Aggressive comp=11 f=3 t=null fc=8 cov=2
             beta=2500 fund=true sum=false dcf=false AggressiveV2 comp=51 f=26 t=null fc=66 cov=2
-            beta=2500 fund=true sum=false dcf=false AggressiveV3 comp=37 f=30 t=null fc=53 cov=2
+            beta=2500 fund=true sum=false dcf=false AggressiveV3 comp=33 f=23 t=null fc=53 cov=2
             beta=2500 fund=false sum=true dcf=true Legacy comp=7 f=0 t=3 fc=4 cov=3
             beta=2500 fund=false sum=true dcf=true Aggressive comp=4 f=-5 t=1 fc=8 cov=3
             beta=2500 fund=false sum=true dcf=true AggressiveV2 comp=61 f=null t=45 fc=66 cov=2

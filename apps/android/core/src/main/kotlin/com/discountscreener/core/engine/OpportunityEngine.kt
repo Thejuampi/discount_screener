@@ -1813,17 +1813,25 @@ object OpportunityEngine {
             BusinessClass.OperatingNonFinancial -> null
         }
 
+    /**
+     * [leverageVotes] is null for a model that carries no leverage term, and V3 is that model.
+     *
+     * It used to default to `{ false }`, which reads as "no class votes leverage" and took
+     * [V4_FUND_LEVERAGE_WEIGHT] off V3's budget on every call. V3 still voted its balance sheet at
+     * that weight, so the term was scored out of a budget it had been removed from: every V3 term
+     * paid 100/84 of its share and the level rose across the board.
+     */
     private fun applyClassExemptions(
         acc: EvidenceAccumulator,
         fundamentals: FundamentalSnapshot,
-        leverageVotes: (BusinessClass) -> Boolean = { false },
+        leverageVotes: ((BusinessClass) -> Boolean)? = null,
     ) {
         var businessClass = FinancialClassPolicy.classify(fundamentals)
         if (businessClass != BusinessClass.OperatingNonFinancial) {
             acc.exemptClassTerm(V3_FUND_FCF_WEIGHT)
             acc.exemptClassTerm(V3_FUND_CASH_QUALITY_WEIGHT)
         }
-        if (!leverageVotes(businessClass)) {
+        if (leverageVotes != null && !leverageVotes(businessClass)) {
             acc.exemptClassTerm(V4_FUND_LEVERAGE_WEIGHT)
         }
     }

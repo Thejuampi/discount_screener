@@ -441,15 +441,22 @@ class MarketDimensionRankingTest {
          * `AggressiveV3ScoringTest` and left this level pin on the old numbers, so the gate was red
          * from the day it landed.
          *
-         * Thirteen of the seventeen rose one point and four held. Every symbol carries identical
-         * fundamentals here, so a term that changes for the whole fixture moves the level together
-         * and the order settles on `upsideBps`.
+         * Every one of the seventeen fell, by one point or two, from the 45/44/43/42 of the commit
+         * before. Every symbol carries identical fundamentals here, so a term that changes for the
+         * whole fixture moves the level together and the order settles on `upsideBps`.
+         *
+         * This pin was recorded twice. The first reading — 46/45/44/43, one point *above* the old
+         * level — was taken while `applyClassExemptions` still defaulted its leverage predicate to
+         * "no class votes", which took 16 points of weight off V3's budget for a term V3 still
+         * voted. Every V3 term was then scored out of 84 instead of 100 and the level rose. That
+         * default is now gone, so the numbers below are the ones the model actually produces.
          */
         val V3_LEVEL = listOf(
-            "ACGL" to 46, "JPM" to 46, "CI" to 46,
-            "UNH" to 45, "NVDA" to 45, "MSFT" to 45,
-            "WMT" to 44, "V" to 44, "BAC" to 44, "XOM" to 44, "JNJ" to 44,
-            "MRK" to 43, "PG" to 43, "HD" to 43, "TSLA" to 43, "META" to 43, "GOOGL" to 43,
+            "CI" to 44,
+            "NVDA" to 43, "MSFT" to 43, "ACGL" to 43, "JPM" to 43,
+            "BAC" to 42, "XOM" to 42, "JNJ" to 42, "UNH" to 42,
+            "HD" to 41, "TSLA" to 41, "META" to 41, "GOOGL" to 41, "WMT" to 41, "V" to 41,
+            "MRK" to 40, "PG" to 40,
         )
 
         val V4_LEVEL = listOf(

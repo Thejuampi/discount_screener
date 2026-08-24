@@ -72,7 +72,7 @@ class AggressiveV4GrowthTest {
             timeseries = revenueSeries(100.0, 130.0, 169.0),
         )
 
-        assertEquals(listOf("Trend++", "Pulse--", "Pulse≠Trend"), evidence.signals)
+        assertEquals(listOf("Trend++", "Pulse--", "Pulse≠Trend"), evidence.signals.filter { it != FUND_COVERAGE_GAP_LABEL })
     }
 
     /**
@@ -96,7 +96,7 @@ class AggressiveV4GrowthTest {
         var factor = OpportunityEngine.aggressiveV4FundamentalsScore(
             detail(earningsGrowthBps = -1_100, trailingEpsCents = 500),
             sectorBenchmarks = null,
-        ).factors.single()
+        ).factors.single { it.key == "Pulse" }
 
         assertEquals(-1_100, factor.inputBps)
     }
@@ -107,7 +107,7 @@ class AggressiveV4GrowthTest {
             detail(),
             sectorBenchmarks = null,
             timeseries = revenueSeries(100.0, 100.0, 100.0),
-        ).factors.single()
+        ).factors.single { it.key == "Trend" }
 
         assertEquals(0, factor.inputBps)
     }
@@ -147,7 +147,7 @@ class AggressiveV4GrowthTest {
         var keys = OpportunityEngine.aggressiveV4FundamentalsScore(
             detail(earningsGrowthBps = 0, trailingEpsCents = 500),
             sectorBenchmarks = null,
-        ).factors.map { it.key }
+        ).factors.map { it.key }.filter { it != FUND_COVERAGE_GAP_LABEL }
 
         assertEquals(listOf("Pulse"), keys)
     }
@@ -156,7 +156,7 @@ class AggressiveV4GrowthTest {
     fun v3_keeps_the_single_growth_term() {
         var keys = OpportunityEngine.aggressiveV3FundamentalsScore(
             baseDetail(fundamentals = fundamentals(earningsGrowthBps = 0)),
-        ).factors.map { it.key }
+        ).factors.map { it.key }.filter { it != FUND_COVERAGE_GAP_LABEL }
 
         assertEquals(listOf("Growth"), keys)
     }
@@ -198,7 +198,7 @@ class AggressiveV4GrowthTest {
             operatingIncome = annual(80.0, 85.0, 90.0),
             nonRecurringCharges = listOf(AnnualReportedValue("2022-12-31", charge)),
         ),
-    ).signals
+    ).signals.filter { it != FUND_COVERAGE_GAP_LABEL }
 
     private fun pulseScore(earningsGrowthBps: Int, trailingEpsCents: Long? = 500) =
         OpportunityEngine.aggressiveV4FundamentalsScore(
@@ -241,6 +241,7 @@ class AggressiveV4GrowthTest {
         isWatched = false,
         fundamentals = FundamentalSnapshot(
             symbol = "SUT",
+            sectorName = "Technology",
             earningsGrowthBps = earningsGrowthBps,
             trailingEpsCents = trailingEpsCents,
         ),

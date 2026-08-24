@@ -1,5 +1,6 @@
 package com.discountscreener.core.contracts
 
+import com.discountscreener.core.engine.FUND_COVERAGE_GAP_LABEL
 import com.discountscreener.core.engine.OpportunityEngine
 import com.discountscreener.core.engine.SectorBenchmarks
 import com.discountscreener.core.model.AnnualReportedValue
@@ -58,6 +59,27 @@ class OpportunityV4ContractTest {
     fun every_fundamentals_case_states_what_a_wrong_constant_would_cost_it() {
         assertEquals(emptyList(), contract.fundamentalsCases.flatMap(::undischargedClaims))
     }
+
+    /**
+     * What lets [scoreOf] drop the coverage flag.
+     *
+     * The filter is only sound while the flag says nothing about a case, and that holds because it
+     * fires on all of them. This asserts it, so a flag that stopped firing — or fired on a subset —
+     * fails here rather than passing silently through a filter that then hides a real difference.
+     */
+    @Test
+    fun the_coverage_flag_fires_on_every_case_in_this_file() {
+        assertEquals(emptyList(), contract.fundamentalsCases.filterNot(::raisesCoverageFlag).map { it.name })
+    }
+
+    private fun raisesCoverageFlag(case: FundamentalsCase): Boolean = OpportunityEngine
+        .aggressiveV4FundamentalsScore(
+            detail = detailOf(case.fundamentals),
+            sectorBenchmarks = case.sectorBenchmarks?.toBenchmarks(),
+            timeseries = timeseriesOf(case),
+        )
+        .signals
+        .contains(FUND_COVERAGE_GAP_LABEL)
 
     /** Null when the case matches; otherwise a line naming the case and both readings. */
     private fun compositeDisagreement(case: CompositeCase): String? {
@@ -137,13 +159,24 @@ class OpportunityV4ContractTest {
         return lines
     }
 
+    /**
+     * The reading the contract binds: the score, and the signals the terms produced.
+     *
+     * [FUND_COVERAGE_GAP_LABEL] is filtered out. It is not a term and carries no points; it says
+     * the budget was mostly idle, which is true of every case in this file by construction — each
+     * one supplies the inputs of a single term so the constant it probes is the only thing moving.
+     * A flag that fires on the whole population separates no case from any other, and writing it
+     * into the expected signals of all of them would put Kotlin's output in a file whose whole
+     * value is that it was derived by hand. The claim that it fires everywhere is not assumed:
+     * [the_coverage_flag_fires_on_every_case_in_this_file] asserts it.
+     */
     private fun scoreOf(case: FundamentalsCase, benchmarks: SectorBenchmarks?): FundamentalsExpectation {
         var (score, signals) = OpportunityEngine.aggressiveV4FundamentalsScore(
             detail = detailOf(case.fundamentals),
             sectorBenchmarks = benchmarks,
             timeseries = timeseriesOf(case),
         )
-        return FundamentalsExpectation(score = score, signals = signals)
+        return FundamentalsExpectation(score = score, signals = signals.filter { it != FUND_COVERAGE_GAP_LABEL })
     }
 
     private fun detailOf(input: FundamentalsInput) = SymbolDetail(
