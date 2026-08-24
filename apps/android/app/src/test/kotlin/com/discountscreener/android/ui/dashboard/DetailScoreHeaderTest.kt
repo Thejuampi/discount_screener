@@ -168,7 +168,7 @@ class DetailScoreHeaderTest {
             subtab = DetailSubtab.Score,
         )
 
-        composeRule.onNodeWithText("F -22 · Weak").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Fundamentals -22 · Weak").performScrollTo().assertIsDisplayed()
     }
 
     @Test
