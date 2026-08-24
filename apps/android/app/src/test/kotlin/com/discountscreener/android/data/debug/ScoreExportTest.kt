@@ -7,6 +7,7 @@ import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.QualificationStatus
+import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.regime.RegimeCauseFactor
 import com.discountscreener.core.regime.RegimeFitTerm
@@ -27,7 +28,8 @@ class ScoreExportTest {
                 "return_on_equity_bps,close_cents,ema20_cents,ema50_cents,ema200_cents,stance," +
                 "t_quality,w_quality,t_lowbeta,w_lowbeta,t_value,w_value," +
                 "t_oversoldqual,w_oversoldqual,t_extension,w_extension,t_trend,w_trend," +
-                "t_defensive,w_defensive,t_growth,w_growth,t_liquidity,w_liquidity",
+                "t_defensive,w_defensive,t_growth,w_growth,t_liquidity,w_liquidity," +
+                "industry,fcf_yield_bps",
             header,
         )
     }
@@ -120,10 +122,35 @@ class ScoreExportTest {
         assertEquals(
             "\"AAA\",1,\"Technology\",40,-6,72,43,\"Included\",45,52,4,1200," +
                 "2500,1800,900,1500,19950,19000,18500,17000" +
-                // No stance and no terms were supplied, so those 19 columns are empty, not zero.
-                ",".repeat(19),
+                // No stance, terms, industry, or FCF yield were supplied, so those columns are empty, not zero.
+                ",".repeat(21),
             line,
         )
+    }
+
+    /**
+     * The lab pull this pair of columns exists for: whether GICS industry (finer than sector)
+     * narrows the FCF-yield spread that sector-level grouping mixes together.
+     */
+    @Test
+    fun industry_and_fcf_yield_are_read_from_the_detail_and_the_fcf_term() {
+        var rows = listOf(
+            row("AAA").copy(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(key = "fcf", token = "FCFy§", bucketPoints = 22, inputBps = -670),
+                ),
+            ),
+        )
+        var details = mapOf(
+            "AAA" to detail("AAA").copy(
+                fundamentals = detail("AAA").fundamentals!!.copy(industryName = "Utilities - Regulated Electric"),
+            ),
+        )
+
+        var cells = ScoreExport.buildCsv(rows, setOf("AAA"), details, emptyMap())
+            .trim().lines()[1].split(",")
+
+        assertEquals(listOf("\"Utilities - Regulated Electric\"", "-670"), listOf(cells[cells.size - 2], cells.last()))
     }
 
     /** A bucket that is absent must read as empty, never as the zero a bucket can really score. */

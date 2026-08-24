@@ -905,7 +905,7 @@ class DashboardViewModelTest {
 
         // The rotation itself is untouched by the market dimension; only where it starts, and it
         // starts where it started before the dimension existed.
-        // Cycle: AggressiveV2 -> AggressiveV3 -> AggressiveV4 -> Legacy -> Aggressive -> AggressiveV2.
+        // Cycle: AggressiveV2 -> V3 -> V4 -> V5 -> Legacy -> Aggressive -> AggressiveV2.
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV3, viewModel.state.value.opportunityScoringModel)
@@ -915,6 +915,11 @@ class DashboardViewModelTest {
         advanceUntilIdle()
         assertEquals(OpportunityScoringModel.AggressiveV4, viewModel.state.value.opportunityScoringModel)
         assertEquals(OpportunityScoringModel.AggressiveV4, repository.lastRequestedOpportunityModel)
+
+        viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
+        advanceUntilIdle()
+        assertEquals(OpportunityScoringModel.AggressiveV5, viewModel.state.value.opportunityScoringModel)
+        assertEquals(OpportunityScoringModel.AggressiveV5, repository.lastRequestedOpportunityModel)
 
         viewModel.dispatch(DashboardAction.ToggleOpportunityScoringModel)
         advanceUntilIdle()

@@ -2,7 +2,9 @@ package com.discountscreener.core.engine
 
 import com.discountscreener.core.math.isForeignTo
 import com.discountscreener.core.math.medianOf
+import com.discountscreener.core.math.robustCentre
 import com.discountscreener.core.model.AnnualReportedValue
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ChartRangeSummary
 import com.discountscreener.core.model.ConfidenceBand
@@ -15,6 +17,8 @@ import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.ScoreFactor
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.regime.AssetClassification
@@ -31,6 +35,7 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 private const val DCF_OPPORTUNITY_THRESHOLD_BPS = 2_000
 private const val DCF_EXPENSIVE_THRESHOLD_BPS = -1_000
@@ -102,6 +107,9 @@ private const val V3_FUND_FCF_YIELD_LOWER = -0.02
 private const val V3_FUND_FCF_YIELD_UPPER = 0.08
 private const val V3_FUND_FCF_WEIGHT = 22.0
 private const val V3_FUND_OCF_FALLBACK_WEIGHT = 10.0
+/** Provisional OCF yield band. Unmeasured OCF/FCF ratios; calibrate before treating as policy. */
+private const val V3_FUND_OCF_YIELD_LOWER = 0.00
+private const val V3_FUND_OCF_YIELD_UPPER = 0.10
 private const val V3_FUND_ROE_LOWER_BPS = 0.0
 private const val V3_FUND_ROE_UPPER_BPS = 2_000.0
 private const val V3_FUND_ROE_WEIGHT = 16.0
@@ -131,6 +139,9 @@ private const val V4_FUND_SECTOR_CHEAP_MULT = 0.7
 private const val V4_FUND_SECTOR_RICH_MULT = 1.5
 private const val V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS = -500.0
 private const val V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS = 1_500.0
+/** Additive FCF-yield band around the sector centre. Yield crosses zero, so this is not a × band. */
+private const val V4_FUND_SECTOR_FCF_YIELD_LOWER_OFFSET_BPS = -400.0
+private const val V4_FUND_SECTOR_FCF_YIELD_UPPER_OFFSET_BPS = 400.0
 
 /**
  * V4's leverage band, in hundredths of a turn of EBITDA. Zero is net cash; 300 is three turns of
@@ -266,6 +277,17 @@ private const val V4_PULSE_MIN_ABS_EPS_CENTS = 10L
  * series describe different businesses; anything under it is noise around the middle of the band.
  */
 private const val V4_GROWTH_CONFLICT_BPS = 1_000
+
+// AggressiveV5's two refusals. Both are labels as well as gates: the score journal reads them,
+// so the outcome report can later attribute a spread to the refusal instead of to noise.
+private const val V5_PULSE_REFUSED_LABEL = "Pulse∅ loss-year"
+private const val V5_CLASS_UNKNOWN_LABEL = "Class∅ unknown"
+internal const val FCF_REFUSED_FINANCIAL_LABEL = "FCFy∅ financial"
+internal const val FCF_REFUSED_UNKNOWN_LABEL = "FCFy∅ unknown"
+internal const val FCF_REFUSED_INELIGIBLE_LABEL = "FCFy∅ ineligible"
+internal const val OCF_BAND_UNMEASURED_LABEL = "OCFy∅ unmeasured"
+internal const val FUND_COVERAGE_GAP_LABEL = "Fund∅ coverage"
+private const val COVERAGE_GAP_IDLE_WEIGHT = 0.5
 
 /** Last five annual revenue points give at most four YoY rates. Two rates are the floor. */
 private const val V4_TREND_MAX_YEARS = 5
@@ -454,6 +476,7 @@ object OpportunityEngine {
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
         OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
         -> CONTINUOUS_AVOID_BELOW_SCORE
     }
 
@@ -465,6 +488,7 @@ object OpportunityEngine {
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
         OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
         -> CONTINUOUS_ACT_AT_OR_ABOVE_SCORE
     }
 
@@ -590,6 +614,7 @@ object OpportunityEngine {
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3FundamentalsScore(detail)
             OpportunityScoringModel.AggressiveV4 -> aggressiveV4FundamentalsScore(detail, sectorBenchmarks, timeseries)
+            OpportunityScoringModel.AggressiveV5 -> aggressiveV5FundamentalsScore(detail, sectorBenchmarks, timeseries)
         }
         var technical = when (model) {
             OpportunityScoringModel.Legacy -> scoreTechnicals(summary).toEvidence()
@@ -597,6 +622,7 @@ object OpportunityEngine {
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2TechnicalScore(summary)
             OpportunityScoringModel.AggressiveV3,
             OpportunityScoringModel.AggressiveV4,
+            OpportunityScoringModel.AggressiveV5,
             -> aggressiveV3TechnicalScore(summary)
         }
         var forecast = when (model) {
@@ -604,7 +630,10 @@ object OpportunityEngine {
             OpportunityScoringModel.Aggressive -> aggressiveForecastScore(detail, analysis).toEvidence()
             OpportunityScoringModel.AggressiveV2 -> aggressiveV2ForecastScore(detail, analysis)
             OpportunityScoringModel.AggressiveV3 -> aggressiveV3ForecastScore(detail, analysis)
-            OpportunityScoringModel.AggressiveV4 -> aggressiveV4ForecastScore(detail, analysis)
+            // V5 inherits V4's street forecast term untouched; its deltas live in fundamentals.
+            OpportunityScoringModel.AggressiveV4,
+            OpportunityScoringModel.AggressiveV5,
+            -> aggressiveV4ForecastScore(detail, analysis)
         }
         var fundamentalsScore = fundamentals.score
         var fundamentalsSignals = fundamentals.signals
@@ -767,7 +796,9 @@ object OpportunityEngine {
          * median rather than the mean — `present` holds two to four values, which is too few to name
          * an outlier in, and `sum / n` is not a centre this project computes.
          */
-        OpportunityScoringModel.AggressiveV4 -> {
+        OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
+        -> {
             var reading = v4AgreementReading(fundamentals, technical, forecast, regime)
             if (reading == null) {
                 0
@@ -1366,8 +1397,9 @@ object OpportunityEngine {
     internal fun aggressiveV3FundamentalsScore(detail: SymbolDetail): BucketEvidence {
         val fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         val acc = EvidenceAccumulator(V3_FUNDAMENTALS_FULL_WEIGHT)
+        applyClassExemptions(acc, fundamentals)
 
-        addCashFlowVote(acc, fundamentals)
+        var yieldVoted = addCashFlowVote(acc, detail)
         addReturnOnEquity(acc, fundamentals, sectorReturnOnEquityBps = null)
         addEarningsGrowth(acc, fundamentals)
         addBalanceSheet(acc, fundamentals)
@@ -1376,22 +1408,32 @@ object OpportunityEngine {
         // Weight scales with how many multiples are present (1/3 … 1) so a single PE cannot
         // saturate the full valuation budget.
         val valuationRamps = mutableListOf<Double>()
+        var valuationComparisons = mutableListOf<ScoreFactorComparison>()
         fundamentals.forwardPeHundredths?.takeIf { it > 0 }?.let { pe ->
             valuationRamps += -smoothRamp(pe.toDouble(), V3_FUND_PE_LOW, V3_FUND_PE_HIGH)
+            valuationComparisons += absoluteMultipleComparison(pe, V3_FUND_PE_LOW, V3_FUND_PE_HIGH, "P/E")
         }
         fundamentals.enterpriseToEbitdaHundredths?.takeIf { it > 0 }?.let { evEbitda ->
             valuationRamps += -smoothRamp(evEbitda.toDouble(), V3_FUND_EV_EBITDA_LOW, V3_FUND_EV_EBITDA_HIGH)
+            valuationComparisons += absoluteMultipleComparison(
+                evEbitda,
+                V3_FUND_EV_EBITDA_LOW,
+                V3_FUND_EV_EBITDA_HIGH,
+                "EV/EBITDA",
+            )
         }
         fundamentals.priceToBookHundredths?.takeIf { it > 0 }?.let { pb ->
             valuationRamps += -smoothRamp(pb.toDouble(), V3_FUND_PB_LOW, V3_FUND_PB_HIGH)
+            valuationComparisons += absoluteMultipleComparison(pb, V3_FUND_PB_LOW, V3_FUND_PB_HIGH, "P/B")
         }
         if (valuationRamps.isNotEmpty()) {
             val blended = valuationRamps.sum() / valuationRamps.size.toDouble()
             val coverageFraction = valuationRamps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
-            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult")
+            acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, "Mult", comparisons = valuationComparisons)
         }
 
-        addCashConversion(acc, fundamentals)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
+        acc.flagCoverageGap()
 
         return acc.toEvidence()
     }
@@ -1413,22 +1455,130 @@ object OpportunityEngine {
     ): BucketEvidence {
         var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
         var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
+        applyClassExemptions(acc, fundamentals, leverageVotes = ::v4LeverageVotes)
 
-        val yieldVoted = addCashFlowVote(acc, fundamentals)
+        var yieldVoted = addCashFlowVote(acc, detail, timeseries, sectorBenchmarks)
         addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
         addV4Growth(acc, fundamentals, timeseries)
-        addV4BalanceSheet(
+        addV4BalanceSheet(acc, fundamentals, sectorBenchmarks?.netDebtToEbitdaHundredths)
+        addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
+        addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
+        addShareCountChange(acc, timeseries)
+        addCyclePeak(acc, fundamentals, timeseries)
+        acc.flagCoverageGap()
+
+        return acc.toEvidence()
+    }
+
+    /**
+     * V5's fundamentals bucket: V4's terms with its two documented defects refused.
+     *
+     * Growth runs [addV5Growth] — same trend/pulse split, but a pulse whose latest filed annual
+     * year is a loss is refused rather than scored against stale profit-year pairs. The balance
+     * sheet runs [addV5BalanceSheet] — the industrial leverage vote only fires for a row the
+     * class policy actually classifies as operating; an unclassified row skips it and flags why.
+     * Every other term is V4's own, which the parity test pins.
+     */
+    internal fun aggressiveV5FundamentalsScore(
+        detail: SymbolDetail,
+        sectorBenchmarks: SectorBenchmarks?,
+        timeseries: FundamentalTimeseries? = null,
+    ): BucketEvidence {
+        var fundamentals = detail.fundamentals ?: return BucketEvidence.absent()
+        var acc = EvidenceAccumulator(V4_FUNDAMENTALS_FULL_WEIGHT)
+        applyClassExemptions(acc, fundamentals, leverageVotes = ::v5LeverageVotes)
+
+        var yieldVoted = addCashFlowVote(acc, detail, timeseries, sectorBenchmarks)
+        addReturnOnEquity(acc, fundamentals, sectorBenchmarks?.returnOnEquityBps)
+        addV5Growth(acc, fundamentals, timeseries)
+        addV5BalanceSheet(
             acc,
             fundamentals,
             sectorBenchmarks?.netDebtToEbitdaHundredths,
-            financialServices = FinancialClassPolicy.isFinancialServices(fundamentals),
         )
         addSectorRelativeMultiples(acc, fundamentals, sectorBenchmarks)
         addCashConversion(acc, fundamentals, yieldVoted = yieldVoted)
         addShareCountChange(acc, timeseries)
         addCyclePeak(acc, fundamentals, timeseries)
+        acc.flagCoverageGap()
 
         return acc.toEvidence()
+    }
+
+    /**
+     * V4's growth split plus one refusal.
+     *
+     * `pulseGrowthBps` already refuses tiny EPS and rates foreign to the annual net-income
+     * series — but that series loses its loss years to [positiveLevelTransitions], so a
+     * perpetual loss-maker can clear the foreign check against nothing or against stale profit
+     * pairs. V5 asks the extra question first: does the latest filed year itself show profit?
+     * A no refuses the pulse and names the reason in the signals.
+     */
+    private fun addV5Growth(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        timeseries: FundamentalTimeseries?,
+    ) {
+        var trendBps = trendGrowthBps(timeseries)
+        var pulseBps = pulseGrowthBps(fundamentals, timeseries)
+        if (pulseBps != null && !latestAnnualNetIncomePositive(timeseries)) {
+            pulseBps = null
+            acc.flag(V5_PULSE_REFUSED_LABEL)
+        }
+        var trendRamp = trendBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        var pulseRamp = pulseBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
+        if (trendRamp != null && trendBps != null) {
+            acc.add(
+                V4_FUND_TREND_WEIGHT,
+                trendRamp,
+                "Trend",
+                trendBps,
+                comparisons = listOf(growthBandComparison(trendBps)),
+            )
+        }
+        if (pulseRamp != null && pulseBps != null) {
+            acc.add(
+                V4_FUND_PULSE_WEIGHT,
+                pulseRamp,
+                "Pulse",
+                pulseBps,
+                comparisons = listOf(growthBandComparison(pulseBps)),
+            )
+        }
+        if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
+            acc.flag("Pulse≠Trend")
+        }
+        if (earningsContamination(timeseries).latestYearContaminated) {
+            acc.flag(EARNINGS_CHARGE_LABEL)
+        }
+    }
+
+    /** The latest filed annual year must itself be profitable to corroborate a quarter rate. */
+    private fun latestAnnualNetIncomePositive(timeseries: FundamentalTimeseries?): Boolean {
+        var latest = timeseries?.netIncome?.maxByOrNull { it.asOfDate } ?: return false
+        return latest.value.isFinite() && latest.value > 0.0
+    }
+
+    /**
+     * V5's leverage gate: fail closed on an unknown class.
+     *
+     * Financial services skip exactly as V4 does — deposits and float are the wrong input. An
+     * operating row takes the same three-input vote. Anything the class policy cannot place gets
+     * no vote at all plus a flag, because industrial bands applied to an unknown balance sheet
+     * are a guess wearing a number.
+     */
+    private fun addV5BalanceSheet(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+    ) {
+        var businessClass = FinancialClassPolicy.classify(fundamentals)
+        when {
+            v5LeverageVotes(businessClass) ->
+                addIndustrialLeverageVote(acc, fundamentals, sectorNetDebtToEbitdaHundredths)
+            businessClass == BusinessClass.FinancialServices -> return
+            else -> acc.flag(V5_CLASS_UNKNOWN_LABEL)
+        }
     }
 
     /**
@@ -1476,10 +1626,20 @@ object OpportunityEngine {
         var latest = series[series.size - 1]
         if (!areConsecutiveFiscalYears(previous, latest)) return
         var changeBps = (latest.value - previous.value) / previous.value * BASIS_POINTS_PER_UNIT
+        var changeBpsInt = changeBps.roundToInt()
         acc.add(
             V4_FUND_SHARE_COUNT_WEIGHT,
             -smoothRamp(changeBps, V4_FUND_SHARE_COUNT_SHRINK_BPS, V4_FUND_SHARE_COUNT_DILUTE_BPS),
             "Shares",
+            changeBpsInt,
+            comparisons = listOf(
+                absoluteBandComparison(
+                    changeBpsInt,
+                    ScoreFactorValueKind.Percent,
+                    V4_FUND_SHARE_COUNT_SHRINK_BPS,
+                    V4_FUND_SHARE_COUNT_DILUTE_BPS,
+                ),
+            ),
         )
     }
 
@@ -1499,38 +1659,82 @@ object OpportunityEngine {
         sectorBenchmarks: SectorBenchmarks?,
     ) {
         var ramps = mutableListOf<Double>()
+        var comparisons = mutableListOf<ScoreFactorComparison>()
         var sectorAdjusted = false
-        fun scoreMultiple(observed: Int?, sectorCentre: Int?, absoluteLow: Double, absoluteHigh: Double) {
+        fun scoreMultiple(
+            observed: Int?,
+            sectorCentre: Int?,
+            absoluteLow: Double,
+            absoluteHigh: Double,
+            metric: String,
+        ) {
             var value = observed?.takeIf { it > 0 } ?: return
             var centre = sectorCentre?.takeIf { it > 0 }
             if (centre != null) sectorAdjusted = true
             var low = centre?.let { it * V4_FUND_SECTOR_CHEAP_MULT } ?: absoluteLow
             var high = centre?.let { it * V4_FUND_SECTOR_RICH_MULT } ?: absoluteHigh
             ramps += -smoothRamp(value.toDouble(), low, high)
+            comparisons += if (centre != null) {
+                ScoreFactorComparison(value, ScoreFactorValueKind.Multiple, metric, centre)
+            } else {
+                absoluteMultipleComparison(value, absoluteLow, absoluteHigh, metric)
+            }
         }
         scoreMultiple(
             fundamentals.forwardPeHundredths,
             sectorBenchmarks?.forwardPeHundredths,
             V3_FUND_PE_LOW,
             V3_FUND_PE_HIGH,
+            "P/E",
         )
         scoreMultiple(
             fundamentals.enterpriseToEbitdaHundredths,
             sectorBenchmarks?.enterpriseToEbitdaHundredths,
             V3_FUND_EV_EBITDA_LOW,
             V3_FUND_EV_EBITDA_HIGH,
+            "EV/EBITDA",
         )
         scoreMultiple(
             fundamentals.priceToBookHundredths,
             sectorBenchmarks?.priceToBookHundredths,
             V3_FUND_PB_LOW,
             V3_FUND_PB_HIGH,
+            "P/B",
         )
         var blended = medianOf(ramps) ?: return
         var coverageFraction = ramps.size.toDouble() / VALUATION_PANEL_MULTIPLE_COUNT
         var label = if (sectorAdjusted) "Mult$SECTOR_ADJUSTED_MARKER" else "Mult"
-        acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, label)
+        acc.add(V3_FUND_VALUATION_WEIGHT * coverageFraction, blended, label, comparisons = comparisons)
     }
+
+    private fun absoluteMultipleComparison(
+        observed: Int,
+        absoluteLow: Double,
+        absoluteHigh: Double,
+        metric: String,
+    ) = absoluteBandComparison(
+        observed,
+        ScoreFactorValueKind.Multiple,
+        absoluteLow,
+        absoluteHigh,
+        metric = metric,
+    )
+
+    private fun absoluteBandComparison(
+        observed: Int,
+        kind: ScoreFactorValueKind,
+        absoluteLow: Double,
+        absoluteHigh: Double,
+        why: String? = null,
+        metric: String? = null,
+    ) = ScoreFactorComparison(
+        observed = observed,
+        kind = kind,
+        metric = metric,
+        referenceLow = absoluteLow.roundToInt(),
+        referenceHigh = absoluteHigh.roundToInt(),
+        why = why,
+    )
 
     // ----------------------------------------------------------------------------------
     // The fundamentals terms V3 and V4 share.
@@ -1541,33 +1745,189 @@ object OpportunityEngine {
     // V3 at all. Those are the terms that differ, so those are the terms that are written twice.
     // ----------------------------------------------------------------------------------
 
-    /** One cash-flow vote: FCF yield when the market cap is known, else the FCF sign, else OCF.
+    /**
+     * One cash-flow vote: FCF as a yield against firm size.
      *
-     * Returns true when the vote spoke through the FCF **yield** — FCF over a known market cap —
-     * because that is the one variant whose dollars [addCashConversion] would re-read. The single
-     * source of that condition lives here; a second hand-written copy beside the branch it mirrors
-     * is how the two drift apart.
+     * Size is equity cap. The numerator is the robust centre of recent annual FCF when the series
+     * can speak, else the TTM print. A sector-adjusted vote uses TTM on both sides. Financial
+     * services, unclassified, and not-eligible names do not take this vote.
      */
-    private fun addCashFlowVote(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot): Boolean {
-        val fcfDollars = fundamentals.freeCashFlowDollars
-        val marketCapDollars = fundamentals.marketCapDollars
+    private fun addCashFlowVote(
+        acc: EvidenceAccumulator,
+        detail: SymbolDetail,
+        timeseries: FundamentalTimeseries? = null,
+        sectorBenchmarks: SectorBenchmarks? = null,
+    ): Boolean {
+        var fundamentals = detail.fundamentals ?: return false
+        var refused = industrialFcfRefusalLabel(fundamentals)
+        if (refused != null) {
+            var seriesFcf = timeseries?.freeCashFlow?.any { row -> row.value.isFinite() } == true
+            var seriesOcf = timeseries?.operatingCashFlow?.any { row -> row.value.isFinite() } == true
+            if (fundamentals.freeCashFlowDollars != null ||
+                fundamentals.operatingCashFlowDollars != null ||
+                seriesFcf ||
+                seriesOcf
+            ) {
+                acc.flag(refused)
+            }
+            return false
+        }
+        var size = sizeForCashVote(detail, timeseries)
+        var sectorYieldBps = sectorBenchmarks?.fcfYieldBps
+        var fcfDollars = if (sectorYieldBps != null) {
+            fundamentals.freeCashFlowDollars
+        } else {
+            fcfDollarsForYield(timeseries, fundamentals.freeCashFlowDollars)
+        }
         when {
-            fcfDollars != null && marketCapDollars != null && marketCapDollars > 0L -> {
-                val yieldFraction = fcfDollars.toDouble() / marketCapDollars.toDouble()
-                acc.add(V3_FUND_FCF_WEIGHT, smoothRamp(yieldFraction, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER), "FCFy")
-                return true
+            fcfDollars != null && size != null -> {
+                addFcfYield(acc, fcfDollars, size, sectorYieldBps)
+                return fcfDollars == fundamentals.freeCashFlowDollars
             }
-            fcfDollars != null -> {
-                acc.add(V3_FUND_FCF_WEIGHT, if (fcfDollars > 0L) 1.0 else -1.0, "FCF")
-            }
+            fcfDollars != null -> return false
             else -> {
-                val ocfDollars = fundamentals.operatingCashFlowDollars
-                if (ocfDollars != null) {
-                    acc.add(V3_FUND_OCF_FALLBACK_WEIGHT, if (ocfDollars > 0L) 1.0 else -1.0, "OCF")
+                var ocfDollars = fundamentals.operatingCashFlowDollars
+                if (ocfDollars != null && size != null) {
+                    addCashYield(
+                        acc,
+                        ocfDollars,
+                        size,
+                        V3_FUND_OCF_FALLBACK_WEIGHT,
+                        "OCF",
+                        sectorYieldBps = null,
+                        yieldLower = V3_FUND_OCF_YIELD_LOWER,
+                        yieldUpper = V3_FUND_OCF_YIELD_UPPER,
+                    )
+                    acc.flag(OCF_BAND_UNMEASURED_LABEL)
                 }
             }
         }
         return false
+    }
+
+    private fun industrialFcfRefusalLabel(fundamentals: FundamentalSnapshot): String? =
+        when (FinancialClassPolicy.classify(fundamentals)) {
+            BusinessClass.FinancialServices -> FCF_REFUSED_FINANCIAL_LABEL
+            BusinessClass.Unclassified -> FCF_REFUSED_UNKNOWN_LABEL
+            BusinessClass.NotEligible -> FCF_REFUSED_INELIGIBLE_LABEL
+            BusinessClass.OperatingNonFinancial -> null
+        }
+
+    private fun applyClassExemptions(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        leverageVotes: (BusinessClass) -> Boolean = { false },
+    ) {
+        var businessClass = FinancialClassPolicy.classify(fundamentals)
+        if (businessClass != BusinessClass.OperatingNonFinancial) {
+            acc.exemptClassTerm(V3_FUND_FCF_WEIGHT)
+            acc.exemptClassTerm(V3_FUND_CASH_QUALITY_WEIGHT)
+        }
+        if (!leverageVotes(businessClass)) {
+            acc.exemptClassTerm(V4_FUND_LEVERAGE_WEIGHT)
+        }
+    }
+
+    /** The one place that decides which classes vote the leverage term, for V4's balance sheet. */
+    private fun v4LeverageVotes(businessClass: BusinessClass): Boolean =
+        businessClass != BusinessClass.FinancialServices
+
+    /** The one place that decides which classes vote the leverage term, for V5's balance sheet. */
+    private fun v5LeverageVotes(businessClass: BusinessClass): Boolean =
+        businessClass == BusinessClass.OperatingNonFinancial
+
+    private fun addFcfYield(
+        acc: EvidenceAccumulator,
+        fcfDollars: Long,
+        size: CashSize,
+        sectorYieldBps: Int?,
+    ) {
+        addCashYield(
+            acc,
+            fcfDollars,
+            size,
+            V3_FUND_FCF_WEIGHT,
+            if (sectorYieldBps != null) "FCFy$SECTOR_ADJUSTED_MARKER" else "FCFy",
+            sectorYieldBps,
+            V3_FUND_FCF_YIELD_LOWER,
+            V3_FUND_FCF_YIELD_UPPER,
+        )
+    }
+
+    private fun addCashYield(
+        acc: EvidenceAccumulator,
+        cashDollars: Long,
+        size: CashSize,
+        weight: Double,
+        label: String,
+        sectorYieldBps: Int?,
+        yieldLower: Double,
+        yieldUpper: Double,
+    ) {
+        if (size.dollars <= 0L) return
+        var yieldBps = cashYieldBps(cashDollars, size.dollars) ?: return
+        var yieldFraction = yieldBps / BASIS_POINTS_PER_UNIT
+        var why = cashYieldWhy(label, size.kind)
+        var ramp = if (sectorYieldBps != null) {
+            var centre = sectorYieldBps.toDouble()
+            smoothRamp(
+                yieldBps.toDouble(),
+                centre + V4_FUND_SECTOR_FCF_YIELD_LOWER_OFFSET_BPS,
+                centre + V4_FUND_SECTOR_FCF_YIELD_UPPER_OFFSET_BPS,
+            )
+        } else {
+            smoothRamp(yieldFraction, yieldLower, yieldUpper)
+        }
+        var comparison = if (sectorYieldBps != null) {
+            ScoreFactorComparison(yieldBps, ScoreFactorValueKind.Percent, reference = sectorYieldBps, why = why)
+        } else {
+            absoluteBandComparison(
+                yieldBps,
+                ScoreFactorValueKind.Percent,
+                yieldLower * BASIS_POINTS_PER_UNIT,
+                yieldUpper * BASIS_POINTS_PER_UNIT,
+                why = why,
+            )
+        }
+        acc.add(weight, ramp, label, yieldBps, comparisons = listOf(comparison))
+    }
+
+    private fun cashYieldWhy(cashLabel: String, kind: CashSizeKind): String {
+        var numerator = if (cashLabel.startsWith("OCF")) "OCF" else "FCF"
+        return when (kind) {
+            CashSizeKind.MarketCap -> "$numerator / market cap"
+            CashSizeKind.PriceTimesShares -> "$numerator / price × shares"
+        }
+    }
+
+    private fun fcfDollarsForYield(timeseries: FundamentalTimeseries?, trailing: Long?): Long? {
+        var series = timeseries?.freeCashFlow
+            ?.filter { row -> row.value.isFinite() }
+            ?.sortedBy { row -> row.asOfDate }
+            ?.takeLast(V4_TREND_MAX_YEARS)
+            ?.map { row -> row.value }
+            .orEmpty()
+        if (series.size >= 5) {
+            robustCentre(series)?.let { return it.roundToLong() }
+            return medianOf(series)!!.roundToLong()
+        }
+        if (series.size >= 2) return medianOf(series)?.roundToLong()
+        if (series.size == 1) return series[0].roundToLong()
+        return trailing
+    }
+
+    private fun sizeForCashVote(detail: SymbolDetail, timeseries: FundamentalTimeseries?): CashSize? {
+        var fundamentals = detail.fundamentals ?: return null
+        if (fundamentals.sharesOutstanding != null && fundamentals.sharesOutstanding > 0L) {
+            return cashFlowSizeForYield(detail)
+        }
+        var fromSeries = timeseries?.dilutedAverageShares
+            ?.filter { row -> row.value.isFinite() && row.value > 0.0 }
+            ?.maxByOrNull { row -> row.asOfDate }
+            ?.value
+            ?.roundToLong()
+            ?.takeIf { it > 0L }
+        return cashFlowSizeForYield(detail, sharesOverride = fromSeries)
     }
 
     /**
@@ -1589,7 +1949,19 @@ object OpportunityEngine {
     ) {
         var roeBps = fundamentals.returnOnEquityBps ?: return
         if (sectorReturnOnEquityBps == null) {
-            acc.add(V3_FUND_ROE_WEIGHT, smoothRamp(roeBps.toDouble(), V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS), "ROE")
+            acc.add(
+                V3_FUND_ROE_WEIGHT,
+                smoothRamp(roeBps.toDouble(), V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS),
+                "ROE",
+                comparisons = listOf(
+                    absoluteBandComparison(
+                        roeBps,
+                        ScoreFactorValueKind.Percent,
+                        V3_FUND_ROE_LOWER_BPS,
+                        V3_FUND_ROE_UPPER_BPS,
+                    ),
+                ),
+            )
             return
         }
         var centre = sectorReturnOnEquityBps.toDouble()
@@ -1598,7 +1970,14 @@ object OpportunityEngine {
             centre + V4_FUND_SECTOR_ROE_LOWER_OFFSET_BPS,
             centre + V4_FUND_SECTOR_ROE_UPPER_OFFSET_BPS,
         )
-        acc.add(V3_FUND_ROE_WEIGHT, ramp, "ROE$SECTOR_ADJUSTED_MARKER")
+        acc.add(
+            V3_FUND_ROE_WEIGHT,
+            ramp,
+            "ROE$SECTOR_ADJUSTED_MARKER",
+            comparisons = listOf(
+                ScoreFactorComparison(roeBps, ScoreFactorValueKind.Percent, reference = sectorReturnOnEquityBps),
+            ),
+        )
     }
 
     private fun addEarningsGrowth(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
@@ -1608,6 +1987,14 @@ object OpportunityEngine {
                 smoothRamp(growthBps.toDouble(), V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS),
                 "Growth",
                 growthBps,
+                comparisons = listOf(
+                    absoluteBandComparison(
+                        growthBps,
+                        ScoreFactorValueKind.Percent,
+                        V3_FUND_GROWTH_LOWER_BPS,
+                        V3_FUND_GROWTH_UPPER_BPS,
+                    ),
+                ),
             )
         }
     }
@@ -1633,10 +2020,22 @@ object OpportunityEngine {
         var trendRamp = trendBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
         var pulseRamp = pulseBps?.let { smoothRamp(it.toDouble(), V4_FUND_GROWTH_LOWER_BPS, V4_FUND_GROWTH_UPPER_BPS) }
         if (trendRamp != null && trendBps != null) {
-            acc.add(V4_FUND_TREND_WEIGHT, trendRamp, "Trend", trendBps)
+            acc.add(
+                V4_FUND_TREND_WEIGHT,
+                trendRamp,
+                "Trend",
+                trendBps,
+                comparisons = listOf(growthBandComparison(trendBps)),
+            )
         }
         if (pulseRamp != null && pulseBps != null) {
-            acc.add(V4_FUND_PULSE_WEIGHT, pulseRamp, "Pulse", pulseBps)
+            acc.add(
+                V4_FUND_PULSE_WEIGHT,
+                pulseRamp,
+                "Pulse",
+                pulseBps,
+                comparisons = listOf(growthBandComparison(pulseBps)),
+            )
         }
         if (trendBps != null && pulseBps != null && abs(trendBps - pulseBps) >= V4_GROWTH_CONFLICT_BPS) {
             acc.flag("Pulse≠Trend")
@@ -1705,41 +2104,122 @@ object OpportunityEngine {
         acc: EvidenceAccumulator,
         fundamentals: FundamentalSnapshot,
         sectorNetDebtToEbitdaHundredths: Int?,
-        financialServices: Boolean = false,
     ) {
-        if (financialServices) return
+        if (!v4LeverageVotes(FinancialClassPolicy.classify(fundamentals))) return
+        addIndustrialLeverageVote(acc, fundamentals, sectorNetDebtToEbitdaHundredths)
+    }
+
+    /** The three-input leverage vote V4 and V5's operating rows share. */
+    private fun addIndustrialLeverageVote(
+        acc: EvidenceAccumulator,
+        fundamentals: FundamentalSnapshot,
+        sectorNetDebtToEbitdaHundredths: Int?,
+    ) {
         var leverage = netDebtToEbitdaOf(fundamentals)
         if (leverage != null) {
             var centre = sectorNetDebtToEbitdaHundredths?.toDouble()
             var lower = centre?.plus(V4_FUND_SECTOR_LEVERAGE_LOWER_OFFSET) ?: V4_FUND_LEVERAGE_LOW
             var upper = centre?.plus(V4_FUND_SECTOR_LEVERAGE_UPPER_OFFSET) ?: V4_FUND_LEVERAGE_HIGH
             var label = if (centre != null) "ND/EBITDA$SECTOR_ADJUSTED_MARKER" else "ND/EBITDA"
+            var comparisons = if (sectorNetDebtToEbitdaHundredths != null) {
+                listOf(
+                    ScoreFactorComparison(
+                        leverage,
+                        ScoreFactorValueKind.Multiple,
+                        reference = sectorNetDebtToEbitdaHundredths,
+                    ),
+                )
+            } else {
+                listOf(
+                    absoluteBandComparison(
+                        leverage,
+                        ScoreFactorValueKind.Multiple,
+                        V4_FUND_LEVERAGE_LOW,
+                        V4_FUND_LEVERAGE_HIGH,
+                    ),
+                )
+            }
             // Negated: more net debt is the worse reading, and the ramp climbs with its input.
-            acc.add(V4_FUND_LEVERAGE_WEIGHT, -smoothRamp(leverage.toDouble(), lower, upper), label)
+            acc.add(
+                V4_FUND_LEVERAGE_WEIGHT,
+                -smoothRamp(leverage.toDouble(), lower, upper),
+                label,
+                comparisons = comparisons,
+            )
             return
         }
         var deHundredths = fundamentals.debtToEquityHundredths
         if (deHundredths != null) {
             var ramp = -smoothRamp(deHundredths.toDouble(), V4_FUND_FALLBACK_DE_LOW, V4_FUND_FALLBACK_DE_HIGH)
-            acc.add(V4_FUND_LEVERAGE_WEIGHT, ramp, "D/E")
+            acc.add(
+                V4_FUND_LEVERAGE_WEIGHT,
+                ramp,
+                "D/E",
+                comparisons = listOf(
+                    absoluteBandComparison(
+                        deHundredths,
+                        ScoreFactorValueKind.Multiple,
+                        V4_FUND_FALLBACK_DE_LOW,
+                        V4_FUND_FALLBACK_DE_HIGH,
+                    ),
+                ),
+            )
             return
         }
         var cash = fundamentals.totalCashDollars
         var debt = fundamentals.totalDebtDollars
         if (cash != null && debt != null) {
-            acc.add(V4_FUND_LEVERAGE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+            acc.add(
+                V4_FUND_LEVERAGE_WEIGHT,
+                if (cash >= debt) 1.0 else -0.5,
+                "Bal",
+                comparisons = listOf(
+                    ScoreFactorComparison(
+                        0,
+                        ScoreFactorValueKind.Dollars,
+                        why = "cash vs debt",
+                        observedDollars = cash,
+                        referenceDollars = debt,
+                    ),
+                ),
+            )
         }
     }
 
     private fun addBalanceSheet(acc: EvidenceAccumulator, fundamentals: FundamentalSnapshot) {
         val deHundredths = fundamentals.debtToEquityHundredths
         if (deHundredths != null) {
-            acc.add(V3_FUND_BALANCE_WEIGHT, -smoothRamp(deHundredths.toDouble(), V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH), "D/E")
+            acc.add(
+                V3_FUND_BALANCE_WEIGHT,
+                -smoothRamp(deHundredths.toDouble(), V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH),
+                "D/E",
+                comparisons = listOf(
+                    absoluteBandComparison(
+                        deHundredths,
+                        ScoreFactorValueKind.Multiple,
+                        V3_FUND_BALANCE_DE_LOW,
+                        V3_FUND_BALANCE_DE_HIGH,
+                    ),
+                ),
+            )
         } else {
             val cash = fundamentals.totalCashDollars
             val debt = fundamentals.totalDebtDollars
             if (cash != null && debt != null) {
-                acc.add(V3_FUND_BALANCE_WEIGHT, if (cash >= debt) 1.0 else -0.5, "Bal")
+                acc.add(
+                    V3_FUND_BALANCE_WEIGHT,
+                    if (cash >= debt) 1.0 else -0.5,
+                    "Bal",
+                    comparisons = listOf(
+                        ScoreFactorComparison(
+                            0,
+                            ScoreFactorValueKind.Dollars,
+                            why = "cash vs debt",
+                            observedDollars = cash,
+                            referenceDollars = debt,
+                        ),
+                    ),
+                )
             }
         }
     }
@@ -1750,14 +2230,36 @@ object OpportunityEngine {
         fundamentals: FundamentalSnapshot,
         yieldVoted: Boolean = false,
     ) {
-        // One fact family, one vote. After a yield vote the conversion ratio re-reads the same
-        // free-cash-flow dollars; counting both would let one number speak twice in this bucket.
-        if (yieldVoted) return
+        // One fact family, one vote. `yieldVoted` is true only when the yield vote itself read
+        // trailing FCF dollars — the same number Conv re-reads below. A yield vote sourced from a
+        // multi-year series is a different number, so it does not silence Conv.
+        if (yieldVoted) {
+            acc.silenceDesignTerm(V3_FUND_CASH_QUALITY_WEIGHT)
+            return
+        }
+        if (industrialFcfRefusalLabel(fundamentals) != null) return
         val fcfDollars = fundamentals.freeCashFlowDollars
         val ocfForQuality = fundamentals.operatingCashFlowDollars
         if (fcfDollars != null && ocfForQuality != null && ocfForQuality > 0L) {
             val conversion = fcfDollars.toDouble() / ocfForQuality.toDouble()
-            acc.add(V3_FUND_CASH_QUALITY_WEIGHT, smoothRamp(conversion, 0.0, 1.0), "Conv")
+            if (!conversion.isFinite()) return
+            var conversionHundredths = (conversion * 100.0)
+                .coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble())
+                .roundToInt()
+            acc.add(
+                V3_FUND_CASH_QUALITY_WEIGHT,
+                smoothRamp(conversion, 0.0, 1.0),
+                "Conv",
+                comparisons = listOf(
+                    absoluteBandComparison(
+                        conversionHundredths,
+                        ScoreFactorValueKind.Multiple,
+                        0.0,
+                        100.0,
+                        why = "FCF / OCF",
+                    ),
+                ),
+            )
         }
     }
 
@@ -2171,19 +2673,50 @@ object OpportunityEngine {
         return 2.0 * (observed - lower) / (upper - lower) - 1.0
     }
 
-    /** Tracks weighted-sum + observed evidence-weight; normalizes against the full bucket budget. */
-    private class EvidenceAccumulator(private val normalizationWeight: Double) {
+    private fun growthBandComparison(observedBps: Int) = absoluteBandComparison(
+        observedBps,
+        ScoreFactorValueKind.Percent,
+        V4_FUND_GROWTH_LOWER_BPS,
+        V4_FUND_GROWTH_UPPER_BPS,
+    )
+
+    /**
+     * Weighted sum over the bucket budget. [exemptClassTerm] may change the budget after
+     * [add]; factor points are computed at [toEvidence], not at add time.
+     */
+    private class EvidenceAccumulator(private var normalizationWeight: Double) {
+        private data class PendingFactor(
+            val weight: Double,
+            val clamped: Double,
+            val label: String,
+            val token: String,
+            val inputBps: Int?,
+            val comparisons: List<ScoreFactorComparison>,
+        )
+
         private var weightedSum = 0.0
         private var evidenceWeight = 0.0
+        private var designSilentWeight = 0.0
         private var penaltyPoints = 0
         val signals = mutableListOf<String>()
-        val factors = mutableListOf<ScoreFactor>()
+        private val slots = mutableListOf<Slot>()
+
+        private sealed class Slot {
+            data class Term(val factor: PendingFactor) : Slot()
+            data class Fixed(val factor: ScoreFactor) : Slot()
+        }
 
         init {
             require(normalizationWeight > 0.0) { "EvidenceAccumulator normalizationWeight must be positive" }
         }
 
-        fun add(weight: Double, ramp: Double, label: String? = null, inputBps: Int? = null) {
+        fun add(
+            weight: Double,
+            ramp: Double,
+            label: String? = null,
+            inputBps: Int? = null,
+            comparisons: List<ScoreFactorComparison> = emptyList(),
+        ) {
             require(weight > 0.0) { "EvidenceAccumulator weight must be positive" }
             var clamped = ramp.coerceIn(-1.0, 1.0)
             weightedSum += weight * clamped
@@ -2191,8 +2724,7 @@ object OpportunityEngine {
             if (label != null) {
                 var token = "$label${signalSuffix(clamped)}"
                 signals += token
-                var points = ((weight * clamped) / normalizationWeight * 100.0).roundToInt()
-                factors += ScoreFactor(key = label, token = token, bucketPoints = points, inputBps = inputBps)
+                slots += Slot.Term(PendingFactor(weight, clamped, label, token, inputBps, comparisons))
             }
         }
 
@@ -2209,12 +2741,27 @@ object OpportunityEngine {
             require(points > 0) { "EvidenceAccumulator penalty must be positive" }
             penaltyPoints += points
             signals += "$label-"
-            factors += ScoreFactor(key = label, token = "$label-", bucketPoints = -points, inputBps = inputBps)
+            slots += Slot.Fixed(ScoreFactor(key = label, token = "$label-", bucketPoints = -points, inputBps = inputBps))
         }
 
         fun flag(label: String) {
             signals += label
-            factors += ScoreFactor(key = label, token = label, bucketPoints = 0)
+            slots += Slot.Fixed(ScoreFactor(key = label, token = label, bucketPoints = 0))
+        }
+
+        fun exemptClassTerm(weight: Double) {
+            require(weight > 0.0) { "EvidenceAccumulator exempt weight must be positive" }
+            normalizationWeight = (normalizationWeight - weight).coerceAtLeast(1.0)
+        }
+
+        fun silenceDesignTerm(weight: Double) {
+            require(weight > 0.0) { "EvidenceAccumulator silence weight must be positive" }
+            designSilentWeight += weight
+        }
+
+        fun flagCoverageGap() {
+            var idle = normalizationWeight - evidenceWeight - designSilentWeight
+            if (idle > COVERAGE_GAP_IDLE_WEIGHT) flag(FUND_COVERAGE_GAP_LABEL)
         }
 
         /** A penalty alone never creates a score: with no term measured the bucket is still absent. */
@@ -2228,13 +2775,26 @@ object OpportunityEngine {
             extraSignals: List<String> = emptyList(),
             scoreOverride: Int? = normalizedScore(),
         ): BucketEvidence {
-            var extraFactors = extraSignals.map { signal ->
+            var scored = slots.map { slot ->
+                when (slot) {
+                    is Slot.Term -> ScoreFactor(
+                        key = slot.factor.label,
+                        token = slot.factor.token,
+                        bucketPoints = ((slot.factor.weight * slot.factor.clamped) / normalizationWeight * 100.0)
+                            .roundToInt(),
+                        inputBps = slot.factor.inputBps,
+                        comparisons = slot.factor.comparisons,
+                    )
+                    is Slot.Fixed -> slot.factor
+                }
+            }
+            var extras = extraSignals.map { signal ->
                 ScoreFactor(key = signal, token = signal, bucketPoints = 0)
             }
             return BucketEvidence(
                 score = scoreOverride,
                 signals = (signals + extraSignals).distinct(),
-                factors = factors + extraFactors,
+                factors = scored + extras,
             )
         }
 

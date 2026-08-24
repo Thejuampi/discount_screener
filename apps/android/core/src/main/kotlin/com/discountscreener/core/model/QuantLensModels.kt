@@ -289,6 +289,13 @@ data class QuantLensExpectedValueRange(
     val disagreementBps: Int? = null,
     val reasonCodes: List<QuantLensReasonCode>,
 ) {
+    /** True when both fans exist. The card must show both, even when they agree. */
+    fun bothFamiliesPresent(): Boolean =
+        modelBaseFairValueCents != null &&
+            modelBaseFairValueCents > 0L &&
+            analystBaseFairValueCents != null &&
+            analystBaseFairValueCents > 0L
+
     init {
         requireValidSection(primaryStatus, reasonCodes)
         requireNonNegativeCents("weightedFairValueCents", weightedFairValueCents)

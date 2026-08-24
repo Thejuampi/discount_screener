@@ -4,6 +4,8 @@ import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ScoreFactor
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeCauseEffect
 import com.discountscreener.core.regime.RegimeCauseFactor
@@ -62,6 +64,173 @@ class ScoreFactorUiTest {
     @Test
     fun trend_names_the_revenue_window() {
         assertEquals("Revenue 3–5y", scoreFactorLabel("Trend"))
+    }
+
+    @Test
+    fun a_sector_multiple_prints_the_symbol_against_the_sector() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "Mult§",
+                        "Mult§--",
+                        -22,
+                        comparisons = listOf(
+                            ScoreFactorComparison(250, ScoreFactorValueKind.Multiple, "P/E", 850),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("Multiples vs sector · P/E 2.5 vs 8.5", line.label)
+    }
+
+    @Test
+    fun three_multiples_name_each_pair() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "Mult",
+                        "Mult+",
+                        2,
+                        comparisons = listOf(
+                            ScoreFactorComparison(2_000, ScoreFactorValueKind.Multiple, "P/E", referenceLow = 800, referenceHigh = 3_500),
+                            ScoreFactorComparison(1_200, ScoreFactorValueKind.Multiple, "EV/EBITDA", referenceLow = 600, referenceHigh = 2_000),
+                            ScoreFactorComparison(300, ScoreFactorValueKind.Multiple, "P/B", referenceLow = 100, referenceHigh = 500),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals(
+            "Multiples · P/E 20.0 vs 8.0–35.0 · EV/EBITDA 12.0 vs 6.0–20.0 · P/B 3.0 vs 1.0–5.0",
+            line.label,
+        )
+    }
+
+    @Test
+    fun a_sector_roe_prints_both_rates() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "ROE§",
+                        "ROE§++",
+                        16,
+                        comparisons = listOf(
+                            ScoreFactorComparison(1_500, ScoreFactorValueKind.Percent, reference = 1_200),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("Return on equity vs sector · 15.0% vs 12.0%", line.label)
+    }
+
+    @Test
+    fun free_cash_flow_prints_dollars_against_zero_and_why_it_is_a_sign_vote() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "FCF",
+                        "FCF++",
+                        20,
+                        comparisons = listOf(
+                            ScoreFactorComparison(
+                                0,
+                                ScoreFactorValueKind.Dollars,
+                                why = "sign only, no market cap",
+                                observedDollars = 1_200_000_000,
+                                referenceDollars = 0,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("Free cash flow · $1.2B vs $0 · sign only, no market cap", line.label)
+    }
+
+    @Test
+    fun missing_dollar_fields_do_not_print_zero() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "FCF",
+                        "FCF+",
+                        4,
+                        comparisons = listOf(
+                            ScoreFactorComparison(
+                                0,
+                                ScoreFactorValueKind.Dollars,
+                                why = "sign only, no market cap",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("Free cash flow · sign only, no market cap", line.label)
+    }
+
+    @Test
+    fun fcf_yield_prints_the_rate_against_the_policy_band() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "FCFy",
+                        "FCFy+",
+                        8,
+                        comparisons = listOf(
+                            ScoreFactorComparison(
+                                610,
+                                ScoreFactorValueKind.Percent,
+                                referenceLow = -200,
+                                referenceHigh = 800,
+                                why = "FCF / market cap",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("FCF yield · 6.1% vs -2.0%–8.0% · FCF / market cap", line.label)
+    }
+
+    @Test
+    fun cash_conversion_prints_the_ratio_and_what_it_divides() {
+        var line = scoreFactorGroups(
+            row(
+                fundamentalsFactors = listOf(
+                    ScoreFactor(
+                        "Conv",
+                        "Conv-",
+                        -6,
+                        comparisons = listOf(
+                            ScoreFactorComparison(
+                                40,
+                                ScoreFactorValueKind.Multiple,
+                                referenceLow = 0,
+                                referenceHigh = 100,
+                                why = "FCF / OCF",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).first().lines.single()
+
+        assertEquals("Cash conversion · 0.4 vs 0.0–1.0 · FCF / OCF", line.label)
     }
 
     @Test
@@ -169,6 +338,33 @@ class ScoreFactorUiTest {
     @Test
     fun the_charges_factor_is_named_in_words() {
         assertEquals("Impairment or restructuring charge", scoreFactorLabel("Charges"))
+    }
+
+    @Test
+    fun a_financial_fcf_skip_states_why_the_vote_is_absent() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(
+                row(fundamentalsFactors = listOf(ScoreFactor("FCFy∅ financial", "FCFy∅ financial", 0))),
+            ),
+        )
+
+        assertEquals(listOf(FCF_FINANCIAL_NOTE), notes)
+    }
+
+    @Test
+    fun incomplete_fundamentals_state_that_the_score_can_move() {
+        var notes = scoreFactorNotes(
+            scoreFactorGroups(
+                row(fundamentalsFactors = listOf(ScoreFactor("Fund∅ coverage", "Fund∅ coverage", 0))),
+            ),
+        )
+
+        assertEquals(listOf(FUND_COVERAGE_GAP_NOTE), notes)
+    }
+
+    @Test
+    fun the_financial_fcf_skip_is_named_in_words() {
+        assertEquals("FCF yield skipped (financials)", scoreFactorLabel("FCFy∅ financial"))
     }
 
     @Test

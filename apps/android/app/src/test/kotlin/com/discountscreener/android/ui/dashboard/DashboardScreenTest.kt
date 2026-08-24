@@ -44,6 +44,7 @@ class DashboardScreenTest {
     fun opportunity_scoring_chip_order_runs_from_the_newest_model_to_the_oldest() {
         assertEquals(
             listOf(
+                OpportunityScoringModel.AggressiveV5,
                 OpportunityScoringModel.AggressiveV4,
                 OpportunityScoringModel.AggressiveV3,
                 OpportunityScoringModel.AggressiveV2,

@@ -84,6 +84,18 @@ enum class OpportunityScoringModel {
      * V3 stays and stays beside it, unedited, so there is a control to compare against.
      */
     AggressiveV4,
+
+    /**
+     * V4 minus its two documented defects, selectable beside it at runtime.
+     *
+     * Delta 1: a quarter EPS pulse whose latest filed annual year is a loss is refused instead of
+     * scored against stale profit-year pairs. Delta 2: a row the class policy cannot classify
+     * skips the industrial leverage vote and flags why, where V4 read "not financial services" as
+     * "industrial". Every other term, weight, band, and composite rule is V4's, pinned by parity.
+     *
+     * The insurer float basis for the cash term stays out (V5.1 candidate).
+     */
+    AggressiveV5,
 }
 
 /**
@@ -100,6 +112,7 @@ fun OpportunityScoringModel.carriesMarketDimension(): Boolean = when (this) {
     -> false
     OpportunityScoringModel.AggressiveV3,
     OpportunityScoringModel.AggressiveV4,
+    OpportunityScoringModel.AggressiveV5,
     -> true
 }
 
@@ -117,6 +130,7 @@ fun OpportunityScoringModel.readsSectorBenchmarks(): Boolean = when (this) {
     OpportunityScoringModel.AggressiveV3,
     -> false
     OpportunityScoringModel.AggressiveV4,
+    OpportunityScoringModel.AggressiveV5,
     -> true
 }
 
@@ -901,12 +915,40 @@ data class ChartRangeSummary(
  * still read.
  */
 @Serializable
+enum class ScoreFactorValueKind {
+    Percent,
+    Multiple,
+    Dollars,
+}
+
+/**
+ * One observed reading against the value the term scored it with.
+ *
+ * [reference] is a single centre (sector median). [referenceLow] and [referenceHigh] are an
+ * absolute band when no centre exists. [observedDollars] / [referenceDollars] are for a
+ * [ScoreFactorValueKind.Dollars] vote. [why] names the comparison in one short clause.
+ */
+@Serializable
+data class ScoreFactorComparison(
+    val observed: Int,
+    val kind: ScoreFactorValueKind,
+    val metric: String? = null,
+    val reference: Int? = null,
+    val referenceLow: Int? = null,
+    val referenceHigh: Int? = null,
+    val why: String? = null,
+    val observedDollars: Long? = null,
+    val referenceDollars: Long? = null,
+)
+
+@Serializable
 data class ScoreFactor(
     val key: String,
     val token: String,
     val bucketPoints: Int,
     /** The rate this term scored, in basis points. Null when the term has no rate. */
     val inputBps: Int? = null,
+    val comparisons: List<ScoreFactorComparison> = emptyList(),
 )
 
 @Serializable

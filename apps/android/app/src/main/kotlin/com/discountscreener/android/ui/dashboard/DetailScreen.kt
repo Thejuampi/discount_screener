@@ -509,14 +509,14 @@ private fun MarketContextSection(row: OpportunityListRow, scoringModel: Opportun
         return
     }
 
-    // Not under V4, which decomposes the same Final its own way one line above.
+    // Not under V4/V5, which decompose the same Final their own way one line above.
     //
     // Both lines are individually correct — `Base` is the composite without the fourth bucket and
     // the impact is an exact subtraction — and printing them together was still wrong. A reader met
     // two breakdowns of one number that share no term, and the word "Market" naming three different
     // quantities on one screen: the bucket's score, this delta, and the on/off toggle. The plan put
     // V4's line "in the same place" V3 shows this one; Wave 3 put it above instead of instead of.
-    if (scoringModel != OpportunityScoringModel.AggressiveV4) {
+    if (!scoringModel.showsAgreementLine()) {
         Text(
             text = marketDimensionImpactLine(row),
             style = MaterialTheme.typography.bodySmall,
@@ -714,6 +714,7 @@ private fun ScoreFactorBreakdown(
                     ) {
                         Text(
                             text = line.label,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                         )

@@ -159,11 +159,18 @@ class MarketFeatureSetTest {
         )
     }
 
-    /** The model decides the set, and V4 is the only model that narrows it. */
+    /** The model decides the set, and the agreement models are the ones that narrow it. */
     @Test
-    fun only_v4_reads_the_narrower_set() {
+    fun only_the_agreement_models_read_the_narrower_set() {
         assertEquals(
-            listOf(MarketFeatureSet.Full, MarketFeatureSet.Full, MarketFeatureSet.Full, MarketFeatureSet.Full, V4),
+            listOf(
+                MarketFeatureSet.Full,
+                MarketFeatureSet.Full,
+                MarketFeatureSet.Full,
+                MarketFeatureSet.Full,
+                V4,
+                V4,
+            ),
             OpportunityScoringModel.entries.map { it.marketFeatureSet() },
         )
     }

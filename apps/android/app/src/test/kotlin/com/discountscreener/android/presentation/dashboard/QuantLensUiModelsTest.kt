@@ -296,6 +296,34 @@ class QuantLensUiModelsTest {
     }
 
     @Test
+    fun ev_section_aligned_still_shows_both_dcf_and_analyst_rows() {
+        val ev = QuantLensExpectedValueRange(
+            primaryStatus = QuantLensPrimaryStatus.Available,
+            band = ExpectedValueRangeBand.ScenarioWeighted,
+            source = ExpectedValueRangeSource.Dcf,
+            weightedFairValueCents = 11_500L,
+            weightedUpsideBps = 1500,
+            lowFairValueCents = 10_800L,
+            highFairValueCents = 12_400L,
+            modelLowFairValueCents = 10_800L,
+            modelBaseFairValueCents = 11_500L,
+            modelHighFairValueCents = 12_400L,
+            analystLowFairValueCents = 10_500L,
+            analystBaseFairValueCents = 11_200L,
+            analystHighFairValueCents = 12_000L,
+            disagreementBps = 264,
+            reasonCodes = listOf(QuantLensReasonCode.CompleteScenarioAnchors),
+        )
+        val section = mapQuantLensReport(report(expectedValueRange = ev), 10_000L)!!
+            .sections
+            .first { it.lensId == QuantLensLensId.ExpectedValueRange }
+        assertEquals(
+            listOf("DCF base", "Analyst base", "DCF range", "Analyst range"),
+            section.rows.map { it.first },
+        )
+    }
+
+    @Test
     fun ev_section_disputed_shows_both_anchors_without_presenting_a_range() {
         val ev = QuantLensExpectedValueRange(
             primaryStatus = QuantLensPrimaryStatus.Disputed,

@@ -26,7 +26,7 @@ object RetrospectiveReport {
             PointInTimeTechnicals.scoresOverHistory(symbol, bars)
         }
         return buildString {
-            appendLine("retrospective — technicals bucket, shared by AggressiveV3 and AggressiveV4")
+            appendLine("retrospective — technicals bucket, shared by AggressiveV3, AggressiveV4, and AggressiveV5")
             appendLine(
                 "symbols=${candlesBySymbol.size} " +
                     "bars=${candlesBySymbol.values.sumOf { it.size }} " +

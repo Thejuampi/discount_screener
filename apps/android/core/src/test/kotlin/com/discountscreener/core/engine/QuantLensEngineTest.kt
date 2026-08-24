@@ -100,6 +100,29 @@ class QuantLensEngineTest {
     }
 
     @Test
+    fun expected_value_aligned_gap_still_keeps_analyst_and_model_cents() {
+        val selection = QuantLensExpectedValuePolicy.select(
+            detail = detail(
+                marketPriceCents = 10_000,
+                externalSignalLowFairValueCents = 10_500,
+                externalSignalFairValueCents = 11_200,
+                externalSignalHighFairValueCents = 12_000,
+            ),
+            dcf = DcfAnalysis(
+                bearIntrinsicValueCents = 10_800,
+                baseIntrinsicValueCents = 11_500,
+                bullIntrinsicValueCents = 12_400,
+                waccBps = 900,
+                baseGrowthBps = 300,
+                netDebtDollars = 0,
+                source = DcfSource.YahooFinance,
+            ),
+        )
+
+        assertEquals(11_200L, selection.analystBaseFairValueCents)
+    }
+
+    @Test
     fun expected_value_marks_amzn_like_model_analyst_gap_disputed_without_single_upside() {
         val report = QuantLensEngine.analyze(
             minimalInput(

@@ -1020,7 +1020,8 @@ class DashboardViewModel(
             OpportunityScoringModel.Aggressive -> OpportunityScoringModel.AggressiveV2
             OpportunityScoringModel.AggressiveV2 -> OpportunityScoringModel.AggressiveV3
             OpportunityScoringModel.AggressiveV3 -> OpportunityScoringModel.AggressiveV4
-            OpportunityScoringModel.AggressiveV4 -> OpportunityScoringModel.Legacy
+            OpportunityScoringModel.AggressiveV4 -> OpportunityScoringModel.AggressiveV5
+            OpportunityScoringModel.AggressiveV5 -> OpportunityScoringModel.Legacy
         }
         setOpportunityScoringModel(nextModel)
     }

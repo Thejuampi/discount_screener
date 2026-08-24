@@ -737,6 +737,7 @@ private fun scoreBadgeColors(score: Int, scoringModel: OpportunityScoringModel):
         OpportunityScoringModel.AggressiveV2,
         OpportunityScoringModel.AggressiveV3,
         OpportunityScoringModel.AggressiveV4,
+        OpportunityScoringModel.AggressiveV5,
         -> 15
     }
     val weak = OpportunityEngine.avoidBelowScore(scoringModel)

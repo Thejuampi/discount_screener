@@ -70,3 +70,19 @@ Source: [`handover-quant-valuation-engine-2026-08-02.md`](handover-quant-valuati
 
 - Dip and Leftover keep their own quality rule without the provisional-WACC term [medium] - ``DipSignalEngine`` and ``LeftoverSignalEngine`` (core/plan) classify model quality from pointEstimateUnreliable, fan order, and fan width only; they never read ``waccInputs.isProvisional()``, so a provisional-WACC analysis can read Solid on those boards while Quant Lens reads Soft. Pre-existing code untouched by the reviewed diff. Adopting ``ValuationDecisionPolicy.isSoftModel`` would change board tags; that is a product call against the dip/leftover board specs.
 - scenarioWidthBps can throw on pathological fans [low] - ``intValueExact()`` raises ArithmeticException when width exceeds Int range (bull/base ratio above ~21 400x). Pre-existing at every caller, including the two private softness copies this diff consolidated. A checked variant or try/catch-to-null would read such input as wide/soft instead of crashing.
+
+## Deferred from: code review (2026-08-23)
+
+Product call answered in [`product-call-android-fcf-score-2026-08-23.md`](product-call-android-fcf-score-2026-08-23.md). Shipped on Android: Q1 B equity cap, Q2 B class refuse, Q4 B OCF 0–10% (unmeasured flag), Q5 B class-only adaptive budget, Q6 B comparisons, Q7 B median after failed trim, Q8 C TTM when `§`. Q3 N/A. Q9 A and Q10 A: no code.
+
+Still open:
+
+- Windows still scores FCF / market cap and the old sign vote. Android ships alone (Q10 A).
+- `Mult§` can mix a sector P/E with an absolute P/B and still say vs sector. Pre-existing panel rule.
+- `formatDollars` jumps from `$999,999` to `$1M` with zero decimals on millions.
+- Long Score comparison lines have no `maxLines`. Phone wrap is a layout call.
+- `sizeForCashVote` copies period-average diluted shares into outstanding when cap is missing. That is not market cap.
+- V3 FCF yield stays TTM (Q9 A).
+- `shared/contracts/opportunity-v4.json` has no FCF cases.
+- OCF 0–10% band is provisional. Calibrate once real OCF/FCF ratios exist.
+- Q8 accepted asymmetry: a `§` sector scores FCF on TTM; a sector without a centre can use the multi-year series.
