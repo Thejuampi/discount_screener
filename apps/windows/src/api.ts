@@ -786,6 +786,7 @@ export type SearchSubmitOutcome =
   | { kind: "unavailable" };
 
 export const api = {
+  getAppVersion: () => invoke<string>("get_app_version"),
   getOpportunities: () => invoke<OpportunityRow[]>("get_opportunities"),
   getRegimeScoringEnabled: () => invoke<boolean>("get_regime_scoring_enabled"),
   setRegimeScoringEnabled: (enabled: boolean) =>

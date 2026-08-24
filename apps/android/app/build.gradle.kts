@@ -35,6 +35,31 @@ val hasCustomReleaseSigning = listOf(
 // Opt-in to signing a release with the debug key, for a local sideload. See the release build type.
 val allowDebugSignedRelease = providers.gradleProperty("allowDebugSignedRelease").orNull.toBoolean()
 
+// Date-based version, computed once from git state by scripts/version.ps1 (single source
+// of truth also used by the Windows build). Falls back if git/powershell is unavailable
+// so IDE syncs never hard-fail.
+val computedVersion: Pair<String, Int> = run {
+    val fallback = "0.0.0-unknown" to 1
+    try {
+        val output = providers.exec {
+            commandLine(
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                rootProject.file("../../scripts/version.ps1").absolutePath,
+            )
+        }.standardOutput.asText.get()
+        val lines = output.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val name = lines.getOrNull(0)
+        val code = lines.getOrNull(1)?.toIntOrNull()
+        if (name != null && code != null) name to code else fallback
+    } catch (_: Exception) {
+        fallback
+    }
+}
+
 // Live / agent QA universe (≤20 symbols) is opt-in via `make android-run-qa`
 // (-PdsQaUniverse=true). A plain debug install is the regular app and cold-starts the
 // product universe. Release never honours the flag.
@@ -48,8 +73,8 @@ android {
         applicationId = "com.discountscreener.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = computedVersion.second
+        versionName = computedVersion.first
     }
 
     buildFeatures {

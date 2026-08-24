@@ -14,13 +14,22 @@ CARGO := cargo
 GRADLE := $(ANDROID_DIR)/gradlew.bat
 NPX := npx
 
-.PHONY: all build test clean fmt check release run \
+.PHONY: all build test clean fmt check release version run \
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
         android-build android-test android-clean android-release android-run android-run-qa android-signing-bootstrap apk \
         windows-run windows-dev windows-stop windows-build windows-test run-windows \
         contracts-test
 
 run: desktop-run
+
+# ── Version (date-based, computed from git state — see scripts/version.ps1) ──
+
+version:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/version.ps1"
+
+# Always succeeds: stamps whatever the current git state calls for (release on
+# main/master, feature build otherwise; dirty gets a -dirty suffix either way).
+release: android-release windows-build
 
 # ── Desktop (Rust) ──
 

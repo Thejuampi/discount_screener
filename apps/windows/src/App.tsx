@@ -45,6 +45,7 @@ export default function App() {
   const { t, lang } = useT();
   const { theme, setTheme } = useTheme();
 
+  const [appVersion, setAppVersion] = useState<string>("");
   const [rows, setRows] = useState<OpportunityRow[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [showAlerts, setShowAlerts] = useState(false);
@@ -114,6 +115,10 @@ export default function App() {
   }, []);
 
   // Debug-only agent bridge (WebView CDP / ds-ui). Not shipped in release production builds.
+  useEffect(() => {
+    void api.getAppVersion().then(setAppVersion);
+  }, []);
+
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     type AgentBridge = {
@@ -454,6 +459,7 @@ export default function App() {
           <span className="sidebar-name">
             {t("app.title")}
             <span className="sidebar-tagline">investment intelligence</span>
+            {appVersion && <span className="sidebar-version">{appVersion}</span>}
           </span>
         </div>
         <nav className="sidebar-nav">

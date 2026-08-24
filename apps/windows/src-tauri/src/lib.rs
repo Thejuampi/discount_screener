@@ -253,6 +253,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_app_version,
             commands::get_opportunities,
             commands::get_symbol_detail,
             commands::debug_seed_cof_native_e2e,
