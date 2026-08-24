@@ -41,18 +41,18 @@ class SecIssuerComponentClient(
     @Volatile
     private var tickerToCik: Map<String, String>? = null
 
-    // A 10-K instance document is tens of megabytes and is held whole, raw and parsed, while it is
-    // fetched. An enrichment round can ask for this many symbols at once at the caller's own fan-out
-    // limit; that limit is sized for a Yahoo quote, not this. Capped here so a cold cache does not
-    // hold that many of these documents in memory at the same time and get the process SIGKILLed.
+    // A 10-K fetch and its two-pass streaming parse are heavy on network and CPU. An enrichment
+    // round can ask for this many symbols at once at the caller's own fan-out limit; that limit is
+    // sized for a Yahoo quote, not this. Capped here so a cold cache does not run that many of
+    // these at the same time.
     private val tenKFetchPermits = Semaphore(TEN_K_FETCH_CONCURRENCY)
 
     override suspend fun lookup(symbol: String, companyName: String?): IssuerComponentSet? =
         withContext(Dispatchers.IO) {
             try {
                 tenKFetchPermits.withPermit {
-                    var xml = loadTenKXml(symbol) ?: return@withContext null
-                    var facts = XbrlDimensionalFacts.parse(xml)
+                    var file = loadTenKFile(symbol) ?: return@withContext null
+                    var facts = XbrlDimensionalFacts.parse { file.reader() }
                     if (facts.isEmpty()) return@withContext null
                     var finance = companyName?.let { name -> loadFinanceDrivers(name) }
                     IssuerComponentAssembler.fromParentFacts(facts, finance)
@@ -69,17 +69,40 @@ class SecIssuerComponentClient(
         return IssuerComponentAssembler.financeFromResidualFacts(slim, "subsidiary_companyfacts:${pick.cik}")
     }
 
-    private fun loadTenKXml(symbol: String): String? {
+    private fun loadTenKFile(symbol: String): File? {
         var cik = resolveCik(symbol) ?: return null
-        var cacheName = "CIK$cik.10k-instance.xml"
-        return cachedText(cacheName) {
-            var accession = latestTenKAccession(cik) ?: return@cachedText null
-            var accDir = accession.replace("-", "")
-            var cikNum = cik.trimStart('0').ifBlank { "0" }
-            var indexUrl = "$ARCHIVES_URL$cikNum/$accDir/index.json"
-            var indexBody = getText(indexUrl) ?: return@cachedText null
-            var xmlName = instanceXmlName(indexBody) ?: return@cachedText null
-            getText("$ARCHIVES_URL$cikNum/$accDir/$xmlName")
+        var dir = cacheDir ?: File(System.getProperty("java.io.tmpdir"))
+        var file = File(dir, "CIK$cik.10k-instance.xml")
+        if (file.isFile && System.currentTimeMillis() - file.lastModified() < ttlMillis) return file
+        var accession = latestTenKAccession(cik) ?: return null
+        var accDir = accession.replace("-", "")
+        var cikNum = cik.trimStart('0').ifBlank { "0" }
+        var indexBody = getText("$ARCHIVES_URL$cikNum/$accDir/index.json") ?: return null
+        var xmlName = instanceXmlName(indexBody) ?: return null
+        return downloadToFile("$ARCHIVES_URL$cikNum/$accDir/$xmlName", file)
+    }
+
+    private fun downloadToFile(url: String, target: File): File? {
+        return try {
+            var request = Request.Builder()
+                .url(url)
+                .header("User-Agent", SEC_USER_AGENT)
+                .header("Accept-Encoding", "identity")
+                .build()
+            client.newCall(request).execute().use { response ->
+                var body = response.body
+                if (!response.isSuccessful || body == null) return@use null
+                target.parentFile?.mkdirs()
+                var tmp = File(target.parentFile, target.name + ".part")
+                tmp.outputStream().use { out -> body.byteStream().copyTo(out) }
+                if (!tmp.renameTo(target)) {
+                    target.delete()
+                    if (!tmp.renameTo(target)) return@use null
+                }
+                target
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

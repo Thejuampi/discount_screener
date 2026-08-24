@@ -21,39 +21,56 @@ private val LEGAL_NAME_TOKENS = setOf(
     "sa", "ag", "the", "and",
 )
 
-fun parseMarketsInsiderBorrowerId(html: String, companyName: String): String? {
+data class MarketsInsiderBorrower(val id: String, val name: String)
+
+fun parseMarketsInsiderBorrowerOptions(html: String): List<MarketsInsiderBorrower> {
+    var options = mutableListOf<MarketsInsiderBorrower>()
+    OPTION_RE.forEachMatch(html) { match ->
+        options += MarketsInsiderBorrower(match.group(1), unescapeHtml(match.group(2)).trim())
+    }
+    return options
+}
+
+fun selectMarketsInsiderBorrowerId(
+    options: List<MarketsInsiderBorrower>,
+    companyName: String,
+): String? {
     var wanted = unescapeHtml(companyName).trim()
     if (wanted.isBlank()) return null
-    var options = OPTION_RE.findAll(html).map { match ->
-        match.groupValues[1] to unescapeHtml(match.groupValues[2]).trim()
-    }.toList()
-    var exact = options.filter { it.second.equals(wanted, ignoreCase = true) }
-        .map { it.first }
+    var exact = options.filter { it.name.equals(wanted, ignoreCase = true) }
+        .map { it.id }
         .distinct()
     if (exact.size == 1) return exact.single()
     if (exact.size > 1) return null
     var key = normalizeIssuerName(wanted)
     if (key.isBlank()) return null
-    var matched = options.filter { normalizeIssuerName(it.second) == key }
-        .map { it.first }
+    var matched = options.filter { normalizeIssuerName(it.name) == key }
+        .map { it.id }
         .distinct()
     return matched.singleOrNull()
 }
 
+fun parseMarketsInsiderBorrowerId(html: String, companyName: String): String? =
+    selectMarketsInsiderBorrowerId(parseMarketsInsiderBorrowerOptions(html), companyName)
+
 fun parseMarketsInsiderBondTable(html: String): List<IssuerInstrumentQuote> {
-    return ROW_RE.findAll(html).mapNotNull { row ->
-        var cells = CELL_RE.findAll(row.groupValues[1]).map { cell ->
-            flattenHtml(cell.groupValues[1])
-        }.toList()
-        if (cells.size < 6) return@mapNotNull null
-        var yieldBps = parsePercentBps(cells[3]) ?: return@mapNotNull null
-        var maturity = parseUsDate(cells[5]) ?: return@mapNotNull null
-        IssuerInstrumentQuote(
+    var quotes = mutableListOf<IssuerInstrumentQuote>()
+    ROW_RE.forEachMatch(html) { row ->
+        var body = row.group(1)
+        var cells = mutableListOf<String>()
+        CELL_RE.forEachMatch(body) { cell ->
+            cells += flattenHtml(cell.group(1))
+        }
+        if (cells.size < 6) return@forEachMatch
+        var yieldBps = parsePercentBps(cells[3]) ?: return@forEachMatch
+        var maturity = parseUsDate(cells[5]) ?: return@forEachMatch
+        quotes += IssuerInstrumentQuote(
             yieldBps = yieldBps,
             maturityDate = maturity,
             currency = cells[1].ifBlank { null },
         )
-    }.toList()
+    }
+    return quotes
 }
 
 internal fun normalizeIssuerName(raw: String): String {
