@@ -432,28 +432,48 @@ private fun disputedPrimaryLine(
     return "Forecast is the analyst range ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}). Identity model ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) is a check · $relationLabel · no single estimate"
 }
 
+/**
+ * The two families side by side, the named one first.
+ *
+ * The footer chip says which model produced the number. A section that chips "DCF and analyst" and
+ * then heads its rows "Identity model" gives one number two names on one card, so a known DCF
+ * family is named DCF here and leads. An unnamed family keeps the disputed wording, where the
+ * primary line calls the analyst range the forecast and the model a check.
+ */
 private fun disputedRows(
     section: QuantLensExpectedValueRange,
     marketPriceCents: Long?,
 ): List<Pair<String, String>> {
-    val modelLow = section.modelLowFairValueCents
-    val modelHigh = section.modelHighFairValueCents
-    val analystLow = section.analystLowFairValueCents
-    val analystHigh = section.analystHighFairValueCents
-    return listOfNotNull(
-        section.analystBaseFairValueCents?.let { base ->
-            "Analyst base" to "${money(base)} · ${marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"}"
-        },
-        section.modelBaseFairValueCents?.let { base ->
-            "Identity model" to "${money(base)} · ${marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"}"
-        },
-        if (analystLow != null && analystHigh != null) {
-            "Analyst range" to "${money(analystLow)}–${money(analystHigh)}"
-        } else null,
-        if (modelLow != null && modelHigh != null) {
-            "Identity range" to "${money(modelLow)}–${money(modelHigh)}"
-        } else null,
+    var modelIsDcf = section.source == ExpectedValueRangeSource.Dcf
+    var modelBase = baseRow(
+        label = if (modelIsDcf) "DCF base" else "Identity model",
+        fairValueCents = section.modelBaseFairValueCents,
+        marketPriceCents = marketPriceCents,
     )
+    var analystBase = baseRow("Analyst base", section.analystBaseFairValueCents, marketPriceCents)
+    var modelRange = rangeRow(
+        label = if (modelIsDcf) "DCF range" else "Identity range",
+        lowCents = section.modelLowFairValueCents,
+        highCents = section.modelHighFairValueCents,
+    )
+    var analystRange = rangeRow("Analyst range", section.analystLowFairValueCents, section.analystHighFairValueCents)
+    return if (modelIsDcf) {
+        listOfNotNull(modelBase, analystBase, modelRange, analystRange)
+    } else {
+        listOfNotNull(analystBase, modelBase, analystRange, modelRange)
+    }
+}
+
+private fun baseRow(label: String, fairValueCents: Long?, marketPriceCents: Long?): Pair<String, String>? {
+    var base = fairValueCents ?: return null
+    var upside = marketPriceCents?.let { upsideBps(base, it)?.let(::signedPercent) } ?: "n/a"
+    return label to "${money(base)} · $upside"
+}
+
+private fun rangeRow(label: String, lowCents: Long?, highCents: Long?): Pair<String, String>? {
+    var low = lowCents ?: return null
+    var high = highCents ?: return null
+    return label to "${money(low)}–${money(high)}"
 }
 
 private fun horizonLabel(horizon: QuantLensHorizon): String = when (horizon) {

@@ -433,12 +433,23 @@ class MarketDimensionRankingTest {
          * vote: the fixture's names share one conversion reading, so its uniform +5 came off every
          * row at once — 38/37/36 down to 33/32/31.
          */
+        /**
+         * V3 last moved in `f1dc81a8`, which re-sourced the cash vote: the FCF yield now reads the
+         * robust centre of the annual series over an equity cap, a name with no size base does not
+         * vote at all, and the class exemption takes the FCF and cash-quality weights off financial
+         * and unclassified names instead of voting them. That commit pinned the new behaviour in
+         * `AggressiveV3ScoringTest` and left this level pin on the old numbers, so the gate was red
+         * from the day it landed.
+         *
+         * Thirteen of the seventeen rose one point and four held. Every symbol carries identical
+         * fundamentals here, so a term that changes for the whole fixture moves the level together
+         * and the order settles on `upsideBps`.
+         */
         val V3_LEVEL = listOf(
-            "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
-            "JNJ" to 44, "UNH" to 44, "NVDA" to 44,
-            "META" to 43, "GOOGL" to 43, "WMT" to 43, "V" to 43, "BAC" to 43, "XOM" to 43,
-            "MRK" to 42, "PG" to 42, "HD" to 42,
-            "TSLA" to 42,
+            "ACGL" to 46, "JPM" to 46, "CI" to 46,
+            "UNH" to 45, "NVDA" to 45, "MSFT" to 45,
+            "WMT" to 44, "V" to 44, "BAC" to 44, "XOM" to 44, "JNJ" to 44,
+            "MRK" to 43, "PG" to 43, "HD" to 43, "TSLA" to 43, "META" to 43, "GOOGL" to 43,
         )
 
         val V4_LEVEL = listOf(
