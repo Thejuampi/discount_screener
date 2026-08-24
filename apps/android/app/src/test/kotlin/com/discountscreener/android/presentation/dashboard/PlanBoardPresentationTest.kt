@@ -26,7 +26,52 @@ class PlanBoardPresentationTest {
     @Test
     fun counts_line_names_the_universe() {
         var ui = presentPlanBoard(PlanBoard.EMPTY)
-        assertTrue(ui.universeLine.contains("opportunities"))
+        assertTrue(ui.universeLine!!.contains("opportunities"))
+    }
+
+    // A board the refresh has not built states no count, no universe, and no scan result. The
+    // whole object is asserted, because any field that slips back to a scanned board's copy
+    // reports a measurement the app never made.
+    @Test
+    fun a_dip_board_the_refresh_has_not_built_states_no_scan_result() {
+        assertEquals(
+            PlanBoardUi(
+                huntLabel = "DIP HUNTER",
+                countsLine = "Not scored yet",
+                offRadarLine = null,
+                universeLine = null,
+                nowTitle = "NOW · DIP",
+                laterTitle = "ALMOST · REVIEW",
+                now = emptyList(),
+                later = emptyList(),
+                emptyNow = true,
+                emptyNowTitle = "Waiting for the refresh",
+                emptyNowDetail = "This board reads the data the refresh is loading. It is built " +
+                    "when the refresh ends.",
+            ),
+            presentPlanBoard(null),
+        )
+    }
+
+    @Test
+    fun a_leftover_board_the_refresh_has_not_built_states_no_scan_result() {
+        assertEquals(
+            PlanBoardUi(
+                huntLabel = "LEFTOVER REVIEW",
+                countsLine = "Not scored yet",
+                offRadarLine = null,
+                universeLine = null,
+                nowTitle = "PRIMARY · FADE",
+                laterTitle = "REVIEW · AT TARGET",
+                now = emptyList(),
+                later = emptyList(),
+                emptyNow = true,
+                emptyNowTitle = "Waiting for the refresh",
+                emptyNowDetail = "This board reads the data the refresh is loading. It is built " +
+                    "when the refresh ends.",
+            ),
+            presentLeftoverBoard(null),
+        )
     }
 
     @Test
@@ -92,7 +137,7 @@ class PlanBoardPresentationTest {
         var opps = PlanBoard.EMPTY.copy(universeName = "opportunities", scanned = 2)
         var profile = PlanBoard.EMPTY.copy(universeName = "qa", scanned = 20)
         var ui = presentSelectedDipBoard(opps, profile, PlanDipUniverse.Profile)
-        assertTrue(ui.universeLine.contains("qa"))
+        assertTrue(ui.universeLine!!.contains("qa"))
     }
 
     @Test
@@ -104,7 +149,7 @@ class PlanBoardPresentationTest {
     @Test
     fun leftover_counts_line_names_the_profile() {
         var ui = presentLeftoverBoard(PlanBoard.EMPTY.copy(universeName = "qa"))
-        assertTrue(ui.universeLine.contains("qa"))
+        assertTrue(ui.universeLine!!.contains("qa"))
     }
 
     @Test

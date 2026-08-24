@@ -265,9 +265,11 @@ data class DashboardSnapshot(
     val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),
     val marketRegime: MarketRegime? = null,
     val marketReadStatus: MarketReadStatus = MarketReadStatus.Pending,
-    val planBoard: PlanBoard = PlanBoard.EMPTY,
-    val planBoardProfile: PlanBoard = PlanBoard.EMPTY,
-    val leftoverBoard: PlanBoard = PlanBoard.EMPTY,
+    // Null while the refresh holds the data these boards read: not built, which is not the same
+    // as built and empty.
+    val planBoard: PlanBoard? = null,
+    val planBoardProfile: PlanBoard? = null,
+    val leftoverBoard: PlanBoard? = null,
 )
 
 data class TickerSearchSuggestion(
