@@ -6,6 +6,8 @@ import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.core.engine.NamedFiler
 import com.discountscreener.core.engine.XbrlDimensionalFacts
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
@@ -24,6 +26,7 @@ private const val EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
+private const val TEN_K_FETCH_CONCURRENCY = 2
 
 class SecIssuerComponentClient(
     private val cacheDir: File? = null,
@@ -38,14 +41,22 @@ class SecIssuerComponentClient(
     @Volatile
     private var tickerToCik: Map<String, String>? = null
 
+    // A 10-K instance document is tens of megabytes and is held whole, raw and parsed, while it is
+    // fetched. An enrichment round can ask for this many symbols at once at the caller's own fan-out
+    // limit; that limit is sized for a Yahoo quote, not this. Capped here so a cold cache does not
+    // hold that many of these documents in memory at the same time and get the process SIGKILLed.
+    private val tenKFetchPermits = Semaphore(TEN_K_FETCH_CONCURRENCY)
+
     override suspend fun lookup(symbol: String, companyName: String?): IssuerComponentSet? =
         withContext(Dispatchers.IO) {
             try {
-                var xml = loadTenKXml(symbol) ?: return@withContext null
-                var facts = XbrlDimensionalFacts.parse(xml)
-                if (facts.isEmpty()) return@withContext null
-                var finance = companyName?.let { name -> loadFinanceDrivers(name) }
-                IssuerComponentAssembler.fromParentFacts(facts, finance)
+                tenKFetchPermits.withPermit {
+                    var xml = loadTenKXml(symbol) ?: return@withContext null
+                    var facts = XbrlDimensionalFacts.parse(xml)
+                    if (facts.isEmpty()) return@withContext null
+                    var finance = companyName?.let { name -> loadFinanceDrivers(name) }
+                    IssuerComponentAssembler.fromParentFacts(facts, finance)
+                }
             } catch (_: Exception) {
                 null
             }
