@@ -153,6 +153,11 @@ pub struct UniverseProfileStatus {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+pub fn get_app_version() -> String {
+    env!("DS_APP_VERSION").to_string()
+}
+
+#[tauri::command]
 pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
     use std::sync::atomic::Ordering;
 

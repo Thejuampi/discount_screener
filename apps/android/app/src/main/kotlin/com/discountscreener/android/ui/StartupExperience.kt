@@ -3,6 +3,7 @@ package com.discountscreener.android.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import com.discountscreener.android.BuildConfig
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -110,6 +111,13 @@ internal fun StartupSplashScreen(loading: Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(top = 12.dp),
+            )
+            Text(
+                text = BuildConfig.VERSION_NAME,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 4.dp),
             )
         }
     }
