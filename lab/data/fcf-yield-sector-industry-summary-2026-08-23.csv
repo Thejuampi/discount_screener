@@ -1,0 +1,18 @@
+sector,industry,members,median_fcf_yield_bps,mad_bps,min_bps,max_bps,symbols
+Utilities,(sector-level - all industries mixed),31,-758,260,-5103,325,
+Utilities,Utilities - Regulated Electric,23,-758,260,-2033,307,"PCG,DUK,PPL,AEE,PEG,FE,EIX,EVRG,ES,LNT,WEC,SO,AEP,ETR,XEL,ED,DTE,EXC,D,CNP,CMS,PNW,NEE"
+Utilities,Utilities - Independent Power Producers,3,8,317,-685,325,"VST,NRG,CEG"
+Utilities,Utilities - Regulated Gas,2,-849,61,-910,-788,"NI,ATO"
+Utilities,Utilities - Diversified,2,-4018,1086,-5103,-2932,"SRE,AES"
+Utilities,Utilities - Regulated Water,1,-664,0,-664,-664,"AWK"
+Financial Services,(sector-level - all industries mixed),11,308,25,216,582,
+Financial Services,Financial Data & Stock Exchanges,9,308,92,216,582,"MCO,CBOE,SPGI,ICE,NDAQ,CME,FDS,MSCI,COIN"
+Financial Services,Credit Services,2,314,19,295,333,"V,MA"
+Energy,(sector-level - all industries mixed),21,545,241,-176,1412,
+Energy,Oil & Gas E&P,9,618,143,-12,1412,"EXE,EQT,FANG,DVN,APA,EOG,OXY,COP,TPL"
+Energy,Oil & Gas Midstream,4,82,73,-176,156,"WMB,OKE,TRGP,KMI"
+Energy,Oil & Gas Equipment & Services,3,697,16,370,713,"BKR,HAL,SLB"
+Energy,Oil & Gas Refining & Marketing,3,838,75,467,913,"VLO,MPC,PSX"
+Energy,Oil & Gas Integrated,2,425,121,304,545,"CVX,XOM"
+Real Estate,(sector-level - all industries mixed),2,344,28,316,372,
+Real Estate,Real Estate Services,2,344,28,316,372,"CBRE,CSGP"

@@ -1,9 +1,11 @@
 package com.discountscreener.core.engine
 
 import com.discountscreener.core.math.robustCentre
+import com.discountscreener.core.model.BusinessClass
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * What the symbol's own sector trades at, so a multiple can be read against its industry.
@@ -21,7 +23,59 @@ data class SectorBenchmarks(
     val priceToBookHundredths: Int?,
     val returnOnEquityBps: Int?,
     val netDebtToEbitdaHundredths: Int?,
+    val fcfYieldBps: Int? = null,
 )
+
+internal enum class CashSizeKind {
+    MarketCap,
+    PriceTimesShares,
+}
+
+internal data class CashSize(
+    val dollars: Long,
+    val kind: CashSizeKind,
+)
+
+/**
+ * Equity cap for an FCF yield. Yahoo FCF is after interest, so the denominator is market cap
+ * when the provider sent one, else price × shares. Enterprise value is not used here.
+ *
+ * [sharesOverride] is a series diluted-average count used only when the snapshot has no
+ * sharesOutstanding. Market cap still wins when it is present.
+ */
+internal fun cashFlowSizeForYield(detail: SymbolDetail, sharesOverride: Long? = null): CashSize? {
+    var fundamentals = detail.fundamentals ?: return null
+    fundamentals.marketCapDollars?.takeIf { it > 0L }?.let { return CashSize(it, CashSizeKind.MarketCap) }
+    var shares = sharesOverride?.takeIf { it > 0L }
+        ?: fundamentals.sharesOutstanding?.takeIf { it > 0L }
+        ?: return null
+    var cap = derivedEquityCap(detail.marketPriceCents, shares) ?: return null
+    return CashSize(cap, CashSizeKind.PriceTimesShares)
+}
+
+private fun derivedEquityCap(priceCents: Long, shares: Long): Long? {
+    if (priceCents <= 0L || shares <= 0L) return null
+    var cap = shares.toDouble() * priceCents / 100.0
+    if (!cap.isFinite() || cap <= 0.0) return null
+    return cap.roundToLong()
+}
+
+internal fun cashYieldBps(cashDollars: Long, sizeDollars: Long): Int? {
+    if (sizeDollars <= 0L) return null
+    var bps = cashDollars.toDouble() / sizeDollars.toDouble() * 10_000.0
+    if (!bps.isFinite()) return null
+    return bps.coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble()).roundToInt()
+}
+
+internal fun trailingFcfYieldBps(detail: SymbolDetail): Int? {
+    var fundamentals = detail.fundamentals ?: return null
+    if (FinancialClassPolicy.classify(fundamentals) != BusinessClass.OperatingNonFinancial) {
+        return null
+    }
+    var fcf = fundamentals.freeCashFlowDollars ?: return null
+    var size = cashFlowSizeForYield(detail) ?: return null
+    return cashYieldBps(fcf, size.dollars)
+}
 
 /**
  * Net debt against a year of EBITDA, in hundredths of a turn. 176 is 1.76x; a negative number is
@@ -86,22 +140,23 @@ private const val MIN_SECTOR_MEMBERS = 5
  */
 fun computeSectorBenchmarks(details: Collection<SymbolDetail>): Map<String, SectorBenchmarks> {
     var bySector = details
-        .mapNotNull { it.fundamentals }
-        .filter { !it.sectorName.isNullOrBlank() }
-        .groupBy { it.sectorName.orEmpty() }
+        .filter { !it.fundamentals?.sectorName.isNullOrBlank() }
+        .groupBy { it.fundamentals!!.sectorName.orEmpty() }
     return bySector.mapValues { (_, members) ->
+        var fundamentals = members.map { it.fundamentals!! }
         SectorBenchmarks(
             // A multiple at or below zero is a loss or a negative book, not a price level, and it
             // would pull the sector's level toward a number no buyer could pay.
-            forwardPeHundredths = centreOfPrices(members.map { it.forwardPeHundredths }),
-            enterpriseToEbitdaHundredths = centreOfPrices(members.map { it.enterpriseToEbitdaHundredths }),
-            priceToBookHundredths = centreOfPrices(members.map { it.priceToBookHundredths }),
+            forwardPeHundredths = centreOfPrices(fundamentals.map { it.forwardPeHundredths }),
+            enterpriseToEbitdaHundredths = centreOfPrices(fundamentals.map { it.enterpriseToEbitdaHundredths }),
+            priceToBookHundredths = centreOfPrices(fundamentals.map { it.priceToBookHundredths }),
             // Return on equity legitimately crosses zero, so nothing is filtered out of it. A
             // sector of loss makers has a negative level and that level is the truth about it.
-            returnOnEquityBps = centreOf(members.map { it.returnOnEquityBps }),
+            returnOnEquityBps = centreOf(fundamentals.map { it.returnOnEquityBps }),
             // Leverage crosses zero for the same kind of reason: a company holding more cash than
             // debt has negative net debt, and that is a fact about it rather than a bad reading.
-            netDebtToEbitdaHundredths = centreOf(members.map { netDebtToEbitdaOf(it) }),
+            netDebtToEbitdaHundredths = centreOf(fundamentals.map { netDebtToEbitdaOf(it) }),
+            fcfYieldBps = centreOf(members.map { trailingFcfYieldBps(it) }),
         )
     }
 }

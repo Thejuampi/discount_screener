@@ -712,6 +712,7 @@ private fun ScoreFactorBreakdown(
                     ) {
                         Text(
                             text = line.label,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                         )

@@ -7,10 +7,13 @@ import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -72,6 +75,90 @@ class AggressiveV3ScoringTest {
     }
 
     @Test
+    fun fcf_yield_keeps_the_rate_against_the_policy_band() {
+        var factor = OpportunityEngine.aggressiveV3FundamentalsScore(
+            baseDetail(
+                fundamentals = fundamentals(
+                    freeCashFlowDollars = 8,
+                    marketCapDollars = 100,
+                ),
+            ),
+        ).factors.single { it.key == "FCFy" }
+
+        assertEquals(
+            listOf(
+                ScoreFactorComparison(
+                    800,
+                    ScoreFactorValueKind.Percent,
+                    referenceLow = -200,
+                    referenceHigh = 800,
+                    why = "FCF / market cap",
+                ),
+            ),
+            factor.comparisons,
+        )
+    }
+
+    @Test
+    fun free_cash_flow_without_a_size_base_does_not_vote() {
+        var keys = OpportunityEngine.aggressiveV3FundamentalsScore(
+            baseDetail(
+                marketPriceCents = 0,
+                fundamentals = fundamentals(freeCashFlowDollars = 1_200_000_000),
+            ),
+        ).factors.map { it.key }
+
+        assertEquals(emptyList(), keys.filter { it == "FCF" || it == "FCFy" })
+    }
+
+    @Test
+    fun cash_conversion_keeps_the_ratio_against_the_zero_to_one_band() {
+        var factor = OpportunityEngine.aggressiveV3FundamentalsScore(
+            baseDetail(
+                fundamentals = fundamentals(
+                    freeCashFlowDollars = 400,
+                    operatingCashFlowDollars = 1_000,
+                ),
+            ),
+        ).factors.single { it.key == "Conv" }
+
+        assertEquals(
+            listOf(
+                ScoreFactorComparison(
+                    40,
+                    ScoreFactorValueKind.Multiple,
+                    referenceLow = 0,
+                    referenceHigh = 100,
+                    why = "FCF / OCF",
+                ),
+            ),
+            factor.comparisons,
+        )
+    }
+
+    @Test
+    fun v3_multiples_keep_each_reading_against_the_absolute_band() {
+        var factor = OpportunityEngine.aggressiveV3FundamentalsScore(
+            baseDetail(
+                fundamentals = fundamentals(
+                    forwardPeHundredths = 2_000,
+                    enterpriseToEbitdaHundredths = 1_200,
+                    priceToBookHundredths = 300,
+                ),
+            ),
+        ).factors.single { it.key == "Mult" }
+
+        assertEquals(
+            listOf(
+                ScoreFactorComparison(2_000, ScoreFactorValueKind.Multiple, "P/E", referenceLow = 800, referenceHigh = 3_500),
+                ScoreFactorComparison(1_200, ScoreFactorValueKind.Multiple, "EV/EBITDA", referenceLow = 600, referenceHigh = 2_000),
+                ScoreFactorComparison(300, ScoreFactorValueKind.Multiple, "P/B", referenceLow = 100, referenceHigh = 500),
+            ),
+            factor.comparisons,
+        )
+    }
+
+    @Test
     fun cheap_multiples_score_higher_than_expensive_multiples() {
         val cheap = OpportunityEngine.aggressiveV3FundamentalsScore(
             baseDetail(
@@ -99,22 +186,37 @@ class AggressiveV3ScoringTest {
     }
 
     @Test
+    fun the_yield_vote_retires_the_conversion_vote() {
+        var keys = OpportunityEngine.aggressiveV3FundamentalsScore(
+            baseDetail(
+                fundamentals = fundamentals(
+                    marketCapDollars = 20_000_000,
+                    freeCashFlowDollars = 900_000,
+                    operatingCashFlowDollars = 1_000_000,
+                ),
+            ),
+        ).factors.map { it.key }
+
+        assertFalse("Conv" in keys)
+    }
+
+    @Test
     fun cash_conversion_rewards_high_fcf_to_ocf() {
         val highConversion = OpportunityEngine.aggressiveV3FundamentalsScore(
             baseDetail(
+                marketPriceCents = 0,
                 fundamentals = fundamentals(
                     freeCashFlowDollars = 900_000,
                     operatingCashFlowDollars = 1_000_000,
-                    marketCapDollars = 20_000_000,
                 ),
             ),
         ).first!!
         val lowConversion = OpportunityEngine.aggressiveV3FundamentalsScore(
             baseDetail(
+                marketPriceCents = 0,
                 fundamentals = fundamentals(
                     freeCashFlowDollars = 100_000,
                     operatingCashFlowDollars = 1_000_000,
-                    marketCapDollars = 20_000_000,
                 ),
             ),
         ).first!!

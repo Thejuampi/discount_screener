@@ -166,32 +166,36 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
             "$anchorCount price reference${if (anchorCount == 1) "" else "s"} · Limited data"
         ExpectedValueRangeBand.Unavailable -> "No price estimate available"
     }
-    val rows = when (section.band) {
-        ExpectedValueRangeBand.ScenarioWeighted -> listOfNotNull(
+    var rows = when {
+        section.bothFamiliesPresent() -> bothFamilyRows(section, price)
+        section.band == ExpectedValueRangeBand.ScenarioWeighted -> listOfNotNull(
             lowBps?.let { "Pessimistic" to signedPercent(it) },
             weightedBps?.let { "Expected" to signedPercent(it) },
             highBps?.let { "Optimistic" to signedPercent(it) },
         )
-        ExpectedValueRangeBand.Tension,
-        ExpectedValueRangeBand.Disputed,
-        -> disputedRows(section, price)
-        ExpectedValueRangeBand.ReferenceOnly -> listOfNotNull(
+        section.band == ExpectedValueRangeBand.Tension ||
+            section.band == ExpectedValueRangeBand.Disputed -> bothFamilyRows(section, price)
+        section.band == ExpectedValueRangeBand.ReferenceOnly -> listOfNotNull(
             section.lowFairValueCents?.let { "Low" to money(it) },
             section.highFairValueCents?.let { "High" to money(it) },
         )
         else -> emptyList()
     }
-    val sourceChip = when (section.source) {
-        ExpectedValueRangeSource.Dcf -> "Cashflow model"
-        ExpectedValueRangeSource.Analyst -> "Analyst consensus"
-        null -> null
+    var sourceChip = if (section.bothFamiliesPresent()) {
+        "DCF and analyst"
+    } else {
+        when (section.source) {
+            ExpectedValueRangeSource.Dcf -> "Cashflow model"
+            ExpectedValueRangeSource.Analyst -> "Analyst consensus"
+            null -> null
+        }
     }
-    val anchorChip = when (section.band) {
-        ExpectedValueRangeBand.ScenarioWeighted -> "3 scenarios"
-        ExpectedValueRangeBand.Tension,
-        ExpectedValueRangeBand.Disputed,
-        -> "No single EV"
-        ExpectedValueRangeBand.ReferenceOnly -> "$anchorCount price point${if (anchorCount == 1) "" else "s"}"
+    val anchorChip = when {
+        section.bothFamiliesPresent() && section.band == ExpectedValueRangeBand.ScenarioWeighted -> null
+        section.band == ExpectedValueRangeBand.ScenarioWeighted -> "3 scenarios"
+        section.band == ExpectedValueRangeBand.Tension ||
+            section.band == ExpectedValueRangeBand.Disputed -> "No single EV"
+        section.band == ExpectedValueRangeBand.ReferenceOnly -> "$anchorCount price point${if (anchorCount == 1) "" else "s"}"
         else -> null
     }
     val freshnessChip = when (section.freshnessQualifier) {
@@ -208,6 +212,7 @@ private fun evSection(report: QuantLensReport, marketPriceCents: Long?): QuantLe
     val footerChips = listOfNotNull(sourceChip, anchorChip, freshnessChip)
     val evRailModel = if (
         section.band == ExpectedValueRangeBand.ScenarioWeighted &&
+        !section.bothFamiliesPresent() &&
         lowBps != null && weightedBps != null && highBps != null &&
         highBps > lowBps
     ) {
@@ -408,6 +413,11 @@ private fun evRowRange(state: QuantLensLensRowState): String {
     val high = state.evHighUpsideBps
     return if (low != null && high != null) "${signedPercent(low)}..${signedPercent(high)} upside" else "Upside estimate"
 }
+
+private fun bothFamilyRows(
+    section: QuantLensExpectedValueRange,
+    marketPriceCents: Long?,
+): List<Pair<String, String>> = disputedRows(section, marketPriceCents)
 
 private fun disputedPrimaryLine(
     section: QuantLensExpectedValueRange,

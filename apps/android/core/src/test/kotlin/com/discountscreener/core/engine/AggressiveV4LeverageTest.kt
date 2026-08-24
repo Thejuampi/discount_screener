@@ -1,5 +1,7 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -148,6 +150,25 @@ class AggressiveV4LeverageTest {
      * members would leave the sector with nothing and send all five rows to the absolute band.
      */
     @Test
+    fun sector_leverage_keeps_the_symbol_turns_against_the_sector_centre() {
+        var factor = OpportunityEngine.aggressiveV4FundamentalsScore(
+            baseDetail(
+                fundamentals = fundamentals(
+                    totalDebtDollars = 20_000_000_000,
+                    totalCashDollars = 5_000_000_000,
+                    ebitdaDollars = 10_000_000_000,
+                ),
+            ),
+            sectorBenchmarks(100),
+        ).factors.single { it.key == "ND/EBITDA§" }
+
+        assertEquals(
+            listOf(ScoreFactorComparison(150, ScoreFactorValueKind.Multiple, reference = 100)),
+            factor.comparisons,
+        )
+    }
+
+    @Test
     fun a_sector_that_holds_net_cash_still_produces_a_centre() {
         var members = listOf(-2_000_000_000L, -1_500_000_000L, -1_000_000_000L, -500_000_000L, 0L)
             .map { netDebt ->
@@ -183,6 +204,7 @@ class AggressiveV4LeverageTest {
         var constantKeys = COHORT
             .flatMap { OpportunityEngine.aggressiveV4FundamentalsScore(it, null).factors }
             .groupBy { it.key }
+            .filterKeys { it != FUND_COVERAGE_GAP_LABEL }
             .filterValues { readings ->
                 readings.size == COHORT.size && readings.distinctBy { it.bucketPoints }.size == 1
             }
@@ -270,7 +292,7 @@ class AggressiveV4LeverageTest {
             ),
         ),
         sectorBenchmarks(sectorNetDebtToEbitdaHundredths),
-    ).factors.single().key
+    ).factors.single { it.key != FUND_COVERAGE_GAP_LABEL }.key
 
     /** A benchmark set that carries a leverage centre and nothing else, so no other factor fires. */
     private fun sectorBenchmarks(netDebtToEbitdaHundredths: Int?) = netDebtToEbitdaHundredths?.let {

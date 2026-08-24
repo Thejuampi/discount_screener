@@ -911,12 +911,40 @@ data class ChartRangeSummary(
  * still read.
  */
 @Serializable
+enum class ScoreFactorValueKind {
+    Percent,
+    Multiple,
+    Dollars,
+}
+
+/**
+ * One observed reading against the value the term scored it with.
+ *
+ * [reference] is a single centre (sector median). [referenceLow] and [referenceHigh] are an
+ * absolute band when no centre exists. [observedDollars] / [referenceDollars] are for a
+ * [ScoreFactorValueKind.Dollars] vote. [why] names the comparison in one short clause.
+ */
+@Serializable
+data class ScoreFactorComparison(
+    val observed: Int,
+    val kind: ScoreFactorValueKind,
+    val metric: String? = null,
+    val reference: Int? = null,
+    val referenceLow: Int? = null,
+    val referenceHigh: Int? = null,
+    val why: String? = null,
+    val observedDollars: Long? = null,
+    val referenceDollars: Long? = null,
+)
+
+@Serializable
 data class ScoreFactor(
     val key: String,
     val token: String,
     val bucketPoints: Int,
     /** The rate this term scored, in basis points. Null when the term has no rate. */
     val inputBps: Int? = null,
+    val comparisons: List<ScoreFactorComparison> = emptyList(),
 )
 
 @Serializable

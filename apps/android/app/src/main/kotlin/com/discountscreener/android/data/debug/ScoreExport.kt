@@ -66,7 +66,8 @@ object ScoreExport {
         "ema50_cents",
         "ema200_cents",
         "stance",
-    ) + TERM_FACTORS.flatMap { listOf("t_${it.legacyTag.lowercase()}", "w_${it.legacyTag.lowercase()}") }
+    ) + TERM_FACTORS.flatMap { listOf("t_${it.legacyTag.lowercase()}", "w_${it.legacyTag.lowercase()}") } +
+        listOf("industry", "fcf_yield_bps")
 
     /**
      * One header line, then one line per row in [rows], in the order the engine ranked them.
@@ -114,7 +115,10 @@ object ScoreExport {
                 // A term the symbol has no input for is absent, and absent is an empty pair of
                 // cells. A zero would read as "the feature was measured and came out neutral".
                 listOf(cell(terms[factor]?.signed), cell(terms[factor]?.weight))
-            }).joinToString(",")
+            } + listOf(
+                quote(fundamentals?.industryName),
+                cell(row.fundamentalsFactors.firstOrNull { it.token.startsWith("FCFy") }?.inputBps),
+            )).joinToString(",")
         }
         return lines.joinToString("\n", postfix = "\n")
     }

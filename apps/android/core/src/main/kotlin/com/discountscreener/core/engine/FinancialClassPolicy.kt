@@ -27,6 +27,10 @@ internal object FinancialClassPolicy {
      *
      * V4 only ever needed the boolean above, and its fail-open reading of `Unclassified` — not
      * financial services, therefore industrial — is exactly the guess V5 refuses.
+     *
+     * The ticker is required because Yahoo files fee networks as Credit Services.
+     * [DcfAnalysisEngine.classifyBusiness] owns the payment-network industry table and the
+     * issuer override. Do not add a second table here.
      */
     fun classify(fundamentals: FundamentalSnapshot): BusinessClass =
         DcfAnalysisEngine.classifyBusiness(
@@ -34,5 +38,6 @@ internal object FinancialClassPolicy {
             fundamentals.industryName,
             fundamentals.sectorKey,
             fundamentals.industryKey,
+            symbol = fundamentals.symbol,
         )
 }

@@ -7,6 +7,8 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.test.Test
@@ -52,7 +54,10 @@ class AggressiveV4FundamentalsTest {
     fun a_symbol_with_no_sector_benchmark_falls_back_to_the_absolute_band_and_says_so() {
         var fallback = score(null)
 
-        assertEquals(2 to listOf("Mult+"), fallback.first to fallback.second)
+        assertEquals(
+            2 to listOf("Mult+"),
+            fallback.score to fallback.signals.filter { it != FUND_COVERAGE_GAP_LABEL },
+        )
     }
 
     /** The other half of the same claim: a sector-scored panel is marked, and marked once. */
@@ -60,7 +65,64 @@ class AggressiveV4FundamentalsTest {
     fun a_sector_scored_panel_carries_the_marker() {
         var scored = score(benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600))
 
-        assertEquals(listOf("Mult§"), scored.second.map { it.trimEnd('+', '-') })
+        assertEquals(
+            listOf("Mult§"),
+            scored.signals.filter { it != FUND_COVERAGE_GAP_LABEL }.map { it.trimEnd('+', '-') },
+        )
+    }
+
+    /**
+     * The Score tab has to print both sides of the comparison. The panel already scored three
+     * multiples against three centres; those pairs have to survive on the factor or the screen
+     * can only show the points.
+     */
+    @Test
+    fun a_sector_panel_keeps_each_multiple_against_its_sector_centre() {
+        var factor = score(benchmarks(forwardPe = 4_000, evEbitda = 2_400, priceToBook = 600))
+            .factors
+            .single { it.key == "Mult§" }
+
+        assertEquals(
+            listOf(
+                ScoreFactorComparison(2_000, ScoreFactorValueKind.Multiple, "P/E", 4_000),
+                ScoreFactorComparison(1_200, ScoreFactorValueKind.Multiple, "EV/EBITDA", 2_400),
+                ScoreFactorComparison(300, ScoreFactorValueKind.Multiple, "P/B", 600),
+            ),
+            factor.comparisons,
+        )
+    }
+
+    @Test
+    fun absolute_return_on_equity_keeps_the_rate_against_the_policy_band() {
+        var factor = OpportunityEngine.aggressiveV4FundamentalsScore(
+            detail("SUT", returnOnEquityBps = 1_000),
+            null,
+        ).factors.single { it.key == "ROE" }
+
+        assertEquals(
+            listOf(
+                ScoreFactorComparison(
+                    1_000,
+                    ScoreFactorValueKind.Percent,
+                    referenceLow = 0,
+                    referenceHigh = 2_000,
+                ),
+            ),
+            factor.comparisons,
+        )
+    }
+
+    @Test
+    fun return_on_equity_keeps_the_symbol_rate_against_the_sector_rate() {
+        var factor = OpportunityEngine.aggressiveV4FundamentalsScore(
+            detail("SUT", returnOnEquityBps = 1_000),
+            benchmarks(returnOnEquityBps = 2_000),
+        ).factors.single { it.key == "ROE§" }
+
+        assertEquals(
+            listOf(ScoreFactorComparison(1_000, ScoreFactorValueKind.Percent, reference = 2_000)),
+            factor.comparisons,
+        )
     }
 
     /**

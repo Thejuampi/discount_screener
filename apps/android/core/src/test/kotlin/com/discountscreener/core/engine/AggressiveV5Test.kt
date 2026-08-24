@@ -139,7 +139,7 @@ class AggressiveV5Test {
     /** A real turnaround files a positive latest year, and its pulse counts again. */
     @Test
     fun a_turnaround_with_a_profitable_latest_year_keeps_its_pulse_under_v5() {
-        var detail = detail(earningsGrowthBps = 3_800, trailingEpsCents = 500)
+        var detail = detail(earningsGrowthBps = 3_800, trailingEpsCents = 500, sectorName = "Technology")
         var series = FundamentalTimeseries(
             revenue = annual(80.0, 95.0, 110.0),
             netIncome = annual(-8.0, -2.0, 14.0),

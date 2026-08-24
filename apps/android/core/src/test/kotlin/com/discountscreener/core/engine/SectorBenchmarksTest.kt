@@ -88,11 +88,41 @@ class SectorBenchmarksTest {
         )
     }
 
+    @Test
+    fun a_sector_with_five_fcf_yields_sets_a_centre() {
+        var details = listOf(3_000, 4_000, 5_000, 6_000, 7_000).mapIndexed { index, yieldBps ->
+            detail(
+                "S$index",
+                freeCashFlowDollars = yieldBps.toLong() * 1_000_000,
+                marketCapDollars = 10_000_000_000,
+            )
+        }
+
+        assertEquals(5_000, computeSectorBenchmarks(details)["Technology"]?.fcfYieldBps)
+    }
+
+    @Test
+    fun a_financial_sector_does_not_set_an_fcf_yield_centre() {
+        var details = listOf(3_000, 4_000, 5_000, 6_000, 7_000).mapIndexed { index, yieldBps ->
+            detail(
+                "B$index",
+                sector = "Financial Services",
+                freeCashFlowDollars = yieldBps.toLong() * 1_000_000,
+                marketCapDollars = 10_000_000_000,
+            )
+        }
+
+        assertEquals(null, computeSectorBenchmarks(details)["Financial Services"]?.fcfYieldBps)
+    }
+
     private fun detail(
         symbol: String,
         sector: String? = "Technology",
         forwardPeHundredths: Int? = null,
         returnOnEquityBps: Int? = null,
+        freeCashFlowDollars: Long? = null,
+        marketCapDollars: Long? = null,
+        enterpriseValueDollars: Long? = null,
     ) = SymbolDetail(
         symbol = symbol,
         profitable = true,
@@ -112,6 +142,9 @@ class SectorBenchmarksTest {
             sectorName = sector,
             forwardPeHundredths = forwardPeHundredths,
             returnOnEquityBps = returnOnEquityBps,
+            freeCashFlowDollars = freeCashFlowDollars,
+            marketCapDollars = marketCapDollars,
+            enterpriseValueDollars = enterpriseValueDollars,
         ),
     )
 }

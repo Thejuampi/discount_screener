@@ -3,10 +3,13 @@ package com.discountscreener.android.ui.dashboard
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import java.util.Locale
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.core.engine.scoreReading
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ScoreFactor
+import com.discountscreener.core.model.ScoreFactorComparison
+import com.discountscreener.core.model.ScoreFactorValueKind
 import com.discountscreener.core.regime.RegimeCause
 import com.discountscreener.core.regime.RegimeCauseEffect
 import com.discountscreener.core.regime.RegimeScoreStatus
@@ -125,6 +128,11 @@ internal const val CYCLE_PEAK_NOTE =
         "the window, not a mid-cycle level."
 
 internal const val EARNINGS_CHARGE_KEY = "Charges"
+internal const val FCF_FINANCIAL_KEY = "FCFy∅ financial"
+internal const val FCF_UNKNOWN_KEY = "FCFy∅ unknown"
+internal const val FCF_INELIGIBLE_KEY = "FCFy∅ ineligible"
+internal const val OCF_BAND_UNMEASURED_KEY = "OCFy∅ unmeasured"
+internal const val FUND_COVERAGE_GAP_KEY = "Fund∅ coverage"
 
 /**
  * What the mark is, and what it is not.
@@ -137,6 +145,24 @@ internal const val EARNINGS_CHARGE_NOTE =
     "The last filed year carries impairment or restructuring worth 15% or more of its operating " +
         "income, so growth read across it is partly the charge. Whether such a charge repeats is " +
         "not measured here."
+
+internal const val FCF_FINANCIAL_NOTE =
+    "Industrial free cash flow is the wrong cash for financial services. Deposits, float, and " +
+        "premium cash are not owner earnings, so this row does not take an FCF yield."
+
+internal const val FCF_UNKNOWN_NOTE =
+    "The sector or industry is unknown, so this row does not take an industrial FCF yield."
+
+internal const val FCF_INELIGIBLE_NOTE =
+    "This asset class does not take an industrial FCF yield (ETF, fund, REIT, or similar)."
+
+internal const val OCF_BAND_UNMEASURED_NOTE =
+    "The OCF yield band (0% to 10%) is a stated estimate. It is not a measured OCF/FCF ratio " +
+        "for this universe."
+
+internal const val FUND_COVERAGE_GAP_NOTE =
+    "Some fundamentals inputs are missing. Empty slots stay in the divisor, so this score sits " +
+        "closer to zero than a complete file. New inputs can raise or lower the number."
 
 internal const val SCORE_READING_LEGEND =
     "−100…+100 · Strong ≥50 · Good ≥15 · Neutral · Weak ≤−15 · Poor ≤−50"
@@ -188,6 +214,11 @@ internal fun scoreFactorNotes(groups: List<ScoreFactorGroupUi>): List<String> {
         PULSE_TREND_DIVERGENCE_NOTE.takeIf { PULSE_TREND_DIVERGENCE_KEY in keys },
         CYCLE_PEAK_NOTE.takeIf { CYCLE_PEAK_KEY in keys },
         EARNINGS_CHARGE_NOTE.takeIf { EARNINGS_CHARGE_KEY in keys },
+        FCF_FINANCIAL_NOTE.takeIf { FCF_FINANCIAL_KEY in keys },
+        FCF_UNKNOWN_NOTE.takeIf { FCF_UNKNOWN_KEY in keys },
+        FCF_INELIGIBLE_NOTE.takeIf { FCF_INELIGIBLE_KEY in keys },
+        OCF_BAND_UNMEASURED_NOTE.takeIf { OCF_BAND_UNMEASURED_KEY in keys },
+        FUND_COVERAGE_GAP_NOTE.takeIf { FUND_COVERAGE_GAP_KEY in keys },
     )
 }
 
@@ -266,8 +297,73 @@ private fun lineFromFactor(factor: ScoreFactor) = ScoreFactorLineUi(
 
 internal fun scoreFactorLineLabel(factor: ScoreFactor): String {
     var name = scoreFactorLabel(factor.key)
+    var comparison = formatScoreFactorComparisons(factor.comparisons)
+    if (comparison != null) return "$name · $comparison"
     var rate = factor.inputBps?.let(::formatBpsPercent) ?: return name
     return "$name · $rate"
+}
+
+internal fun formatScoreFactorComparisons(comparisons: List<ScoreFactorComparison>): String? {
+    if (comparisons.isEmpty()) return null
+    var rendered = comparisons.mapNotNull { comparison ->
+        var pair = formatComparisonPair(comparison)
+        var metric = comparison.metric
+        var body = when {
+            pair != null && !metric.isNullOrEmpty() -> "$metric $pair"
+            pair != null -> pair
+            !metric.isNullOrEmpty() -> metric
+            else -> ""
+        }
+        var why = comparison.why
+        when {
+            body.isNotEmpty() && !why.isNullOrEmpty() -> "$body · $why"
+            body.isNotEmpty() -> body
+            !why.isNullOrEmpty() -> why
+            else -> null
+        }
+    }
+    if (rendered.isEmpty()) return null
+    return rendered.joinToString(" · ")
+}
+
+private fun formatComparisonPair(comparison: ScoreFactorComparison): String? {
+    if (comparison.kind == ScoreFactorValueKind.Dollars) {
+        var observed = comparison.observedDollars
+        var reference = comparison.referenceDollars
+        return when {
+            observed != null && reference != null -> "${formatDollars(observed)} vs ${formatDollars(reference)}"
+            observed != null -> formatDollars(observed)
+            reference != null -> formatDollars(reference)
+            else -> null
+        }
+    }
+    var observed = formatFactorValue(comparison.observed, comparison.kind)
+    var reference = comparison.reference?.let { formatFactorValue(it, comparison.kind) }
+    if (reference != null) return "$observed vs $reference"
+    var low = comparison.referenceLow
+    var high = comparison.referenceHigh
+    if (low != null && high != null) {
+        return "$observed vs ${formatFactorValue(low, comparison.kind)}–${formatFactorValue(high, comparison.kind)}"
+    }
+    return observed
+}
+
+private fun formatFactorValue(value: Int, kind: ScoreFactorValueKind): String = when (kind) {
+    ScoreFactorValueKind.Percent -> String.format(Locale.US, "%.1f%%", value / 100.0)
+    ScoreFactorValueKind.Multiple -> String.format(Locale.US, "%.1f", value / 100.0)
+    ScoreFactorValueKind.Dollars -> formatDollars(value.toLong())
+}
+
+private fun formatDollars(value: Long): String {
+    var sign = if (value < 0) "-" else ""
+    var amount = if (value == Long.MIN_VALUE) Long.MAX_VALUE else abs(value)
+    return when {
+        amount >= 1_000_000_000L ->
+            sign + "$" + String.format(Locale.US, "%.1fB", amount / 1_000_000_000.0)
+        amount >= 1_000_000L ->
+            sign + "$" + String.format(Locale.US, "%.0fM", amount / 1_000_000.0)
+        else -> sign + "$" + String.format(Locale.US, "%,d", amount)
+    }
 }
 
 // A signal token carries its strength in trailing `+`/`-` characters; the key is what is left.
@@ -287,6 +383,11 @@ private fun tokenStrength(token: String): Int = when {
 
 private val FACTOR_NAMES = mapOf(
     "FCFy" to "FCF yield",
+    "FCFy∅ financial" to "FCF yield skipped (financials)",
+    "FCFy∅ unknown" to "FCF yield skipped (unknown class)",
+    "FCFy∅ ineligible" to "FCF yield skipped (not eligible)",
+    "OCFy∅ unmeasured" to "OCF yield band unmeasured",
+    "Fund∅ coverage" to "Score uses incomplete fundamentals",
     "FCF" to "Free cash flow",
     "OCF" to "Operating cash flow",
     "ROE" to "Return on equity",
