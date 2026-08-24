@@ -1201,10 +1201,18 @@ private fun parseHtmlTitle(body: String): String? {
 }
 
 internal fun parseCompanyNameFromTitle(title: String, symbol: String): String? {
-    val normalizedTitle = normalizeCompanyName(title) ?: return null
-    val pattern = Regex("(?i)\\s+\\(${Regex.escape(symbol)}\\)\\s+")
-    val match = pattern.find(normalizedTitle) ?: return null
-    return normalizedTitle.substring(0, match.range.first).trim().takeIf(String::isNotBlank)
+    var normalizedTitle = normalizeCompanyName(title) ?: return null
+    var marker = "($symbol)"
+    var from = 0
+    while (true) {
+        var at = normalizedTitle.indexOf(marker, from, ignoreCase = true)
+        if (at < 0) return null
+        from = at + 1
+        var after = at + marker.length
+        if (at == 0 || !normalizedTitle[at - 1].isWhitespace()) continue
+        if (after >= normalizedTitle.length || !normalizedTitle[after].isWhitespace()) continue
+        return normalizedTitle.substring(0, at).trim().takeIf(String::isNotBlank)
+    }
 }
 
 private fun parseEmbeddedStringField(body: String, marker: String): String? {

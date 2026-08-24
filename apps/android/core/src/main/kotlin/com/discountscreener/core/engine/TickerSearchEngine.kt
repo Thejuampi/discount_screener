@@ -60,7 +60,7 @@ object TickerSearchEngine {
         if (normalizedName.isBlank()) return null
         return when {
             normalizedName == normalizedQuery -> TickerSearchRank.NAME_EXACT
-            normalizedName.split(Regex("\\s+")).any { word -> word.startsWith(normalizedQuery) } ->
+            normalizedName.split(" ").any { word -> word.startsWith(normalizedQuery) } ->
                 TickerSearchRank.NAME_WORD_START
             normalizedQuery in normalizedName -> TickerSearchRank.NAME_CONTAINS
             else -> null
@@ -89,12 +89,16 @@ object TickerSearchEngine {
     fun shouldTriggerRemoteSearch(query: String, localResults: List<TickerSearchResult>): Boolean {
         val trimmed = query.trim()
         if (trimmed.length < 2) return false
-        if (trimmed.contains(Regex("\\s"))) return true
+        if (trimmed.any { it.isWhitespace() }) return true
         return localResults.isEmpty()
     }
 
-    fun isTickerToken(query: String): Boolean =
-        query.trim().matches(Regex("^[A-Za-z0-9.\\-]+$"))
+    fun isTickerToken(query: String): Boolean {
+        var trimmed = query.trim()
+        return trimmed.isNotEmpty() && trimmed.all {
+            it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '-'
+        }
+    }
 
     fun looksLikeTicker(query: String): Boolean {
         val trimmed = query.trim()
@@ -167,8 +171,20 @@ object TickerSearchEngine {
         }
     }
 
-    private fun normalizeNameQuery(value: String): String =
-        value.trim().lowercase(Locale.US).replace(Regex("\\s+"), " ")
+    private fun normalizeNameQuery(value: String): String {
+        var out = StringBuilder(value.length)
+        var pendingSpace = false
+        for (c in value.trim().lowercase(Locale.US)) {
+            if (c.isWhitespace()) {
+                pendingSpace = true
+            } else {
+                if (pendingSpace && out.isNotEmpty()) out.append(' ')
+                pendingSpace = false
+                out.append(c)
+            }
+        }
+        return out.toString()
+    }
 
     private fun candidateComparator(): Comparator<TickerSearchCandidate> =
         compareBy<TickerSearchCandidate> { it.matchRank }

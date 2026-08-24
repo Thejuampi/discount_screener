@@ -689,4 +689,14 @@ private inline fun <reified T : Enum<T>> enumFromSnakeCase(token: String): T =
     enumValues<T>().firstOrNull { it.toSnakeCase() == token }
         ?: throw IllegalArgumentException("unknown ${T::class.simpleName} token: $token")
 
-private fun Enum<*>.toSnakeCase(): String = name.replace(Regex("([a-z0-9])([A-Z])"), "$1_$2").lowercase()
+private fun Enum<*>.toSnakeCase(): String {
+    var out = StringBuilder(name.length + 4)
+    for (i in name.indices) {
+        var c = name[i]
+        if (c in 'A'..'Z' && i > 0 && (name[i - 1] in 'a'..'z' || name[i - 1] in '0'..'9')) {
+            out.append('_')
+        }
+        out.append(c.lowercaseChar())
+    }
+    return out.toString()
+}

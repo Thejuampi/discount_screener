@@ -33,15 +33,35 @@ object ComponentFamilyPolicy {
     private val STRUCTURAL_LOCAL: Set<String>
         get() = ValuationPolicy.current.component.structuralLocal
 
+    // Split camel case: break before an uppercase char that follows a lowercase char, and before
+    // the last uppercase char of an acronym run when a lowercase char follows it.
     fun tokens(memberQname: String): List<String> {
         var local = memberQname.substringAfterLast(':')
         if (local.endsWith("Member")) local = local.removeSuffix("Member")
-        var spaced = local
-            .replace(Regex("([A-Z]+)([A-Z][a-z])"), "$1 $2")
-            .replace(Regex("([a-z])([A-Z])"), "$1 $2")
-        return spaced.lowercase()
-            .split(Regex("[^a-z0-9]+"))
-            .filter { it.isNotBlank() }
+        var words = mutableListOf<String>()
+        var word = StringBuilder()
+        for (i in local.indices) {
+            var c = local[i]
+            var lower = c.lowercaseChar()
+            if (lower !in 'a'..'z' && lower !in '0'..'9') {
+                if (word.isNotEmpty()) {
+                    words += word.toString()
+                    word = StringBuilder()
+                }
+                continue
+            }
+            var prev = if (i > 0) local[i - 1] else null
+            var next = if (i + 1 < local.length) local[i + 1] else null
+            var breaks = c in 'A'..'Z' && prev != null &&
+                (prev in 'a'..'z' || (prev in 'A'..'Z' && next != null && next in 'a'..'z'))
+            if (breaks && word.isNotEmpty()) {
+                words += word.toString()
+                word = StringBuilder()
+            }
+            word.append(lower)
+        }
+        if (word.isNotEmpty()) words += word.toString()
+        return words
     }
 
     fun economy(memberQname: String): ComponentEconomy? {

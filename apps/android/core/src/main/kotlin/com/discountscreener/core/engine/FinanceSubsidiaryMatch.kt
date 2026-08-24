@@ -27,10 +27,17 @@ object FinanceSubsidiaryMatch {
     }
 
     fun normalize(raw: String): String {
-        var cleaned = raw.lowercase()
-            .replace(Regex("[^a-z0-9]+"), " ")
-            .trim()
-        var words = cleaned.split(Regex("\\s+")).filter { it.isNotBlank() && it !in LEGAL }
-        return words.joinToString(" ")
+        var words = mutableListOf<String>()
+        var word = StringBuilder()
+        for (c in raw.lowercase()) {
+            if (c in 'a'..'z' || c in '0'..'9') {
+                word.append(c)
+            } else if (word.isNotEmpty()) {
+                words += word.toString()
+                word = StringBuilder()
+            }
+        }
+        if (word.isNotEmpty()) words += word.toString()
+        return words.filter { it !in LEGAL }.joinToString(" ")
     }
 }

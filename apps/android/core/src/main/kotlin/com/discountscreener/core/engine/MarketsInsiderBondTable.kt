@@ -6,16 +6,12 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private val US_DATE = DateTimeFormatter.ofPattern("M/d/yyyy", Locale.US)
-private val ROW_RE = Regex("""<tr class="table__tr">(.*?)</tr>""", setOf(RegexOption.DOT_MATCHES_ALL))
-private val CELL_RE = Regex("""<td[^>]*>(.*?)</td>""", setOf(RegexOption.DOT_MATCHES_ALL))
-private val TAG_RE = Regex("""<[^>]+>""")
-private val OPTION_RE = Regex(
-    """<option value="(\d+)"[^>]*>([^<]*)</option>""",
-    setOf(RegexOption.IGNORE_CASE),
-)
-private val SPACE_RE = Regex("""\s+""")
-private val PAREN_RE = Regex("""\([^)]*\)""")
-private val NON_TOKEN_RE = Regex("""[^a-z0-9]+""")
+private const val OPTION_OPEN = "<option value=\""
+private const val OPTION_CLOSE = "</option>"
+private const val ROW_OPEN = "<tr class=\"table__tr\">"
+private const val ROW_CLOSE = "</tr>"
+private const val CELL_OPEN = "<td"
+private const val CELL_CLOSE = "</td>"
 private val LEGAL_NAME_TOKENS = setOf(
     "inc", "corp", "corporation", "ltd", "llc", "co", "company", "plc",
     "sa", "ag", "the", "and",
@@ -25,8 +21,23 @@ data class MarketsInsiderBorrower(val id: String, val name: String)
 
 fun parseMarketsInsiderBorrowerOptions(html: String): List<MarketsInsiderBorrower> {
     var options = mutableListOf<MarketsInsiderBorrower>()
-    OPTION_RE.forEachMatch(html) { match ->
-        options += MarketsInsiderBorrower(match.group(1), unescapeHtml(match.group(2)).trim())
+    var from = 0
+    while (true) {
+        var start = html.indexOf(OPTION_OPEN, from, ignoreCase = true)
+        if (start < 0) break
+        from = start + 1
+        var idStart = start + OPTION_OPEN.length
+        var idEnd = idStart
+        while (idEnd < html.length && html[idEnd] in '0'..'9') idEnd++
+        if (idEnd == idStart || idEnd >= html.length || html[idEnd] != '"') continue
+        var tagClose = html.indexOf('>', idEnd + 1)
+        if (tagClose < 0) break
+        var textEnd = html.indexOf('<', tagClose + 1)
+        if (textEnd < 0) break
+        if (!html.startsWith(OPTION_CLOSE, textEnd, ignoreCase = true)) continue
+        var name = unescapeHtml(html.substring(tagClose + 1, textEnd)).trim()
+        options += MarketsInsiderBorrower(html.substring(idStart, idEnd), name)
+        from = textEnd + OPTION_CLOSE.length
     }
     return options
 }
@@ -55,15 +66,18 @@ fun parseMarketsInsiderBorrowerId(html: String, companyName: String): String? =
 
 fun parseMarketsInsiderBondTable(html: String): List<IssuerInstrumentQuote> {
     var quotes = mutableListOf<IssuerInstrumentQuote>()
-    ROW_RE.forEachMatch(html) { row ->
-        var body = row.group(1)
-        var cells = mutableListOf<String>()
-        CELL_RE.forEachMatch(body) { cell ->
-            cells += flattenHtml(cell.group(1))
-        }
-        if (cells.size < 6) return@forEachMatch
-        var yieldBps = parsePercentBps(cells[3]) ?: return@forEachMatch
-        var maturity = parseUsDate(cells[5]) ?: return@forEachMatch
+    var from = 0
+    while (true) {
+        var rowStart = html.indexOf(ROW_OPEN, from)
+        if (rowStart < 0) break
+        var bodyStart = rowStart + ROW_OPEN.length
+        var rowEnd = html.indexOf(ROW_CLOSE, bodyStart)
+        if (rowEnd < 0) break
+        from = rowEnd + ROW_CLOSE.length
+        var cells = parseCells(html, bodyStart, rowEnd)
+        if (cells.size < 6) continue
+        var yieldBps = parsePercentBps(cells[3]) ?: continue
+        var maturity = parseUsDate(cells[5]) ?: continue
         quotes += IssuerInstrumentQuote(
             yieldBps = yieldBps,
             maturityDate = maturity,
@@ -73,20 +87,62 @@ fun parseMarketsInsiderBondTable(html: String): List<IssuerInstrumentQuote> {
     return quotes
 }
 
+private fun parseCells(html: String, rowStart: Int, rowEnd: Int): List<String> {
+    var cells = mutableListOf<String>()
+    var from = rowStart
+    while (true) {
+        var cellStart = html.indexOf(CELL_OPEN, from)
+        if (cellStart < 0 || cellStart >= rowEnd) break
+        var open = html.indexOf('>', cellStart + CELL_OPEN.length)
+        if (open < 0 || open >= rowEnd) break
+        var close = html.indexOf(CELL_CLOSE, open + 1)
+        if (close < 0 || close >= rowEnd) break
+        cells += flattenHtml(html.substring(open + 1, close))
+        from = close + CELL_CLOSE.length
+    }
+    return cells
+}
+
 internal fun normalizeIssuerName(raw: String): String {
     var cleaned = unescapeHtml(raw).lowercase()
     cleaned = cleaned.replace("&", " ")
-    cleaned = PAREN_RE.replace(cleaned, " ")
-    var tokens = NON_TOKEN_RE.replace(cleaned, " ")
-        .split(" ")
-        .filter { it.isNotBlank() && it !in LEGAL_NAME_TOKENS }
-    return tokens.joinToString(" ")
+    cleaned = stripParens(cleaned)
+    var tokens = mutableListOf<String>()
+    var token = StringBuilder()
+    for (c in cleaned) {
+        if (c in 'a'..'z' || c in '0'..'9') {
+            token.append(c)
+        } else if (token.isNotEmpty()) {
+            tokens += token.toString()
+            token = StringBuilder()
+        }
+    }
+    if (token.isNotEmpty()) tokens += token.toString()
+    return tokens.filter { it !in LEGAL_NAME_TOKENS }.joinToString(" ")
+}
+
+private fun stripParens(raw: String): String {
+    var out = StringBuilder(raw.length)
+    var i = 0
+    while (i < raw.length) {
+        if (raw[i] == '(') {
+            var close = raw.indexOf(')', i + 1)
+            if (close >= 0) {
+                out.append(' ')
+                i = close + 1
+                continue
+            }
+        }
+        out.append(raw[i])
+        i++
+    }
+    return out.toString()
 }
 
 private fun parsePercentBps(raw: String): Int? {
     var token = raw.trim().removeSuffix("%").trim()
     if (token.isEmpty() || token == "-") return null
-    var pct = token.toDoubleOrNull() ?: return null
+    var pct = token.plainDoubleOrNull() ?: return null
     if (!pct.isFinite()) return null
     return (pct * 100.0).roundToInt().takeIf { it in 0..5_000 }
 }
@@ -96,8 +152,40 @@ private fun parseUsDate(raw: String): String? {
     return parsed.toString()
 }
 
-private fun flattenHtml(raw: String): String =
-    unescapeHtml(TAG_RE.replace(raw, " ")).replace(SPACE_RE, " ").trim()
+private fun flattenHtml(raw: String): String = collapseSpaces(unescapeHtml(stripTags(raw)))
+
+private fun stripTags(raw: String): String {
+    var out = StringBuilder(raw.length)
+    var i = 0
+    while (i < raw.length) {
+        if (raw[i] == '<') {
+            var close = raw.indexOf('>', i + 1)
+            if (close > i + 1) {
+                out.append(' ')
+                i = close + 1
+                continue
+            }
+        }
+        out.append(raw[i])
+        i++
+    }
+    return out.toString()
+}
+
+private fun collapseSpaces(raw: String): String {
+    var out = StringBuilder(raw.length)
+    var pendingSpace = false
+    for (c in raw) {
+        if (c.isWhitespace()) {
+            pendingSpace = true
+        } else {
+            if (pendingSpace && out.isNotEmpty()) out.append(' ')
+            pendingSpace = false
+            out.append(c)
+        }
+    }
+    return out.toString()
+}
 
 private fun unescapeHtml(raw: String): String =
     raw.replace("&amp;", "&")

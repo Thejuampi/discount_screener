@@ -141,11 +141,21 @@ class SecIssuerComponentClient(
                 var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
                 var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
                     ?: continue
-                var clean = name.replace(Regex("""\s+\(CIK.*"""), "").trim()
+                var clean = stripCikSuffix(name)
                 found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
             }
         }
         return found.values.toList()
+    }
+
+    // Cut a "  (CIK 0000320193)" tail: the first "(CIK" that a whitespace char precedes.
+    private fun stripCikSuffix(name: String): String {
+        var at = name.indexOf("(CIK")
+        while (at > 0) {
+            if (name[at - 1].isWhitespace()) return name.substring(0, at).trim()
+            at = name.indexOf("(CIK", at + 1)
+        }
+        return name.trim()
     }
 
     private fun loadSievedFacts(cik: String): String? {

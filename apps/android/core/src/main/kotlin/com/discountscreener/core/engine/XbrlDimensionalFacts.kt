@@ -1,7 +1,6 @@
 package com.discountscreener.core.engine
 
 import java.io.Reader
-import java.util.regex.Matcher
 
 data class TaggedFact(
     val concept: String,
@@ -17,14 +16,10 @@ data class TaggedFact(
  * Company-facts JSON drops those members.
  */
 object XbrlDimensionalFacts {
-    private val contextRe = Regex("""<context id="([^"]+)">(.*?)</context>""", RegexOption.DOT_MATCHES_ALL)
-    private val memberRe = Regex("""<xbrldi:explicitMember[^>]*>([^<]+)</xbrldi:explicitMember>""")
-    private val instantRe = Regex("""<instant>([^<]+)</instant>""")
-    private val startRe = Regex("""<startDate>([^<]+)</startDate>""")
-    private val endRe = Regex("""<endDate>([^<]+)</endDate>""")
-    private val factRe = Regex("""<([A-Za-z0-9_-]+:[A-Za-z0-9_-]+)([^>]*)>([^<]+)</""")
-    private val contextRefRe = Regex("""contextRef="([^"]+)"""")
-    private val unitRefRe = Regex("""unitRef="([^"]+)"""")
+    private const val CONTEXT_OPEN = "<context id=\""
+    private const val CONTEXT_CLOSE = "</context>"
+    private const val MEMBER_OPEN = "<xbrldi:explicitMember"
+    private const val MEMBER_CLOSE = "</xbrldi:explicitMember>"
 
     // A 10-K instance document is tens to hundreds of megabytes. Only a bounded scan window is
     // ever held in memory; the margin must cover the largest single match (a context block or one
@@ -39,52 +34,157 @@ object XbrlDimensionalFacts {
     fun parse(openReader: () -> Reader): List<TaggedFact> {
         var contexts = linkedMapOf<String, Context>()
         openReader().use { reader ->
-            scanMatches(reader, contextRe, CONTEXT_MARGIN) { match ->
-                var body = match.group(2)
-                var members = mutableListOf<String>()
-                memberRe.forEachMatch(body) { member ->
-                    members += member.group(1).trim()
-                }
-                var instant = instantRe.find(body)?.groupValues?.get(1)
-                var start = startRe.find(body)?.groupValues?.get(1)
-                var end = endRe.find(body)?.groupValues?.get(1)
-                contexts[match.group(1)] = Context(members, instant, start, end ?: instant)
+            scanMatches(reader, CONTEXT_MARGIN, ::findContext) { match ->
+                var body = match.groups[1]
+                contexts[match.groups[0]] = Context(
+                    members = parseMembers(body),
+                    start = tagValue(body, "startDate"),
+                    end = tagValue(body, "endDate") ?: tagValue(body, "instant"),
+                )
             }
         }
         var facts = mutableListOf<TaggedFact>()
         openReader().use { reader ->
-            scanMatches(reader, factRe, FACT_MARGIN) { match ->
-                var attrs = match.group(2)
-                var contextId = contextRefRe.find(attrs)?.groupValues?.get(1)
-                    ?: return@scanMatches
+            scanMatches(reader, FACT_MARGIN, ::findFact) { match ->
+                var attrs = match.groups[1]
+                var contextId = attrValue(attrs, "contextRef") ?: return@scanMatches
                 var context = contexts[contextId] ?: return@scanMatches
                 var end = context.end ?: return@scanMatches
-                var value = match.group(3).trim().toDoubleOrNull() ?: return@scanMatches
-                var unit = unitRefRe.find(attrs)?.groupValues?.get(1)
+                var value = match.groups[2].trim().plainDoubleOrNull() ?: return@scanMatches
                 facts += TaggedFact(
-                    concept = match.group(1),
+                    concept = match.groups[0],
                     periodEnd = end,
                     periodStart = context.start,
                     value = value,
                     members = context.members,
-                    unit = unit,
+                    unit = attrValue(attrs, "unitRef"),
                 )
             }
         }
         return facts
     }
 
-    // Stream the reader in chunks and apply the regex over a sliding window. A match is emitted
-    // only when it ends before the margin tail, so a match cut by a chunk boundary is re-found
-    // complete on the next round. Emitted text is dropped; memory stays bounded by the margin.
-    // One Matcher scans each window: see [forEachMatch] for why per-match Matchers are poison here.
+    private class Match(val start: Int, val end: Int, val groups: List<String>)
+
+    // A context block: <context id="ID">BODY</context>. Groups: id, body.
+    private fun findContext(text: String, fromIndex: Int): Match? {
+        var from = fromIndex
+        while (true) {
+            var start = text.indexOf(CONTEXT_OPEN, from)
+            if (start < 0) return null
+            from = start + 1
+            var idStart = start + CONTEXT_OPEN.length
+            var idEnd = text.indexOf('"', idStart)
+            if (idEnd < 0) return null
+            if (idEnd == idStart) continue
+            if (idEnd + 1 >= text.length || text[idEnd + 1] != '>') continue
+            var bodyStart = idEnd + 2
+            var close = text.indexOf(CONTEXT_CLOSE, bodyStart)
+            if (close < 0) return null
+            return Match(
+                start = start,
+                end = close + CONTEXT_CLOSE.length,
+                groups = listOf(text.substring(idStart, idEnd), text.substring(bodyStart, close)),
+            )
+        }
+    }
+
+    // A fact element: <prefix:Name ATTRS>VALUE</ — a namespaced element with text content.
+    // Groups: concept, attrs, value.
+    private fun findFact(text: String, fromIndex: Int): Match? {
+        var from = fromIndex
+        while (true) {
+            var start = text.indexOf('<', from)
+            if (start < 0) return null
+            from = start + 1
+            var p = start + 1
+            var prefixStart = p
+            while (p < text.length && isConceptChar(text[p])) p++
+            if (p == prefixStart || p >= text.length || text[p] != ':') continue
+            p++
+            var localStart = p
+            while (p < text.length && isConceptChar(text[p])) p++
+            if (p == localStart) continue
+            var concept = text.substring(start + 1, p)
+            var open = text.indexOf('>', p)
+            if (open < 0) return null
+            var valueEnd = text.indexOf('<', open + 1)
+            if (valueEnd < 0) return null
+            if (valueEnd == open + 1) continue
+            if (valueEnd + 1 >= text.length || text[valueEnd + 1] != '/') continue
+            return Match(
+                start = start,
+                end = valueEnd + 2,
+                groups = listOf(concept, text.substring(p, open), text.substring(open + 1, valueEnd)),
+            )
+        }
+    }
+
+    private fun isConceptChar(c: Char): Boolean =
+        c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == '_' || c == '-'
+
+    private fun parseMembers(body: String): List<String> {
+        var members = mutableListOf<String>()
+        var from = 0
+        while (true) {
+            var start = body.indexOf(MEMBER_OPEN, from)
+            if (start < 0) break
+            from = start + 1
+            var open = body.indexOf('>', start + MEMBER_OPEN.length)
+            if (open < 0) break
+            var textEnd = body.indexOf('<', open + 1)
+            if (textEnd < 0) break
+            if (textEnd == open + 1) continue
+            if (!body.startsWith(MEMBER_CLOSE, textEnd)) continue
+            members += body.substring(open + 1, textEnd).trim()
+            from = textEnd + MEMBER_CLOSE.length
+        }
+        return members
+    }
+
+    // First <tag>VALUE</tag> in body, or null.
+    private fun tagValue(body: String, tag: String): String? {
+        var openTag = "<$tag>"
+        var closeTag = "</$tag>"
+        var from = 0
+        while (true) {
+            var start = body.indexOf(openTag, from)
+            if (start < 0) return null
+            from = start + 1
+            var valueStart = start + openTag.length
+            var valueEnd = body.indexOf('<', valueStart)
+            if (valueEnd < 0) return null
+            if (valueEnd == valueStart) continue
+            if (!body.startsWith(closeTag, valueEnd)) continue
+            return body.substring(valueStart, valueEnd)
+        }
+    }
+
+    // First name="VALUE" in attrs, or null.
+    private fun attrValue(attrs: String, name: String): String? {
+        var marker = "$name=\""
+        var from = 0
+        while (true) {
+            var start = attrs.indexOf(marker, from)
+            if (start < 0) return null
+            from = start + 1
+            var valueStart = start + marker.length
+            var valueEnd = attrs.indexOf('"', valueStart)
+            if (valueEnd < 0) return null
+            if (valueEnd == valueStart) continue
+            return attrs.substring(valueStart, valueEnd)
+        }
+    }
+
+    // Stream the reader in chunks and scan a sliding window. A match is emitted only when it ends
+    // before the margin tail, so a match cut by a chunk boundary is re-found complete on the next
+    // round. Emitted text is dropped; memory stays bounded by the margin.
     private fun scanMatches(
         reader: Reader,
-        regex: Regex,
         margin: Int,
-        onMatch: (Matcher) -> Unit,
+        find: (String, Int) -> Match?,
+        onMatch: (Match) -> Unit,
     ) {
-        var pattern = regex.toPattern()
         var buf = CharArray(CHUNK_CHARS)
         var carry = StringBuilder()
         while (true) {
@@ -95,12 +195,14 @@ object XbrlDimensionalFacts {
             var text = carry.toString()
             var cut = text.length - margin
             var keepFrom = cut
-            var matcher = pattern.matcher(text)
-            while (matcher.find()) {
-                if (matcher.end() <= cut) {
-                    onMatch(matcher)
+            var at = 0
+            while (true) {
+                var match = find(text, at) ?: break
+                if (match.end <= cut) {
+                    onMatch(match)
+                    at = match.end
                 } else {
-                    keepFrom = minOf(keepFrom, matcher.start())
+                    keepFrom = minOf(keepFrom, match.start)
                     break
                 }
             }
@@ -108,15 +210,16 @@ object XbrlDimensionalFacts {
             carry = StringBuilder(text.substring(keepFrom))
         }
         var tail = carry.toString()
-        var matcher = pattern.matcher(tail)
-        while (matcher.find()) {
-            onMatch(matcher)
+        var at = 0
+        while (true) {
+            var match = find(tail, at) ?: break
+            onMatch(match)
+            at = match.end
         }
     }
 
     private data class Context(
         val members: List<String>,
-        val instant: String?,
         val start: String?,
         val end: String?,
     )
