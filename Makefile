@@ -7,7 +7,6 @@ ANDROID_DIR := $(REPO_ROOT)/apps/android
 WINDOWS_DIR := $(REPO_ROOT)/apps/windows
 DIST_DIR := $(REPO_ROOT)/dist
 APK_EXPORT_DEBUG := $(DIST_DIR)/discount-screener-debug.apk
-APK_EXPORT_RELEASE := $(DIST_DIR)/discount-screener-release.apk
 
 CARGO := cargo
 # Absolute, not bare: cmd.exe resolves a bare `gradlew.bat` from the working directory, sh does not.
@@ -78,7 +77,7 @@ android-clean:
 
 android-release:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleRelease -PallowDebugSignedRelease=true && popd
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk' '$(APK_EXPORT_RELEASE)'; Write-Host 'Release APK: $(APK_EXPORT_RELEASE)'"
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/export-android-apk.ps1" -SourceApk "$(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk" -DistDir "$(DIST_DIR)" -Kind release
 
 android-signing-bootstrap:
 	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/create-android-release-keystore.ps1" -UpdateLocalProperties
