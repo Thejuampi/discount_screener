@@ -57,7 +57,7 @@ When the Android SDK is not available, `:core:test` remains the portable verific
 
 Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug.apk`.
 
-Use `make android-release` to export a **release (not debug) APK** to `dist/discount-screener-release.apk`. That target is the release build type. It is not a signing ceremony. Android still stamps a key so the file can install; with no keystore that stamp is the debug key.
+Use `make android-release` to export a **release (not debug) APK** to `dist/discount-screener-release-<version>.apk`. The `<version>` token is the same git stamp as `versionName` (`scripts/version.ps1`). That target is the release build type. It is not a signing ceremony. Android still stamps a key so the file can install; with no keystore that stamp is the debug key.
 
 To stamp your own identity, run `make android-signing-bootstrap` once, or set `DISCOUNT_SCREENER_RELEASE_STORE_FILE`, `DISCOUNT_SCREENER_RELEASE_STORE_PASSWORD`, `DISCOUNT_SCREENER_RELEASE_KEY_ALIAS`, and `DISCOUNT_SCREENER_RELEASE_KEY_PASSWORD` as Gradle properties, environment variables, or `local.properties` entries.
 

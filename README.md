@@ -74,7 +74,7 @@ All commands run from the repository root via `make`.
 | `make android-run-qa` | Same, but for live / agent QA: boots profile `qa` (≤20 symbols). Keeps the on-device database |
 | `make android-test` | Run unit tests |
 | `make apk` | Build debug APK → `dist/discount-screener-debug.apk` |
-| `make android-release` | Build release (not debug) APK → `dist/discount-screener-release.apk` |
+| `make android-release` | Build release (not debug) APK → `dist/discount-screener-release-<version>.apk` |
 | `make android-signing-bootstrap` | First-time release-signing setup |
 
 ### Windows
