@@ -38,4 +38,23 @@ class ValuationPolicyTest {
             ValuationPolicyBook.parse("version: x\n")
         }
     }
+
+    @Test
+    fun cross_flipped_bars_follows_the_book() {
+        var patched = ValuationPolicy.current.withCrossFlippedBars(8)
+        ValuationPolicy.use(patched) {
+            assertEquals(8, ValuationPolicy.current.cross.flippedBarsMax)
+        }
+    }
+
+    @Test
+    fun missing_cross_section_fails_closed() {
+        var yaml = ValuationPolicyBook::class.java
+            .getResource("/valuation-policy.yaml")!!
+            .readText()
+            .replace(Regex("(?s)\ncross:.*?(?=\n[a-z_]+:)"), "\n")
+        assertFailsWith<IllegalStateException> {
+            ValuationPolicyBook.parse(yaml)
+        }
+    }
 }

@@ -89,7 +89,7 @@ class SnapshotCostBenchTest {
                 appendLine("| symbols fetched | ${samples["refresh.symbol"].orEmpty().size} |")
                 listOf(
                     "refresh.symbol", "refresh.apply", "refresh.persist",
-                    "snapshot.candidates", "snapshot.score", "snapshot.request", "snapshot.project", "snapshot.trackedRows", "snapshot.opportunityRows", "snapshot.planBoard", "snapshot.planBoardProfile", "snapshot.leftoverBoard",
+                    "snapshot.candidates", "snapshot.score", "snapshot.request", "snapshot.project", "snapshot.trackedRows", "snapshot.opportunityRows", "snapshot.planBoard", "snapshot.planBoardProfile", "snapshot.leftoverBoard", "snapshot.crossBoard", "snapshot.crossBoardProfile",
                 ).forEach { stage ->
                     var values = samples[stage].orEmpty().sorted()
                     appendLine("| $stage ms, sum / middle / slowest | ${values.sum()} / ${values.getOrNull(values.size / 2)} / ${values.lastOrNull()} |")

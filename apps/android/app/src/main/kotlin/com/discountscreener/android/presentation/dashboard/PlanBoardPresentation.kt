@@ -1,5 +1,6 @@
 package com.discountscreener.android.presentation.dashboard
 
+import com.discountscreener.core.plan.CrossCopy
 import com.discountscreener.core.plan.DipCopy
 import com.discountscreener.core.plan.DipLane
 import com.discountscreener.core.plan.DipSetup
@@ -86,6 +87,37 @@ fun presentPlanBoard(board: PlanBoard?): PlanBoardUi {
     )
 }
 
+fun presentSelectedCrossBoard(
+    opportunities: PlanBoard?,
+    profile: PlanBoard?,
+    universe: PlanDipUniverse,
+): PlanBoardUi {
+    var board = if (universe == PlanDipUniverse.Opportunities) opportunities else profile
+    return presentCrossBoard(board)
+}
+
+fun presentCrossBoard(board: PlanBoard?): PlanBoardUi {
+    if (board == null) return pendingBoard("CROSS HUNTER", "NOW · CROSS", "ALMOST · REVIEW")
+    var offRadar = if (board.offRadarAlmost > 0) {
+        "${board.offRadarAlmost} more almost off radar"
+    } else {
+        null
+    }
+    return PlanBoardUi(
+        huntLabel = "CROSS HUNTER",
+        countsLine = "${board.nowCount} now  ·  ${board.later.size} almost  ·  ${board.refuseCount} out",
+        offRadarLine = offRadar,
+        universeLine = "Universe ${board.universeName}  ·  ${board.scanned} scanned",
+        nowTitle = "NOW · CROSS",
+        laterTitle = "ALMOST · REVIEW",
+        now = board.now.map { presentCard(it, cross = true) },
+        later = board.later.map { presentCard(it, cross = true) },
+        emptyNow = board.now.isEmpty(),
+        emptyNowTitle = "No golden cross now",
+        emptyNowDetail = "No name meets F, a fresh MACD golden cross, and Street 20% together.",
+    )
+}
+
 fun presentLeftoverBoard(board: PlanBoard?): PlanBoardUi {
     if (board == null) return pendingBoard("LEFTOVER REVIEW", "PRIMARY · FADE", "REVIEW · AT TARGET")
     var offRadar = if (board.offRadarAlmost > 0) {
@@ -108,20 +140,21 @@ fun presentLeftoverBoard(board: PlanBoard?): PlanBoardUi {
     )
 }
 
-private fun presentCard(setup: DipSetup, leftover: Boolean = false): PlanCardUi {
-    var streetLabel = if (leftover) {
-        LeftoverCopy.streetLine(setup.streetUpsideBps)
-    } else {
-        DipCopy.streetLine(setup.streetUpsideBps)
+private fun presentCard(setup: DipSetup, leftover: Boolean = false, cross: Boolean = false): PlanCardUi {
+    var streetLabel = when {
+        leftover -> LeftoverCopy.streetLine(setup.streetUpsideBps)
+        cross -> CrossCopy.streetLine(setup.streetUpsideBps)
+        else -> DipCopy.streetLine(setup.streetUpsideBps)
     }
-    var fLabel = if (leftover) {
-        LeftoverCopy.fLine(setup.fundamentalsScore)
-    } else {
-        DipCopy.fLine(setup.fundamentalsScore)
+    var fLabel = when {
+        leftover -> LeftoverCopy.fLine(setup.fundamentalsScore)
+        cross -> CrossCopy.fLine(setup.fundamentalsScore)
+        else -> DipCopy.fLine(setup.fundamentalsScore)
     }
     var laneLabel = when {
         leftover && setup.lane == DipLane.Now -> "Fade"
         leftover -> "At target"
+        cross && setup.lane == DipLane.Now -> "Cross"
         setup.lane == DipLane.Now -> "Now"
         else -> "Almost"
     }

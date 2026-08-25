@@ -286,6 +286,16 @@ data class LeftoverSection(
     val laterCap: Int,
 )
 
+data class CrossSection(
+    val flippedBarsMax: Int,
+    val streetNowBps: Int,
+    val streetAlmostBps: Int,
+    val fFloor: Int,
+    val rsiHot: Double,
+    val nowCap: Int,
+    val laterCap: Int,
+)
+
 data class MacdHorizonSection(
     val align: Int,
     val flat: Int,
@@ -475,6 +485,7 @@ data class ValuationPolicyBook(
     val robustCentre: RobustCentreSection,
     val dip: DipSection,
     val leftover: LeftoverSection,
+    val cross: CrossSection,
     val macdHorizon: MacdHorizonSection,
     val pricePath: PricePathSection,
     val opportunity: OpportunitySection,
@@ -491,6 +502,9 @@ data class ValuationPolicyBook(
 
     fun withCoverageDefault(bps: Int): ValuationPolicyBook =
         copy(coverageCredit = coverageCredit.copy(defaultSpreadBps = bps))
+
+    fun withCrossFlippedBars(max: Int): ValuationPolicyBook =
+        copy(cross = cross.copy(flippedBarsMax = max))
 
     companion object {
         fun loadDefault(): ValuationPolicyBook {
@@ -537,6 +551,7 @@ data class ValuationPolicyBook(
             var robust = root.child("robust_centre")
             var dip = root.child("dip")
             var leftover = root.child("leftover")
+            var cross = root.child("cross")
             var macd = root.child("macd_horizon")
             var pricePath = root.child("price_path")
             var opportunity = root.child("opportunity")
@@ -775,6 +790,15 @@ data class ValuationPolicyBook(
                     rsiHot = leftover.double("rsi_hot"),
                     nowCap = leftover.int("now_cap"),
                     laterCap = leftover.int("later_cap"),
+                ),
+                cross = CrossSection(
+                    flippedBarsMax = cross.int("flipped_bars_max"),
+                    streetNowBps = cross.int("street_now_bps"),
+                    streetAlmostBps = cross.int("street_almost_bps"),
+                    fFloor = cross.int("f_floor"),
+                    rsiHot = cross.double("rsi_hot"),
+                    nowCap = cross.int("now_cap"),
+                    laterCap = cross.int("later_cap"),
                 ),
                 macdHorizon = MacdHorizonSection(
                     align = macd.int("align"),

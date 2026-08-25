@@ -97,6 +97,7 @@ enum class DashboardTab {
 
 enum class PlanHunt {
     Dip,
+    Cross,
     Leftover,
 }
 
@@ -261,9 +262,13 @@ data class DashboardUiState(
     val planBoardOpps: PlanBoardUi = presentPlanBoard(null),
     val planBoardProfile: PlanBoardUi = presentPlanBoard(null),
     val leftoverBoard: PlanBoardUi = presentLeftoverBoard(null),
+    val crossBoardOpps: PlanBoardUi = presentCrossBoard(null),
+    val crossBoardProfile: PlanBoardUi = presentCrossBoard(null),
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
+    val crossBoard: PlanBoardUi
+        get() = if (planDipUniverse == PlanDipUniverse.Opportunities) crossBoardOpps else crossBoardProfile
     /**
      * The open ticker's score: the ranked-list row when present, otherwise the fetched
      * selected row. Never show a score that belongs to a different symbol.
@@ -1352,6 +1357,8 @@ class DashboardViewModel(
             planBoardOpps = presentPlanBoard(snapshot.planBoard),
             planBoardProfile = presentPlanBoard(snapshot.planBoardProfile),
             leftoverBoard = presentLeftoverBoard(snapshot.leftoverBoard),
+            crossBoardOpps = presentCrossBoard(snapshot.crossBoard),
+            crossBoardProfile = presentCrossBoard(snapshot.crossBoardProfile),
         )
         rememberDetailSession(_state.value)
     }

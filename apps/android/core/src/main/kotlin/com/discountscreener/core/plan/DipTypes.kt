@@ -28,6 +28,7 @@ data class MacdTape(
 enum class MacdHorizonSense {
     DipTurn,
     LeftoverFade,
+    CrossFresh,
 }
 
 enum class DipModelQuality {
@@ -75,6 +76,7 @@ data class DipSetup(
     val rsi: Double?,
     val macdPhase: MacdPhase,
     val macdHorizonScore: Int = 0,
+    val barsSinceCross: Int? = null,
     val streetUpsideBps: Int?,
     val fundamentalsScore: Int?,
     val valuationRelation: AnchorRelation,

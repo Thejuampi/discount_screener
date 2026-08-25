@@ -270,6 +270,8 @@ data class DashboardSnapshot(
     val planBoard: PlanBoard? = null,
     val planBoardProfile: PlanBoard? = null,
     val leftoverBoard: PlanBoard? = null,
+    val crossBoard: PlanBoard? = null,
+    val crossBoardProfile: PlanBoard? = null,
 )
 
 data class TickerSearchSuggestion(

@@ -20,6 +20,7 @@ object MacdHorizonScore {
         return when (sense) {
             MacdHorizonSense.DipTurn -> dipScore(year, fiveYear)
             MacdHorizonSense.LeftoverFade -> leftoverScore(year, fiveYear)
+            MacdHorizonSense.CrossFresh -> crossScore(year, fiveYear)
         }
     }
 
@@ -39,6 +40,12 @@ object MacdHorizonScore {
     private fun leftoverScore(year: MacdTape, fiveYear: MacdTape): Int {
         if (isFade(year) && isFade(fiveYear)) return ALIGN
         if (isExpanding(fiveYear)) return DRAG
+        return FLAT
+    }
+
+    private fun crossScore(year: MacdTape, fiveYear: MacdTape): Int {
+        if (isExpanding(year) && isExpanding(fiveYear)) return ALIGN
+        if (fiveYear.histogram < 0.0 && fiveYear.histSlope <= 0.0) return DRAG
         return FLAT
     }
 

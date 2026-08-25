@@ -49,6 +49,26 @@ class PlanBoardMemoTest {
         assertNotSame(first, second)
     }
 
+    @Test
+    fun cross_unchanged_reuses_instance() {
+        var memo = PlanBoardMemo()
+        var inputs = listOf(row("EXPD", marketPriceCents = 12_000L))
+
+        var first = memo.crossProfile(inputs, universeName = "qa")
+        var second = memo.crossProfile(inputs, universeName = "qa")
+
+        assertSame(first, second)
+    }
+
+    @Test
+    fun cross_price_change_rebuilds() {
+        var memo = PlanBoardMemo()
+        var first = memo.crossProfile(listOf(row("EXPD", marketPriceCents = 12_000L)), universeName = "qa")
+        var second = memo.crossProfile(listOf(row("EXPD", marketPriceCents = 12_100L)), universeName = "qa")
+
+        assertNotSame(first, second)
+    }
+
     private fun row(symbol: String, marketPriceCents: Long) = DipRowInput(
         symbol = symbol,
         fundamentalsScore = 20,

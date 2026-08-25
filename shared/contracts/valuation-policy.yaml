@@ -331,6 +331,15 @@ leftover:
   now_cap: 120
   later_cap: 80
 
+cross:
+  flipped_bars_max: 3
+  street_now_bps: 2000
+  street_almost_bps: 1500
+  f_floor: 0
+  rsi_hot: 55.0
+  now_cap: 120
+  later_cap: 80
+
 macd_horizon:
   align: 3
   flat: 0

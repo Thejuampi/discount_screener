@@ -207,6 +207,7 @@ fun DashboardScreen(
                     dipUniverse = state.planDipUniverse,
                     dipBoard = state.planBoard,
                     leftoverBoard = state.leftoverBoard,
+                    crossBoard = state.crossBoard,
                     onAction = onAction,
                 )
                 DashboardTab.Opportunities -> {
