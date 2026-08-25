@@ -173,7 +173,7 @@ class OpportunityV4ContractTest {
      * A flag that fires on the whole population separates no case from any other, and writing it
      * into the expected signals of all of them would put Kotlin's output in a file whose whole
      * value is that it was derived by hand. The claim that it fires everywhere is not assumed:
-     * [the_coverage_flag_fires_on_every_case_in_this_file] asserts it.
+     * [the_coverage_flag_fires_on_every_reading_this_file_filters] asserts it.
      */
     private fun scoreOf(case: FundamentalsCase, benchmarks: SectorBenchmarks?): FundamentalsExpectation {
         var (score, signals) = evidenceOf(case, benchmarks)

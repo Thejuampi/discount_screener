@@ -1,5 +1,15 @@
 # Deferred Work
 
+## Deferred from: code review (2026-08-24)
+
+PR #48 Cross hunt vs `main` (`review_mode` no-spec).
+
+- **Valuation tag path copied into Cross.** `CrossSignalEngine.valuationTag` duplicates Dip/Leftover `ValuationDecisionPolicy` work. Tag only. Not a Now gate.
+- **`presentCard` two booleans.** `leftover` and `cross` flags. Almost Cross falls through to Dip “Almost”. A later hunt will stack more flags.
+
+Closed since: the V3 ranking rescore landed on `main` with both suites green, and the stale
+`OpportunityV4ContractTest` KDoc link now names `the_coverage_flag_fires_on_every_reading_this_file_filters`.
+
 ## 2026-08-16 — Honest path and Street stretch
 
 Source: [`handover-honest-path-street-stretch-2026-08-16.md`](handover-honest-path-street-stretch-2026-08-16.md)
