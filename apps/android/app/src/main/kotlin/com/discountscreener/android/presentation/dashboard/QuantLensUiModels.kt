@@ -429,40 +429,31 @@ private fun disputedPrimaryLine(
     if (modelBase == null || analystBase == null) return "Model and analyst $relationLabel · no single estimate"
     val modelUpside = marketPriceCents?.let { upsideBps(modelBase, it) }
     val analystUpside = marketPriceCents?.let { upsideBps(analystBase, it) }
-    return "Forecast is the analyst range ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}). Identity model ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) is a check · $relationLabel · no single estimate"
+    return "Forecast is the analyst range ${money(analystBase)} (${analystUpside?.let(::signedPercent) ?: "n/a"}). DCF model ${money(modelBase)} (${modelUpside?.let(::signedPercent) ?: "n/a"}) is a check · $relationLabel · no single estimate"
 }
 
 /**
- * The two families side by side, the named one first.
+ * The two families side by side, the model family first.
  *
- * The footer chip says which model produced the number. A section that chips "DCF and analyst" and
- * then heads its rows "Identity model" gives one number two names on one card, so a known DCF
- * family is named DCF here and leads. An unnamed family keeps the disputed wording, where the
- * primary line calls the analyst range the forecast and the model a check.
+ * The footer chip says which family produced the number, and a section that chips "DCF and analyst"
+ * and then heads its rows "Identity model" gives one number two names on one card.
+ *
+ * The name comes from the model anchors and never from [QuantLensExpectedValueRange.source]. That
+ * field is null on the disputed and tension bands — the policy returns those before it picks a
+ * source — and it says Analyst on a soft scenario range that still carries both families, so
+ * reading it named a DCF number "Identity model" on exactly the cards this row list exists for.
+ * `modelBaseFairValueCents` cannot lie about it: the policy fills the model anchors from the DCF
+ * analysis and from nothing else.
  */
 private fun disputedRows(
     section: QuantLensExpectedValueRange,
     marketPriceCents: Long?,
-): List<Pair<String, String>> {
-    var modelIsDcf = section.source == ExpectedValueRangeSource.Dcf
-    var modelBase = baseRow(
-        label = if (modelIsDcf) "DCF base" else "Identity model",
-        fairValueCents = section.modelBaseFairValueCents,
-        marketPriceCents = marketPriceCents,
-    )
-    var analystBase = baseRow("Analyst base", section.analystBaseFairValueCents, marketPriceCents)
-    var modelRange = rangeRow(
-        label = if (modelIsDcf) "DCF range" else "Identity range",
-        lowCents = section.modelLowFairValueCents,
-        highCents = section.modelHighFairValueCents,
-    )
-    var analystRange = rangeRow("Analyst range", section.analystLowFairValueCents, section.analystHighFairValueCents)
-    return if (modelIsDcf) {
-        listOfNotNull(modelBase, analystBase, modelRange, analystRange)
-    } else {
-        listOfNotNull(analystBase, modelBase, analystRange, modelRange)
-    }
-}
+): List<Pair<String, String>> = listOfNotNull(
+    baseRow("DCF base", section.modelBaseFairValueCents, marketPriceCents),
+    baseRow("Analyst base", section.analystBaseFairValueCents, marketPriceCents),
+    rangeRow("DCF range", section.modelLowFairValueCents, section.modelHighFairValueCents),
+    rangeRow("Analyst range", section.analystLowFairValueCents, section.analystHighFairValueCents),
+)
 
 private fun baseRow(label: String, fairValueCents: Long?, marketPriceCents: Long?): Pair<String, String>? {
     var base = fairValueCents ?: return null

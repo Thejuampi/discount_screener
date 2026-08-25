@@ -202,9 +202,8 @@ class AggressiveV4LeverageTest {
     @Test
     fun no_v4_fundamental_factor_is_constant_across_a_cohort() {
         var constantKeys = COHORT
-            .flatMap { OpportunityEngine.aggressiveV4FundamentalsScore(it, null).factors }
+            .flatMap { OpportunityEngine.aggressiveV4FundamentalsScore(it, null).termFactors() }
             .groupBy { it.key }
-            .filterKeys { it != FUND_COVERAGE_GAP_LABEL }
             .filterValues { readings ->
                 readings.size == COHORT.size && readings.distinctBy { it.bucketPoints }.size == 1
             }
@@ -292,7 +291,7 @@ class AggressiveV4LeverageTest {
             ),
         ),
         sectorBenchmarks(sectorNetDebtToEbitdaHundredths),
-    ).factors.single { it.key != FUND_COVERAGE_GAP_LABEL }.key
+    ).termFactors().single().key
 
     /** A benchmark set that carries a leverage centre and nothing else, so no other factor fires. */
     private fun sectorBenchmarks(netDebtToEbitdaHundredths: Int?) = netDebtToEbitdaHundredths?.let {

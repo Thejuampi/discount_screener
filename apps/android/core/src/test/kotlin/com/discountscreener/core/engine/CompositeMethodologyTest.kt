@@ -28,12 +28,18 @@ import kotlin.test.assertNotEquals
  * test, take the `ACTUAL` block it prints on failure, and paste it in — reviewing every moved line,
  * because each one is a score somebody sees.
  *
- * Regenerated once, for the commit that made the cash-flow term a yield. Twenty lines moved and all
- * twenty are AggressiveV3 with `fund=true`: `f` went 30 -> 23. The fixture below files no sector, so
- * the class policy reads it as `Unclassified` and the industrial FCF vote is refused for it, as is
- * cash conversion. The two weights leave both the numerator and the budget, and the terms that
- * remain report a lower level. Legacy, Aggressive and AggressiveV2 do not run that path and did not
- * move; no `fund=false` row moved.
+ * Regenerated once, in `3520c818`. Twenty lines moved and all twenty are AggressiveV3 with
+ * `fund=true`: `f` went 30 -> 23. Two engine changes produced that one number, and both are in the
+ * budget the terms are scored against.
+ *
+ *  * `f1dc81a8` made the cash-flow term a yield and added the class exemption. The fixture below
+ *    files no sector, so the policy reads it as `Unclassified`, the industrial FCF vote and cash
+ *    conversion are both refused, and their weights leave the numerator and the divisor together.
+ *  * `3520c818` gave V3 back the sixteen points of leverage budget that the exemption's old
+ *    `{ false }` default had been taking from a term V3 still voted.
+ *
+ * The divisor went 100 -> 52 under the first and 52 -> 68 under the second. Legacy, Aggressive and
+ * AggressiveV2 run neither path and did not move; no `fund=false` row moved.
  */
 class CompositeMethodologyTest {
 

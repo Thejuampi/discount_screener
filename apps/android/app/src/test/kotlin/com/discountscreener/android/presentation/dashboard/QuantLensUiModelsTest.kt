@@ -343,14 +343,22 @@ class QuantLensUiModelsTest {
 
         assertEquals("Disputed", section.chip.label)
         assertTrue(section.primaryLine.contains("no single estimate"))
-        assertTrue(section.rows.any { it.first == "Identity model" })
+        assertTrue(section.rows.any { it.first == "DCF base" })
         assertTrue(section.rows.any { it.first == "Analyst base" })
         assertEquals(null, section.evRailModel)
         assertTrue(section.footerChips.contains("Sources disagree"))
     }
 
+    /**
+     * The disputed band is where the card used to name a DCF number "Identity model".
+     *
+     * The policy returns this band before it picks a source, so `source` is null here. Naming the
+     * family off that field printed the unnamed wording under a footer chip that said "DCF and
+     * analyst". The rows and the primary line are asserted together because the defect was that
+     * the two halves of one card disagreed.
+     */
     @Test
-    fun ev_section_disputed_lists_analyst_before_the_identity_model() {
+    fun the_disputed_card_names_the_model_family_dcf_in_the_rows_and_in_the_line() {
         val ev = QuantLensExpectedValueRange(
             primaryStatus = QuantLensPrimaryStatus.Disputed,
             band = ExpectedValueRangeBand.Disputed,
@@ -366,7 +374,10 @@ class QuantLensUiModelsTest {
         val section = mapQuantLensReport(report(expectedValueRange = ev), 23_977L)!!
             .sections
             .first { it.lensId == QuantLensLensId.ExpectedValueRange }
-        assertEquals("Analyst base", section.rows.first().first)
+        assertEquals(
+            "rows=DCF base line=DCF model",
+            "rows=${section.rows.first().first} line=${if ("DCF model" in section.primaryLine) "DCF model" else section.primaryLine}",
+        )
     }
 
     @Test

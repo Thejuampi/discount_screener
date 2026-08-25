@@ -66,20 +66,25 @@ class OpportunityV4ContractTest {
      * The filter is only sound while the flag says nothing about a case, and that holds because it
      * fires on all of them. This asserts it, so a flag that stopped firing — or fired on a subset —
      * fails here rather than passing silently through a filter that then hides a real difference.
+     *
+     * Every reading the filter touches is checked, and [scoreOf] runs twice for a case that
+     * declares an absolute fallback. Checking only the benchmark reading would leave the other one
+     * filtered with nothing behind it.
      */
     @Test
-    fun the_coverage_flag_fires_on_every_case_in_this_file() {
-        assertEquals(emptyList(), contract.fundamentalsCases.filterNot(::raisesCoverageFlag).map { it.name })
+    fun the_coverage_flag_fires_on_every_reading_this_file_filters() {
+        assertEquals(emptyList(), contract.fundamentalsCases.flatMap(::readingsWithoutCoverageFlag))
     }
 
-    private fun raisesCoverageFlag(case: FundamentalsCase): Boolean = OpportunityEngine
-        .aggressiveV4FundamentalsScore(
-            detail = detailOf(case.fundamentals),
-            sectorBenchmarks = case.sectorBenchmarks?.toBenchmarks(),
-            timeseries = timeseriesOf(case),
-        )
-        .signals
-        .contains(FUND_COVERAGE_GAP_LABEL)
+    private fun readingsWithoutCoverageFlag(case: FundamentalsCase): List<String> = benchmarkReadings(case)
+        .filterNot { (_, benchmarks) -> evidenceOf(case, benchmarks).signals.contains(FUND_COVERAGE_GAP_LABEL) }
+        .map { (reading, _) -> "${case.name} [$reading]" }
+
+    /** The benchmark configurations [fundamentalsDisagreements] scores this case under. */
+    private fun benchmarkReadings(case: FundamentalsCase): List<Pair<String, SectorBenchmarks?>> = buildList {
+        add("with benchmarks" to case.sectorBenchmarks?.toBenchmarks())
+        if (case.expectedWithoutBenchmarks != null) add("absolute fallback" to null)
+    }
 
     /** Null when the case matches; otherwise a line naming the case and both readings. */
     private fun compositeDisagreement(case: CompositeCase): String? {
@@ -171,13 +176,16 @@ class OpportunityV4ContractTest {
      * [the_coverage_flag_fires_on_every_case_in_this_file] asserts it.
      */
     private fun scoreOf(case: FundamentalsCase, benchmarks: SectorBenchmarks?): FundamentalsExpectation {
-        var (score, signals) = OpportunityEngine.aggressiveV4FundamentalsScore(
+        var (score, signals) = evidenceOf(case, benchmarks)
+        return FundamentalsExpectation(score = score, signals = signals.filter { it != FUND_COVERAGE_GAP_LABEL })
+    }
+
+    private fun evidenceOf(case: FundamentalsCase, benchmarks: SectorBenchmarks?) = OpportunityEngine
+        .aggressiveV4FundamentalsScore(
             detail = detailOf(case.fundamentals),
             sectorBenchmarks = benchmarks,
             timeseries = timeseriesOf(case),
         )
-        return FundamentalsExpectation(score = score, signals = signals.filter { it != FUND_COVERAGE_GAP_LABEL })
-    }
 
     private fun detailOf(input: FundamentalsInput) = SymbolDetail(
         symbol = SYMBOL,

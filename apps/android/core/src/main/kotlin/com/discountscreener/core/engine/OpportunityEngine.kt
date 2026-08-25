@@ -1814,24 +1814,29 @@ object OpportunityEngine {
         }
 
     /**
-     * [leverageVotes] is null for a model that carries no leverage term, and V3 is that model.
+     * Takes off the budget the weights of the terms this row's class cannot answer.
      *
-     * It used to default to `{ false }`, which reads as "no class votes leverage" and took
-     * [V4_FUND_LEVERAGE_WEIGHT] off V3's budget on every call. V3 still voted its balance sheet at
-     * that weight, so the term was scored out of a budget it had been removed from: every V3 term
-     * paid 100/84 of its share and the level rose across the board.
+     * A weight may only leave the budget when the term also leaves the numerator. The FCF and cash
+     * quality pair holds that: [industrialFcfRefusalLabel] refuses both votes for the same classes
+     * this exempts them for.
+     *
+     * [leverageVotes] defaults to "every class votes", which is what a model whose leverage term
+     * has no class rule needs. V3 is that model: it votes its balance sheet at
+     * [V3_FUND_BALANCE_WEIGHT] for every class, and that constant is [V4_FUND_LEVERAGE_WEIGHT].
+     * The default used to be `{ false }`, so V3 lost sixteen points of budget for a term it still
+     * voted — every V3 term paid 100/84 of its share and the level rose across the board.
      */
     private fun applyClassExemptions(
         acc: EvidenceAccumulator,
         fundamentals: FundamentalSnapshot,
-        leverageVotes: ((BusinessClass) -> Boolean)? = null,
+        leverageVotes: (BusinessClass) -> Boolean = { true },
     ) {
         var businessClass = FinancialClassPolicy.classify(fundamentals)
         if (businessClass != BusinessClass.OperatingNonFinancial) {
             acc.exemptClassTerm(V3_FUND_FCF_WEIGHT)
             acc.exemptClassTerm(V3_FUND_CASH_QUALITY_WEIGHT)
         }
-        if (leverageVotes != null && !leverageVotes(businessClass)) {
+        if (!leverageVotes(businessClass)) {
             acc.exemptClassTerm(V4_FUND_LEVERAGE_WEIGHT)
         }
     }

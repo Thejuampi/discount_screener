@@ -178,6 +178,34 @@ class MarketDimensionRankingTest {
     }
 
     /**
+     * The anchor under [V3_LEVEL], and the thing that says what a moved level means.
+     *
+     * A composite pin recorded off a green run can catch a change and cannot catch a wrongness —
+     * paste in a reading from a build that is wrong in a way nobody noticed and it agrees. This
+     * splits the pin into the half that is the model's arithmetic and the half that is the market.
+     * The three buckets are identical for all seventeen names, by the fixture's design: it gives
+     * every symbol the same fundamentals and the same candles on purpose. So one number, 39, is the
+     * whole fundamentals reading of [V3_LEVEL], and the spread from 44 down to 40 in that list is
+     * the beta haircut and nothing else.
+     *
+     * That is what makes the split in [V3_LEVEL] readable: a term that moves moves `f` for every
+     * row at once, and the haircut then scales one uniform delta into a one-point drop on some rows
+     * and a two-point drop on others.
+     */
+    @Test
+    fun every_v3_row_reads_the_same_three_buckets() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                List(V3_LEVEL.size) { "f=39 t=12 fc=null cov=3" },
+                snapshot(repository, OpportunityScoringModel.AggressiveV3).opportunityRows.map { row ->
+                    "f=${row.fundamentalsScore} t=${row.technicalScore} " +
+                        "fc=${row.forecastScore} cov=${row.coverageCount}"
+                },
+            )
+        }
+    }
+
+    /**
      * The journal is only worth having if something writes to it. A perfect table that nothing
      * calls looks identical, from the store's own tests, to a table that works.
      *
@@ -441,9 +469,12 @@ class MarketDimensionRankingTest {
          * `AggressiveV3ScoringTest` and left this level pin on the old numbers, so the gate was red
          * from the day it landed.
          *
-         * Every one of the seventeen fell, by one point or two, from the 45/44/43/42 of the commit
-         * before. Every symbol carries identical fundamentals here, so a term that changes for the
-         * whole fixture moves the level together and the order settles on `upsideBps`.
+         * Every one of the seventeen fell from the 45/44/43/42 of the commit before: seven by two
+         * points and ten by one. The split is not a split in the model. [every_v3_row_reads_the_same_three_buckets]
+         * pins the reason — all seventeen rows read `f=39 t=12 fc=null cov=3`, so the fundamentals
+         * term moved by one amount for the whole fixture and the beta haircut scaled that one
+         * amount into a one-point drop on some rows and a two-point drop on others. The order below
+         * is the haircut's too, which is why it is not the order of the old pin.
          *
          * This pin was recorded twice. The first reading — 46/45/44/43, one point *above* the old
          * level — was taken while `applyClassExemptions` still defaulted its leverage predicate to

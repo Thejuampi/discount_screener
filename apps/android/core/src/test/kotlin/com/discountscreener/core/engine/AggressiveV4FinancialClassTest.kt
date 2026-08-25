@@ -13,8 +13,13 @@ import kotlin.test.assertTrue
  * own filing carries hundreds of billions of deposits; scored as an operating company it pins the
  * bottom of the band on them.
  *
- * The gate is an allowlist on Yahoo's sector key, so an unclassified sector keeps today's
- * behaviour — fail-open to the current rule, never to a guess.
+ * The leverage gate reads the canonical class and only [BusinessClass.FinancialServices] loses the
+ * EBITDA vote, so an unclassified row keeps it.
+ *
+ * The cash gate is stricter and fails closed. An unclassified row cannot answer an industrial FCF
+ * yield either, so `industrialFcfRefusalLabel` refuses that vote and the cash conversion vote for
+ * it, and `applyClassExemptions` takes both weights — 32 points — off its budget. Sizing the blast
+ * radius of a sector-key change means counting that row as losing two terms.
  */
 class AggressiveV4FinancialClassTest {
 
@@ -89,9 +94,9 @@ class AggressiveV4FinancialClassTest {
      * The gate removes the terms a bank cannot answer and leaves the rest. Return on equity — the
      * ratio that actually ranks banks — still scores, here pinned at the top of its absolute band.
      *
-     * 26, not the 15 of the days before the class exemption. A bank now has the FCF (22), cash
-     * quality (10) and leverage (16) weights taken off its budget, so V4's 110 becomes 62 and the
-     * ROE weight of 16 is a larger share of what is left: 16 / 62 × 100 rather than 16 / 110 × 100.
+     * A bank has the FCF (22), cash quality (10) and leverage (16) weights taken off its budget, so
+     * V4's 110 becomes 62 and the ROE weight of 16 is that much larger a share of what is left:
+     * 16 / 62 × 100, pinned at the top of the band, is 26.
      */
     @Test
     fun a_bank_still_scores_its_return_on_equity() {
