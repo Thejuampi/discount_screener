@@ -67,8 +67,20 @@ data class DiscoverySnapshot(
 /** Parses recreate job summary fields `added=N` / `removed=N`. */
 fun parseDiscoveryMembershipDelta(errorSummary: String?): Pair<Int, Int>? {
     if (errorSummary.isNullOrBlank()) return null
-    val added = Regex("""added=(\d+)""").find(errorSummary)?.groupValues?.get(1)?.toIntOrNull()
-    val removed = Regex("""removed=(\d+)""").find(errorSummary)?.groupValues?.get(1)?.toIntOrNull()
+    var added = numberAfter(errorSummary, "added=")
+    var removed = numberAfter(errorSummary, "removed=")
     if (added == null || removed == null) return null
     return added to removed
+}
+
+private fun numberAfter(text: String, marker: String): Int? {
+    var start = text.indexOf(marker)
+    while (start >= 0) {
+        var digitsStart = start + marker.length
+        var end = digitsStart
+        while (end < text.length && text[end] in '0'..'9') end++
+        if (end > digitsStart) return text.substring(digitsStart, end).toIntOrNull()
+        start = text.indexOf(marker, start + 1)
+    }
+    return null
 }

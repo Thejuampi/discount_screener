@@ -143,8 +143,17 @@ open class MarketDataRepository(
             }
             // Only a usable reading is kept, and only its bars are stored. A round that failed
             // hard enough to be unusable is a round whose bars are as likely to be partial.
+            // Persist one chunk and drop it so a 501-name universe does not keep every year of
+            // bars in RAM until the last write returns.
             if (usable) {
-                dailyCandleSink?.persistBacktestCandles(fetched.candlesBySymbol, now)
+                var sink = dailyCandleSink
+                if (sink != null) {
+                    fetched.candleChunks.forEach { chunk ->
+                        if (chunk.isNotEmpty()) {
+                            sink.persistBacktestCandles(chunk, now)
+                        }
+                    }
+                }
             }
         } finally {
             // A cancelled read must still let the next one in; a cancelled coroutine cannot take
@@ -178,19 +187,28 @@ open class MarketDataRepository(
      * request per symbol rather than a reuse of the summary the dashboard already holds.
      */
     private suspend fun fetchUniverse(symbols: List<String>): UniverseFetch {
-        val fetched = fetchConcurrently(symbols) { symbol ->
-            val candles = dailyCandlesOrEmpty(symbol, YEAR_RANGE)
-            SymbolDailyView(
-                symbol = symbol,
-                summary = candles.takeIf { it.isNotEmpty() }
-                    ?.let { ChartAnalysis.buildSummary(ChartRange.Year, it, nowEpochSeconds()) },
-                closes = closesOf(candles),
-            ) to candles
+        val views = ArrayList<SymbolDailyView>(symbols.size)
+        val candleChunks = ArrayList<Map<String, List<HistoricalCandle>>>(
+            (symbols.size + UNIVERSE_PERSIST_CHUNK - 1) / UNIVERSE_PERSIST_CHUNK,
+        )
+        symbols.chunked(UNIVERSE_PERSIST_CHUNK).forEach { chunk ->
+            val fetched = fetchConcurrently(chunk) { symbol ->
+                val candles = dailyCandlesOrEmpty(symbol, YEAR_RANGE)
+                SymbolDailyView(
+                    symbol = symbol,
+                    summary = candles.takeIf { it.isNotEmpty() }
+                        ?.let { ChartAnalysis.buildSummary(ChartRange.Year, it, nowEpochSeconds()) },
+                    closes = closesOf(candles),
+                ) to candles
+            }
+            views.addAll(fetched.map { it.first })
+            candleChunks.add(
+                fetched.filter { it.second.isNotEmpty() }.associate { it.first.symbol to it.second },
+            )
         }
         return UniverseFetch(
-            views = fetched.map { it.first },
-            candlesBySymbol = fetched.filter { it.second.isNotEmpty() }
-                .associate { it.first.symbol to it.second },
+            views = views,
+            candleChunks = candleChunks,
         )
     }
 
@@ -200,7 +218,7 @@ open class MarketDataRepository(
      */
     private class UniverseFetch(
         val views: List<SymbolDailyView>,
-        val candlesBySymbol: Map<String, List<HistoricalCandle>>,
+        val candleChunks: List<Map<String, List<HistoricalCandle>>>,
     )
 
     /** One symbol failing costs its pillar a sample; it must not cost the whole reading. */
@@ -238,5 +256,12 @@ open class MarketDataRepository(
 
         /** Matches the dashboard's own refresh concurrency, so the two do not gang up on Yahoo. */
         const val MARKET_FETCH_CONCURRENCY = 4
+
+        /**
+         * Symbols whose daily bars stay in RAM together. 90 names in one map is what the store
+         * already writes in one transaction; smaller than that so the emulator can drop a year
+         * of bars before the next Yahoo round.
+         */
+        const val UNIVERSE_PERSIST_CHUNK = 40
     }
 }

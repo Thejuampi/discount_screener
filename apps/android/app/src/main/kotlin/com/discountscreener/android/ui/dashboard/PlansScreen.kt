@@ -107,11 +107,13 @@ fun PlansScreen(
                     )
                 }
             }
-            Text(
-                text = board.universeLine,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            board.universeLine?.let { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             board.offRadarLine?.let { line ->
                 Text(
                     text = line,

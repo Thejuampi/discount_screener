@@ -261,6 +261,19 @@ class MarketDataRepositoryTest {
     }
 
     /**
+     * Holding a year of daily bars for every tracked name until the last fetch lands is what
+     * filled two gigabytes on the emulator after the 501/501 spinner dropped. Persist each
+     * chunk and drop it.
+     */
+    @Test
+    fun a_universe_of_many_names_persists_bars_in_more_than_one_chunk() = runTest {
+        var sink = RecordingCandleSink()
+        repository(sink = sink).refreshIfStale(tickers())
+
+        assertEquals(true, sink.callCount > 1)
+    }
+
+    /**
      * A round that failed hard enough to be unusable is a round whose bars are as likely partial,
      * and a partial year written into the retrospective is worse than a missing day.
      */
@@ -299,7 +312,7 @@ class MarketDataRepositoryTest {
             capturedAtEpochSeconds: Long,
         ): Int {
             callCount += 1
-            stored = candlesBySymbol
+            stored = stored + candlesBySymbol
             return 0
         }
     }

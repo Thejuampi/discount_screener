@@ -24,7 +24,7 @@ data class PlanBoardUi(
     val huntLabel: String,
     val countsLine: String,
     val offRadarLine: String?,
-    val universeLine: String,
+    val universeLine: String?,
     val nowTitle: String,
     val laterTitle: String,
     val now: List<PlanCardUi>,
@@ -34,16 +34,38 @@ data class PlanBoardUi(
     val emptyNowDetail: String,
 )
 
+/**
+ * A board the refresh has not built yet.
+ *
+ * A blocked board is not a scanned universe with no hit. Saying "no name meets the rule" for
+ * a board that scanned nothing states a result the app never measured.
+ */
+private fun pendingBoard(huntLabel: String, nowTitle: String, laterTitle: String) = PlanBoardUi(
+    huntLabel = huntLabel,
+    countsLine = "Not scored yet",
+    offRadarLine = null,
+    universeLine = null,
+    nowTitle = nowTitle,
+    laterTitle = laterTitle,
+    now = emptyList(),
+    later = emptyList(),
+    emptyNow = true,
+    emptyNowTitle = "Waiting for the refresh",
+    emptyNowDetail = "This board reads the data the refresh is loading. It is built when the " +
+        "refresh ends.",
+)
+
 fun presentSelectedDipBoard(
-    opportunities: PlanBoard,
-    profile: PlanBoard,
+    opportunities: PlanBoard?,
+    profile: PlanBoard?,
     universe: PlanDipUniverse,
 ): PlanBoardUi {
     var board = if (universe == PlanDipUniverse.Opportunities) opportunities else profile
     return presentPlanBoard(board)
 }
 
-fun presentPlanBoard(board: PlanBoard): PlanBoardUi {
+fun presentPlanBoard(board: PlanBoard?): PlanBoardUi {
+    if (board == null) return pendingBoard("DIP HUNTER", "NOW · DIP", "ALMOST · REVIEW")
     var offRadar = if (board.offRadarAlmost > 0) {
         "${board.offRadarAlmost} more almost off radar"
     } else {
@@ -64,7 +86,8 @@ fun presentPlanBoard(board: PlanBoard): PlanBoardUi {
     )
 }
 
-fun presentLeftoverBoard(board: PlanBoard): PlanBoardUi {
+fun presentLeftoverBoard(board: PlanBoard?): PlanBoardUi {
+    if (board == null) return pendingBoard("LEFTOVER REVIEW", "PRIMARY · FADE", "REVIEW · AT TARGET")
     var offRadar = if (board.offRadarAlmost > 0) {
         "${board.offRadarAlmost} more at target off radar"
     } else {

@@ -6,6 +6,8 @@ import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.core.engine.NamedFiler
 import com.discountscreener.core.engine.XbrlDimensionalFacts
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
@@ -24,6 +26,7 @@ private const val EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
+private const val TEN_K_FETCH_CONCURRENCY = 2
 
 class SecIssuerComponentClient(
     private val cacheDir: File? = null,
@@ -38,14 +41,22 @@ class SecIssuerComponentClient(
     @Volatile
     private var tickerToCik: Map<String, String>? = null
 
+    // A 10-K fetch and its two-pass streaming parse are heavy on network and CPU. An enrichment
+    // round can ask for this many symbols at once at the caller's own fan-out limit; that limit is
+    // sized for a Yahoo quote, not this. Capped here so a cold cache does not run that many of
+    // these at the same time.
+    private val tenKFetchPermits = Semaphore(TEN_K_FETCH_CONCURRENCY)
+
     override suspend fun lookup(symbol: String, companyName: String?): IssuerComponentSet? =
         withContext(Dispatchers.IO) {
             try {
-                var xml = loadTenKXml(symbol) ?: return@withContext null
-                var facts = XbrlDimensionalFacts.parse(xml)
-                if (facts.isEmpty()) return@withContext null
-                var finance = companyName?.let { name -> loadFinanceDrivers(name) }
-                IssuerComponentAssembler.fromParentFacts(facts, finance)
+                tenKFetchPermits.withPermit {
+                    var file = loadTenKFile(symbol) ?: return@withContext null
+                    var facts = XbrlDimensionalFacts.parse { file.reader() }
+                    if (facts.isEmpty()) return@withContext null
+                    var finance = companyName?.let { name -> loadFinanceDrivers(name) }
+                    IssuerComponentAssembler.fromParentFacts(facts, finance)
+                }
             } catch (_: Exception) {
                 null
             }
@@ -58,17 +69,40 @@ class SecIssuerComponentClient(
         return IssuerComponentAssembler.financeFromResidualFacts(slim, "subsidiary_companyfacts:${pick.cik}")
     }
 
-    private fun loadTenKXml(symbol: String): String? {
+    private fun loadTenKFile(symbol: String): File? {
         var cik = resolveCik(symbol) ?: return null
-        var cacheName = "CIK$cik.10k-instance.xml"
-        return cachedText(cacheName) {
-            var accession = latestTenKAccession(cik) ?: return@cachedText null
-            var accDir = accession.replace("-", "")
-            var cikNum = cik.trimStart('0').ifBlank { "0" }
-            var indexUrl = "$ARCHIVES_URL$cikNum/$accDir/index.json"
-            var indexBody = getText(indexUrl) ?: return@cachedText null
-            var xmlName = instanceXmlName(indexBody) ?: return@cachedText null
-            getText("$ARCHIVES_URL$cikNum/$accDir/$xmlName")
+        var dir = cacheDir ?: File(System.getProperty("java.io.tmpdir"))
+        var file = File(dir, "CIK$cik.10k-instance.xml")
+        if (file.isFile && System.currentTimeMillis() - file.lastModified() < ttlMillis) return file
+        var accession = latestTenKAccession(cik) ?: return null
+        var accDir = accession.replace("-", "")
+        var cikNum = cik.trimStart('0').ifBlank { "0" }
+        var indexBody = getText("$ARCHIVES_URL$cikNum/$accDir/index.json") ?: return null
+        var xmlName = instanceXmlName(indexBody) ?: return null
+        return downloadToFile("$ARCHIVES_URL$cikNum/$accDir/$xmlName", file)
+    }
+
+    private fun downloadToFile(url: String, target: File): File? {
+        return try {
+            var request = Request.Builder()
+                .url(url)
+                .header("User-Agent", SEC_USER_AGENT)
+                .header("Accept-Encoding", "identity")
+                .build()
+            client.newCall(request).execute().use { response ->
+                var body = response.body
+                if (!response.isSuccessful || body == null) return@use null
+                target.parentFile?.mkdirs()
+                var tmp = File(target.parentFile, target.name + ".part")
+                tmp.outputStream().use { out -> body.byteStream().copyTo(out) }
+                if (!tmp.renameTo(target)) {
+                    target.delete()
+                    if (!tmp.renameTo(target)) return@use null
+                }
+                target
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -107,11 +141,21 @@ class SecIssuerComponentClient(
                 var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
                 var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
                     ?: continue
-                var clean = name.replace(Regex("""\s+\(CIK.*"""), "").trim()
+                var clean = stripCikSuffix(name)
                 found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
             }
         }
         return found.values.toList()
+    }
+
+    // Cut a "  (CIK 0000320193)" tail: the first "(CIK" that a whitespace char precedes.
+    private fun stripCikSuffix(name: String): String {
+        var at = name.indexOf("(CIK")
+        while (at > 0) {
+            if (name[at - 1].isWhitespace()) return name.substring(0, at).trim()
+            at = name.indexOf("(CIK", at + 1)
+        }
+        return name.trim()
     }
 
     private fun loadSievedFacts(cik: String): String? {
