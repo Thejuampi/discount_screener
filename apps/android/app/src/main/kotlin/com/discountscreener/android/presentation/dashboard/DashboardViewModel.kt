@@ -258,9 +258,9 @@ data class DashboardUiState(
     val marketRegime: MarketRegimeUi = presentMarketRegime(null, MarketReadStatus.Pending),
     val planHunt: PlanHunt = PlanHunt.Dip,
     val planDipUniverse: PlanDipUniverse = PlanDipUniverse.Opportunities,
-    val planBoardOpps: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
-    val planBoardProfile: PlanBoardUi = presentPlanBoard(PlanBoard.EMPTY),
-    val leftoverBoard: PlanBoardUi = presentLeftoverBoard(PlanBoard.EMPTY),
+    val planBoardOpps: PlanBoardUi = presentPlanBoard(null),
+    val planBoardProfile: PlanBoardUi = presentPlanBoard(null),
+    val leftoverBoard: PlanBoardUi = presentLeftoverBoard(null),
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile

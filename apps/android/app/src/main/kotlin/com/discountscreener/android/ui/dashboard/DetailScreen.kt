@@ -878,17 +878,6 @@ private fun SnapshotContent(
         }
 
         item {
-            DetailScoreHeader(
-                route = route,
-                scoreRow = scoreRow,
-                scoringModel = scoringModel,
-                regimeScoringEnabled = regimeScoringEnabled,
-                symbolNote = symbolNote,
-                onAction = onAction,
-            )
-        }
-
-        item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ChartRange.entries.forEach { range ->
                     FilterChip(

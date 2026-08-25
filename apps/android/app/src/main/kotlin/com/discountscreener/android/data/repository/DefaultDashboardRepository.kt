@@ -262,6 +262,13 @@ private data class QuantLensCacheEntry(
     val result: ComputationResult<QuantLensReport>,
 )
 
+/** The three plan boards of one build. They are built together and they are held together. */
+private data class PlanBoards(
+    val dip: PlanBoard,
+    val profile: PlanBoard,
+    val leftover: PlanBoard,
+)
+
 private data class ProfileSwitchRequest(
     val generation: Long,
     val profile: String,
@@ -383,6 +390,9 @@ class DefaultDashboardRepository(
     private val dipSetups = DipSetupMemo(DipSignalEngine::evaluate)
     private val leftoverSetups = DipSetupMemo(LeftoverSignalEngine::evaluate)
     private val planBoardMemo = PlanBoardMemo()
+
+    /** The last build, read back for the length of a load. See [planBoardsLocked]. */
+    private var heldPlanBoards: PlanBoards? = null
     private val dcfCache = linkedMapOf<String, DcfAnalysis>()
     private val issuerYieldBySymbol = linkedMapOf<String, IssuerYieldPoint>()
     private val componentsBySymbol = linkedMapOf<String, IssuerComponentSet>()
@@ -1979,6 +1989,7 @@ class DefaultDashboardRepository(
             memberInputs = built
             return built
         }
+        var boards = planBoardsLocked(opportunityRows, ::profileMemberInputs)
         var projectedSelectedDetail = screenData.selectedDetail
         selectedDetail = projectedSelectedDetail?.detail ?: selectedDetail
         if (projectedSelectedDetail != null && normalizedSelectedSymbol != null) {
@@ -2082,48 +2093,66 @@ class DefaultDashboardRepository(
                 marketDataRepository == null || marketReadAttempted -> MarketReadStatus.Unavailable
                 else -> MarketReadStatus.Pending
             },
-            planBoard = if (skipBoardsDuringLoadLocked()) {
-                PlanBoard.EMPTY
-            } else {
-                timedPart("snapshot.planBoard") { planBoardMemo.dipOpportunities(
-                    rows = opportunityRows,
-                    yearCandlesBySymbol = opportunityRows.associate { row ->
-                        row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
-                    },
-                    fiveYearCandlesBySymbol = opportunityRows.associate { row ->
-                        row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
-                    },
-                    dcfBySymbol = dcfCache.toMap(),
-                ) }
-            },
-            planBoardProfile = if (skipBoardsDuringLoadLocked()) {
-                PlanBoard.EMPTY
-            } else {
-                timedPart("snapshot.planBoardProfile") { planBoardMemo.dipProfile(
-                    inputs = profileMemberInputs(),
-                    universeName = currentProfile,
-                    evaluate = dipSetups::setup,
-                ) }
-            },
-            leftoverBoard = if (skipBoardsDuringLoadLocked()) {
-                PlanBoard.EMPTY
-            } else {
-                timedPart("snapshot.leftoverBoard") { planBoardMemo.leftover(
-                    inputs = profileMemberInputs(),
-                    universeName = currentProfile,
-                    evaluate = leftoverSetups::setup,
-                ) }
-            },
+            planBoard = boards?.dip,
+            planBoardProfile = boards?.profile,
+            leftoverBoard = boards?.leftover,
         )
     }
 
     /**
-     * The profile plan board scores every name the list dropped. Under a load that is 1.4 s of
-     * CPU on the same mutex the refresh needs, every eight rows. The Opportunities list does not
-     * read those boards, so they wait until the first refresh has ended ([DashboardStartupPhase.Ready]).
+     * The three plan boards, or null while the price refresh holds the data they read.
+     *
+     * The profile board scores every name the list dropped. Under the price refresh that is 1.4 s
+     * of CPU on the same mutex the refresh needs, every eight rows. The Opportunities list does not
+     * read these boards, so they wait until the price refresh has ended
+     * ([DashboardStartupPhase.Ready]).
+     *
+     * The gate counts the price refresh alone. `loadRunning` also counts the enrichment, which
+     * fetches statements for every name and runs for minutes after the prices land. Under that gate
+     * the boards were never built at all and the Plans screen stayed blocked on a profile the size
+     * of `sp500`.
+     *
+     * The enrichment emits a snapshot every few rows. Building the boards on each of those emits
+     * costs about 2 s over an `sp500` load, so the enrichment gets one build and reads it back
+     * until it ends. The reading it holds is real: the boards were built from the rows this load
+     * had at that moment, and the enrichment adds statements, which the next build reads.
      */
-    private fun skipBoardsDuringLoadLocked(): Boolean =
-        loadRunning.value || startupPhase != DashboardStartupPhase.Ready
+    private fun planBoardsLocked(
+        opportunityRows: List<OpportunityListRow>,
+        profileMemberInputs: () -> List<DipRowInput>,
+    ): PlanBoards? {
+        if (refreshPassesRunning > 0 || startupPhase != DashboardStartupPhase.Ready) {
+            return null
+        }
+        var held = heldPlanBoards
+        if (held != null && loadRunning.value) {
+            return held
+        }
+        var built = PlanBoards(
+            dip = timedPart("snapshot.planBoard") { planBoardMemo.dipOpportunities(
+                rows = opportunityRows,
+                yearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
+                },
+                fiveYearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
+                },
+                dcfBySymbol = dcfCache.toMap(),
+            ) },
+            profile = timedPart("snapshot.planBoardProfile") { planBoardMemo.dipProfile(
+                inputs = profileMemberInputs(),
+                universeName = currentProfile,
+                evaluate = dipSetups::setup,
+            ) },
+            leftover = timedPart("snapshot.leftoverBoard") { planBoardMemo.leftover(
+                inputs = profileMemberInputs(),
+                universeName = currentProfile,
+                evaluate = leftoverSetups::setup,
+            ) },
+        )
+        heldPlanBoards = built
+        return built
+    }
 
     private fun profileMemberInputsLocked(
         opportunityRows: List<OpportunityListRow>,
@@ -3514,6 +3543,11 @@ class DefaultDashboardRepository(
     }
 
     private fun applyTransitionLocked(feedback: ProfileTransitionFeedback) {
+        // A board built for the profile this transition leaves says nothing about the one it
+        // enters, and a board built before a refresh reads the prices that refresh replaced.
+        if (feedback.startupPhase != DashboardStartupPhase.Ready) {
+            heldPlanBoards = null
+        }
         startupPhase = feedback.startupPhase
         refreshCompletedSymbols = feedback.refreshCompletedSymbols
         refreshTargetSymbols = feedback.refreshTargetSymbols

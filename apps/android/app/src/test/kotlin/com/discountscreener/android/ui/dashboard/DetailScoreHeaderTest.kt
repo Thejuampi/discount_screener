@@ -33,6 +33,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Opening a ticker must answer "what is this scored, and under which model" without a trip back to
@@ -67,6 +68,22 @@ class DetailScoreHeaderTest {
         setDetailContent(scoreRow = scoreRow(composite = 42), subtab = DetailSubtab.Lens)
 
         composeRule.onNodeWithText("Score 42").assertDoesNotExist()
+    }
+
+    /**
+     * Snapshot drew the header twice: once above the forecast section and once below it. A reader
+     * met two model selectors on one screen and no way to tell which one the score followed.
+     *
+     * The tall viewport is what makes this bind. A `LazyColumn` composes what fits, so on a phone
+     * screen the second header was never in the semantics tree and a count of one was true of a
+     * screen that carries two.
+     */
+    @Test
+    @Config(qualifiers = "w411dp-h4000dp")
+    fun the_snapshot_tab_draws_the_score_header_once() {
+        setDetailContent(scoreRow = scoreRow(composite = 42))
+
+        composeRule.onAllNodesWithText("Legacy").assertCountEquals(1)
     }
 
     @Test
@@ -168,7 +185,7 @@ class DetailScoreHeaderTest {
             subtab = DetailSubtab.Score,
         )
 
-        composeRule.onNodeWithText("F -22 · Weak").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Fundamentals -22 · Weak").performScrollTo().assertIsDisplayed()
     }
 
     @Test
