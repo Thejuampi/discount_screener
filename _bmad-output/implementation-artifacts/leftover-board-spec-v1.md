@@ -90,7 +90,7 @@ Total order, then cap. Never sort by Σ. Never sort by DCF. Never sort by fade-f
 
 ## UI
 
-Plans hunt tabs: Dip | Leftover. Session-only. Default Dip.
+Plans hunt tabs: Dip | Cross | Leftover. Session-only. Default Dip. Cross is a separate hunt: `_bmad-output/implementation-artifacts/cross-board-spec-v1.md`.
 
 Compose is a passive View. All leftover rules live in `:core` `LeftoverSignalEngine`.
 

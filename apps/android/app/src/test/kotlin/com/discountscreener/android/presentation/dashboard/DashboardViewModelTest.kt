@@ -214,6 +214,11 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun plan_hunts_are_dip_cross_leftover() {
+        assertEquals(listOf("Dip", "Cross", "Leftover"), PlanHunt.entries.map { it.name })
+    }
+
+    @Test
     fun start_loads_discovery_snapshot_without_recreate_or_refresh() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
         val viewModel = testViewModel(repository)

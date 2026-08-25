@@ -46,9 +46,14 @@ fun PlansScreen(
     dipUniverse: PlanDipUniverse,
     dipBoard: PlanBoardUi,
     leftoverBoard: PlanBoardUi,
+    crossBoard: PlanBoardUi,
     onAction: (DashboardAction) -> Unit,
 ) {
-    var board = if (hunt == PlanHunt.Dip) dipBoard else leftoverBoard
+    var board = when (hunt) {
+        PlanHunt.Dip -> dipBoard
+        PlanHunt.Cross -> crossBoard
+        PlanHunt.Leftover -> leftoverBoard
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -87,7 +92,7 @@ fun PlansScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            if (hunt == PlanHunt.Dip) {
+            if (hunt == PlanHunt.Dip || hunt == PlanHunt.Cross) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -255,6 +260,7 @@ private fun PlanSpark(values: List<Long>, tone: Color) {
 
 private fun huntTabLabel(hunt: PlanHunt): String = when (hunt) {
     PlanHunt.Dip -> "Dip"
+    PlanHunt.Cross -> "Cross"
     PlanHunt.Leftover -> "Leftover"
 }
 

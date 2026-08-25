@@ -44,6 +44,7 @@ import com.discountscreener.android.presentation.dashboard.presentValuationJudgm
 import com.discountscreener.android.domain.model.DipSetupMemo
 import com.discountscreener.android.domain.model.PlanBoardMemo
 import com.discountscreener.core.plan.DipRowInput
+import com.discountscreener.core.plan.CrossSignalEngine
 import com.discountscreener.core.plan.DipSignalEngine
 import com.discountscreener.core.plan.LeftoverSignalEngine
 import com.discountscreener.core.plan.PlanBoard
@@ -262,11 +263,13 @@ private data class QuantLensCacheEntry(
     val result: ComputationResult<QuantLensReport>,
 )
 
-/** The three plan boards of one build. They are built together and they are held together. */
+/** The plan boards of one build. They are built together and they are held together. */
 private data class PlanBoards(
     val dip: PlanBoard,
     val profile: PlanBoard,
     val leftover: PlanBoard,
+    val cross: PlanBoard,
+    val crossProfile: PlanBoard,
 )
 
 private data class ProfileSwitchRequest(
@@ -389,6 +392,7 @@ class DefaultDashboardRepository(
     private val chartSummaries = linkedMapOf<String, MutableMap<ChartRange, ChartRangeSummary>>()
     private val dipSetups = DipSetupMemo(DipSignalEngine::evaluate)
     private val leftoverSetups = DipSetupMemo(LeftoverSignalEngine::evaluate)
+    private val crossSetups = DipSetupMemo(CrossSignalEngine::evaluate)
     private val planBoardMemo = PlanBoardMemo()
 
     /** The last build, read back for the length of a load. See [planBoardsLocked]. */
@@ -2096,11 +2100,13 @@ class DefaultDashboardRepository(
             planBoard = boards?.dip,
             planBoardProfile = boards?.profile,
             leftoverBoard = boards?.leftover,
+            crossBoard = boards?.cross,
+            crossBoardProfile = boards?.crossProfile,
         )
     }
 
     /**
-     * The three plan boards, or null while the price refresh holds the data they read.
+     * The plan boards, or null while the price refresh holds the data they read.
      *
      * The profile board scores every name the list dropped. Under the price refresh that is 1.4 s
      * of CPU on the same mutex the refresh needs, every eight rows. The Opportunities list does not
@@ -2148,6 +2154,21 @@ class DefaultDashboardRepository(
                 inputs = profileMemberInputs(),
                 universeName = currentProfile,
                 evaluate = leftoverSetups::setup,
+            ) },
+            cross = timedPart("snapshot.crossBoard") { planBoardMemo.crossOpportunities(
+                rows = opportunityRows,
+                yearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.Year)].orEmpty()
+                },
+                fiveYearCandlesBySymbol = opportunityRows.associate { row ->
+                    row.symbol to chartCache[chartKey(row.symbol, ChartRange.FiveYears)].orEmpty()
+                },
+                dcfBySymbol = dcfCache.toMap(),
+            ) },
+            crossProfile = timedPart("snapshot.crossBoardProfile") { planBoardMemo.crossProfile(
+                inputs = profileMemberInputs(),
+                universeName = currentProfile,
+                evaluate = crossSetups::setup,
             ) },
         )
         heldPlanBoards = built
@@ -3340,6 +3361,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        crossSetups.clear()
         planBoardMemo.clear()
         hydratedStates.forEach { state ->
             if (state.chartSummaries.isNotEmpty()) {
@@ -4747,6 +4769,7 @@ class DefaultDashboardRepository(
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
+        crossSetups.clear()
         planBoardMemo.clear()
         dcfCache.clear()
         secondaryAsked.clear()

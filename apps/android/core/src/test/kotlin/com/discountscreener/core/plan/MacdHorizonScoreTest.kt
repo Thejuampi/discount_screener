@@ -63,6 +63,16 @@ class MacdHorizonScoreTest {
         )
         assertEquals(MacdHorizonScore.DRAG, score)
     }
+
+    @Test
+    fun cross_aligns_when_both_years_are_expanding() {
+        var score = MacdHorizonScore.score(
+            year = expandingTape(),
+            fiveYear = expandingTape(),
+            sense = MacdHorizonSense.CrossFresh,
+        )
+        assertEquals(MacdHorizonScore.ALIGN, score)
+    }
 }
 
 private fun turningTape(): MacdTape = MacdTape(

@@ -1813,10 +1813,23 @@ object OpportunityEngine {
             BusinessClass.OperatingNonFinancial -> null
         }
 
+    /**
+     * Takes off the budget the weights of the terms this row's class cannot answer.
+     *
+     * A weight may only leave the budget when the term also leaves the numerator. The FCF and cash
+     * quality pair holds that: [industrialFcfRefusalLabel] refuses both votes for the same classes
+     * this exempts them for.
+     *
+     * [leverageVotes] defaults to "every class votes", which is what a model whose leverage term
+     * has no class rule needs. V3 is that model: it votes its balance sheet at
+     * [V3_FUND_BALANCE_WEIGHT] for every class, and that constant is [V4_FUND_LEVERAGE_WEIGHT].
+     * The default used to be `{ false }`, so V3 lost sixteen points of budget for a term it still
+     * voted — every V3 term paid 100/84 of its share and the level rose across the board.
+     */
     private fun applyClassExemptions(
         acc: EvidenceAccumulator,
         fundamentals: FundamentalSnapshot,
-        leverageVotes: (BusinessClass) -> Boolean = { false },
+        leverageVotes: (BusinessClass) -> Boolean = { true },
     ) {
         var businessClass = FinancialClassPolicy.classify(fundamentals)
         if (businessClass != BusinessClass.OperatingNonFinancial) {

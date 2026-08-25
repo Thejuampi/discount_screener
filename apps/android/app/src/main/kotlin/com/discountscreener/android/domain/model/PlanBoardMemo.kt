@@ -2,6 +2,7 @@ package com.discountscreener.android.domain.model
 
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.plan.CrossSignalEngine
 import com.discountscreener.core.plan.DipRowInput
 import com.discountscreener.core.plan.DipSetup
 import com.discountscreener.core.plan.DipSignalEngine
@@ -19,6 +20,10 @@ class PlanBoardMemo {
     private var dipOppsBoard: PlanBoard? = null
     private var dipProfileKey: String? = null
     private var dipProfileBoard: PlanBoard? = null
+    private var crossOppsKey: String? = null
+    private var crossOppsBoard: PlanBoard? = null
+    private var crossProfileKey: String? = null
+    private var crossProfileBoard: PlanBoard? = null
 
     fun leftover(
         inputs: List<DipRowInput>,
@@ -77,6 +82,48 @@ class PlanBoardMemo {
         return board
     }
 
+    fun crossOpportunities(
+        rows: List<OpportunityListRow>,
+        yearCandlesBySymbol: Map<String, List<HistoricalCandle>>,
+        fiveYearCandlesBySymbol: Map<String, List<HistoricalCandle>>,
+        dcfBySymbol: Map<String, DcfAnalysis>,
+    ): PlanBoard {
+        var key = opportunityFingerprint(
+            universeName = "opps",
+            rows = rows,
+            yearCandlesBySymbol = yearCandlesBySymbol,
+            fiveYearCandlesBySymbol = fiveYearCandlesBySymbol,
+            dcfBySymbol = dcfBySymbol,
+        )
+        crossOppsBoard?.let { cached ->
+            if (crossOppsKey == key) return cached
+        }
+        var board = CrossBoardAssembler.assemble(
+            rows = rows,
+            yearCandlesBySymbol = yearCandlesBySymbol,
+            fiveYearCandlesBySymbol = fiveYearCandlesBySymbol,
+            dcfBySymbol = dcfBySymbol,
+        )
+        crossOppsKey = key
+        crossOppsBoard = board
+        return board
+    }
+
+    fun crossProfile(
+        inputs: List<DipRowInput>,
+        universeName: String,
+        evaluate: (DipRowInput) -> DipSetup = CrossSignalEngine::evaluate,
+    ): PlanBoard {
+        var key = fingerprint(universeName, inputs)
+        crossProfileBoard?.let { cached ->
+            if (crossProfileKey == key) return cached
+        }
+        var board = CrossBoardAssembler.assemble(inputs = inputs, universeName = universeName, evaluate = evaluate)
+        crossProfileKey = key
+        crossProfileBoard = board
+        return board
+    }
+
     fun clear() {
         leftoverKey = null
         leftoverBoard = null
@@ -84,6 +131,10 @@ class PlanBoardMemo {
         dipOppsBoard = null
         dipProfileKey = null
         dipProfileBoard = null
+        crossOppsKey = null
+        crossOppsBoard = null
+        crossProfileKey = null
+        crossProfileBoard = null
     }
 
     companion object {

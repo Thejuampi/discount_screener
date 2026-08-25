@@ -2713,11 +2713,15 @@ class DefaultDashboardRepositoryTest {
                     leftoverSame = true,
                     dipOppsSame = true,
                     dipProfileSame = true,
+                    crossOppsSame = true,
+                    crossProfileSame = true,
                 ),
                 BoardReuse(
                     leftoverSame = first.leftoverBoard === second.leftoverBoard,
                     dipOppsSame = first.planBoard === second.planBoard,
                     dipProfileSame = first.planBoardProfile === second.planBoardProfile,
+                    crossOppsSame = first.crossBoard === second.crossBoard,
+                    crossProfileSame = first.crossBoardProfile === second.crossBoardProfile,
                 ),
             )
         } finally {
@@ -3003,6 +3007,8 @@ class DefaultDashboardRepositoryTest {
         val leftoverSame: Boolean,
         val dipOppsSame: Boolean,
         val dipProfileSame: Boolean,
+        val crossOppsSame: Boolean,
+        val crossProfileSame: Boolean,
     )
 
     private class CountingJournalStore(

@@ -56,7 +56,7 @@ class AggressiveV4FundamentalsTest {
 
         assertEquals(
             2 to listOf("Mult+"),
-            fallback.score to fallback.signals.filter { it != FUND_COVERAGE_GAP_LABEL },
+            fallback.score to fallback.termSignals(),
         )
     }
 
@@ -67,7 +67,7 @@ class AggressiveV4FundamentalsTest {
 
         assertEquals(
             listOf("Mult§"),
-            scored.signals.filter { it != FUND_COVERAGE_GAP_LABEL }.map { it.trimEnd('+', '-') },
+            scored.termSignals().map { it.trimEnd('+', '-') },
         )
     }
 

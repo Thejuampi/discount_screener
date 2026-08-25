@@ -178,6 +178,34 @@ class MarketDimensionRankingTest {
     }
 
     /**
+     * The anchor under [V3_LEVEL], and the thing that says what a moved level means.
+     *
+     * A composite pin recorded off a green run can catch a change and cannot catch a wrongness —
+     * paste in a reading from a build that is wrong in a way nobody noticed and it agrees. This
+     * splits the pin into the half that is the model's arithmetic and the half that is the market.
+     * The three buckets are identical for all seventeen names, by the fixture's design: it gives
+     * every symbol the same fundamentals and the same candles on purpose. So one number, 39, is the
+     * whole fundamentals reading of [V3_LEVEL], and the spread from 44 down to 40 in that list is
+     * the beta haircut and nothing else.
+     *
+     * That is what makes the split in [V3_LEVEL] readable: a term that moves moves `f` for every
+     * row at once, and the haircut then scales one uniform delta into a one-point drop on some rows
+     * and a two-point drop on others.
+     */
+    @Test
+    fun every_v3_row_reads_the_same_three_buckets() = runTest(dispatcher) {
+        withRepository { repository ->
+            assertEquals(
+                List(V3_LEVEL.size) { "f=39 t=12 fc=null cov=3" },
+                snapshot(repository, OpportunityScoringModel.AggressiveV3).opportunityRows.map { row ->
+                    "f=${row.fundamentalsScore} t=${row.technicalScore} " +
+                        "fc=${row.forecastScore} cov=${row.coverageCount}"
+                },
+            )
+        }
+    }
+
+    /**
      * The journal is only worth having if something writes to it. A perfect table that nothing
      * calls looks identical, from the store's own tests, to a table that works.
      *
@@ -433,12 +461,33 @@ class MarketDimensionRankingTest {
          * vote: the fixture's names share one conversion reading, so its uniform +5 came off every
          * row at once — 38/37/36 down to 33/32/31.
          */
+        /**
+         * V3 last moved in `f1dc81a8`, which re-sourced the cash vote: the FCF yield now reads the
+         * robust centre of the annual series over an equity cap, a name with no size base does not
+         * vote at all, and the class exemption takes the FCF and cash-quality weights off financial
+         * and unclassified names instead of voting them. That commit pinned the new behaviour in
+         * `AggressiveV3ScoringTest` and left this level pin on the old numbers, so the gate was red
+         * from the day it landed.
+         *
+         * Every one of the seventeen fell from the 45/44/43/42 of the commit before: seven by two
+         * points and ten by one. The split is not a split in the model. [every_v3_row_reads_the_same_three_buckets]
+         * pins the reason — all seventeen rows read `f=39 t=12 fc=null cov=3`, so the fundamentals
+         * term moved by one amount for the whole fixture and the beta haircut scaled that one
+         * amount into a one-point drop on some rows and a two-point drop on others. The order below
+         * is the haircut's too, which is why it is not the order of the old pin.
+         *
+         * This pin was recorded twice. The first reading — 46/45/44/43, one point *above* the old
+         * level — was taken while `applyClassExemptions` still defaulted its leverage predicate to
+         * "no class votes", which took 16 points of weight off V3's budget for a term V3 still
+         * voted. Every V3 term was then scored out of 84 instead of 100 and the level rose. That
+         * default is now gone, so the numbers below are the ones the model actually produces.
+         */
         val V3_LEVEL = listOf(
-            "MSFT" to 45, "ACGL" to 45, "JPM" to 45, "CI" to 45,
-            "JNJ" to 44, "UNH" to 44, "NVDA" to 44,
-            "META" to 43, "GOOGL" to 43, "WMT" to 43, "V" to 43, "BAC" to 43, "XOM" to 43,
-            "MRK" to 42, "PG" to 42, "HD" to 42,
-            "TSLA" to 42,
+            "CI" to 44,
+            "NVDA" to 43, "MSFT" to 43, "ACGL" to 43, "JPM" to 43,
+            "BAC" to 42, "XOM" to 42, "JNJ" to 42, "UNH" to 42,
+            "HD" to 41, "TSLA" to 41, "META" to 41, "GOOGL" to 41, "WMT" to 41, "V" to 41,
+            "MRK" to 40, "PG" to 40,
         )
 
         val V4_LEVEL = listOf(
