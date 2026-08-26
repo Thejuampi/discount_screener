@@ -1,0 +1,201 @@
+@startuml earnings-cheapness
+' CONTRACT frozen 2026-08-26. Hunt Baratas.
+' Runtime model: the app parses this file once at process start.
+' A restart picks up edits. The process does not reload mid-run.
+' Ranking V2–V5 stays untouched.
+
+skinparam shadowing false
+skinparam roundcorner 6
+skinparam Padding 4
+skinparam ArrowThickness 1
+skinparam ActivityBorderColor #333
+skinparam ActivityBackgroundColor #fff
+skinparam NoteBackgroundColor #f7f7f7
+skinparam NoteBorderColor #999
+
+title EarningsCheapness
+
+start
+
+partition "0  class" {
+  :FinancialClassPolicy.classify;
+  if (Unclassified or NotEligible?) then (yes)
+    :Unavailable(class);
+    stop
+  endif
+}
+
+partition "1  eps_basis  (window centre)" {
+  :n = count of annual EPS years;
+  :eps_basis = robust_mean(all annual EPS, Z=3);
+  note right
+    Keep loss years.
+    Dropping them raises the centre
+    on the same names CyclePeak marks.
+  end note
+
+  if (eps_basis missing or ≤ 0?) then (yes)
+    :Unavailable(eps_basis);
+    stop
+  endif
+
+  if (through-cycle industry\nand n < 7?) then (yes)
+    :flag eps_window_short;
+  endif
+}
+
+partition "2  b  (OLS slope, EPS per year)" {
+  :b = OLS slope of EPS_t vs year t;
+  if (OLS revenue slope > 0 and b < 0?) then (yes)
+    :flag margin_compress;
+  endif
+  note right
+    Linear. Tolerates loss years.
+    CAGR does not.
+  end note
+}
+
+partition "3  two clocks of the same identity" {
+  :k_now  = (n - 1) / 2;
+  :k_next = (n + 1) / 2;
+  :eps_now  = eps_basis + b × k_now;
+  :eps_next = eps_basis + b × k_next;
+  note right
+    Linear projection from the window centre.
+    k_now brings the centre to this year.
+    k_next brings it to next year.
+    One identity. Not two sources.
+    pe_now is the Ruarte input.
+  end note
+
+  if (eps_now ≤ 0?) then (yes)
+    :Unavailable(eps_now);
+    stop
+  endif
+
+  :pe_now = price / eps_now;
+  if (eps_next ≤ 0?) then (yes)
+    :pe_next ← empty;
+  else (no)
+    :pe_next = price / eps_next;
+  endif
+
+  :ruarte_zone = ZONE(pe_now);
+  note left
+    labels only, on pe_now
+    <10 HistoricalBuy
+    10–20 Reasonable
+    20–30 Attention
+    >30 Euphoria
+    >50 Alert
+    provenance ruarte-zone/1
+  end note
+
+  split
+    :sector_now = centre of
+    members' pe_now;
+    :r_now = cheapness of pe_now
+    vs 0.7×–1.5× sector_now;
+    :cheap_now ← r_now > 0;
+    :r_own = own-history percentile;
+    if (sign(r_now) ≠ sign(r_own)?) then (yes)
+      :flag own_vs_sector;
+    endif
+  split again
+    :sector_next = centre of
+    members' pe_next
+    (eps_next > 0);
+    if (n_members < 5?) then (yes)
+      :r_next ← empty;
+    else (no)
+      :r_next = cheapness of pe_next
+      vs 0.7×–1.5× sector_next;
+      :cheap_next ← r_next > 0;
+    endif
+  split again
+    :quality = V5 F minus Mult
+    q = Σ w·ramp / budget;
+  end split
+}
+
+partition "4  agreement  (does slope b move the name across the band)" {
+  note right
+    Agreement is slope-cross only.
+    own-history vs sector is the flag
+    own_vs_sector, not this state.
+  end note
+
+  if (r_now empty?) then (yes)
+    :Unavailable(ramps);
+    stop
+  elseif (r_next empty or pe_next empty?) then (yes)
+    :SingleSource;
+  elseif (cheap_now and not cheap_next?) then (yes)
+    :Disputed(now);
+    note right
+      EPS falling.
+      Now looks cheap.
+      Value-trap side.
+    end note
+  elseif (not cheap_now and cheap_next?) then (yes)
+    :Disputed(next);
+    note right
+      Grower expensive today.
+      Slope carries the name
+      across the band by next year.
+    end note
+  elseif (cheap_now and cheap_next?) then (yes)
+    :AlignedCheap;
+  else (both rich)
+    :AlignedRich;
+  endif
+}
+
+partition "5  universe  (thesis, not a score)" {
+  if (hunt on?) then (yes)
+    :in_universe = cycle_universe(symbol);
+  else (off)
+    :in_universe = true;
+  endif
+}
+
+partition "6  triage  (decision + one reason)" {
+  if (not in_universe?) then (yes)
+    :Out  reason=universe;
+    stop
+  endif
+
+  if (AlignedRich?) then (yes)
+    :Avoid  reason=aligned_rich;
+  elseif (AlignedCheap and q ≥ 0\nand not eps_window_short?) then (yes)
+    :Act  reason=aligned_cheap;
+  else (Watch, first match wins)
+    :Watch;
+    note right
+      reason, first match:
+      1  Disputed(now)
+      2  Disputed(next)
+      3  quality            (q < 0 beats window)
+      4  SingleSource
+      5  eps_window_short
+      Flags, not reasons:
+      own_vs_sector
+      margin_compress
+    end note
+  endif
+}
+
+stop
+
+legend left
+  Frozen contract. Linear projection. No g.
+  Tape (T) stays out.
+  Street consensus EPS stays out of pe_next.
+  Yahoo forwardPE / V4 Mult§ stay labels.
+  Quant Engine stays out of ranking.
+  Never average pe_now and pe_next on Disputed.
+  Output is (triage, reason). One reason.
+  cheap_now is sector-only. r_own is a flag.
+endlegend
+
+@enduml

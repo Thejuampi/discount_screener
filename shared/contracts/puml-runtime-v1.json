@@ -1,0 +1,104 @@
+{
+  "contract": "puml-runtime-v1",
+  "status": "active",
+  "architecture": "_bmad-output/planning-artifacts/puml-runtime-architecture.md",
+  "purpose": "Four-layer runtime for a diagram-backed model. A new hunt is a new PUML document plus a PumlHost, not a new engine.",
+  "layers": [
+    {
+      "name": "Model",
+      "role": "Common evaluate surface. Any scoring or hunt model.",
+      "kotlin": "com.discountscreener.core.runtime.Model",
+      "evaluate": "evaluate(ModelInput) -> ModelOutput"
+    },
+    {
+      "name": "PumlModel",
+      "role": "A Model whose policy is a parsed PlantUML activity document.",
+      "kotlin": "com.discountscreener.core.puml.PumlModel",
+      "extends": "Model",
+      "fields": ["document"]
+    },
+    {
+      "name": "PumlModelFactory",
+      "role": "Pure: PUML text in, PumlModel out. No I/O. Fail closed on unknown activity syntax.",
+      "kotlin": "com.discountscreener.core.puml.PumlModelFactory",
+      "load": "load(PumlSource, PumlHost) -> PumlModel",
+      "firstDialect": "com.discountscreener.core.puml.ActivityPumlModelFactory"
+    },
+    {
+      "name": "PumlEngine",
+      "role": "Interprets the document. Does not encode hunt arithmetic or hunt labels. Named phrases the diagram does not define go to PumlHost.",
+      "kotlin": "com.discountscreener.core.puml.PumlEngine",
+      "run": "run(PumlDocument, ModelInput, PumlHost) -> ModelOutput",
+      "firstInterpreter": "com.discountscreener.core.puml.InterpretingPumlEngine"
+    }
+  ],
+  "host": {
+    "name": "PumlHost",
+    "role": "Document vocabulary. The only hunt-specific Kotlin for a PUML-backed model.",
+    "kotlin": "com.discountscreener.core.puml.PumlHost",
+    "evaluate": "evaluate(phrase, env) -> ModelValue",
+    "decorateEmit": "decorateEmit(name, fields, env, flags, document) -> fields. Default is identity. A host may fill empty emit fields (Watch reason).",
+    "unknownPhrase": "ModelValue.Missing"
+  },
+  "values": {
+    "ModelValue": ["Num", "Text", "Flag", "Series", "Empty", "Missing"],
+    "missingIsAValue": true,
+    "zeroIsNotAbsence": true
+  },
+  "output": {
+    "type": "ModelOutput",
+    "kotlin": "com.discountscreener.core.runtime.ModelOutput",
+    "fields": {
+      "bindings": "Map<String, ModelValue>",
+      "flags": "Set<String>",
+      "emission": "ModelEmission | null"
+    },
+    "emission": {
+      "name": "PascalCase box label",
+      "fields": "arg and/or reason copied from the box, plus host decorateEmit"
+    },
+    "forbidden": [
+      "ModelOutput.Decided",
+      "ModelOutput.Unavailable as a runtime type",
+      "hard-coded Act/Watch/Avoid/Unavailable in the engine"
+    ]
+  },
+  "activityDialect": {
+    "accepted": [
+      "start",
+      "stop",
+      "partition",
+      "assignment",
+      "clear empty",
+      "flag",
+      "emit PascalCase",
+      "if/elseif/else",
+      "split",
+      "notes",
+      "legend"
+    ],
+    "emitShapes": ["Name", "Name(arg)", "Name reason=x"],
+    "bareCall": "non-emit activity box with no = or ←; host.evaluate",
+    "tables": "A note header 'key, first match:' plus numbered rows becomes document.tables[key]. The engine does not interpret the table.",
+    "unknownSyntax": "fail closed"
+  },
+  "invariants": [
+    "PumlModel is a Model.",
+    "Factory.load is pure and fail-closed.",
+    "Engine.run walks the activity graph and does not hard-code hunt formulas or hunt labels.",
+    "A process loads each PUML source once at start. A restart sees edits. Mid-run reload is out of scope.",
+    "Tape, Street consensus EPS, and Quant Engine stay out unless a document names them.",
+    "A new hunt is a new PUML document plus a PumlHost."
+  ],
+  "extensibility": {
+    "newHunt": "new .puml + PumlHost",
+    "newDialect": "new PumlModelFactory, same PumlModel",
+    "codeModel": "implement Model"
+  },
+  "firstDocument": {
+    "puml": "_bmad-output/planning-artifacts/earnings-cheapness.puml",
+    "title": "EarningsCheapness",
+    "host": "com.discountscreener.core.baratas.BaratasPumlHost",
+    "binding": "com.discountscreener.core.baratas.BaratasModels"
+  }
+}
