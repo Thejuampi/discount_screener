@@ -15,6 +15,23 @@ skinparam NoteBorderColor #999
 
 title EarningsCheapness
 
+note right
+  alias:
+  count of annual EPS years -> count(annual_eps)
+  all annual EPS -> annual_eps
+  OLS slope of EPS_t vs year t -> ols(annual_eps)
+  OLS revenue slope -> ols(annual_revenue)
+  through-cycle industry -> through_cycle
+  hunt on -> hunt_on
+  cycle_universe(symbol) -> through_cycle
+  centre of members' pe_now -> median(peer_pe_now)
+  centre of members' pe_next (eps_next > 0) -> median(peer_pe_next)
+  own-history percentile -> r_own
+  n_members -> count(peer_pe_next)
+  V5 F minus Mult -> q
+  Σ w·ramp / budget -> q
+end note
+
 start
 
 partition "0  class" {
@@ -80,22 +97,27 @@ partition "3  two clocks of the same identity" {
     :pe_next = price / eps_next;
   endif
 
-  :ruarte_zone = ZONE(pe_now);
+  if (pe_now < 10?) then (yes)
+    :ruarte_zone ← HistoricalBuy;
+  elseif (pe_now ≤ 20?) then (yes)
+    :ruarte_zone ← Reasonable;
+  elseif (pe_now ≤ 30?) then (yes)
+    :ruarte_zone ← Attention;
+  elseif (pe_now ≤ 50?) then (yes)
+    :ruarte_zone ← Euphoria;
+  else (alert)
+    :ruarte_zone ← Alert;
+  endif
   note left
     labels only, on pe_now
-    <10 HistoricalBuy
-    10–20 Reasonable
-    20–30 Attention
-    >30 Euphoria
-    >50 Alert
+    Edit the ifs above to move a band.
     provenance ruarte-zone/1
   end note
 
   split
     :sector_now = centre of
     members' pe_now;
-    :r_now = cheapness of pe_now
-    vs 0.7×–1.5× sector_now;
+    :r_now = cheapness(pe_now, sector_now, 0.7, 1.5);
     :cheap_now ← r_now > 0;
     :r_own = own-history percentile;
     if (sign(r_now) ≠ sign(r_own)?) then (yes)
@@ -108,14 +130,17 @@ partition "3  two clocks of the same identity" {
     if (n_members < 5?) then (yes)
       :r_next ← empty;
     else (no)
-      :r_next = cheapness of pe_next
-      vs 0.7×–1.5× sector_next;
+      :r_next = cheapness(pe_next, sector_next, 0.7, 1.5);
       :cheap_next ← r_next > 0;
     endif
   split again
     :quality = V5 F minus Mult
     q = Σ w·ramp / budget;
   end split
+
+  if (q < 0?) then (yes)
+    :flag quality;
+  endif
 }
 
 partition "4  agreement  (does slope b move the name across the band)" {
@@ -153,7 +178,7 @@ partition "4  agreement  (does slope b move the name across the band)" {
 
 partition "5  universe  (thesis, not a score)" {
   if (hunt on?) then (yes)
-    :in_universe = cycle_universe(symbol);
+    :in_universe = through_cycle;
   else (off)
     :in_universe = true;
   endif

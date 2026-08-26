@@ -36,8 +36,9 @@
     "name": "PumlHost",
     "role": "Document vocabulary. The only hunt-specific Kotlin for a PUML-backed model.",
     "kotlin": "com.discountscreener.core.puml.PumlHost",
-    "evaluate": "evaluate(phrase, env) -> ModelValue",
-    "decorateEmit": "decorateEmit(name, fields, env, flags, document) -> fields. Default is identity. A host may fill empty emit fields (Watch reason).",
+    "evaluate": "evaluate(phrase, env) -> ModelValue. Prefer aliases in the document.",
+    "call": "call(name, args, env, document) -> ModelValue. Primitive catalog. Coefficients stay in the diagram.",
+    "decorateEmit": "decorateEmit(name, fields, env, flags, document) -> fields. Default fills reason from document.tables['reason'] then from arg.",
     "unknownPhrase": "ModelValue.Missing"
   },
   "values": {
@@ -88,10 +89,13 @@
     "Engine.run walks the activity graph and does not hard-code hunt formulas or hunt labels.",
     "A process loads each PUML source once at start. A restart sees edits. Mid-run reload is out of scope.",
     "Tape, Street consensus EPS, and Quant Engine stay out unless a document names them.",
-    "A new hunt is a new PUML document plus a PumlHost."
+    "A new hunt is a new PUML document plus a PumlHost.",
+    "A new partition, a new if, or a changed coefficient is a PUML edit. It does not require Kotlin.",
+    "host.call is a primitive catalog. The diagram supplies the arguments."
   ],
   "extensibility": {
-    "newHunt": "new .puml + PumlHost",
+    "newHunt": "new .puml + extra host.call names",
+    "newBlockOrIfOrCoefficient": "edit the .puml only",
     "newDialect": "new PumlModelFactory, same PumlModel",
     "codeModel": "implement Model"
   },

@@ -84,6 +84,7 @@ class PumlModelFactoryTest {
         }
         is PumlExpr.Bool -> expr.value.toString()
         is PumlExpr.Phrase -> expr.text
+        is PumlExpr.Call -> "${expr.name}(${expr.args.joinToString(", ") { render(it) }})"
         is PumlExpr.Unary -> "${expr.op} ${render(expr.inner)}"
         is PumlExpr.Binary -> "${render(expr.left)} ${expr.op} ${render(expr.right)}"
     }

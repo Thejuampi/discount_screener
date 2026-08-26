@@ -22,6 +22,33 @@ class BaratasModelTest {
     }
 
     @Test
+    fun cheapness_band_edit_in_the_document_changes_r_now() {
+        var base = evaluate(
+            eps = listOf(8.0, 9.0, 10.0, 11.0, 12.0),
+            price = 100.0,
+        ).num("r_now")
+        var mutated = BaratasModels.load(
+            PumlModelFactoryTest.frozenPumlText().replace(
+                "cheapness(pe_now, sector_now, 0.7, 1.5)",
+                "cheapness(pe_now, sector_now, 0.4, 1.5)",
+            ),
+        ).evaluate(
+            ModelInput.of(
+                "class" to ModelValue.Text("OperatingNonFinancial"),
+                "annual_eps" to ModelValue.Series(listOf(8.0, 9.0, 10.0, 11.0, 12.0)),
+                "annual_revenue" to ModelValue.Series(listOf(80.0, 90.0, 100.0, 110.0, 120.0)),
+                "price" to ModelValue.Num(100.0),
+                "hunt_on" to ModelValue.Flag(false),
+                "through_cycle" to ModelValue.Flag(false),
+                "q" to ModelValue.Num(0.2),
+                "peer_pe_now" to ModelValue.Series(List(5) { 10.0 }),
+                "peer_pe_next" to ModelValue.Series(List(5) { 10.0 }),
+            ),
+        ).num("r_now")
+        assertEquals(true, base != mutated && base != null && mutated != null)
+    }
+
+    @Test
     fun linear_clocks_follow_the_puml_identities() {
         var out = evaluate(
             eps = listOf(8.0, 9.0, 10.0, 11.0, 12.0),

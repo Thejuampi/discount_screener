@@ -19,7 +19,7 @@ A diagram-backed model has four types. A new hunt is a new PlantUML document plu
 | 3 | `PumlModelFactory` | Pure: PUML text in, `PumlModel` out. No I/O. Fail closed on unknown activity syntax. |
 | 4 | `PumlEngine` | Walks the activity graph. Runs formulas that sit in the tree. Named phrases go to `PumlHost`. |
 
-`PumlHost` is the document vocabulary. It is not a fifth evaluate surface. The app holds a `Model`.
+`PumlHost` is a **primitive catalog** (`call(name, args)`). It is not a phrase dictionary of one hunt. The app holds a `Model`.
 
 ```
 Model.evaluate(input) → ModelOutput
@@ -69,12 +69,17 @@ A process loads each PUML source once at start. A restart sees edits. Mid-run re
 
 ## Extensibility
 
-| Change | Add | Do not |
+A diagram edit is a model edit. Restart the process. Do not change Kotlin.
+
+| Change | Edit | Kotlin |
 | --- | --- | --- |
-| New hunt | `.puml` + `PumlHost` | Fork `PumlEngine` |
-| New activity document with the same phrases | `.puml` only | Copy the host |
-| New diagram dialect | `PumlModelFactory` | Change `Model` / `PumlModel` |
-| Non-PUML model | implement `Model` | Force PlantUML |
+| New partition / block | the `.puml` | none |
+| New `if` / `elseif` | the `.puml` | none |
+| Coefficient (`×2` → `×3`, `0.7` → `0.5`) | the `.puml` | none |
+| English nickname | `alias:` note in the `.puml` | none |
+| New primitive name (`ols`, `cheapness`, …) | host.`call` | yes |
+| New hunt | `.puml` + host extras | host only |
+| New diagram dialect | new `PumlModelFactory` | factory only |
 
 ## Forbidden in factory and engine
 

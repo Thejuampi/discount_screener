@@ -13,6 +13,8 @@ data class PumlDocument(
     val sourceText: String,
     /** Named lists drawn from notes with a `key, first match:` header. */
     val tables: Map<String, List<String>> = emptyMap(),
+    /** English phrase in the diagram mapped to an expression. */
+    val aliases: Map<String, PumlExpr> = emptyMap(),
 )
 
 data class PumlPartition(
@@ -50,6 +52,8 @@ sealed class PumlExpr {
     data class Bool(val value: Boolean) : PumlExpr()
 
     data class Phrase(val text: String) : PumlExpr()
+
+    data class Call(val name: String, val args: List<PumlExpr>) : PumlExpr()
 
     data class Unary(val op: String, val inner: PumlExpr) : PumlExpr()
 

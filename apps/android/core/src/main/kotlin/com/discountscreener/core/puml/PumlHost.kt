@@ -17,6 +17,19 @@ interface PumlHost {
     fun evaluate(phrase: String, env: MutableMap<String, ModelValue>): ModelValue
 
     /**
+     * A named primitive. The diagram supplies the arguments.
+     *
+     * A new coefficient or a new call of an existing name does not need Kotlin.
+     * A new primitive name does.
+     */
+    fun call(
+        name: String,
+        args: List<ModelValue>,
+        env: MutableMap<String, ModelValue>,
+        document: PumlDocument,
+    ): ModelValue = ModelValue.Missing
+
+    /**
      * A bare `:Name;` call with no assignment.
      *
      * Default writes the result under [phrase]. A host may also bind a short alias.
@@ -37,5 +50,18 @@ interface PumlHost {
         env: Map<String, ModelValue>,
         flags: Set<String>,
         document: PumlDocument,
-    ): Map<String, String> = fields
+    ): Map<String, String> {
+        var out = fields
+        if ("reason" !in out) {
+            var hit = document.tables["reason"].orEmpty().firstOrNull { token ->
+                env[token]?.asFlag() == true || token in flags
+            }
+            if (hit != null) out = out + ("reason" to hit)
+        }
+        if ("reason" !in out) {
+            var arg = out["arg"]
+            if (arg != null) out = out + ("reason" to arg)
+        }
+        return out
+    }
 }

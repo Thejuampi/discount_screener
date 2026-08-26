@@ -43,7 +43,7 @@ object InterpretingPumlEngine : PumlEngine {
         var emission = emissionIn
         steps.forEach { step ->
             when (step) {
-                is PumlStep.Assign -> env[step.name] = eval(step.expression, env, host)
+                is PumlStep.Assign -> env[step.name] = assignValue(step.expression, env, host, document)
                 is PumlStep.Clear -> env[step.name] = ModelValue.Empty
                 is PumlStep.BareCall -> host.onBareCall(step.phrase, env)
                 is PumlStep.Flag -> {
@@ -60,7 +60,7 @@ object InterpretingPumlEngine : PumlEngine {
                     )
                 }
                 is PumlStep.Branch -> {
-                    var yes = truthy(eval(step.condition, env, host))
+                    var yes = truthy(eval(step.condition, env, host, document))
                     var branch = if (yes) step.yes else step.no
                     var nested = runSteps(branch, env, flags, host, document, emission)
                     if (nested.output != null) return nested
@@ -97,28 +97,49 @@ object InterpretingPumlEngine : PumlEngine {
         return ModelEmission(name = step.label, fields = fields)
     }
 
+    private fun assignValue(
+        expr: PumlExpr,
+        env: MutableMap<String, ModelValue>,
+        host: PumlHost,
+        document: PumlDocument,
+    ): ModelValue {
+        var value = eval(expr, env, host, document)
+        if (value is ModelValue.Missing && expr is PumlExpr.Ident && expr.name.first().isUpperCase()) {
+            return ModelValue.Text(expr.name)
+        }
+        return value
+    }
+
     private fun eval(
         expr: PumlExpr,
         env: MutableMap<String, ModelValue>,
         host: PumlHost,
+        document: PumlDocument,
     ): ModelValue = when (expr) {
         is PumlExpr.Number -> ModelValue.Num(expr.value)
         is PumlExpr.Bool -> ModelValue.Flag(expr.value)
-        is PumlExpr.Ident -> resolveIdent(expr.name, env, host)
+        is PumlExpr.Ident -> resolveIdent(expr.name, env, host, document)
         is PumlExpr.Phrase -> {
             env[expr.text]?.let { return it }
+            document.aliases[expr.text]?.let { return eval(it, env, host, document) }
             host.evaluate(expr.text, env)
         }
-        is PumlExpr.Unary -> evalUnary(expr.op, eval(expr.inner, env, host))
-        is PumlExpr.Binary -> evalBinary(expr.op, expr.left, expr.right, env, host)
+        is PumlExpr.Call -> {
+            var args = expr.args.map { eval(it, env, host, document) }
+            host.call(expr.name, args, env, document)
+        }
+        is PumlExpr.Unary -> evalUnary(expr.op, eval(expr.inner, env, host, document))
+        is PumlExpr.Binary -> evalBinary(expr.op, expr.left, expr.right, env, host, document)
     }
 
     private fun resolveIdent(
         name: String,
         env: MutableMap<String, ModelValue>,
         host: PumlHost,
+        document: PumlDocument,
     ): ModelValue {
         env[name]?.let { return it }
+        document.aliases[name]?.let { return eval(it, env, host, document) }
         env.values.forEach { value ->
             if (value is ModelValue.Text && value.value == name) return ModelValue.Flag(true)
         }
@@ -138,19 +159,20 @@ object InterpretingPumlEngine : PumlEngine {
         rightExpr: PumlExpr,
         env: MutableMap<String, ModelValue>,
         host: PumlHost,
+        document: PumlDocument,
     ): ModelValue {
         if (op == "or") {
-            var left = eval(leftExpr, env, host)
+            var left = eval(leftExpr, env, host, document)
             if (truthy(left)) return ModelValue.Flag(true)
-            return ModelValue.Flag(truthy(eval(rightExpr, env, host)))
+            return ModelValue.Flag(truthy(eval(rightExpr, env, host, document)))
         }
         if (op == "and") {
-            var left = eval(leftExpr, env, host)
+            var left = eval(leftExpr, env, host, document)
             if (!truthy(left)) return ModelValue.Flag(false)
-            return ModelValue.Flag(truthy(eval(rightExpr, env, host)))
+            return ModelValue.Flag(truthy(eval(rightExpr, env, host, document)))
         }
-        var left = eval(leftExpr, env, host)
-        var right = eval(rightExpr, env, host)
+        var left = eval(leftExpr, env, host, document)
+        var right = eval(rightExpr, env, host, document)
         var ln = left.asNum()
         var rn = right.asNum()
         return when (op) {

@@ -50,6 +50,7 @@ internal fun parseActivityDocument(text: String): PumlDocument {
         legend = legend,
         sourceText = text,
         tables = extractTables(text),
+        aliases = extractAliases(text),
     )
 }
 
@@ -80,6 +81,27 @@ private fun extractTables(text: String): Map<String, List<String>> {
         }
     }
     return tables
+}
+
+private fun extractAliases(text: String): Map<String, PumlExpr> {
+    var aliases = LinkedHashMap<String, PumlExpr>()
+    var notes = Regex(
+        """note (?:right|left)\s*(.*?)\s*end note""",
+        RegexOption.DOT_MATCHES_ALL,
+    ).findAll(text)
+    notes.forEach { note ->
+        var lines = note.groupValues[1].lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.none { it == "alias:" }) return@forEach
+        lines.forEach { line ->
+            if (line == "alias:") return@forEach
+            var sep = line.indexOf("->")
+            if (sep <= 0) return@forEach
+            var key = line.substring(0, sep).trim()
+            var rhs = line.substring(sep + 2).trim()
+            if (key.isNotEmpty() && rhs.isNotEmpty()) aliases[key] = parseExpression(rhs)
+        }
+    }
+    return aliases
 }
 
 private fun extractLegend(text: String): List<String> {
@@ -252,10 +274,41 @@ private fun parseActivityBox(body: String): List<PumlStep> {
 private fun isEmitBox(text: String): Boolean = EMIT_BOX.matchEntire(text) != null
 
 private fun splitBoxAssignments(body: String): List<String> {
-    var parts = body.split(Regex("""(?=\b[A-Za-z_][\w.]*\s*(=|←))"""))
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-    return if (parts.size <= 1) listOf(body.trim()) else parts
+    var depth = 0
+    var parts = ArrayList<String>()
+    var start = 0
+    var identStart = -1
+    var i = 0
+    while (i < body.length) {
+        var c = body[i]
+        when {
+            c == '(' -> {
+                depth += 1
+                identStart = -1
+            }
+            c == ')' -> {
+                depth -= 1
+                identStart = -1
+            }
+            depth == 0 && c.isWhitespace() -> identStart = -1
+            depth == 0 && (c.isLetter() || c == '_') -> {
+                if (identStart < 0) identStart = i
+            }
+            depth == 0 && identStart >= 0 && (c == '=' || c == '←') -> {
+                if (identStart > start) {
+                    parts.add(body.substring(start, identStart).trim())
+                    start = identStart
+                }
+                identStart = -1
+            }
+            depth == 0 && !c.isLetterOrDigit() && c != '_' && c != '.' && !c.isWhitespace() -> {
+                identStart = -1
+            }
+        }
+        i += 1
+    }
+    parts.add(body.substring(start).trim())
+    return parts.filter { it.isNotEmpty() }
 }
 
 private fun parseSingleBox(body: String): PumlStep {
@@ -297,9 +350,37 @@ internal fun parseCondition(text: String): PumlExpr = parseBoolean(text.trim())
 
 internal fun parseExpression(text: String): PumlExpr {
     var trimmed = text.trim()
+    if (trimmed == "true") return PumlExpr.Bool(true)
+    if (trimmed == "false") return PumlExpr.Bool(false)
+    trimmed.toDoubleOrNull()?.let { return PumlExpr.Number(it) }
     if (looksArithmetic(trimmed)) return parseArithmetic(trimmed)
     if (looksCompare(trimmed)) return parseBoolean(trimmed)
+    if (looksLikeCall(trimmed)) return parseCall(trimmed)
     return PumlExpr.Phrase(trimmed)
+}
+
+private fun looksLikeCall(text: String): Boolean {
+    var open = text.indexOf('(')
+    if (open <= 0 || !text.endsWith(")")) return false
+    var name = text.substring(0, open)
+    if (!name.matches(Regex("""[A-Za-z_][\w.]*"""))) return false
+    var depth = 0
+    text.forEach { c ->
+        when (c) {
+            '(' -> depth += 1
+            ')' -> depth -= 1
+        }
+        if (depth < 0) return false
+    }
+    return depth == 0
+}
+
+private fun parseCall(text: String): PumlExpr.Call {
+    var open = text.indexOf('(')
+    var name = text.substring(0, open)
+    var inner = text.substring(open + 1, text.length - 1).trim()
+    var args = if (inner.isEmpty()) emptyList() else splitTop(inner, ",").map { parseExpression(it.trim()) }
+    return PumlExpr.Call(name, args)
 }
 
 private fun looksCompare(text: String): Boolean {
@@ -473,6 +554,7 @@ private fun parseCompare(text: String): PumlExpr {
 private fun parseCompareAtom(text: String): PumlExpr {
     var t = text.trim()
     t.toDoubleOrNull()?.let { return PumlExpr.Number(it) }
+    if (looksLikeCall(t)) return parseCall(t)
     if (t.contains(' ') || '(' in t) return PumlExpr.Phrase(t)
     return PumlExpr.Ident(t)
 }
