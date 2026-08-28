@@ -18,7 +18,7 @@ fun hedgeQuoteOf(rows: List<ChainRow>, move: ImpliedMove, forward: Double): Hedg
     var longMid = midOf(long.put) ?: return null
     var target = move.strike * (1.0 - PUT_SPREAD_WIDTH)
     var short = rows
-        .filter { it.strike > 0.0 && it.strike < move.strike }
+        .filter { it.strike > 0.0 && it.strike < move.strike && midOf(it.put) != null }
         .minWithOrNull(compareBy({ abs(it.strike - target) }, { it.strike }))
     var spread = short?.let { midOf(it.put) }?.let { longMid - it }?.takeIf { it > 0.0 }
     return HedgeQuote(

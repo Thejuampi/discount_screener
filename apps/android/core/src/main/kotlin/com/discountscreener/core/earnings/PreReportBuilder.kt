@@ -60,6 +60,7 @@ fun preReportOf(
         impliedMoveBps = impliedMoveBps,
         eventImpliedMoveBps = eventMove,
         normalDailyMoveBps = normalDailyMoveBps,
+        quoteSpreadBps = move?.quoteSpreadBps,
         expiryEpochDay = settlementDate?.toEpochDay(),
         forwardPriceCents = move?.let { priceCents },
         strikeCents = move?.strike?.let { toCents(it) },

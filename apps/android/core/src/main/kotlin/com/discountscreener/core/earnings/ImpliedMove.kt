@@ -2,6 +2,7 @@ package com.discountscreener.core.earnings
 
 import java.time.LocalDate
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 data class OptionQuote(val bid: Double, val ask: Double)
 
@@ -11,6 +12,7 @@ data class ImpliedMove(
     val fraction: Double,
     val strike: Double,
     val straddlePrice: Double,
+    val quoteSpreadBps: Int,
 )
 
 private const val MAX_STRIKE_OFFSET = 0.025
@@ -26,12 +28,16 @@ fun impliedMove(rows: List<ChainRow>, forward: Double): ImpliedMove? {
     var put = midOf(nearest.put) ?: return null
     var straddle = call + put
     if (straddle <= 0.0) return null
+    var width = widthOf(nearest.call) + widthOf(nearest.put)
     return ImpliedMove(
         fraction = straddle / forward,
         strike = nearest.strike,
         straddlePrice = straddle,
+        quoteSpreadBps = (width / straddle * 10_000.0).roundToInt(),
     )
 }
+
+private fun widthOf(quote: OptionQuote): Double = quote.ask - quote.bid
 
 internal fun midOf(quote: OptionQuote): Double? {
     if (!quote.bid.isFinite() || !quote.ask.isFinite()) return null

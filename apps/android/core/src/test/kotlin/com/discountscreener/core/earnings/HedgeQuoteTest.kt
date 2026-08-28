@@ -83,9 +83,25 @@ class HedgeQuoteTest {
         assertEquals(500, hedgeQuoteOf(ladder, move(100.0), forward = 80.0)?.protectivePutCostBps)
     }
 
+    @Test
+    fun a_strike_nobody_bids_for_is_skipped_for_the_next_one_that_trades() {
+        assertEquals(93.0, hedgeQuoteOf(withDeadStrike, move(100.0), forward = 100.0)?.shortStrike)
+    }
+
+    @Test
+    fun a_strike_nobody_bids_for_never_costs_the_spread_its_price() {
+        assertEquals(200, hedgeQuoteOf(withDeadStrike, move(100.0), forward = 100.0)?.putSpreadCostBps)
+    }
+
+    private val withDeadStrike = listOf(
+        row(100.0, put = 4.0),
+        ChainRow(95.0, OptionQuote(1.0, 1.2), OptionQuote(0.0, 3.0)),
+        row(93.0, put = 2.0),
+    )
+
     private fun quote(): HedgeQuote? = hedgeQuoteOf(ladder, move(100.0), forward = 100.0)
 
-    private fun move(strike: Double) = ImpliedMove(fraction = 0.08, strike = strike, straddlePrice = 8.0)
+    private fun move(strike: Double) = ImpliedMove(fraction = 0.08, strike = strike, straddlePrice = 8.0, quoteSpreadBps = 200)
 
     private fun row(strike: Double, put: Double) =
         ChainRow(strike, OptionQuote(1.0, 1.2), OptionQuote(put - 0.1, put + 0.1))

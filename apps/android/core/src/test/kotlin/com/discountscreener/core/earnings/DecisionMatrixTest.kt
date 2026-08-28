@@ -178,6 +178,29 @@ class DecisionMatrixTest {
         assertTrue(decisionOf(cheapRisky(spread = 80)).justification.contains("0.8%"))
     }
 
+    @Test
+    fun a_chain_quoted_wider_than_its_own_mid_decides_nothing() {
+        assertEquals(DecisionCell.Undecided, decisionOf(stale(quote = 6_000)).cell)
+    }
+
+    @Test
+    fun a_chain_quoted_wider_than_its_own_mid_says_why_it_decided_nothing() {
+        assertTrue(decisionOf(stale(quote = 6_000)).justification.contains("60.0% wide"))
+    }
+
+    @Test
+    fun a_chain_quoted_at_the_width_limit_still_decides() {
+        assertEquals(DecisionCell.CheapHighRisk, decisionOf(stale(quote = MAX_QUOTE_SPREAD_BPS)).cell)
+    }
+
+    @Test
+    fun a_chain_with_no_width_of_its_own_never_counts_as_stale() {
+        assertEquals(DecisionCell.CheapHighRisk, decisionOf(stale(quote = null)).cell)
+    }
+
+    private fun stale(quote: Int?) =
+        pre(price = 3_500L, ratio = 15_000).copy(quoteSpreadBps = quote)
+
     private fun cheapRisky(spread: Int?) = pre(price = 3_500L, ratio = 15_000, spread = spread)
 
     private fun pre(

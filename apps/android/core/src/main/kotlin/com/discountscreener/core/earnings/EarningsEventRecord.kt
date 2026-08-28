@@ -29,6 +29,7 @@ data class PreReport(
     val impliedMoveBps: Int? = null,
     val eventImpliedMoveBps: Int? = null,
     val normalDailyMoveBps: Int? = null,
+    val quoteSpreadBps: Int? = null,
     val expiryEpochDay: Long? = null,
     val forwardPriceCents: Long? = null,
     val strikeCents: Long? = null,

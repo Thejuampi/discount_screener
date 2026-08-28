@@ -8,6 +8,7 @@ const val HIGH_RISK_RATIO_BPS = 13_000
 const val LOW_RISK_RATIO_BPS = 8_000
 const val CHEAP_PRICE_TO_FAIR_BPS = 9_000
 const val HEDGE_COST_CAP_BPS = 100
+const val MAX_QUOTE_SPREAD_BPS = 5_000
 
 fun eventRiskOf(riskRatioBps: Int?): EventRisk = when {
     riskRatioBps == null -> EventRisk.Unknown
@@ -25,6 +26,7 @@ fun priceToFairBps(pre: PreReport): Int? {
 fun decisionOf(pre: PreReport): EventDecision {
     var risk = eventRiskOf(pre.riskRatioBps)
     var valuation = priceToFairBps(pre)
+    if (isQuoteStale(pre)) return staleQuote(pre)
     if (risk == EventRisk.Unknown || valuation == null) return undecided(pre, risk)
     var cheap = valuation <= CHEAP_PRICE_TO_FAIR_BPS
     return when {
@@ -62,6 +64,22 @@ fun decisionOf(pre: PreReport): EventDecision {
         )
     }
 }
+
+fun isQuoteStale(pre: PreReport): Boolean {
+    var spread = pre.quoteSpreadBps ?: return false
+    return spread > MAX_QUOTE_SPREAD_BPS
+}
+
+private fun staleQuote(pre: PreReport) = EventDecision(
+    cell = DecisionCell.Undecided,
+    action = EventAction.Hold,
+    positionSizeBps = FULL_POSITION_BPS,
+    hedge = HedgeKind.None,
+    hedgeCostBps = null,
+    sectorOverrideApplied = false,
+    justification = "The chain is quoted ${percentText(pre.quoteSpreadBps ?: 0)} wide against its own " +
+        "mid, so the priced move is the spread and not the report. Read it again while the market is open.",
+)
 
 private fun cheapHighRisk(pre: PreReport): EventDecision {
     var spread = pre.putSpreadCostBps

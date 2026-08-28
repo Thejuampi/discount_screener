@@ -208,12 +208,13 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `EarningsEventLog.kt` | Bitácora JSONL, solo agrega. La última copia gana; las líneas dañadas se cuentan. | 7 |
 | `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal por diferencia. | 4.2, 7 |
 | `DecisionMatrix.kt` | Clasifica el riesgo (>1.3 alto, <0.8 bajo), resuelve la celda de la matriz con el precio contra el DCF (barato ≤ 0.9×) y aplica el tope de costo de cobertura. | 4.3, 4.5, 4.6 |
+| `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
 | `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
 | `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
 
-Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`.
+Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 145 pruebas en el paquete `earnings` de `:core`; en `:app`, 28 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: 166 pruebas en el paquete `earnings` de `:core`; en `:app`, 28 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 
@@ -258,6 +259,16 @@ evento² = total² − (movimiento diario típico)² × (días hábiles hasta el
 - La resta nunca deja el evento por debajo del 30% del total. Un ticker tranquilo con un vencimiento lejano no puede quedar con riesgo de evento cero.
 
 El ratio de §4.3 se lee contra este número, no contra el total. La pantalla muestra los dos: el movimiento priceado al vencimiento y el que queda para el evento.
+
+### Lo que la cadena en vivo enseñó
+
+Los parsers se escribieron contra fixtures a mano. Bajar la cadena real de LVS el 2026-08-27, fuera de rueda, mostró dos cosas que la fixture no tenía.
+
+**Strikes sin oferta.** Todos los strikes por debajo del dinero venían con `bid` en cero. La pata corta del spread se elegía por cercanía al 5% y después se descartaba por no tener precio, así que el spread quedaba sin cotizar aunque más abajo hubiera un strike que sí se opera. Ahora la elección solo mira strikes cotizables.
+
+**Cadena cotizada más ancha que su propio mid.** El call ATM venía 0.25 / 2.49 contra un straddle de 1.74: la horquilla era 154% del straddle. El mid de eso no precia el reporte, precia el spread del market maker.
+
+La respuesta no es descartar el evento. Una cadena no se vuelve a publicar, así que el evento se guarda igual, con `quoteSpreadBps` al lado del movimiento. Lo que se frena es la decisión: por encima del 50% de ancho, la celda queda `Undecided` y la justificación dice que hay que leerla con el mercado abierto. La bitácora conserva el número crudo; el gate no actúa sobre él.
 
 ### El tope de costo (§4.6)
 
