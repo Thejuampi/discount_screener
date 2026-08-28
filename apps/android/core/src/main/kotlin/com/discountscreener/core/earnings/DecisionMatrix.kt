@@ -125,7 +125,17 @@ private fun undecided(pre: PreReport, risk: EventRisk) = EventDecision(
     justification = missingText(pre, risk),
 )
 
+/**
+ * A chain that answered with nothing quoted is not the same as no chain at all.
+ *
+ * Outside the session Yahoo returns the whole ladder with a bid and an ask of zero, which the
+ * straddle refuses on purpose. AVGO read "no option chain" all morning while the chain was there
+ * and simply shut, so the card sent the reader looking for a fault that did not exist. The expiry
+ * is on file whenever the chain answered, and that is enough to tell the two apart.
+ */
 private fun missingText(pre: PreReport, risk: EventRisk): String = when {
+    risk == EventRisk.Unknown && pre.impliedMoveBps == null && pre.expiryEpochDay != null ->
+        "The chain for this expiry is not quoted yet, so the report carries no priced move."
     risk == EventRisk.Unknown && pre.impliedMoveBps == null ->
         "No option chain for this expiry, so the report carries no priced move yet."
     risk == EventRisk.Unknown ->

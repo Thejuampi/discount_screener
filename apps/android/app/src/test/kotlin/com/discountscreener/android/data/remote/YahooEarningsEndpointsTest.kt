@@ -78,6 +78,43 @@ class YahooEarningsEndpointsTest {
         assertThrows(Throwable::class.java) { runBlocking { client.fetchConsensus("LVS") } }
     }
 
+    @Test
+    fun an_empty_result_array_is_asked_again_with_a_fresh_cookie() = runTest {
+        var seen = mutableListOf<String>()
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder()
+                .addInterceptor(recording(seen, options = EMPTY_RESULT_BODY))
+                .build(),
+        )
+        runCatching { client.fetchOptionChain("LVS") }
+
+        assertEquals(2, seen.count { it.contains("/options/") })
+    }
+
+    @Test
+    fun a_chain_endpoint_that_keeps_refusing_never_passes_for_a_ticker_without_options() = runTest {
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder()
+                .addInterceptor(recording(mutableListOf(), options = EMPTY_RESULT_BODY))
+                .build(),
+        )
+
+        assertThrows(Throwable::class.java) { runBlocking { client.fetchOptionChain("LVS") } }
+    }
+
+    @Test
+    fun a_ticker_that_really_carries_no_options_is_never_asked_twice() = runTest {
+        var seen = mutableListOf<String>()
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder()
+                .addInterceptor(recording(seen, options = NO_OPTIONS_BODY))
+                .build(),
+        )
+        client.fetchOptionChain("THIN")
+
+        assertEquals(1, seen.count { it.contains("/options/") })
+    }
+
     private fun client(seen: MutableList<String>) = YahooFinanceClient(
         httpClient = OkHttpClient.Builder().addInterceptor(recording(seen)).build(),
     )
@@ -85,12 +122,13 @@ class YahooEarningsEndpointsTest {
     private fun recording(
         seen: MutableList<String>,
         quoteSummary: String = QUOTE_SUMMARY_BODY,
+        options: String = OPTIONS_BODY,
     ) = Interceptor { chain ->
         var request = chain.request()
         seen += request.url.toString()
         var payload = when {
             request.url.encodedPath.contains("getcrumb") -> "testcrumb"
-            request.url.encodedPath.contains("/options/") -> OPTIONS_BODY
+            request.url.encodedPath.contains("/options/") -> options
             request.url.encodedPath.contains("quoteSummary") -> quoteSummary
             else -> "<html></html>"
         }
@@ -109,6 +147,11 @@ class YahooEarningsEndpointsTest {
             "options":[{"expirationDate":1787875200,
             "calls":[{"strike":44.0,"bid":1.60,"ask":1.72}],
             "puts":[{"strike":44.0,"bid":1.38,"ask":1.50}]}]}]}}"""
+
+        const val EMPTY_RESULT_BODY = """{"optionChain":{"result":[],"error":null}}"""
+
+        const val NO_OPTIONS_BODY = """{"optionChain":{"result":[{"underlyingSymbol":"THIN",
+            "expirationDates":[],"options":[]}],"error":null}}"""
 
         const val QUOTE_SUMMARY_BODY = """{"quoteSummary":{"result":[{"earningsTrend":{"trend":[
             {"period":"0q","endDate":"2026-09-30","earningsEstimate":{"avg":{"raw":0.62},

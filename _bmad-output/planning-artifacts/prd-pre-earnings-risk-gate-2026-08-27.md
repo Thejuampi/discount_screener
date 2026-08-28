@@ -220,7 +220,7 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 226 pruebas en el paquete `earnings` de `:core`; en `:app`, 36 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: 229 pruebas en el paquete `earnings` de `:core`; en `:app`, 36 del grabador, 11 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 
@@ -238,7 +238,11 @@ Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada s
 
 Un evento que quedó sin implied move se vuelve a pedir en cada pasada, mientras el reporte siga dentro de la ventana de captura. Una cadena de opciones no se vuelve a publicar: una sola consulta fallida le costaría al evento su movimiento priceado para siempre, que es justo la pérdida que esta bitácora existe para evitar.
 
-Por eso `fetchOptionChain` distingue dos respuestas que antes se veían iguales: un ticker sin opciones y un proveedor que se negó a contestar. Solo la segunda vale la pena volver a preguntarla.
+Por eso `fetchOptionChain` distingue tres respuestas que antes se veían iguales:
+
+- **`result` vacío.** El proveedor no contestó por ese símbolo. Es la forma que toma una cookie vencida. Se limpia la sesión y se pregunta una vez más; si vuelve a pasar, el evento queda sin precio y la próxima pasada lo pide de nuevo.
+- **`result` con el subyacente y la lista de vencimientos vacía.** El ticker no tiene opciones. No se pregunta dos veces.
+- **La escalera entera cotizada en cero.** Fuera de rueda Yahoo devuelve bid y ask en cero para los 101 strikes: `marketState: PRE`. El straddle la rechaza a propósito. La tarjeta ahora dice "the chain for this expiry is not quoted yet" en vez de "no option chain", porque la cadena está y solo está cerrada. Medido en vivo sobre AVGO el 2026-08-28: 0 de 101 calls con bid.
 
 Un reporte con hora sin confirmar se guarda igual, con `timing = Unknown`, y su ventana de reacción abarca el día entero. Yahoo manda la hora dentro de la rueda cuando la fecha todavía no está confirmada; descartarlo perdía la mayoría de los eventos reales.
 

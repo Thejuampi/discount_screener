@@ -99,6 +99,13 @@ class DecisionMatrixTest {
     }
 
     @Test
+    fun a_chain_that_answered_but_quoted_nothing_says_it_is_not_quoted_yet() {
+        var pre = pre(price = 3_500L, ratio = null, impliedMoveBps = null).copy(expiryEpochDay = 20_700L)
+
+        assertTrue(decisionOf(pre).justification.contains("not quoted yet"))
+    }
+
+    @Test
     fun an_undecided_event_with_a_priced_move_blames_the_missing_history() {
         var decision = decisionOf(pre(price = 3_500L, ratio = null, impliedMoveBps = 700))
 

@@ -26,10 +26,17 @@ private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
  *
  * A ticker that carries no options and a provider that refused the call both parse to no chain.
  * Only the second is worth asking again, so the caller has to be able to tell them apart.
+ *
+ * Yahoo answers a symbol it knows with one result carrying the underlying, even when that symbol
+ * has no options at all: the expiry list simply comes back empty. An empty `result` array means it
+ * did not answer for the symbol, which is the shape a stale cookie produces, and it is worth asking
+ * again. AVGO went a whole day recording no priced move behind that empty array, because it read as
+ * a ticker without options and nothing was logged.
  */
 fun isOptionChainAnswer(body: String): Boolean =
     runCatching { lenient.parseToJsonElement(body).jsonObject }.getOrNull()
-        ?.containsKey("optionChain") == true
+        ?.get("optionChain")?.let { runCatching { it.jsonObject["result"]?.jsonArray }.getOrNull() }
+        ?.isNotEmpty() == true
 
 fun parseOptionChain(body: String): OptionChainSnapshot? {
     var root = runCatching { lenient.parseToJsonElement(body).jsonObject }.getOrNull() ?: return null

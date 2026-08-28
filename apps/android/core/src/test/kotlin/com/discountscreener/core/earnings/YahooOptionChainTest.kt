@@ -71,8 +71,21 @@ class YahooOptionChainTest {
     }
 
     @Test
-    fun a_ticker_that_lists_no_chain_is_still_an_answer_from_the_chain_endpoint() {
-        assertTrue(isOptionChainAnswer("""{"optionChain":{"result":[],"error":"Not Found"}}"""))
+    fun a_ticker_that_carries_no_options_is_still_an_answer_from_the_chain_endpoint() {
+        var body = """{"optionChain":{"result":[{"underlyingSymbol":"THIN",
+            "expirationDates":[],"options":[]}],"error":null}}"""
+
+        assertTrue(isOptionChainAnswer(body))
+    }
+
+    @Test
+    fun an_empty_result_array_is_a_refusal_and_never_a_ticker_without_options() {
+        assertFalse(isOptionChainAnswer("""{"optionChain":{"result":[],"error":"Not Found"}}"""))
+    }
+
+    @Test
+    fun a_chain_endpoint_that_answered_nothing_at_all_is_a_refusal() {
+        assertFalse(isOptionChainAnswer("""{"optionChain":{"error":"Invalid Cookie"}}"""))
     }
 
     @Test

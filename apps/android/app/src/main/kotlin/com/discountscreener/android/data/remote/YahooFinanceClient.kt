@@ -554,17 +554,19 @@ open class YahooFinanceClient(
             var body = executeText(request)
             return parseOptionChain(body)
                 ?: if (isOptionChainAnswer(body)) null
-                else throw IOException("Yahoo options answered no chain: ${body.take(160)}")
+                else throw OptionChainRefused("Yahoo options answered no chain: ${body.take(160)}")
         }
 
         try {
             once()
         } catch (error: IOException) {
-            if (!isAuthError(error)) throw error
+            if (!isAuthError(error) && error !is OptionChainRefused) throw error
             session.clear()
             once()
         }
     }
+
+    private class OptionChainRefused(message: String) : IOException(message)
 
     open suspend fun fetchConsensus(
         symbol: String,
