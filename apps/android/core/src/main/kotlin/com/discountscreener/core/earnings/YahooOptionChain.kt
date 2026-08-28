@@ -21,6 +21,16 @@ data class OptionChainSnapshot(
 
 private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
 
+/**
+ * Whether the body is an option-chain answer at all.
+ *
+ * A ticker that carries no options and a provider that refused the call both parse to no chain.
+ * Only the second is worth asking again, so the caller has to be able to tell them apart.
+ */
+fun isOptionChainAnswer(body: String): Boolean =
+    runCatching { lenient.parseToJsonElement(body).jsonObject }.getOrNull()
+        ?.containsKey("optionChain") == true
+
 fun parseOptionChain(body: String): OptionChainSnapshot? {
     var root = runCatching { lenient.parseToJsonElement(body).jsonObject }.getOrNull() ?: return null
     var result = root["optionChain"]?.jsonObject?.get("result")?.jsonArray?.firstOrNull()?.jsonObject

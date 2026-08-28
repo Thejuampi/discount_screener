@@ -69,3 +69,7 @@ worktrees/
 # Cargo build artifacts for the windows workspace and its members
 /apps/windows/src-tauri/target/
 /apps/windows/src-tauri/*/target/
+
+# JVM crash dumps left by test workers that run out of native memory
+hs_err_pid*.log
+replay_pid*.log

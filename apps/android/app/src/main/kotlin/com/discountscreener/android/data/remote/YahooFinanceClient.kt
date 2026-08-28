@@ -6,6 +6,7 @@ import com.discountscreener.core.earnings.CURRENT_QUARTER
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.OptionChainSnapshot
 import com.discountscreener.core.earnings.consensusOf
+import com.discountscreener.core.earnings.isOptionChainAnswer
 import com.discountscreener.core.earnings.parseOptionChain
 import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
@@ -543,7 +544,10 @@ open class YahooFinanceClient(
                 .header("Accept", "application/json,text/plain,*/*")
                 .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
                 .build()
-            return parseOptionChain(executeText(request))
+            var body = executeText(request)
+            return parseOptionChain(body)
+                ?: if (isOptionChainAnswer(body)) null
+                else throw IOException("Yahoo options answered no chain: ${body.take(160)}")
         }
 
         try {

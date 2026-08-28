@@ -25,7 +25,7 @@ fun settlementOf(
     )
 }
 
-private fun reactionOf(closes: List<DailyClose>, reportDate: LocalDate, timing: ReportTiming): Int? {
+internal fun reactionOf(closes: List<DailyClose>, reportDate: LocalDate, timing: ReportTiming): Int? {
     var ordered = closes.sortedBy { it.date }
     var base = when (timing) {
         ReportTiming.AfterClose -> ordered.lastOrNull { it.date <= reportDate }

@@ -93,6 +93,10 @@ class DiscountScreenerAppContainer(context: Context) {
         )
     }
 
+    private val secFilings by lazy {
+        SecEdgarTimeseriesProvider(File(appContext.cacheDir, "sec-edgar"))
+    }
+
     private val earningsEventRecorder by lazy {
         EarningsEventRecorder(
             log = EarningsEventLog(File(File(appContext.filesDir, "earnings"), "events.jsonl")),
@@ -101,6 +105,10 @@ class DiscountScreenerAppContainer(context: Context) {
             closes = { symbol ->
                 yahooClient.fetchCandles(symbol, "3mo", "1d").map { dailyCloseOf(it.epochSeconds, it.closeCents) }
             },
+            history = { symbol ->
+                yahooClient.fetchCandles(symbol, "5y", "1d").map { dailyCloseOf(it.epochSeconds, it.closeCents) }
+            },
+            announcements = { symbol -> secFilings.earningsAnnouncements(symbol) },
             nowProvider = { System.currentTimeMillis() / 1_000 },
             logger = AndroidAppLogger(),
         )

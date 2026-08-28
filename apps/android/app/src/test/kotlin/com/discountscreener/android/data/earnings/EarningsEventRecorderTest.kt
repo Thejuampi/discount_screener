@@ -6,6 +6,7 @@ import com.discountscreener.core.earnings.ChainRow
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
 import com.discountscreener.core.earnings.DecisionCell
+import com.discountscreener.core.earnings.EarningsAnnouncement
 import com.discountscreener.core.earnings.EarningsEventLog
 import com.discountscreener.core.earnings.OptionQuote
 import com.discountscreener.core.earnings.OptionChainSnapshot
@@ -307,13 +308,39 @@ class EarningsEventRecorderTest {
         log: EarningsEventLog,
         chains: EarningsEventRecorder.OptionChainSource = EarningsEventRecorder.OptionChainSource { _, _ -> chain },
         closes: EarningsEventRecorder.CloseSource = EarningsEventRecorder.CloseSource { emptyList() },
+        history: EarningsEventRecorder.CloseSource = closes,
+        announcements: EarningsEventRecorder.AnnouncementSource =
+            EarningsEventRecorder.AnnouncementSource { emptyList() },
     ) = EarningsEventRecorder(
         log = log,
         chains = chains,
         consensus = { _ -> consensus },
         closes = closes,
+        history = history,
+        announcements = announcements,
         nowProvider = { TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond() },
     )
+
+    private fun filed(vararg daysAgo: Long) = EarningsEventRecorder.AnnouncementSource { symbol ->
+        if (symbol == "SPY") {
+            emptyList()
+        } else {
+            daysAgo.map { EarningsAnnouncement(TODAY.minusDays(it), ReportTiming.AfterClose) }
+        }
+    }
+
+    private fun reactingCloses(jumpBps: Int) = EarningsEventRecorder.CloseSource { symbol ->
+        var start = TODAY.minusDays(400)
+        var jumpDays = setOf(390L, 300L, 200L, 100L).map { TODAY.minusDays(it) }
+        var level = 10_000.0
+        (0..400).map { index ->
+            var day = start.plusDays(index.toLong())
+            if (symbol != "SPY" && jumpDays.any { it.plusDays(1) == day }) {
+                level *= 1.0 + jumpBps / 10_000.0
+            }
+            DailyClose(day, level.toLong())
+        }
+    }
 
     private fun quietDays() = EarningsEventRecorder.CloseSource { symbol ->
         if (symbol == "SPY") {
@@ -418,5 +445,77 @@ class EarningsEventRecorderTest {
 
     private companion object {
         val TODAY: LocalDate = LocalDate.of(2026, 8, 23)
+    }
+
+    @Test
+    fun the_reports_the_company_already_filed_give_the_gate_its_denominator() = runTest {
+        var log = log()
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 500),
+            announcements = filed(390L, 300L, 200L, 100L),
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals(
+            500,
+            log.read().events.single().pre.medianAbsoluteAbnormalReturnBps,
+        )
+    }
+
+    @Test
+    fun a_ticker_with_filed_history_stops_waiting_for_the_log_to_fill() = runTest {
+        var log = log()
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 500),
+            announcements = filed(390L, 300L, 200L, 100L),
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertTrue(
+            log.read().events.single().pre.riskRatioBps != null,
+        )
+    }
+
+    @Test
+    fun a_company_that_filed_nothing_leaves_the_log_history_in_charge() = runTest {
+        var log = log()
+
+        recorder(log, closes = quietDays(), history = reactingCloses(jumpBps = 500))
+            .capture(listOf(row(earningsIn = 3)))
+
+        assertNull(log.read().events.single().pre.medianAbsoluteAbnormalReturnBps)
+    }
+
+    @Test
+    fun a_filing_archive_that_fails_never_costs_the_event_its_record() = runTest {
+        var log = log()
+
+        recorder(
+            log,
+            closes = quietDays(),
+            announcements = EarningsEventRecorder.AnnouncementSource { error("SEC is down") },
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("LVS", log.read().events.single().pre.symbol)
+    }
+
+    @Test
+    fun a_report_the_chain_never_priced_is_asked_again_before_it_lands() = runTest {
+        var log = log()
+        var answers = mutableListOf<OptionChainSnapshot?>(null, chain)
+        var recorder = recorder(
+            log,
+            chains = EarningsEventRecorder.OptionChainSource { _, _ -> answers.removeAt(0) },
+        )
+        recorder.capture(listOf(row(earningsIn = 3)))
+
+        recorder(log, chains = EarningsEventRecorder.OptionChainSource { _, _ -> chain })
+            .capture(listOf(row(earningsIn = 3)))
+
+        assertEquals(701, log.event("LVS", TODAY.plusDays(3).toEpochDay())?.pre?.impliedMoveBps)
     }
 }

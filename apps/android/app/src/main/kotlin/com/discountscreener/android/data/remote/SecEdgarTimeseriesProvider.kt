@@ -17,6 +17,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.discountscreener.core.earnings.EarningsAnnouncement
+import com.discountscreener.core.earnings.parseEarningsAnnouncements
 import okhttp3.Response
 import kotlin.math.abs
 import java.io.File
@@ -27,6 +29,7 @@ import java.util.concurrent.TimeUnit
 
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
+private const val SUBMISSIONS_URL = "https://data.sec.gov/submissions/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
 /**
@@ -82,6 +85,25 @@ class SecEdgarTimeseriesProvider(
     override suspend fun fetchSievedCompanyFacts(symbol: String): String? = withContext(Dispatchers.IO) {
         loadSievedFacts(symbol)
     }
+
+    /**
+     * Every past earnings announcement of one ticker, dated by the company itself.
+     *
+     * An 8-K carrying item 2.02 is the results release. Its acceptance timestamp says whether the
+     * report landed before the open or after the close, which is what decides the reaction window.
+     */
+    suspend fun earningsAnnouncements(symbol: String): List<EarningsAnnouncement> =
+        withContext(Dispatchers.IO) {
+            var cik = resolveCik(symbol) ?: return@withContext emptyList()
+            var body = cachedText("CIK$cik.submissions.json") {
+                var request = Request.Builder()
+                    .url("${SUBMISSIONS_URL}CIK$cik.json")
+                    .header("User-Agent", SEC_USER_AGENT)
+                    .build()
+                governedText(request)
+            } ?: return@withContext emptyList()
+            parseEarningsAnnouncements(body)
+        }
 
     private suspend fun resolveCik(symbol: String): String? {
         val map = tickerToCik ?: loadTickerMap()

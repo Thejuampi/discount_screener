@@ -5,6 +5,7 @@ import com.discountscreener.core.earnings.DecisionCell
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventRisk
 import com.discountscreener.core.earnings.PreReport
+import com.discountscreener.core.earnings.ratioText
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.eventRiskOf
 import com.discountscreener.core.earnings.priceToFairBps
@@ -67,7 +68,7 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
         impliedMove = pre.impliedMoveBps?.let(::formatPct) ?: MISSING,
         eventMove = eventMoveText(pre),
         ownHistory = pre.medianAbsoluteAbnormalReturnBps?.let(::formatPct) ?: MISSING,
-        riskRatio = pre.riskRatioBps?.let { "%.2fx".format(it / 10_000.0) } ?: MISSING,
+        riskRatio = pre.riskRatioBps?.let { ratioText(it) } ?: MISSING,
         priceToFair = priceToFairBps(pre)?.let(::formatPct) ?: MISSING,
         action = decision?.action?.name ?: MISSING,
         positionSize = decision?.positionSizeBps?.let { "${it / 100}%" } ?: MISSING,

@@ -133,10 +133,7 @@ private fun missingText(pre: PreReport, risk: EventRisk): String = when {
     else -> "No fair value for this ticker yet."
 }
 
-private fun ratioText(riskRatioBps: Int?): String {
-    var ratio = (riskRatioBps ?: 0) / 10_000.0
-    return "${(ratio * 10).toInt() / 10.0}x"
-}
+fun ratioText(riskRatioBps: Int?): String = "%.2fx".format((riskRatioBps ?: 0) / 10_000.0)
 
 private const val FULL_POSITION_BPS = 10_000
 private const val HALF_POSITION_BPS = 5_000

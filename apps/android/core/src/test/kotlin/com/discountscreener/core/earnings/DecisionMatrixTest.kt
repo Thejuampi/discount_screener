@@ -117,7 +117,7 @@ class DecisionMatrixTest {
 
     @Test
     fun the_justification_names_the_multiple_the_market_is_paying() {
-        assertTrue(decisionOf(pre(price = 3_500L, ratio = 15_000)).justification.contains("1.5x"))
+        assertTrue(decisionOf(pre(price = 3_500L, ratio = 15_000)).justification.contains("1.50x"))
     }
 
     @Test

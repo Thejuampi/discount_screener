@@ -6,6 +6,7 @@ import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
 import com.discountscreener.core.earnings.DcfAsOf
+import com.discountscreener.core.earnings.EarningsAnnouncement
 import com.discountscreener.core.earnings.EarningsEventLog
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventLogRead
@@ -14,6 +15,7 @@ import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.decisionOf
 import com.discountscreener.core.earnings.expiryAfterReport
 import com.discountscreener.core.earnings.normalDailyMoveBps
+import com.discountscreener.core.earnings.pastAbnormalReturnsOf
 import com.discountscreener.core.earnings.preReportOf
 import com.discountscreener.core.earnings.reportTimingOf
 import com.discountscreener.core.earnings.settlementOf
@@ -26,6 +28,8 @@ class EarningsEventRecorder(
     private val chains: OptionChainSource,
     private val consensus: ConsensusSource,
     private val closes: CloseSource,
+    private val history: CloseSource = closes,
+    private val announcements: AnnouncementSource = AnnouncementSource { emptyList() },
     private val nowProvider: () -> Long,
     private val logger: AppLogger = NoOpAppLogger,
     private val windowDays: Long = CAPTURE_WINDOW_DAYS,
@@ -44,12 +48,25 @@ class EarningsEventRecorder(
         suspend fun closes(symbol: String): List<DailyClose>
     }
 
+    fun interface AnnouncementSource {
+        suspend fun announcements(symbol: String): List<EarningsAnnouncement>
+    }
+
     fun events(): EventLogRead = log.read()
 
+    /**
+     * A report the chain never priced is asked again on the next pass.
+     *
+     * An option chain is never republished. One failed lookup would otherwise cost the event its
+     * priced move for good, which is the loss this log exists to prevent. The retry stops when the
+     * report leaves the capture window.
+     */
     suspend fun capture(rows: List<OpportunityListRow>): Int {
         var today = LocalDate.ofInstant(Instant.ofEpochSecond(nowProvider()), ZoneOffset.UTC)
         var stored = settleDueEvents(log.read().events, today)
-        var known = stored.mapTo(HashSet()) { it.pre.symbol to it.pre.reportEpochDay }
+        var priced = stored
+            .filter { it.pre.impliedMoveBps != null }
+            .mapTo(HashSet()) { it.pre.symbol to it.pre.reportEpochDay }
         var reactions = stored
             .mapNotNull { record -> record.post?.abnormalReturnBps?.let { record.pre.symbol to it } }
             .groupBy({ it.first }, { it.second })
@@ -58,7 +75,7 @@ class EarningsEventRecorder(
             var epoch = row.nextEarningsEpoch ?: return@forEach
             var (reportDate, timing) = reportTimingOf(epoch)
             if (!isInWindow(reportDate, today)) return@forEach
-            if (row.symbol to reportDate.toEpochDay() in known) return@forEach
+            if (row.symbol to reportDate.toEpochDay() in priced) return@forEach
             runCatching {
                 captureOne(row, reportDate, timing, reactions[row.symbol].orEmpty(), today)
             }
@@ -114,6 +131,7 @@ class EarningsEventRecorder(
         var chain = expiry?.let {
             chains.chain(row.symbol, it.atStartOfDay(ZoneOffset.UTC).toEpochSecond())
         }
+        var filed = filedReactionsOf(row.symbol)
         var pre = preReportOf(
             symbol = row.symbol,
             reportDate = reportDate,
@@ -123,11 +141,28 @@ class EarningsEventRecorder(
             chain = chain,
             expiry = expiry,
             consensus = consensus.consensus(row.symbol),
-            pastAbnormalReturnsBps = pastReactionsBps,
+            pastAbnormalReturnsBps = filed.ifEmpty { pastReactionsBps },
             normalDailyMoveBps = quietDayMoveOf(row.symbol),
         )
         log.append(EarningsEventRecord(pre = pre, decision = decisionOf(pre)))
     }
+
+    private suspend fun filedReactionsOf(symbol: String): List<Int> =
+        runCatching {
+            var events = announcements.announcements(symbol)
+            if (events.isEmpty()) emptyList() else pastAbnormalReturnsOf(
+                announcements = events,
+                symbolCloses = history.closes(symbol),
+                marketCloses = marketHistory(),
+            )
+        }
+            .onFailure { error -> logger.error(TAG, "earnings filing history failed: $symbol", error) }
+            .getOrDefault(emptyList())
+
+    private suspend fun marketHistory(): List<DailyClose> =
+        marketHistoryCache ?: history.closes(marketSymbol).also { marketHistoryCache = it }
+
+    private var marketHistoryCache: List<DailyClose>? = null
 
     private suspend fun quietDayMoveOf(symbol: String): Int? =
         runCatching { normalDailyMoveBps(closes.closes(symbol)) }

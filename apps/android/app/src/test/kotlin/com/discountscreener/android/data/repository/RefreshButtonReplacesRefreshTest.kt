@@ -109,7 +109,7 @@ class RefreshButtonReplacesRefreshTest {
             var snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
             if (snapshot.startupPhase == DashboardStartupPhase.Ready && !repository.loadInFlight.value) return
             if (System.currentTimeMillis() >= deadline) {
-                fail("Timed out waiting for a settled load; last phase=${snapshot.startupPhase}")
+                fail("Timed out waiting for a settled load; last phase=${snapshot.startupPhase} inFlight=${repository.loadInFlight.value} peak=${repository.peekPeakRefreshPasses()}")
             }
             delay(POLL_MILLIS)
         }

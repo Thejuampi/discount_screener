@@ -179,6 +179,7 @@ Ninguna pieza del módulo está bloqueada por dinero. Lo único que no se compra
 | Dispersión de estimados | `(high − low)` y `numberOfAnalysts` de `earningsEstimate`. No es el desvío estándar. Se declara la definición usada y se mantiene fija. | Gratis |
 | EPS y revenue reales | `earningsHistory` de Yahoo da 4 trimestres con real, estimado y sorpresa. EDGAR XBRL da los reales sin límite de historia. | Gratis |
 | Retorno de mercado y beta ex-evento | Serie de precios de un índice por el mismo endpoint de chart que ya se usa. | Gratis |
+| **Fechas exactas de reportes pasados** | EDGAR: el 8-K con item 2.02 es el anuncio de resultados, fechado por la propia empresa. La marca de aceptación dice si salió antes de la apertura o después del cierre. AVGO da 20 trimestres. | Gratis, mismo host que el proveedor SEC que ya usa la app |
 | **Historia de implied move** | **No se backfillea gratis.** O se compra (ORATS y similares venden cadenas históricas), o se empieza a capturar hoy, un registro por evento. | Compra, o dos años de espera |
 | **Historia de consenso más allá de 4 trimestres** | Misma respuesta: capturar desde hoy, o comprar. | Compra, o espera |
 
@@ -186,7 +187,9 @@ Ninguna pieza del módulo está bloqueada por dinero. Lo único que no se compra
 
 El log de eventos (§7) deja de ser el último paso y pasa a ser el primero. Es la única pieza que empieza a pagar el día que se escribe: cada reporte que pasa sin log es un evento que no vuelve. Con el log corriendo, la historia se acumula sola mientras se construye el resto.
 
-Con la historia que existe hoy (4 trimestres de `earningsHistory`) no se puede correr la regresión de §4.2, que pide 16–20 trimestres. La regresión llega después. El score de §4.3 sí se puede correr antes, porque su denominador es la mediana del retorno anormal, y eso sale de las series de precio, que sí tienen historia.
+Con la historia que existe hoy (4 trimestres de `earningsHistory`) no se puede correr la regresión de §4.2, que pide 16–20 trimestres. El 8-K de EDGAR sí llega: da 20 trimestres de fechas exactas, y con las series de precio eso alcanza para la regresión y para el denominador de §4.3.
+
+El denominador de §4.3 sale de ahí desde la primera pasada. Antes salía solo de la bitácora propia, y en una instalación nueva la bitácora está vacía: cada tarjeta decía `Undecided` hasta que la app viera pasar sus propios reportes, o sea años. Ahora la bitácora acumula el implied move, que EDGAR no tiene, y EDGAR aporta las fechas, que la bitácora todavía no juntó.
 
 ## 12. Preguntas abiertas
 
@@ -210,11 +213,12 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `DecisionMatrix.kt` | Clasifica el riesgo (>1.3 alto, <0.8 bajo), resuelve la celda de la matriz con el precio contra el DCF (barato ≤ 0.9×) y aplica el tope de costo de cobertura. | 4.3, 4.5, 4.6 |
 | `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
 | `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
+| `EdgarFilings.kt` | Lee las presentaciones de EDGAR y saca cada anuncio de resultados: forma 8-K con item 2.02. Fecha por marca de aceptación en hora de Nueva York, porque `filingDate` pasa al día hábil siguiente después de las 17:30. Calcula los retornos anormales pasados con la misma regla de ventana que la liquidación. | 4.2, 4.3 |
 | `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 166 pruebas en el paquete `earnings` de `:core`; en `:app`, 28 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: 192 pruebas en el paquete `earnings` de `:core`; en `:app`, 33 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 
@@ -223,10 +227,15 @@ Cobertura: 166 pruebas en el paquete `earnings` de `:core`; en `:app`, 28 del gr
 | `YahooFinanceClient.fetchOptionChain` | Pega a `/v7/finance/options/{symbol}`. Sin fecha lista los vencimientos; con `date` trae la escalera. |
 | `YahooFinanceClient.fetchConsensus` | Lee `earningsTrend`, que ahora viaja en `QUOTE_SUMMARY_MODULES`. Cero módulos nuevos en el pedido. |
 | `EarningsEventRecorder` | Toma las filas del refresh, filtra las que reportan dentro de 10 días, baja la cadena y escribe el bloque ya decidido. Antes de capturar, liquida los reportes que ya pasaron (1 a 30 días) contra SPY. Lee la bitácora una vez por pasada. |
+| `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |
 
-Un evento se escribe una sola vez. La segunda pasada sobre el mismo reporte no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.
+Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada sobre él no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.
+
+Un evento que quedó sin implied move se vuelve a pedir en cada pasada, mientras el reporte siga dentro de la ventana de captura. Una cadena de opciones no se vuelve a publicar: una sola consulta fallida le costaría al evento su movimiento priceado para siempre, que es justo la pérdida que esta bitácora existe para evitar.
+
+Por eso `fetchOptionChain` distingue dos respuestas que antes se veían iguales: un ticker sin opciones y un proveedor que se negó a contestar. Solo la segunda vale la pena volver a preguntarla.
 
 Un reporte con hora sin confirmar se guarda igual, con `timing = Unknown`, y su ventana de reacción abarca el día entero. Yahoo manda la hora dentro de la rueda cuando la fecha todavía no está confirmada; descartarlo perdía la mayoría de los eventos reales.
 

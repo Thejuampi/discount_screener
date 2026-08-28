@@ -3,6 +3,7 @@ package com.discountscreener.core.earnings
 import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -67,6 +68,21 @@ class YahooOptionChainTest {
     @Test
     fun a_body_that_is_not_a_chain_refuses() {
         assertNull(parseOptionChain("""{"optionChain":{"result":[],"error":"Not Found"}}"""))
+    }
+
+    @Test
+    fun a_ticker_that_lists_no_chain_is_still_an_answer_from_the_chain_endpoint() {
+        assertTrue(isOptionChainAnswer("""{"optionChain":{"result":[],"error":"Not Found"}}"""))
+    }
+
+    @Test
+    fun a_page_that_is_not_json_is_never_mistaken_for_an_empty_chain() {
+        assertFalse(isOptionChainAnswer("<html>429 Too Many Requests</html>"))
+    }
+
+    @Test
+    fun a_json_answer_from_some_other_endpoint_is_never_mistaken_for_a_chain() {
+        assertFalse(isOptionChainAnswer("""{"quoteSummary":{"result":[]}}"""))
     }
 
     @Test
