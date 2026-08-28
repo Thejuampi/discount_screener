@@ -3,7 +3,6 @@ package com.discountscreener.core.earnings
 import com.discountscreener.core.math.medianOf
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.ZoneId
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -13,15 +12,12 @@ data class DcfAsOf(val fairValueCents: Long, val computedOn: LocalDate)
 
 val EXCHANGE_ZONE: ZoneId = ZoneId.of("America/New_York")
 
-private val MARKET_OPEN: LocalTime = LocalTime.of(9, 30)
-private val MARKET_CLOSE: LocalTime = LocalTime.of(16, 0)
-
 fun reportTimingOf(epochSeconds: Long): Pair<LocalDate, ReportTiming> {
     var moment = Instant.ofEpochSecond(epochSeconds).atZone(EXCHANGE_ZONE)
     var time = moment.toLocalTime()
     var timing = when {
-        time < MARKET_OPEN -> ReportTiming.BeforeOpen
-        time >= MARKET_CLOSE -> ReportTiming.AfterClose
+        time < MARKET_OPENS -> ReportTiming.BeforeOpen
+        time >= MARKET_CLOSES -> ReportTiming.AfterClose
         else -> ReportTiming.Unknown
     }
     return moment.toLocalDate() to timing

@@ -2,7 +2,6 @@ package com.discountscreener.core.earnings
 
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.ZonedDateTime
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -15,9 +14,6 @@ const val RESULTS_OF_OPERATIONS_ITEM = "2.02"
 const val EARNINGS_FORM = "8-K"
 
 private val EDGAR_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
-
-private val MARKET_OPENS: LocalTime = LocalTime.of(9, 30)
-private val MARKET_CLOSES: LocalTime = LocalTime.of(16, 0)
 
 data class EarningsAnnouncement(val date: LocalDate, val timing: ReportTiming)
 

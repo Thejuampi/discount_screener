@@ -58,6 +58,8 @@ import com.discountscreener.core.earnings.dailyCloseOf
 import com.discountscreener.core.engine.CachedObservedMarketParamsSource
 import com.discountscreener.core.engine.CachedYahooTnxMarketParamsSource
 import com.discountscreener.core.engine.FredThenTnxMarketParamsSource
+import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ViewFilter
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -219,6 +221,23 @@ class DiscountScreenerAppContainer(context: Context) {
      */
     fun keepLoadsRunningInBackground() {
         ForegroundLoadKeeper(appContext).keep(repository.loadInFlight, backgroundScope)
+    }
+
+    /**
+     * Prices every report inside its window from what is already on the phone.
+     *
+     * The universe is restored, never refreshed: the capture needs the symbols and their report
+     * dates, and a background run has no business spending a five-hundred-symbol load to get them.
+     */
+    suspend fun capturePendingEarnings(): Int {
+        var preferences = repository.loadScoringPreferences()
+        var snapshot = repository.bootstrap(
+            filter = ViewFilter(),
+            selectedSymbol = null,
+            selectedRange = ChartRange.Month,
+            opportunityScoringModel = preferences.opportunityModel,
+        )
+        return earningsEventRecorder.capture(snapshot.opportunityRows)
     }
 
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =

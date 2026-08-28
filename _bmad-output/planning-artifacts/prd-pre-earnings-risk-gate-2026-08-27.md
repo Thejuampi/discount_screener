@@ -236,6 +236,7 @@ Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del gr
 | `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |
+| `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
 
 Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada sobre él no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.
 
@@ -246,6 +247,14 @@ Por eso `fetchOptionChain` distingue tres respuestas que antes se veían iguales
 - **`result` vacío.** El proveedor no contestó por ese símbolo. Es la forma que toma una cookie vencida. Se limpia la sesión y se pregunta una vez más; si vuelve a pasar, el evento queda sin precio y la próxima pasada lo pide de nuevo.
 - **`result` con el subyacente y la lista de vencimientos vacía.** El ticker no tiene opciones. No se pregunta dos veces.
 - **La escalera entera cotizada en cero.** Fuera de rueda Yahoo devuelve bid y ask en cero para los 101 strikes: `marketState: PRE`. El straddle la rechaza a propósito. La tarjeta ahora dice "the chain for this expiry is not quoted yet" en vez de "no option chain", porque la cadena está y solo está cerrada. Medido en vivo sobre AVGO el 2026-08-28: 0 de 101 calls con bid.
+
+### La captura no puede depender de que el usuario abra la app
+
+Fuera de rueda cada strike cotiza bid cero, así que solo una pasada dentro del horario regular deja un movimiento priceado. Hasta acá la única pasada era la del refresh, y el refresh solo corre con la app abierta: un reporte quedaba priceado nada más si el usuario abría la app durante una rueda dentro de sus diez días de ventana. Una cadena de opciones no se vuelve a publicar, y cada rueda perdida era un reporte sin precio para siempre.
+
+`EarningsCaptureWorker` cierra ese agujero. Corre cada 90 minutos —cuatro pasadas por rueda—, pregunta `quotesAreLive` antes de gastar un pedido y sale sin hacer nada si el mercado está cerrado. El trabajo se encola con nombre único y política `UPDATE`: un pedido idéntico no cambia nada, así que un relanzamiento no le reinicia la cadencia, y un período nuevo en una versión nueva sí llega a un teléfono que ya tenía el viejo encolado. Con `KEEP` ese teléfono se quedaba con la cadencia vieja para siempre.
+
+`quotesAreLive` lee la hora de Nueva York, nunca la zona en la que está el teléfono. Un feriado se ve como rueda abierta: la cadena vuelve sin cotizar, el straddle la rechaza y el costo es un pedido gastado en vez de un número equivocado.
 
 Un reporte con hora sin confirmar se guarda igual, con `timing = Unknown`, y su ventana de reacción abarca el día entero. Yahoo manda la hora dentro de la rueda cuando la fecha todavía no está confirmada; descartarlo perdía la mayoría de los eventos reales.
 
