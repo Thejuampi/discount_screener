@@ -128,9 +128,30 @@ class EarningsGateScreenTest {
         shadowOf(Looper.getMainLooper()).idle()
     }
 
+    @Test
+    fun a_settled_report_shows_the_surprise_the_company_printed() {
+        render(gate(day = -3, post = PostReport(abnormalReturnBps = 412, surpriseScoreBps = 10_435)))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("EPS +1.04 of the analyst spread"))
+
+        composeRule.onNodeWithText("EPS +1.04 of the analyst spread").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_settled_report_shows_the_share_of_the_index_it_was_charged() {
+        render(gate(day = -3, post = PostReport(abnormalReturnBps = 412, marketBetaBps = 17_000)))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("Abnormal move +4.12%, beta 1.70x"))
+
+        composeRule.onNodeWithText("Abnormal move +4.12%, beta 1.70x").assertIsDisplayed()
+    }
+
     private fun gate(
         day: Long,
         abnormalReturnBps: Int? = null,
+        post: PostReport? = null,
         damaged: Int = 0,
         spread: Int? = null,
     ): EarningsGateUi {
@@ -154,7 +175,7 @@ class EarningsGateScreenTest {
                 EarningsEventRecord(
                     pre = pre,
                     decision = decisionOf(pre),
-                    post = abnormalReturnBps?.let { PostReport(abnormalReturnBps = it) },
+                    post = post ?: abnormalReturnBps?.let { PostReport(abnormalReturnBps = it) },
                 ),
             ),
             damagedLines = damaged,

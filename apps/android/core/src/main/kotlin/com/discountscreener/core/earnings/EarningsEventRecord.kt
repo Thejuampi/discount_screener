@@ -81,5 +81,6 @@ data class PostReport(
     val revenueSurpriseBps: Int? = null,
     val stockReturnBps: Int? = null,
     val marketReturnBps: Int? = null,
+    val marketBetaBps: Int? = null,
     val abnormalReturnBps: Int? = null,
 )

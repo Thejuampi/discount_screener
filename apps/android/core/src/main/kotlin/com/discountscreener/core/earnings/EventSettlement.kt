@@ -31,6 +31,7 @@ fun settlementOf(
         revenueSurpriseBps = revenueSurpriseBps(revenue, pre),
         stockReturnBps = stock,
         marketReturnBps = market,
+        marketBetaBps = marketBeta?.let { (it * 10_000.0).roundToInt() },
         abnormalReturnBps = abnormal,
     )
 }

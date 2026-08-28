@@ -4,6 +4,7 @@ import com.discountscreener.android.ui.dashboard.formatPct
 import com.discountscreener.core.earnings.DecisionCell
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventRisk
+import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ratioText
 import com.discountscreener.core.earnings.ReportTiming
@@ -37,6 +38,7 @@ data class EarningsEventRowUi(
     val hedgeCost: String,
     val justification: String,
     val reaction: String?,
+    val surprise: String?,
 )
 
 fun presentEarningsGate(
@@ -75,9 +77,34 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
         hedge = hedgeLabel(decision?.hedge?.name),
         hedgeCost = hedgeCostText(pre),
         justification = decision?.justification.orEmpty(),
-        reaction = record.post?.abnormalReturnBps?.let { "Abnormal move ${formatSignedPct(it)}" },
+        reaction = reactionText(record.post),
+        surprise = surpriseText(record.post),
     )
 }
+
+/**
+ * What the report turned out to be, once it landed.
+ *
+ * The reaction alone says the price moved and never why. The surprise is the half the log already
+ * held and no screen ever showed: the beat measured in how far apart the analysts were, and the
+ * revenue against the number they had agreed on.
+ */
+private fun surpriseText(post: PostReport?): String? {
+    if (post == null) return null
+    var parts = listOfNotNull(
+        post.surpriseScoreBps?.let { "EPS ${formatSigned(it)} of the analyst spread" },
+        post.revenueSurpriseBps?.let { "revenue ${formatSignedPct(it)}" },
+    )
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(", ")
+}
+
+private fun reactionText(post: PostReport?): String? {
+    var abnormal = post?.abnormalReturnBps ?: return null
+    var beta = post.marketBetaBps?.let { ", beta ${ratioText(it)}" }.orEmpty()
+    return "Abnormal move ${formatSignedPct(abnormal)}$beta"
+}
+
+private fun formatSigned(bps: Int): String = "%+.2f".format(bps / 10_000.0)
 
 private fun timingLabel(timing: ReportTiming): String = when (timing) {
     ReportTiming.BeforeOpen -> "Before open"

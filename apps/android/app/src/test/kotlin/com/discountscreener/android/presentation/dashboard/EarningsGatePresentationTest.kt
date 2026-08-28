@@ -108,6 +108,51 @@ class EarningsGatePresentationTest {
     }
 
     @Test
+    fun a_settled_report_names_the_share_of_the_index_it_was_charged() {
+        var settled = PostReport(abnormalReturnBps = 412, marketBetaBps = 17_000)
+
+        assertEquals("Abnormal move +4.12%, beta 1.70x", present(listOf(record(day = -3, post = settled))).settled.single().reaction)
+    }
+
+    @Test
+    fun a_settled_report_with_no_beta_on_file_still_shows_its_move() {
+        var ui = present(listOf(record(day = -3, abnormalReturnBps = 412)))
+
+        assertEquals("Abnormal move +4.12%", ui.settled.single().reaction)
+    }
+
+    @Test
+    fun a_settled_report_shows_how_far_the_eps_beat_the_analyst_spread() {
+        var settled = PostReport(abnormalReturnBps = 412, surpriseScoreBps = 10_435)
+
+        assertEquals("EPS +1.04 of the analyst spread", present(listOf(record(day = -3, post = settled))).settled.single().surprise)
+    }
+
+    @Test
+    fun a_settled_report_shows_the_revenue_against_what_was_expected() {
+        var settled = PostReport(abnormalReturnBps = 412, revenueSurpriseBps = 1_000)
+
+        assertEquals("revenue +10.00%", present(listOf(record(day = -3, post = settled))).settled.single().surprise)
+    }
+
+    @Test
+    fun a_settled_report_shows_both_surprises_together_when_it_has_both() {
+        var settled = PostReport(abnormalReturnBps = 412, surpriseScoreBps = -5_000, revenueSurpriseBps = -250)
+
+        assertEquals("EPS -0.50 of the analyst spread, revenue -2.50%", present(listOf(record(day = -3, post = settled))).settled.single().surprise)
+    }
+
+    @Test
+    fun a_settled_report_that_carries_no_actuals_shows_no_surprise() {
+        assertNull(present(listOf(record(day = -3, abnormalReturnBps = 412))).settled.single().surprise)
+    }
+
+    @Test
+    fun a_report_not_settled_yet_shows_no_surprise() {
+        assertNull(present(listOf(record(day = 3))).upcoming.single().surprise)
+    }
+
+    @Test
     fun a_report_not_settled_yet_shows_no_reaction() {
         assertNull(present(listOf(record(day = 3))).upcoming.single().reaction)
     }
@@ -187,6 +232,7 @@ class EarningsGatePresentationTest {
         ratio: Int? = 17_525,
         timing: ReportTiming = ReportTiming.AfterClose,
         abnormalReturnBps: Int? = null,
+        post: PostReport? = null,
         spread: Int? = null,
         put: Int? = null,
         event: Int? = null,
@@ -211,7 +257,7 @@ class EarningsGatePresentationTest {
         return EarningsEventRecord(
             pre = pre,
             decision = decisionOf(pre),
-            post = abnormalReturnBps?.let { PostReport(abnormalReturnBps = it) },
+            post = post ?: abnormalReturnBps?.let { PostReport(abnormalReturnBps = it) },
         )
     }
 
