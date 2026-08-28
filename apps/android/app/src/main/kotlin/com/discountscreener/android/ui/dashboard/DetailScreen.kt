@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -1372,92 +1373,60 @@ private fun ModelValuationSection(
     ui: ValuationJudgmentUi,
     projectedDetail: ProjectedDetailData?,
 ) {
-    Text("Valuation", fontWeight = FontWeight.Bold)
-    priceLine(detail, ui)?.let { line ->
+    valuationCardLines(detail, ui).forEach { line ->
         Text(
-            text = line,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-        )
-    }
-    ui.caveatLines.forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    modelReasonLines(ui).forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    var officialGapBps = ui.officialGapBps
-    if (officialGapBps != null) {
-        Text(
-            text = "Identity vs analyst $officialGapBps bps",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    honestyPairLines(ui).forEach { line ->
-        var bent = line != ui.honestValueLine
-        Text(
-            text = line,
-            style = if (line == ui.nonHonestReason) {
-                MaterialTheme.typography.bodySmall
-            } else {
-                MaterialTheme.typography.titleSmall
-            },
-            fontWeight = if (bent) FontWeight.Normal else FontWeight.SemiBold,
-            color = if (bent) {
-                MaterialTheme.colorScheme.tertiary
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            },
-        )
-    }
-    ui.nonHonestLines.forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.tertiary,
-        )
-        Text(
-            text = "Price ${money(detail.marketPriceCents)}",
-            style = MaterialTheme.typography.labelMedium,
-        )
-        // With no primary the card would otherwise be a stance token alone, so this is where the
-        // reader gets both series. When a primary exists they already render above; repeating
-        // them here printed the same numbers three times on one screen.
-        judgmentReferenceLines(ui).forEach { line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    var ownModel = ownModelLines(ui)
-    if (ownModel.isNotEmpty()) {
-        ownModel.forEach { line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Text(
-            text = ui.horizonPriceNote,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = line.text,
+            style = valuationLineStyle(line.role),
+            fontWeight = valuationLineWeight(line.role),
+            color = valuationLineColor(line.role),
         )
     }
     WaccAssumptionsSection(projectedDetail = projectedDetail)
     FcfDiagnosticsSection(projectedDetail = projectedDetail)
     AnalystConcentrationSection(detail = detail)
+}
+
+@Composable
+private fun valuationLineStyle(role: ValuationLineRole): TextStyle = when (role) {
+    ValuationLineRole.Title -> MaterialTheme.typography.bodyLarge
+    ValuationLineRole.Price -> MaterialTheme.typography.bodyMedium
+    ValuationLineRole.Caveat -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Reason -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Gap -> MaterialTheme.typography.labelMedium
+    ValuationLineRole.HonestAnchor -> MaterialTheme.typography.titleSmall
+    ValuationLineRole.BentAnchor -> MaterialTheme.typography.titleSmall
+    ValuationLineRole.BentReason -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.KnobNote -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Series -> MaterialTheme.typography.labelSmall
+    ValuationLineRole.OwnModel -> MaterialTheme.typography.labelSmall
+    ValuationLineRole.OwnModelNote -> MaterialTheme.typography.labelSmall
+}
+
+/**
+ * The label styles carry `FontWeight.Medium` of their own, so a blanket `Normal` here would thin
+ * every gap, series and own-model line on the card.
+ */
+private fun valuationLineWeight(role: ValuationLineRole): FontWeight = when (role) {
+    ValuationLineRole.Title -> FontWeight.Bold
+    ValuationLineRole.HonestAnchor -> FontWeight.SemiBold
+    ValuationLineRole.Gap,
+    ValuationLineRole.Series,
+    ValuationLineRole.OwnModel,
+    ValuationLineRole.OwnModelNote,
+    -> FontWeight.Medium
+    else -> FontWeight.Normal
+}
+
+@Composable
+private fun valuationLineColor(role: ValuationLineRole): Color = when (role) {
+    ValuationLineRole.Price -> MaterialTheme.colorScheme.error
+    ValuationLineRole.HonestAnchor -> MaterialTheme.colorScheme.onSurface
+    ValuationLineRole.BentAnchor,
+    ValuationLineRole.BentReason,
+    ValuationLineRole.KnobNote,
+    -> MaterialTheme.colorScheme.tertiary
+    ValuationLineRole.Title -> MaterialTheme.colorScheme.onSurface
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
 @Composable
@@ -3656,14 +3625,6 @@ internal fun modelReasonLines(ui: ValuationJudgmentUi): List<String> =
     ui.reasonLines.filterNot { line ->
         line == "Primary is the analyst range." || line == "Primary is the identity model."
     }
-
-private fun priceLine(
-    detail: SymbolDetail,
-    ui: ValuationJudgmentUi,
-): String? {
-    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L } ?: return null
-    return "${ui.lastPriceLabel} ${money(last)}"
-}
 
 /** Our own model. It shows small, under the anchor, and the score never reads it. */
 internal fun ownModelLines(ui: ValuationJudgmentUi): List<String> = buildList {
