@@ -70,7 +70,7 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 - `puml-runtime-v1.json`:
-  four-layer runtime for diagram-backed models (`Model` → `PumlModel` → factory + engine). A new hunt is a PUML document plus a host. Architecture: `_bmad-output/planning-artifacts/puml-runtime-architecture.md`
+  four-layer runtime for diagram-backed models (`Model` → `PumlModel` → factory + engine). The `.puml` is the live model and holds its own functions. Load includes the Kotlin primitive lib. Architecture: `_bmad-output/planning-artifacts/puml-runtime-architecture.md`
 
 ## Scope
 

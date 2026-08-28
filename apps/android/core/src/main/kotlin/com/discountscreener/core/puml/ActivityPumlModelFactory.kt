@@ -42,66 +42,15 @@ internal fun parseActivityDocument(text: String): PumlDocument {
     var body = stripIgnored(text)
     var lines = logicalLines(body)
     var parser = ActivityParser(lines)
-    var partitions = parser.parsePartitions()
-    require(partitions.isNotEmpty()) { "PUML activity document requires at least one partition" }
+    var parsed = parser.parseBody()
+    require(parsed.partitions.isNotEmpty()) { "PUML activity document requires at least one partition" }
     return PumlDocument(
         title = title,
-        partitions = partitions,
+        partitions = parsed.partitions,
         legend = legend,
         sourceText = text,
-        tables = extractTables(text),
-        aliases = extractAliases(text),
+        functions = parsed.functions,
     )
-}
-
-private fun extractTables(text: String): Map<String, List<String>> {
-    var tables = LinkedHashMap<String, List<String>>()
-    var notes = Regex(
-        """note (?:right|left)\s*(.*?)\s*end note""",
-        RegexOption.DOT_MATCHES_ALL,
-    ).findAll(text)
-    notes.forEach { note ->
-        var lines = note.groupValues[1].lines().map { it.trim() }.filter { it.isNotEmpty() }
-        var i = 0
-        while (i < lines.size) {
-            var header = Regex("""^([A-Za-z_][\w.]*),\s*first match:\s*$""").matchEntire(lines[i])
-            if (header != null) {
-                var key = header.groupValues[1]
-                var rows = ArrayList<String>()
-                i += 1
-                while (i < lines.size) {
-                    var row = Regex("""^\d+\s+(\S+)""").find(lines[i]) ?: break
-                    rows.add(row.groupValues[1])
-                    i += 1
-                }
-                if (rows.isNotEmpty()) tables[key] = rows
-                continue
-            }
-            i += 1
-        }
-    }
-    return tables
-}
-
-private fun extractAliases(text: String): Map<String, PumlExpr> {
-    var aliases = LinkedHashMap<String, PumlExpr>()
-    var notes = Regex(
-        """note (?:right|left)\s*(.*?)\s*end note""",
-        RegexOption.DOT_MATCHES_ALL,
-    ).findAll(text)
-    notes.forEach { note ->
-        var lines = note.groupValues[1].lines().map { it.trim() }.filter { it.isNotEmpty() }
-        if (lines.none { it == "alias:" }) return@forEach
-        lines.forEach { line ->
-            if (line == "alias:") return@forEach
-            var sep = line.indexOf("->")
-            if (sep <= 0) return@forEach
-            var key = line.substring(0, sep).trim()
-            var rhs = line.substring(sep + 2).trim()
-            if (key.isNotEmpty() && rhs.isNotEmpty()) aliases[key] = parseExpression(rhs)
-        }
-    }
-    return aliases
 }
 
 private fun extractLegend(text: String): List<String> {
@@ -154,27 +103,38 @@ private fun logicalLines(body: String): List<String> {
 private class ActivityParser(private val lines: List<String>) {
     var index: Int = 0
 
-    fun parsePartitions(): List<PumlPartition> {
+    data class ParsedBody(
+        val partitions: List<PumlPartition>,
+        val functions: Map<String, PumlFunction>,
+    )
+
+    fun parseBody(): ParsedBody {
         var partitions = ArrayList<PumlPartition>()
+        var functions = LinkedHashMap<String, PumlFunction>()
         while (index < lines.size) {
             var line = lines[index]
             when {
                 line == "start" || line == "stop" -> index += 1
-                line.startsWith("partition ") -> partitions.add(parsePartition())
+                line.startsWith("partition ") -> {
+                    var header = lines[index]
+                    var nameMatch = Regex("""partition\s+"([^"]+)"\s*\{""").find(header)
+                        ?: error("partition header must be quoted: $header")
+                    index += 1
+                    var steps = parseUntil(setOf("}"))
+                    if (index < lines.size && lines[index] == "}") index += 1
+                    var title = nameMatch.groupValues[1].trim()
+                    var fn = parseFunctionTitle(title)
+                    if (fn != null) {
+                        require(fn.name !in functions) { "duplicate function partition: ${fn.name}" }
+                        functions[fn.name] = PumlFunction(fn.name, fn.params, steps)
+                    } else {
+                        partitions.add(PumlPartition(name = title, steps = steps))
+                    }
+                }
                 else -> error("unsupported activity syntax: $line")
             }
         }
-        return partitions
-    }
-
-    private fun parsePartition(): PumlPartition {
-        var header = lines[index]
-        var nameMatch = Regex("""partition\s+"([^"]+)"\s*\{""").find(header)
-            ?: error("partition header must be quoted: $header")
-        index += 1
-        var steps = parseUntil(setOf("}"))
-        if (index < lines.size && lines[index] == "}") index += 1
-        return PumlPartition(name = nameMatch.groupValues[1], steps = steps)
+        return ParsedBody(partitions, functions)
     }
 
     private fun parseUntil(enders: Set<String>): List<PumlStep> {
@@ -251,6 +211,22 @@ private class ActivityParser(private val lines: List<String>) {
     }
 }
 
+private val FUNCTION_TITLE = Regex("""^([A-Za-z_][\w]*)\((.*)\)$""")
+
+private data class FunctionTitle(val name: String, val params: List<String>)
+
+private fun parseFunctionTitle(title: String): FunctionTitle? {
+    var match = FUNCTION_TITLE.matchEntire(title.trim()) ?: return null
+    var raw = match.groupValues[2].trim()
+    var params = if (raw.isEmpty()) {
+        emptyList()
+    } else {
+        raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+    if (params.any { !it.matches(Regex("""[A-Za-z_][\w]*""")) }) return null
+    return FunctionTitle(match.groupValues[1], params)
+}
+
 private fun extractIfCondition(header: String): String {
     var open = header.indexOf('(')
     var thenAt = header.indexOf(") then")
@@ -259,7 +235,7 @@ private fun extractIfCondition(header: String): String {
 }
 
 private val EMIT_BOX = Regex(
-    """^([A-Z][A-Za-z0-9_]*)(?:\(([^)]*)\))?(?:\s+reason=([A-Za-z_][\w.]*))?$""",
+    """^([A-Z][A-Za-z0-9_]*)(?:\(([^)]*)\))?(?:\s+reason=(\S+))?$""",
 )
 
 private fun parseActivityBox(body: String): List<PumlStep> {
@@ -414,14 +390,48 @@ private fun indexOfTop(text: String, op: String): Int {
 }
 
 private fun looksArithmetic(text: String): Boolean {
-    if (Regex("""[A-Za-z]-[A-Za-z]""").containsMatchIn(text)) return false
     if (text.any { it.isWhitespace() && it != ' ' }) return false
-    var allowed = text.replace(Regex("""[A-Za-z_][\w.]*"""), "x")
+    var stripped = stripCallsForArithmeticLook(text)
+    if (Regex("""[A-Za-z]-[A-Za-z]""").containsMatchIn(stripped)) return false
+    var allowed = stripped.replace(Regex("""[A-Za-z_][\w.]*"""), "x")
         .replace(Regex("""\d+(\.\d+)?"""), "1")
         .replace("×", "*")
         .replace(" ", "")
     return allowed.all { it in "x1+-*/()*" } && (text.contains('+') || text.contains('-') ||
         text.contains('×') || text.contains('/') || text.contains('*'))
+}
+
+private fun stripCallsForArithmeticLook(text: String): String {
+    var out = StringBuilder()
+    var i = 0
+    while (i < text.length) {
+        var c = text[i]
+        if (c.isLetter() || c == '_') {
+            var j = i
+            while (j < text.length && (text[j].isLetterOrDigit() || text[j] == '_' || text[j] == '.')) j += 1
+            if (j < text.length && text[j] == '(') {
+                var depth = 0
+                var k = j
+                while (k < text.length) {
+                    if (text[k] == '(') depth += 1
+                    if (text[k] == ')') {
+                        depth -= 1
+                        if (depth == 0) {
+                            k += 1
+                            break
+                        }
+                    }
+                    k += 1
+                }
+                out.append('x')
+                i = k
+                continue
+            }
+        }
+        out.append(c)
+        i += 1
+    }
+    return out.toString()
 }
 
 private fun parseArithmetic(text: String): PumlExpr {
@@ -452,8 +462,26 @@ private fun lexArithmetic(text: String): List<String> {
             c.isLetter() || c == '_' -> {
                 var j = i
                 while (j < text.length && (text[j].isLetterOrDigit() || text[j] == '_' || text[j] == '.')) j += 1
-                out.add(text.substring(i, j))
-                i = j
+                if (j < text.length && text[j] == '(') {
+                    var depth = 0
+                    var k = j
+                    while (k < text.length) {
+                        if (text[k] == '(') depth += 1
+                        if (text[k] == ')') {
+                            depth -= 1
+                            if (depth == 0) {
+                                k += 1
+                                break
+                            }
+                        }
+                        k += 1
+                    }
+                    out.add(text.substring(i, k))
+                    i = k
+                } else {
+                    out.add(text.substring(i, j))
+                    i = j
+                }
             }
             else -> error("bad arithmetic char '$c' in $text")
         }
@@ -497,6 +525,7 @@ private class ArithParser(private val tokens: List<String>) {
         }
         i += 1
         tok.toDoubleOrNull()?.let { return PumlExpr.Number(it) }
+        if (looksLikeCall(tok)) return parseCall(tok)
         return PumlExpr.Ident(tok)
     }
 }

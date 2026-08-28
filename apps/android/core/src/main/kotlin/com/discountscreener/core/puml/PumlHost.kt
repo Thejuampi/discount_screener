@@ -3,9 +3,10 @@ package com.discountscreener.core.puml
 import com.discountscreener.core.runtime.ModelValue
 
 /**
- * Named phrases the diagram uses and does not define.
+ * Irreducible primitives the diagram calls by name.
  *
- * A new hunt adds a host. It does not fork the engine.
+ * Hunt formulas, coefficients, and ifs live in the `.puml`. A new primitive
+ * name needs Kotlin. A new hunt formula does not.
  */
 interface PumlHost {
     /**
@@ -19,8 +20,8 @@ interface PumlHost {
     /**
      * A named primitive. The diagram supplies the arguments.
      *
-     * A new coefficient or a new call of an existing name does not need Kotlin.
-     * A new primitive name does.
+     * Allowed names: count, robust_mean, ols, median, sign, and extras
+     * a host adds (classify). Hunt identities are not primitives.
      */
     fun call(
         name: String,
@@ -32,7 +33,7 @@ interface PumlHost {
     /**
      * A bare `:Name;` call with no assignment.
      *
-     * Default writes the result under [phrase]. A host may also bind a short alias.
+     * Default writes the result under [phrase].
      */
     fun onBareCall(phrase: String, env: MutableMap<String, ModelValue>) {
         env[phrase] = evaluate(phrase, env)
@@ -41,8 +42,7 @@ interface PumlHost {
     /**
      * Optional rewrite of emit fields before the engine writes them.
      *
-     * Default is identity. A host may fill empty fields the diagram leaves
-     * to a table, such as Watch reason.
+     * Default is identity. Reasons live in the document (`:Watch reason=x;`).
      */
     fun decorateEmit(
         name: String,
@@ -50,18 +50,5 @@ interface PumlHost {
         env: Map<String, ModelValue>,
         flags: Set<String>,
         document: PumlDocument,
-    ): Map<String, String> {
-        var out = fields
-        if ("reason" !in out) {
-            var hit = document.tables["reason"].orEmpty().firstOrNull { token ->
-                env[token]?.asFlag() == true || token in flags
-            }
-            if (hit != null) out = out + ("reason" to hit)
-        }
-        if ("reason" !in out) {
-            var arg = out["arg"]
-            if (arg != null) out = out + ("reason" to arg)
-        }
-        return out
-    }
+    ): Map<String, String> = fields
 }

@@ -11,14 +11,18 @@ data class PumlDocument(
     val partitions: List<PumlPartition>,
     val legend: List<String>,
     val sourceText: String,
-    /** Named lists drawn from notes with a `key, first match:` header. */
-    val tables: Map<String, List<String>> = emptyMap(),
-    /** English phrase in the diagram mapped to an expression. */
-    val aliases: Map<String, PumlExpr> = emptyMap(),
+    /** Callable partitions in this document. Name → params + body. */
+    val functions: Map<String, PumlFunction> = emptyMap(),
 )
 
 data class PumlPartition(
     val name: String,
+    val steps: List<PumlStep>,
+)
+
+data class PumlFunction(
+    val name: String,
+    val params: List<String>,
     val steps: List<PumlStep>,
 )
 

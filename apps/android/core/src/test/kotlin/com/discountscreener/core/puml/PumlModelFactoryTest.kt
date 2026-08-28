@@ -42,12 +42,22 @@ class PumlModelFactoryTest {
     }
 
     @Test
-    fun frozen_document_exposes_the_first_match_table() {
-        var model = ActivityPumlModelFactory.load(frozenSource(), SilentHost)
+    fun document_keeps_the_cheapness_ramp_identity() {
         assertEquals(
-            listOf("Disputed(now)", "Disputed(next)", "quality", "SingleSource", "eps_window_short"),
-            model.document.tables["reason"],
+            true,
+            frozenPumlText().contains("0 - ramp(pe, lo, hi)"),
         )
+    }
+
+    @Test
+    fun document_registers_cheapness_as_a_function() {
+        var model = ActivityPumlModelFactory.load(frozenSource(), SilentHost)
+        assertEquals(listOf("pe", "centre", "cheap", "rich"), model.document.functions["cheapness"]?.params)
+    }
+
+    @Test
+    fun document_has_no_alias_note() {
+        assertEquals(false, frozenPumlText().contains("alias:"))
     }
 
     private fun assignNamed(pumlText: String, name: String): PumlExpr {

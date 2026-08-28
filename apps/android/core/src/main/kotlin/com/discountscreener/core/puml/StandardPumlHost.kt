@@ -1,14 +1,23 @@
 package com.discountscreener.core.puml
 
+import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.math.clamp
+import com.discountscreener.core.math.isForeignTo
+import com.discountscreener.core.math.maximum
 import com.discountscreener.core.math.medianOf
+import com.discountscreener.core.math.minimum
+import com.discountscreener.core.math.ols
+import com.discountscreener.core.math.percentile
+import com.discountscreener.core.math.ramp
 import com.discountscreener.core.math.robustCentre
 import com.discountscreener.core.runtime.ModelValue
 import kotlin.math.sign
 
 /**
- * Primitive catalog. The diagram names the call and supplies the arguments.
+ * Kotlin lib the PUML catalog includes at load.
  *
- * A new hunt that only needs these names does not write a new engine.
+ * Names: count, robust_mean, median, ols, ramp, clamp, min, max, sign,
+ * percentile, foreign, classify.
  */
 open class StandardPumlHost : PumlHost {
     override fun evaluate(
@@ -33,13 +42,50 @@ open class StandardPumlHost : PumlHost {
                 var series = firstSeries(args) ?: return ModelValue.Missing
                 ols(series)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
             }
-            "median", "centre", "center" -> {
+            "median" -> {
                 var series = firstSeries(args) ?: return ModelValue.Missing
                 medianOf(series)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
+            }
+            "ramp" -> {
+                var observed = args.getOrNull(0)?.asNum() ?: return ModelValue.Missing
+                var lower = args.getOrNull(1)?.asNum() ?: return ModelValue.Missing
+                var upper = args.getOrNull(2)?.asNum() ?: return ModelValue.Missing
+                ramp(observed, lower, upper)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
+            }
+            "clamp" -> {
+                var observed = args.getOrNull(0)?.asNum() ?: return ModelValue.Missing
+                var lower = args.getOrNull(1)?.asNum() ?: return ModelValue.Missing
+                var upper = args.getOrNull(2)?.asNum() ?: return ModelValue.Missing
+                clamp(observed, lower, upper)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
+            }
+            "min" -> {
+                var nums = numericArgs(args)
+                if (nums.isEmpty()) ModelValue.Missing else minimum(nums)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
+            }
+            "max" -> {
+                var nums = numericArgs(args)
+                if (nums.isEmpty()) ModelValue.Missing else maximum(nums)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
             }
             "sign" -> {
                 var n = args.firstOrNull()?.asNum() ?: return ModelValue.Missing
                 ModelValue.Num(sign(n))
+            }
+            "percentile" -> {
+                var series = firstSeries(args) ?: return ModelValue.Missing
+                var value = args.firstNotNullOfOrNull { it.asNum() } ?: return ModelValue.Missing
+                percentile(series, value)?.let { ModelValue.Num(it) } ?: ModelValue.Missing
+            }
+            "foreign" -> {
+                var series = firstSeries(args) ?: return ModelValue.Missing
+                var value = args.firstNotNullOfOrNull { it.asNum() } ?: return ModelValue.Missing
+                ModelValue.Flag(isForeignTo(value, series))
+            }
+            "classify" -> {
+                var sector = args.getOrNull(0)?.asText()
+                var industry = args.getOrNull(1)?.asText()
+                if (sector == null && industry == null) return ModelValue.Missing
+                var klass = DcfAnalysisEngine.classifyBusiness(sector, industry)
+                ModelValue.Text(klass.name)
             }
             else -> extraCall(key, args, env, document)
         }
@@ -60,23 +106,12 @@ open class StandardPumlHost : PumlHost {
         return null
     }
 
-    protected fun ols(values: List<Double>): Double? {
-        if (values.size < 2) return null
-        var n = values.size.toDouble()
-        var sumT = 0.0
-        var sumY = 0.0
-        var sumTy = 0.0
-        var sumTt = 0.0
-        values.forEachIndexed { i, y ->
-            if (!y.isFinite()) return null
-            var t = i.toDouble()
-            sumT += t
-            sumY += y
-            sumTy += t * y
-            sumTt += t * t
+    private fun numericArgs(args: List<ModelValue>): List<Double> {
+        var out = ArrayList<Double>()
+        args.forEach { arg ->
+            var n = arg.asNum()
+            if (n != null) out.add(n)
         }
-        var denom = n * sumTt - sumT * sumT
-        if (denom == 0.0) return 0.0
-        return (n * sumTy - sumT * sumY) / denom
+        return out
     }
 }
