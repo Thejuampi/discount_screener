@@ -238,7 +238,9 @@ class DiscountScreenerAppContainer(context: Context) {
             selectedRange = ChartRange.Month,
             opportunityScoringModel = preferences.opportunityModel,
         )
-        return earningsEventRecorder.capture(repository.earningsCandidateRows())
+        var candidates = repository.earningsCandidateRows()
+        AndroidAppLogger().info(EARNINGS_TAG, "earnings capture: ${candidates.size} symbol(s) on file")
+        return earningsEventRecorder.capture(candidates)
     }
 
     /**
@@ -258,6 +260,8 @@ class DiscountScreenerAppContainer(context: Context) {
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =
         DashboardViewModel.factory(dashboardUseCases)
 }
+
+private const val EARNINGS_TAG = "EarningsCapture"
 
 /**
  * Cold-start universe for an installed build.
