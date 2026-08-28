@@ -193,6 +193,8 @@ El denominador de §4.3 sale de ahí desde la primera pasada. Antes salía solo 
 
 ## 12. Preguntas abiertas
 
+0. **Beta ex-evento.** **Hecho.** El retorno anormal ya descuenta `beta × retorno_mercado` en vez de restar el mercado uno a uno. La beta se ajusta sobre los retornos diarios sacando cada día de reporte y el día de cada lado, porque dejarlos adentro deja que los mismos eventos que se miden fijen la vara que los mide. Bajo 60 días pareados no se reporta beta y la resta vuelve a ser uno a uno. Medido en vivo sobre AVGO contra SPY: beta ≈ 1,7, y el retorno anormal del mismo evento pasó de −122 a −120 bps.
+
 1. ~~**Horizonte del ratio.**~~ **Resuelto.** Ver §13, "El horizonte del ratio". El implied move se separa en movimiento de evento y deriva tranquila antes de dividir.
 2. **Potencia del criterio §9.** 8–12 trimestres sobre la cartera actual da N eventos; partidos en dos celdas, la diferencia de retorno anormal entre "alto" y "normal" puede caer dentro del ruido. Hay que contar N y medir la dispersión antes de comprometer ese criterio.
 3. ~~**Definición de SUE sin desvío estándar.**~~ **Resuelto.** El denominador es la mitad del rango de los estimados, `(high − low) / 2`. Con estimados simétricos alrededor de la media esa es la distancia de la media a cualquiera de los bordes, que es lo que el desvío estándar viene a representar. Un solo analista, o un panel que dijo todos el mismo número, no tiene rango: el score queda sin reportar antes que dividir por nada. Fijado en `SurpriseScore.kt` y no se mueve.
@@ -209,9 +211,10 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `EarningsEventRecord.kt` | Esquema del evento: pre, decisión, resultado. | 7 |
 | `PreReportBuilder.kt` | Arma el bloque pre-reporte y el ratio de riesgo. `reportTimingOf` decide antes/después de la campana en hora de Nueva York. | 4.3, 7 |
 | `EarningsEventLog.kt` | Bitácora JSONL, solo agrega. La última copia gana; las líneas dañadas se cuentan. | 7 |
-| `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal por diferencia. Al liquidar también escribe el EPS y el revenue reales del trimestre, con sus dos sorpresas. | 4.2, 7 |
+| `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal descontando beta × mercado. Al liquidar también escribe el EPS y el revenue reales del trimestre, con sus dos sorpresas. | 4.2, 7 |
 | `DecisionMatrix.kt` | Clasifica el riesgo (>1.3 alto, <0.8 bajo), resuelve la celda de la matriz con el precio contra el DCF (barato ≤ 0.9×) y aplica el tope de costo de cobertura. | 4.3, 4.5, 4.6 |
 | `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
+| `MarketBeta.kt` | Estima cuánto del movimiento diario del ticker explica el índice, excluyendo los días de reporte y el día de cada lado. Bajo 60 días pareados no devuelve nada, y el retorno anormal vuelve a la resta uno a uno. | 4.2, 4.3 |
 | `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
 | `EdgarFilings.kt` | Lee las presentaciones de EDGAR y saca cada anuncio de resultados: forma 8-K con item 2.02. Fecha por marca de aceptación en hora de Nueva York, porque `filingDate` pasa al día hábil siguiente después de las 17:30. Calcula los retornos anormales pasados con la misma regla de ventana que la liquidación. | 4.2, 4.3 |
 | `ReportedQuarter.kt` | Lee los trimestres que la empresa ya reportó: EPS real, el estimado contra el que se lo midió, y el revenue del mismo trimestre. Une `earningsHistory` con `incomeStatementHistoryQuarterly` por fecha de cierre. | 4.2, 7 |
@@ -220,7 +223,7 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 229 pruebas en el paquete `earnings` de `:core`; en `:app`, 36 del grabador, 11 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del grabador, 11 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 

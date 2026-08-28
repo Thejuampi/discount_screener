@@ -15,6 +15,7 @@ import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
 import com.discountscreener.core.earnings.decisionOf
 import com.discountscreener.core.earnings.expiryAfterReport
+import com.discountscreener.core.earnings.marketBetaExcludingEvents
 import com.discountscreener.core.earnings.normalDailyMoveBps
 import com.discountscreener.core.earnings.pastAbnormalReturnsOf
 import com.discountscreener.core.earnings.preReportOf
@@ -120,10 +121,29 @@ class EarningsEventRecorder(
             symbolCloses = closes.closes(record.pre.symbol),
             marketCloses = marketCloses,
             reportedQuarters = reportedQuartersOf(record.pre.symbol),
+            marketBeta = betaOf(record.pre.symbol),
         ) ?: return null
         log.settle(record.pre.symbol, record.pre.reportEpochDay, post)
         return record.copy(post = post)
     }
+
+    /**
+     * How much of the ticker's move the index explains, measured away from its own reports.
+     *
+     * The long history and the filed report dates are already bought for the risk denominator, so
+     * the slope costs no call of its own. A ticker whose history is too short keeps the one-for-one
+     * subtraction it had.
+     */
+    private suspend fun betaOf(symbol: String): Double? =
+        runCatching {
+            marketBetaExcludingEvents(
+                symbolCloses = history.closes(symbol),
+                marketCloses = marketHistory(),
+                eventDates = announcements.announcements(symbol).map { it.date },
+            )
+        }
+            .onFailure { error -> logger.error(TAG, "earnings beta failed: $symbol", error) }
+            .getOrNull()
 
     private suspend fun reportedQuartersOf(symbol: String): List<ReportedQuarter> =
         runCatching { reported.quarters(symbol) }

@@ -53,10 +53,11 @@ fun pastAbnormalReturnsOf(
     if (symbolCloses.isEmpty() || marketCloses.isEmpty()) return emptyList()
     var stock = symbolCloses.sortedBy { it.date }
     var market = marketCloses.sortedBy { it.date }
+    var beta = marketBetaExcludingEvents(stock, market, announcements.map { it.date })
     return announcements.mapNotNull { event ->
         var own = reactionOf(stock, event.date, event.timing) ?: return@mapNotNull null
         var index = reactionOf(market, event.date, event.timing) ?: return@mapNotNull null
-        own - index
+        abnormalReturnBps(own, index, beta)
     }
 }
 

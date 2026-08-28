@@ -258,6 +258,17 @@ class EarningsEventRecorderTest {
     }
 
     @Test
+    fun a_ticker_that_moves_harder_than_the_index_keeps_less_of_it_as_its_own_reaction() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), history = leveredHistory(), announcements = filed(90))
+            .capture(emptyList())
+
+        assertEquals(100, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.abnormalReturnBps)
+    }
+
+    @Test
     fun a_filing_archive_that_fails_never_costs_the_report_its_reaction() = runTest {
         var log = log()
         log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
@@ -374,6 +385,26 @@ class EarningsEventRecorderTest {
             daysAgo.map { EarningsAnnouncement(TODAY.minusDays(it), ReportTiming.AfterClose) }
         }
     }
+
+    /**
+     * A ticker that moves twice the index every day, and an index that moves at all.
+     *
+     * The slope needs more paired days than the reaction window carries, so this is the long
+     * history the beta is fitted on, kept apart from the closes that price the report itself.
+     */
+    private fun leveredHistory() = EarningsEventRecorder.CloseSource { symbol ->
+        var levered = symbol != marketSymbolName
+        (0..200).map { index ->
+            var level = 100_000_000.0
+            for (day in 1..index) {
+                var move = if (day % 2 == 0) 0.01 else -0.005
+                level *= 1.0 + if (levered) 2.0 * move else move
+            }
+            DailyClose(TODAY.minusDays((200 - index).toLong()), Math.round(level))
+        }
+    }
+
+    private val marketSymbolName = "SPY"
 
     private fun reactingCloses(jumpBps: Int) = EarningsEventRecorder.CloseSource { symbol ->
         var start = TODAY.minusDays(400)

@@ -15,11 +15,12 @@ fun settlementOf(
     symbolCloses: List<DailyClose>,
     marketCloses: List<DailyClose>,
     reportedQuarters: List<ReportedQuarter> = emptyList(),
+    marketBeta: Double? = null,
 ): PostReport? {
     var reportDate = LocalDate.ofEpochDay(pre.reportEpochDay)
     var stock = reactionOf(symbolCloses, reportDate, pre.timing) ?: return null
     var market = reactionOf(marketCloses, reportDate, pre.timing)
-    var abnormal = market?.let { stock - it }
+    var abnormal = market?.let { abnormalReturnBps(stock, it, marketBeta) }
     var reported = quarterReportedOn(reportedQuarters, reportDate)
     var eps = reported?.epsActual?.let { toCents(it) }
     var revenue = reported?.revenueActual?.let { toCents(it) }
