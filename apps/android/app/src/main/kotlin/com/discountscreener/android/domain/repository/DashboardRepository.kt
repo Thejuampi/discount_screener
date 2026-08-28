@@ -2,6 +2,7 @@ package com.discountscreener.android.domain.repository
 
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
 import com.discountscreener.android.domain.model.DashboardSnapshot
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.DiscoverySnapshot
@@ -70,6 +71,8 @@ interface DashboardRepository {
      * matters. Nothing in the product reads this; it is the input to the offline correlation.
      */
     suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String
+    suspend fun earningsCandidateRows(): List<OpportunityListRow>
+
     suspend fun earningsEvents(): EarningsGateUi
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     /**

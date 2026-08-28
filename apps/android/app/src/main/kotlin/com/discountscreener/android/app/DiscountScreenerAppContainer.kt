@@ -232,13 +232,13 @@ class DiscountScreenerAppContainer(context: Context) {
      */
     suspend fun capturePendingEarnings(): Int {
         var preferences = repository.loadScoringPreferences()
-        var snapshot = repository.bootstrap(
+        repository.bootstrap(
             filter = ViewFilter(),
             selectedSymbol = null,
             selectedRange = ChartRange.Month,
             opportunityScoringModel = preferences.opportunityModel,
         )
-        return earningsEventRecorder.capture(snapshot.opportunityRows)
+        return earningsEventRecorder.capture(repository.earningsCandidateRows())
     }
 
     /**

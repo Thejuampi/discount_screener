@@ -563,6 +563,24 @@ class DefaultDashboardRepository(
         }
     }
 
+    /**
+     * Every tracked symbol, qualified or not, for the earnings capture to read.
+     *
+     * The product list keeps roughly one symbol in eight, on how cheap it looks today. Which
+     * reports have to be logged has nothing to do with that: an option chain is never republished,
+     * so a name left out today has no implied move on file when it turns cheap next quarter.
+     * Measured on the phone the day this changed, 16 symbols reported inside the ten-day window
+     * and the qualified list carried 2 of them.
+     */
+    override suspend fun earningsCandidateRows(): List<OpportunityListRow> = withContext(computeDispatcher) {
+        val model = loadScoringPreferences().opportunityModel
+        stateMutex.withLock { earningsCandidateRowsLocked(model) }
+    }
+
+    private fun earningsCandidateRowsLocked(
+        scoringModel: OpportunityScoringModel,
+    ): List<OpportunityListRow> = opportunityRowsLocked(ViewFilter(), scoringModel, includeUnqualified = true)
+
     override suspend fun earningsEvents(): EarningsGateUi = withContext(computeDispatcher) {
         val recorder = earningsEventRecorder ?: return@withContext EarningsGateUi()
         val read = runCatching { recorder.events() }
@@ -1366,7 +1384,7 @@ class DefaultDashboardRepository(
         }
         val scoredRows = stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) }
         journalScores(scoredRows, scoringModel)
-        captureEarningsEvents(scoredRows)
+        captureEarningsEvents(stateMutex.withLock { earningsCandidateRowsLocked(scoringModel) })
         emitUpdate()
         startEnrichment(symbolsToEnrich, generation, skip)
         startMarketReadForCurrentProfile(generation)
@@ -2727,9 +2745,10 @@ class DefaultDashboardRepository(
     private fun opportunityRowsLocked(
         filter: ViewFilter,
         scoringModel: OpportunityScoringModel,
+        includeUnqualified: Boolean = false,
     ): List<OpportunityListRow> {
         val issueMessagesBySymbol = activeIssueMessagesBySymbolLocked()
-        return rankedOpportunityRowsLocked(scoringModel)
+        return rankedOpportunityRowsLocked(scoringModel, includeUnqualified)
         .mapIndexed { currentIndex, row ->
             buildOpportunityRowLocked(row, currentIndex, scoringModel, issueMessagesBySymbol[row.symbol])
         }
@@ -2759,6 +2778,7 @@ class DefaultDashboardRepository(
 
     private fun rankedOpportunityRowsLocked(
         scoringModel: OpportunityScoringModel,
+        includeUnqualified: Boolean = false,
     ) = OpportunityEngine.buildRows(
         engine,
         OpportunityContext(
@@ -2772,6 +2792,7 @@ class DefaultDashboardRepository(
             sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
             timeseriesBySymbol = timeseriesCache,
         ),
+        includeUnqualified = includeUnqualified,
     )
 
     /**

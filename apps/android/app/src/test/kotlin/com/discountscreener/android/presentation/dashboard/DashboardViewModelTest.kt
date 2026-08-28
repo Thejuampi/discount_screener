@@ -1516,6 +1516,8 @@ class DashboardViewModelTest {
         var earningsGate: EarningsGateUi = EarningsGateUi()
         var earningsEventsCallCount = 0
 
+        override suspend fun earningsCandidateRows(): List<OpportunityListRow> = emptyList()
+
         override suspend fun earningsEvents(): EarningsGateUi {
             earningsEventsCallCount++
             return earningsGate

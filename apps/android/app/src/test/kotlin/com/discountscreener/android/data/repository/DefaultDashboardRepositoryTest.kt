@@ -2874,6 +2874,63 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * Qualification keeps roughly one symbol in eight, on how cheap the name looks today. Which
+     * reports have to be logged has nothing to do with that: an option chain is never republished,
+     * so a name left out today has no implied move on file when it turns cheap next quarter.
+     */
+    @Test
+    fun the_earnings_capture_reads_a_symbol_the_product_list_left_out() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = expensiveClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            awaitSnapshot(repository) { current ->
+                current.trackedRows.count { it.state == TrackedRowState.Live } >= 3
+            }
+
+            assertTrue(repository.earningsCandidateRows().isNotEmpty())
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun a_universe_nobody_would_buy_still_shows_an_empty_product_list() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = expensiveClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            awaitSnapshot(repository) { current ->
+                current.trackedRows.count { it.state == TrackedRowState.Live } >= 3
+            }
+
+            assertTrue(
+                repository.currentSnapshot(
+                    ViewFilter(),
+                    null,
+                    ChartRange.Year,
+                    OpportunityScoringModel.AggressiveV4,
+                ).opportunityRows.isEmpty(),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    private fun expensiveClient() = object : FakeYahooFinanceClient() {
+        override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+            var base = super.fetchSymbol(symbol)
+            var price = base.snapshot!!.marketPriceCents
+            return base.copy(
+                snapshot = base.snapshot!!.copy(intrinsicValueCents = price / 2),
+                externalSignal = base.externalSignal!!.copy(fairValueCents = price / 2),
+            )
+        }
+    }
+
     @Test
     fun ensure_detail_loaded_scores_an_unqualified_ad_hoc_ticker() = runTest(dispatcher) {
         var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
