@@ -14,6 +14,7 @@ import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
+import com.discountscreener.core.earnings.ReportedQuarter
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -237,6 +238,37 @@ class EarningsEventRecorderTest {
     }
 
     @Test
+    fun the_quarter_the_company_reported_is_written_beside_its_reaction() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), reported = quarters(endedDaysAgo = 33)).capture(emptyList())
+
+        assertEquals(74L, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.epsActualCents)
+    }
+
+    @Test
+    fun the_beat_over_the_consensus_is_scored_when_the_report_settles() = runTest {
+        var log = log()
+        log.append(estimatedEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), reported = quarters(endedDaysAgo = 33)).capture(emptyList())
+
+        assertEquals(10_435, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.surpriseScoreBps)
+    }
+
+    @Test
+    fun a_filing_archive_that_fails_never_costs_the_report_its_reaction() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+        var angry = EarningsEventRecorder.ReportedQuarterSource { error("no actuals today") }
+
+        recorder(log, closes = closeSource(), reported = angry).capture(emptyList())
+
+        assertEquals(300, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.abnormalReturnBps)
+    }
+
+    @Test
     fun a_settled_reaction_reaches_the_block_written_in_the_same_pass() = runTest {
         var log = log()
         log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
@@ -311,6 +343,8 @@ class EarningsEventRecorderTest {
         history: EarningsEventRecorder.CloseSource = closes,
         announcements: EarningsEventRecorder.AnnouncementSource =
             EarningsEventRecorder.AnnouncementSource { emptyList() },
+        reported: EarningsEventRecorder.ReportedQuarterSource =
+            EarningsEventRecorder.ReportedQuarterSource { emptyList() },
     ) = EarningsEventRecorder(
         log = log,
         chains = chains,
@@ -318,8 +352,20 @@ class EarningsEventRecorderTest {
         closes = closes,
         history = history,
         announcements = announcements,
+        reported = reported,
         nowProvider = { TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond() },
     )
+
+    private fun quarters(endedDaysAgo: Long) = EarningsEventRecorder.ReportedQuarterSource {
+        listOf(
+            ReportedQuarter(
+                quarterEndDate = TODAY.minusDays(endedDaysAgo),
+                epsActual = 0.74,
+                epsEstimate = 0.62,
+                revenueActual = 3_355_000_000.0,
+            ),
+        )
+    }
 
     private fun filed(vararg daysAgo: Long) = EarningsEventRecorder.AnnouncementSource { symbol ->
         if (symbol == "SPY") {
@@ -390,6 +436,17 @@ class EarningsEventRecorderTest {
             priceCents = 4_000L,
         ),
     )
+
+    private fun estimatedEvent(symbol: String, day: Long) = pastEvent(symbol, day).let { event ->
+        event.copy(
+            pre = event.pre.copy(
+                consensusEpsCents = 62L,
+                consensusEpsLowCents = 51L,
+                consensusEpsHighCents = 74L,
+                consensusRevenueCents = 305_000_000_000L,
+            ),
+        )
+    }
 
     private fun settledEvent(symbol: String, day: Long, abnormalReturnBps: Int) = EarningsEventRecord(
         pre = PreReport(

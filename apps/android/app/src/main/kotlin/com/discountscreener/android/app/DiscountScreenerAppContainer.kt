@@ -109,6 +109,7 @@ class DiscountScreenerAppContainer(context: Context) {
                 yahooClient.fetchCandles(symbol, "5y", "1d").map { dailyCloseOf(it.epochSeconds, it.closeCents) }
             },
             announcements = { symbol -> secFilings.earningsAnnouncements(symbol) },
+            reported = { symbol -> yahooClient.fetchReportedQuarters(symbol) },
             nowProvider = { System.currentTimeMillis() / 1_000 },
             logger = AndroidAppLogger(),
         )

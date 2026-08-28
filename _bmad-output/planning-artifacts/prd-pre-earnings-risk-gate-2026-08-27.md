@@ -177,7 +177,7 @@ Ninguna pieza del módulo está bloqueada por dinero. Lo único que no se compra
 | Implied move de hoy | Endpoint de opciones de Yahoo (`/v7/finance/options/{symbol}`): trae vencimientos, strikes, y precio de call y put. Alcanza para §4.1. | Gratis, mismo proveedor que ya usa la app |
 | Consenso EPS y revenue del trimestre en curso | `earningsTrend`, período `0q`. Ya viene en la respuesta que el repo pide; hay que dejar de descartarlo. | Gratis, cero llamadas nuevas |
 | Dispersión de estimados | `(high − low)` y `numberOfAnalysts` de `earningsEstimate`. No es el desvío estándar. Se declara la definición usada y se mantiene fija. | Gratis |
-| EPS y revenue reales | `earningsHistory` de Yahoo da 4 trimestres con real, estimado y sorpresa. EDGAR XBRL da los reales sin límite de historia. | Gratis |
+| EPS y revenue reales | `earningsHistory` de Yahoo da 4 trimestres con real, estimado y sorpresa; `incomeStatementHistoryQuarterly` da el revenue de los mismos trimestres. Ya cableado. EDGAR XBRL daría los reales sin límite de historia, si algún día hacen falta más de 4. | Gratis |
 | Retorno de mercado y beta ex-evento | Serie de precios de un índice por el mismo endpoint de chart que ya se usa. | Gratis |
 | **Fechas exactas de reportes pasados** | EDGAR: el 8-K con item 2.02 es el anuncio de resultados, fechado por la propia empresa. La marca de aceptación dice si salió antes de la apertura o después del cierre. AVGO da 20 trimestres. | Gratis, mismo host que el proveedor SEC que ya usa la app |
 | **Historia de implied move** | **No se backfillea gratis.** O se compra (ORATS y similares venden cadenas históricas), o se empieza a capturar hoy, un registro por evento. | Compra, o dos años de espera |
@@ -195,7 +195,7 @@ El denominador de §4.3 sale de ahí desde la primera pasada. Antes salía solo 
 
 1. ~~**Horizonte del ratio.**~~ **Resuelto.** Ver §13, "El horizonte del ratio". El implied move se separa en movimiento de evento y deriva tranquila antes de dividir.
 2. **Potencia del criterio §9.** 8–12 trimestres sobre la cartera actual da N eventos; partidos en dos celdas, la diferencia de retorno anormal entre "alto" y "normal" puede caer dentro del ruido. Hay que contar N y medir la dispersión antes de comprometer ese criterio.
-3. **Definición de SUE sin desvío estándar.** Con `low`, `high` y `numberOfAnalysts` se puede definir un denominador, pero es una decisión de modelo que hay que fijar una vez y no mover.
+3. ~~**Definición de SUE sin desvío estándar.**~~ **Resuelto.** El denominador es la mitad del rango de los estimados, `(high − low) / 2`. Con estimados simétricos alrededor de la media esa es la distancia de la media a cualquiera de los bordes, que es lo que el desvío estándar viene a representar. Un solo analista, o un panel que dijo todos el mismo número, no tiene rango: el score queda sin reportar antes que dividir por nada. Fijado en `SurpriseScore.kt` y no se mueve.
 
 ## 13. Lo que ya está construido
 
@@ -209,16 +209,18 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `EarningsEventRecord.kt` | Esquema del evento: pre, decisión, resultado. | 7 |
 | `PreReportBuilder.kt` | Arma el bloque pre-reporte y el ratio de riesgo. `reportTimingOf` decide antes/después de la campana en hora de Nueva York. | 4.3, 7 |
 | `EarningsEventLog.kt` | Bitácora JSONL, solo agrega. La última copia gana; las líneas dañadas se cuentan. | 7 |
-| `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal por diferencia. | 4.2, 7 |
+| `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal por diferencia. Al liquidar también escribe el EPS y el revenue reales del trimestre, con sus dos sorpresas. | 4.2, 7 |
 | `DecisionMatrix.kt` | Clasifica el riesgo (>1.3 alto, <0.8 bajo), resuelve la celda de la matriz con el precio contra el DCF (barato ≤ 0.9×) y aplica el tope de costo de cobertura. | 4.3, 4.5, 4.6 |
 | `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
 | `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
 | `EdgarFilings.kt` | Lee las presentaciones de EDGAR y saca cada anuncio de resultados: forma 8-K con item 2.02. Fecha por marca de aceptación en hora de Nueva York, porque `filingDate` pasa al día hábil siguiente después de las 17:30. Calcula los retornos anormales pasados con la misma regla de ventana que la liquidación. | 4.2, 4.3 |
+| `ReportedQuarter.kt` | Lee los trimestres que la empresa ya reportó: EPS real, el estimado contra el que se lo midió, y el revenue del mismo trimestre. Une `earningsHistory` con `incomeStatementHistoryQuarterly` por fecha de cierre. | 4.2, 7 |
+| `SurpriseScore.kt` | Puntúa la sorpresa en unidades de dispersión de los analistas, y la sorpresa de revenue contra el consenso guardado antes del reporte. | 4.2, 7 |
 | `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 192 pruebas en el paquete `earnings` de `:core`; en `:app`, 33 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: 226 pruebas en el paquete `earnings` de `:core`; en `:app`, 36 del grabador, 8 de los endpoints, 28 del presentador y 12 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 
@@ -227,6 +229,7 @@ Cobertura: 192 pruebas en el paquete `earnings` de `:core`; en `:app`, 33 del gr
 | `YahooFinanceClient.fetchOptionChain` | Pega a `/v7/finance/options/{symbol}`. Sin fecha lista los vencimientos; con `date` trae la escalera. |
 | `YahooFinanceClient.fetchConsensus` | Lee `earningsTrend`, que ahora viaja en `QUOTE_SUMMARY_MODULES`. Cero módulos nuevos en el pedido. |
 | `EarningsEventRecorder` | Toma las filas del refresh, filtra las que reportan dentro de 10 días, baja la cadena y escribe el bloque ya decidido. Antes de capturar, liquida los reportes que ya pasaron (1 a 30 días) contra SPY. Lee la bitácora una vez por pasada. |
+| `YahooFinanceClient.fetchReportedQuarters` | Pide `earningsHistory` e `incomeStatementHistoryQuarterly` en su propio par de módulos. Solo un evento que liquida los necesita: meterlos en `QUOTE_SUMMARY_MODULES` haría que cada símbolo de cada refresh cargue un estado de resultados trimestral que nunca lee. |
 | `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |

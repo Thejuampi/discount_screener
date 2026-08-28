@@ -3,6 +3,7 @@ package com.discountscreener.core.earnings
 import java.time.Instant
 import java.time.LocalDate
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 data class DailyClose(val date: LocalDate, val closeCents: Long)
 
@@ -13,17 +14,28 @@ fun settlementOf(
     pre: PreReport,
     symbolCloses: List<DailyClose>,
     marketCloses: List<DailyClose>,
+    reportedQuarters: List<ReportedQuarter> = emptyList(),
 ): PostReport? {
     var reportDate = LocalDate.ofEpochDay(pre.reportEpochDay)
     var stock = reactionOf(symbolCloses, reportDate, pre.timing) ?: return null
     var market = reactionOf(marketCloses, reportDate, pre.timing)
     var abnormal = market?.let { stock - it }
+    var reported = quarterReportedOn(reportedQuarters, reportDate)
+    var eps = reported?.epsActual?.let { toCents(it) }
+    var revenue = reported?.revenueActual?.let { toCents(it) }
     return PostReport(
+        epsActualCents = eps,
+        surpriseScoreBps = surpriseScoreBps(eps, pre),
+        revenueActualCents = revenue,
+        revenueSurpriseBps = revenueSurpriseBps(revenue, pre),
         stockReturnBps = stock,
         marketReturnBps = market,
         abnormalReturnBps = abnormal,
     )
 }
+
+private fun toCents(value: Double): Long? =
+    if (value.isFinite()) (value * 100.0).roundToLong() else null
 
 internal fun reactionOf(closes: List<DailyClose>, reportDate: LocalDate, timing: ReportTiming): Int? {
     var ordered = closes.sortedBy { it.date }

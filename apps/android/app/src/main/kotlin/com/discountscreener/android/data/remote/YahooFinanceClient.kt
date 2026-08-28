@@ -7,6 +7,8 @@ import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.OptionChainSnapshot
 import com.discountscreener.core.earnings.consensusOf
 import com.discountscreener.core.earnings.isOptionChainAnswer
+import com.discountscreener.core.earnings.ReportedQuarter
+import com.discountscreener.core.earnings.reportedQuartersOf
 import com.discountscreener.core.earnings.parseOptionChain
 import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
@@ -146,6 +148,8 @@ private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
 internal const val QUOTE_SUMMARY_MODULES =
     "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend," +
         "calendarEvents,earningsTrend"
+
+internal const val REPORTED_QUARTER_MODULES = "earningsHistory,incomeStatementHistoryQuarterly"
 
 /**
  * Symbols a batch quote call asks for at once, and the size below which a failing batch is not
@@ -409,12 +413,15 @@ open class YahooFinanceClient(
         return parseQuoteBatch(root, appSymbolByRequestSymbol)
     }
 
-    private suspend fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
+    private suspend fun fetchQuoteSummaryJson(
+        requestSymbol: String,
+        modules: String = QUOTE_SUMMARY_MODULES,
+    ): JsonObject {
         suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
-                .addQueryParameter("modules", QUOTE_SUMMARY_MODULES)
+                .addQueryParameter("modules", modules)
                 .addQueryParameter("crumb", crumb)
                 .build()
             val request = Request.Builder()
@@ -565,6 +572,19 @@ open class YahooFinanceClient(
     ): ConsensusEstimate? = withContext(Dispatchers.IO) {
         consensusOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol)), period)
     }
+
+    /**
+     * The quarters the company has already reported: actual EPS, the estimate it was measured
+     * against, and the revenue of the same quarter.
+     *
+     * Its own two modules rather than the shared summary, because only a settling event needs
+     * them. Adding them to [QUOTE_SUMMARY_MODULES] would make every symbol of every refresh carry
+     * a quarterly income statement it never reads.
+     */
+    open suspend fun fetchReportedQuarters(symbol: String): List<ReportedQuarter> =
+        withContext(Dispatchers.IO) {
+            reportedQuartersOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol), REPORTED_QUARTER_MODULES))
+        }
 
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {
         val requestSymbol = yahooRequestSymbol(symbol)

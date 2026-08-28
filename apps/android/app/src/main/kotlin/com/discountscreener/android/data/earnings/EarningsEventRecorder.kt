@@ -12,6 +12,7 @@ import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventLogRead
 import com.discountscreener.core.earnings.OptionChainSnapshot
 import com.discountscreener.core.earnings.ReportTiming
+import com.discountscreener.core.earnings.ReportedQuarter
 import com.discountscreener.core.earnings.decisionOf
 import com.discountscreener.core.earnings.expiryAfterReport
 import com.discountscreener.core.earnings.normalDailyMoveBps
@@ -30,6 +31,7 @@ class EarningsEventRecorder(
     private val closes: CloseSource,
     private val history: CloseSource = closes,
     private val announcements: AnnouncementSource = AnnouncementSource { emptyList() },
+    private val reported: ReportedQuarterSource = ReportedQuarterSource { emptyList() },
     private val nowProvider: () -> Long,
     private val logger: AppLogger = NoOpAppLogger,
     private val windowDays: Long = CAPTURE_WINDOW_DAYS,
@@ -50,6 +52,10 @@ class EarningsEventRecorder(
 
     fun interface AnnouncementSource {
         suspend fun announcements(symbol: String): List<EarningsAnnouncement>
+    }
+
+    fun interface ReportedQuarterSource {
+        suspend fun quarters(symbol: String): List<ReportedQuarter>
     }
 
     fun events(): EventLogRead = log.read()
@@ -109,10 +115,20 @@ class EarningsEventRecorder(
         record: EarningsEventRecord,
         marketCloses: List<DailyClose>,
     ): EarningsEventRecord? {
-        var post = settlementOf(record.pre, closes.closes(record.pre.symbol), marketCloses) ?: return null
+        var post = settlementOf(
+            pre = record.pre,
+            symbolCloses = closes.closes(record.pre.symbol),
+            marketCloses = marketCloses,
+            reportedQuarters = reportedQuartersOf(record.pre.symbol),
+        ) ?: return null
         log.settle(record.pre.symbol, record.pre.reportEpochDay, post)
         return record.copy(post = post)
     }
+
+    private suspend fun reportedQuartersOf(symbol: String): List<ReportedQuarter> =
+        runCatching { reported.quarters(symbol) }
+            .onFailure { error -> logger.error(TAG, "earnings actuals failed: $symbol", error) }
+            .getOrDefault(emptyList())
 
     private fun isSettleable(record: EarningsEventRecord, today: LocalDate): Boolean {
         var days = today.toEpochDay() - record.pre.reportEpochDay

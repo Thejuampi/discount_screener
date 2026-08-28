@@ -69,6 +69,52 @@ class EventSettlementTest {
         assertEquals(LocalDate.of(2026, 8, 20), dailyCloseOf(1_787_232_600L, 4_200L).date)
     }
 
+    @Test
+    fun the_quarter_the_company_reported_lands_in_the_settled_record() {
+        assertEquals(244L, settled()?.epsActualCents)
+    }
+
+    @Test
+    fun the_revenue_of_that_quarter_lands_with_it() {
+        assertEquals(2_218_700_000_000L, settled()?.revenueActualCents)
+    }
+
+    @Test
+    fun the_beat_is_scored_against_how_far_apart_the_analysts_were() {
+        assertEquals(10_000, settled()?.surpriseScoreBps)
+    }
+
+    @Test
+    fun the_revenue_beat_reads_back_as_the_share_it_beat_the_consensus_by() {
+        assertEquals(1_000, settled()?.revenueSurpriseBps)
+    }
+
+    @Test
+    fun a_settlement_with_no_quarter_on_file_still_prices_the_reaction() {
+        assertEquals(500, settlementOf(estimated(), stock, market)?.stockReturnBps)
+    }
+
+    @Test
+    fun a_settlement_with_no_quarter_on_file_scores_no_surprise() {
+        assertNull(settlementOf(estimated(), stock, market)?.surpriseScoreBps)
+    }
+
+    private fun settled() = settlementOf(estimated(), stock, market, listOf(reportedQuarter))
+
+    private fun estimated() = pre(ReportTiming.AfterClose).copy(
+        consensusEpsCents = 240L,
+        consensusEpsLowCents = 236L,
+        consensusEpsHighCents = 244L,
+        consensusRevenueCents = 2_016_999_999_999L,
+    )
+
+    private val reportedQuarter = ReportedQuarter(
+        quarterEndDate = REPORT.minusDays(20),
+        epsActual = 2.44,
+        epsEstimate = 2.40,
+        revenueActual = 22_187_000_000.0,
+    )
+
     private fun pre(timing: ReportTiming) = PreReport(
         symbol = "LVS",
         reportEpochDay = REPORT.toEpochDay(),
