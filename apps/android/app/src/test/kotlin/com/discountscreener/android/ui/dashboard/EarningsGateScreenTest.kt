@@ -119,6 +119,20 @@ class EarningsGateScreenTest {
         composeRule.onNodeWithText("Reduce · 50%").assertIsDisplayed()
     }
 
+    @Test
+    fun the_screen_says_when_the_capture_last_ran() {
+        render(gate(day = 3).copy(lastCapture = "Checked 42m ago"))
+
+        composeRule.onNodeWithText("Checked 42m ago").assertIsDisplayed()
+    }
+
+    @Test
+    fun an_empty_log_still_says_the_capture_is_running() {
+        render(EarningsGateUi(lastCapture = "Checked 42m ago"))
+
+        composeRule.onNodeWithText(EMPTY_DETAIL, substring = true).assertIsDisplayed()
+    }
+
     private fun render(state: EarningsGateUi, loading: Boolean = false) {
         composeRule.setContent {
             DiscountScreenerTheme {
@@ -185,5 +199,6 @@ class EarningsGateScreenTest {
 
     private companion object {
         val TODAY: LocalDate = LocalDate.of(2026, 8, 23)
+        const val EMPTY_DETAIL = "Checked 42m ago."
     }
 }

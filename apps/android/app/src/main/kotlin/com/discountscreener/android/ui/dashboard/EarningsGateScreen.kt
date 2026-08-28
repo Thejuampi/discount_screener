@@ -32,7 +32,8 @@ fun EarningsGateScreen(state: EarningsGateUi, loading: Boolean) {
         EmptyState(
             title = "No earnings events logged yet",
             detail = "A report is captured when it comes within ten days of a refresh. " +
-                "Option chains are never republished, so the log only grows forward.",
+                "Option chains are never republished, so the log only grows forward." +
+                state.lastCapture?.let { " $it." }.orEmpty(),
         )
         return
     }
@@ -41,6 +42,16 @@ fun EarningsGateScreen(state: EarningsGateUi, loading: Boolean) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(vertical = 12.dp),
     ) {
+        state.lastCapture?.let { checked ->
+            item {
+                Text(
+                    text = checked,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(EARNINGS_GATE_LAST_CAPTURE),
+                )
+            }
+        }
         if (state.upcoming.isNotEmpty()) {
             item { GateSectionLabel("Reporting soon") }
             items(state.upcoming, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
@@ -62,6 +73,7 @@ fun EarningsGateScreen(state: EarningsGateUi, loading: Boolean) {
 }
 
 const val EARNINGS_GATE_LIST = "earningsGateList"
+const val EARNINGS_GATE_LAST_CAPTURE = "earningsGateLastCapture"
 
 @Composable
 private fun EarningsEventCard(row: EarningsEventRowUi) {

@@ -572,6 +572,8 @@ class DefaultDashboardRepository(
             events = read.events,
             damagedLines = read.unreadableLines,
             today = LocalDate.ofInstant(Instant.ofEpochSecond(nowProvider()), ZoneOffset.UTC),
+            lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
+            nowEpochSeconds = nowProvider(),
         )
     }
 

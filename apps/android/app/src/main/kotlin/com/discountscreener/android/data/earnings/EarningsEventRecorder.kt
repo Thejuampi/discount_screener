@@ -89,6 +89,7 @@ class EarningsEventRecorder(
                 .onSuccess { written++ }
                 .onFailure { error -> logger.error(TAG, "earnings capture failed: ${row.symbol}", error) }
         }
+        log.stampCapture(nowProvider())
         return written
     }
 

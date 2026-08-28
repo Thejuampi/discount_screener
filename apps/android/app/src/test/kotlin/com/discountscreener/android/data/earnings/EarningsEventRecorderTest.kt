@@ -345,6 +345,22 @@ class EarningsEventRecorderTest {
         )
     }
 
+    /**
+     * A pass with nothing to capture writes no line, and the screen would read that as a module
+     * that stopped running. The time it ran is what tells the two apart.
+     */
+    @Test
+    fun a_pass_that_captured_nothing_still_records_that_it_ran() = runTest {
+        var log = log()
+
+        recorder(log).capture(emptyList())
+
+        assertEquals(
+            TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond(),
+            log.read().lastCaptureEpochSeconds,
+        )
+    }
+
     private fun log() = EarningsEventLog(File(folder.newFolder(), "events.jsonl"))
 
     private fun recorder(

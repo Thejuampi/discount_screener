@@ -183,4 +183,26 @@ class EarningsEventLogTest {
         marketReturnBps = 60,
         abnormalReturnBps = 356,
     )
+
+    @Test
+    fun a_pass_that_wrote_nothing_still_leaves_the_time_it_ran() {
+        var log = log()
+        log.stampCapture(1_787_000_000L)
+
+        assertEquals(1_787_000_000L, log.read().lastCaptureEpochSeconds)
+    }
+
+    @Test
+    fun a_log_that_never_ran_reports_no_time() {
+        assertNull(log().read().lastCaptureEpochSeconds)
+    }
+
+    @Test
+    fun the_newest_pass_replaces_the_time_of_the_one_before() {
+        var log = log()
+        log.stampCapture(1_787_000_000L)
+        log.stampCapture(1_787_000_600L)
+
+        assertEquals(1_787_000_600L, log.read().lastCaptureEpochSeconds)
+    }
 }

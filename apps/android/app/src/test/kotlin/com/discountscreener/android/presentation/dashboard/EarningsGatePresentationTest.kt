@@ -8,6 +8,7 @@ import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.decisionOf
 import java.time.LocalDate
+import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -226,6 +227,14 @@ class EarningsGatePresentationTest {
     private fun present(events: List<EarningsEventRecord>, damaged: Int = 0) =
         presentEarningsGate(events = events, damagedLines = damaged, today = TODAY)
 
+    private fun checked(agoSeconds: Long) = presentEarningsGate(
+        events = listOf(record(day = 3)),
+        damagedLines = 0,
+        today = TODAY,
+        lastCaptureEpochSeconds = NOW_EPOCH_SECONDS - agoSeconds,
+        nowEpochSeconds = NOW_EPOCH_SECONDS,
+    ).lastCapture
+
     private fun record(
         day: Long,
         symbol: String = "LVS",
@@ -261,7 +270,33 @@ class EarningsGatePresentationTest {
         )
     }
 
+    @Test
+    fun a_pass_that_just_ran_says_so() {
+        assertEquals("Checked just now", checked(agoSeconds = 30L))
+    }
+
+    @Test
+    fun a_pass_from_this_hour_is_counted_in_minutes() {
+        assertEquals("Checked 42m ago", checked(agoSeconds = 42L * 60L))
+    }
+
+    @Test
+    fun a_pass_from_yesterday_is_counted_in_hours() {
+        assertEquals("Checked 26h ago", checked(agoSeconds = 26L * 3_600L))
+    }
+
+    @Test
+    fun a_pass_from_last_week_is_counted_in_days() {
+        assertEquals("Checked 6d ago", checked(agoSeconds = 6L * 24L * 3_600L))
+    }
+
+    @Test
+    fun a_module_that_never_ran_says_nothing_rather_than_guessing() {
+        assertNull(present(listOf(record(day = 3))).lastCapture)
+    }
+
     private companion object {
         val TODAY: LocalDate = LocalDate.of(2026, 8, 23)
+        val NOW_EPOCH_SECONDS: Long = TODAY.atTime(14, 0).toEpochSecond(ZoneOffset.UTC)
     }
 }

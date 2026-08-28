@@ -145,6 +145,7 @@ Post-reporte:
 
 - Con 16–20 trimestres, el coeficiente de asimetría puede no ser significativo. En ese caso, el modelo simétrico es el que se usa en producción.
 - La métrica sectorial sin consenso histórico queda fuera de la regresión. Su peso en la decisión es menor que el de EPS y revenue.
+- La captura de fondo lee la fecha de reporte que dejó el último refresh. Si nadie abre la app por más de diez días, esa fecha puede haber quedado atrás y el símbolo pasa su ventana sin que el trabajo periódico sepa que había un reporte. Refrescar el calendario de quinientos símbolos desde el fondo cuesta un pedido por símbolo y necesita persistir la fecha nueva, así que hoy el límite se declara en vez de taparse: la captura de fondo cubre al usuario que abre la app cada tanto, no al que no la abre nunca.
 - El implied move es una medida de riesgo neutral, no una probabilidad real. Sirve para comparar contra la historia del propio ticker, no para estimar probabilidad de movimiento.
 
 ## 9. Criterios de éxito

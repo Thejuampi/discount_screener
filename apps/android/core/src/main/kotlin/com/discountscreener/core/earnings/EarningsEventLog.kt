@@ -6,7 +6,13 @@ import kotlinx.serialization.json.Json
 class EarningsEventLog(private val file: File) {
 
     fun read(): EventLogRead {
-        if (!file.isFile) return EventLogRead(events = emptyList(), unreadableLines = 0)
+        if (!file.isFile) {
+            return EventLogRead(
+                events = emptyList(),
+                unreadableLines = 0,
+                lastCaptureEpochSeconds = lastCaptureEpochSeconds(),
+            )
+        }
         var newest = LinkedHashMap<EventKey, EarningsEventRecord>()
         var damaged = 0
         file.forEachLine { line ->
@@ -17,8 +23,25 @@ class EarningsEventLog(private val file: File) {
         return EventLogRead(
             events = newest.values.sortedWith(compareBy({ it.pre.reportEpochDay }, { it.pre.symbol })),
             unreadableLines = damaged,
+            lastCaptureEpochSeconds = lastCaptureEpochSeconds(),
         )
     }
+
+    /**
+     * When the capture last ran, whether or not it had anything to write.
+     *
+     * A pass that wrote nothing leaves no line in the log, so the log alone cannot tell a module
+     * that is working from one that stopped running. The mark is what the screen reads to say so.
+     */
+    fun stampCapture(epochSeconds: Long) {
+        markFile().parentFile?.mkdirs()
+        runCatching { markFile().writeText(epochSeconds.toString()) }
+    }
+
+    fun lastCaptureEpochSeconds(): Long? =
+        runCatching { markFile().readText().trim().toLong() }.getOrNull()?.takeIf { it > 0L }
+
+    private fun markFile(): File = File(file.parentFile, file.name + ".captured-at")
 
     fun event(symbol: String, reportEpochDay: Long): EarningsEventRecord? =
         read().events.firstOrNull { it.pre.symbol == symbol && it.pre.reportEpochDay == reportEpochDay }
@@ -55,6 +78,7 @@ class EarningsEventLog(private val file: File) {
 data class EventLogRead(
     val events: List<EarningsEventRecord>,
     val unreadableLines: Int,
+    val lastCaptureEpochSeconds: Long? = null,
 )
 
 private data class EventKey(val symbol: String, val reportEpochDay: Long)

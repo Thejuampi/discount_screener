@@ -16,6 +16,7 @@ data class EarningsGateUi(
     val upcoming: List<EarningsEventRowUi> = emptyList(),
     val settled: List<EarningsEventRowUi> = emptyList(),
     val damagedLines: Int = 0,
+    val lastCapture: String? = null,
 ) {
     val isEmpty: Boolean get() = upcoming.isEmpty() && settled.isEmpty()
 }
@@ -45,6 +46,8 @@ fun presentEarningsGate(
     events: List<EarningsEventRecord>,
     damagedLines: Int,
     today: LocalDate,
+    lastCaptureEpochSeconds: Long? = null,
+    nowEpochSeconds: Long? = null,
 ): EarningsGateUi {
     var upcoming = events.filter { it.pre.reportEpochDay >= today.toEpochDay() }
         .sortedBy { it.pre.reportEpochDay }
@@ -54,7 +57,26 @@ fun presentEarningsGate(
         upcoming = upcoming.map(::rowOf),
         settled = settled.map(::rowOf),
         damagedLines = damagedLines,
+        lastCapture = lastCaptureText(lastCaptureEpochSeconds, nowEpochSeconds),
     )
+}
+
+/**
+ * The capture runs on its own every ninety minutes, and a pass with nothing to write leaves no
+ * trace in the list. Without this line a module that stopped running looks exactly like a module
+ * with nothing to say.
+ */
+private fun lastCaptureText(lastCaptureEpochSeconds: Long?, nowEpochSeconds: Long?): String? {
+    var last = lastCaptureEpochSeconds ?: return null
+    var now = nowEpochSeconds ?: return null
+    var minutes = (now - last) / 60L
+    return when {
+        minutes < 0L -> null
+        minutes < 1L -> "Checked just now"
+        minutes < 60L -> "Checked ${minutes}m ago"
+        minutes < 60L * 48L -> "Checked ${minutes / 60L}h ago"
+        else -> "Checked ${minutes / (60L * 24L)}d ago"
+    }
 }
 
 private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
