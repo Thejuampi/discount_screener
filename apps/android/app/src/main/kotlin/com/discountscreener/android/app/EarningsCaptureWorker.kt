@@ -48,8 +48,14 @@ open class EarningsCaptureWorker(
 
     internal open fun now(): Instant = Instant.now()
 
-    internal open suspend fun capture(): Int =
-        DiscountScreenerAppContainer(applicationContext).capturePendingEarnings()
+    internal open suspend fun capture(): Int {
+        var container = DiscountScreenerAppContainer(applicationContext)
+        return try {
+            container.capturePendingEarnings()
+        } finally {
+            container.shutdown()
+        }
+    }
 
     companion object {
         const val WORK_NAME = "earnings-capture"

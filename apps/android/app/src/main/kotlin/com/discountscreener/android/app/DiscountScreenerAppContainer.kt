@@ -64,6 +64,7 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -239,6 +240,20 @@ class DiscountScreenerAppContainer(context: Context) {
         )
         return earningsEventRecorder.capture(snapshot.opportunityRows)
     }
+
+    /**
+     * Stops everything this container started on its own.
+     *
+     * The activity never needs it: its container lives as long as the process it draws in. A
+     * background run does need it — building the repository starts a cache sweep that loops
+     * forever, and a run that walked away from it would leave one more loop behind every 90
+     * minutes, in a process the platform keeps alive between runs.
+     */
+    fun shutdown() {
+        backgroundScope.cancel()
+    }
+
+    internal fun runningBackgroundWork(): Boolean = backgroundScope.isActive
 
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =
         DashboardViewModel.factory(dashboardUseCases)
