@@ -1,0 +1,39 @@
+{
+  "optionChain": {
+    "result": [
+      {
+        "underlyingSymbol": "LVS",
+        "expirationDates": [1787875200, 1787270400, 1789689600],
+        "strikes": [42.0, 43.0, 44.0, 44.5, 45.0, 46.0],
+        "hasMiniOptions": false,
+        "quote": {
+          "symbol": "LVS",
+          "regularMarketPrice": 44.24,
+          "regularMarketTime": 1787778000
+        },
+        "options": [
+          {
+            "expirationDate": 1787875200,
+            "hasMiniOptions": false,
+            "calls": [
+              {"contractSymbol": "LVS260828C00042000", "strike": 42.0, "lastPrice": 3.05, "bid": 2.95, "ask": 3.15, "volume": 120, "openInterest": 840, "inTheMoney": true},
+              {"contractSymbol": "LVS260828C00043000", "strike": 43.0, "lastPrice": 2.30, "bid": 2.22, "ask": 2.38, "volume": 310, "openInterest": 1520, "inTheMoney": true},
+              {"contractSymbol": "LVS260828C00044000", "strike": 44.0, "lastPrice": 1.66, "bid": 1.60, "ask": 1.72, "volume": 1450, "openInterest": 3980, "inTheMoney": true},
+              {"contractSymbol": "LVS260828C00044500", "strike": 44.5, "lastPrice": 1.40, "bid": 1.34, "ask": 1.46, "volume": 980, "openInterest": 2210, "inTheMoney": false},
+              {"contractSymbol": "LVS260828C00045000", "strike": 45.0, "lastPrice": 1.15, "bid": 1.10, "ask": 1.20, "volume": 1720, "openInterest": 5140, "inTheMoney": false},
+              {"contractSymbol": "LVS260828C00046000", "strike": 46.0, "lastPrice": 0.72, "bid": 0.68, "ask": 0.76, "volume": 640, "openInterest": 2900, "inTheMoney": false}
+            ],
+            "puts": [
+              {"contractSymbol": "LVS260828P00042000", "strike": 42.0, "lastPrice": 0.71, "bid": 0.66, "ask": 0.76, "volume": 240, "openInterest": 1310, "inTheMoney": false},
+              {"contractSymbol": "LVS260828P00043000", "strike": 43.0, "lastPrice": 1.02, "bid": 0.97, "ask": 1.07, "volume": 415, "openInterest": 1880, "inTheMoney": false},
+              {"contractSymbol": "LVS260828P00044000", "strike": 44.0, "lastPrice": 1.44, "bid": 1.38, "ask": 1.50, "volume": 1330, "openInterest": 4260, "inTheMoney": false},
+              {"contractSymbol": "LVS260828P00044500", "strike": 44.5, "lastPrice": 1.70, "bid": 1.64, "ask": 1.76, "volume": 870, "openInterest": 1990, "inTheMoney": true},
+              {"contractSymbol": "LVS260828P00045000", "strike": 45.0, "lastPrice": 1.98, "bid": 1.92, "ask": 2.04, "volume": 1510, "openInterest": 4720, "inTheMoney": true}
+            ]
+          }
+        ]
+      }
+    ],
+    "error": null
+  }
+}

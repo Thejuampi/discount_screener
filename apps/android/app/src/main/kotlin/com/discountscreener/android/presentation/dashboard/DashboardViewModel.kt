@@ -33,6 +33,7 @@ import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -93,6 +94,7 @@ enum class DashboardTab {
     Discovery,
     System,
     Estimates,
+    Earnings,
 }
 
 enum class PlanHunt {
@@ -264,6 +266,8 @@ data class DashboardUiState(
     val leftoverBoard: PlanBoardUi = presentLeftoverBoard(null),
     val crossBoardOpps: PlanBoardUi = presentCrossBoard(null),
     val crossBoardProfile: PlanBoardUi = presentCrossBoard(null),
+    val earningsGate: EarningsGateUi = EarningsGateUi(),
+    val earningsGateLoading: Boolean = false,
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -300,6 +304,7 @@ class DashboardViewModel(
     private val exportScores: ExportScoresUseCase,
     private val runRetrospective: RunRetrospectiveUseCase,
     private val runOutcomeReport: RunOutcomeReportUseCase,
+    private val getEarningsEvents: GetEarningsEventsUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -318,6 +323,7 @@ class DashboardViewModel(
 
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
+    private var activeEarningsJob: kotlinx.coroutines.Job? = null
     private var tickerSearchJob: Job? = null
     private var discoveryProgressJob: Job? = null
     private var selectProfileJob: Job? = null
@@ -508,6 +514,25 @@ class DashboardViewModel(
         }
         if (tab == DashboardTab.Discovery) {
             loadDiscovery()
+        }
+        if (tab == DashboardTab.Earnings) {
+            loadEarningsGate()
+        }
+    }
+
+    private fun loadEarningsGate() {
+        activeEarningsJob?.cancel()
+        _state.value = _state.value.copy(earningsGateLoading = true)
+        activeEarningsJob = viewModelScope.launch {
+            try {
+                _state.value = _state.value.copy(earningsGate = getEarningsEvents())
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(earningsGate = EarningsGateUi())
+            } finally {
+                _state.value = _state.value.copy(earningsGateLoading = false)
+            }
         }
     }
 
@@ -1409,6 +1434,7 @@ class DashboardViewModel(
                         exportScores = useCases.exportScores,
                         runRetrospective = useCases.runRetrospective,
                         runOutcomeReport = useCases.runOutcomeReport,
+                        getEarningsEvents = useCases.getEarningsEvents,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

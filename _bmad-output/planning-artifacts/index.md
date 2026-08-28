@@ -27,6 +27,10 @@ Use this index to choose the right planning document without loading the full BM
 - Related: [DCF Source Consistency Architecture](../implementation-artifacts/dcf-source-consistency-architecture.md) - provider selection for inputs entering the engine.
 - Related runtime: Windows `dcf_model.rs` + `quant_lens.rs`; Android `DcfAnalysisEngine.kt`; desktop `workstation/app_core.rs` valuation routing.
 
+## Proposed Feature: Pre-Earnings Risk Gate
+
+- [PRD — Pre-Earnings Risk Gate](prd-pre-earnings-risk-gate-2026-08-27.md) - implied move, SUE regression, risk score, and a decision matrix that keeps event risk apart from the DCF. Status: proposed, not planned. Blocked on a consensus-estimates provider and on options-chain history; sections 10-11 hold the repo gap and the open questions.
+
 ## Proposed Feature: Company Performance Lens
 
 - [Product Brief](product-brief-company-performance-lens.md) - opportunity framing for business-performance quality, trajectory, confidence, and decision readiness.

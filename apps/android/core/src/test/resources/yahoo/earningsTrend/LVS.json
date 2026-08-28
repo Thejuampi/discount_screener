@@ -1,0 +1,71 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {"currency": "USD"},
+        "earningsTrend": {
+          "trend": [
+            {
+              "period": "0q",
+              "endDate": "2026-09-30",
+              "growth": {"raw": 0.1842, "fmt": "18.40%"},
+              "earningsEstimate": {
+                "avg": {"raw": 0.62, "fmt": "0.62"},
+                "low": {"raw": 0.51, "fmt": "0.51"},
+                "high": {"raw": 0.74, "fmt": "0.74"},
+                "yearAgoEps": {"raw": 0.53, "fmt": "0.53"},
+                "numberOfAnalysts": {"raw": 17, "fmt": "17"},
+                "growth": {"raw": 0.1698, "fmt": "16.98%"},
+                "earningsCurrency": "USD"
+              },
+              "revenueEstimate": {
+                "avg": {"raw": 3050000000, "fmt": "3.05B"},
+                "low": {"raw": 2910000000, "fmt": "2.91B"},
+                "high": {"raw": 3180000000, "fmt": "3.18B"},
+                "numberOfAnalysts": {"raw": 15, "fmt": "15"},
+                "growth": {"raw": 0.0712, "fmt": "7.12%"},
+                "revenueCurrency": "USD"
+              },
+              "maxAge": 1
+            },
+            {
+              "period": "+1q",
+              "endDate": "2026-12-31",
+              "earningsEstimate": {
+                "avg": {"raw": 0.71, "fmt": "0.71"},
+                "low": {"raw": 0.58, "fmt": "0.58"},
+                "high": {"raw": 0.86, "fmt": "0.86"},
+                "numberOfAnalysts": {"raw": 16, "fmt": "16"},
+                "earningsCurrency": "USD"
+              },
+              "revenueEstimate": {
+                "avg": {"raw": 3210000000, "fmt": "3.21B"},
+                "numberOfAnalysts": {"raw": 14, "fmt": "14"},
+                "revenueCurrency": "USD"
+              },
+              "maxAge": 1
+            },
+            {
+              "period": "+1y",
+              "endDate": "2027-12-31",
+              "earningsEstimate": {
+                "avg": {"raw": 2.94, "fmt": "2.94"},
+                "low": {"raw": 2.31, "fmt": "2.31"},
+                "high": {"raw": 3.55, "fmt": "3.55"},
+                "numberOfAnalysts": {"raw": 18, "fmt": "18"},
+                "earningsCurrency": "USD"
+              },
+              "revenueEstimate": {
+                "avg": {"raw": 13400000000, "fmt": "13.4B"},
+                "numberOfAnalysts": {"raw": 17, "fmt": "17"},
+                "revenueCurrency": "USD"
+              },
+              "maxAge": 1
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

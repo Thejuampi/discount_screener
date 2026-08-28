@@ -2,6 +2,11 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
+import com.discountscreener.core.earnings.CURRENT_QUARTER
+import com.discountscreener.core.earnings.ConsensusEstimate
+import com.discountscreener.core.earnings.OptionChainSnapshot
+import com.discountscreener.core.earnings.consensusOf
+import com.discountscreener.core.earnings.parseOptionChain
 import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
 import com.discountscreener.core.model.AnnualReportedValue
@@ -119,6 +124,7 @@ private const val QUOTE_BATCH_URL = "https://query1.finance.yahoo.com/v7/finance
 private const val FUNDAMENTALS_TIMESERIES_URL =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
 private const val SEARCH_API_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+private const val OPTIONS_API_URL = "https://query1.finance.yahoo.com/v7/finance/options/"
 private const val LOG_TAG = "DiscountScreener"
 
 private const val USER_AGENT =
@@ -137,7 +143,8 @@ private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
  * - ROE: `financialData.returnOnEquity` only (reported; no synthesis)
  */
 internal const val QUOTE_SUMMARY_MODULES =
-    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents"
+    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend," +
+        "calendarEvents,earningsTrend"
 
 /**
  * Symbols a batch quote call asks for at once, and the size below which a failing batch is not
@@ -507,6 +514,52 @@ open class YahooFinanceClient(
             .build()
         val body = executeText(request)
         parseSearchQuotes(json.parseToJsonElement(body).jsonObject)
+    }
+
+    /**
+     * The option chain of one expiry, or null when Yahoo has none for the symbol.
+     *
+     * Two calls are needed for one event and that is the provider's shape, not a choice here: the
+     * first answer lists every expiry the ticker has, the second returns the ladder of the one that
+     * covers the report. Callers that already know the expiry pass [expiryEpochSeconds] and pay for
+     * one call.
+     *
+     * Nothing is interpreted here. The body goes straight to `parseOptionChain`, which is the same
+     * function the fixture tests run, so a saved answer and a live one cannot drift apart.
+     */
+    open suspend fun fetchOptionChain(
+        symbol: String,
+        expiryEpochSeconds: Long? = null,
+    ): OptionChainSnapshot? = withContext(Dispatchers.IO) {
+        suspend fun once(): OptionChainSnapshot? {
+            val crumb = session.ensureCrumb()
+            val url = (OPTIONS_API_URL + yahooRequestSymbol(symbol)).toHttpUrl().newBuilder()
+                .apply { expiryEpochSeconds?.let { addQueryParameter("date", it.toString()) } }
+                .addQueryParameter("crumb", crumb)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+                .build()
+            return parseOptionChain(executeText(request))
+        }
+
+        try {
+            once()
+        } catch (error: IOException) {
+            if (!isAuthError(error)) throw error
+            session.clear()
+            once()
+        }
+    }
+
+    open suspend fun fetchConsensus(
+        symbol: String,
+        period: String = CURRENT_QUARTER,
+    ): ConsensusEstimate? = withContext(Dispatchers.IO) {
+        consensusOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol)), period)
     }
 
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {

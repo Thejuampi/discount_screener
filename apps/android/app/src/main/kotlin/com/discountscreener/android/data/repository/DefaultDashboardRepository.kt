@@ -1,6 +1,12 @@
 package com.discountscreener.android.data.repository
 
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
+import com.discountscreener.android.presentation.dashboard.EarningsGateUi
+import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.data.debug.ScoreExport
+import com.discountscreener.android.data.earnings.EarningsEventRecorder
 import com.discountscreener.android.data.persistence.CaptureKind
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
 import com.discountscreener.android.data.persistence.MetricGroupStatus
@@ -339,6 +345,11 @@ class DefaultDashboardRepository(
     private val issuerYieldLookup: IssuerYieldLookup? = null,
     private val componentLookup: IssuerComponentLookup? = null,
     /**
+     * Captures the pre-earnings block for rows whose report is near. Null skips the capture, which
+     * is what every test that predates it wants and what an install with no log folder gets.
+     */
+    private val earningsEventRecorder: EarningsEventRecorder? = null,
+    /**
      * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
      * Production leaves this null.
      */
@@ -552,6 +563,18 @@ class DefaultDashboardRepository(
         }
     }
 
+    override suspend fun earningsEvents(): EarningsGateUi = withContext(computeDispatcher) {
+        val recorder = earningsEventRecorder ?: return@withContext EarningsGateUi()
+        val read = runCatching { recorder.events() }
+            .onFailure { error -> logger.error(TAG, "earnings log read failed", error) }
+            .getOrNull() ?: return@withContext EarningsGateUi()
+        presentEarningsGate(
+            events = read.events,
+            damagedLines = read.unreadableLines,
+            today = LocalDate.ofInstant(Instant.ofEpochSecond(nowProvider()), ZoneOffset.UTC),
+        )
+    }
+
     override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> = withContext(computeDispatcher) {
         stateMutex.withLock {
             safeEstimatesReportLocked().also { result ->
@@ -728,6 +751,18 @@ class DefaultDashboardRepository(
         }.onFailure { error ->
             logger.error(TAG, "score journal append failed", error)
         }
+    }
+
+    private suspend fun captureEarningsEvents(rows: List<OpportunityListRow>) {
+        val recorder = earningsEventRecorder ?: return
+        if (rows.isEmpty()) return
+        runCatching { recorder.capture(rows) }
+            .onSuccess { written ->
+                if (written > 0) {
+                    logger.info(TAG, "earnings log: captured $written event(s)")
+                }
+            }
+            .onFailure { error -> logger.error(TAG, "earnings capture failed", error) }
     }
 
     override suspend fun ensureDetailLoaded(
@@ -1327,10 +1362,9 @@ class DefaultDashboardRepository(
             }
             trackedSymbols.filter { engine.detail(it) != null }
         }
-        journalScores(
-            stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
-            scoringModel,
-        )
+        val scoredRows = stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) }
+        journalScores(scoredRows, scoringModel)
+        captureEarningsEvents(scoredRows)
         emitUpdate()
         startEnrichment(symbolsToEnrich, generation, skip)
         startMarketReadForCurrentProfile(generation)

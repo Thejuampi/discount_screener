@@ -24,6 +24,7 @@ import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -157,6 +158,40 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun opening_the_earnings_tab_reads_the_event_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(1, repository.earningsEventsCallCount)
+    }
+
+    @Test
+    fun the_earnings_tab_shows_what_the_log_answered() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsGate = EarningsGateUi(damagedLines = 3)
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(3, viewModel.state.value.earningsGate.damagedLines)
+    }
+
+    @Test
+    fun a_tab_that_is_not_the_earnings_tab_never_reads_the_event_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Watch))
+        advanceUntilIdle()
+
+        assertEquals(0, repository.earningsEventsCallCount)
+    }
+
+    @Test
     fun select_tab_updates_current_tab() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
         val viewModel = testViewModel(repository)
@@ -208,7 +243,7 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates"),
+            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates", "Earnings"),
             DashboardTab.entries.map { it.name },
         )
     }
@@ -1247,6 +1282,7 @@ class DashboardViewModelTest {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            getEarningsEvents = GetEarningsEventsUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
@@ -1475,6 +1511,14 @@ class DashboardViewModelTest {
                 )
             }
             return snapshot
+        }
+
+        var earningsGate: EarningsGateUi = EarningsGateUi()
+        var earningsEventsCallCount = 0
+
+        override suspend fun earningsEvents(): EarningsGateUi {
+            earningsEventsCallCount++
+            return earningsGate
         }
 
         override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> {

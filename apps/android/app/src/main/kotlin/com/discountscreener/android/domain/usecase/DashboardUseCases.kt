@@ -19,6 +19,7 @@ data class DashboardUseCases(
     val exportScores: ExportScoresUseCase,
     val runRetrospective: RunRetrospectiveUseCase,
     val runOutcomeReport: RunOutcomeReportUseCase,
+    val getEarningsEvents: GetEarningsEventsUseCase,
     val getIndexEstimates: GetIndexEstimatesUseCase,
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     val getEstimatesHistory: GetEstimatesHistoryUseCase,
