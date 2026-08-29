@@ -26,10 +26,10 @@
 | UC-2 Confirm the debug surface | 1 | 1 | 0 | 0 |
 | UC-3 Value an issuer through the sieve | 2 (AAPL, MSFT) | 2 | 0 | 0 |
 | UC-4 Re-open an issuer already cached | 1 (AAPL) | 1 | 0 | 0 |
-| UC-5 Value a bank through the sieve | 0 | — | — | 1 |
+| UC-5 Value a bank through the sieve | 1 (JPM) | 1 | 0 | 0 |
 
-**Session verdict:** every executed scenario passed. UC-5 did not run: no financial-class
-name sits in the 20-symbol `qa` profile.
+**Session verdict:** every scenario passed. Both business classes ran live, so nothing is left
+unexercised in this report.
 
 ## 3. Use cases
 
@@ -91,15 +91,17 @@ break the answer.
 | Field | Content |
 | --- | --- |
 | Actor | Analyst |
-| Precondition | A financial-class issuer in the loaded universe. |
-| Steps | Open Detail for a bank and read the model. |
-| Expected | The residual-income path finds its drivers in the sieved document. |
-| Actual | Not run. The `qa` profile carries no financial-class name. |
-| Status | Not run |
+| Precondition | UC-3 passed. JPM sits outside the 20-symbol `qa` profile. |
+| Steps | 1. `ds-ui open-detail JPM`. 2. `ds-ui qa-snapshot JPM`. |
+| Expected | The one-shot open finds the bank and the residual-income path finds its drivers in the sieved document. |
+| Actual | `model: "residual_income_equity"`, `business_class: "financial_services"`, base 31 132 cents, bear 27 163, bull 34 812, `-12.9%` against market. |
+| Status | Pass |
 
-Covered off the app by `sieve_parity_tests`, which walks the JPM companyfacts fixture through the
-sieve and compares both readers against the raw document.
+The bank path reads a different field set than FCFF does, so this is the scenario that would break
+first if the sieve's allow-list were cut to what the operating model needs. It held. The off-app
+cover stays: `sieve_parity_tests` walks the JPM companyfacts fixture through the sieve and compares
+both readers against the raw document.
 
 ## 4. Not run
 
-- **UC-5 Value a bank through the sieve.** Needs a universe that holds a financial-class issuer.
+None.
