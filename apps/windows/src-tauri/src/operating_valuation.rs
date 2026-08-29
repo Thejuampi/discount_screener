@@ -1307,6 +1307,16 @@ mod tests {
     fn durable_row_decision(
         row: &ValidationRow,
     ) -> (ForwardEarningsCandidate, OperatingRouteDecision) {
+        durable_row_decision_holding(
+            row,
+            i32::try_from(row.hold_years).expect("hold years fit i32"),
+        )
+    }
+
+    fn durable_row_decision_holding(
+        row: &ValidationRow,
+        hold_years: i32,
+    ) -> (ForwardEarningsCandidate, OperatingRouteDecision) {
         let forward = value_forward_earnings(&ForwardEarningsInput {
             // Frozen rows carry no FCFF diagnostics, so this is the unlevered-ROE
             // branch of the production resolver, not the through-cycle one.
@@ -1340,7 +1350,7 @@ mod tests {
                 min_forecast_horizon_days: 180,
                 max_forecast_horizon_days: 730,
                 min_analyst_count: 3,
-                hold_years: i32::try_from(row.hold_years).expect("hold years fit i32"),
+                hold_years,
                 fade_years: 10,
                 max_projection_years: 25,
                 macro_stable_growth_bps: 300,
@@ -1418,6 +1428,61 @@ mod tests {
             rows.len(),
             names.join(", ")
         )
+    }
+
+    /// What an explicit hold would do to the four names that carry the gate's error.
+    ///
+    /// `derive_hold_years` returns 0 for any name growing faster than 12% unless it is a
+    /// semiconductor, so AMZN reaches the terminal with no hold even though it reports a 22.2%
+    /// return on capital and durable excess-return evidence. This sweep says what the hold is
+    /// worth before anybody changes the rule.
+    ///
+    /// Run: cargo test --lib cohort_hold_years_sweep -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic: prints a hold-years sweep for the cohort's worst names"]
+    fn cohort_hold_years_sweep() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../shared/contracts/operating-valuation-router-v1.json"
+        );
+        let contract: SharedContract =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read contract"))
+                .expect("parse contract");
+        for row in contract
+            .validation_cohorts
+            .reported
+            .iter()
+            .chain(contract.validation_cohorts.holdout.iter())
+        {
+            if row.near_growth_bps <= 1_200
+                && !matches!(row.symbol.as_str(), "WYNN" | "AMZN" | "MU" | "CEG")
+            {
+                continue;
+            }
+            let target = present_value_of_target(
+                row.validation_only["analystTargetCents"]
+                    .as_i64()
+                    .expect("target anchor"),
+                row.resolved_cost_of_equity_bps,
+            );
+            let mut line = format!(
+                "{:5} roc={:?} hold={} anchor={}",
+                row.symbol, row.return_on_capital_bps, row.hold_years, target
+            );
+            for hold in [0, 3, 5, 7, 10] {
+                let (forward, decision) = durable_row_decision_holding(row, hold);
+                let value = if decision.status == RouteStatus::Disputed {
+                    forward.intrinsic_value_cents
+                } else {
+                    decision.selected_value_cents
+                };
+                let error = value
+                    .map(|value| (value - target).abs() as f64 / target as f64 * 100.0)
+                    .unwrap_or(f64::NAN);
+                line.push_str(&format!("  [{hold}y {value:?} {error:.1}%]"));
+            }
+            println!("{line}");
+        }
     }
 
     #[test]

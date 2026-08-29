@@ -58,5 +58,40 @@ reported names now sit under 11%. Four carry the failure:
 MU is the only one of the four that reads high. Start with WYNN: it is a quarter of the reported
 cohort's remaining error on its own.
 
+## The hold-years rule is not the cause. Measured, not argued.
+
+`derive_hold_years` returns 0 for any name growing faster than 12% a year unless it is a
+semiconductor. AMZN takes that branch with a 22.2% return on capital and `durable_excess_return_evidence`
+on the row, which looks like the fastest compounders getting the least credit. It looked like the
+cause of the reported cohort's error.
+
+`cohort_hold_years_sweep` says otherwise. Value against the present-value anchor, per hold length:
+
+| Name | Return on capital | 0y (today) | 3y | 5y | 7y |
+| --- | --- | --- | --- | --- | --- |
+| GOOGL | 41.6% | **0.2%** | 43.1% | 78.9% | 122.0% |
+| NVDA | 107.5% | **2.5%** | 2.5% | 2.5% | 2.5% |
+| HPE | 5.3% | **3.6%** | 26.5% | 48.2% | 71.5% |
+| ORCL | 14.1% | **6.9%** | 31.2% | 61.7% | 97.5% |
+| AVGO | 23.1% | **9.8%** | 27.6% | 58.2% | 94.3% |
+| MSFT | 27.3% | **12.3%** | 56.5% | 92.6% | 134.8% |
+| AMZN | 22.2% | 19.7% | **1.1%** | 16.5% | 33.1% |
+| META | 22.1% | **21.6%** | 73.0% | 115.6% | 166.4% |
+
+Seven of the eight high-growth names are best at zero hold, most of them by a wide margin. Granting
+an explicit hold to names with durable excess returns would fix AMZN and break the other six. The
+fade-only shortcut earns its place.
+
+What the sweep does say about the four names that carry the error:
+
+- **AMZN** wants a 3-year hold and nothing else. One name, not a rule.
+- **WYNN** reports no return on equity, so the ladder drops it to zero. A 7-year hold lands it at
+  3.2%. The missing input is the problem, not the hold length.
+- **CEG** takes the utilities branch at 5 years and still reads 14.4%. It wants 10.
+- **MU** moves 1.3 points across the whole sweep. Its 18.1% error lives in the earnings or the
+  terminal, not in the hold.
+
+Two of the four are missing or thin inputs. Chase the inputs before the policy.
+
 Do not close this gate by moving the threshold. It measures the model against the bar, so green
 comes from a driver or it does not come. See [operational anti-patterns](../../operational-anti-patterns.md).
