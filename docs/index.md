@@ -47,6 +47,8 @@ This index is the starting point for humans and AI agents trying to understand t
 - [High-signal screener cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json) - 26-name recompute goal gate.
 - [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules, numerical conclusion protocol.
 - [Valuation Change Visibility PRD](../_bmad-output/planning-artifacts/prd.md) - feature PRD for valuation-change visibility.
+- [Pre-Earnings Risk Gate PRD](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android-only. Prices the implied move against the ticker's own history of abnormal post-report returns; logs every earnings event because option chains are never republished.
+- [Reading the earnings log by ticker SPEC](../_bmad-output/specs/spec-earnings-log-by-ticker/SPEC.md) - Android-only. Ticker search on the Earnings tab, earnings section in a ticker's detail.
 - [Planning Artifacts Index](../_bmad-output/planning-artifacts/index.md) - local navigation for BMad planning files.
 - [Valuation Change Visibility Architecture](../_bmad-output/planning-artifacts/architecture.md) - technical decisions for that feature slice.
 - [Valuation Change Visibility UX Spec](../_bmad-output/planning-artifacts/ux-design-specification.md) - Android-first UX strategy and interaction rules.
