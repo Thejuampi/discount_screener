@@ -770,6 +770,11 @@ the network reader crosses a decoder lock on every one of a companyfacts file's 
 `SecIssuerComponentClient` sieves the response stream too. It read the whole 4 MB body to a string
 first, which spent the memory the sieve exists to save.
 
+That client built its own `OkHttpClient` inside the constructor, so no test could reach the new
+path. It now takes the client as a defaulted parameter, and `cannedHttpClient` answers one URL
+fragment with one body. A streamed body has no string seam above it, so the double sits under the
+client.
+
 | Test | Goes red when |
 | --- | --- |
 | `the_sieve_keeps_under_a_fifth_of_the_source` | the sieve keeps a concept whole again |
@@ -782,3 +787,6 @@ first, which spent the memory the sieve exists to save.
 | `a_dimensional_fact_never_reaches_the_output` | a segment breakdown reaches the output |
 | `a_null_segment_stays_in_the_output` | a null segment is dropped and a reader changes its mind |
 | `the_fields_no_reader_asks_for_never_reach_the_output` | `accn`, `fy` or `frame` come back |
+| `the_response_arrives_sieved` | the issuer client stops sieving what the network sends |
+| `the_cache_holds_what_the_stream_returned` | the slim cache and the returned facts drift apart |
+| `a_second_read_costs_no_request` | a cached companyfacts file asks the network again |

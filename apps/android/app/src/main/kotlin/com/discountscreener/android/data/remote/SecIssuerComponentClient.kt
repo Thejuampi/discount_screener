@@ -30,15 +30,17 @@ private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfact
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
 private const val TEN_K_FETCH_CONCURRENCY = 2
 
+private fun defaultSecClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(15, TimeUnit.SECONDS)
+    .readTimeout(60, TimeUnit.SECONDS)
+    .build()
+
 class SecIssuerComponentClient(
     private val cacheDir: File? = null,
     private val ttlMillis: Long = DEFAULT_TTL_MILLIS,
+    private val client: OkHttpClient = defaultSecClient(),
 ) : IssuerComponentLookup {
     private val json = Json { ignoreUnknownKeys = true }
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
 
     @Volatile
     private var tickerToCik: Map<String, String>? = null
@@ -160,7 +162,7 @@ class SecIssuerComponentClient(
         return name.trim()
     }
 
-    private fun loadSievedFacts(cik: String): String? {
+    internal fun loadSievedFacts(cik: String): String? {
         var slimFile = cacheDir?.let { File(it, companyFactsSlimFileName(cik)) }
         if (slimFile != null && slimFile.isFile) {
             var age = System.currentTimeMillis() - slimFile.lastModified()
