@@ -205,4 +205,72 @@ class EarningsEventLogTest {
 
         assertEquals(1_787_000_600L, log.read().lastCaptureEpochSeconds)
     }
+
+    @Test
+    fun the_symbol_the_calendar_stopped_on_reads_back() {
+        var log = log()
+
+        log.stampCalendarCursor("NTAP")
+
+        assertEquals("NTAP", log.calendarCursor())
+    }
+
+    @Test
+    fun a_log_whose_calendar_never_ran_reports_no_symbol() {
+        assertNull(log().calendarCursor())
+    }
+
+    @Test
+    fun a_report_date_bought_from_the_calendar_reads_back() {
+        var log = log()
+
+        log.rememberCalendarAsks(mapOf("NTAP" to ask(1_787_875_200L)))
+
+        assertEquals(1_787_875_200L, log.calendarAsks()["NTAP"]?.nextEarningsEpoch)
+    }
+
+    @Test
+    fun the_hour_the_calendar_was_asked_reads_back() {
+        var log = log()
+
+        log.rememberCalendarAsks(mapOf("NTAP" to ask(1_787_875_200L)))
+
+        assertEquals(1_787_000_000L, log.calendarAsks()["NTAP"]?.askedAtEpochSeconds)
+    }
+
+    @Test
+    fun a_symbol_the_calendar_could_not_answer_still_reads_back_as_asked() {
+        var log = log()
+
+        log.rememberCalendarAsks(mapOf("SATS" to ask(null)))
+
+        assertEquals(1_787_000_000L, log.calendarAsks()["SATS"]?.askedAtEpochSeconds)
+    }
+
+    @Test
+    fun a_later_pass_keeps_the_dates_the_one_before_bought() {
+        var log = log()
+        log.rememberCalendarAsks(mapOf("NTAP" to ask(1_787_875_200L)))
+
+        log.rememberCalendarAsks(mapOf("DELL" to ask(1_788_048_000L)))
+
+        assertEquals(1_787_875_200L, log.calendarAsks()["NTAP"]?.nextEarningsEpoch)
+    }
+
+    @Test
+    fun a_date_asked_for_twice_keeps_the_newest_answer() {
+        var log = log()
+        log.rememberCalendarAsks(mapOf("NTAP" to ask(1_787_875_200L)))
+
+        log.rememberCalendarAsks(mapOf("NTAP" to ask(1_788_048_000L)))
+
+        assertEquals(1_788_048_000L, log.calendarAsks()["NTAP"]?.nextEarningsEpoch)
+    }
+
+    @Test
+    fun a_log_whose_calendar_bought_nothing_reads_back_no_dates() {
+        assertTrue(log().calendarAsks().isEmpty())
+    }
+
+    private fun ask(epoch: Long?) = CalendarAsk(epoch, askedAtEpochSeconds = 1_787_000_000L)
 }

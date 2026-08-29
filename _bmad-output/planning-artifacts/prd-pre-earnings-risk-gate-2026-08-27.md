@@ -145,7 +145,7 @@ Post-reporte:
 
 - Con 16–20 trimestres, el coeficiente de asimetría puede no ser significativo. En ese caso, el modelo simétrico es el que se usa en producción.
 - La métrica sectorial sin consenso histórico queda fuera de la regresión. Su peso en la decisión es menor que el de EPS y revenue.
-- La captura de fondo lee la fecha de reporte que dejó el último refresh. Si nadie abre la app por más de diez días, esa fecha puede haber quedado atrás y el símbolo pasa su ventana sin que el trabajo periódico sepa que había un reporte. Refrescar el calendario de quinientos símbolos desde el fondo cuesta un pedido por símbolo y necesita persistir la fecha nueva, así que hoy el límite se declara en vez de taparse: la captura de fondo cubre al usuario que abre la app cada tanto, no al que no la abre nunca.
+- La captura de fondo ya no depende de la fecha que dejó el último refresh: cada pasada pregunta el calendario de hasta doce símbolos cuya fecha venció o falta, y arranca donde paró la anterior. Queda un límite más chico: un símbolo entra a la cola solo una vez por día, así que un reporte adelantado de golpe puede tardar hasta un día en aparecer.
 - El implied move es una medida de riesgo neutral, no una probabilidad real. Sirve para comparar contra la historia del propio ticker, no para estimar probabilidad de movimiento.
 
 ## 9. Criterios de éxito
@@ -237,6 +237,7 @@ Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del gr
 | `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |
+| `EarningsEventRecorder.refreshStaleDates` | Antes de precisar nada, pide a Yahoo la fecha del próximo reporte de los símbolos cuya fecha venció o falta: doce por pasada, rotando con un cursor guardado al lado de la bitácora. La respuesta se guarda con la hora en que se preguntó, así un símbolo sin fecha futura no vuelve a la cola hasta el día siguiente. |
 | `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
 
 Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada sobre él no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.

@@ -151,6 +151,8 @@ internal const val QUOTE_SUMMARY_MODULES =
 
 internal const val REPORTED_QUARTER_MODULES = "earningsHistory,incomeStatementHistoryQuarterly"
 
+internal const val CALENDAR_MODULES = "calendarEvents"
+
 /**
  * Symbols a batch quote call asks for at once, and the size below which a failing batch is not
  * split further.
@@ -586,6 +588,22 @@ open class YahooFinanceClient(
     open suspend fun fetchReportedQuarters(symbol: String): List<ReportedQuarter> =
         withContext(Dispatchers.IO) {
             reportedQuartersOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol), REPORTED_QUARTER_MODULES))
+        }
+
+    /**
+     * When this symbol reports next, asked on its own.
+     *
+     * The date on file comes from the last refresh, and a refresh needs the app open. The
+     * background capture has to learn on its own that a report moved, or that the one it knew has
+     * already happened, or it prices nothing.
+     */
+    open suspend fun fetchNextEarningsEpoch(symbol: String, nowEpochSeconds: Long): Long? =
+        withContext(Dispatchers.IO) {
+            var root = fetchQuoteSummaryJson(yahooRequestSymbol(symbol), CALENDAR_MODULES)
+            var calendar = root["quoteSummary"]?.jsonObject
+                ?.get("result")?.jsonArray?.firstOrNull()?.jsonObject
+                ?.get("calendarEvents")?.jsonObject
+            nextEarningsEpochOf(calendar, nowEpochSeconds)
         }
 
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {

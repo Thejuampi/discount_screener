@@ -113,6 +113,7 @@ class DiscountScreenerAppContainer(context: Context) {
             },
             announcements = { symbol -> secFilings.earningsAnnouncements(symbol) },
             reported = { symbol -> yahooClient.fetchReportedQuarters(symbol) },
+            calendar = { symbol, now -> yahooClient.fetchNextEarningsEpoch(symbol, now) },
             nowProvider = { System.currentTimeMillis() / 1_000 },
             logger = AndroidAppLogger(),
         )

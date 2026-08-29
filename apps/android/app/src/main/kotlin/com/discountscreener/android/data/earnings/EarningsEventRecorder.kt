@@ -3,6 +3,7 @@ package com.discountscreener.android.data.earnings
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.core.earnings.CalendarAsk
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
 import com.discountscreener.core.earnings.DcfAsOf
@@ -33,6 +34,7 @@ class EarningsEventRecorder(
     private val history: CloseSource = closes,
     private val announcements: AnnouncementSource = AnnouncementSource { emptyList() },
     private val reported: ReportedQuarterSource = ReportedQuarterSource { emptyList() },
+    private val calendar: CalendarSource = CalendarSource { _, _ -> null },
     private val nowProvider: () -> Long,
     private val logger: AppLogger = NoOpAppLogger,
     private val windowDays: Long = CAPTURE_WINDOW_DAYS,
@@ -59,6 +61,10 @@ class EarningsEventRecorder(
         suspend fun quarters(symbol: String): List<ReportedQuarter>
     }
 
+    fun interface CalendarSource {
+        suspend fun nextEarningsEpoch(symbol: String, nowEpochSeconds: Long): Long?
+    }
+
     fun events(): EventLogRead = log.read()
 
     /**
@@ -78,8 +84,9 @@ class EarningsEventRecorder(
             .mapNotNull { record -> record.post?.abnormalReturnBps?.let { record.pre.symbol to it } }
             .groupBy({ it.first }, { it.second })
         var written = 0
+        var refreshed = refreshStaleDates(rows, today)
         rows.forEach { row ->
-            var epoch = row.nextEarningsEpoch ?: return@forEach
+            var epoch = refreshed[row.symbol] ?: row.nextEarningsEpoch ?: return@forEach
             var (reportDate, timing) = reportTimingOf(epoch)
             if (!isInWindow(reportDate, today)) return@forEach
             if (row.symbol to reportDate.toEpochDay() in priced) return@forEach
@@ -91,6 +98,54 @@ class EarningsEventRecorder(
         }
         log.stampCapture(nowProvider())
         return written
+    }
+
+    /**
+     * The report dates the last refresh left behind, asked again a few at a time.
+     *
+     * A refresh needs the app open. A phone nobody opens carries dates that have already passed,
+     * or none at all, and the capture then prices nothing while the chains it needed expire. Each
+     * pass buys a handful of lookups and starts where the last one stopped, so the whole universe
+     * comes round.
+     */
+    private suspend fun refreshStaleDates(
+        rows: List<OpportunityListRow>,
+        today: LocalDate,
+    ): Map<String, Long> {
+        var stale = rows.filter { isStale(it.nextEarningsEpoch, today) }.map { it.symbol }
+        if (stale.isEmpty()) return emptyMap()
+        var asks = log.calendarAsks().filterKeys { it in stale }
+        var known = asks
+            .mapNotNull { (symbol, ask) ->
+                ask.nextEarningsEpoch?.takeIf { !isStale(it, today) }?.let { symbol to it }
+            }
+            .toMap()
+        var open = stale.filterNot { it in known || askedRecently(asks[it]) }.sorted()
+        if (open.isEmpty()) return known
+        var cursor = log.calendarCursor()
+        var start = cursor?.let { mark -> open.indexOfFirst { it > mark }.takeIf { it >= 0 } } ?: 0
+        var asked = List(minOf(CALENDAR_LOOKUPS_PER_PASS, open.size)) { open[(start + it) % open.size] }
+        var found = HashMap<String, CalendarAsk>()
+        asked.forEach { symbol ->
+            var epoch = runCatching { calendar.nextEarningsEpoch(symbol, nowProvider()) }
+                .onFailure { error -> logger.error(TAG, "earnings calendar failed: $symbol", error) }
+                .getOrNull()
+            found[symbol] = CalendarAsk(epoch, nowProvider())
+        }
+        log.stampCalendarCursor(asked.last())
+        log.rememberCalendarAsks(found)
+        logger.info(TAG, "earnings calendar: asked ${asked.size} of ${open.size} stale date(s)")
+        return known + found.mapNotNull { (symbol, ask) -> ask.nextEarningsEpoch?.let { symbol to it } }
+    }
+
+    private fun askedRecently(ask: CalendarAsk?): Boolean {
+        var at = ask?.askedAtEpochSeconds ?: return false
+        return nowProvider() - at < CALENDAR_RECHECK_SECONDS
+    }
+
+    private fun isStale(epochSeconds: Long?, today: LocalDate): Boolean {
+        var epoch = epochSeconds ?: return true
+        return reportTimingOf(epoch).first < today
     }
 
     private suspend fun settleDueEvents(
@@ -213,6 +268,8 @@ class EarningsEventRecorder(
 
     private companion object {
         const val CAPTURE_WINDOW_DAYS = 10L
+        const val CALENDAR_LOOKUPS_PER_PASS = 12
+        const val CALENDAR_RECHECK_SECONDS = 24L * 60L * 60L
         const val SETTLE_WINDOW_DAYS = 30L
         const val MARKET_SYMBOL = "SPY"
         const val TAG = "DiscountScreener"

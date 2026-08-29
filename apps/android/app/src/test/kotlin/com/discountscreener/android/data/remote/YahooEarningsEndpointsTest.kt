@@ -115,8 +115,32 @@ class YahooEarningsEndpointsTest {
         assertEquals(1, seen.count { it.contains("/options/") })
     }
 
-    private fun client(seen: MutableList<String>) = YahooFinanceClient(
-        httpClient = OkHttpClient.Builder().addInterceptor(recording(seen)).build(),
+    @Test
+    fun the_report_date_is_asked_on_the_calendar_module_alone() = runTest {
+        var seen = mutableListOf<String>()
+        client(seen).fetchNextEarningsEpoch("LVS", nowEpochSeconds = 1_787_000_000L)
+
+        assertEquals("calendarEvents", seen.first { it.contains("quoteSummary") }.substringAfter("modules=").substringBefore("&"))
+    }
+
+    @Test
+    fun the_next_report_ahead_of_now_is_the_one_that_reads_back() = runTest {
+        var epoch = client(mutableListOf(), quoteSummary = CALENDAR_BODY)
+            .fetchNextEarningsEpoch("LVS", nowEpochSeconds = 1_787_000_000L)
+
+        assertEquals(1_787_875_200L, epoch)
+    }
+
+    @Test
+    fun a_calendar_with_no_date_on_it_reads_back_as_nothing() = runTest {
+        var epoch = client(mutableListOf(), quoteSummary = EMPTY_CALENDAR_BODY)
+            .fetchNextEarningsEpoch("LVS", nowEpochSeconds = 1_787_000_000L)
+
+        assertEquals(null, epoch)
+    }
+
+    private fun client(seen: MutableList<String>, quoteSummary: String = QUOTE_SUMMARY_BODY) = YahooFinanceClient(
+        httpClient = OkHttpClient.Builder().addInterceptor(recording(seen, quoteSummary)).build(),
     )
 
     private fun recording(
@@ -152,6 +176,12 @@ class YahooEarningsEndpointsTest {
 
         const val NO_OPTIONS_BODY = """{"optionChain":{"result":[{"underlyingSymbol":"THIN",
             "expirationDates":[],"options":[]}],"error":null}}"""
+
+        const val CALENDAR_BODY = """{"quoteSummary":{"result":[{"calendarEvents":{"earnings":{
+            "earningsDate":[{"raw":1787875200},{"raw":1788048000}]}}}],"error":null}}"""
+
+        const val EMPTY_CALENDAR_BODY =
+            """{"quoteSummary":{"result":[{"calendarEvents":{"earnings":{"earningsDate":[]}}}],"error":null}}"""
 
         const val QUOTE_SUMMARY_BODY = """{"quoteSummary":{"result":[{"earningsTrend":{"trend":[
             {"period":"0q","endDate":"2026-09-30","earningsEstimate":{"avg":{"raw":0.62},

@@ -2,6 +2,7 @@ package com.discountscreener.android.data.earnings
 
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.core.earnings.CalendarAsk
 import com.discountscreener.core.earnings.ChainRow
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
@@ -363,6 +364,132 @@ class EarningsEventRecorderTest {
 
     private fun log() = EarningsEventLog(File(folder.newFolder(), "events.jsonl"))
 
+    @Test
+    fun a_report_date_that_already_passed_is_asked_again() = runTest {
+        var asked = mutableListOf<String>()
+
+        recorder(log(), calendar = asking(asked)).capture(listOf(row(earningsIn = -20)))
+
+        assertEquals(listOf("LVS"), asked)
+    }
+
+    @Test
+    fun a_symbol_with_no_report_date_on_file_is_asked() = runTest {
+        var asked = mutableListOf<String>()
+
+        recorder(log(), calendar = asking(asked)).capture(listOf(row(earningsIn = null)))
+
+        assertEquals(listOf("LVS"), asked)
+    }
+
+    @Test
+    fun a_report_date_still_ahead_costs_no_call() = runTest {
+        var asked = mutableListOf<String>()
+
+        recorder(log(), calendar = asking(asked)).capture(listOf(row(earningsIn = 3)))
+
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun a_date_the_calendar_moved_into_the_window_is_priced_on_the_same_pass() = runTest {
+        var log = log()
+
+        recorder(log, calendar = answering(TODAY.plusDays(2))).capture(listOf(row(earningsIn = -20)))
+
+        assertEquals(TODAY.plusDays(2).toEpochDay(), log.read().events.single().pre.reportEpochDay)
+    }
+
+    @Test
+    fun one_pass_never_asks_the_whole_universe() = runTest {
+        var asked = mutableListOf<String>()
+
+        recorder(log(), calendar = asking(asked)).capture(staleUniverse(20))
+
+        assertEquals(12, asked.size)
+    }
+
+    @Test
+    fun the_next_pass_starts_where_the_last_one_stopped() = runTest {
+        var log = log()
+        var asked = mutableListOf<String>()
+        recorder(log, calendar = asking(mutableListOf())).capture(staleUniverse(20))
+
+        recorder(log, calendar = asking(asked)).capture(staleUniverse(20))
+
+        assertEquals("S12", asked.first())
+    }
+
+    @Test
+    fun the_pass_after_the_last_symbol_wraps_back_to_the_first() = runTest {
+        var log = log()
+        log.stampCalendarCursor("S19")
+        var asked = mutableListOf<String>()
+
+        recorder(log, calendar = asking(asked)).capture(staleUniverse(20))
+
+        assertEquals("S00", asked.first())
+    }
+
+    @Test
+    fun a_calendar_that_refuses_never_costs_the_pass() = runTest {
+        var log = log()
+        var refusing = EarningsEventRecorder.CalendarSource { _, _ -> error("yahoo down") }
+
+        recorder(log, calendar = refusing).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("LVS", log.read().events.single().pre.symbol)
+    }
+
+    @Test
+    fun a_date_the_calendar_already_answered_is_never_asked_for_twice() = runTest {
+        var log = log()
+        recorder(log, calendar = answering(TODAY.plusDays(40))).capture(listOf(row(earningsIn = -20)))
+        var asked = mutableListOf<String>()
+
+        recorder(log, calendar = asking(asked)).capture(listOf(row(earningsIn = -20)))
+
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun a_symbol_the_calendar_could_not_answer_is_left_alone_on_the_next_pass() = runTest {
+        var log = log()
+        recorder(log, calendar = asking(mutableListOf())).capture(listOf(row(earningsIn = -20)))
+        var asked = mutableListOf<String>()
+
+        recorder(log, calendar = asking(asked)).capture(listOf(row(earningsIn = -20)))
+
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun a_date_the_calendar_answered_a_day_ago_is_asked_again() = runTest {
+        var log = log()
+        log.rememberCalendarAsks(
+            mapOf("LVS" to CalendarAsk(nextEarningsEpoch = null, askedAtEpochSeconds = yesterday())),
+        )
+        var asked = mutableListOf<String>()
+
+        recorder(log, calendar = asking(asked)).capture(listOf(row(earningsIn = -20)))
+
+        assertEquals(listOf("LVS"), asked)
+    }
+
+    private fun yesterday() = TODAY.minusDays(1).atStartOfDay(ZoneOffset.UTC).toEpochSecond() - 60L
+
+    private fun staleUniverse(size: Int) =
+        List(size) { row(earningsIn = null, symbol = "S%02d".format(it)) }
+
+    private fun asking(seen: MutableList<String>) = EarningsEventRecorder.CalendarSource { symbol, _ ->
+        seen += symbol
+        null
+    }
+
+    private fun answering(date: LocalDate) = EarningsEventRecorder.CalendarSource { _, _ ->
+        date.atTime(17, 0).toInstant(ZoneOffset.ofHours(-4)).epochSecond
+    }
+
     private fun recorder(
         log: EarningsEventLog,
         chains: EarningsEventRecorder.OptionChainSource = EarningsEventRecorder.OptionChainSource { _, _ -> chain },
@@ -372,6 +499,8 @@ class EarningsEventRecorderTest {
             EarningsEventRecorder.AnnouncementSource { emptyList() },
         reported: EarningsEventRecorder.ReportedQuarterSource =
             EarningsEventRecorder.ReportedQuarterSource { emptyList() },
+        calendar: EarningsEventRecorder.CalendarSource =
+            EarningsEventRecorder.CalendarSource { _, _ -> null },
     ) = EarningsEventRecorder(
         log = log,
         chains = chains,
@@ -380,6 +509,7 @@ class EarningsEventRecorderTest {
         history = history,
         announcements = announcements,
         reported = reported,
+        calendar = calendar,
         nowProvider = { TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond() },
     )
 

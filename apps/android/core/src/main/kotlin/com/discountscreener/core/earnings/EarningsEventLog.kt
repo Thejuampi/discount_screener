@@ -43,6 +43,56 @@ class EarningsEventLog(private val file: File) {
 
     private fun markFile(): File = File(file.parentFile, file.name + ".captured-at")
 
+    /**
+     * The last symbol whose report date the capture asked Yahoo for.
+     *
+     * One pass can only afford a handful of calendar lookups, and the universe is hundreds of
+     * symbols wide. The mark is where the next pass starts, so every stale date gets its turn
+     * instead of the same few being asked forever.
+     */
+    fun stampCalendarCursor(symbol: String) {
+        cursorFile().parentFile?.mkdirs()
+        runCatching { cursorFile().writeText(symbol) }
+    }
+
+    fun calendarCursor(): String? =
+        runCatching { cursorFile().readText().trim() }.getOrNull()?.takeIf { it.isNotEmpty() }
+
+    private fun cursorFile(): File = File(file.parentFile, file.name + ".calendar-cursor")
+
+    /**
+     * What the calendar answered for a symbol, and when it was asked.
+     *
+     * Yahoo answers a symbol it has no future date for with the last one that passed. Keeping only
+     * the date would put that symbol back in the queue on every pass, and the same few names would
+     * hold the whole universe behind them. The hour of the ask is what lets the next pass move on.
+     */
+    fun rememberCalendarAsks(asks: Map<String, CalendarAsk>) {
+        if (asks.isEmpty()) return
+        var kept = calendarAsks() + asks
+        asksFile().parentFile?.mkdirs()
+        runCatching {
+            asksFile().writeText(
+                kept.entries.joinToString(separator = LINE) { (symbol, ask) ->
+                    "$symbol ${ask.nextEarningsEpoch ?: NO_DATE} ${ask.askedAtEpochSeconds}"
+                },
+            )
+        }
+    }
+
+    fun calendarAsks(): Map<String, CalendarAsk> =
+        runCatching { asksFile().readLines() }
+            .getOrDefault(emptyList())
+            .mapNotNull { line ->
+                var parts = line.trim().split(" ")
+                if (parts.size != 3) return@mapNotNull null
+                var askedAt = parts[2].toLongOrNull() ?: return@mapNotNull null
+                parts[0] to CalendarAsk(parts[1].toLongOrNull(), askedAt)
+            }
+            .toMap()
+
+    private fun asksFile(): File = File(file.parentFile, file.name + ".calendar-asks")
+
     fun event(symbol: String, reportEpochDay: Long): EarningsEventRecord? =
         read().events.firstOrNull { it.pre.symbol == symbol && it.pre.reportEpochDay == reportEpochDay }
 
@@ -72,8 +122,15 @@ class EarningsEventLog(private val file: File) {
 
     private companion object {
         val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        const val LINE = "\n"
+        const val NO_DATE = "-"
     }
 }
+
+data class CalendarAsk(
+    val nextEarningsEpoch: Long?,
+    val askedAtEpochSeconds: Long,
+)
 
 data class EventLogRead(
     val events: List<EarningsEventRecord>,
