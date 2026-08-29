@@ -152,6 +152,7 @@ For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cro
 - Android `debt-resolution/1` owns stock, coupon, and published k_d. Stock is the filed year-end instant. Estimated coupons enter year-cash only. k_d stays market yield, then rated/coverage synthetic, then the filed coupon over average debt. `InterestPaid*` is not a filed coupon. A current instrument yield attaches through `issuer-market-yield/2` onto `marketYieldBps`. The yield sets k_d. It does not shrink the tax-year window. Android reads Markets Insider issuer bond rows, keeps USD quotes, and takes the median of remaining 4–15 year yields. Missing yield leaves the rung empty.
 - Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved CapEx, OCF, or tax evidence is **unavailable** — not zero.
 - Financial services remain on residual income.
+- The Android sieve is the boundary of what SEC facts exist downstream. It keeps an annual (`fp=FY`), consolidated `10-K`/`10-K/A` fact of a policy concept, with the seven fields a reader reads. A reader that needs a quarter, another form, or a dropped field must widen `SecCompanyFactsSieve` **and** bump `COMPANY_FACTS_SIEVE_VERSION`, or the cache answers with the old shape.
 
 ## Quant Lens (signal vs noise)
 
