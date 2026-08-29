@@ -14,6 +14,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardViewModel
+import com.discountscreener.android.presentation.dashboard.eventsFor
 import com.discountscreener.android.ui.dashboard.DashboardScreen
 import com.discountscreener.android.ui.dashboard.DetailScreen
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
@@ -83,6 +84,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             scoringModel = state.opportunityScoringModel,
                             regimeScoringEnabled = state.regimeScoringEnabled,
                             symbolNote = state.symbolNotes[detailRoute.symbol].orEmpty(),
+                            earningsEvents = state.earningsGate.eventsFor(detailRoute.symbol),
                             onAction = viewModel::dispatch,
                         )
                     }

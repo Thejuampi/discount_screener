@@ -1,6 +1,6 @@
 # PRD: Pre-Earnings Risk Gate
 
-Status: proposed, 2026-08-27. Author: Juan. Not planned, not scoped, no wave assigned.
+Status: proposed, 2026-08-27. Actualizado 2026-08-28 con §4.7. Author: Juan. Not planned, not scoped, no wave assigned.
 
 ## 1. Objetivo
 
@@ -15,6 +15,7 @@ El módulo cubre:
 - Matriz de decisión que separa valuación (DCF) de riesgo de evento.
 - Reglas de cobertura con opciones.
 - Log de paper trading para validación.
+- Lectura de la bitácora por ticker: buscador en la lista de eventos y sección de earnings en el detalle del ticker.
 
 Fuera de alcance:
 - El módulo no calibra el DCF. El consenso y el implied move son inputs de riesgo, nunca inputs de valuación.
@@ -98,6 +99,22 @@ En la celda "justo/barato + riesgo alto", la cobertura preferida es put protecto
 Tope de costo:
 - Put protector: si cuesta más del 1.5–2% del valor de la posición, se reduce tamaño en vez de cubrir.
 - Put spread: si cuesta más del 1%, se reduce tamaño en vez de cubrir.
+
+### 4.7 Lectura por ticker
+
+El gate escribe un registro por reporte. Hoy la única forma de leerlo es una lista ordenada por fecha. Con cinco tickers alcanza. Con el universo entero, el lector que quiere saber de un símbolo tiene que recorrerla entera, y el evento del ticker que está mirando en el detalle no aparece en la pantalla donde lo está mirando.
+
+**Buscador en la pestaña Earnings.** Campo de texto arriba de la lista. Filtra las dos secciones —"reportan pronto" y "ya reportaron"— por ticker, sin distinguir mayúsculas, por prefijo del símbolo. Campo vacío es la lista completa.
+
+Lo que el filtro no puede tapar:
+- La línea de última captura y el conteo de líneas dañadas quedan visibles siempre. Dicen si el módulo sigue corriendo y si la bitácora está sana. Un filtro que las esconde convierte una captura rota en una búsqueda sin resultados.
+- Una búsqueda sin coincidencias dice que no hay coincidencias, y nombra el término. Nunca muestra el vacío de instalación nueva: ese texto dice "no hay reportes en la bitácora" y sería mentira con la bitácora llena.
+
+**Sección de earnings en el detalle del ticker.** Al abrir el detalle de un ticker, si la bitácora tiene un evento suyo, el detalle lo muestra. La misma tarjeta que la pestaña, sin una segunda forma de leer los mismos bps. Si la bitácora tiene varios, muestra el próximo que reporta y el último que ya liquidó. Sin evento no hay sección: ni caja vacía ni texto de relleno.
+
+Reglas comunes a las dos superficies:
+- Las dos solo leen. Abrir un detalle o tipear en el buscador no baja una cadena, no dispara una captura y no liquida nada. La captura tiene su propio reloj (§13, `EarningsCaptureWorker`); una pantalla que pidiera la cadena gastaría el pedido que el worker necesita y podría quemar la única pasada en rueda del día.
+- Las dos leen la misma bitácora ya presentada. El detalle no abre el archivo por su cuenta.
 
 ## 5. Fuentes de datos
 
@@ -311,5 +328,17 @@ En la celda "barato + riesgo alto":
 - Put spread hasta 1% del valor de la posición: se cubre, a media posición, y la justificación dice el precio.
 - Put spread por encima del 1%: se recorta el tamaño y no se cubre. La justificación nombra el costo y el tope que lo dejó afuera.
 - Cadena que no cotiza spread: se pide la cobertura sin precio, como antes.
+
+### Lectura por ticker (§4.7)
+
+| Pieza | Dónde |
+|---|---|
+| `EarningsGateUi.matching` | Filtra las dos listas por prefijo del símbolo. `damagedLines` y `lastCapture` no se tocan: describen la lectura entera y tienen que quedar visibles detrás de cualquier filtro. |
+| `EarningsGateUi.eventsFor` | Lo que ve el detalle de un ticker: el próximo reporte que tiene y el último que liquidó. Las dos listas llegan ordenadas, así que la primera coincidencia de cada una es la que lleva decisión viva. |
+| `EarningsGateScreen` | Campo de filtro arriba de la lista, con el estado en el composable. Una búsqueda sin coincidencias nombra el término y nunca muestra el vacío de instalación nueva. |
+| `DetailScreen` | Sección `EARNINGS` dentro del subtab Snapshot, debajo del encabezado de score. Sin evento no se dibuja nada. La tarjeta es la misma que la pestaña: `EarningsEventCard` pasó a `internal`. |
+| `DashboardViewModel.openDetail` | Carga la bitácora una sola vez si todavía está vacía. `loadEarningsGate` no está cacheado, así que llamarlo por cada detalle releería el archivo entero. |
+
+Las dos superficies solo leen. Abrir un detalle o tipear en el filtro no baja una cadena ni dispara una captura: el worker conserva su única pasada en rueda.
 
 **Falta:** la regresión de §4.2 espera a que la bitácora junte 16–20 trimestres.

@@ -856,6 +856,9 @@ class DashboardViewModel(
             ),
             symbol,
         )
+        if (_state.value.earningsGate.isEmpty && !_state.value.earningsGateLoading) {
+            loadEarningsGate()
+        }
         detailLoadJob?.cancel()
         detailLoadJob = viewModelScope.launch {
             try {

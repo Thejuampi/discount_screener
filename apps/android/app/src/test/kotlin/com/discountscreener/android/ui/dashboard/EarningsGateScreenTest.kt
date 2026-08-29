@@ -3,6 +3,8 @@ package com.discountscreener.android.ui.dashboard
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithTag
@@ -109,6 +111,9 @@ class EarningsGateScreenTest {
     fun a_captured_report_shows_what_the_hedge_would_cost() {
         render(gate(day = 3, spread = 80))
 
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("0.80% of the position (44.00 / 42.00 puts)"))
+
         composeRule.onNodeWithText("0.80% of the position (44.00 / 42.00 puts)").assertIsDisplayed()
     }
 
@@ -168,9 +173,10 @@ class EarningsGateScreenTest {
         post: PostReport? = null,
         damaged: Int = 0,
         spread: Int? = null,
+        symbol: String = "LVS",
     ): EarningsGateUi {
         var pre = PreReport(
-            symbol = "LVS",
+            symbol = symbol,
             reportEpochDay = TODAY.plusDays(day).toEpochDay(),
             timing = ReportTiming.AfterClose,
             priceCents = 4_424L,
@@ -195,6 +201,84 @@ class EarningsGateScreenTest {
             damagedLines = damaged,
             today = TODAY,
         )
+    }
+
+    private fun twoTickers(): EarningsGateUi {
+        var lvs = gate(day = 3)
+        var avgo = gate(day = 5, symbol = "AVGO")
+        return lvs.copy(upcoming = lvs.upcoming + avgo.upcoming, damagedLines = 2, lastCapture = EMPTY_DETAIL)
+    }
+
+    @Test
+    fun typing_a_ticker_leaves_only_that_ticker_on_the_screen() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("av")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("LVS").assertDoesNotExist()
+    }
+
+    @Test
+    fun typing_a_ticker_keeps_that_ticker_on_the_screen() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("av")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("AVGO").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_search_that_matches_nothing_names_what_was_searched() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("zzzz")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("No logged report matches \"zzzz\".").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_search_that_matches_nothing_never_claims_the_log_is_empty() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("zzzz")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("No earnings events logged yet").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_search_that_matches_nothing_still_says_when_the_capture_last_ran() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("zzzz")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LAST_CAPTURE).assertIsDisplayed()
+    }
+
+    @Test
+    fun a_search_that_matches_nothing_still_counts_the_damaged_lines() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("zzzz")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("2 unreadable line(s) in the log, skipped.").assertIsDisplayed()
+    }
+
+    @Test
+    fun clearing_the_search_brings_the_whole_log_back() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextInput("av")
+        shadowOf(Looper.getMainLooper()).idle()
+        composeRule.onNodeWithTag(EARNINGS_GATE_SEARCH).performTextClearance()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        composeRule.onNodeWithText("LVS").assertIsDisplayed()
     }
 
     private companion object {

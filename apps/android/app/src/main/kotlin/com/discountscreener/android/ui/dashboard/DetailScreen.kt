@@ -81,6 +81,7 @@ import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
@@ -123,6 +124,9 @@ import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
+const val DETAIL_EARNINGS_SECTION = "detailEarningsSection"
+const val DETAIL_SNAPSHOT_LIST = "detailSnapshotList"
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DetailScreen(
@@ -145,6 +149,7 @@ fun DetailScreen(
     regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
     /** What the reader wrote about this symbol. Empty when nothing was written. */
     symbolNote: String = "",
+    earningsEvents: List<EarningsEventRowUi> = emptyList(),
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -307,6 +312,7 @@ fun DetailScreen(
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
                     symbolNote = symbolNote,
+                    earningsEvents = earningsEvents.filter { it.symbol.equals(route.symbol, ignoreCase = true) },
                     onAction = onAction,
                 )
                 DetailSubtab.Score -> ScoreContent(
@@ -795,6 +801,7 @@ private fun SnapshotContent(
     projectedDetail: ProjectedDetailData?,
     detailNotice: DashboardNotice? = null,
     symbolNote: String = "",
+    earningsEvents: List<EarningsEventRowUi> = emptyList(),
     onAction: (DashboardAction) -> Unit,
 ) {
     var replayCandles = replayBackingCandles ?: candles
@@ -831,7 +838,10 @@ private fun SnapshotContent(
     var volumeSizedCandles by rememberSaveable { mutableStateOf(false) }
     var timeAxisGutter = timeAxisTrailingGutter(volumeProfileModel != null)
 
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(
+        modifier = Modifier.testTag(DETAIL_SNAPSHOT_LIST),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         item {
             DetailScoreHeader(
                 route = route,
@@ -841,6 +851,18 @@ private fun SnapshotContent(
                 symbolNote = symbolNote,
                 onAction = onAction,
             )
+        }
+
+        if (earningsEvents.isNotEmpty()) {
+            item {
+                Text(
+                    text = "EARNINGS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION),
+                )
+            }
+            items(earningsEvents, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
         }
 
         item {

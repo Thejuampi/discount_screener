@@ -43,6 +43,20 @@ data class EarningsEventRowUi(
     val reportedOn: String?,
 )
 
+fun EarningsGateUi.matching(query: String): EarningsGateUi {
+    var term = query.trim()
+    if (term.isEmpty()) return this
+    return copy(
+        upcoming = upcoming.filter { it.symbol.startsWith(term, ignoreCase = true) },
+        settled = settled.filter { it.symbol.startsWith(term, ignoreCase = true) },
+    )
+}
+
+fun EarningsGateUi.eventsFor(symbol: String): List<EarningsEventRowUi> = listOfNotNull(
+    upcoming.firstOrNull { it.symbol.equals(symbol, ignoreCase = true) },
+    settled.firstOrNull { it.symbol.equals(symbol, ignoreCase = true) },
+)
+
 fun presentEarningsGate(
     events: List<EarningsEventRecord>,
     damagedLines: Int,

@@ -16,10 +16,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
@@ -29,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.matching
 import com.discountscreener.core.earnings.EventRisk
 
 @Composable
@@ -65,11 +71,22 @@ fun EarningsGateScreen(
         }
         return
     }
+    var query by remember { mutableStateOf("") }
+    var shown = state.matching(query)
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).testTag(EARNINGS_GATE_LIST),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(vertical = 12.dp),
     ) {
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Filter by ticker") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(EARNINGS_GATE_SEARCH),
+            )
+        }
         state.lastCapture?.let { checked ->
             item {
                 Text(
@@ -80,13 +97,22 @@ fun EarningsGateScreen(
                 )
             }
         }
-        if (state.upcoming.isNotEmpty()) {
-            item { GateSectionLabel("Reporting soon") }
-            items(state.upcoming, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
+        if (shown.isEmpty) {
+            item {
+                Text(
+                    text = "No logged report matches \"${query.trim()}\".",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(EARNINGS_GATE_NO_MATCH),
+                )
+            }
         }
-        if (state.settled.isNotEmpty()) {
+        if (shown.upcoming.isNotEmpty()) {
+            item { GateSectionLabel("Reporting soon") }
+            items(shown.upcoming, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
+        }
+        if (shown.settled.isNotEmpty()) {
             item { GateSectionLabel("Already reported") }
-            items(state.settled, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
+            items(shown.settled, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
         }
         if (state.damagedLines > 0) {
             item {
@@ -186,9 +212,11 @@ const val EARNINGS_GATE_RESTORE = "earningsGateRestore"
 const val EARNINGS_GATE_NOTICE = "earningsGateNotice"
 const val EARNINGS_GATE_LIST = "earningsGateList"
 const val EARNINGS_GATE_LAST_CAPTURE = "earningsGateLastCapture"
+const val EARNINGS_GATE_SEARCH = "earningsGateSearch"
+const val EARNINGS_GATE_NO_MATCH = "earningsGateNoMatch"
 
 @Composable
-private fun EarningsEventCard(row: EarningsEventRowUi) {
+internal fun EarningsEventCard(row: EarningsEventRowUi) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(12.dp),

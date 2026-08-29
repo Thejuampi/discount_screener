@@ -10,6 +10,7 @@ import com.discountscreener.core.earnings.decisionOf
 import java.time.LocalDate
 import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -251,6 +252,74 @@ class EarningsGatePresentationTest {
 
     private fun row(spread: Int?, put: Int? = 325) =
         present(listOf(record(day = 3, spread = spread, put = put))).upcoming.single()
+
+    @Test
+    fun the_filter_keeps_only_the_tickers_whose_symbol_starts_with_the_term() {
+        var ui = present(listOf(record(day = 3), record(day = 5, symbol = "AVGO"), record(day = 7, symbol = "AMD")))
+
+        assertEquals(listOf("AVGO"), ui.matching("av").upcoming.map { it.symbol })
+    }
+
+    @Test
+    fun the_filter_reaches_the_reports_that_already_happened() {
+        var ui = present(listOf(record(day = -3), record(day = -5, symbol = "AVGO")))
+
+        assertEquals(listOf("AVGO"), ui.matching("AVGO").settled.map { it.symbol })
+    }
+
+    @Test
+    fun an_empty_term_leaves_the_whole_log_showing() {
+        var ui = present(listOf(record(day = 3), record(day = 5, symbol = "AVGO")))
+
+        assertEquals(2, ui.matching("   ").upcoming.size)
+    }
+
+    @Test
+    fun a_term_that_only_appears_inside_the_symbol_does_not_match_it() {
+        assertTrue(present(listOf(record(day = 3, symbol = "AVGO"))).matching("vg").isEmpty)
+    }
+
+    @Test
+    fun the_damaged_line_count_survives_a_filter_that_matches_nothing() {
+        var ui = present(listOf(record(day = 3)), damaged = 4)
+
+        assertEquals(4, ui.matching("zzzz").damagedLines)
+    }
+
+    @Test
+    fun the_capture_mark_survives_a_filter_that_matches_nothing() {
+        var ui = presentEarningsGate(
+            events = listOf(record(day = 3)),
+            damagedLines = 0,
+            today = TODAY,
+            lastCaptureEpochSeconds = NOW_EPOCH_SECONDS - 60,
+            nowEpochSeconds = NOW_EPOCH_SECONDS,
+        )
+
+        assertNotNull(ui.matching("zzzz").lastCapture)
+    }
+
+    @Test
+    fun a_ticker_detail_gets_its_next_report_and_its_last_settled_one() {
+        var ui = present(listOf(record(day = 3), record(day = 9), record(day = -2), record(day = -8)))
+
+        assertEquals(listOf("2026-08-26", "2026-08-21"), ui.eventsFor("LVS").map { it.reportDate })
+    }
+
+    @Test
+    fun a_ticker_with_only_past_reports_gets_one_event_in_its_detail() {
+        assertEquals(1, present(listOf(record(day = -2), record(day = -8))).eventsFor("LVS").size)
+    }
+
+    @Test
+    fun a_ticker_the_log_never_saw_gets_no_event_in_its_detail() {
+        assertTrue(present(listOf(record(day = 3))).eventsFor("AVGO").isEmpty())
+    }
+
+    @Test
+    fun a_detail_lookup_ignores_the_case_of_the_symbol() {
+        assertEquals(1, present(listOf(record(day = 3))).eventsFor("lvs").size)
+    }
 
     private fun present(events: List<EarningsEventRecord>, damaged: Int = 0) =
         presentEarningsGate(events = events, damagedLines = damaged, today = TODAY)
