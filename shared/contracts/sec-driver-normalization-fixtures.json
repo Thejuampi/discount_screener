@@ -1,6 +1,6 @@
 {
   "contract": "sec-driver-normalization-fixtures",
-  "policyFingerprint": "sec-driver-normalization/11",
+  "policyFingerprint": "sec-driver-normalization/12",
   "capturedAt": "2026-07-30",
   "source": "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
   "fixtures": [
