@@ -701,6 +701,12 @@ mod tests {
         }
     }
 
+    /// The pinned value belongs to a policy version, and the version moves.
+    ///
+    /// 16 881 cents was the answer under `business-class-policy/16`. Residual income was reworked
+    /// at `0c897087` on the way to `/31`, which moved COF to 17 881 and left this test red for
+    /// twelve days. Re-pin with the policy that set the number, so the next move is visible in the
+    /// diff instead of arriving as a failure nobody dates.
     #[test]
     fn cof_reads_reported_payout_from_summary_detail_for_residual_income() {
         assert!(
@@ -723,7 +729,7 @@ mod tests {
             analysis.model,
             crate::dcf_model::ValuationModel::ResidualIncomeEquity
         );
-        assert_eq!(analysis.base_intrinsic_value_cents, 16_881);
+        assert_eq!(analysis.base_intrinsic_value_cents, 17_881);
         assert!(analysis
             .reason_codes
             .contains(&"retention_source=reported:8347bps".to_string()));
@@ -740,7 +746,7 @@ mod tests {
                 .dcf_analyses
                 .get("COF")
                 .map(|value| value.base_intrinsic_value_cents),
-            Some(16_881)
+            Some(17_881)
         );
 
         state.ingest_fundamentals(crate::engine::FundamentalSnapshot {

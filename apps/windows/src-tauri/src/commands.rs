@@ -1972,7 +1972,7 @@ mod feed_coordinator_tests {
         assert_eq!(refresh_calls, 1, "Detail must issue one bounded refresh");
         let state = screener.lock().unwrap();
         let after = state.detail("COF").expect("refreshed COF detail");
-        assert_eq!(after.dcf_value_cents, Some(16_881));
+        assert_eq!(after.dcf_value_cents, Some(17_881));
         assert_eq!(
             after.dcf_analysis.as_ref().map(|analysis| analysis.model),
             Some(crate::dcf_model::ValuationModel::ResidualIncomeEquity)
