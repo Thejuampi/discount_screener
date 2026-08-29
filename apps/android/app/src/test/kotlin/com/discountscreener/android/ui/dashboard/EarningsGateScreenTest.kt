@@ -203,6 +203,27 @@ class EarningsGateScreenTest {
         )
     }
 
+    @Test
+    fun a_log_holding_only_damaged_lines_still_counts_them() {
+        render(EarningsGateUi(damagedLines = 3))
+
+        composeRule.onNodeWithText("3 unreadable line(s) in the log, skipped.").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_log_holding_only_damaged_lines_never_claims_to_be_empty() {
+        render(EarningsGateUi(damagedLines = 3))
+
+        composeRule.onNodeWithText("No earnings events logged yet").assertDoesNotExist()
+    }
+
+    @Test
+    fun an_untouched_search_field_never_says_nothing_matched() {
+        render(twoTickers())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_NO_MATCH).assertDoesNotExist()
+    }
+
     private fun twoTickers(): EarningsGateUi {
         var lvs = gate(day = 3)
         var avgo = gate(day = 5, symbol = "AVGO")

@@ -15,6 +15,10 @@ import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.eventsFor
 import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
+import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.android.domain.model.RowDecisionState
+import com.discountscreener.android.domain.model.RowFreshness
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
@@ -130,6 +134,7 @@ class DetailEarningsSectionTest {
                     charts = emptyMap(),
                     history = emptyList(),
                     alerts = emptyList(),
+                    scoreRow = scoreRow(),
                     earningsEvents = events,
                     onAction = {},
                 )
@@ -137,6 +142,25 @@ class DetailEarningsSectionTest {
         }
         shadowOf(Looper.getMainLooper()).idle()
     }
+
+    private fun scoreRow() = OpportunityListRow(
+        symbol = "LVS",
+        marketPriceCents = 4_424L,
+        intrinsicValueCents = 42_633L,
+        gapBps = 5_000,
+        confidence = ConfidenceBand.High,
+        isWatched = false,
+        fundamentalsScore = 20,
+        technicalScore = 20,
+        forecastScore = 20,
+        compositeScore = 34,
+        compositeScoreBase = 34,
+        coverageCount = 3,
+        decisionState = RowDecisionState.Act,
+        freshness = RowFreshness.Updated,
+        freshnessAsOfEpochSeconds = System.currentTimeMillis() / 1000L,
+        nextEarningsEpoch = TODAY.plusDays(30).atStartOfDay(UTC).toEpochSecond(),
+    )
 
     private fun eventsOf(symbol: String): List<EarningsEventRowUi> {
         var pre = PreReport(

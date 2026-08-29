@@ -151,6 +151,7 @@ fun DetailScreen(
     /** What the reader wrote about this symbol. Empty when nothing was written. */
     symbolNote: String = "",
     earningsEvents: List<EarningsEventRowUi> = emptyList(),
+    earningsLoading: Boolean = false,
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -314,6 +315,7 @@ fun DetailScreen(
                     detailNotice = detailNotice,
                     symbolNote = symbolNote,
                     earningsEvents = earningsEvents.filter { it.symbol.equals(route.symbol, ignoreCase = true) },
+                    earningsLoading = earningsLoading,
                     onAction = onAction,
                 )
                 DetailSubtab.Score -> ScoreContent(
@@ -803,6 +805,7 @@ private fun SnapshotContent(
     detailNotice: DashboardNotice? = null,
     symbolNote: String = "",
     earningsEvents: List<EarningsEventRowUi> = emptyList(),
+    earningsLoading: Boolean = false,
     onAction: (DashboardAction) -> Unit,
 ) {
     var replayCandles = replayBackingCandles ?: candles
@@ -864,11 +867,11 @@ private fun SnapshotContent(
                 )
             }
             items(earningsEvents, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
-        } else {
+        } else if (!earningsLoading && scoreRow != null) {
             item {
                 Text(
                     text = earningsGateAbsence(
-                        scoreRow?.nextEarningsEpoch,
+                        scoreRow.nextEarningsEpoch,
                         System.currentTimeMillis() / 1_000L,
                     ),
                     style = MaterialTheme.typography.labelSmall,

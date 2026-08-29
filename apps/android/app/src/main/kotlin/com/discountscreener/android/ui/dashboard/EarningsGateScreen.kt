@@ -50,7 +50,7 @@ fun EarningsGateScreen(
         EmptyState(title = "Reading the earnings log", detail = "One line per report, kept on this device.")
         return
     }
-    if (state.isEmpty) {
+    if (state.isEmpty && state.damagedLines == 0) {
         Column(
             modifier = Modifier.fillMaxSize().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -97,7 +97,7 @@ fun EarningsGateScreen(
                 )
             }
         }
-        if (shown.isEmpty) {
+        if (shown.isEmpty && query.isNotBlank()) {
             item {
                 Text(
                     text = "No logged report matches \"${query.trim()}\".",

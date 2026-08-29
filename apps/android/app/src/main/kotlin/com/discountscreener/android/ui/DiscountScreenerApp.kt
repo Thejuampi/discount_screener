@@ -85,6 +85,7 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                             regimeScoringEnabled = state.regimeScoringEnabled,
                             symbolNote = state.symbolNotes[detailRoute.symbol].orEmpty(),
                             earningsEvents = state.earningsGate.eventsFor(detailRoute.symbol),
+                            earningsLoading = state.earningsGateLoading,
                             onAction = viewModel::dispatch,
                         )
                     }

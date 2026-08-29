@@ -343,6 +343,7 @@ class DashboardViewModel(
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
     private var activeEarningsJob: kotlinx.coroutines.Job? = null
+    private var earningsGateLoaded = false
     private var tickerSearchJob: Job? = null
     private var discoveryProgressJob: Job? = null
     private var selectProfileJob: Job? = null
@@ -545,6 +546,7 @@ class DashboardViewModel(
 
     private fun loadEarningsGate() {
         activeEarningsJob?.cancel()
+        earningsGateLoaded = true
         _state.value = _state.value.copy(earningsGateLoading = true)
         activeEarningsJob = viewModelScope.launch {
             try {
@@ -552,6 +554,7 @@ class DashboardViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                earningsGateLoaded = false
                 _state.value = _state.value.copy(earningsGate = EarningsGateUi())
             } finally {
                 _state.value = _state.value.copy(earningsGateLoading = false)
@@ -856,7 +859,7 @@ class DashboardViewModel(
             ),
             symbol,
         )
-        if (_state.value.earningsGate.isEmpty && !_state.value.earningsGateLoading) {
+        if (!earningsGateLoaded) {
             loadEarningsGate()
         }
         detailLoadJob?.cancel()
