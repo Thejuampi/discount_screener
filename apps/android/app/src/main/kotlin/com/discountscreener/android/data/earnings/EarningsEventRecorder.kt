@@ -75,7 +75,7 @@ class EarningsEventRecorder(
      * report leaves the capture window.
      */
     suspend fun capture(rows: List<OpportunityListRow>): Int {
-        var today = LocalDate.ofInstant(Instant.ofEpochSecond(nowProvider()), ZoneOffset.UTC)
+        var today = Instant.ofEpochSecond(nowProvider()).atZone(ZoneOffset.UTC).toLocalDate()
         var stored = settleDueEvents(log.read().events, today)
         var priced = stored
             .filter { it.pre.impliedMoveBps != null }

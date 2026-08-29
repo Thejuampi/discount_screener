@@ -17,6 +17,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
@@ -132,7 +133,7 @@ class SecIssuerComponentClient(
         var found = linkedMapOf<String, NamedFiler>()
         for (arm in listOf("Financial", "Credit", "Capital")) {
             var query = "\"$stem $arm\""
-            var url = "$EFTS_URL?q=${java.net.URLEncoder.encode(query, Charsets.UTF_8)}&forms=10-K"
+            var url = "$EFTS_URL?q=${URLEncoder.encode(query, "UTF-8")}&forms=10-K"
             var body = getText(url) ?: continue
             var hits = json.parseToJsonElement(body).jsonObject["hits"]
                 ?.jsonObject?.get("hits")?.jsonArray ?: continue

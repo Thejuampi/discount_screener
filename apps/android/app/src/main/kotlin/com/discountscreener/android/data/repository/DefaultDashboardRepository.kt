@@ -589,7 +589,7 @@ class DefaultDashboardRepository(
         presentEarningsGate(
             events = read.events,
             damagedLines = read.unreadableLines,
-            today = LocalDate.ofInstant(Instant.ofEpochSecond(nowProvider()), ZoneOffset.UTC),
+            today = Instant.ofEpochSecond(nowProvider()).atZone(ZoneOffset.UTC).toLocalDate(),
             lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
             nowEpochSeconds = nowProvider(),
         )
