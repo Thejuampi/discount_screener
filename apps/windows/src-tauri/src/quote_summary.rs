@@ -418,6 +418,12 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             price,
             market_price_cents,
         ),
+        book_value_per_share_cents_with_deficit: resolve_book_value_per_share_cents_with_deficit(
+            statistics,
+            financial_data,
+            price,
+            market_price_cents,
+        ),
         retention_bps: resolve_retention_bps(financial_data, summary_detail),
     });
 
@@ -559,6 +565,29 @@ fn resolve_return_on_equity_bps(financial_data: Option<&Value>) -> Option<i32> {
 }
 
 /// BVPS: statistics bookValue/bookValuePerShare, else price / P/B.
+/// Reported book value per share with its sign kept.
+///
+/// [`resolve_book_value_per_share_cents`] drops a negative reading, because a
+/// deficit breaks every ratio built on equity alone. A deficit is still a real
+/// measurement, and invested capital adds debt back, so the return-on-capital
+/// lane needs the number the issuer actually reported. The price-over-book
+/// derivation is not repeated here: it cannot produce a negative reading, so it
+/// would only hide the deficit again.
+fn resolve_book_value_per_share_cents_with_deficit(
+    statistics: Option<&Value>,
+    financial_data: Option<&Value>,
+    price: Option<&Value>,
+    market_price_cents: Option<i64>,
+) -> Option<i64> {
+    statistics
+        .and_then(|s| raw_double(s, "bookValue").or_else(|| raw_double(s, "bookValuePerShare")))
+        .filter(|v| *v != 0.0)
+        .map(|v| (v * 100.0).round() as i64)
+        .or_else(|| {
+            resolve_book_value_per_share_cents(statistics, financial_data, price, market_price_cents)
+        })
+}
+
 fn resolve_book_value_per_share_cents(
     statistics: Option<&Value>,
     financial_data: Option<&Value>,

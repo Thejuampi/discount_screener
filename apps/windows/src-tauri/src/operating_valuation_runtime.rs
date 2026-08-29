@@ -28,7 +28,7 @@ pub fn fundamentals_fingerprint(fundamentals: &FundamentalSnapshot) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!(
-        "fund-runtime/2|symbol={}|hash={hash:016x}",
+        "fund-runtime/3|symbol={}|hash={hash:016x}",
         fundamentals.symbol
     )
 }
@@ -738,6 +738,12 @@ pub fn return_on_capital_bps(
 /// Multi-year return on invested capital from the FCFF lane's normalized cash
 /// flow. `None` whenever any leg is missing — the caller falls back rather than
 /// substituting a default.
+///
+/// Book equity is read with its deficit intact. A buyback-heavy issuer reports
+/// negative common equity and still runs on a large positive capital base once
+/// debt is added back; refusing it on the sign of the equity leg alone starved
+/// this whole ladder, and the `invested <= 0` guard below is the check that
+/// actually protects the division.
 fn through_cycle_return_on_capital_bps(
     fundamentals: &FundamentalSnapshot,
     fcff_analysis: Option<&DcfAnalysis>,
@@ -746,7 +752,10 @@ fn through_cycle_return_on_capital_bps(
     if normalized_fcff <= 0 {
         return None;
     }
-    let book_value_per_share = fundamentals.book_value_per_share_cents.filter(|v| *v > 0)?;
+    let book_value_per_share = fundamentals
+        .book_value_per_share_cents_with_deficit
+        .or(fundamentals.book_value_per_share_cents)
+        .filter(|v| *v != 0)?;
     let shares = fundamentals.shares_outstanding.filter(|v| *v > 0)?;
     let book_equity = i128::from(book_value_per_share) * i128::from(shares) / 100;
     let invested = book_equity + i128::from(fundamentals.total_debt_dollars.unwrap_or(0).max(0));
@@ -1201,5 +1210,46 @@ mod tests {
                 .iter()
                 .any(|fingerprint| fingerprint.contains(symbol)));
         }
+    }
+
+    /// A buyback-heavy issuer reports negative common equity. Its capital base is
+    /// still large and positive once debt is added back, and it still earns a
+    /// return on it. Refusing the row on the sign of the equity leg left the
+    /// forward lane with no return on capital at all, which the terminal reads as
+    /// "growth is value-neutral" — a real haircut charged for a number the issuer
+    /// did report.
+    #[test]
+    fn a_book_value_deficit_still_resolves_a_return_on_capital() {
+        let fundamentals = FundamentalSnapshot {
+            symbol: "WYNN".into(),
+            return_on_equity_bps: None,
+            shares_outstanding: Some(105_000_000),
+            total_debt_dollars: Some(11_800_000_000),
+            book_value_per_share_cents_with_deficit: Some(-1_100),
+            ..Default::default()
+        };
+        assert_eq!(
+            return_on_capital_bps(&fundamentals, Some(&fcff(10_000, 700_000_000, 0))),
+            Some(657)
+        );
+    }
+
+    /// The sign of the equity leg is not the guard. The size of the capital base
+    /// is. A deficit that debt cannot cover leaves nothing to divide by, and the
+    /// row goes back to having no evidence.
+    #[test]
+    fn a_deficit_larger_than_the_debt_resolves_nothing() {
+        let fundamentals = FundamentalSnapshot {
+            symbol: "WYNN".into(),
+            return_on_equity_bps: None,
+            shares_outstanding: Some(105_000_000),
+            total_debt_dollars: Some(500_000_000),
+            book_value_per_share_cents_with_deficit: Some(-1_100),
+            ..Default::default()
+        };
+        assert_eq!(
+            return_on_capital_bps(&fundamentals, Some(&fcff(10_000, 700_000_000, 0))),
+            None
+        );
     }
 }

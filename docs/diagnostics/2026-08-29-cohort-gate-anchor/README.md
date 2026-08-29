@@ -93,5 +93,44 @@ What the sweep does say about the four names that carry the error:
 
 Two of the four are missing or thin inputs. Chase the inputs before the policy.
 
+## WYNN: the number was reported and thrown away
+
+The sweep said WYNN's problem is a missing input. It is. `durable_cohort_return_on_capital_capture`
+went and asked Yahoo:
+
+| Field | WYNN |
+| --- | --- |
+| Reported book value per share | `-166` cents |
+| Book value the snapshot kept | none |
+| Return on equity | none |
+| Debt to equity | none |
+| Shares outstanding | 102 973 891 |
+| Total debt | $12 342 463 488 |
+
+Yahoo reports the book value. `resolve_book_value_per_share_cents` dropped it for being negative,
+because every ratio built on equity alone - price to book, residual income, return on equity -
+breaks on a deficit. That filter is right for those consumers and wrong for one: return on
+**invested** capital adds debt back, and WYNN's capital base is `-171 M + 12.34 B = 12.17 B`, plainly
+positive.
+
+Both of WYNN's routes to a return on capital were closed by the same sign:
+
+- `through_cycle_return_on_capital_bps` refused the row on `book_value_per_share_cents > 0`, two
+  lines above an `invested <= 0` guard that already protects the division.
+- `unlevered_return_on_equity_bps` needs a return on equity, and Yahoo reports none. On a deficit it
+  never will. That route is closed for this issuer permanently.
+
+So the snapshot now carries `book_value_per_share_cents_with_deficit` beside the positive-only
+field. One consumer reads it. Nothing else changes, and `fund-runtime/2` became `/3` so the
+fingerprint change is declared instead of silent.
+
+GDDY is the same shape from the other side: five cents of book value against 573x gearing, which
+`MAX_MEANINGFUL_GEARING_HUNDREDTHS` refuses on the equity route. Its invested capital is $3.85 B.
+
+This does not move the gate. The cohort rows are frozen inputs, and WYNN's still needs a normalized
+FCFF before the through-cycle route can produce a number for it. What it does is reopen the route.
+Before this, no amount of correct data could have reached WYNN, because the sign of its equity
+closed both doors.
+
 Do not close this gate by moving the threshold. It measures the model against the bar, so green
 comes from a driver or it does not come. See [operational anti-patterns](../../operational-anti-patterns.md).

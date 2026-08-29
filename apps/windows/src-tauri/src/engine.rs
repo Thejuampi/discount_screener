@@ -134,7 +134,17 @@ pub struct FundamentalSnapshot {
     pub trailing_eps_cents: Option<i64>,
     pub earnings_growth_bps: Option<i32>,
     /// Common book value per share in cents (when reported or derived).
+    /// Positive only: residual income and price-to-book have no meaning on a
+    /// deficit, so the resolver drops a negative reading here.
     pub book_value_per_share_cents: Option<i64>,
+    /// The same reading with its sign kept, deficits included.
+    ///
+    /// A buyback-heavy issuer can carry negative common equity and still hold a
+    /// large, positive invested capital once debt is added back. Return on
+    /// invested capital is the one consumer that must see the deficit instead of
+    /// losing the issuer, so it reads this field.
+    #[serde(default)]
+    pub book_value_per_share_cents_with_deficit: Option<i64>,
     /// Retained earnings fraction in basis points; required by residual income.
     pub retention_bps: Option<i32>,
 }
@@ -2222,6 +2232,7 @@ impl ScreenerState {
                 trailing_eps_cents,
                 earnings_growth_bps,
                 book_value_per_share_cents,
+                book_value_per_share_cents_with_deficit,
                 retention_bps,
             );
         }
