@@ -35,7 +35,8 @@ internal class DcfSourceCoordinator(
      *
      * [allowSecondary] is what keeps a screen of five hundred rows loadable. The secondary provider
      * is SEC EDGAR, and one symbol there costs a whole companyfacts file: about 4 MB, of which the
-     * sieve keeps an eighth. Paid once per symbol on a bulk load, that file is most of the load.
+     * sieve keeps about a thirtieth. Paid once per symbol on a bulk load, that file is most of the
+     * load.
      * So the list resolves from Yahoo, and SEC is asked for only when a symbol is opened.
      */
     suspend fun resolve(

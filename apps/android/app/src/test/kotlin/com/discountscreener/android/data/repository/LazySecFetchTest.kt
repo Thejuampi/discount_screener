@@ -24,7 +24,7 @@ import java.io.File
  * SEC EDGAR is asked for one symbol at a time, and only when that symbol is opened.
  *
  * One symbol there costs a whole companyfacts file: 4.28 MB on average over twenty real files, of
- * which the sieve keeps 12%. Paid once per symbol on a bulk load, that file was 77% of the load in
+ * which the sieve keeps about 3%. Paid once per symbol on a bulk load, that file was 77% of the load in
  * the `sp500` projection — about 2.1 GB downloaded, written and read back for one screen. No
  * concurrency window can remove a call the code makes, so the call moves instead.
  *

@@ -4,6 +4,7 @@ import com.discountscreener.core.engine.FinanceSubsidiaryMatch
 import com.discountscreener.core.engine.IssuerComponentAssembler
 import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.core.engine.NamedFiler
+import com.discountscreener.core.engine.SecCompanyFactsSieve
 import com.discountscreener.core.engine.XbrlDimensionalFacts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
@@ -165,8 +166,7 @@ class SecIssuerComponentClient(
             var age = System.currentTimeMillis() - slimFile.lastModified()
             if (age < ttlMillis) return slimFile.readText()
         }
-        var body = getText("${COMPANY_FACTS_URL}CIK$cik.json") ?: return null
-        var slim = com.discountscreener.core.engine.SecCompanyFactsSieve.sieve(body.reader())
+        var slim = sievedStream("${COMPANY_FACTS_URL}CIK$cik.json") ?: return null
         slimFile?.let {
             it.parentFile?.mkdirs()
             it.writeText(slim)
@@ -196,6 +196,29 @@ class SecIssuerComponentClient(
             map
         } catch (_: Exception) {
             emptyMap()
+        }
+    }
+
+    /**
+     * A companyfacts answer, sieved as it arrives.
+     *
+     * The file is about 4 MB and the sieve keeps a small part of it. Reading the body to a string
+     * first would hold all 4 MB, plus the copy the decoder makes, for nothing.
+     */
+    private fun sievedStream(url: String): String? {
+        return try {
+            var request = Request.Builder()
+                .url(url)
+                .header("User-Agent", SEC_USER_AGENT)
+                .header("Accept-Encoding", "identity")
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                var body = response.body ?: return null
+                body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

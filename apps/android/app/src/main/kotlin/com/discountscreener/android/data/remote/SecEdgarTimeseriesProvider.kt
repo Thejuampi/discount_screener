@@ -37,7 +37,7 @@ private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
  * old concept set and no way to say so, so it would answer "this company reports no impairment"
  * for a file that simply never looked. The name changes, and the old file is left to expire.
  */
-internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-intangibles-nonrecurring-1"
+internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-annual-consolidated-1"
 private const val VALIDATOR_SUFFIX = ".etag"
 private const val NOT_MODIFIED = 304
 
@@ -138,7 +138,7 @@ class SecEdgarTimeseriesProvider(
      * The sieved facts for one symbol, from the cache when it is fresh and from SEC when it is not.
      *
      * Two costs decide the shape of this. A companyfacts file is about 4 MB and the sieve keeps
-     * about 12% of it, so the answer is never written whole: it is sieved as it arrives. And an
+     * about 3% of it, so the answer is never written whole: it is sieved as it arrives. And an
      * expired cache does not mean a changed filing, so the refresh asks conditionally. A company
      * that filed nothing new answers 304 with no body, and the file already on disk is kept.
      */
@@ -179,7 +179,7 @@ class SecEdgarTimeseriesProvider(
                     }
                     val body = response.body
                         ?: return@use RequestGovernor.Attempt.Failed(false, IOException("empty SEC body"))
-                    // Sieved as it arrives: the whole file is about 4 MB and 12% of it is kept, so
+                    // Sieved as it arrives: the whole file is about 4 MB and 3% of it is kept, so
                     // it is never held in memory whole and never written whole.
                     val slim = body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
                     if (slimFile != null) {
