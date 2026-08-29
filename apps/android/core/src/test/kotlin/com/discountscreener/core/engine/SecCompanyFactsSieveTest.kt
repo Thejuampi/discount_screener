@@ -108,6 +108,35 @@ class SecCompanyFactsSieveTest {
         assertEquals("""{"facts":{}}""", slim)
     }
 
+    /**
+     * SEC sends the shape it wants to send. A concept that arrives as null, or a `units` that is
+     * not an object, must cost that concept and nothing else. Before, the sieve stopped there and
+     * the company lost every fact it had.
+     */
+    @Test
+    fun a_concept_that_is_not_an_object_costs_only_that_concept() {
+        var raw = """
+            {"facts":{"us-gaap":{
+              "InterestExpense":null,
+              "OperatingIncomeLoss":{"units":{"USD":[{"fp":"FY","form":"10-K","end":"2024-09-30","val":7}]}}
+            }}}
+        """.trimIndent()
+        var slim = SecCompanyFactsSieve.sieve(raw.reader(), setOf("InterestExpense", "OperatingIncomeLoss"))
+        assertTrue(slim.contains("OperatingIncomeLoss"))
+    }
+
+    @Test
+    fun a_units_that_is_not_an_object_costs_only_that_concept() {
+        var raw = """
+            {"facts":{"us-gaap":{
+              "InterestExpense":{"units":[]},
+              "OperatingIncomeLoss":{"units":{"USD":[{"fp":"FY","form":"10-K","end":"2024-09-30","val":7}]}}
+            }}}
+        """.trimIndent()
+        var slim = SecCompanyFactsSieve.sieve(raw.reader(), setOf("InterestExpense", "OperatingIncomeLoss"))
+        assertTrue(slim.contains("OperatingIncomeLoss"))
+    }
+
     @Test
     fun default_sieve_keeps_acgl_dividend_and_unh_minority_tags() {
         var allowed = SecCompanyFactsSieve.defaultAllowedQnames

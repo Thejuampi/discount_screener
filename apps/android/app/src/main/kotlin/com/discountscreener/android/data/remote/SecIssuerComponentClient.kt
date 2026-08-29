@@ -167,9 +167,9 @@ class SecIssuerComponentClient(
             if (age < ttlMillis) return slimFile.readText()
         }
         var slim = sievedStream("${COMPANY_FACTS_URL}CIK$cik.json") ?: return null
-        slimFile?.let {
-            it.parentFile?.mkdirs()
-            it.writeText(slim)
+        slimFile?.let { target ->
+            target.parentFile?.mkdirs()
+            writeAtomically(target, slim)
         }
         return slim
     }

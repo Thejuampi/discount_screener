@@ -30,6 +30,7 @@ object SecCompanyFactsSieve {
         allowedQnames: Set<String> = defaultAllowedQnames,
     ): String {
         var reader = JsonStreamReader(input)
+        var forms = acceptedForms
         reader.skipWs()
         reader.expect('{')
         var out = StringBuilder()
@@ -53,7 +54,7 @@ object SecCompanyFactsSieve {
             reader.expect(':')
             reader.skipWs()
             if (key == "facts") {
-                copyFacts(reader, out, allowedQnames)
+                copyFacts(reader, out, allowedQnames, forms)
             } else {
                 reader.skipValue()
             }
@@ -66,6 +67,7 @@ object SecCompanyFactsSieve {
         reader: JsonStreamReader,
         out: StringBuilder,
         allowedQnames: Set<String>,
+        forms: Set<String>,
     ) {
         reader.expect('{')
         var firstTaxonomy = true
@@ -89,7 +91,7 @@ object SecCompanyFactsSieve {
             reader.skipWs()
             if (key == "us-gaap" || key == "dei") {
                 var chunk = StringBuilder()
-                var kept = copyTaxonomy(reader, chunk, key, allowedQnames)
+                var kept = copyTaxonomy(reader, chunk, key, allowedQnames, forms)
                 if (kept) {
                     if (!firstTaxonomy) out.append(',')
                     firstTaxonomy = false
@@ -106,6 +108,7 @@ object SecCompanyFactsSieve {
         out: StringBuilder,
         taxonomy: String,
         allowedQnames: Set<String>,
+        forms: Set<String>,
     ): Boolean {
         reader.expect('{')
         out.append('"').append(taxonomy).append("\":{")
@@ -132,7 +135,7 @@ object SecCompanyFactsSieve {
             reader.skipWs()
             if (key in allowedQnames) {
                 chunk.setLength(0)
-                if (copyConcept(reader, chunk)) {
+                if (copyConcept(reader, chunk, forms)) {
                     if (!first) out.append(',')
                     first = false
                     kept = true
@@ -146,7 +149,16 @@ object SecCompanyFactsSieve {
         return kept
     }
 
-    private fun copyConcept(reader: JsonStreamReader, out: StringBuilder): Boolean {
+    private fun copyConcept(
+        reader: JsonStreamReader,
+        out: StringBuilder,
+        forms: Set<String>,
+    ): Boolean {
+        reader.skipWs()
+        if (reader.peekChar() != '{') {
+            reader.skipValue()
+            return false
+        }
         reader.expect('{')
         var units = StringBuilder()
         var kept = false
@@ -169,7 +181,7 @@ object SecCompanyFactsSieve {
             reader.expect(':')
             reader.skipWs()
             if (key == "units" && !kept) {
-                kept = copyUnits(reader, units)
+                kept = copyUnits(reader, units, forms)
             } else {
                 reader.skipValue()
             }
@@ -179,7 +191,16 @@ object SecCompanyFactsSieve {
         return true
     }
 
-    private fun copyUnits(reader: JsonStreamReader, out: StringBuilder): Boolean {
+    private fun copyUnits(
+        reader: JsonStreamReader,
+        out: StringBuilder,
+        forms: Set<String>,
+    ): Boolean {
+        reader.skipWs()
+        if (reader.peekChar() != '{') {
+            reader.skipValue()
+            return false
+        }
         reader.expect('{')
         var first = true
         var kept = false
@@ -203,7 +224,7 @@ object SecCompanyFactsSieve {
             reader.expect(':')
             reader.skipWs()
             facts.setLength(0)
-            if (copyFactArray(reader, facts)) {
+            if (copyFactArray(reader, facts, forms)) {
                 if (!first) out.append(',')
                 first = false
                 kept = true
@@ -213,7 +234,11 @@ object SecCompanyFactsSieve {
         return kept
     }
 
-    private fun copyFactArray(reader: JsonStreamReader, out: StringBuilder): Boolean {
+    private fun copyFactArray(
+        reader: JsonStreamReader,
+        out: StringBuilder,
+        forms: Set<String>,
+    ): Boolean {
         reader.skipWs()
         if (reader.peekChar() != '[') {
             reader.skipValue()
@@ -238,7 +263,7 @@ object SecCompanyFactsSieve {
                 }
             }
             fact.setLength(0)
-            if (copyFact(reader, fact)) {
+            if (copyFact(reader, fact, forms)) {
                 if (!first) out.append(',')
                 first = false
                 kept = true
@@ -255,7 +280,11 @@ object SecCompanyFactsSieve {
      * `segment` that holds null stays in the output, because one reader treats the bare key as a
      * refusal and the other treats a null value as consolidated.
      */
-    private fun copyFact(reader: JsonStreamReader, out: StringBuilder): Boolean {
+    private fun copyFact(
+        reader: JsonStreamReader,
+        out: StringBuilder,
+        forms: Set<String>,
+    ): Boolean {
         reader.skipWs()
         if (reader.peekChar() != '{') {
             reader.skipValue()
@@ -301,14 +330,27 @@ object SecCompanyFactsSieve {
             first = false
             fields.append('"').append(key).append("\":").append(value)
         }
-        if (dimensional || period != ANNUAL_PERIOD || form !in acceptedForms) return false
+        if (dimensional || period != ANNUAL_PERIOD || form !in forms) return false
         out.append('{').append(fields).append('}')
         return true
     }
 
     private fun unquoted(raw: StringBuilder): String? {
         if (raw.length < 2 || raw[0] != '"' || raw[raw.length - 1] != '"') return null
-        return raw.substring(1, raw.length - 1)
+        var body = raw.substring(1, raw.length - 1)
+        if (!body.contains('\\')) return body
+        var out = StringBuilder(body.length)
+        var at = 0
+        while (at < body.length) {
+            var char = body[at]
+            if (char == '\\' && at + 1 < body.length) {
+                at++
+                char = body[at]
+            }
+            out.append(char)
+            at++
+        }
+        return out.toString()
     }
 }
 
@@ -317,6 +359,7 @@ internal class JsonStreamReader(private val raw: Reader) {
     private val scratch = StringBuilder()
     private var length = 0
     private var at = 0
+    private var drained = false
 
     fun peekChar(): Char {
         var code = peek()
@@ -553,16 +596,16 @@ internal class JsonStreamReader(private val raw: Reader) {
     }
 
     private fun fill(): Boolean {
+        if (drained) return false
         at = 0
         length = 0
-        while (true) {
-            var read = raw.read(buffer, 0, buffer.size)
-            if (read < 0) return false
-            if (read > 0) {
-                length = read
-                return true
-            }
+        var read = raw.read(buffer, 0, buffer.size)
+        if (read <= 0) {
+            drained = true
+            return false
         }
+        length = read
+        return true
     }
 
     companion object {

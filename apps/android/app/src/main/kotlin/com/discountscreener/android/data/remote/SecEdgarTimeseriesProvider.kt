@@ -33,9 +33,10 @@ private const val SUBMISSIONS_URL = "https://data.sec.gov/submissions/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
 /**
- * Bumped whenever the sieve keeps a new concept. A slim cache written by an older version has the
- * old concept set and no way to say so, so it would answer "this company reports no impairment"
- * for a file that simply never looked. The name changes, and the old file is left to expire.
+ * Bumped whenever the sieve keeps a different set of facts: a new concept, a wider period or form,
+ * or another field per fact. A slim cache written by an older version has the old shape and no way
+ * to say so, so it would answer "this company reports no impairment" for a file that simply never
+ * looked. The name changes, and the old file is left to expire.
  */
 internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-annual-consolidated-1"
 private const val VALIDATOR_SUFFIX = ".etag"
@@ -50,6 +51,21 @@ private const val SEC_MAX_IN_FLIGHT = 4
 
 internal fun companyFactsSlimFileName(cikPadded: String): String =
     "CIK$cikPadded.sieve-$COMPANY_FACTS_SIEVE_VERSION.json"
+
+/**
+ * Write the whole text, or leave the file as it was.
+ *
+ * Two clients write this name. A process that stops in the middle of a plain write leaves a
+ * truncated file that both of them then read as the company's facts for the rest of the day.
+ */
+internal fun writeAtomically(target: File, text: String) {
+    var partial = File(target.parentFile, target.name + ".part")
+    partial.writeText(text)
+    if (!partial.renameTo(target)) {
+        target.delete()
+        partial.renameTo(target)
+    }
+}
 
 class SecEdgarTimeseriesProvider(
     private val cacheDir: File? = null,
@@ -184,7 +200,7 @@ class SecEdgarTimeseriesProvider(
                     val slim = body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
                     if (slimFile != null) {
                         slimFile.parentFile?.mkdirs()
-                        slimFile.writeText(slim)
+                        writeAtomically(slimFile, slim)
                         response.header("ETag")?.let { tag -> validatorFile?.writeText(tag) }
                     }
                     RequestGovernor.Attempt.Ok(slim)

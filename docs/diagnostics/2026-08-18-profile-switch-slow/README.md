@@ -748,7 +748,12 @@ parse time for rows it always threw away.
 The sieve now applies that same filter on the stream, and keeps only the seven fields a reader
 reads. `accn`, `fy`, `frame`, and the concept `label` and `description` never reach the output.
 
-Measured on Apple's real companyfacts file, 3 789 099 chars, on a desktop JVM, fastest of five:
+Measured on Apple's real companyfacts file, 3 789 099 chars. The reading is a desktop JVM, fastest
+of five, so it is not comparable with the emulator timings in the tables above. It is the same
+machine before and after, which is what the comparison needs.
+
+The 12% in the table above is the average of the twenty-file corpus. Apple's file keeps 15.7%, so
+the two numbers measure different populations, not a change:
 
 | Reading | Before | After |
 | --- | --- | --- |
@@ -768,6 +773,10 @@ first, which spent the memory the sieve exists to save.
 | Test | Goes red when |
 | --- | --- |
 | `the_sieve_keeps_under_a_fifth_of_the_source` | the sieve keeps a concept whole again |
+| `the_timeseries_reader_reaches_the_same_series_through_the_sieve` | a cut changes the drivers, restatement precedence included |
+| `the_residual_reader_reaches_the_same_drivers_through_the_sieve` | a cut changes the residual drivers on a real JPM or ACGL file |
+| `a_concept_that_is_not_an_object_costs_only_that_concept` | one odd concept costs the whole company its facts |
+| `a_units_that_is_not_an_object_costs_only_that_concept` | one odd `units` costs the whole company its facts |
 | `a_quarter_never_reaches_the_output` | the period filter leaves the stream |
 | `a_form_that_is_not_a_ten_k_never_reaches_the_output` | the form filter leaves the stream |
 | `a_dimensional_fact_never_reaches_the_output` | a segment breakdown reaches the output |
