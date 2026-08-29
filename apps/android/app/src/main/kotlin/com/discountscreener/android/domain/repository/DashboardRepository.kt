@@ -74,6 +74,10 @@ interface DashboardRepository {
     suspend fun earningsCandidateRows(): List<OpportunityListRow>
 
     suspend fun earningsEvents(): EarningsGateUi
+
+    suspend fun earningsLogBackup(): String
+
+    suspend fun restoreEarningsLog(text: String): Int
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     /**
      * Records an estimates snapshot using [com.discountscreener.core.engine.EstimatesHistoryPolicy]

@@ -1,6 +1,11 @@
 package com.discountscreener.android.ui.dashboard
 
+import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,31 +15,54 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
+import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.core.earnings.EventRisk
 
 @Composable
-fun EarningsGateScreen(state: EarningsGateUi, loading: Boolean) {
+fun EarningsGateScreen(
+    state: EarningsGateUi,
+    loading: Boolean,
+    pendingBackup: String? = null,
+    notice: String? = null,
+    onAction: (DashboardAction) -> Unit = {},
+) {
+    EarningsLogHandOff(pendingBackup = pendingBackup, onAction = onAction)
     if (loading && state.isEmpty) {
         EmptyState(title = "Reading the earnings log", detail = "One line per report, kept on this device.")
         return
     }
     if (state.isEmpty) {
-        EmptyState(
-            title = "No earnings events logged yet",
-            detail = "A report is captured when it comes within ten days of a refresh. " +
-                "Option chains are never republished, so the log only grows forward." +
-                state.lastCapture?.let { " $it." }.orEmpty(),
-        )
+        Column(
+            modifier = Modifier.fillMaxSize().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // EmptyState fills whatever it is given, so it needs a share of the height and not
+            // all of it. Without the weight the buttons below it land off the bottom of the
+            // screen, which is exactly the screen a reader with a fresh install arrives at.
+            Box(modifier = Modifier.weight(1f)) {
+                EmptyState(
+                    title = "No earnings events logged yet",
+                    detail = "A report is captured when it comes within ten days of a refresh. " +
+                        "Option chains are never republished, so the log only grows forward." +
+                        state.lastCapture?.let { " $it." }.orEmpty(),
+                )
+            }
+            notice?.let { GateNotice(it) }
+            EarningsLogButtons(onAction)
+        }
         return
     }
     LazyColumn(
@@ -69,9 +97,93 @@ fun EarningsGateScreen(state: EarningsGateUi, loading: Boolean) {
                 )
             }
         }
+        item {
+            notice?.let { GateNotice(it) }
+            EarningsLogButtons(onAction)
+        }
     }
 }
 
+/**
+ * The log out to a file the phone does not own, and back in from one.
+ *
+ * Whatever the reader picks outlives an uninstall, and an uninstall is what a lost signing key
+ * forces. The release build is not debuggable, so no cable reaches this file either. Every other
+ * thing on the phone can be downloaded again; the option chains in here are never republished.
+ */
+@Composable
+private fun EarningsLogHandOff(pendingBackup: String?, onAction: (DashboardAction) -> Unit) {
+    var context = LocalContext.current
+    var save = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(BACKUP_MIME),
+    ) { target ->
+        var text = pendingBackup
+        var written = if (target == null || text == null) {
+            null
+        } else {
+            runCatching { writeTo(context, target, text) }.getOrNull()
+        }
+        if (written == null) {
+            onAction(DashboardAction.EarningsLogBackupDropped)
+        } else {
+            onAction(DashboardAction.EarningsLogBackupWritten(written))
+        }
+    }
+    LaunchedEffect(pendingBackup) {
+        if (pendingBackup != null) save.launch(BACKUP_NAME)
+    }
+}
+
+@Composable
+private fun EarningsLogButtons(onAction: (DashboardAction) -> Unit) {
+    var context = LocalContext.current
+    var open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { source ->
+        var text = source?.let { runCatching { readFrom(context, it) }.getOrNull() }
+        if (text != null) onAction(DashboardAction.RestoreEarningsLog(text))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { onAction(DashboardAction.BackUpEarningsLog) },
+            modifier = Modifier.weight(1f).testTag(EARNINGS_GATE_BACK_UP),
+        ) {
+            Text("Back up log")
+        }
+        OutlinedButton(
+            onClick = { open.launch(arrayOf("*/*")) },
+            modifier = Modifier.weight(1f).testTag(EARNINGS_GATE_RESTORE),
+        ) {
+            Text("Restore")
+        }
+    }
+}
+
+@Composable
+private fun GateNotice(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.testTag(EARNINGS_GATE_NOTICE),
+    )
+}
+
+private fun writeTo(context: Context, target: Uri, text: String): Int {
+    var stream = context.contentResolver.openOutputStream(target, "wt")
+        ?: error("The chosen file refused to open for writing.")
+    stream.use { it.write(text.toByteArray()) }
+    return text.trim().lines().count { it.isNotBlank() }
+}
+
+private fun readFrom(context: Context, source: Uri): String =
+    context.contentResolver.openInputStream(source)?.use { it.readBytes().decodeToString() }
+        ?: error("The chosen file refused to open for reading.")
+
+private const val BACKUP_MIME = "application/x-ndjson"
+private const val BACKUP_NAME = "earnings-log.jsonl"
+
+const val EARNINGS_GATE_BACK_UP = "earningsGateBackUp"
+const val EARNINGS_GATE_RESTORE = "earningsGateRestore"
+const val EARNINGS_GATE_NOTICE = "earningsGateNotice"
 const val EARNINGS_GATE_LIST = "earningsGateList"
 const val EARNINGS_GATE_LAST_CAPTURE = "earningsGateLastCapture"
 

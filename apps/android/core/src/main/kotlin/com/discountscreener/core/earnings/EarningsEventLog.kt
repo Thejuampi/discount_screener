@@ -117,6 +117,42 @@ class EarningsEventLog(private val file: File) {
         return true
     }
 
+    /**
+     * The log as one line per report, carrying only what each one finally said.
+     *
+     * The file on disk is append-only, so a report that was captured and later settled sits in it
+     * twice. A backup carries the answer and not the history of writes.
+     */
+    fun backupText(): String {
+        var events = read().events
+        if (events.isEmpty()) return ""
+        return events.joinToString(separator = LINE, postfix = LINE) {
+            json.encodeToString(EarningsEventRecord.serializer(), it)
+        }
+    }
+
+    /**
+     * Reports from a backup that this phone does not already hold in a fuller state.
+     *
+     * A restore must never cost the reader something the phone already knew. A report the log has
+     * settled keeps what it has. One it never saw, or saw and never settled, takes the backup's.
+     * This is what makes the log survive a reinstall: option chains are never republished, so a
+     * report captured and then lost is lost for good.
+     */
+    fun restore(text: String): Int {
+        var mine = read().events.associateBy { it.key() }
+        var added = 0
+        text.lineSequence().forEach { line ->
+            if (line.isBlank()) return@forEach
+            var record = decode(line) ?: return@forEach
+            var current = mine[record.key()]
+            if (current != null && (current.post != null || record.post == null)) return@forEach
+            append(record)
+            added++
+        }
+        return added
+    }
+
     private fun decode(line: String): EarningsEventRecord? =
         runCatching { json.decodeFromString(EarningsEventRecord.serializer(), line) }.getOrNull()
 

@@ -138,6 +138,102 @@ class EarningsEventLogTest {
         assertEquals("LVS", EarningsEventLog(file).read().events.single().pre.symbol)
     }
 
+    @Test
+    fun a_backup_carries_one_line_for_every_report() {
+        var log = log()
+        log.append(event("LVS", day = 20_692L))
+        log.append(event("AVGO", day = 20_693L))
+
+        assertEquals(2, log.backupText().trim().lines().size)
+    }
+
+    @Test
+    fun a_report_written_twice_is_backed_up_once() {
+        var log = log()
+        log.append(event("LVS", day = 20_692L))
+        log.settle("LVS", 20_692L, post)
+
+        assertEquals(1, log.backupText().trim().lines().size)
+    }
+
+    @Test
+    fun a_backup_keeps_what_the_report_finally_said() {
+        var log = log()
+        log.append(event("LVS", day = 20_692L))
+        log.settle("LVS", 20_692L, post)
+
+        assertTrue(log.backupText().contains("\"abnormalReturnBps\":356"))
+    }
+
+    @Test
+    fun an_empty_log_backs_up_to_nothing() {
+        assertEquals("", log().backupText())
+    }
+
+    @Test
+    fun a_restore_brings_back_a_report_this_phone_never_saw() {
+        var backup = log().also { it.append(event("LVS", day = 20_692L)) }.backupText()
+        var fresh = EarningsEventLog(folder.resolve("other/events.jsonl").toFile())
+
+        fresh.restore(backup)
+
+        assertEquals(event("LVS", day = 20_692L), fresh.event("LVS", reportEpochDay = 20_692L))
+    }
+
+    @Test
+    fun a_restore_counts_the_reports_it_added() {
+        var backup = log().also { it.append(event("LVS", day = 20_692L)) }.backupText()
+        var fresh = EarningsEventLog(folder.resolve("other/events.jsonl").toFile())
+
+        assertEquals(1, fresh.restore(backup))
+    }
+
+    @Test
+    fun a_report_this_phone_already_holds_is_not_restored_twice() {
+        var log = log()
+        log.append(event("LVS", day = 20_692L))
+
+        assertEquals(0, log.restore(log.backupText()))
+    }
+
+    @Test
+    fun a_settled_report_is_never_overwritten_by_an_unsettled_backup() {
+        var backup = log().also { it.append(event("LVS", day = 20_692L)) }.backupText()
+        var log = log()
+        log.settle("LVS", 20_692L, post)
+
+        log.restore(backup)
+
+        assertEquals(356, log.event("LVS", reportEpochDay = 20_692L)?.post?.abnormalReturnBps)
+    }
+
+    @Test
+    fun a_settled_backup_fills_in_a_report_this_phone_never_settled() {
+        var settled = log()
+        settled.append(event("LVS", day = 20_692L))
+        settled.settle("LVS", 20_692L, post)
+        var backup = settled.backupText()
+        var fresh = EarningsEventLog(folder.resolve("other/events.jsonl").toFile())
+        fresh.append(event("LVS", day = 20_692L))
+
+        fresh.restore(backup)
+
+        assertEquals(356, fresh.event("LVS", reportEpochDay = 20_692L)?.post?.abnormalReturnBps)
+    }
+
+    @Test
+    fun a_damaged_line_in_a_backup_never_costs_the_rest_of_it() {
+        var backup = log().also { it.append(event("LVS", day = 20_692L)) }.backupText()
+        var fresh = EarningsEventLog(folder.resolve("other/events.jsonl").toFile())
+
+        assertEquals(1, fresh.restore("not json at all\n" + backup))
+    }
+
+    @Test
+    fun a_backup_of_nothing_restores_nothing() {
+        assertEquals(0, log().restore(""))
+    }
+
     private fun file(): File = folder.resolve("events.jsonl").toFile()
 
     private fun log() = EarningsEventLog(file())

@@ -27,7 +27,9 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
 import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
@@ -184,6 +186,19 @@ sealed interface DashboardAction {
     /** Debug surface only — writes the score export and reports where it landed. */
     data object ExportScores : DashboardAction
 
+    /**
+     * Hand the earnings log out to a file the phone does not own.
+     *
+     * A release build is not debuggable and an uninstall takes the log with it, so a lost
+     * signing key would cost every option chain ever captured. Nothing else here is
+     * irreplaceable; those chains are never republished.
+     */
+    data object BackUpEarningsLog : DashboardAction
+
+    data class EarningsLogBackupWritten(val eventCount: Int) : DashboardAction
+    data object EarningsLogBackupDropped : DashboardAction
+    data class RestoreEarningsLog(val text: String) : DashboardAction
+
     data object RunRetrospective : DashboardAction
     data object RunOutcomeReport : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
@@ -268,6 +283,8 @@ data class DashboardUiState(
     val crossBoardProfile: PlanBoardUi = presentCrossBoard(null),
     val earningsGate: EarningsGateUi = EarningsGateUi(),
     val earningsGateLoading: Boolean = false,
+    val earningsLogBackup: String? = null,
+    val earningsGateNotice: String? = null,
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -305,6 +322,8 @@ class DashboardViewModel(
     private val runRetrospective: RunRetrospectiveUseCase,
     private val runOutcomeReport: RunOutcomeReportUseCase,
     private val getEarningsEvents: GetEarningsEventsUseCase,
+    private val backUpEarningsLog: EarningsLogBackupUseCase,
+    private val restoreEarningsLog: RestoreEarningsLogUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -374,6 +393,10 @@ class DashboardViewModel(
             is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             DashboardAction.ExportScores -> exportScoreCsv()
+            DashboardAction.BackUpEarningsLog -> prepareEarningsLogBackup()
+            is DashboardAction.EarningsLogBackupWritten -> finishEarningsLogBackup(action.eventCount)
+            DashboardAction.EarningsLogBackupDropped -> dropEarningsLogBackup()
+            is DashboardAction.RestoreEarningsLog -> restoreEarningsLogFrom(action.text)
             DashboardAction.RunRetrospective -> runRetrospectiveReport()
             DashboardAction.RunOutcomeReport -> runOutcomeReportAction()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
@@ -533,6 +556,53 @@ class DashboardViewModel(
             } finally {
                 _state.value = _state.value.copy(earningsGateLoading = false)
             }
+        }
+    }
+
+    private fun prepareEarningsLogBackup() {
+        viewModelScope.launch {
+            var backup = try {
+                backUpEarningsLog()
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    earningsGateNotice = "Backup failed: ${error.message ?: "unknown error"}",
+                )
+                return@launch
+            }
+            _state.value = if (backup.eventCount == 0) {
+                _state.value.copy(earningsGateNotice = "No reports logged yet, so nothing to back up.")
+            } else {
+                _state.value.copy(earningsLogBackup = backup.text, earningsGateNotice = null)
+            }
+        }
+    }
+
+    private fun finishEarningsLogBackup(eventCount: Int) {
+        _state.value = _state.value.copy(
+            earningsLogBackup = null,
+            earningsGateNotice = "Backed up $eventCount report(s).",
+        )
+    }
+
+    private fun dropEarningsLogBackup() {
+        _state.value = _state.value.copy(earningsLogBackup = null)
+    }
+
+    /**
+     * A restore reports the reports it added, including none.
+     *
+     * Silence would read the same whether the file was the wrong one or the phone already
+     * held everything in it, and those call for opposite next moves.
+     */
+    private fun restoreEarningsLogFrom(text: String) {
+        viewModelScope.launch {
+            var message = try {
+                "Restored ${restoreEarningsLog(text)} report(s) from the backup."
+            } catch (error: Throwable) {
+                "Restore failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(earningsGateNotice = message)
+            loadEarningsGate()
         }
     }
 
@@ -1435,6 +1505,8 @@ class DashboardViewModel(
                         runRetrospective = useCases.runRetrospective,
                         runOutcomeReport = useCases.runOutcomeReport,
                         getEarningsEvents = useCases.getEarningsEvents,
+                        backUpEarningsLog = useCases.backUpEarningsLog,
+                        restoreEarningsLog = useCases.restoreEarningsLog,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

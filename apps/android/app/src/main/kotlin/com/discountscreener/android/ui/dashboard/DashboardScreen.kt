@@ -238,6 +238,9 @@ fun DashboardScreen(
                 DashboardTab.Earnings -> EarningsGateScreen(
                 state = state.earningsGate,
                 loading = state.earningsGateLoading,
+                pendingBackup = state.earningsLogBackup,
+                notice = state.earningsGateNotice,
+                onAction = onAction,
             )
             DashboardTab.Estimates -> EstimatesScreen(
                     indexEstimates = state.indexEstimates,

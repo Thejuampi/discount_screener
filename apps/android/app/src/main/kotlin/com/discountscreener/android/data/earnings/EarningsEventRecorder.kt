@@ -67,6 +67,10 @@ class EarningsEventRecorder(
 
     fun events(): EventLogRead = log.read()
 
+    fun backupText(): String = log.backupText()
+
+    fun restore(text: String): Int = log.restore(text)
+
     /**
      * A report the chain never priced is asked again on the next pass.
      *

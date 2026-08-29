@@ -595,6 +595,21 @@ class DefaultDashboardRepository(
         )
     }
 
+    /**
+     * The earnings log, ready to be written somewhere the phone cannot reach.
+     *
+     * A release build is not debuggable, so `adb run-as` cannot pull this file. Losing the signing
+     * key forces an uninstall, and an uninstall takes the log with it. Everything else on this
+     * phone can be downloaded again; option chains cannot.
+     */
+    override suspend fun earningsLogBackup(): String = withContext(computeDispatcher) {
+        earningsEventRecorder?.backupText().orEmpty()
+    }
+
+    override suspend fun restoreEarningsLog(text: String): Int = withContext(computeDispatcher) {
+        earningsEventRecorder?.restore(text) ?: 0
+    }
+
     override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> = withContext(computeDispatcher) {
         stateMutex.withLock {
             safeEstimatesReportLocked().also { result ->
