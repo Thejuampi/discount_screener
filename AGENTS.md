@@ -269,9 +269,10 @@ Two doubles live in `apps/android/app/src/test/.../`:
 
 - `offlineHttpClient()` — throws an `AssertionError` naming the URL. Use it under any double that
   overrides some of a client's calls, so the calls it forgot land on the test.
-- `cannedHttpClient(fragment, body)` — answers one URL fragment with one body, and throws on the
-  rest. Use it when the client consumes the response as a stream: no string of the body exists
-  above the client, so the double must sit under it.
+- `cannedHttpClient(fragment, body)`, or `cannedHttpClient(routes)` for a flow that crosses several
+  endpoints — answers a named URL with one body, and throws on the rest. Use it when the client
+  consumes the response as a stream: no string of the body exists above the client, so the double
+  must sit under it. Name the full URL, so a wrong path fails instead of matching by accident.
 
 No test reaches a live provider. A red test says which URL leaked.
 

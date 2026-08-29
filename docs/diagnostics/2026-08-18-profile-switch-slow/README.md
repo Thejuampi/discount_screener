@@ -771,9 +771,12 @@ the network reader crosses a decoder lock on every one of a companyfacts file's 
 first, which spent the memory the sieve exists to save.
 
 That client built its own `OkHttpClient` inside the constructor, so no test could reach the new
-path. It now takes the client as a defaulted parameter, and `cannedHttpClient` answers one URL
-fragment with one body. A streamed body has no string seam above it, so the double sits under the
-client.
+path. It now takes the client as a defaulted parameter, and `cannedHttpClient` answers a named URL
+with one body. A streamed body has no string seam above it, so the double sits under the client.
+
+The whole lookup runs on that seam now: the ticker map, the submissions list, the filing index, the
+instance download, the subsidiary search and the sieved companyfacts, each pinned to its full URL.
+A wrong URL fails the test with that URL in the message.
 
 | Test | Goes red when |
 | --- | --- |
@@ -791,3 +794,5 @@ client.
 | `the_cache_holds_what_the_stream_returned` | the slim cache and the returned facts drift apart |
 | `a_second_read_costs_no_request` | a cached companyfacts file asks the network again |
 | `a_cache_older_than_the_ttl_is_read_again` | a day-old slim cache is served forever |
+| `the_parent_facts_reach_the_operating_component` | a step of the lookup asks SEC for the wrong URL |
+| `the_subsidiary_search_reaches_the_finance_component` | the subsidiary search or its companyfacts read breaks |

@@ -15,13 +15,21 @@ import okhttp3.ResponseBody.Companion.toResponseBody
  * only place the body is still a body. Anything the test did not plan for lands as an
  * [AssertionError], for the reason [offlineHttpClient] gives.
  */
-internal fun cannedHttpClient(fragment: String, body: String): OkHttpClient = OkHttpClient.Builder()
+internal fun cannedHttpClient(fragment: String, body: String): OkHttpClient =
+    cannedHttpClient(listOf(fragment to body))
+
+/**
+ * The same double over several routes. The first fragment the URL holds wins.
+ *
+ * A lookup crosses six SEC endpoints. Naming each one keeps the test honest about which answer
+ * feeds which step, and an unplanned seventh call still lands as an [AssertionError].
+ */
+internal fun cannedHttpClient(routes: List<Pair<String, String>>): OkHttpClient = OkHttpClient.Builder()
     .addInterceptor(
         Interceptor { chain ->
             var request = chain.request()
-            if (!request.url.toString().contains(fragment)) {
-                throw AssertionError("A unit test reached the network: ${request.method} ${request.url}")
-            }
+            var body = routes.firstOrNull { request.url.toString().contains(it.first) }?.second
+                ?: throw AssertionError("A unit test reached the network: ${request.method} ${request.url}")
             if (request.header("Accept-Encoding") != "identity") {
                 throw AssertionError(
                     "The request asked SEC for a compressed body: ${request.url}" + "\n" +
