@@ -21,6 +21,12 @@ User-visible functionality should be kept in 1:1 parity across both clients by d
   gap, not a product gap. A desktop has the RAM; a phone does not. Close it on the desktop when the
   file count per session grows.
 
+  A desktop sieve cannot copy Android's field set. `annual_candidates_with_shape` reads `frame` and
+  `fy`, `extract_normalized_investment_evidence` reads `accn`, and `extract_current_shares` accepts
+  `10-Q` and `8-K`. Android keeps none of those. Cut them on the desktop and the shares count and
+  the investment evidence go wrong, silently. Any desktop sieve needs its own field set, taken from
+  those three readers, and its own cache version.
+
 One-platform changes are allowed only when the request explicitly says so or when the platform cannot support the behavior.
 
 - Call out the exception clearly in the task or pull request.
