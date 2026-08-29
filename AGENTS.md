@@ -44,9 +44,23 @@ Technical names stay as they are: `AggressiveV3`, `robust_mean`, `:core`, commit
 
 ## BMAD Method
 
-Installed. Menu, not a pipeline. Process, lanes, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
+A requirement runs the closed cycle. No step is optional, and no step is skipped because the change looks small:
 
-**Default:** implement against this file + `project-context.md`. Do not start a full ceremony unless Juan asks or the change is large.
+**PRD → spec → build → review → repeat**
+
+| Step | Skill | Leaves behind |
+| --- | --- | --- |
+| PRD | `/bmad-prd` | The WHY and the acceptance bar, in `_bmad-output/planning-artifacts/` |
+| Spec | `/bmad-spec` | The WHAT, locked: contracts, edge cases, the examples that must pass |
+| Build | `/bmad-quick-dev` | The code, TDD, plus the docs the change makes untrue |
+| Review | `/bmad-code-review` | An adversarial read of the diff against the spec |
+| Repeat | — | Next slice, or `/bmad-correct-course` when reality diverged |
+
+**Review does not close while docs are stale.** A user-visible change that leaves `docs/`, this file, `project-context.md`, or a contract describing the old behavior is not reviewed - it is half built. Write the docs in the build step so the review has something to check.
+
+Bugfix, rename, or spike: implement directly with TDD. That exemption covers a fix, never a requirement.
+
+Process, lanes, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
 
 This file + `project-context.md` + contracts **outrank** generic BMAD templates. Unsure: `bmad-help` once.
 

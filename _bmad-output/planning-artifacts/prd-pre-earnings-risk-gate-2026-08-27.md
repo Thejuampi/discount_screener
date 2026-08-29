@@ -65,13 +65,17 @@ Reglas de estimación:
 ### 4.3 Score de riesgo
 
 ```
-ratio_riesgo = implied_move / mediana(|retorno_anormal| histórico del ticker)
+ratio_riesgo = movimiento_de_evento / mediana(|retorno_anormal| histórico del ticker)
 ```
+
+El numerador es el movimiento del evento, no el straddle entero. El straddle precia el reporte más los días tranquilos que faltan hasta el vencimiento; la mediana es de un día. La separación está en §13, "El horizonte del ratio".
 
 Categorías iniciales, calibradas después con distribución empírica por sector:
 - ratio_riesgo > 1.3 → riesgo alto.
 - ratio_riesgo < 0.8 → riesgo bajo.
 - 0.8–1.3 → riesgo normal.
+
+Una cadena que no cotiza, o que cotiza con una horquilla por encima del 50% del straddle, no da ratio. El evento se guarda igual y la celda queda `Undecided`.
 
 Los umbrales se normalizan por sector y, opcionalmente, por VIX o por el implied move promedio del sector en el mismo período.
 
@@ -90,6 +94,8 @@ Regla explícita: si la métrica real cae por debajo de la mediana de los últim
 | Justo/barato (precio ≤ 0.9 × DCF justo) | Alto | Mantener con tamaño reducido (media posición o un tercio), o cubrir |
 | Justo/barato | Normal | Mantener |
 
+El riesgo bajo se trata igual que el normal: la matriz tiene dos columnas de riesgo, no tres. Un movimiento priceado por debajo de la historia del ticker no pide acción, solo deja de pedir cobertura. `DecisionMatrix.kt` resuelve `Low` y `Normal` a la misma celda.
+
 "Justo/barato" se define como precio ≤ 0.9 × DCF justo. Por encima de ese umbral, se trata como "caro".
 
 ### 4.6 Regla de cobertura
@@ -102,24 +108,25 @@ Tope de costo:
 
 ### 4.7 Lectura por ticker
 
-El gate escribe un registro por reporte. Hoy la única forma de leerlo es una lista ordenada por fecha. Con cinco tickers alcanza. Con el universo entero, el lector que quiere saber de un símbolo tiene que recorrerla entera, y el evento del ticker que está mirando en el detalle no aparece en la pantalla donde lo está mirando.
+El gate escribe un registro por reporte. Hoy la única forma de leerlo es una lista ordenada por fecha. Con cinco tickers alcanza. Con el universo entero falla dos veces. Quien busca un símbolo tiene que recorrer la lista completa. Y el detalle del ticker no muestra el evento de ese ticker.
 
-**Buscador en la pestaña Earnings.** Campo de texto arriba de la lista. Filtra las dos secciones —"reportan pronto" y "ya reportaron"— por ticker, sin distinguir mayúsculas, por prefijo del símbolo. Campo vacío es la lista completa.
+**Buscador en la pestaña Earnings.** Filtra las dos secciones —"reportan pronto" y "ya reportaron"— por prefijo del símbolo, sin distinguir mayúsculas.
 
 Lo que el filtro no puede tapar:
 - La línea de última captura y el conteo de líneas dañadas quedan visibles siempre. Dicen si el módulo sigue corriendo y si la bitácora está sana. Un filtro que las esconde convierte una captura rota en una búsqueda sin resultados.
-- Una búsqueda sin coincidencias dice que no hay coincidencias, y nombra el término. Nunca muestra el vacío de instalación nueva: ese texto dice "no hay reportes en la bitácora" y sería mentira con la bitácora llena.
+- Una búsqueda sin coincidencias dice que no hay coincidencias, y nombra el término. Nunca muestra el vacío de instalación nueva: ese texto dice "No earnings events logged yet" y sería mentira con la bitácora llena.
+- Una bitácora que solo tiene líneas dañadas tampoco es una instalación nueva. El conteo se muestra; el vacío no.
 
-**Sección de earnings en el detalle del ticker.** Al abrir el detalle de un ticker, si la bitácora tiene un evento suyo, el detalle lo muestra. La misma tarjeta que la pestaña, sin una segunda forma de leer los mismos bps. Si la bitácora tiene varios, muestra el próximo que reporta y el último que ya liquidó.
+**Sección de earnings en el detalle del ticker.** Al abrir el detalle de un ticker, si la bitácora tiene un evento suyo, el detalle lo muestra. La misma tarjeta que la pestaña, sin una segunda forma de leer los mismos bps. Si la bitácora tiene varios, muestra el próximo que reporta y el último que ya liquidó. Con solo pasados, o solo futuros, muestra el que hay.
 
 Sin evento, una sola línea dice por qué, y nunca repite la fecha que el encabezado ya trae:
 - Reporte más allá de la ventana de captura: la cadena se precia dentro de los 10 días.
 - Reporte dentro de la ventana y todavía sin preciar: falta una pasada con el mercado abierto. Esta es la única de las tres que señala algo que puede fallar.
-- Sin fecha de reporte: no hay nada que preciar.
+- Sin fecha de reporte, o con una que ya pasó sin que Yahoo la renovara: no hay nada que preciar.
 
-Reglas comunes a las dos superficies:
-- Las dos solo leen. Abrir un detalle o tipear en el buscador no baja una cadena, no dispara una captura y no liquida nada. La captura tiene su propio reloj (§13, `EarningsCaptureWorker`); una pantalla que pidiera la cadena gastaría el pedido que el worker necesita y podría quemar la única pasada en rueda del día.
-- Las dos leen la misma bitácora ya presentada. El detalle no abre el archivo por su cuenta.
+Mientras la bitácora se está leyendo, la línea no se dibuja. Una razón afirmada antes de leer el archivo puede ser falsa.
+
+Las dos superficies solo leen, y leen la misma bitácora ya presentada. El cableado está en §13.
 
 ## 5. Fuentes de datos
 
@@ -163,6 +170,12 @@ Post-reporte:
 - retorno_accion, retorno_mercado, retorno_anormal
 - decision_correcta (bool, medida contra el retorno anormal real)
 
+### 7.1 La bitácora tiene que sobrevivir al teléfono
+
+Una compilación de release no es depurable, así que ningún cable llega a este archivo. Perder la llave de firma obliga a desinstalar, y desinstalar se lleva la bitácora. Todo lo demás en el teléfono se vuelve a bajar; las cadenas de opciones no.
+
+La pantalla escribe la bitácora a un archivo que el lector elige, y la vuelve a leer desde otro. El respaldo lleva una línea por reporte con lo que ese reporte dijo al final, no el historial de escrituras. Al restaurar, un reporte que el teléfono ya liquidó conserva lo suyo: una restauración nunca puede costarle al lector algo que ya sabía.
+
 ## 8. Riesgos y limitaciones conocidas
 
 - Con 16–20 trimestres, el coeficiente de asimetría puede no ser significativo. En ese caso, el modelo simétrico es el que se usa en producción.
@@ -176,6 +189,8 @@ Post-reporte:
 - El módulo corre sin intervención manual para cualquier ticker con datos de opciones y consenso disponibles.
 - Después del paper trading, la matriz de decisión muestra una diferencia medible en retorno anormal entre los casos "riesgo alto" y "riesgo normal".
 - Los umbrales quedan calibrados por sector, con evidencia empírica documentada, no fijados a mano.
+- Un reporte de la cartera se lee sin buscarlo: el evento del ticker aparece en el detalle del ticker, y la lista se filtra a un símbolo en tres letras (§4.7).
+- La bitácora sobrevive una reinstalación. Un respaldo escrito antes de desinstalar devuelve todos los reportes que el teléfono había capturado (§7).
 
 ## 10. Estado del repo frente a este PRD (2026-08-27)
 
@@ -187,10 +202,14 @@ Ya existe y sirve tal cual:
 - **Consenso de analistas.** El módulo `earningsTrend` de Yahoo ya se pide (`FORWARD_FORECAST_MODULES = "earningsTrend,price"`). Cada período trae `earningsEstimate.{low, avg, high, numberOfAnalysts}` y `revenueEstimate`. Hoy el parser solo lee el período `+1y`; el trimestre en curso (`0q`) viene en la misma respuesta y se descarta.
 - **Series de precio históricas** para el retorno del ticker, y las mismas series para un índice dan el retorno de mercado y la beta.
 
-No existe todavía:
-- **Cadena de opciones.** No hay ningún cliente de opciones en el repo. Sin esto no hay §4.1 ni §4.3.
-- **Log de eventos** (§7) ni arnés de paper trading (§6).
-- **Desvío estándar de estimados.** Yahoo entrega `low`, `high` y `numberOfAnalysts`, no el desvío. El SUE de §4.2 necesita una definición de reemplazo declarada, no el desvío verdadero.
+Faltaba en esa fecha y ya se construyó (ver §13):
+- **Cadena de opciones.** `YahooFinanceClient.fetchOptionChain` contra `/v7/finance/options/{symbol}`.
+- **Log de eventos** (§7). Corriendo, con captura de fondo cada 90 minutos.
+- **Desvío estándar de estimados.** Yahoo entrega `low`, `high` y `numberOfAnalysts`. El SUE usa `(high − low) / 2` como denominador declarado (§12, pregunta 3).
+
+Sigue sin existir:
+- **Arnés de paper trading** (§6).
+- **Regresión de §4.2.** Espera a que la bitácora junte 16–20 trimestres.
 
 ## 11. Lo que falta de verdad, y cómo se consigue
 
@@ -345,6 +364,8 @@ En la celda "barato + riesgo alto":
 | `earningsGateAbsence` | Sin evento, la razón en una línea. Vive al lado de `earningsMark`, que ya traduce la misma fecha, y lee `CAPTURE_WINDOW_DAYS`. |
 | `CAPTURE_WINDOW_DAYS` | Pasó del grabador a `:core`. La pantalla y el grabador tienen que nombrar la misma ventana o la explicación miente. |
 | `DashboardViewModel.openDetail` | Carga la bitácora una sola vez si todavía está vacía. `loadEarningsGate` no está cacheado, así que llamarlo por cada detalle releería el archivo entero. |
+| `EarningsGateScreen` (vacío) | El vacío de instalación nueva pide bitácora sin eventos **y** sin líneas dañadas. Un archivo que solo tiene líneas rotas muestra el conteo. |
+| `EarningsLogHandOff` / `EarningsLogButtons` | Respaldo y restauración de la bitácora (§7.1), al pie de la misma lista y alcanzables bajo cualquier filtro. |
 
 Las dos superficies solo leen. Abrir un detalle o tipear en el filtro no baja una cadena ni dispara una captura: el worker conserva su única pasada en rueda.
 
