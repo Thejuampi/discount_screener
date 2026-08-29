@@ -260,6 +260,15 @@ claim this tool rests on: a captured file replays into the rows the app had on s
 Capture is the only step that touches a device, and it obeys the standing rule — no live provider
 calls from a test. Replay reads a file.
 
+### SEC companyfacts arrives sieved on both clients (mandatory)
+
+A companyfacts file is about 4 MB and every reader uses a small part of it. Both clients cut it on
+the stream: `SecCompanyFactsSieve` on Android, `sec_company_facts_sieve` on the desktop. Nothing
+downstream sees a fact the sieve dropped, so widening a reader means widening its own sieve first.
+
+The two field sets differ on purpose. See
+[`docs/cross-platform-parity.md`](docs/cross-platform-parity.md) before you touch either.
+
 ### Network doubles — a client that streams has no string seam (mandatory)
 
 Every http client takes its `OkHttpClient` as a defaulted constructor parameter. A client that

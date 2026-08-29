@@ -68,7 +68,7 @@ pub fn fetch_cik_map(client: &Client) -> Result<HashMap<String, u64>, String> {
 // ── EDGAR companyfacts ────────────────────────────────────────────────────────
 
 /// A single annual (10-K) cash flow value from EDGAR XBRL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnualValue {
     pub year: i32,
     pub value_dollars: i64,
@@ -971,13 +971,14 @@ pub fn fetch_company_facts(
         "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
         cik
     );
-    client
+    let response = client
         .get(&url)
         .header("Accept", "application/json")
+        .header("Accept-Encoding", "identity")
         .send()
-        .map_err(|e| format!("FetchFailed: EDGAR {}: {}", symbol, e))?
-        .json()
-        .map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))
+        .map_err(|e| format!("FetchFailed: EDGAR {}: {}", symbol, e))?;
+    let slim = crate::sec_company_facts_sieve::sieve(response);
+    serde_json::from_str(&slim).map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))
 }
 
 pub fn fetch_fcf_history(
@@ -1135,13 +1136,15 @@ pub fn fetch_shares_outstanding(
         "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
         cik_padded
     );
-    let body: serde_json::Value = client
+    let response = client
         .get(url)
         .header("Accept", "application/json")
+        .header("Accept-Encoding", "identity")
         .send()
-        .map_err(|e| format!("EDGAR shares {}: {}", symbol, e))?
-        .json()
-        .map_err(|e| format!("EDGAR shares parse {}: {}", symbol, e))?;
+        .map_err(|e| format!("EDGAR shares {}: {}", symbol, e))?;
+    let slim = crate::sec_company_facts_sieve::sieve(response);
+    let body: serde_json::Value =
+        serde_json::from_str(&slim).map_err(|e| format!("EDGAR shares parse {}: {}", symbol, e))?;
     Ok(extract_current_shares(&body))
 }
 
@@ -1183,6 +1186,73 @@ pub fn fetch_dcf(
         })
         .collect();
     Ok(compute_dcf(&annual, shares_outstanding))
+}
+
+#[cfg(test)]
+mod sieve_parity_tests {
+    use super::*;
+    use crate::sec_driver_normalization_policy_generated as policy;
+
+    /// The sieve is allowed to drop bytes. It is not allowed to change a number.
+    ///
+    /// Every cut it makes is a cut a reader makes for itself after the parse, so the readers must
+    /// reach the same values whether they walk the source or the sieved copy. The fixture is a
+    /// real JPM companyfacts slice, with its frames, accession numbers and labels in place.
+    fn jpm() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/core/src/test/resources/sec-companyfacts/JPM.json");
+        let raw = std::fs::read_to_string(path).expect("JPM companyfacts fixture");
+        serde_json::from_str(&raw).expect("json")
+    }
+
+    fn sieved_jpm() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/core/src/test/resources/sec-companyfacts/JPM.json");
+        let raw = std::fs::read_to_string(path).expect("JPM companyfacts fixture");
+        let slim = crate::sec_company_facts_sieve::sieve(raw.as_bytes());
+        serde_json::from_str(&slim).expect("sieved json")
+    }
+
+    #[test]
+    fn the_operating_cash_flow_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::OPERATING_CASH_FLOW),
+            extract_driver_annual(&sieved_jpm(), policy::OPERATING_CASH_FLOW)
+        );
+    }
+
+    #[test]
+    fn the_equity_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::STOCKHOLDERS_EQUITY),
+            extract_driver_annual(&sieved_jpm(), policy::STOCKHOLDERS_EQUITY)
+        );
+    }
+
+    #[test]
+    fn the_interest_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::INTEREST_EXPENSE),
+            extract_driver_annual(&sieved_jpm(), policy::INTEREST_EXPENSE)
+        );
+    }
+
+    #[test]
+    fn the_investment_evidence_survives_the_sieve() {
+        assert_eq!(
+            extract_normalized_investment_evidence(&jpm()).development_total_by_end,
+            extract_normalized_investment_evidence(&sieved_jpm()).development_total_by_end
+        );
+    }
+
+    #[test]
+    fn the_shares_count_survives_the_sieve() {
+        let raw = "{\"facts\":{\"dei\":{\"EntityCommonStockSharesOutstanding\":{\"units\":{\"shares\":[{\"form\":\"10-Q\",\"end\":\"2025-06-30\",\"val\":2770000000,\"filed\":\"2025-07-30\"}]}}}}}";
+        let slim: serde_json::Value =
+            serde_json::from_str(&crate::sec_company_facts_sieve::sieve(raw.as_bytes()))
+                .expect("json");
+        assert_eq!(Some(2_770_000_000), extract_current_shares(&slim));
+    }
 }
 
 #[cfg(test)]
