@@ -125,6 +125,7 @@ import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 const val DETAIL_EARNINGS_SECTION = "detailEarningsSection"
+const val DETAIL_EARNINGS_ABSENT = "detailEarningsAbsent"
 const val DETAIL_SNAPSHOT_LIST = "detailSnapshotList"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -863,6 +864,18 @@ private fun SnapshotContent(
                 )
             }
             items(earningsEvents, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
+        } else {
+            item {
+                Text(
+                    text = earningsGateAbsence(
+                        scoreRow?.nextEarningsEpoch,
+                        System.currentTimeMillis() / 1_000L,
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(DETAIL_EARNINGS_ABSENT),
+                )
+            }
         }
 
         item {

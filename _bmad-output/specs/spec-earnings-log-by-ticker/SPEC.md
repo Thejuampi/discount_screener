@@ -34,7 +34,7 @@ Both failures cost the same thing: a captured event that nobody reads is worth w
 
 - **CAP-4**
   - **intent:** Opening a ticker's detail shows that ticker's earnings event when the log holds one.
-  - **success:** With an AVGO event in the log, the AVGO detail screen renders an earnings section carrying the same fields the tab's card carries. With a symbol the log has never seen, the detail renders no earnings section at all — no empty box, no placeholder text.
+  - **success:** With an AVGO event in the log, the AVGO detail screen renders an earnings section carrying the same fields the tab's card carries. With a symbol the log has never seen, the detail renders one line naming why: beyond the capture window, inside it and still unpriced, or without a report date at all. The line never repeats the date the score header already carries.
 
 - **CAP-5**
   - **intent:** When the log holds several events for the open ticker, the detail shows the two that carry a decision.

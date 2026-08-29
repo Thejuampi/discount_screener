@@ -3,6 +3,7 @@ package com.discountscreener.android.data.earnings
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
 import com.discountscreener.android.domain.model.OpportunityListRow
+import com.discountscreener.core.earnings.CAPTURE_WINDOW_DAYS
 import com.discountscreener.core.earnings.CalendarAsk
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
@@ -278,7 +279,6 @@ class EarningsEventRecorder(
     }
 
     private companion object {
-        const val CAPTURE_WINDOW_DAYS = 10L
         const val CALENDAR_LOOKUPS_PER_PASS = 12
         const val CALENDAR_RECHECK_SECONDS = 24L * 60L * 60L
         const val SETTLE_WINDOW_DAYS = 30L

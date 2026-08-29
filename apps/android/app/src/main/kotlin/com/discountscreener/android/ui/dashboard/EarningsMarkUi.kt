@@ -1,5 +1,6 @@
 package com.discountscreener.android.ui.dashboard
 
+import com.discountscreener.core.earnings.CAPTURE_WINDOW_DAYS
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -59,3 +60,21 @@ internal fun earningsMark(
 
 /** Pinned to [Locale.US] because the rest of the score tab is written in English. */
 private val EARNINGS_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.US)
+
+internal fun earningsGateAbsence(
+    nextEarningsEpoch: Long?,
+    nowEpochSeconds: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+): String {
+    var epoch = nextEarningsEpoch ?: return NO_DATE_YET
+    var today = Instant.ofEpochSecond(nowEpochSeconds).atZone(zone).toLocalDate()
+    var date = Instant.ofEpochSecond(epoch).atZone(zone).toLocalDate()
+    var days = ChronoUnit.DAYS.between(today, date)
+    if (days < 0L) return NO_DATE_YET
+    if (days > CAPTURE_WINDOW_DAYS) {
+        return "Earnings gate: the chain is priced inside $CAPTURE_WINDOW_DAYS days of the report."
+    }
+    return "Earnings gate: inside the window, still unpriced. A pass has to land with the market open."
+}
+
+private const val NO_DATE_YET = "Earnings gate: no report date yet, so nothing to price."

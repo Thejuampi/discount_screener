@@ -8,6 +8,8 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
+const val CAPTURE_WINDOW_DAYS = 10L
+
 data class DcfAsOf(val fairValueCents: Long, val computedOn: LocalDate)
 
 val EXCHANGE_ZONE: ZoneId = ZoneId.of("America/New_York")

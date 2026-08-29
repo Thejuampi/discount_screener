@@ -20,6 +20,9 @@ import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.decisionOf
 import java.time.LocalDate
+import java.time.ZoneId
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -65,6 +68,55 @@ class DetailEarningsSectionTest {
         composeRule.onNodeWithTag(DETAIL_EARNINGS_SECTION).assertDoesNotExist()
     }
 
+    @Test
+    fun a_report_beyond_the_capture_window_says_the_gate_prices_it_closer_in() {
+        assertEquals(
+            "Earnings gate: the chain is priced inside 10 days of the report.",
+            earningsGateAbsence(epochOf(30), NOW, UTC),
+        )
+    }
+
+    @Test
+    fun a_report_inside_the_window_with_no_record_says_the_pass_has_not_landed() {
+        assertEquals(
+            "Earnings gate: inside the window, still unpriced. A pass has to land with the market open.",
+            earningsGateAbsence(epochOf(4), NOW, UTC),
+        )
+    }
+
+    @Test
+    fun a_report_on_the_last_day_of_the_window_still_counts_as_inside_it() {
+        assertTrue(earningsGateAbsence(epochOf(10), NOW, UTC).contains("inside the window"))
+    }
+
+    @Test
+    fun a_ticker_with_no_report_date_says_there_is_nothing_to_price() {
+        assertEquals(
+            "Earnings gate: no report date yet, so nothing to price.",
+            earningsGateAbsence(null, NOW, UTC),
+        )
+    }
+
+    @Test
+    fun a_report_date_that_already_passed_reads_as_no_date_at_all() {
+        assertEquals(
+            "Earnings gate: no report date yet, so nothing to price.",
+            earningsGateAbsence(epochOf(-3), NOW, UTC),
+        )
+    }
+
+    @Test
+    fun the_detail_of_a_ticker_the_log_never_saw_says_why_it_has_no_event() {
+        render(emptyList())
+
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST)
+            .performScrollToNode(hasTestTag(DETAIL_EARNINGS_ABSENT))
+
+        composeRule.onNodeWithTag(DETAIL_EARNINGS_ABSENT).assertIsDisplayed()
+    }
+
+    private fun epochOf(days: Long): Long = TODAY.plusDays(days).atStartOfDay(UTC).toEpochSecond()
+
     private fun render(events: List<EarningsEventRowUi>) {
         composeRule.setContent {
             DiscountScreenerTheme {
@@ -109,5 +161,7 @@ class DetailEarningsSectionTest {
 
     private companion object {
         val TODAY: LocalDate = LocalDate.of(2026, 8, 23)
+        val UTC: ZoneId = ZoneId.of("UTC")
+        val NOW: Long = TODAY.atStartOfDay(UTC).toEpochSecond()
     }
 }

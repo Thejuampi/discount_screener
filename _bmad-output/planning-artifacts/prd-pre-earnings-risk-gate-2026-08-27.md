@@ -110,7 +110,12 @@ Lo que el filtro no puede tapar:
 - La línea de última captura y el conteo de líneas dañadas quedan visibles siempre. Dicen si el módulo sigue corriendo y si la bitácora está sana. Un filtro que las esconde convierte una captura rota en una búsqueda sin resultados.
 - Una búsqueda sin coincidencias dice que no hay coincidencias, y nombra el término. Nunca muestra el vacío de instalación nueva: ese texto dice "no hay reportes en la bitácora" y sería mentira con la bitácora llena.
 
-**Sección de earnings en el detalle del ticker.** Al abrir el detalle de un ticker, si la bitácora tiene un evento suyo, el detalle lo muestra. La misma tarjeta que la pestaña, sin una segunda forma de leer los mismos bps. Si la bitácora tiene varios, muestra el próximo que reporta y el último que ya liquidó. Sin evento no hay sección: ni caja vacía ni texto de relleno.
+**Sección de earnings en el detalle del ticker.** Al abrir el detalle de un ticker, si la bitácora tiene un evento suyo, el detalle lo muestra. La misma tarjeta que la pestaña, sin una segunda forma de leer los mismos bps. Si la bitácora tiene varios, muestra el próximo que reporta y el último que ya liquidó.
+
+Sin evento, una sola línea dice por qué, y nunca repite la fecha que el encabezado ya trae:
+- Reporte más allá de la ventana de captura: la cadena se precia dentro de los 10 días.
+- Reporte dentro de la ventana y todavía sin preciar: falta una pasada con el mercado abierto. Esta es la única de las tres que señala algo que puede fallar.
+- Sin fecha de reporte: no hay nada que preciar.
 
 Reglas comunes a las dos superficies:
 - Las dos solo leen. Abrir un detalle o tipear en el buscador no baja una cadena, no dispara una captura y no liquida nada. La captura tiene su propio reloj (§13, `EarningsCaptureWorker`); una pantalla que pidiera la cadena gastaría el pedido que el worker necesita y podría quemar la única pasada en rueda del día.
@@ -336,7 +341,9 @@ En la celda "barato + riesgo alto":
 | `EarningsGateUi.matching` | Filtra las dos listas por prefijo del símbolo. `damagedLines` y `lastCapture` no se tocan: describen la lectura entera y tienen que quedar visibles detrás de cualquier filtro. |
 | `EarningsGateUi.eventsFor` | Lo que ve el detalle de un ticker: el próximo reporte que tiene y el último que liquidó. Las dos listas llegan ordenadas, así que la primera coincidencia de cada una es la que lleva decisión viva. |
 | `EarningsGateScreen` | Campo de filtro arriba de la lista, con el estado en el composable. Una búsqueda sin coincidencias nombra el término y nunca muestra el vacío de instalación nueva. |
-| `DetailScreen` | Sección `EARNINGS` dentro del subtab Snapshot, debajo del encabezado de score. Sin evento no se dibuja nada. La tarjeta es la misma que la pestaña: `EarningsEventCard` pasó a `internal`. |
+| `DetailScreen` | Sección `EARNINGS` dentro del subtab Snapshot, debajo del encabezado de score. La tarjeta es la misma que la pestaña: `EarningsEventCard` pasó a `internal`. |
+| `earningsGateAbsence` | Sin evento, la razón en una línea. Vive al lado de `earningsMark`, que ya traduce la misma fecha, y lee `CAPTURE_WINDOW_DAYS`. |
+| `CAPTURE_WINDOW_DAYS` | Pasó del grabador a `:core`. La pantalla y el grabador tienen que nombrar la misma ventana o la explicación miente. |
 | `DashboardViewModel.openDetail` | Carga la bitácora una sola vez si todavía está vacía. `loadEarningsGate` no está cacheado, así que llamarlo por cada detalle releería el archivo entero. |
 
 Las dos superficies solo leen. Abrir un detalle o tipear en el filtro no baja una cadena ni dispara una captura: el worker conserva su única pasada en rueda.
