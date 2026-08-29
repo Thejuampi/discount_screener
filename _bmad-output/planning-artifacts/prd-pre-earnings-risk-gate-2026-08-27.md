@@ -146,6 +146,7 @@ Post-reporte:
 - Con 16–20 trimestres, el coeficiente de asimetría puede no ser significativo. En ese caso, el modelo simétrico es el que se usa en producción.
 - La métrica sectorial sin consenso histórico queda fuera de la regresión. Su peso en la decisión es menor que el de EPS y revenue.
 - La captura de fondo ya no depende de la fecha que dejó el último refresh: cada pasada pregunta el calendario de hasta doce símbolos cuya fecha venció o falta, y arranca donde paró la anterior. Queda un límite más chico: un símbolo entra a la cola solo una vez por día, así que un reporte adelantado de golpe puede tardar hasta un día en aparecer.
+- El cierre del evento se lee el día que la empresa presentó el 8-K, no el que decía el calendario. Una fecha sin presentación cerca queda sin cerrar en vez de inventar una reacción que el reporte nunca causó, porque esa reacción sería la mediana contra la que se divide todo ratio de riesgo posterior. Límite: un ticker sin archivo en EDGAR conserva la fecha del calendario.
 - El implied move es una medida de riesgo neutral, no una probabilidad real. Sirve para comparar contra la historia del propio ticker, no para estimar probabilidad de movimiento.
 
 ## 9. Criterios de éxito
@@ -238,6 +239,7 @@ Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del gr
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |
 | `EarningsEventRecorder.refreshStaleDates` | Antes de precisar nada, pide a Yahoo la fecha del próximo reporte de los símbolos cuya fecha venció o falta: doce por pasada, rotando con un cursor guardado al lado de la bitácora. La respuesta se guarda con la hora en que se preguntó, así un símbolo sin fecha futura no vuelve a la cola hasta el día siguiente. |
+| `EventSettlement.settlementOf` | Cierra el evento el día del 8-K con ítem 2.02, y toma de ahí también la hora. Si la empresa tiene archivos en EDGAR y ninguno cae a menos de siete días de la fecha del calendario, no cierra: una reacción leída en un día sin reporte entra a la mediana que denomina todos los ratios de riesgo siguientes. El día usado queda escrito en `PostReport.reportedOnEpochDay` y la tarjeta lo muestra cuando difiere del calendario. |
 | `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
 
 Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada sobre él no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.

@@ -263,10 +263,43 @@ class EarningsEventRecorderTest {
         var log = log()
         log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
 
-        recorder(log, closes = closeSource(), history = leveredHistory(), announcements = filed(90))
+        recorder(log, closes = closeSource(), history = leveredHistory(), announcements = filed(90, 3))
             .capture(emptyList())
 
         assertEquals(100, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.abnormalReturnBps)
+    }
+
+    @Test
+    fun a_report_no_filing_ever_confirmed_is_left_unsettled() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), announcements = filed(30)).capture(emptyList())
+
+        assertNull(log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post)
+    }
+
+    @Test
+    fun a_report_the_company_filed_a_day_early_is_read_on_the_day_it_filed() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), announcements = filed(4)).capture(emptyList())
+
+        assertEquals(0, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.stockReturnBps)
+    }
+
+    @Test
+    fun the_day_the_filing_landed_is_written_beside_the_reaction() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), announcements = filed(4)).capture(emptyList())
+
+        assertEquals(
+            TODAY.minusDays(4).toEpochDay(),
+            log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.reportedOnEpochDay,
+        )
     }
 
     @Test

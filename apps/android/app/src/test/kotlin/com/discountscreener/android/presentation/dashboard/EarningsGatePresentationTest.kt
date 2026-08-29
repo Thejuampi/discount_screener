@@ -149,6 +149,34 @@ class EarningsGatePresentationTest {
     }
 
     @Test
+    fun a_report_the_company_filed_on_another_day_names_that_day() {
+        var settled = PostReport(
+            abnormalReturnBps = 412,
+            reportedOnEpochDay = TODAY.minusDays(1).toEpochDay(),
+        )
+
+        assertEquals(
+            "${TODAY.minusDays(1)} (calendar said ${TODAY.minusDays(3)})",
+            present(listOf(record(day = -3, post = settled))).settled.single().reportedOn,
+        )
+    }
+
+    @Test
+    fun a_report_the_company_filed_when_the_calendar_said_names_no_other_day() {
+        var settled = PostReport(
+            abnormalReturnBps = 412,
+            reportedOnEpochDay = TODAY.minusDays(3).toEpochDay(),
+        )
+
+        assertNull(present(listOf(record(day = -3, post = settled))).settled.single().reportedOn)
+    }
+
+    @Test
+    fun a_report_not_settled_yet_names_no_day_it_was_filed_on() {
+        assertNull(present(listOf(record(day = 3))).upcoming.single().reportedOn)
+    }
+
+    @Test
     fun a_report_not_settled_yet_shows_no_surprise() {
         assertNull(present(listOf(record(day = 3))).upcoming.single().surprise)
     }

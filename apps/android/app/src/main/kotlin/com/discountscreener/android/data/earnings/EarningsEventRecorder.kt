@@ -172,12 +172,14 @@ class EarningsEventRecorder(
         record: EarningsEventRecord,
         marketCloses: List<DailyClose>,
     ): EarningsEventRecord? {
+        var filings = filedAnnouncementsOf(record.pre.symbol)
         var post = settlementOf(
             pre = record.pre,
             symbolCloses = closes.closes(record.pre.symbol),
             marketCloses = marketCloses,
             reportedQuarters = reportedQuartersOf(record.pre.symbol),
-            marketBeta = betaOf(record.pre.symbol),
+            marketBeta = betaOf(record.pre.symbol, filings),
+            announcements = filings,
         ) ?: return null
         log.settle(record.pre.symbol, record.pre.reportEpochDay, post)
         return record.copy(post = post)
@@ -190,16 +192,21 @@ class EarningsEventRecorder(
      * the slope costs no call of its own. A ticker whose history is too short keeps the one-for-one
      * subtraction it had.
      */
-    private suspend fun betaOf(symbol: String): Double? =
+    private suspend fun betaOf(symbol: String, filings: List<EarningsAnnouncement>): Double? =
         runCatching {
             marketBetaExcludingEvents(
                 symbolCloses = history.closes(symbol),
                 marketCloses = marketHistory(),
-                eventDates = announcements.announcements(symbol).map { it.date },
+                eventDates = filings.map { it.date },
             )
         }
             .onFailure { error -> logger.error(TAG, "earnings beta failed: $symbol", error) }
             .getOrNull()
+
+    private suspend fun filedAnnouncementsOf(symbol: String): List<EarningsAnnouncement> =
+        runCatching { announcements.announcements(symbol) }
+            .onFailure { error -> logger.error(TAG, "earnings filing list failed: $symbol", error) }
+            .getOrDefault(emptyList())
 
     private suspend fun reportedQuartersOf(symbol: String): List<ReportedQuarter> =
         runCatching { reported.quarters(symbol) }

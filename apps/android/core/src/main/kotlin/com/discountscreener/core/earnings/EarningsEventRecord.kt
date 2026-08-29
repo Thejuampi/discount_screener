@@ -83,4 +83,5 @@ data class PostReport(
     val marketReturnBps: Int? = null,
     val marketBetaBps: Int? = null,
     val abnormalReturnBps: Int? = null,
+    val reportedOnEpochDay: Long? = null,
 )

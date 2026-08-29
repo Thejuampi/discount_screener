@@ -99,6 +99,72 @@ class EventSettlementTest {
         assertNull(settlementOf(estimated(), stock, market)?.surpriseScoreBps)
     }
 
+    @Test
+    fun a_report_no_filing_confirms_is_never_settled() {
+        assertNull(settlementOf(pre(ReportTiming.AfterClose), stock, market, announcements = faraway))
+    }
+
+    @Test
+    fun a_report_the_company_filed_a_day_late_is_read_on_the_day_it_filed() {
+        assertEquals(453, lateFiling()?.stockReturnBps)
+    }
+
+    @Test
+    fun the_day_the_report_was_filed_is_written_down() {
+        assertEquals(REPORT.plusDays(1).toEpochDay(), lateFiling()?.reportedOnEpochDay)
+    }
+
+    @Test
+    fun the_filing_nearest_the_calendar_date_is_the_one_that_settles_it() {
+        assertEquals(453, twoFilings()?.stockReturnBps)
+    }
+
+    @Test
+    fun the_hour_on_the_filing_beats_the_hour_on_the_calendar() {
+        assertEquals(-238, morningFiling()?.stockReturnBps)
+    }
+
+    @Test
+    fun a_symbol_with_no_filings_at_all_still_settles_on_the_calendar_date() {
+        assertEquals(REPORT.toEpochDay(), settlementOf(pre(ReportTiming.AfterClose), stock, market)?.reportedOnEpochDay)
+    }
+
+    private fun lateFiling() = settlementOf(
+        pre(ReportTiming.AfterClose),
+        wideStock(),
+        wideMarket(),
+        announcements = listOf(EarningsAnnouncement(REPORT.plusDays(1), ReportTiming.AfterClose)),
+    )
+
+    private fun twoFilings() = settlementOf(
+        pre(ReportTiming.AfterClose),
+        wideStock(),
+        wideMarket(),
+        announcements = listOf(
+            EarningsAnnouncement(REPORT.plusDays(1), ReportTiming.AfterClose),
+            EarningsAnnouncement(REPORT.plusDays(5), ReportTiming.AfterClose),
+        ),
+    )
+
+    private fun morningFiling() = settlementOf(
+        pre(ReportTiming.AfterClose),
+        stock,
+        market,
+        announcements = listOf(EarningsAnnouncement(REPORT, ReportTiming.BeforeOpen)),
+    )
+
+    private val faraway = listOf(EarningsAnnouncement(REPORT.plusDays(30), ReportTiming.AfterClose))
+
+    private fun wideStock() = stock + listOf(
+        DailyClose(REPORT.plusDays(2), 4_500L),
+        DailyClose(REPORT.plusDays(3), 4_600L),
+    )
+
+    private fun wideMarket() = market + listOf(
+        DailyClose(REPORT.plusDays(2), 10_200L),
+        DailyClose(REPORT.plusDays(3), 10_200L),
+    )
+
     private fun settled() = settlementOf(estimated(), stock, market, listOf(reportedQuarter))
 
     private fun estimated() = pre(ReportTiming.AfterClose).copy(

@@ -110,6 +110,7 @@ private fun EarningsEventCard(row: EarningsEventRowUi) {
             GateLine("Action", "${row.action} · ${row.positionSize}")
             GateLine("Hedge", row.hedge)
             GateLine("Hedge cost", row.hedgeCost)
+            row.reportedOn?.let { GateLine("Reported", it) }
             row.reaction?.let { GateLine("Reaction", it) }
             row.surprise?.let { GateLine("Surprise", it) }
             if (row.justification.isNotBlank()) {

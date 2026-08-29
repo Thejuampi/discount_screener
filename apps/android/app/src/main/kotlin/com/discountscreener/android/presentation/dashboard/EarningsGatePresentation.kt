@@ -40,6 +40,7 @@ data class EarningsEventRowUi(
     val justification: String,
     val reaction: String?,
     val surprise: String?,
+    val reportedOn: String?,
 )
 
 fun presentEarningsGate(
@@ -101,7 +102,21 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
         justification = decision?.justification.orEmpty(),
         reaction = reactionText(record.post),
         surprise = surpriseText(record.post),
+        reportedOn = reportedOnText(pre, record.post),
     )
+}
+
+/**
+ * The day the report was really filed, shown only when the calendar had it wrong.
+ *
+ * The date on the card is the one the calendar carried when the chain was captured, and companies
+ * move reports. This line tells the reader the reaction below was read on another day, so a
+ * report that landed late is never mistaken for one that landed on plan.
+ */
+private fun reportedOnText(pre: PreReport, post: PostReport?): String? {
+    var filed = post?.reportedOnEpochDay ?: return null
+    if (filed == pre.reportEpochDay) return null
+    return "${LocalDate.ofEpochDay(filed)} (calendar said ${LocalDate.ofEpochDay(pre.reportEpochDay)})"
 }
 
 /**
