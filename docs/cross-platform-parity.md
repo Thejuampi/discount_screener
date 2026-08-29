@@ -23,6 +23,11 @@ User-visible functionality should be kept in 1:1 parity across both clients by d
   Each side has its own tests: `SecCompanyFactsSieveParityTest` on Android,
   `edgar::sieve_parity_tests` on the desktop.
 
+  Both clients also read the document once per issuer. Android caches the sieved copy on disk for a
+  day; the desktop holds it in memory for six hours, capped at 64 issuers
+  (`edgar::shared_company_facts`). Before that, a screen pulled the same 4 MB twice for every
+  issuer: once for the shares count, once for the driver history.
+
 One-platform changes are allowed only when the request explicitly says so or when the platform cannot support the behavior.
 
 - Call out the exception clearly in the task or pull request.
