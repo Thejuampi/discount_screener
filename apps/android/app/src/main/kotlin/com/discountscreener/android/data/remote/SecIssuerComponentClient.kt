@@ -162,6 +162,13 @@ class SecIssuerComponentClient(
         return name.trim()
     }
 
+    /**
+     * The sieved companyfacts of one CIK, from the day's cache or from the network.
+     *
+     * This call blocks on the network. Every caller runs it on [Dispatchers.IO]. The provider's
+     * function of the same name is `suspend`; this one is not, so the dispatcher is the caller's
+     * to hold.
+     */
     internal fun loadSievedFacts(cik: String): String? {
         var slimFile = cacheDir?.let { File(it, companyFactsSlimFileName(cik)) }
         if (slimFile != null && slimFile.isFile) {

@@ -790,3 +790,4 @@ client.
 | `the_response_arrives_sieved` | the issuer client stops sieving what the network sends |
 | `the_cache_holds_what_the_stream_returned` | the slim cache and the returned facts drift apart |
 | `a_second_read_costs_no_request` | a cached companyfacts file asks the network again |
+| `a_cache_older_than_the_ttl_is_read_again` | a day-old slim cache is served forever |

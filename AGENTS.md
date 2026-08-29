@@ -260,6 +260,21 @@ claim this tool rests on: a captured file replays into the rows the app had on s
 Capture is the only step that touches a device, and it obeys the standing rule — no live provider
 calls from a test. Replay reads a file.
 
+### Network doubles — a client that streams has no string seam (mandatory)
+
+Every http client takes its `OkHttpClient` as a defaulted constructor parameter. A client that
+builds one inside itself cannot be reached by a test, and the path it owns ships unproven.
+
+Two doubles live in `apps/android/app/src/test/.../`:
+
+- `offlineHttpClient()` — throws an `AssertionError` naming the URL. Use it under any double that
+  overrides some of a client's calls, so the calls it forgot land on the test.
+- `cannedHttpClient(fragment, body)` — answers one URL fragment with one body, and throws on the
+  rest. Use it when the client consumes the response as a stream: no string of the body exists
+  above the client, so the double must sit under it.
+
+No test reaches a live provider. A red test says which URL leaked.
+
 ### Commands and gates
 
 - Strict TDD for behavior changes: failing test → smallest green → refactor while green.

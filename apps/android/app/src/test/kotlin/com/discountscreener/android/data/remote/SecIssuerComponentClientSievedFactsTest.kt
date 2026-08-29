@@ -39,11 +39,28 @@ class SecIssuerComponentClientSievedFactsTest {
         )
     }
 
+    @Test
+    fun a_cache_older_than_the_ttl_is_read_again() {
+        var dir = temp.newFolder()
+        clientOn(dir).loadSievedFacts(CIK)
+        var cached = File(dir, companyFactsSlimFileName(CIK))
+        cached.setLastModified(System.currentTimeMillis() - 2L * TTL_MILLIS)
+        assertEquals(
+            SecCompanyFactsSieve.sieve(RESTATED.reader()),
+            SecIssuerComponentClient(
+                cacheDir = dir,
+                ttlMillis = TTL_MILLIS,
+                client = cannedHttpClient("companyfacts", RESTATED),
+            ).loadSievedFacts(CIK),
+        )
+    }
+
     private fun clientOn(dir: File) =
         SecIssuerComponentClient(cacheDir = dir, client = cannedHttpClient("companyfacts", RAW))
 
     private companion object {
         const val CIK = "0000320193"
+        const val TTL_MILLIS = 60_000L
         val RAW = """
             {
               "cik": 320193,
@@ -66,5 +83,7 @@ class SecIssuerComponentClientSievedFactsTest {
               }
             }
         """.trimIndent()
+
+        val RESTATED = RAW.replace("40.0", "44.0")
     }
 }

@@ -22,6 +22,13 @@ internal fun cannedHttpClient(fragment: String, body: String): OkHttpClient = Ok
             if (!request.url.toString().contains(fragment)) {
                 throw AssertionError("A unit test reached the network: ${request.method} ${request.url}")
             }
+            if (request.header("Accept-Encoding") != "identity") {
+                throw AssertionError(
+                    "The request asked SEC for a compressed body: ${request.url}" + "\n" +
+                        "  The sieve reads the response as it arrives. A gzip frame costs the phone " +
+                        "the decode of 4 MB it does not keep.",
+                )
+            }
             Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
