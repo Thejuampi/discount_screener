@@ -3853,6 +3853,7 @@ class DefaultDashboardRepository(
         providerFundamentals: FundamentalSnapshot?,
         chartCandles: List<HistoricalCandle>?,
         timeseries: FundamentalTimeseries,
+        peerCoupons: List<PeerCouponEvidence> = emptyList(),
     ): TimeseriesFallback? {
         val latestShares = timeseries.dilutedAverageShares.lastOrNull()?.value?.takeIf { it > 0.0 }
             ?: providerFundamentals?.sharesOutstanding?.toDouble()
@@ -3883,6 +3884,7 @@ class DefaultDashboardRepository(
             timeseries = timeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            peerCoupons = peerCoupons,
             issuerYield = cachedIssuerYield(symbol),
             components = cachedComponents(symbol),
         ).getOrNull() ?: return null
@@ -3909,6 +3911,11 @@ class DefaultDashboardRepository(
         if (providerFundamentals == null || !isFinancialServices(providerFundamentals)) {
             resolveIssuerYield(symbol, companyName)
         }
+        var peers = if (providerFundamentals != null) {
+            peerCouponsFor(symbol, providerFundamentals)
+        } else {
+            emptyList()
+        }
         val selection = dcfSourceCoordinator.resolve(symbol, allowSecondary = false) { timeseries ->
             dcfFallbackFromTimeseries(
                 symbol = symbol,
@@ -3916,6 +3923,7 @@ class DefaultDashboardRepository(
                 providerFundamentals = providerFundamentals,
                 chartCandles = chartCandles,
                 timeseries = timeseries,
+                peerCoupons = peers,
             )?.analysis
         }.selection
         val selectedTimeseries = selection.timeseries ?: return null
@@ -3925,6 +3933,7 @@ class DefaultDashboardRepository(
             providerFundamentals = providerFundamentals,
             chartCandles = chartCandles,
             timeseries = selectedTimeseries,
+            peerCoupons = peers,
         ) ?: return null
         return fallback.copy(analysis = selection.analysis ?: fallback.analysis)
     }

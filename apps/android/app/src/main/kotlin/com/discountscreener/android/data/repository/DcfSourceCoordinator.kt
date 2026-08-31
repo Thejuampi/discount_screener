@@ -3,6 +3,7 @@ package com.discountscreener.android.data.repository
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.core.engine.DcfSourceSelectionPolicy
+import com.discountscreener.core.engine.attachFiledInterestFrom
 import com.discountscreener.core.engine.attachStatutoryTaxFrom
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
@@ -61,7 +62,9 @@ internal class DcfSourceCoordinator(
             source = DcfSource.YahooFinance,
             timeseries = fetchYahoo(symbol)?.also { fetched[DcfSource.YahooFinance] = it }
                 ?.let { raw ->
-                    secCandidate?.timeseries?.let { attachStatutoryTaxFrom(raw, it) } ?: raw
+                    secCandidate?.timeseries?.let { sec ->
+                        attachFiledInterestFrom(attachStatutoryTaxFrom(raw, sec), sec)
+                    } ?: raw
                 },
             evaluate = evaluate,
         )

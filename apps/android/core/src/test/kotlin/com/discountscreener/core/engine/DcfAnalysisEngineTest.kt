@@ -1183,6 +1183,22 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun levered_empty_interest_forms_fcff_with_yield_and_peer_coupons() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(interestExpense = emptyList()),
+            marketParams = MarketParams(provisional = false),
+            peerCoupons = listOf(
+                PeerCouponEvidence("P1", 5.0, 100.0),
+                PeerCouponEvidence("P2", 6.0, 100.0),
+                PeerCouponEvidence("P3", 4.0, 100.0),
+            ),
+            issuerYield = IssuerYieldPoint(700, concept = "IssuerInstrumentYield:usd_4_15y_median"),
+        ).getOrThrow()
+        assertEquals(ValuationModel.FcffWacc, analysis.model)
+    }
+
+    @Test
     fun net_debt_without_interest_still_refuses() {
         var result = DcfAnalysisEngine.compute(
             fundamentals = completeFundamentals().copy(

@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:07Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T16:23Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -12,7 +12,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `yahoo_missing_marginal_tax` | Domicile 21% proxy when country is set | Rebuild the app. Refresh quotes so `country` is on the snapshot. |
 | `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |
 | `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |
-| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon | Levered names with empty Yahoo interest still refuse. |
+| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. PCAR is a captive-finance leftover. |
 
 ## Counts
 
@@ -22,7 +22,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `identity_ok` | 65 | closed |
 | `latest_reported_fcf_non_positive` | 39 | engine_fixed_pending_rebuild |
 | `not_eligible_silent` | 29 | expected refuse, UI reason missing |
-| `yahoo_missing_cost_of_debt` | 14 | mixed — net-cash pending rebuild; levered still open |
+| `yahoo_missing_cost_of_debt` | 14 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open |
 | `mixed_issuer_missing_lender_book` | 7 | open |
 | `financials_missing_book_or_roe` | 5 | open |
 | `no_payload` | 5 | open — list hole |
@@ -463,17 +463,17 @@ Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuil
 | --- | --- | --- | --- | --- | --- |
 | MPWR | engine_fixed_pending_rebuild | Technology | Semiconductors | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | ALGN | engine_fixed_pending_rebuild | Healthcare | Medical Instruments & Supplies | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| CBRE | open | Real Estate | Real Estate Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| ULTA | open | Consumer Cyclical | Specialty Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| CBRE | engine_fixed_pending_rebuild | Real Estate | Real Estate Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| ULTA | engine_fixed_pending_rebuild | Consumer Cyclical | Specialty Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | CSGP | engine_fixed_pending_rebuild | Real Estate | Real Estate Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| CMG | open | Consumer Cyclical | Restaurants | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| CMG | expected | Consumer Cyclical | Restaurants | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | PCAR | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | FFIV | engine_fixed_pending_rebuild | Technology | Software - Infrastructure | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | MNST | engine_fixed_pending_rebuild | Consumer Defensive | Beverages - Non - Alcoholic | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| LULU | open | Consumer Cyclical | Apparel Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| WSM | open | Consumer Cyclical | Specialty Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| LULU | expected | Consumer Cyclical | Apparel Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| WSM | engine_fixed_pending_rebuild | Consumer Cyclical | Specialty Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | GRMN | engine_fixed_pending_rebuild | Technology | Scientific & Technical Instruments | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| LEN | open | Consumer Cyclical | Residential Construction | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| LEN | expected | Consumer Cyclical | Residential Construction | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | TTD | engine_fixed_pending_rebuild | Communication Services | Advertising Agencies | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 
 ### `mixed_issuer_missing_lender_book` (7)

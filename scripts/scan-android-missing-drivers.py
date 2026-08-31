@@ -20,6 +20,26 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSON = ROOT / "docs" / "diagnostics" / "sp500-missing-drivers.json"
 DEFAULT_MD = ROOT / "docs" / "diagnostics" / "sp500-missing-drivers.md"
 
+SEC_FILED_NET_INTEREST = frozenset({"CBRE", "ULTA", "WSM"})
+NO_APPROVED_COUPON = {
+    "CMG": (
+        "expected",
+        "Restaurant lease stock. SEC has no approved interest-expense tag. Markets Insider has no parent bonds.",
+    ),
+    "LULU": (
+        "expected",
+        "Lease stock. SEC files InterestPaid only. Cash paid is not a coupon. Markets Insider has no parent bonds.",
+    ),
+    "PCAR": (
+        "open",
+        "Captive finance. SEC files InterestPaid only. Paccar Financial has bonds; the parent name does not match.",
+    ),
+    "LEN": (
+        "expected",
+        "Homebuilder capitalizes interest. SEC files InterestPaidNet. Markets Insider has no parent bonds.",
+    ),
+}
+
 
 def classify(symbol: str, row: dict | None) -> dict:
     if row is None:
@@ -125,17 +145,24 @@ def classify(symbol: str, row: dict | None) -> dict:
                 and cash >= debt
                 and debt >= 0
             )
-            return entry(
-                symbol,
-                "yahoo_missing_cost_of_debt",
-                "engine_fixed_pending_rebuild" if cash_covers else "open",
-                (
-                    "Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuild."
-                    if cash_covers
-                    else "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists."
-                ),
-                extra,
-            )
+            if cash_covers:
+                status = "engine_fixed_pending_rebuild"
+                note = "Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuild."
+            elif symbol in SEC_FILED_NET_INTEREST:
+                status = "engine_fixed_pending_rebuild"
+                note = (
+                    "Yahoo interest is empty. Detail copies filed SEC net interest onto Yahoo years. "
+                    "Rebuild and open Detail."
+                )
+            elif symbol in NO_APPROVED_COUPON:
+                status, note = NO_APPROVED_COUPON[symbol]
+            else:
+                status = "open"
+                note = (
+                    "Material net debt and empty Yahoo interest. "
+                    "Still refuses until a yield or filed coupon exists."
+                )
+            return entry(symbol, "yahoo_missing_cost_of_debt", status, note, extra)
         if biz == "FinancialServices" or "insurance" in (industry or "").lower() or "asset management" in (industry or "").lower() or "healthcare plans" in (industry or "").lower():
             return entry(
                 symbol,
@@ -186,7 +213,7 @@ def render_md(payload: dict) -> str:
         "| `yahoo_missing_marginal_tax` | Domicile 21% proxy when country is set | Rebuild the app. Refresh quotes so `country` is on the snapshot. |",
         "| `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |",
         "| `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |",
-        "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon | Levered names with empty Yahoo interest still refuse. |",
+        "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. PCAR is a captive-finance leftover. |",
         "",
         "## Counts",
         "",
@@ -266,7 +293,7 @@ def main() -> None:
         "identity_ok": "closed",
         "yahoo_missing_marginal_tax": "engine_fixed_pending_rebuild — domicile tax proxy",
         "latest_reported_fcf_non_positive": "engine_fixed_pending_rebuild",
-        "yahoo_missing_cost_of_debt": "mixed — net-cash pending rebuild; levered still open",
+        "yahoo_missing_cost_of_debt": "mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open",
         "mixed_issuer_missing_lender_book": "open",
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
         "financials_missing_book_or_roe": "open",

@@ -255,6 +255,103 @@ class DriverResolutionTest {
         assertEquals(0.15, filled.marginalTaxRate.single().value)
     }
 
+    @Test
+    fun yahoo_without_interest_takes_filed_sec_interest() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2025-12-31", 1.0, source = DcfSource.YahooFinance)),
+            totalDebt = listOf(AnnualReportedValue("2025-12-31", 100.0, source = DcfSource.YahooFinance)),
+        )
+        var sec = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2025-12-31",
+                    value = -216_000_000.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        )
+        var filled = attachFiledInterestFrom(yahoo, sec)
+        assertEquals(-216_000_000.0, filled.interestExpense.single().value)
+    }
+
+    @Test
+    fun yahoo_keeps_its_own_interest_year() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2025-12-31", 1.0, source = DcfSource.YahooFinance)),
+            interestExpense = listOf(
+                AnnualReportedValue("2025-12-31", 9.0, concept = "annualInterestExpense", source = DcfSource.YahooFinance),
+            ),
+        )
+        var sec = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2025-12-31",
+                    value = -216.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        )
+        var filled = attachFiledInterestFrom(yahoo, sec)
+        assertEquals(9.0, filled.interestExpense.single().value)
+    }
+
+    @Test
+    fun sec_interest_fills_a_yahoo_hole_by_fiscal_year() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2026-01-31", 1.0, source = DcfSource.YahooFinance)),
+        )
+        var sec = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2026-02-01",
+                    value = 36_838_000.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        )
+        var filled = attachFiledInterestFrom(yahoo, sec)
+        assertEquals("2026-01-31", filled.interestExpense.single().asOfDate)
+    }
+
+    @Test
+    fun cash_paid_sec_interest_does_not_fill_yahoo() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2025-12-31", 1.0, source = DcfSource.YahooFinance)),
+        )
+        var sec = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2025-12-31",
+                    value = 50_137_000.0,
+                    concept = "InterestPaidNet",
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        )
+        var filled = attachFiledInterestFrom(yahoo, sec)
+        assertEquals(true, filled.interestExpense.isEmpty())
+    }
+
+    @Test
+    fun yahoo_plus_sec_interest_forms_cost_of_debt() {
+        var yahoo = financingTimeseries().copy(interestExpense = emptyList())
+        var sec = FundamentalTimeseries(
+            interestExpense = financingTimeseries().interestExpense.map { point ->
+                point.copy(
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                    source = DcfSource.SecEdgar,
+                    value = -point.value,
+                )
+            },
+        )
+        var filled = attachFiledInterestFrom(yahoo, sec)
+        var resolved = resolveRateInputs(filled, 120L, 430).getOrThrow()!!
+        assertEquals(WaccFieldSource.InterestOverAverageDebt, resolved.costOfDebtSource)
+    }
+
     private fun financingTimeseries() = FundamentalTimeseries(
         interestExpense = listOf(
             AnnualReportedValue("2021-12-31", 5.0),

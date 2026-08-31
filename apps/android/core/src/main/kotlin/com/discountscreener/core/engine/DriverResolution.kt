@@ -89,6 +89,47 @@ fun attachStatutoryTaxFrom(
     return target.copy(marginalTaxRate = filled)
 }
 
+fun attachFiledInterestFrom(
+    target: FundamentalTimeseries,
+    source: FundamentalTimeseries,
+): FundamentalTimeseries {
+    var filed = source.interestExpense.filter { point ->
+        !isCashPaidCouponConcept(point.concept) &&
+            point.value.isFinite() &&
+            abs(point.value) > 0.0
+    }
+    if (filed.isEmpty()) return target
+    var byDate = filed.associateBy { annualKey(it) }
+    var byYear = filed.associateBy { annualKey(it).take(4) }
+    var existing = target.interestExpense
+        .filter { point ->
+            !isCashPaidCouponConcept(point.concept) &&
+                point.value.isFinite() &&
+                abs(point.value) > 0.0
+        }
+        .associateBy { annualKey(it) }
+    var anchors = target.operatingCashFlow.ifEmpty { target.totalDebt }
+    if (anchors.isEmpty()) return target
+    var filled = anchors.mapNotNull { row ->
+        var key = annualKey(row)
+        existing[key]?.let { return@mapNotNull it }
+        var match = byDate[key] ?: byYear[key.take(4)] ?: return@mapNotNull null
+        AnnualReportedValue(
+            asOfDate = row.asOfDate,
+            value = match.value,
+            periodEnd = row.asOfDate,
+            concept = match.concept,
+            source = match.source,
+        )
+    }
+    if (filled.isEmpty()) return target
+    var filledKeys = filled.map(::annualKey).toSet()
+    var merged = (
+        target.interestExpense.filter { annualKey(it) !in filledKeys } + filled
+        ).sortedBy { it.asOfDate }
+    return target.copy(interestExpense = merged)
+}
+
 internal fun taxObservations(timeseries: FundamentalTimeseries): List<TaxObservation> =
     timeseries.marginalTaxRate
         .ifEmpty { timeseries.taxRateForCalcs }

@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:07Z",
+  "scannedAt": "2026-08-31T16:23Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -30,7 +30,7 @@
     {
       "class": "yahoo_missing_cost_of_debt",
       "count": 14,
-      "statusHint": "mixed \u2014 net-cash pending rebuild; levered still open"
+      "statusHint": "mixed \u2014 net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open"
     },
     {
       "class": "mixed_issuer_missing_lender_book",
@@ -11091,8 +11091,8 @@
       {
         "symbol": "CBRE",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo interest is empty. Detail copies filed SEC net interest onto Yahoo years. Rebuild and open Detail.",
         "sector": "Real Estate",
         "industry": "Real Estate Services",
         "company": "CBRE Group, Inc.",
@@ -11117,8 +11117,8 @@
       {
         "symbol": "ULTA",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo interest is empty. Detail copies filed SEC net interest onto Yahoo years. Rebuild and open Detail.",
         "sector": "Consumer Cyclical",
         "industry": "Specialty Retail",
         "company": "Ulta Beauty, Inc.",
@@ -11169,8 +11169,8 @@
       {
         "symbol": "CMG",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "expected",
+        "note": "Restaurant lease stock. SEC has no approved interest-expense tag. Markets Insider has no parent bonds.",
         "sector": "Consumer Cyclical",
         "industry": "Restaurants",
         "company": "Chipotle Mexican Grill, Inc.",
@@ -11196,7 +11196,7 @@
         "symbol": "PCAR",
         "class": "yahoo_missing_cost_of_debt",
         "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "note": "Captive finance. SEC files InterestPaid only. Paccar Financial has bonds; the parent name does not match.",
         "sector": "Industrials",
         "industry": "Farm & Heavy Construction Machinery",
         "company": "PACCAR Inc",
@@ -11273,8 +11273,8 @@
       {
         "symbol": "LULU",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "expected",
+        "note": "Lease stock. SEC files InterestPaid only. Cash paid is not a coupon. Markets Insider has no parent bonds.",
         "sector": "Consumer Cyclical",
         "industry": "Apparel Retail",
         "company": "lululemon athletica inc.",
@@ -11299,8 +11299,8 @@
       {
         "symbol": "WSM",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo interest is empty. Detail copies filed SEC net interest onto Yahoo years. Rebuild and open Detail.",
         "sector": "Consumer Cyclical",
         "industry": "Specialty Retail",
         "company": "Williams-Sonoma, Inc.",
@@ -11351,8 +11351,8 @@
       {
         "symbol": "LEN",
         "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Material net debt and empty Yahoo interest. Still refuses until a yield or filed coupon exists.",
+        "status": "expected",
+        "note": "Homebuilder capitalizes interest. SEC files InterestPaidNet. Markets Insider has no parent bonds.",
         "sector": "Consumer Cyclical",
         "industry": "Residential Construction",
         "company": "Lennar Corporation",
