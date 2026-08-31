@@ -110,6 +110,9 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Beta missing → industry shrink
 - Latest OCF is the run-rate only when the prior window already printed two positive OCF years. A first-cash ramp keeps the recent OCF centre.
 - Latest FCFF margin is the base run-rate when the recent-window median is non-positive and that latest aligned year is positive (`fcff_margin=latest_positive_aligned_annual`). Refuse `non_positive_normalized_fcff` only when the latest year is also non-positive.
+- Yahoo latest reported FCF sign does not block driver FCFF. `LatestFcfNonPositive` stays only when aligned OCF/CapEx/revenue years are short.
+- When reported cash covers reported debt, a failed coupon path is not-applicable. WACC is cost of equity. Material net debt with no yield, spread, or filed interest still refuses.
+- WACC tax is filing statutory first. When that series is empty, attach the versioned domicile row (`DomicileTaxProxy`, provisional) from `valuation-policy.yaml` `tax.rows` using the issuer country. Missing country stays unavailable. Historical effective tax is not the shield.
 
 **Forbidden**
 

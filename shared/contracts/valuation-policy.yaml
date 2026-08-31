@@ -29,6 +29,13 @@ erp:
       erp_bps: 500
       source: kroll_recommended_us_2025-09-02
 
+tax:
+  version: domicile-tax-proxy/1
+  rows:
+    - countries: ["United States", "USA", "US"]
+      statutory_bps: 2100
+      source: us_federal_statutory_2018
+
 dcf:
   beta_company_weight_pct: 67
   beta_industry_weight_pct: 33

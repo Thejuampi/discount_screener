@@ -75,6 +75,20 @@ class DcfSourceSelectionPolicyTest {
     }
 
     @Test
+    fun negative_latest_reported_fcf_keeps_driver_path_usable() {
+        var timeseries = usableTimeseries().copy(
+            freeCashFlow = listOf(
+                AnnualReportedValue("2021-12-31", 100.0),
+                AnnualReportedValue("2022-12-31", 120.0),
+                AnnualReportedValue("2023-12-31", -1.0),
+            ),
+        )
+        var candidate = candidate(DcfSource.YahooFinance, timeseries)
+
+        assertEquals(true, DcfSourceSelectionPolicy.isDcfUsable(candidate))
+    }
+
+    @Test
     fun source_with_aligned_driver_rows_wins_over_priority_only_source() {
         val yahoo = usableTimeseries().copy(
             operatingCashFlow = annual(100.0, 120.0, 140.0),

@@ -1144,6 +1144,80 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun us_domicile_lets_yahoo_form_fcff_when_filed_tax_is_absent() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(country = "United States"),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(
+            true,
+            analysis.reasonCodes.any { it.startsWith("marginal_tax_source=domicile_tax_proxy") },
+        )
+    }
+
+    @Test
+    fun net_cash_skips_coupon_and_forms_fcff() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                country = "United States",
+                totalDebtDollars = 100_000_000L,
+                totalCashDollars = 250_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                interestExpense = emptyList(),
+                totalDebt = emptyList(),
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("cost_of_debt=not_applicable_cash_covers_debt"))
+    }
+
+    @Test
+    fun net_debt_without_interest_still_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                country = "United States",
+                totalDebtDollars = 200_000_000L,
+                totalCashDollars = 50_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                interestExpense = emptyList(),
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(true, result.isFailure)
+    }
+
+    @Test
+    fun missing_country_still_refuses_without_filed_tax() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(true, result.isFailure)
+    }
+
+    @Test
     fun all_negative_aligned_fcff_still_refuses() {
         var result = DcfAnalysisEngine.compute(
             fundamentals = nandCycleFundamentals(),

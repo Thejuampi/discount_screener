@@ -221,6 +221,26 @@ class DriverResolutionTest {
     }
 
     @Test
+    fun us_domicile_attaches_statutory_tax_when_yahoo_has_none() {
+        var yahoo = financingTimeseries().copy(marginalTaxRate = emptyList())
+        var filled = attachDomicileTax(yahoo, "United States")
+        assertEquals("DomicileTaxProxy", filled.marginalTaxRate.last().concept)
+    }
+
+    @Test
+    fun unknown_domicile_leaves_yahoo_tax_empty() {
+        var yahoo = financingTimeseries().copy(marginalTaxRate = emptyList())
+        var filled = attachDomicileTax(yahoo, "Atlantis")
+        assertEquals(true, filled.marginalTaxRate.isEmpty())
+    }
+
+    @Test
+    fun filed_statutory_tax_beats_the_domicile_proxy() {
+        var filled = attachDomicileTax(financingTimeseries(), "United States")
+        assertEquals("JurisdictionStatutory", filled.marginalTaxRate.last().concept)
+    }
+
+    @Test
     fun yahoo_keeps_its_own_marginal_tax() {
         var yahoo = FundamentalTimeseries(
             operatingCashFlow = listOf(AnnualReportedValue("2026-06-27", 1.0)),

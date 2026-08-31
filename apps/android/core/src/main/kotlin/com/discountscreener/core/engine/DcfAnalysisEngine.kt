@@ -1546,11 +1546,24 @@ object DcfAnalysisEngine {
         marketPriceCents: Long?,
         marketParams: MarketParams,
     ): ResolvedWacc {
+        var reportedDebt = fundamentals.totalDebtDollars
+        var reportedCash = fundamentals.totalCashDollars
+        var cashCoversDebt = reportedDebt != null && reportedCash != null &&
+            reportedDebt >= 0L && reportedCash >= reportedDebt
         val resolvedRates = resolveRateInputs(
-            timeseries = timeseries,
+            timeseries = attachDomicileTax(timeseries, fundamentals.country),
             reportedTotalDebtDollars = fundamentals.totalDebtDollars,
             _riskFreeBps = marketParams.rfBps,
-        ).getOrElse { error(it.message ?: "fcff rate inputs unavailable") }
+        ).fold(
+            onSuccess = { rates -> rates },
+            onFailure = { error ->
+                if (cashCoversDebt) {
+                    null
+                } else {
+                    error(error.message ?: "fcff rate inputs unavailable")
+                }
+            },
+        )
         val (marketCap, marketCapSource) = resolveMarketCapDollars(fundamentals, timeseries, marketPriceCents)
             ?: error("market cap is missing")
         val (costOfEquityBps, betaSource, betaProv) = costOfEquityBps(fundamentals, marketParams)
@@ -1600,15 +1613,16 @@ object DcfAnalysisEngine {
                 waccClamped = betaProv || marketParams.provisional ||
                     resolvedRates?.quality == DriverEvidenceQuality.Provisional || provisionalUplift > 0,
             ),
-            rateReasons = resolvedRates?.reasons.orEmpty().let { reasons ->
-                if (reasons.isEmpty()) {
-                    listOf(
-                        "cost_of_debt=not_applicable_explicit_zero_debt",
-                        "marginal_tax=not_applicable_no_debt_tax_shield",
-                    )
-                } else {
-                    reasons
-                }
+            rateReasons = when {
+                cashCoversDebt && (reportedDebt ?: 0L) > 0L -> listOf(
+                    "cost_of_debt=not_applicable_cash_covers_debt",
+                    "marginal_tax=not_applicable_no_debt_tax_shield",
+                )
+                resolvedRates?.reasons.isNullOrEmpty() -> listOf(
+                    "cost_of_debt=not_applicable_explicit_zero_debt",
+                    "marginal_tax=not_applicable_no_debt_tax_shield",
+                )
+                else -> resolvedRates?.reasons.orEmpty()
             },
         )
     }

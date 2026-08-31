@@ -1044,6 +1044,7 @@ private fun buildQuoteContext(
         sectorName = assetProfile.string("sectorDisp") ?: assetProfile.string("sector"),
         industryKey = assetProfile.string("industryKey"),
         industryName = assetProfile.string("industryDisp") ?: assetProfile.string("industry"),
+        country = assetProfile.string("country"),
         marketCapDollars = resolveMarketCapDollars(
             reportedMarketCap = price.rawDouble("marketCap"),
             sharesOutstanding = statistics.rawDouble("sharesOutstanding"),

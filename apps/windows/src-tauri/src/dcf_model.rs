@@ -3283,12 +3283,20 @@ fn derive_wacc(
     market_params: &MarketParams,
     source: &str,
 ) -> Result<ResolvedWacc, String> {
-    let resolved_rates = crate::driver_resolution::resolve_rate_inputs_for_source(
+    let cash_covers_debt = matches!(
+        (fundamentals.total_debt_dollars, fundamentals.total_cash_dollars),
+        (Some(debt), Some(cash)) if debt >= 0 && cash >= debt
+    );
+    let resolved_rates = match crate::driver_resolution::resolve_rate_inputs_for_source(
         fcf_history,
         fundamentals.total_debt_dollars,
         market_params.rf_bps,
         source,
-    )?;
+    ) {
+        Ok(rates) => rates,
+        Err(_) if cash_covers_debt => None,
+        Err(error) => return Err(error),
+    };
     let (market_cap, market_cap_source) = resolve_market_cap(fundamentals, market_price_cents)
         .ok_or_else(|| "market cap is missing".to_string())?;
     let (cost_of_equity_bps, beta_source, beta_prov) =
@@ -3331,17 +3339,27 @@ fn derive_wacc(
             rates.quality,
             rates.reasons,
         ),
-        None => (
-            0,
-            WaccFieldSource::NotApplicable,
-            0,
-            WaccFieldSource::NotApplicable,
-            crate::driver_resolution::EvidenceQuality::Solid,
-            vec![
-                "cost_of_debt=not_applicable_explicit_zero_debt".into(),
-                "marginal_tax=not_applicable_no_debt_tax_shield".into(),
-            ],
-        ),
+        None => {
+            let reasons = if cash_covers_debt && fundamentals.total_debt_dollars.unwrap_or(0) > 0 {
+                vec![
+                    "cost_of_debt=not_applicable_cash_covers_debt".into(),
+                    "marginal_tax=not_applicable_no_debt_tax_shield".into(),
+                ]
+            } else {
+                vec![
+                    "cost_of_debt=not_applicable_explicit_zero_debt".into(),
+                    "marginal_tax=not_applicable_no_debt_tax_shield".into(),
+                ]
+            };
+            (
+                0,
+                WaccFieldSource::NotApplicable,
+                0,
+                WaccFieldSource::NotApplicable,
+                crate::driver_resolution::EvidenceQuality::Solid,
+                reasons,
+            )
+        }
     };
 
     let after_tax_debt =

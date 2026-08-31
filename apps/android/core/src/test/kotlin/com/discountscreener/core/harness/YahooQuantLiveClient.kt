@@ -184,6 +184,7 @@ internal fun parseQuoteSummary(body: String, symbol: String): FundamentalSnapsho
         sectorName = assetProfile.string("sectorDisp") ?: assetProfile.string("sector"),
         industryKey = assetProfile.string("industryKey"),
         industryName = assetProfile.string("industryDisp") ?: assetProfile.string("industry"),
+        country = assetProfile.string("country"),
         marketCapDollars = price.rawDouble("marketCap")?.takeIf { it > 0.0 }?.toLong(),
         sharesOutstanding = statistics.rawDouble("sharesOutstanding")?.toLong(),
         trailingPeHundredths = statistics.rawDouble("trailingPE")?.times(100.0)?.roundToLong()?.toInt(),

@@ -26,6 +26,43 @@ internal data class TaxObservation(
     val source: WaccFieldSource,
 )
 
+fun attachDomicileTax(
+    timeseries: FundamentalTimeseries,
+    country: String?,
+): FundamentalTimeseries {
+    var qualifying = timeseries.marginalTaxRate.filter { point ->
+        var kind = taxSource(point.concept)
+        kind == WaccFieldSource.TaxReconciliation ||
+            kind == WaccFieldSource.JurisdictionStatutory ||
+            kind == WaccFieldSource.DomicileTaxProxy ||
+            kind == WaccFieldSource.ReportedMarginalTax
+    }
+    if (qualifying.isNotEmpty()) return timeseries
+    var row = domicileTaxRow(country) ?: return timeseries
+    var anchors = timeseries.totalDebt.ifEmpty { timeseries.operatingCashFlow }.ifEmpty { timeseries.revenue }
+    if (anchors.isEmpty()) return timeseries
+    var rate = row.statutoryBps / 10_000.0
+    return timeseries.copy(
+        marginalTaxRate = anchors.map { point ->
+            AnnualReportedValue(
+                asOfDate = point.asOfDate,
+                value = rate,
+                periodEnd = annualKey(point),
+                concept = "DomicileTaxProxy",
+                source = point.source,
+            )
+        },
+    )
+}
+
+internal fun domicileTaxRow(country: String?): DomicileTaxRow? {
+    var key = country?.trim()?.lowercase().orEmpty()
+    if (key.isEmpty()) return null
+    return ValuationPolicy.current.tax.rows.firstOrNull { row ->
+        row.countries.any { alias -> alias.trim().lowercase() == key }
+    }
+}
+
 fun attachStatutoryTaxFrom(
     target: FundamentalTimeseries,
     source: FundamentalTimeseries,
