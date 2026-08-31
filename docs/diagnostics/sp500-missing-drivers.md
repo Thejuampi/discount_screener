@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:53Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T17:04Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -15,6 +15,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |
 | `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |
 | `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |
+| `no_payload` | quoteSummary 404 scrapes the quote HTML page | Rebuild. Refresh BK, SATS, FISV, FOX, NWS. Do not copy FOXA or NWSA. |
 
 ## Counts
 
@@ -27,7 +28,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
 | `mixed_issuer_missing_lender_book` | 8 | CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse |
 | `financials_missing_book_or_roe` | 5 | ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC |
-| `no_payload` | 5 | open — list hole |
+| `no_payload` | 5 | engine_fixed_pending_rebuild — quoteSummary 404 HTML recovery |
 | `sec_non_positive_normalized_fcff` | 1 | open / SNDK pending rebuild |
 
 ## Queue
@@ -506,15 +507,15 @@ Yahoo latest ROE is a loss year. Detail SEC median of recent years stays positiv
 
 ### `no_payload` (5)
 
-No symbol_latest row. The list never stored this ticker.
+Yahoo quoteSummary 404s with a valid crumb. Fetch the quote HTML page on 404 only. Rebuild and refresh.
 
 | Symbol | Status | Sector | Industry | Source | Detail |
 | --- | --- | --- | --- | --- | --- |
-| BK | open |  |  |  | No symbol_latest row. The list never stored this ticker. |
-| SATS | open |  |  |  | No symbol_latest row. The list never stored this ticker. |
-| FISV | open |  |  |  | No symbol_latest row. The list never stored this ticker. |
-| FOX | open |  |  |  | No symbol_latest row. The list never stored this ticker. |
-| NWS | open |  |  |  | No symbol_latest row. The list never stored this ticker. |
+| BK | engine_fixed_pending_rebuild |  |  |  | Yahoo quoteSummary 404s with a valid crumb. Fetch the quote HTML page on 404 only. Rebuild and refresh. |
+| SATS | engine_fixed_pending_rebuild |  |  |  | Batch quote omits SATS. quoteSummary then 404s. Fetch the quote HTML page on 404 only. Rebuild and refresh. |
+| FISV | engine_fixed_pending_rebuild |  |  |  | Never attempted. Tail of tracked_symbol after SATS 404. Next refresh uses quoteSummary, then HTML on 404. FISV is the live ticker. |
+| FOX | engine_fixed_pending_rebuild |  |  |  | Never attempted. Dual-class FOX is not FOXA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A. |
+| NWS | engine_fixed_pending_rebuild |  |  |  | Never attempted. Dual-class NWS is not NWSA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A. |
 
 ### `sec_non_positive_normalized_fcff` (1)
 

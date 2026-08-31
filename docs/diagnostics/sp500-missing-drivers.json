@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:53Z",
+  "scannedAt": "2026-08-31T17:04Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -45,7 +45,7 @@
     {
       "class": "no_payload",
       "count": 5,
-      "statusHint": "open \u2014 list hole"
+      "statusHint": "engine_fixed_pending_rebuild \u2014 quoteSummary 404 HTML recovery"
     },
     {
       "class": "sec_non_positive_normalized_fcff",
@@ -11706,32 +11706,32 @@
       {
         "symbol": "BK",
         "class": "no_payload",
-        "status": "open",
-        "note": "No symbol_latest row. The list never stored this ticker."
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo quoteSummary 404s with a valid crumb. Fetch the quote HTML page on 404 only. Rebuild and refresh."
       },
       {
         "symbol": "SATS",
         "class": "no_payload",
-        "status": "open",
-        "note": "No symbol_latest row. The list never stored this ticker."
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Batch quote omits SATS. quoteSummary then 404s. Fetch the quote HTML page on 404 only. Rebuild and refresh."
       },
       {
         "symbol": "FISV",
         "class": "no_payload",
-        "status": "open",
-        "note": "No symbol_latest row. The list never stored this ticker."
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Never attempted. Tail of tracked_symbol after SATS 404. Next refresh uses quoteSummary, then HTML on 404. FISV is the live ticker."
       },
       {
         "symbol": "FOX",
         "class": "no_payload",
-        "status": "open",
-        "note": "No symbol_latest row. The list never stored this ticker."
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Never attempted. Dual-class FOX is not FOXA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A."
       },
       {
         "symbol": "NWS",
         "class": "no_payload",
-        "status": "open",
-        "note": "No symbol_latest row. The list never stored this ticker."
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Never attempted. Dual-class NWS is not NWSA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A."
       }
     ],
     "sec_non_positive_normalized_fcff": [

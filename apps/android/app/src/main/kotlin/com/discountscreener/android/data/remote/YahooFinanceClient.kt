@@ -254,7 +254,7 @@ open class YahooFinanceClient(
         }
 
         currentCoroutineContext().ensureActive()
-        // Primary path: JSON quoteSummary (same modules Yahoo's web JS uses).
+        var quoteSummaryNotFound = false
         var quoteContext = try {
             val root = fetchQuoteSummaryJson(requestSymbol)
             parseQuoteSummary(
@@ -264,6 +264,7 @@ open class YahooFinanceClient(
                 diagnostics = diagnostics,
             )
         } catch (error: IOException) {
+            quoteSummaryNotFound = isNotFound(error)
             diagnostics += ProviderDiagnostic(
                 component = QUOTE_SUMMARY_COMPONENT,
                 kind = ERROR_KIND,
@@ -273,8 +274,7 @@ open class YahooFinanceClient(
             null
         }
 
-        // Optional legacy HTML scrape (off by default).
-        if (quoteContext == null && htmlFallback) {
+        if (quoteContext == null && (htmlFallback || quoteSummaryNotFound)) {
             quoteContext = try {
                 val body = fetchQuotePage(requestSymbol)
                 val quotePrice = parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics)
@@ -786,6 +786,11 @@ open class YahooFinanceClient(
         return message.contains("Invalid Crumb", ignoreCase = true) ||
             message.contains("Invalid Cookie", ignoreCase = true) ||
             message.contains("HTTP 401")
+    }
+
+    private fun isNotFound(error: IOException): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("HTTP 404")
     }
 }
 

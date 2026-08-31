@@ -35,10 +35,35 @@ NO_APPROVED_COUPON = {
         "Homebuilder capitalizes interest. SEC files InterestPaidNet. Markets Insider has no parent bonds.",
     ),
 }
+NO_PAYLOAD = {
+    "BK": (
+        "engine_fixed_pending_rebuild",
+        "Yahoo quoteSummary 404s with a valid crumb. Fetch the quote HTML page on 404 only. Rebuild and refresh.",
+    ),
+    "SATS": (
+        "engine_fixed_pending_rebuild",
+        "Batch quote omits SATS. quoteSummary then 404s. Fetch the quote HTML page on 404 only. Rebuild and refresh.",
+    ),
+    "FISV": (
+        "engine_fixed_pending_rebuild",
+        "Never attempted. Tail of tracked_symbol after SATS 404. Next refresh uses quoteSummary, then HTML on 404. FISV is the live ticker.",
+    ),
+    "FOX": (
+        "engine_fixed_pending_rebuild",
+        "Never attempted. Dual-class FOX is not FOXA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A.",
+    ),
+    "NWS": (
+        "engine_fixed_pending_rebuild",
+        "Never attempted. Dual-class NWS is not NWSA. Next refresh uses quoteSummary, then HTML on 404. Do not copy Class A.",
+    ),
+}
 
 
 def classify(symbol: str, row: dict | None) -> dict:
     if row is None:
+        if symbol in NO_PAYLOAD:
+            status, note = NO_PAYLOAD[symbol]
+            return entry(symbol, "no_payload", status, note)
         return entry(symbol, "no_payload", "open", "No symbol_latest row. The list never stored this ticker.")
     fund = row.get("fundamentals") or {}
     sector = fund.get("sectorName")
@@ -289,6 +314,7 @@ def render_md(payload: dict) -> str:
         "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |",
         "| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |",
         "| `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |",
+        "| `no_payload` | quoteSummary 404 scrapes the quote HTML page | Rebuild. Refresh BK, SATS, FISV, FOX, NWS. Do not copy FOXA or NWSA. |",
         "",
         "## Counts",
         "",
@@ -373,7 +399,7 @@ def main() -> None:
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
         "financials_missing_book_or_roe": "ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC",
         "not_eligible_silent": "expected refuse, UI reason missing",
-        "no_payload": "open — list hole",
+        "no_payload": "engine_fixed_pending_rebuild — quoteSummary 404 HTML recovery",
         "no_dcf": "open",
         "missing_driver_other": "open",
         "zero_identity": "open",
