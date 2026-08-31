@@ -371,6 +371,7 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 - Type-driven design: encode invariants in types; validate at boundaries; keep invalid states unrepresentable.
 - Decouple market-data, persistence, and UI/rendering.
 - Temp work only under `.agents/workspace/tmp`.
+- Seek decision log: append nodes to [`.grok/decisions.json`](.grok/decisions.json). Do not replace the tree.
 - User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments.
 - Demand-driven expensive work: history, valuation, and heavy fetches stay bounded and on-demand where practical.
 - Android Detail second open of a warm ticker paints from the session cache. Skip disk and network when memory already holds the chart and DCF. Leftover and dip boards reuse the last assemble when the input fingerprint is unchanged. Session flags (`revisionHistoryHydrated`, `pricingHistoryHydrated`, `liveDcfResolvedSymbols`, replay backing) clear in `resetInMemoryLocked`.
@@ -389,3 +390,4 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 | Contracts | [`shared/contracts/README.md`](shared/contracts/README.md) |
 | Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/2`) |
 | BMAD process | [`.grok/rules/bmad.md`](.grok/rules/bmad.md) |
+| Seek decision log | [`.grok/decisions.json`](.grok/decisions.json) — append `open` / `taken` / `failed` / `skipped` nodes. Do not replace the tree. |
