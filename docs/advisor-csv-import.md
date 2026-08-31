@@ -6,7 +6,7 @@ Windows Advisor import. Contract: [`shared/contracts/advisor-csv-import-v1.yaml`
 
 | File | Kind | What it says |
 | --- | --- | --- |
-| `positions*.csv` (J.P. Morgan) | Holdings snapshot | Quantity and unit cost as of one date |
+| `positions*.csv` (J.P. Morgan) | Holdings snapshot | Full book image. Quantity and unit cost as of one date. Lots the file omits are removed. |
 | `transactions*.csv` (Chase) | Trades window | Buys, sells, and reinvests in the last 90 days |
 | Schwab / Coinbase / generic | Trades ledger | Full history that can rebuild open lots |
 
@@ -15,7 +15,7 @@ A snapshot is the book. A 90-day blotter is a window. Do not swap them.
 ## How to load Chase
 
 1. Import `positions*.csv`.
-2. Read the warning. It names a snapshot replace.
+2. Read the warning. It names the load count and the lots it will remove.
 3. Confirm.
 4. Import `transactions*.csv`.
 5. Read the merge warning. Confirm.
@@ -24,6 +24,7 @@ The app applies only trades after the snapshot as-of. Trades on that day stay in
 
 ## Rules that matter
 
+- The positions file is the full book. Confirm removes lots the file does not name.
 - Cost on a J.P. Morgan row is **Unit Cost**, not Price.
 - `"1,273"` is 1273 shares.
 - Cash and the Chase sweep `QACDS` drop.

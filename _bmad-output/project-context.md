@@ -158,7 +158,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - **Prefer demand-driven expensive work.** History loading, valuation/DCF analysis, Yahoo fetches, and Android startup flows must be bounded, cancellable where practical, and observable enough to debug. Financial residual income may run on fundamentals ingest or Quant Lens demand; operating FCFF still needs cash-flow history.
 - **Live QA findings override build confidence.** Passing unit tests and Gradle builds is insufficient when the installed app hangs, fails to launch, or renders the wrong surface.
 - **Do not “fix” valuation noise with output clamps.** Fix model routing, driver definitions, parameter dynamics, and Quant Lens agreement policy instead.
-- **Windows Advisor CSV kinds stay distinct.** A J.P. Morgan positions file is a holdings snapshot. A Chase transactions file is a 90-day trades window. Warn, then confirm, before a snapshot replace. Merge window trades onto current lots after book as-of. Never aggregate a 90-day blotter from zero. Contract: `shared/contracts/advisor-csv-import-v1.yaml`.
+- **Windows Advisor CSV kinds stay distinct.** A J.P. Morgan positions file is the full book image. Warn, then confirm. Confirm upserts listed lots and deletes every current lot the file omits. A Chase transactions file is a 90-day trades window. Merge window trades onto current lots after book as-of. Never aggregate a 90-day blotter from zero. Contract: `shared/contracts/advisor-csv-import-v1.yaml`.
 
 ---
 

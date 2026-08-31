@@ -3377,6 +3377,7 @@ pub struct PortfolioImportResult {
     pub created: usize,
     pub updated: usize,
     pub skipped: usize,
+    pub removed: usize,
 }
 
 /// Bulk import: upsert each position keyed by symbol.
@@ -3408,6 +3409,30 @@ pub fn portfolio_import(
         created,
         updated,
         skipped,
+        removed: 0,
+    })
+}
+
+#[tauri::command]
+pub fn portfolio_replace(
+    positions: Vec<ImportPosition>,
+    state: State<AppState>,
+) -> Result<PortfolioImportResult, String> {
+    let mut rows: Vec<(String, f64, i64, Option<String>)> = Vec::new();
+    for p in positions {
+        rows.push((
+            p.symbol.trim().to_uppercase(),
+            p.quantity,
+            p.avg_cost_cents,
+            p.opened_at,
+        ));
+    }
+    let (created, updated, skipped, removed) = state.db.portfolio_replace(&rows)?;
+    Ok(PortfolioImportResult {
+        created,
+        updated,
+        skipped,
+        removed,
     })
 }
 

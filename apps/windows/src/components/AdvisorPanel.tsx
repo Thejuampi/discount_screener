@@ -346,9 +346,17 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     lots: PortfolioLot[],
     ignored: number,
     asOf: string | null,
+    replaceBook: boolean,
   ) => {
-    var res = await api.portfolioImport(lots);
-    var msg = `[${format}] ` + t("advisor.csv.result", { created: res.created, updated: res.updated, skipped: res.skipped });
+    var res = replaceBook
+      ? await api.portfolioReplace(lots)
+      : await api.portfolioImport(lots);
+    var msg = `[${format}] ` + t("advisor.csv.result", {
+      created: res.created,
+      updated: res.updated,
+      skipped: res.skipped,
+      removed: res.removed,
+    });
     if (ignored > 0) msg += ` · ${ignored} filas no-trade omitidas`;
     if (asOf) localStorage.setItem(BOOK_AS_OF_STORAGE_KEY, asOf);
     setCsvMsg(msg);
@@ -378,7 +386,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
         return;
       }
       if (plan.action === "upsert_ledger") {
-        await applyCsvPositions(plan.format, plan.positions, plan.ignored, null);
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, null, false);
         return;
       }
       setCsvMsg(null);
@@ -395,11 +403,11 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     setCsvPending(null);
     try {
       if (plan.action === "confirm_holdings_replace") {
-        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf);
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf, true);
         return;
       }
       if (plan.action === "confirm_trades_merge") {
-        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf);
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf, false);
       }
     } catch (e) {
       setCsvMsg(`⚠ ${e instanceof Error ? e.message : String(e)}`);
@@ -621,6 +629,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
               {csvPending.action === "confirm_holdings_replace"
                 ? t("advisor.csv.warnHoldings", {
                     count: csvPending.positions.length,
+                    remove: csvPending.remove.length,
                     asOf: csvPending.asOf ?? "—",
                   })
                 : t("advisor.csv.warnTrades", { asOf: csvPending.asOf })}

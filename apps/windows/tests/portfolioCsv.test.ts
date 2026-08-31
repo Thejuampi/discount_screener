@@ -67,6 +67,19 @@ test("jpm holdings import plans a confirm replace", () => {
   assert.equal(plan.action, "confirm_holdings_replace");
 });
 
+test("a holdings snapshot removes lots the file omits", () => {
+  var plan = planCsvImport(parseAnyCsv(sample()), {
+    lots: [{ symbol: "AXON", quantity: 4, avg_cost_cents: 43600, opened_at: null }],
+    bookAsOf: null,
+  });
+  assert.deepEqual(plan.action === "confirm_holdings_replace" ? plan.remove : [], ["AXON"]);
+});
+
+test("a holdings snapshot with an empty book removes nothing", () => {
+  var plan = planCsvImport(parseAnyCsv(sample()), { lots: [], bookAsOf: null });
+  assert.deepEqual(plan.action === "confirm_holdings_replace" ? plan.remove : ["x"], []);
+});
+
 const CHASE_HEADER =
   "Trade Date,Post Date,Settlement Date,Account Name,Account Number,Account Type,Type,Description,Cusip,Ticker,Security Type,Local Currency,Price USD,Price Local,Quantity,G/L Short USD,G/L Short Local,G/L Long USDs,G/L Long Local,Amount USD,Amount Local,Income USD,Income Local,Balance,Commissions USD,Commissions Local,Tran Code,Tran Code Description,Broker,Check Number,Tax Withheld";
 

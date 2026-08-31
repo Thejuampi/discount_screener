@@ -1,5 +1,5 @@
 contract: advisor-csv-import-v1
-policyVersion: advisor-csv-import/1
+policyVersion: advisor-csv-import/2
 status: active
 surface: windows-advisor
 owner: apps/windows/src/portfolioCsv.ts
@@ -52,8 +52,9 @@ holdings_snapshot:
   write:
     - Show a warning first.
     - Wait for Confirm or Cancel.
-    - On Confirm, upsert listed symbols only.
-    - Do not delete lots that the file omits.
+    - The file is the full book image.
+    - On Confirm, upsert listed symbols and delete every current lot the file omits.
+    - An empty keep set refuses. It does not wipe the book.
     - Store book as-of in localStorage key ds_advisor_book_as_of.
   confirmIsRequired: true
   silentUpsert: forbidden
@@ -161,6 +162,21 @@ examples:
     case: holdings import plans a confirm replace
     expect:
       action: confirm_holdings_replace
+
+  - id: JPM-REMOVE-OMITTED
+    case: a holdings snapshot removes lots the file omits
+    input:
+      currentLots: [AXON]
+      fileLots: [PHYL, AMZN]
+    expect:
+      remove: [AXON]
+
+  - id: JPM-REMOVE-EMPTY-BOOK
+    case: a holdings snapshot with an empty book removes nothing
+    input:
+      currentLots: []
+    expect:
+      remove: []
 
   - id: CHASE-KIND
     case: chase transactions csv is a trades window

@@ -696,16 +696,16 @@ const T: Record<string, { es: string; en: string }> = {
   "advisor.col.days":           { es: "Días", en: "Days" },
   "advisor.csv.import":         { es: "Importar CSV", en: "Import CSV" },
   "advisor.csv.help":           {
-    es: "J.P. Morgan positions.csv es un snapshot: avisa y pide confirmación. Chase transactions.csv es un blotter de 90 días: se fusiona después del as-of. También Schwab, Coinbase y genérico (symbol, side, quantity, price, date). Dividendos y cash se omiten. Costo promedio. Reinvest cuenta como compra.",
-    en: "J.P. Morgan positions.csv is a snapshot: warn, then confirm. Chase transactions.csv is a 90-day blotter: merge after as-of. Also Schwab, Coinbase, and generic (symbol, side, quantity, price, date). Dividends and cash skip. Average cost. Reinvest counts as a buy.",
+    es: "J.P. Morgan positions.csv es la imagen completa del libro: avisa, confirma, y borra lo que el archivo no nombra. Chase transactions.csv es un blotter de 90 días: se fusiona después del as-of. También Schwab, Coinbase y genérico (symbol, side, quantity, price, date). Dividendos y cash se omiten. Costo promedio. Reinvest cuenta como compra.",
+    en: "J.P. Morgan positions.csv is the full book image: warn, confirm, and remove lots the file omits. Chase transactions.csv is a 90-day blotter: merge after as-of. Also Schwab, Coinbase, and generic (symbol, side, quantity, price, date). Dividends and cash skip. Average cost. Reinvest counts as a buy.",
   },
   "advisor.csv.result":         {
-    es: "✓ {created} nuevas · {updated} actualizadas · {skipped} ignoradas",
-    en: "✓ {created} created · {updated} updated · {skipped} skipped",
+    es: "✓ {created} nuevas · {updated} actualizadas · {skipped} ignoradas · {removed} borradas",
+    en: "✓ {created} created · {updated} updated · {skipped} skipped · {removed} removed",
   },
   "advisor.csv.warnHoldings":   {
-    es: "Este archivo es un snapshot de posiciones (J.P. Morgan). Reemplaza cantidad y costo de {count} símbolos. No importa operaciones. As-of {asOf}.",
-    en: "This file is a holdings snapshot (J.P. Morgan). It replaces quantity and cost for {count} symbols. It does not import trades. As-of {asOf}.",
+    es: "Este archivo es la imagen completa del libro (J.P. Morgan). Carga {count} lotes y borra {remove} lotes que el archivo no nombra. As-of {asOf}.",
+    en: "This file is the full book image (J.P. Morgan). It loads {count} lots and removes {remove} lots the file omits. As-of {asOf}.",
   },
   "advisor.csv.warnTrades":     {
     es: "Este archivo es un blotter de operaciones (Chase). La app aplica las operaciones posteriores a {asOf} sobre las posiciones actuales. Las operaciones del as-of o anteriores no cambian la cantidad.",

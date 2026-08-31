@@ -1,7 +1,7 @@
 ---
 id: SPEC-advisor-csv-import
 status: final
-policyVersion: advisor-csv-import/1
+policyVersion: advisor-csv-import/2
 companions:
   - ../../project-context.md
 sources:
@@ -30,8 +30,8 @@ The generic importer asked for a `side` column and a column named `price`. The s
   - **success:** PHYL quantity `1,273` is 1273. Price is unit cost 35.28, not market 34.61. Side is buy. Cash and QACDS rows drop.
 
 - **CAP-3**
-  - **intent:** A holdings snapshot never writes until Juan confirms.
-  - **success:** The panel shows a warning that names snapshot, replace, and as-of. Confirm writes listed symbols. Cancel writes nothing. `window.confirm` is not the surface.
+  - **intent:** A holdings snapshot is the full book. It never writes until Juan confirms.
+  - **success:** The panel shows a warning that names snapshot, load count, remove count, and as-of. Confirm upserts listed symbols and deletes every current lot the file omits. Cancel writes nothing. `window.confirm` is not the surface. An empty keep set refuses and does not wipe the book.
 
 - **CAP-4**
   - **intent:** A Chase blotter merges onto the current book.
@@ -46,7 +46,7 @@ The generic importer asked for a `side` column and a column named `price`. The s
 - Detect order is Coinbase, Schwab, J.P. Morgan, Chase, generic.
 - J.P. Morgan and Chase dates are US `MM/DD/YYYY`.
 - Generic dates stay Latin `DD/MM/YYYY`.
-- Upsert listed symbols only. The file does not delete omitted lots.
+- A holdings snapshot is the full book image. Confirm deletes every current lot the file omits.
 - Book as-of lives in `localStorage` key `ds_advisor_book_as_of`.
 - A sell that exceeds the lot skips that trade. The importer does not open a short.
 - Refuse over invent.

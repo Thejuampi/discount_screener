@@ -34,6 +34,7 @@ export type ImportPlan =
       kind: "holdings_snapshot";
       asOf: string | null;
       positions: PortfolioLot[];
+      remove: string[];
       ignored: number;
     }
   | {
@@ -479,12 +480,17 @@ export function planCsvImport(
 ): ImportPlan {
   if (parsed.kind === "holdings_snapshot") {
     var holdings = aggregateToPositions(parsed.txs);
+    var keep = new Set(holdings.map((row) => row.symbol));
+    var remove = ctx.lots
+      .map((lot) => lot.symbol)
+      .filter((symbol) => !keep.has(symbol));
     return {
       action: "confirm_holdings_replace",
       format: parsed.format,
       kind: "holdings_snapshot",
       asOf: parsed.asOf,
       positions: holdings,
+      remove,
       ignored: parsed.ignored,
     };
   }

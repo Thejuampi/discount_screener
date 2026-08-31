@@ -303,6 +303,7 @@ pub fn run() {
             commands::portfolio_update,
             commands::portfolio_delete,
             commands::portfolio_import,
+            commands::portfolio_replace,
             commands::get_quote_prices,
             commands::get_model_accuracy,
             commands::compute_congress_metrics,
