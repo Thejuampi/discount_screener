@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T17:04Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T17:13Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -16,6 +16,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |
 | `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |
 | `no_payload` | quoteSummary 404 scrapes the quote HTML page | Rebuild. Refresh BK, SATS, FISV, FOX, NWS. Do not copy FOXA or NWSA. |
+| `not_eligible_silent` | Enrichment stores NotEligible with the classification reason | Rebuild. REIT names show the refuse reason. |
 
 ## Counts
 
@@ -24,7 +25,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `yahoo_missing_marginal_tax` | 336 | engine_fixed_pending_rebuild — domicile tax proxy |
 | `identity_ok` | 65 | closed |
 | `latest_reported_fcf_non_positive` | 39 | engine_fixed_pending_rebuild |
-| `not_eligible_silent` | 29 | expected refuse, UI reason missing |
+| `not_eligible_silent` | 29 | engine_fixed_pending_rebuild — persist classification reason |
 | `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
 | `mixed_issuer_missing_lender_book` | 8 | CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse |
 | `financials_missing_book_or_roe` | 5 | ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC |
@@ -424,39 +425,39 @@ Yahoo latest reported FCF is non-positive. Source selection now lets aligned dri
 
 ### `not_eligible_silent` (29)
 
-REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.
+REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.
 
 | Symbol | Status | Sector | Industry | Source | Detail |
 | --- | --- | --- | --- | --- | --- |
-| WY | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| VICI | expected | Real Estate | REIT - Diversified |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| CCI | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| IRM | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| AMT | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| DLR | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| SBAC | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| EQIX | expected | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| REG | expected | Real Estate | REIT - Retail |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| INVH | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| EQR | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| FRT | expected | Real Estate | REIT - Retail |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| KIM | expected | Real Estate | REIT - Retail |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| UDR | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| HST | expected | Real Estate | REIT - Hotel & Motel |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| PLD | expected | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| EXR | expected | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| MAA | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| CPT | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| SPG | expected | Real Estate | REIT - Retail |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| O | expected | Real Estate | REIT - Retail |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| BXP | expected | Real Estate | REIT - Office |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| AVB | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| VTR | expected | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| DOC | expected | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| WELL | expected | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| PSA | expected | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| ESS | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
-| ARE | expected | Real Estate | REIT - Office |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
+| WY | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| VICI | engine_fixed_pending_rebuild | Real Estate | REIT - Diversified |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| CCI | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| IRM | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| AMT | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| DLR | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| SBAC | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| EQIX | engine_fixed_pending_rebuild | Real Estate | REIT - Specialty |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| REG | engine_fixed_pending_rebuild | Real Estate | REIT - Retail |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| INVH | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| EQR | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| FRT | engine_fixed_pending_rebuild | Real Estate | REIT - Retail |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| KIM | engine_fixed_pending_rebuild | Real Estate | REIT - Retail |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| UDR | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| HST | engine_fixed_pending_rebuild | Real Estate | REIT - Hotel & Motel |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| PLD | engine_fixed_pending_rebuild | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| EXR | engine_fixed_pending_rebuild | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| MAA | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| CPT | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| SPG | engine_fixed_pending_rebuild | Real Estate | REIT - Retail |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| O | engine_fixed_pending_rebuild | Real Estate | REIT - Retail |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| BXP | engine_fixed_pending_rebuild | Real Estate | REIT - Office |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| AVB | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| VTR | engine_fixed_pending_rebuild | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| DOC | engine_fixed_pending_rebuild | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| WELL | engine_fixed_pending_rebuild | Real Estate | REIT - Healthcare Facilities |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| PSA | engine_fixed_pending_rebuild | Real Estate | REIT - Industrial |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| ESS | engine_fixed_pending_rebuild | Real Estate | REIT - Residential |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
+| ARE | engine_fixed_pending_rebuild | Real Estate | REIT - Office |  | REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild. |
 
 ### `yahoo_missing_cost_of_debt` (13)
 

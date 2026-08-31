@@ -80,8 +80,8 @@ def classify(symbol: str, row: dict | None) -> dict:
             return entry(
                 symbol,
                 "not_eligible_silent",
-                "expected",
-                "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+                "engine_fixed_pending_rebuild",
+                "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
                 extra,
             )
         return entry(symbol, "no_dcf", "open", "No dcfAnalysis object on the latest payload.", extra)
@@ -315,6 +315,7 @@ def render_md(payload: dict) -> str:
         "| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |",
         "| `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |",
         "| `no_payload` | quoteSummary 404 scrapes the quote HTML page | Rebuild. Refresh BK, SATS, FISV, FOX, NWS. Do not copy FOXA or NWSA. |",
+        "| `not_eligible_silent` | Enrichment stores NotEligible with the classification reason | Rebuild. REIT names show the refuse reason. |",
         "",
         "## Counts",
         "",
@@ -398,7 +399,7 @@ def main() -> None:
         "mixed_issuer_missing_lender_book": "CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse",
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
         "financials_missing_book_or_roe": "ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC",
-        "not_eligible_silent": "expected refuse, UI reason missing",
+        "not_eligible_silent": "engine_fixed_pending_rebuild — persist classification reason",
         "no_payload": "engine_fixed_pending_rebuild — quoteSummary 404 HTML recovery",
         "no_dcf": "open",
         "missing_driver_other": "open",

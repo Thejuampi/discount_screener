@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T17:04Z",
+  "scannedAt": "2026-08-31T17:13Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -25,7 +25,7 @@
     {
       "class": "not_eligible_silent",
       "count": 29,
-      "statusHint": "expected refuse, UI reason missing"
+      "statusHint": "engine_fixed_pending_rebuild \u2014 persist classification reason"
     },
     {
       "class": "yahoo_missing_cost_of_debt",
@@ -10776,8 +10776,8 @@
       {
         "symbol": "WY",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "Weyerhaeuser Company"
@@ -10785,8 +10785,8 @@
       {
         "symbol": "VICI",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Diversified",
         "company": "VICI Properties Inc."
@@ -10794,8 +10794,8 @@
       {
         "symbol": "CCI",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "Crown Castle Inc."
@@ -10803,8 +10803,8 @@
       {
         "symbol": "IRM",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "Iron Mountain Incorporated"
@@ -10812,8 +10812,8 @@
       {
         "symbol": "AMT",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "American Tower Corporation"
@@ -10821,8 +10821,8 @@
       {
         "symbol": "DLR",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "Digital Realty Trust, Inc."
@@ -10830,8 +10830,8 @@
       {
         "symbol": "SBAC",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "SBA Communications Corporation"
@@ -10839,8 +10839,8 @@
       {
         "symbol": "EQIX",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Specialty",
         "company": "Equinix, Inc."
@@ -10848,8 +10848,8 @@
       {
         "symbol": "REG",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Retail",
         "company": "Regency Centers Corporation"
@@ -10857,8 +10857,8 @@
       {
         "symbol": "INVH",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "Invitation Homes Inc."
@@ -10866,8 +10866,8 @@
       {
         "symbol": "EQR",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "Equity Residential"
@@ -10875,8 +10875,8 @@
       {
         "symbol": "FRT",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Retail",
         "company": "Federal Realty Investment Trust"
@@ -10884,8 +10884,8 @@
       {
         "symbol": "KIM",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Retail",
         "company": "Kimco Realty Corporation"
@@ -10893,8 +10893,8 @@
       {
         "symbol": "UDR",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "UDR, Inc."
@@ -10902,8 +10902,8 @@
       {
         "symbol": "HST",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Hotel & Motel",
         "company": "Host Hotels & Resorts, Inc."
@@ -10911,8 +10911,8 @@
       {
         "symbol": "PLD",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Industrial",
         "company": "Prologis, Inc."
@@ -10920,8 +10920,8 @@
       {
         "symbol": "EXR",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Industrial",
         "company": "Extra Space Storage Inc."
@@ -10929,8 +10929,8 @@
       {
         "symbol": "MAA",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "Mid-America Apartment Communities, Inc."
@@ -10938,8 +10938,8 @@
       {
         "symbol": "CPT",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "Camden Property Trust"
@@ -10947,8 +10947,8 @@
       {
         "symbol": "SPG",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Retail",
         "company": "Simon Property Group, Inc."
@@ -10956,8 +10956,8 @@
       {
         "symbol": "O",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Retail",
         "company": "Realty Income Corporation"
@@ -10965,8 +10965,8 @@
       {
         "symbol": "BXP",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Office",
         "company": "BXP, Inc."
@@ -10974,8 +10974,8 @@
       {
         "symbol": "AVB",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "AvalonBay Communities Inc"
@@ -10983,8 +10983,8 @@
       {
         "symbol": "VTR",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Healthcare Facilities",
         "company": "Ventas, Inc."
@@ -10992,8 +10992,8 @@
       {
         "symbol": "DOC",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Healthcare Facilities",
         "company": "Healthpeak Properties, Inc."
@@ -11001,8 +11001,8 @@
       {
         "symbol": "WELL",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Healthcare Facilities",
         "company": "Welltower Inc."
@@ -11010,8 +11010,8 @@
       {
         "symbol": "PSA",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Industrial",
         "company": "Public Storage"
@@ -11019,8 +11019,8 @@
       {
         "symbol": "ESS",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Residential",
         "company": "Essex Property Trust, Inc."
@@ -11028,8 +11028,8 @@
       {
         "symbol": "ARE",
         "class": "not_eligible_silent",
-        "status": "expected",
-        "note": "REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "REIT or real-estate shell. Enrichment now stores NotEligible with the classification reason. Rebuild.",
         "sector": "Real Estate",
         "industry": "REIT - Office",
         "company": "Alexandria Real Estate Equities, Inc."

@@ -74,6 +74,7 @@ import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.ValuationPolicy
 import com.discountscreener.core.engine.IssuerYieldLookup
 import com.discountscreener.core.engine.IssuerYieldPoint
 import com.discountscreener.core.engine.PeerCouponEvidence
@@ -862,16 +863,25 @@ class DefaultDashboardRepository(
         val needsDcfResolve = stateMutex.withLock {
             fundamentals != null && (needsDcfResolutionLocked(symbol) || !secondaryAsked.contains(symbol))
         }
-        if (fundamentals != null && needsDcfResolve && isFinancialServices(fundamentals)) {
-            val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
-            stateMutex.withLock {
-                secondaryAsked.add(symbol)
-                engine.ingestFundamentals(outcome.fundamentals)
-                putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
-                liveDcfResolvedSymbols += symbol
-            }
-            wroteDcf = true
-        } else if (fundamentals != null && needsDcfResolve) {
+        if (fundamentals != null && needsDcfResolve) {
+            var businessClass = businessClassOf(fundamentals)
+            if (isClassificationRefuse(businessClass)) {
+                var analysis = terminalClassificationAnalysis(businessClass, fundamentals)
+                stateMutex.withLock {
+                    putDcfAnalysisLocked(symbol, analysis, fundamentals)
+                    liveDcfResolvedSymbols += symbol
+                }
+                wroteDcf = true
+            } else if (isFinancialServices(fundamentals)) {
+                val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
+                stateMutex.withLock {
+                    secondaryAsked.add(symbol)
+                    engine.ingestFundamentals(outcome.fundamentals)
+                    putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+                    liveDcfResolvedSymbols += symbol
+                }
+                wroteDcf = true
+            } else {
             var peers = peerCouponsFor(symbol, fundamentals)
             var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
             var components = resolveComponents(symbol, detailForDcf?.companyName)
@@ -903,6 +913,7 @@ class DefaultDashboardRepository(
                 resolvedAnalysis?.let { analysis -> putDcfAnalysisLocked(symbol, analysis, fundamentals) }
             }
             captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
+            }
         }
 
         if (captures.isNotEmpty() || wroteDcf) {
@@ -4218,11 +4229,15 @@ class DefaultDashboardRepository(
                 val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
                 val fundamentals = detailForDcf?.fundamentals
                 val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
-                if (fundamentals != null && isFinancialServices(fundamentals)) {
-                    val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, allowSecondary = false)
-                    residualFundamentals = outcome.fundamentals
-                    dcfAnalysis = outcome.analysis
-                } else if (fundamentals != null) {
+                if (fundamentals != null) {
+                    var businessClass = businessClassOf(fundamentals)
+                    if (isClassificationRefuse(businessClass)) {
+                        dcfAnalysis = terminalClassificationAnalysis(businessClass, fundamentals)
+                    } else if (isFinancialServices(fundamentals)) {
+                        val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, allowSecondary = false)
+                        residualFundamentals = outcome.fundamentals
+                        dcfAnalysis = outcome.analysis
+                    } else {
                     var peers = peerCouponsFor(symbol, fundamentals)
                     var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
                     var components = resolveComponents(symbol, detailForDcf?.companyName)
@@ -4252,6 +4267,7 @@ class DefaultDashboardRepository(
                         timeseries = resolution.selection.timeseries
                         fetchedTimeseries = resolution.fetched
                         dcfAnalysis = analysisFromSelection(resolution.selection, fundamentals)
+                    }
                     }
                 }
             } catch (error: Exception) {
@@ -4546,11 +4562,7 @@ class DefaultDashboardRepository(
             fund.industryKey,
             symbol = symbol,
         )
-        if (
-            businessClass == BusinessClass.Unclassified ||
-            businessClass == BusinessClass.NotEligible
-        ) {
-            dcfCache.remove(symbol)
+        if (isClassificationRefuse(businessClass)) {
             return
         }
         if (businessClass != BusinessClass.FinancialServices) return
@@ -4587,14 +4599,20 @@ class DefaultDashboardRepository(
 
     private fun marketParams(): MarketParams = lastMarketParams
 
-    private fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+    private fun businessClassOf(fundamentals: FundamentalSnapshot): BusinessClass =
         DcfAnalysisEngine.classifyBusiness(
             fundamentals.sectorName,
             fundamentals.industryName,
             fundamentals.sectorKey,
             fundamentals.industryKey,
             symbol = fundamentals.symbol,
-        ) == BusinessClass.FinancialServices
+        )
+
+    private fun isClassificationRefuse(businessClass: BusinessClass): Boolean =
+        businessClass == BusinessClass.Unclassified || businessClass == BusinessClass.NotEligible
+
+    private fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+        businessClassOf(fundamentals) == BusinessClass.FinancialServices
 
     /**
      * The residual-income chain for one financial-services symbol.
@@ -4650,19 +4668,17 @@ class DefaultDashboardRepository(
         }
         val fund = engine.detail(symbol)?.fundamentals
         if (fund != null) {
-            val businessClass = DcfAnalysisEngine.classifyBusiness(
-                fund.sectorName,
-                fund.industryName,
-                fund.sectorKey,
-                fund.industryKey,
-                symbol = symbol,
-            )
-            if (
-                businessClass == BusinessClass.Unclassified ||
-                businessClass == BusinessClass.NotEligible
-            ) {
-                dcfCache.remove(symbol)
-                return false
+            val businessClass = businessClassOf(fund)
+            if (isClassificationRefuse(businessClass)) {
+                var reason = DcfAnalysisEngine.classificationUnavailableReason(businessClass)
+                if (
+                    analysis != null &&
+                    analysis.businessClass == businessClass &&
+                    analysis.valuationUnavailableReason == reason
+                ) {
+                    return false
+                }
+                return true
             }
             if (
                 businessClass == BusinessClass.FinancialServices &&
@@ -4804,6 +4820,61 @@ class DefaultDashboardRepository(
                 fallbackReason = reasons.firstOrNull()?.code,
             ),
             providerReasons = reasons,
+        )
+    }
+
+    private fun terminalClassificationAnalysis(
+        businessClass: BusinessClass,
+        fundamentals: FundamentalSnapshot?,
+    ): DcfAnalysis {
+        var reason = DcfAnalysisEngine.classificationUnavailableReason(businessClass).orEmpty()
+        var resolverState = if (businessClass == BusinessClass.NotEligible) {
+            ResolverState.NotEligible
+        } else {
+            ResolverState.Unavailable
+        }
+        var providerState = if (businessClass == BusinessClass.NotEligible) {
+            ProviderState.NotEligible
+        } else {
+            ProviderState.Unavailable
+        }
+        var code = if (businessClass == BusinessClass.NotEligible) {
+            ProviderDecisionReasonCode.FundOrEtfUnsupported
+        } else {
+            ProviderDecisionReasonCode.SymbolUnsupported
+        }
+        var fundFp = fundamentals?.let(::fundamentalsInputFingerprint).orEmpty()
+        return DcfAnalysis(
+            bearIntrinsicValueCents = 0L,
+            baseIntrinsicValueCents = 0L,
+            bullIntrinsicValueCents = 0L,
+            waccBps = 0,
+            baseGrowthBps = 0,
+            netDebtDollars = 0L,
+            source = DcfSource.Unknown,
+            resolverState = resolverState,
+            decisionFingerprint = notEligibleDecisionFingerprint(fundFp, "class|$businessClass"),
+            engineVersion = ENGINE_VERSION,
+            modelPolicyVersion = MODEL_POLICY_VERSION,
+            businessClass = businessClass,
+            model = ValuationModel.None,
+            provenance = DataProvenance(
+                source = DcfSource.Unknown,
+                providerState = providerState,
+                fallbackReason = code,
+            ),
+            providerReasons = listOf(
+                ProviderDecisionReason(
+                    code = code,
+                    provider = DcfSource.Unknown,
+                    upstreamStatus = reason,
+                ),
+            ),
+            reasonCodes = listOf(
+                code.name,
+                "valuation_policy=${ValuationPolicy.VERSION}",
+            ),
+            valuationUnavailableReason = reason,
         )
     }
 

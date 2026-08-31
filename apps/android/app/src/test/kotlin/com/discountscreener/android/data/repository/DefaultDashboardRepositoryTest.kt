@@ -63,6 +63,7 @@ import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.model.getOrNull
+import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -2011,6 +2012,89 @@ class DefaultDashboardRepositoryTest {
             }
             assertEquals(ResolverState.Selected, recovered.resolverState)
             assertTrue(recovered.baseIntrinsicValueCents > 0L)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun reit_persists_classification_unavailable_reason() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var fund = dcfFundamentals(symbol)
+                    if (symbol == "AAPL") {
+                        fund = fund.copy(
+                            sectorName = "Real Estate",
+                            industryName = "REIT - Specialty",
+                            sectorKey = "real-estate",
+                            industryKey = "reit-specialty",
+                        )
+                    }
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = fund,
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            val analysis = awaitDcfAnalysis(repository, "AAPL") { candidate ->
+                !candidate.valuationUnavailableReason.isNullOrBlank()
+            }
+            assertEquals(
+                DcfAnalysisEngine.classificationUnavailableReason(BusinessClass.NotEligible),
+                analysis.valuationUnavailableReason,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun reit_does_not_fetch_timeseries() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var aaplTimeseriesFetches = 0
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var fund = dcfFundamentals(symbol)
+                    if (symbol == "AAPL") {
+                        fund = fund.copy(
+                            sectorName = "Real Estate",
+                            industryName = "REIT - Specialty",
+                            sectorKey = "real-estate",
+                            industryKey = "reit-specialty",
+                        )
+                    }
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = fund,
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    if (symbol == "AAPL") aaplTimeseriesFetches += 1
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            awaitDcfAnalysis(repository, "AAPL") { candidate ->
+                candidate.businessClass == BusinessClass.NotEligible
+            }
+            assertEquals(0, aaplTimeseriesFetches)
         } finally {
             store.close()
         }
