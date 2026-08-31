@@ -634,6 +634,11 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                   })
                 : t("advisor.csv.warnTrades", { asOf: csvPending.asOf })}
             </div>
+            {csvPending.action === "confirm_holdings_replace" && csvPending.remove.length > 0 && (
+              <div style={{ marginTop: 6, fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
+                {t("advisor.csv.warnHoldingsRemove", { names: csvPending.remove.join(", ") })}
+              </div>
+            )}
             <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
               <button className="congress-sync-btn" onClick={confirmCsvImport}>
                 {t("advisor.csv.confirm")}

@@ -51,6 +51,7 @@ holdings_snapshot:
     - quantity <= 0
   write:
     - Show a warning first.
+    - The warning names the load count, the remove count, and the omitted symbols.
     - Wait for Confirm or Cancel.
     - The file is the full book image.
     - On Confirm, upsert listed symbols and delete every current lot the file omits.
@@ -166,10 +167,10 @@ examples:
   - id: JPM-REMOVE-OMITTED
     case: a holdings snapshot removes lots the file omits
     input:
-      currentLots: [AXON]
+      currentLots: [MSFT, AXON]
       fileLots: [PHYL, AMZN]
     expect:
-      remove: [AXON]
+      remove: [AXON, MSFT]
 
   - id: JPM-REMOVE-EMPTY-BOOK
     case: a holdings snapshot with an empty book removes nothing

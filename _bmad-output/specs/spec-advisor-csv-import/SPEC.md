@@ -31,7 +31,7 @@ The generic importer asked for a `side` column and a column named `price`. The s
 
 - **CAP-3**
   - **intent:** A holdings snapshot is the full book. It never writes until Juan confirms.
-  - **success:** The panel shows a warning that names snapshot, load count, remove count, and as-of. Confirm upserts listed symbols and deletes every current lot the file omits. Cancel writes nothing. `window.confirm` is not the surface. An empty keep set refuses and does not wipe the book.
+  - **success:** The panel shows a warning that names snapshot, load count, remove count, the omitted symbols, and as-of. Confirm upserts listed symbols and deletes every current lot the file omits. Cancel writes nothing. `window.confirm` is not the surface. An empty keep set refuses and does not wipe the book.
 
 - **CAP-4**
   - **intent:** A Chase blotter merges onto the current book.

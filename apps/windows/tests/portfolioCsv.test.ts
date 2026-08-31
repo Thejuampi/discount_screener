@@ -69,10 +69,13 @@ test("jpm holdings import plans a confirm replace", () => {
 
 test("a holdings snapshot removes lots the file omits", () => {
   var plan = planCsvImport(parseAnyCsv(sample()), {
-    lots: [{ symbol: "AXON", quantity: 4, avg_cost_cents: 43600, opened_at: null }],
+    lots: [
+      { symbol: "MSFT", quantity: 1, avg_cost_cents: 10000, opened_at: null },
+      { symbol: "AXON", quantity: 4, avg_cost_cents: 43600, opened_at: null },
+    ],
     bookAsOf: null,
   });
-  assert.deepEqual(plan.action === "confirm_holdings_replace" ? plan.remove : [], ["AXON"]);
+  assert.deepEqual(plan.action === "confirm_holdings_replace" ? plan.remove : [], ["AXON", "MSFT"]);
 });
 
 test("a holdings snapshot with an empty book removes nothing", () => {

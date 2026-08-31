@@ -707,6 +707,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "Este archivo es la imagen completa del libro (J.P. Morgan). Carga {count} lotes y borra {remove} lotes que el archivo no nombra. As-of {asOf}.",
     en: "This file is the full book image (J.P. Morgan). It loads {count} lots and removes {remove} lots the file omits. As-of {asOf}.",
   },
+  "advisor.csv.warnHoldingsRemove": {
+    es: "Se borran: {names}",
+    en: "Removing: {names}",
+  },
   "advisor.csv.warnTrades":     {
     es: "Este archivo es un blotter de operaciones (Chase). La app aplica las operaciones posteriores a {asOf} sobre las posiciones actuales. Las operaciones del as-of o anteriores no cambian la cantidad.",
     en: "This file is a trade blotter (Chase). The app applies trades after {asOf} onto current lots. Trades on or before as-of do not change quantity.",

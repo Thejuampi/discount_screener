@@ -483,7 +483,8 @@ export function planCsvImport(
     var keep = new Set(holdings.map((row) => row.symbol));
     var remove = ctx.lots
       .map((lot) => lot.symbol)
-      .filter((symbol) => !keep.has(symbol));
+      .filter((symbol) => !keep.has(symbol))
+      .sort();
     return {
       action: "confirm_holdings_replace",
       format: parsed.format,
