@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:23Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T16:28Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -12,7 +12,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `yahoo_missing_marginal_tax` | Domicile 21% proxy when country is set | Rebuild the app. Refresh quotes so `country` is on the snapshot. |
 | `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |
 | `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |
-| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. PCAR is a captive-finance leftover. |
+| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |
 
 ## Counts
 
@@ -22,8 +22,8 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `identity_ok` | 65 | closed |
 | `latest_reported_fcf_non_positive` | 39 | engine_fixed_pending_rebuild |
 | `not_eligible_silent` | 29 | expected refuse, UI reason missing |
-| `yahoo_missing_cost_of_debt` | 14 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open |
-| `mixed_issuer_missing_lender_book` | 7 | open |
+| `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
+| `mixed_issuer_missing_lender_book` | 8 | open |
 | `financials_missing_book_or_roe` | 5 | open |
 | `no_payload` | 5 | open — list hole |
 | `sec_non_positive_normalized_fcff` | 1 | open / SNDK pending rebuild |
@@ -455,7 +455,7 @@ REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row
 | ESS | expected | Real Estate | REIT - Residential |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
 | ARE | expected | Real Estate | REIT - Office |  | REIT or real-estate shell. Classification refuses FCFF. Detail has no reason row. |
 
-### `yahoo_missing_cost_of_debt` (14)
+### `yahoo_missing_cost_of_debt` (13)
 
 Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuild.
 
@@ -467,7 +467,6 @@ Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuil
 | ULTA | engine_fixed_pending_rebuild | Consumer Cyclical | Specialty Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | CSGP | engine_fixed_pending_rebuild | Real Estate | Real Estate Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | CMG | expected | Consumer Cyclical | Restaurants | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| PCAR | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | FFIV | engine_fixed_pending_rebuild | Technology | Software - Infrastructure | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | MNST | engine_fixed_pending_rebuild | Consumer Defensive | Beverages - Non - Alcoholic | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | LULU | expected | Consumer Cyclical | Apparel Retail | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
@@ -476,7 +475,7 @@ Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuil
 | LEN | expected | Consumer Cyclical | Residential Construction | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | TTD | engine_fixed_pending_rebuild | Communication Services | Advertising Agencies | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 
-### `mixed_issuer_missing_lender_book` (7)
+### `mixed_issuer_missing_lender_book` (8)
 
 Classifier marked a factory-plus-lender split. Lender book is missing.
 
@@ -485,6 +484,7 @@ Classifier marked a factory-plus-lender split. Lender book is missing.
 | HPE | open | Technology | Communication Equipment | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | CAT | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | INTU | open | Technology | Software - Application | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| PCAR | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | MCO | open | Financial Services | Financial Data & Stock Exchanges | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | EPAM | open | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | SNA | open | Industrials | Tools & Accessories | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |

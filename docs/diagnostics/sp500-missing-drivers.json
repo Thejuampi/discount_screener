@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:23Z",
+  "scannedAt": "2026-08-31T16:28Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -29,12 +29,12 @@
     },
     {
       "class": "yahoo_missing_cost_of_debt",
-      "count": 14,
-      "statusHint": "mixed \u2014 net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open"
+      "count": 13,
+      "statusHint": "mixed \u2014 net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected"
     },
     {
       "class": "mixed_issuer_missing_lender_book",
-      "count": 7,
+      "count": 8,
       "statusHint": "open"
     },
     {
@@ -11193,32 +11193,6 @@
         ]
       },
       {
-        "symbol": "PCAR",
-        "class": "yahoo_missing_cost_of_debt",
-        "status": "open",
-        "note": "Captive finance. SEC files InterestPaid only. Paccar Financial has bonds; the parent name does not match.",
-        "sector": "Industrials",
-        "industry": "Farm & Heavy Construction Machinery",
-        "company": "PACCAR Inc",
-        "model": "None",
-        "businessClass": null,
-        "baseIntrinsicValueCents": 0,
-        "source": "YahooFinance",
-        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
-        "reasonCodes": [
-          "MissingDriverEvidence"
-        ],
-        "totalDebtDollars": 14816300032,
-        "totalCashDollars": 8667400192,
-        "providerStatuses": [
-          [
-            "YahooFinance",
-            "MissingDriverEvidence",
-            "fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods"
-          ]
-        ]
-      },
-      {
         "symbol": "FFIV",
         "class": "yahoo_missing_cost_of_debt",
         "status": "engine_fixed_pending_rebuild",
@@ -11477,6 +11451,32 @@
             "YahooFinance",
             "MissingDriverEvidence",
             "fcff unavailable: lender book missing on a mixed issuer"
+          ]
+        ]
+      },
+      {
+        "symbol": "PCAR",
+        "class": "mixed_issuer_missing_lender_book",
+        "status": "open",
+        "note": "Parent 10-K prints FinancialServicesMember. Paccar Financial has no separate 10-K. Do not run FCFF on finance cash.",
+        "sector": "Industrials",
+        "industry": "Farm & Heavy Construction Machinery",
+        "company": "PACCAR Inc",
+        "model": "None",
+        "businessClass": null,
+        "baseIntrinsicValueCents": 0,
+        "source": "YahooFinance",
+        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
+        "reasonCodes": [
+          "MissingDriverEvidence"
+        ],
+        "totalDebtDollars": 14816300032,
+        "totalCashDollars": 8667400192,
+        "providerStatuses": [
+          [
+            "YahooFinance",
+            "MissingDriverEvidence",
+            "fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods"
           ]
         ]
       },

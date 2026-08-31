@@ -60,4 +60,14 @@ class IssuerComponentAssemblerTest {
         )
         assertEquals(167_745_000_000.0, set.operating!!.revenue.single().value)
     }
+
+    @Test
+    fun paccar_financial_services_member_marks_the_lender_arm() {
+        var xml = javaClass.classLoader!!.getResource("xbrl/pcar-financial-services.xml")!!.readText()
+        var set = IssuerComponentAssembler.fromParentFacts(
+            facts = XbrlDimensionalFacts.parse(xml),
+            finance = null,
+        )
+        assertEquals(true, set.missingLenderBook())
+    }
 }

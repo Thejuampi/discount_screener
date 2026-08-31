@@ -50,4 +50,16 @@ class FinanceSubsidiaryMatchTest {
         )
         assertEquals("0000027673", pick?.cik)
     }
+
+    @Test
+    fun paccar_stem_plus_financial_matches() {
+        var pick = FinanceSubsidiaryMatch.pick(
+            parentRegistrant = "PACCAR Inc",
+            candidates = listOf(
+                NamedFiler("0000075362", "PACCAR Inc"),
+                NamedFiler("0000075363", "PACCAR Financial Corp"),
+            ),
+        )
+        assertEquals("0000075363", pick?.cik)
+    }
 }

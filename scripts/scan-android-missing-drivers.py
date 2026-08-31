@@ -30,10 +30,6 @@ NO_APPROVED_COUPON = {
         "expected",
         "Lease stock. SEC files InterestPaid only. Cash paid is not a coupon. Markets Insider has no parent bonds.",
     ),
-    "PCAR": (
-        "open",
-        "Captive finance. SEC files InterestPaid only. Paccar Financial has bonds; the parent name does not match.",
-    ),
     "LEN": (
         "expected",
         "Homebuilder capitalizes interest. SEC files InterestPaidNet. Markets Insider has no parent bonds.",
@@ -136,6 +132,14 @@ def classify(symbol: str, row: dict | None) -> dict:
                 "Classifier marked a factory-plus-lender split. Lender book is missing.",
                 extra,
             )
+        if debt_msgs and symbol == "PCAR":
+            return entry(
+                symbol,
+                "mixed_issuer_missing_lender_book",
+                "open",
+                "Parent 10-K prints FinancialServicesMember. Paccar Financial has no separate 10-K. Do not run FCFF on finance cash.",
+                extra,
+            )
         if debt_msgs:
             debt = fund.get("totalDebtDollars")
             cash = fund.get("totalCashDollars")
@@ -213,7 +217,7 @@ def render_md(payload: dict) -> str:
         "| `yahoo_missing_marginal_tax` | Domicile 21% proxy when country is set | Rebuild the app. Refresh quotes so `country` is on the snapshot. |",
         "| `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |",
         "| `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |",
-        "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. PCAR is a captive-finance leftover. |",
+        "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |",
         "",
         "## Counts",
         "",
@@ -293,7 +297,7 @@ def main() -> None:
         "identity_ok": "closed",
         "yahoo_missing_marginal_tax": "engine_fixed_pending_rebuild — domicile tax proxy",
         "latest_reported_fcf_non_positive": "engine_fixed_pending_rebuild",
-        "yahoo_missing_cost_of_debt": "mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected; PCAR open",
+        "yahoo_missing_cost_of_debt": "mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected",
         "mixed_issuer_missing_lender_book": "open",
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
         "financials_missing_book_or_roe": "open",

@@ -1183,6 +1183,29 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun paccar_shape_refuses_as_mixed_issuer_not_missing_coupon() {
+        var xml = javaClass.classLoader!!.getResource("xbrl/pcar-financial-services.xml")!!.readText()
+        var components = IssuerComponentAssembler.fromParentFacts(
+            facts = XbrlDimensionalFacts.parse(xml),
+            finance = null,
+        )
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PCAR",
+                sectorName = "Industrials",
+                industryName = "Farm & Heavy Construction Machinery",
+            ),
+            timeseries = completeTimeseries().copy(interestExpense = emptyList()),
+            marketParams = MarketParams(provisional = false),
+            components = components,
+        )
+        assertEquals(
+            "fcff unavailable: lender book missing on a mixed issuer",
+            result.exceptionOrNull()?.message,
+        )
+    }
+
+    @Test
     fun levered_empty_interest_forms_fcff_with_yield_and_peer_coupons() {
         var analysis = DcfAnalysisEngine.compute(
             fundamentals = completeFundamentals(),

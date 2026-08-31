@@ -1,11 +1,11 @@
 {
-  "last": "no-coupon-names",
+  "last": "pcar-captive",
   "nodes": [
     {"id": "yahoo-interest", "label": "Find if Yahoo sends interest under another timeseries key", "score": 0.85, "status": "taken", "next": ["issuer-yield", "sec-interest"]},
     {"id": "issuer-yield", "label": "Attach issuer market yield when Yahoo interest is empty", "score": 0.7, "status": "taken", "next": ["no-coupon-names"]},
     {"id": "sec-interest", "label": "Copy filed SEC interest onto Yahoo years like statutory tax", "score": 0.75, "status": "taken", "next": ["issuer-yield"]},
     {"id": "no-coupon-names", "label": "CMG LULU PCAR LEN have no approved filed coupon on Yahoo or SEC", "score": 0.6, "status": "taken", "next": ["pcar-captive"]},
-    {"id": "pcar-captive", "label": "PCAR captive finance leftover after coupon refuse", "score": 0.5, "status": "open", "next": ["mixed-issuer"]},
+    {"id": "pcar-captive", "label": "PCAR captive finance leftover after coupon refuse", "score": 0.5, "status": "taken", "next": ["mixed-issuer"]},
     {"id": "mixed-issuer", "label": "Fix mixed_issuer_missing_lender_book (7 names)", "score": 0.65, "status": "open", "next": []},
     {"id": "material-debt-no-interest", "label": "Levered names with empty Yahoo interest still refuse", "score": 0.55, "status": "taken", "next": ["yahoo-interest"]}
   ]
