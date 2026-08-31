@@ -172,6 +172,14 @@ sustaining_capex:
 
 component:
   material_revenue_bps: 500
+  captive_parent_industry_contains:
+    - machinery
+    - auto manufacturer
+    - automotive
+    - tools
+    - communication equipment
+    - computer hardware
+    - farm
   financial_tokens: [financial, finance, credit]
   instrument_tokens: [facility, revolving, allowance, receivable, line]
   operating_tokens:

@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:28Z",
+  "scannedAt": "2026-08-31T16:33Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -35,7 +35,7 @@
     {
       "class": "mixed_issuer_missing_lender_book",
       "count": 8,
-      "statusHint": "open"
+      "statusHint": "false mixed pending rebuild; CAT HPE SNA PCAR still need lender book"
     },
     {
       "class": "financials_missing_book_or_roe",
@@ -11431,8 +11431,8 @@
       {
         "symbol": "INTU",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Parent industry is not a captive-finance host. Credit Karma, ratings lines, and IT verticals stay on FCFF. Rebuild.",
         "sector": "Technology",
         "industry": "Software - Application",
         "company": "Intuit Inc.",
@@ -11483,8 +11483,8 @@
       {
         "symbol": "MCO",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Parent industry is not a captive-finance host. Credit Karma, ratings lines, and IT verticals stay on FCFF. Rebuild.",
         "sector": "Financial Services",
         "industry": "Financial Data & Stock Exchanges",
         "company": "Moody's Corporation",
@@ -11509,8 +11509,8 @@
       {
         "symbol": "EPAM",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Parent industry is not a captive-finance host. Credit Karma, ratings lines, and IT verticals stay on FCFF. Rebuild.",
         "sector": "Technology",
         "industry": "Information Technology Services",
         "company": "EPAM Systems, Inc.",
@@ -11561,8 +11561,8 @@
       {
         "symbol": "CTSH",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Parent industry is not a captive-finance host. Credit Karma, ratings lines, and IT verticals stay on FCFF. Rebuild.",
         "sector": "Technology",
         "industry": "Information Technology Services",
         "company": "Cognizant Technology Solutions Corporation",

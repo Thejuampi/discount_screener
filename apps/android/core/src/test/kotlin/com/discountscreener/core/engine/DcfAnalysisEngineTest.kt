@@ -1206,6 +1206,26 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun software_credit_karma_shape_stays_on_fcff() {
+        var xml = javaClass.classLoader!!.getResource("xbrl/pcar-financial-services.xml")!!.readText()
+        var components = IssuerComponentAssembler.fromParentFacts(
+            facts = XbrlDimensionalFacts.parse(xml),
+            finance = null,
+        )
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "INTU",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+            ),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = components,
+        ).getOrThrow()
+        assertEquals(ValuationModel.FcffWacc, analysis.model)
+    }
+
+    @Test
     fun levered_empty_interest_forms_fcff_with_yield_and_peer_coupons() {
         var analysis = DcfAnalysisEngine.compute(
             fundamentals = completeFundamentals(),

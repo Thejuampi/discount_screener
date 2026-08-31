@@ -166,10 +166,14 @@ object DcfAnalysisEngine {
             BusinessClass.FinancialServices ->
                 residualIncome(fundamentals, marketPriceCents, marketParams)
             BusinessClass.OperatingNonFinancial -> {
-                if (components?.missingLenderBook() == true) {
+                var captiveParent = ComponentFamilyPolicy.parentHostsCaptive(
+                    fundamentals.industryName,
+                    fundamentals.sectorName,
+                )
+                if (captiveParent && components?.missingLenderBook() == true) {
                     error("fcff unavailable: lender book missing on a mixed issuer")
                 }
-                if (components?.isMixed() == true) {
+                if (captiveParent && components?.isMixed() == true) {
                     ComponentSumValuation.value(
                         fundamentals = fundamentals,
                         parentTimeseries = timeseries,

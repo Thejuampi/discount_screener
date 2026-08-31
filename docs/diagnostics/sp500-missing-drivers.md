@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:28Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T16:33Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -13,6 +13,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |
 | `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |
 | `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |
+| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive | Rebuild INTU, MCO, EPAM, CTSH. CAT, HPE, SNA, PCAR still need the finance-sub book. |
 
 ## Counts
 
@@ -23,7 +24,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `latest_reported_fcf_non_positive` | 39 | engine_fixed_pending_rebuild |
 | `not_eligible_silent` | 29 | expected refuse, UI reason missing |
 | `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
-| `mixed_issuer_missing_lender_book` | 8 | open |
+| `mixed_issuer_missing_lender_book` | 8 | false mixed pending rebuild; CAT HPE SNA PCAR still need lender book |
 | `financials_missing_book_or_roe` | 5 | open |
 | `no_payload` | 5 | open — list hole |
 | `sec_non_positive_normalized_fcff` | 1 | open / SNDK pending rebuild |
@@ -483,12 +484,12 @@ Classifier marked a factory-plus-lender split. Lender book is missing.
 | --- | --- | --- | --- | --- | --- |
 | HPE | open | Technology | Communication Equipment | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | CAT | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| INTU | open | Technology | Software - Application | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| INTU | engine_fixed_pending_rebuild | Technology | Software - Application | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | PCAR | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
-| MCO | open | Financial Services | Financial Data & Stock Exchanges | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| EPAM | open | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| MCO | engine_fixed_pending_rebuild | Financial Services | Financial Data & Stock Exchanges | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| EPAM | engine_fixed_pending_rebuild | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | SNA | open | Industrials | Tools & Accessories | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| CTSH | open | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| CTSH | engine_fixed_pending_rebuild | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 
 ### `financials_missing_book_or_roe` (5)
 

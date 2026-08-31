@@ -173,6 +173,7 @@ data class SustainingCapexSection(
 
 data class ComponentSection(
     val materialRevenueBps: Int,
+    val captiveParentIndustryContains: List<String>,
     val financialTokens: Set<String>,
     val instrumentTokens: Set<String>,
     val operatingTokens: Set<String>,
@@ -703,6 +704,7 @@ data class ValuationPolicyBook(
                 ),
                 component = ComponentSection(
                     materialRevenueBps = component.int("material_revenue_bps"),
+                    captiveParentIndustryContains = component.stringList("captive_parent_industry_contains"),
                     financialTokens = component.stringList("financial_tokens").toSet(),
                     instrumentTokens = component.stringList("instrument_tokens").toSet(),
                     operatingTokens = component.stringList("operating_tokens").toSet(),

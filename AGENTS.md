@@ -79,7 +79,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 | BusinessClass | Primary model | Discount rate | Cash / driver |
 | --- | --- | --- | --- |
-| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing |
+| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the parent industry hosts a captive and the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing. Software, IT services, and ratings stay on FCFF. |
 | `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, **lenders** such as COF) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path; long-run ROE = min(ROE0, CoE+500) |
 | Payment networks (`V`, `MA`) even if Yahoo says Credit Services | **FCFF + WACC** | WACC | Fee cash flow — residual on book prints ~book |
 | `NotEligible` (ETF, fund, crypto shell, REIT, …) | none | — | — |

@@ -22,7 +22,7 @@ Failure modes that already bit this repo, with what broke and the fix. Read this
 | Latest reported FCF blocked driver FCFF | Yahoo latest FCF ≤ 0 made source selection NotEligible before the driver engine ran (ORCL, BA, PCG class) | Keep LatestFcfNonPositive only when aligned OCF/CapEx/revenue years are short. Driver FCFF decides from the annual identities. |
 | Net-cash name refused for a missing coupon | Snapshot debt > 0 with cash covering it, Yahoo interest empty, WACC still demanded k_d | If reported cash covers reported debt, a failed coupon is not-applicable. Material net debt still refuses. |
 | Default “not financial ⇒ FCFF” | CI Healthcare Plans → absurd DCF; UI did not refuse | Closed-world `Unclassified` + reason in UI |
-| One cash model on a factory-plus-lender filing | General Motors yield hook printed $464 from mixed factory and loan cash | `component-sotp/2`: value each part; add; ticker is not the rule |
+| One cash model on a factory-plus-lender filing | General Motors yield hook printed $464 from mixed factory and loan cash | `component-sotp/2`: value each part; add; ticker is not the rule. Only parents in machinery, auto, tools, or equipment host a captive. Credit Karma, Moody's product lines, and IT client verticals stay on FCFF. |
 | Factory NOPAT minus plant spend | NOPAT is after depreciation; subtracting full CapEx double-counts plant | Factory FCFF = NOPAT + depreciation − sustaining CapEx |
 | Weak absurd checks / quarantine-as-green | Suite green while MU-class OOM or many quarantines | Order-of-magnitude + business-class asserts; 20-slot fixture = **0** quarantine |
 | Backend refuse, UI mute dash | User cannot tell model refused vs still loading | Surface `valuation_unavailable_reason` / i18n refuse copy |
