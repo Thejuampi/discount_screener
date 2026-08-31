@@ -135,21 +135,31 @@ class SecIssuerComponentClient(
         if (stem.isBlank()) return emptyList()
         var found = linkedMapOf<String, NamedFiler>()
         for (arm in listOf("Financial", "Credit", "Capital")) {
-            var query = "\"$stem $arm\""
-            var url = "$EFTS_URL?q=${URLEncoder.encode(query, "UTF-8")}&forms=10-K"
-            var body = getText(url) ?: continue
-            var hits = json.parseToJsonElement(body).jsonObject["hits"]
-                ?.jsonObject?.get("hits")?.jsonArray ?: continue
-            for (hit in hits) {
-                var source = hit.jsonObject["_source"]?.jsonObject ?: continue
-                var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
-                var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-                    ?: continue
-                var clean = stripCikSuffix(name)
-                found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
-            }
+            var phrase = "$stem $arm"
+            collectFilers(
+                found,
+                "$EFTS_URL?entityName=${URLEncoder.encode(phrase, "UTF-8")}&forms=10-K",
+            )
+            collectFilers(
+                found,
+                "$EFTS_URL?q=${URLEncoder.encode("\"$phrase\"", "UTF-8")}&forms=10-K",
+            )
         }
         return found.values.toList()
+    }
+
+    private fun collectFilers(found: MutableMap<String, NamedFiler>, url: String) {
+        var body = getText(url) ?: return
+        var hits = json.parseToJsonElement(body).jsonObject["hits"]
+            ?.jsonObject?.get("hits")?.jsonArray ?: return
+        for (hit in hits) {
+            var source = hit.jsonObject["_source"]?.jsonObject ?: continue
+            var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
+            var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
+                ?: continue
+            var clean = stripCikSuffix(name)
+            found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
+        }
     }
 
     // Cut a "  (CIK 0000320193)" tail: the first "(CIK" that a whitespace char precedes.

@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:33Z",
+  "scannedAt": "2026-08-31T16:45Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -35,7 +35,7 @@
     {
       "class": "mixed_issuer_missing_lender_book",
       "count": 8,
-      "statusHint": "false mixed pending rebuild; CAT HPE SNA PCAR still need lender book"
+      "statusHint": "CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse"
     },
     {
       "class": "financials_missing_book_or_roe",
@@ -11379,8 +11379,8 @@
       {
         "symbol": "HPE",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "expected",
+        "note": "No finance-sub 10-K. Parent segment prints revenue/EBIT, not book equity and NI. Do not invent ROE.",
         "sector": "Technology",
         "industry": "Communication Equipment",
         "company": "Hewlett Packard Enterprise Company",
@@ -11405,8 +11405,8 @@
       {
         "symbol": "CAT",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "EFTS entityName finds the finance-sub 10-K (CAT 0000764764, PCAR 0000731288). Rebuild Detail.",
         "sector": "Industrials",
         "industry": "Farm & Heavy Construction Machinery",
         "company": "Caterpillar Inc.",
@@ -11457,8 +11457,8 @@
       {
         "symbol": "PCAR",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Parent 10-K prints FinancialServicesMember. Paccar Financial has no separate 10-K. Do not run FCFF on finance cash.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "EFTS entityName finds PACCAR Financial Corp CIK 0000731288. Rebuild Detail.",
         "sector": "Industrials",
         "industry": "Farm & Heavy Construction Machinery",
         "company": "PACCAR Inc",
@@ -11535,8 +11535,8 @@
       {
         "symbol": "SNA",
         "class": "mixed_issuer_missing_lender_book",
-        "status": "open",
-        "note": "Classifier marked a factory-plus-lender split. Lender book is missing.",
+        "status": "expected",
+        "note": "No finance-sub 10-K. Parent segment prints revenue/EBIT, not book equity and NI. Do not invent ROE.",
         "sector": "Industrials",
         "industry": "Tools & Accessories",
         "company": "Snap-on Incorporated",

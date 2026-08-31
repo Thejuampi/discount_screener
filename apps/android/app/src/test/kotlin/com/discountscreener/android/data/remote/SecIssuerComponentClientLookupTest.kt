@@ -29,6 +29,12 @@ class SecIssuerComponentClientLookupTest {
         assertEquals(2_058_000_000.0, set!!.financial!!.netIncome.last().value, 0.0)
     }
 
+    @Test
+    fun entity_name_search_reaches_the_finance_sub_when_full_text_hits_the_parent() {
+        var set = runBlocking { catClient().lookup("CAT", "Caterpillar Inc") }
+        assertEquals(540_000_000.0, set!!.financial!!.netIncome.last().value, 0.0)
+    }
+
     private fun client() = SecIssuerComponentClient(
         cacheDir = temp.newFolder(),
         client = cannedHttpClient(
@@ -38,7 +44,23 @@ class SecIssuerComponentClientLookupTest {
                 "$FILING_DIR/index.json" to FILING_INDEX,
                 "$FILING_DIR/gm-20251231_htm.xml" to instanceXml(),
                 "https://efts.sec.gov/LATEST/search-index?q=" to EFTS_HITS,
+                "https://efts.sec.gov/LATEST/search-index?entityName=" to EMPTY_HITS,
                 "https://data.sec.gov/api/xbrl/companyfacts/CIK0000804269.json" to COMPANY_FACTS,
+            ),
+        ),
+    )
+
+    private fun catClient() = SecIssuerComponentClient(
+        cacheDir = temp.newFolder(),
+        client = cannedHttpClient(
+            listOf(
+                "https://www.sec.gov/files/company_tickers.json" to CAT_TICKERS,
+                "https://data.sec.gov/submissions/CIK0000018230.json" to SUBMISSIONS,
+                "$CAT_FILING_DIR/index.json" to CAT_FILING_INDEX,
+                "$CAT_FILING_DIR/cat-20251231_htm.xml" to instanceXml(),
+                "https://efts.sec.gov/LATEST/search-index?q=" to CAT_PARENT_HITS,
+                "https://efts.sec.gov/LATEST/search-index?entityName=" to CAT_ENTITY_HITS,
+                "https://data.sec.gov/api/xbrl/companyfacts/CIK0000764764.json" to CAT_COMPANY_FACTS,
             ),
         ),
     )
@@ -70,6 +92,55 @@ class SecIssuerComponentClientLookupTest {
               {"_source":{"ciks":["0000804269"],
                "display_names":["General Motors Financial Company, Inc.  (CIK 0000804269)"]}}
             ]}}
+        """.trimIndent()
+
+        val EMPTY_HITS = """{"hits":{"hits":[]}}"""
+
+        const val CAT_FILING_DIR = "https://www.sec.gov/Archives/edgar/data/18230/000000000125000001"
+
+        val CAT_TICKERS = """{"0":{"cik_str":18230,"ticker":"CAT","title":"Caterpillar Inc"}}"""
+
+        val CAT_FILING_INDEX = """
+            {"directory":{"item":[
+              {"name":"cat-20251231.xsd"},
+              {"name":"cat-20251231_htm.xml"}
+            ]}}
+        """.trimIndent()
+
+        val CAT_PARENT_HITS = """
+            {"hits":{"hits":[
+              {"_source":{"ciks":["0000018230"],
+               "display_names":["CATERPILLAR INC  (CIK 0000018230)"]}}
+            ]}}
+        """.trimIndent()
+
+        val CAT_ENTITY_HITS = """
+            {"hits":{"hits":[
+              {"_source":{"ciks":["0000764764"],
+               "display_names":["CATERPILLAR FINANCIAL SERVICES CORP  (CIK 0000764764)"]}}
+            ]}}
+        """.trimIndent()
+
+        val CAT_COMPANY_FACTS = """
+            {
+              "cik": 764764,
+              "facts": {
+                "us-gaap": {
+                  "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": {
+                    "units": { "USD": [
+                      { "fp": "FY", "form": "10-K", "end": "2025-12-31", "val": 3227000000,
+                        "filed": "2026-02-13" }
+                    ] }
+                  },
+                  "NetIncomeLoss": {
+                    "units": { "USD": [
+                      { "fp": "FY", "form": "10-K", "start": "2025-01-01", "end": "2025-12-31",
+                        "val": 540000000, "filed": "2026-02-13" }
+                    ] }
+                  }
+                }
+              }
+            }
         """.trimIndent()
 
         val COMPANY_FACTS = """

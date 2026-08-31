@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:33Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T16:45Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -13,7 +13,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |
 | `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |
 | `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |
-| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive | Rebuild INTU, MCO, EPAM, CTSH. CAT, HPE, SNA, PCAR still need the finance-sub book. |
+| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |
 
 ## Counts
 
@@ -24,7 +24,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `latest_reported_fcf_non_positive` | 39 | engine_fixed_pending_rebuild |
 | `not_eligible_silent` | 29 | expected refuse, UI reason missing |
 | `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
-| `mixed_issuer_missing_lender_book` | 8 | false mixed pending rebuild; CAT HPE SNA PCAR still need lender book |
+| `mixed_issuer_missing_lender_book` | 8 | CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse |
 | `financials_missing_book_or_roe` | 5 | open |
 | `no_payload` | 5 | open — list hole |
 | `sec_non_positive_normalized_fcff` | 1 | open / SNDK pending rebuild |
@@ -478,17 +478,17 @@ Reported cash covers reported debt. Coupon failure is now not-applicable. Rebuil
 
 ### `mixed_issuer_missing_lender_book` (8)
 
-Classifier marked a factory-plus-lender split. Lender book is missing.
+No finance-sub 10-K. Parent segment prints revenue/EBIT, not book equity and NI. Do not invent ROE.
 
 | Symbol | Status | Sector | Industry | Source | Detail |
 | --- | --- | --- | --- | --- | --- |
-| HPE | open | Technology | Communication Equipment | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| CAT | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| HPE | expected | Technology | Communication Equipment | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| CAT | engine_fixed_pending_rebuild | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | INTU | engine_fixed_pending_rebuild | Technology | Software - Application | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| PCAR | open | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
+| PCAR | engine_fixed_pending_rebuild | Industrials | Farm & Heavy Construction Machinery | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods) |
 | MCO | engine_fixed_pending_rebuild | Financial Services | Financial Data & Stock Exchanges | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | EPAM | engine_fixed_pending_rebuild | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
-| SNA | open | Industrials | Tools & Accessories | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
+| SNA | expected | Industrials | Tools & Accessories | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 | CTSH | engine_fixed_pending_rebuild | Technology | Information Technology Services | YahooFinance | YahooFinance:MissingDriverEvidence (fcff unavailable: lender book missing on a mixed issuer) |
 
 ### `financials_missing_book_or_roe` (5)

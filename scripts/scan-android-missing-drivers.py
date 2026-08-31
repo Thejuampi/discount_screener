@@ -146,6 +146,22 @@ def classify(symbol: str, row: dict | None) -> dict:
                     "Parent industry is not a captive-finance host. Credit Karma, ratings lines, and IT verticals stay on FCFF. Rebuild.",
                     extra,
                 )
+            if symbol in ("CAT", "PCAR"):
+                return entry(
+                    symbol,
+                    "mixed_issuer_missing_lender_book",
+                    "engine_fixed_pending_rebuild",
+                    "EFTS entityName finds the finance-sub 10-K (CAT 0000764764, PCAR 0000731288). Rebuild Detail.",
+                    extra,
+                )
+            if symbol in ("HPE", "SNA"):
+                return entry(
+                    symbol,
+                    "mixed_issuer_missing_lender_book",
+                    "expected",
+                    "No finance-sub 10-K. Parent segment prints revenue/EBIT, not book equity and NI. Do not invent ROE.",
+                    extra,
+                )
             return entry(
                 symbol,
                 "mixed_issuer_missing_lender_book",
@@ -157,8 +173,8 @@ def classify(symbol: str, row: dict | None) -> dict:
             return entry(
                 symbol,
                 "mixed_issuer_missing_lender_book",
-                "open",
-                "Parent 10-K prints FinancialServicesMember. Paccar Financial has no separate 10-K. Do not run FCFF on finance cash.",
+                "engine_fixed_pending_rebuild",
+                "EFTS entityName finds PACCAR Financial Corp CIK 0000731288. Rebuild Detail.",
                 extra,
             )
         if debt_msgs:
@@ -239,7 +255,7 @@ def render_md(payload: dict) -> str:
         "| `sec_non_positive_normalized_fcff` | Latest positive FCFF year (policy/37) | Rebuild. Reopen SNDK. |",
         "| `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |",
         "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |",
-        "| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive | Rebuild INTU, MCO, EPAM, CTSH. CAT, HPE, SNA, PCAR still need the finance-sub book. |",
+        "| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |",
         "",
         "## Counts",
         "",
@@ -320,7 +336,7 @@ def main() -> None:
         "yahoo_missing_marginal_tax": "engine_fixed_pending_rebuild — domicile tax proxy",
         "latest_reported_fcf_non_positive": "engine_fixed_pending_rebuild",
         "yahoo_missing_cost_of_debt": "mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected",
-        "mixed_issuer_missing_lender_book": "false mixed pending rebuild; CAT HPE SNA PCAR still need lender book",
+        "mixed_issuer_missing_lender_book": "CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse",
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
         "financials_missing_book_or_roe": "open",
         "not_eligible_silent": "expected refuse, UI reason missing",
