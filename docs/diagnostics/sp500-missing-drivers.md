@@ -1,6 +1,6 @@
 # SP500 missing drivers
 
-Scanned 2026-08-31T16:45Z. Profile tracked 501 names. Latest rows 496.
+Scanned 2026-08-31T16:53Z. Profile tracked 501 names. Latest rows 496.
 Source is the Android `discount_screener_state.sqlite3` copy. List path uses Yahoo. SEC runs on Detail open.
 
 Fix one class at a time. Do not invent numbers. An expected refuse stays expected.
@@ -14,6 +14,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |
 | `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |
 | `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |
+| `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |
 
 ## Counts
 
@@ -25,7 +26,7 @@ Fix one class at a time. Do not invent numbers. An expected refuse stays expecte
 | `not_eligible_silent` | 29 | expected refuse, UI reason missing |
 | `yahoo_missing_cost_of_debt` | 13 | mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected |
 | `mixed_issuer_missing_lender_book` | 8 | CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse |
-| `financials_missing_book_or_roe` | 5 | open |
+| `financials_missing_book_or_roe` | 5 | ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC |
 | `no_payload` | 5 | open — list hole |
 | `sec_non_positive_normalized_fcff` | 1 | open / SNDK pending rebuild |
 
@@ -493,15 +494,15 @@ No finance-sub 10-K. Parent segment prints revenue/EBIT, not book equity and NI.
 
 ### `financials_missing_book_or_roe` (5)
 
-Residual income refused. Book or ROE is missing.
+Yahoo latest ROE is a loss year. Detail SEC median of recent years stays positive. Open Detail.
 
 | Symbol | Status | Sector | Industry | Source | Detail |
 | --- | --- | --- | --- | --- | --- |
-| CNC | open | Healthcare | Healthcare Plans | SecEdgar | Residual income refused. Book or ROE is missing. |
-| ARES | open | Financial Services | Asset Management | SecEdgar | Residual income refused. Book or ROE is missing. |
-| WRB | open | Financial Services | Insurance - Property & Casualty | SecEdgar | Residual income refused. Book or ROE is missing. |
-| IVZ | open | Financial Services | Asset Management | SecEdgar | Residual income refused. Book or ROE is missing. |
-| BX | open | Financial Services | Asset Management | SecEdgar | Residual income refused. Book or ROE is missing. |
+| CNC | engine_fixed_pending_rebuild | Healthcare | Healthcare Plans | SecEdgar | Yahoo latest ROE is a loss year. Detail SEC median of recent years stays positive. Open Detail. |
+| ARES | engine_fixed_pending_rebuild | Financial Services | Asset Management | SecEdgar | Yahoo payout at or above 1 is retention 0. Refresh quotes. |
+| WRB | engine_fixed_pending_rebuild | Financial Services | Insurance - Property & Casualty | SecEdgar | Yahoo book is empty. SEC files equity and NI. Open Detail. |
+| IVZ | engine_fixed_pending_rebuild | Financial Services | Asset Management | SecEdgar | Yahoo latest ROE is a loss year. Detail SEC drops loss years and keeps the remaining positive ROE. Open Detail. |
+| BX | engine_fixed_pending_rebuild | Financial Services | Asset Management | SecEdgar | Yahoo payout at or above 1 is retention 0. Refresh quotes. |
 
 ### `no_payload` (5)
 

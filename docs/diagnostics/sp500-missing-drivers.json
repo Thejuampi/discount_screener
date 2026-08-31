@@ -1,5 +1,5 @@
 {
-  "scannedAt": "2026-08-31T16:45Z",
+  "scannedAt": "2026-08-31T16:53Z",
   "source": "android emulator discount_screener_state.sqlite3",
   "profile": "sp500",
   "tracked": 501,
@@ -40,7 +40,7 @@
     {
       "class": "financials_missing_book_or_roe",
       "count": 5,
-      "statusHint": "open"
+      "statusHint": "ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC"
     },
     {
       "class": "no_payload",
@@ -11589,8 +11589,8 @@
       {
         "symbol": "CNC",
         "class": "financials_missing_book_or_roe",
-        "status": "open",
-        "note": "Residual income refused. Book or ROE is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo latest ROE is a loss year. Detail SEC median of recent years stays positive. Open Detail.",
         "sector": "Healthcare",
         "industry": "Healthcare Plans",
         "company": "Centene Corporation",
@@ -11612,8 +11612,8 @@
       {
         "symbol": "ARES",
         "class": "financials_missing_book_or_roe",
-        "status": "open",
-        "note": "Residual income refused. Book or ROE is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo payout at or above 1 is retention 0. Refresh quotes.",
         "sector": "Financial Services",
         "industry": "Asset Management",
         "company": "Ares Management Corporation",
@@ -11635,8 +11635,8 @@
       {
         "symbol": "WRB",
         "class": "financials_missing_book_or_roe",
-        "status": "open",
-        "note": "Residual income refused. Book or ROE is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo book is empty. SEC files equity and NI. Open Detail.",
         "sector": "Financial Services",
         "industry": "Insurance - Property & Casualty",
         "company": "W. R. Berkley Corporation",
@@ -11658,8 +11658,8 @@
       {
         "symbol": "IVZ",
         "class": "financials_missing_book_or_roe",
-        "status": "open",
-        "note": "Residual income refused. Book or ROE is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo latest ROE is a loss year. Detail SEC drops loss years and keeps the remaining positive ROE. Open Detail.",
         "sector": "Financial Services",
         "industry": "Asset Management",
         "company": "Invesco Ltd.",
@@ -11681,8 +11681,8 @@
       {
         "symbol": "BX",
         "class": "financials_missing_book_or_roe",
-        "status": "open",
-        "note": "Residual income refused. Book or ROE is missing.",
+        "status": "engine_fixed_pending_rebuild",
+        "note": "Yahoo payout at or above 1 is retention 0. Refresh quotes.",
         "sector": "Financial Services",
         "industry": "Asset Management",
         "company": "Blackstone Inc.",

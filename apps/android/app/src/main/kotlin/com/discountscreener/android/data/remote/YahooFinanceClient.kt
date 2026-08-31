@@ -1452,7 +1452,8 @@ internal fun resolveRetentionBps(
     val payout = financialData.rawDouble("payoutRatio")
         ?: summaryDetail.rawDouble("payoutRatio")
         ?: return null
-    if (!payout.isFinite() || payout !in 0.0..1.0) return null
+    if (!payout.isFinite() || payout < 0.0) return null
+    if (payout >= 1.0) return 0
     return ((1.0 - payout) * 10_000.0).roundToLong().toInt()
 }
 

@@ -205,6 +205,38 @@ def classify(symbol: str, row: dict | None) -> dict:
                 )
             return entry(symbol, "yahoo_missing_cost_of_debt", status, note, extra)
         if biz == "FinancialServices" or "insurance" in (industry or "").lower() or "asset management" in (industry or "").lower() or "healthcare plans" in (industry or "").lower():
+            if symbol in ("ARES", "BX"):
+                return entry(
+                    symbol,
+                    "financials_missing_book_or_roe",
+                    "engine_fixed_pending_rebuild",
+                    "Yahoo payout at or above 1 is retention 0. Refresh quotes.",
+                    extra,
+                )
+            if symbol == "CNC":
+                return entry(
+                    symbol,
+                    "financials_missing_book_or_roe",
+                    "engine_fixed_pending_rebuild",
+                    "Yahoo latest ROE is a loss year. Detail SEC median of recent years stays positive. Open Detail.",
+                    extra,
+                )
+            if symbol == "WRB":
+                return entry(
+                    symbol,
+                    "financials_missing_book_or_roe",
+                    "engine_fixed_pending_rebuild",
+                    "Yahoo book is empty. SEC files equity and NI. Open Detail.",
+                    extra,
+                )
+            if symbol == "IVZ":
+                return entry(
+                    symbol,
+                    "financials_missing_book_or_roe",
+                    "engine_fixed_pending_rebuild",
+                    "Yahoo latest ROE is a loss year. Detail SEC drops loss years and keeps the remaining positive ROE. Open Detail.",
+                    extra,
+                )
             return entry(
                 symbol,
                 "financials_missing_book_or_roe",
@@ -256,6 +288,7 @@ def render_md(payload: dict) -> str:
         "| `latest_reported_fcf_non_positive` | Driver path stays open when OCF/CapEx/revenue align | Rebuild. |",
         "| `yahoo_missing_cost_of_debt` | Cash covering debt skips a failed coupon. Detail copies filed SEC interest onto Yahoo years | Rebuild. Open CBRE, ULTA, WSM. CMG, LULU, LEN stay refused. |",
         "| `mixed_issuer_missing_lender_book` | Mixed split only when the parent industry hosts a captive. EFTS entityName loads CAT and PCAR finance-sub 10-Ks | Rebuild CAT, PCAR, INTU, MCO, EPAM, CTSH. HPE and SNA stay refused: no sub 10-K, no parent book. |",
+        "| `financials_missing_book_or_roe` | Yahoo payout ≥ 1 is retention 0. Detail SEC fills CNC/IVZ median ROE and WRB book | Refresh quotes for ARES, BX. Open Detail for CNC, WRB, IVZ. |",
         "",
         "## Counts",
         "",
@@ -338,7 +371,7 @@ def main() -> None:
         "yahoo_missing_cost_of_debt": "mixed — net-cash and SEC-interest pending rebuild; CMG/LULU/LEN expected",
         "mixed_issuer_missing_lender_book": "CAT/PCAR and false mixed pending rebuild; HPE/SNA expected refuse",
         "sec_non_positive_normalized_fcff": "open / SNDK pending rebuild",
-        "financials_missing_book_or_roe": "open",
+        "financials_missing_book_or_roe": "ARES/BX payout clamp pending quote refresh; CNC/WRB/IVZ pending Detail SEC",
         "not_eligible_silent": "expected refuse, UI reason missing",
         "no_payload": "open — list hole",
         "no_dcf": "open",

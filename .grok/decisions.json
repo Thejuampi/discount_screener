@@ -1,5 +1,5 @@
 {
-  "last": "efts-sub-10k",
+  "last": "financials-book-roe",
   "nodes": [
     {"id": "yahoo-interest", "label": "Find if Yahoo sends interest under another timeseries key", "score": 0.85, "status": "taken", "next": ["issuer-yield", "sec-interest"]},
     {"id": "issuer-yield", "label": "Attach issuer market yield when Yahoo interest is empty", "score": 0.7, "status": "taken", "next": ["no-coupon-names"]},
@@ -12,7 +12,7 @@
     {"id": "parent-segment-book", "label": "Read lender book from parent FinancialServices segment when no sub 10-K", "score": 0.75, "status": "failed", "next": ["financials-book-roe"]},
     {"id": "efts-sub-10k", "label": "Find CAT HPE SNA finance-sub 10-K via EFTS and residual facts", "score": 0.8, "status": "taken", "next": ["parent-segment-book", "financials-book-roe"]},
     {"id": "material-debt-no-interest", "label": "Levered names with empty Yahoo interest still refuse", "score": 0.55, "status": "taken", "next": ["yahoo-interest"]},
-    {"id": "financials-book-roe", "label": "Fix financials missing book or ROE (CNC ARES WRB IVZ BX)", "score": 0.6, "status": "open", "next": ["no-payload"]},
+    {"id": "financials-book-roe", "label": "Fix financials missing book or ROE (CNC ARES WRB IVZ BX)", "score": 0.6, "status": "taken", "next": ["no-payload"]},
     {"id": "no-payload", "label": "Fix no-payload list holes (BK SATS FISV FOX NWS)", "score": 0.55, "status": "open", "next": []}
   ]
 }

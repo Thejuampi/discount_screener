@@ -583,6 +583,26 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun payout_at_one_is_zero_retention() {
+        var financialData = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(1.0))
+            })
+        }
+        assertEquals(0, resolveRetentionBps(financialData, JsonObject(emptyMap())))
+    }
+
+    @Test
+    fun payout_above_one_is_zero_retention() {
+        var financialData = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(1.47))
+            })
+        }
+        assertEquals(0, resolveRetentionBps(financialData, JsonObject(emptyMap())))
+    }
+
+    @Test
     fun missing_payout_in_both_modules_yields_null_retention() {
         val empty = JsonObject(emptyMap())
         assertNull(resolveRetentionBps(empty, empty))

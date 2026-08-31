@@ -264,7 +264,8 @@ private fun parseTimeseriesMetric(root: JsonObject, name: String): List<AnnualRe
 
 private fun resolveRetentionBps(financialData: JsonObject?, summaryDetail: JsonObject?): Int? {
     var payout = financialData.rawDouble("payoutRatio") ?: summaryDetail.rawDouble("payoutRatio")
-    if (payout == null || !payout.isFinite() || payout < 0.0 || payout > 1.0) return null
+    if (payout == null || !payout.isFinite() || payout < 0.0) return null
+    if (payout >= 1.0) return 0
     return ((1.0 - payout) * 10_000.0).roundToInt()
 }
 

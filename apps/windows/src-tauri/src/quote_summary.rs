@@ -9,7 +9,7 @@
 //!
 //! | Driver | Source precedence | Notes |
 //! | --- | --- | --- |
-//! | **Payout → retention** | `financialData.payoutRatio` then `summaryDetail.payoutRatio` | Keep only finite values in `[0, 1]`; `retention = (1 − payout) × 10_000` bps. Empty Yahoo objects (`{}`) are treated as missing. |
+//! | **Payout → retention** | `financialData.payoutRatio` then `summaryDetail.payoutRatio` | Finite payout `≥ 0`. Payout `≥ 1` is retention 0. Else `retention = (1 − payout) × 10_000` bps. Empty Yahoo objects (`{}`) are missing. |
 //! | **Book / BVPS** | `defaultKeyStatistics.bookValue` (or `bookValuePerShare`), else `price / priceToBook` | Positive book only. Price is `financialData.currentPrice` → `price.regularMarketPrice` → cents fallback. |
 //! | **ROE** | `financialData.returnOnEquity` only | Reported ROE; no EPS/book synthesis. |
 //!
@@ -584,7 +584,12 @@ fn resolve_book_value_per_share_cents_with_deficit(
         .filter(|v| *v != 0.0)
         .map(|v| (v * 100.0).round() as i64)
         .or_else(|| {
-            resolve_book_value_per_share_cents(statistics, financial_data, price, market_price_cents)
+            resolve_book_value_per_share_cents(
+                statistics,
+                financial_data,
+                price,
+                market_price_cents,
+            )
         })
 }
 
@@ -622,8 +627,14 @@ fn resolve_retention_bps(
     financial_data
         .and_then(|f| raw_double(f, "payoutRatio"))
         .or_else(|| summary_detail.and_then(|detail| raw_double(detail, "payoutRatio")))
-        .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
-        .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32)
+        .filter(|payout| payout.is_finite() && *payout >= 0.0)
+        .map(|payout| {
+            if payout >= 1.0 {
+                0
+            } else {
+                ((1.0 - payout) * 10_000.0).round() as i32
+            }
+        })
 }
 
 fn is_usable_name(name: &str, symbol: &str) -> bool {
@@ -878,6 +889,26 @@ mod tests {
             .fundamentals
             .expect("fundamentals");
         assert_eq!(fund.retention_bps, Some(6_000)); // 1 - 0.40
+    }
+
+    #[test]
+    fn payout_at_one_is_zero_retention() {
+        let financial = serde_json::json!({ "payoutRatio": { "raw": 1.0 } });
+        let empty = serde_json::json!({});
+        assert_eq!(
+            resolve_retention_bps(Some(&financial), Some(&empty)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn payout_above_one_is_zero_retention() {
+        let financial = serde_json::json!({ "payoutRatio": { "raw": 1.47 } });
+        let empty = serde_json::json!({});
+        assert_eq!(
+            resolve_retention_bps(Some(&financial), Some(&empty)),
+            Some(0)
+        );
     }
 
     #[test]
