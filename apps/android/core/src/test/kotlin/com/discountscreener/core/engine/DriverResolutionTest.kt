@@ -202,6 +202,39 @@ class DriverResolutionTest {
         assertEquals(550, resolved.costOfDebtBps)
     }
 
+    @Test
+    fun yahoo_without_marginal_tax_takes_filed_statutory_tax() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2026-06-27", 1.0)),
+        )
+        var sec = FundamentalTimeseries(
+            marginalTaxRate = listOf(
+                AnnualReportedValue(
+                    "2026-07-03",
+                    0.21,
+                    concept = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate",
+                ),
+            ),
+        )
+        var filled = attachStatutoryTaxFrom(yahoo, sec)
+        assertEquals(0.21, filled.marginalTaxRate.single().value)
+    }
+
+    @Test
+    fun yahoo_keeps_its_own_marginal_tax() {
+        var yahoo = FundamentalTimeseries(
+            operatingCashFlow = listOf(AnnualReportedValue("2026-06-27", 1.0)),
+            marginalTaxRate = listOf(AnnualReportedValue("2026-06-27", 0.15, concept = "MarginalTax")),
+        )
+        var sec = FundamentalTimeseries(
+            marginalTaxRate = listOf(
+                AnnualReportedValue("2026-07-03", 0.21, concept = "JurisdictionStatutory"),
+            ),
+        )
+        var filled = attachStatutoryTaxFrom(yahoo, sec)
+        assertEquals(0.15, filled.marginalTaxRate.single().value)
+    }
+
     private fun financingTimeseries() = FundamentalTimeseries(
         interestExpense = listOf(
             AnnualReportedValue("2021-12-31", 5.0),

@@ -3,6 +3,7 @@ package com.discountscreener.android.data.repository
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.core.engine.DcfSourceSelectionPolicy
+import com.discountscreener.core.engine.attachStatutoryTaxFrom
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceCandidate
@@ -58,7 +59,10 @@ internal class DcfSourceCoordinator(
 
         val yahooCandidate = candidate(
             source = DcfSource.YahooFinance,
-            timeseries = fetchYahoo(symbol)?.also { fetched[DcfSource.YahooFinance] = it },
+            timeseries = fetchYahoo(symbol)?.also { fetched[DcfSource.YahooFinance] = it }
+                ?.let { raw ->
+                    secCandidate?.timeseries?.let { attachStatutoryTaxFrom(raw, it) } ?: raw
+                },
             evaluate = evaluate,
         )
         return DcfResolution(DcfSourceSelectionPolicy.select(yahoo = yahooCandidate, sec = secCandidate), fetched)

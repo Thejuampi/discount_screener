@@ -1,5 +1,6 @@
 package com.discountscreener.core.engine
 
+import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.FundamentalTimeseries
 import com.discountscreener.core.model.WaccFieldSource
 import kotlin.math.abs
@@ -24,6 +25,32 @@ internal data class TaxObservation(
     val bps: Int,
     val source: WaccFieldSource,
 )
+
+fun attachStatutoryTaxFrom(
+    target: FundamentalTimeseries,
+    source: FundamentalTimeseries,
+): FundamentalTimeseries {
+    if (target.marginalTaxRate.isNotEmpty()) return target
+    var statutory = source.marginalTaxRate.filter { point ->
+        var kind = taxSource(point.concept)
+        kind == WaccFieldSource.TaxReconciliation || kind == WaccFieldSource.JurisdictionStatutory
+    }
+    if (statutory.isEmpty()) return target
+    var byYear = statutory.associateBy { annualKey(it).take(4) }
+    var latest = statutory.maxByOrNull(::annualKey) ?: return target
+    var filled = target.operatingCashFlow.ifEmpty { target.revenue }.map { row ->
+        var match = byYear[annualKey(row).take(4)] ?: latest
+        AnnualReportedValue(
+            asOfDate = row.asOfDate,
+            value = match.value,
+            periodEnd = row.asOfDate,
+            concept = match.concept ?: "JurisdictionStatutory",
+            source = match.source,
+        )
+    }
+    if (filled.isEmpty()) return target
+    return target.copy(marginalTaxRate = filled)
+}
 
 internal fun taxObservations(timeseries: FundamentalTimeseries): List<TaxObservation> =
     timeseries.marginalTaxRate

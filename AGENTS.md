@@ -109,6 +109,7 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Missing required drivers → `Unavailable` / `NotEligible` with reason codes
 - Beta missing → industry shrink
 - Latest OCF is the run-rate only when the prior window already printed two positive OCF years. A first-cash ramp keeps the recent OCF centre.
+- Latest FCFF margin is the base run-rate when the recent-window median is non-positive and that latest aligned year is positive (`fcff_margin=latest_positive_aligned_annual`). Refuse `non_positive_normalized_fcff` only when the latest year is also non-positive.
 
 **Forbidden**
 

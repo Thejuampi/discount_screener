@@ -29,7 +29,7 @@ pub const ENGINE_VERSION: &str = "valuation-model-family/1";
 /// Policy bump: versioned industry-beta priors + through-cycle commodity pull
 /// (industry-beta-policy/2). Unclassified sector/industry still refuse FCFF.
 /// See `shared/contracts/industry-beta-policy-v1.json`.
-pub const MODEL_POLICY_VERSION: &str = "business-class-policy/36-ocf-prior-franchise";
+pub const MODEL_POLICY_VERSION: &str = "business-class-policy/37-latest-positive-fcff";
 /// Sole industry-prior table version for CoE shrink (cache fingerprint input).
 pub const INDUSTRY_BETA_POLICY_VERSION: &str = "industry-beta-policy/2";
 
@@ -1632,6 +1632,7 @@ struct DriverModelInputs {
     tax_defaulted: bool,
     ocf_persistent_recovery: bool,
     ocf_centre_without_prior_franchise: bool,
+    latest_positive_fcff_base: bool,
 }
 
 /// Build a driver-consistent FCFF path from aligned annual operating data.
@@ -1956,8 +1957,13 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         .copied()
         .filter(|margin| *margin >= 0)
         .collect();
+    let latest_fcff_margin_bps = driver_points.last().and_then(|point| point.fcff_margin_bps);
+    let latest_positive_fcff_base =
+        nonneg_margins.len() < 2 && latest_fcff_margin_bps.is_some_and(|margin| margin > 0);
     let annual_base_margin_bps = if nonneg_margins.len() >= 2 {
         median_bps(&nonneg_margins)
+    } else if latest_positive_fcff_base {
+        latest_fcff_margin_bps.expect("latest positive FCFF margin")
     } else {
         median_bps(&margins)
     };
@@ -2049,6 +2055,7 @@ fn driver_model_inputs(history: &[FcfPoint]) -> Option<DriverModelInputs> {
         tax_defaulted: false,
         ocf_persistent_recovery,
         ocf_centre_without_prior_franchise,
+        latest_positive_fcff_base: latest_positive_fcff_base && !owner_earnings_base,
     })
 }
 
@@ -2402,6 +2409,11 @@ fn fcff_driver_wacc(
         if drivers.owner_earnings_base {
             format!(
                 "fcff_margin=owner_earnings_ocf_minus_maintenance:{}",
+                drivers.base_fcff_margin_bps
+            )
+        } else if drivers.latest_positive_fcff_base {
+            format!(
+                "fcff_margin=latest_positive_aligned_annual:{}",
                 drivers.base_fcff_margin_bps
             )
         } else {
@@ -3965,6 +3977,60 @@ mod tests {
             "5% grower must add back growth CapEx, got margin {} bps",
             drivers.base_fcff_margin_bps
         );
+    }
+
+    fn nand_cycle_history(latest_ocf: f64) -> Vec<FcfPoint> {
+        let rows = [
+            (
+                2023,
+                6_086_000_000.0,
+                -713_000_000.0,
+                219_000_000.0,
+                31_000_000.0,
+            ),
+            (
+                2024,
+                6_663_000_000.0,
+                -309_000_000.0,
+                166_000_000.0,
+                40_000_000.0,
+            ),
+            (
+                2025,
+                7_355_000_000.0,
+                84_000_000.0,
+                204_000_000.0,
+                63_000_000.0,
+            ),
+            (
+                2026,
+                20_248_000_000.0,
+                latest_ocf,
+                177_000_000.0,
+                73_000_000.0,
+            ),
+        ];
+        rows.into_iter()
+            .map(|(year, revenue, ocf, capex, interest)| {
+                FcfPoint::new(year, ocf - capex)
+                    .with_operating_drivers(ocf, capex, revenue, Some(interest), Some(2_100))
+                    .with_rate_resolution_inputs(Some(0.0), Some(2_100), None, None)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn latest_positive_fcff_year_sets_the_base_when_window_median_is_negative() {
+        let drivers =
+            driver_model_inputs(&nand_cycle_history(11_671_000_000.0)).expect("driver inputs");
+        assert!(drivers.latest_positive_fcff_base);
+    }
+
+    #[test]
+    fn all_negative_aligned_fcff_keeps_a_non_positive_base() {
+        let drivers =
+            driver_model_inputs(&nand_cycle_history(-500_000_000.0)).expect("driver inputs");
+        assert!(drivers.base_fcff_margin_bps <= 0);
     }
 
     #[test]

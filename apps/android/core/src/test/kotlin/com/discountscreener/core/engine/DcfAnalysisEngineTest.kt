@@ -1121,6 +1121,42 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun latest_positive_fcff_year_keeps_identity_when_window_median_is_negative() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = 11_671_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun latest_positive_fcff_year_stamps_latest_positive_run_rate() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = 11_671_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(
+            true,
+            analysis.reasonCodes.any { it.startsWith("fcff_margin=latest_positive_aligned_annual:") },
+        )
+    }
+
+    @Test
+    fun all_negative_aligned_fcff_still_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = -500_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(
+            true,
+            result.exceptionOrNull()?.message.orEmpty().startsWith("non_positive_normalized_fcff"),
+        )
+    }
+
+    @Test
     fun compute_without_market_cap_or_price_fails_clearly() {
         val fundamentals = completeFundamentals().copy(marketCapDollars = null)
         val result = DcfAnalysisEngine.compute(
@@ -1548,6 +1584,52 @@ class DcfAnalysisEngineTest {
             totalDebt = rows.map { AnnualReportedValue(it.first.first, it.second.third) },
             marginalTaxRate = rows.map {
                 AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+    }
+
+    private fun nandCycleFundamentals() = completeFundamentals().copy(
+        symbol = "SNDK",
+        sectorName = "Technology",
+        industryName = "Computer Hardware",
+        sectorKey = "technology",
+        industryKey = "computer-hardware",
+        marketCapDollars = 217_000_000_000L,
+        sharesOutstanding = 146_419_001L,
+        totalDebtDollars = 201_000_000L,
+        totalCashDollars = 4_762_000_000L,
+        betaMillis = 1_400,
+    )
+
+    private fun nandCycleTimeseries(latestOcfDollars: Double): FundamentalTimeseries {
+        var years = listOf("2023-06-30", "2024-06-28", "2025-06-27", "2026-07-03")
+        var revenue = listOf(6_086_000_000.0, 6_663_000_000.0, 7_355_000_000.0, 20_248_000_000.0)
+        var ocf = listOf(-713_000_000.0, -309_000_000.0, 84_000_000.0, latestOcfDollars)
+        var capex = listOf(-219_000_000.0, -166_000_000.0, -204_000_000.0, -177_000_000.0)
+        var interest = listOf(31_000_000.0, 40_000_000.0, 63_000_000.0, 73_000_000.0)
+        var debt = listOf(0.0, 0.0, 1_849_000_000.0, 0.0)
+        var shares = listOf(145_000_000.0, 145_000_000.0, 145_000_000.0, 155_000_000.0)
+        fun points(values: List<Double>) = years.mapIndexed { i, date ->
+            AnnualReportedValue(date, values[i])
+        }
+        return FundamentalTimeseries(
+            freeCashFlow = years.mapIndexed { i, date ->
+                AnnualReportedValue(date, ocf[i] + capex[i])
+            },
+            operatingCashFlow = points(ocf),
+            capitalExpenditure = points(capex),
+            revenue = points(revenue),
+            interestExpense = points(interest),
+            taxRateForCalcs = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = points(debt),
+            dilutedAverageShares = points(shares),
+            pretaxIncome = years.mapIndexed { i, date ->
+                AnnualReportedValue(date, ocf[i])
+            },
+            marginalTaxRate = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
             },
         )
     }
