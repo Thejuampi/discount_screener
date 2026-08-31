@@ -387,4 +387,5 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 | Analyst-method / ledger slice | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |
 | Valuation ADRs | [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) |
 | Contracts | [`shared/contracts/README.md`](shared/contracts/README.md) |
+| Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) |
 | BMAD process | [`.grok/rules/bmad.md`](.grok/rules/bmad.md) |

@@ -1,0 +1,249 @@
+contract: advisor-csv-import-v1
+policyVersion: advisor-csv-import/1
+status: active
+surface: windows-advisor
+owner: apps/windows/src/portfolioCsv.ts
+
+notes:
+  - A holdings snapshot and a trade blotter are different files. The importer names the kind before any write.
+  - The importer never silent-replaces trade-derived lots with a snapshot.
+  - A 90-day blotter never rebuilds the book from zero.
+  - Refuse over invent. Skip cash. Skip unknown Type values.
+  - Unit tests in apps/windows/tests/portfolioCsv.test.ts encode every case below.
+
+kinds:
+  holdings_snapshot:
+    meaning: Point-in-time book. Quantity and unit cost as of one date.
+    formats: [J.P. Morgan]
+    detect:
+      allHeaders: [asset class, ticker, quantity, unit cost, as of]
+    apply: confirm_holdings_replace
+  trades_window:
+    meaning: Bounded blotter. Chase last-90-days is this kind.
+    formats: [Chase]
+    detect:
+      allHeaders: [trade date, type, ticker, price usd, quantity]
+    apply: confirm_trades_merge
+  trades_ledger:
+    meaning: Full trade history that can rebuild open lots from zero.
+    formats: [Coinbase, Schwab, genérico]
+    apply: upsert_ledger
+
+detectionOrder:
+  - Coinbase
+  - Schwab
+  - J.P. Morgan
+  - Chase
+  - genérico
+
+holdings_snapshot:
+  costBasis: unit_cost
+  marketPriceColumn: ignored
+  side: buy
+  openedAt: acquisition_date
+  asOf: as_of
+  dateConvention: us_mdy
+  numberConvention: us_thousands
+  skip:
+    - empty ticker
+    - asset class starting with Cash
+    - ticker QACDS
+    - quantity <= 0
+  write:
+    - Show a warning first.
+    - Wait for Confirm or Cancel.
+    - On Confirm, upsert listed symbols only.
+    - Do not delete lots that the file omits.
+    - Store book as-of in localStorage key ds_advisor_book_as_of.
+  confirmIsRequired: true
+  silentUpsert: forbidden
+
+trades_window:
+  sideFromType:
+    buy: [Buy]
+    sell: [Sell]
+    reinvest_is_buy: [Reinvest]
+    skip: [Dividend, DBS, WDL, DBT, BNK, Name Change]
+  quantity: abs
+  priceColumn: price usd
+  dateColumn: trade date
+  dateConvention: us_mdy
+  merge:
+    requires: [current_lots, book_as_of]
+    refuse:
+      trades_without_book: lots are empty
+      missing_book_as_of: lots exist and ds_advisor_book_as_of is empty
+    qtyAndCost:
+      applyWhen: trade_date > book_as_of
+      ignoreWhen: trade_date <= book_as_of
+    openedAt:
+      fillFromEarliestBuyWhenEmpty: true
+      usesPreAsOfBuys: true
+    sellBeyondQty: skip that trade, keep the lot, do not open a short
+    startFrom: current lots
+    startFromZero: forbidden
+  confirmIsRequired: true
+
+trades_ledger:
+  behavior: existing Coinbase, Schwab, and generic parsers
+  aggregateFromCsv: true
+  confirmIsRequired: false
+
+numberRules:
+  us_thousands:
+    - '"1,273" = 1273'
+    - '"16,339.32" = 16339.32'
+    - '"1.273" as a J.P. Morgan quantity is not a thousands group and stays 1.273'
+  latin_decimal:
+    - generic semicolon CSV may use 250,50 = 250.50
+
+dateRules:
+  us_mdy:
+    - J.P. Morgan and Chase use MM/DD/YYYY
+    - '"8/31/2026" = 2026-08-31'
+    - '"08/31/2026" = 2026-08-31'
+  latin_dmy:
+    - generic comma/semicolon CSV keeps DD/MM/YYYY
+
+examples:
+
+  - id: JPM-KIND
+    case: jpm positions csv is a holdings snapshot not a trade blotter
+    input:
+      formatHint: J.P. Morgan
+    expect:
+      format: J.P. Morgan
+      kind: holdings_snapshot
+
+  - id: JPM-THOUSANDS
+    case: jpm thousands commas stay thousands
+    input:
+      quantityRaw: "1,273"
+    expect:
+      quantity: 1273
+
+  - id: JPM-UNIT-COST
+    case: jpm cost basis is unit cost not the market print
+    input:
+      marketPrice: 34.61
+      unitCost: 35.28
+    expect:
+      price: 35.28
+
+  - id: JPM-SIDE
+    case: jpm holdings are buys
+    expect:
+      side: buy
+
+  - id: JPM-SKIP-CASH
+    case: jpm cash rows do not become positions
+    input:
+      rows: [PHYL, US DOLLAR, AMZN, QACDS]
+    expect:
+      symbols: [PHYL, AMZN]
+
+  - id: JPM-AGG
+    case: jpm snapshot aggregates to open lots
+    input:
+      phylQty: 1273
+      phylUnitCost: 35.28
+    expect:
+      avg_cost_cents: 3528
+
+  - id: JPM-ASOF
+    case: jpm as-of becomes the book as-of
+    input:
+      asOfRaw: "08/31/2026"
+    expect:
+      asOf: "2026-08-31"
+
+  - id: JPM-CONFIRM
+    case: holdings import plans a confirm replace
+    expect:
+      action: confirm_holdings_replace
+
+  - id: CHASE-KIND
+    case: chase transactions csv is a trades window
+    expect:
+      format: Chase
+      kind: trades_window
+
+  - id: CHASE-PRICE
+    case: chase reads price usd
+    input:
+      priceUsd: 563.35
+    expect:
+      price: 563.35
+
+  - id: CHASE-ABS-QTY
+    case: chase sell quantity is absolute
+    input:
+      quantityRaw: "-4"
+      type: Sell
+    expect:
+      side: sell
+      quantity: 4
+
+  - id: CHASE-REINVEST
+    case: chase reinvest is a buy
+    input:
+      type: Reinvest
+    expect:
+      side: buy
+
+  - id: CHASE-SKIP-DIVIDEND
+    case: chase dividend rows do not form positions
+    input:
+      type: Dividend
+    expect:
+      skipped: true
+
+  - id: MERGE-REFUSE-NO-BOOK
+    case: a trades window without lots refuses
+    input:
+      lots: []
+    expect:
+      action: refuse
+      reason: trades_without_book
+
+  - id: MERGE-REFUSE-NO-ASOF
+    case: a trades window without book as-of refuses
+    input:
+      lots: [{ symbol: AMZN, quantity: 10, avg_cost_cents: 20000 }]
+      bookAsOf: null
+    expect:
+      action: refuse
+      reason: missing_book_as_of
+
+  - id: MERGE-SAME-DAY
+    case: trades on as-of do not change quantity or cost
+    input:
+      lots: [{ symbol: AMZN, quantity: 10, avg_cost_cents: 20000, opened_at: "2024-01-15" }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { date: "2026-08-31", side: buy, quantity: 10, price: 50 }
+    expect:
+      quantity: 10
+      avg_cost_cents: 20000
+
+  - id: MERGE-POST-ASOF-BUY
+    case: a buy after as-of adds size and blends cost
+    input:
+      lots: [{ symbol: AMZN, quantity: 10, avg_cost_cents: 20000, opened_at: "2024-01-15" }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { date: "2026-09-01", side: buy, quantity: 10, price: 220 }
+    expect:
+      quantity: 20
+      avg_cost_cents: 21000
+
+  - id: MERGE-OPENED-AT
+    case: an empty opened_at takes the earliest blotter buy
+    input:
+      lots: [{ symbol: AMZN, quantity: 10, avg_cost_cents: 20000, opened_at: null }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { date: "2026-06-02", side: buy, quantity: 10, price: 200 }
+    expect:
+      quantity: 10
+      opened_at: "2026-06-02"

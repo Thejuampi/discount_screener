@@ -1,8 +1,15 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, fmt } from "../api";
-import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, ImportPosition, PortfolioRiskResponse } from "../api";
+import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, PortfolioRiskResponse } from "../api";
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
+import {
+  BOOK_AS_OF_STORAGE_KEY,
+  parseAnyCsv,
+  planCsvImport,
+  type ImportPlan,
+  type PortfolioLot,
+} from "../portfolioCsv";
 import {
   evaluatePortfolioAgainstRegime,
   type PortfolioActionKey,
@@ -57,266 +64,6 @@ const daysOpen = (openedAt: string | null): number | null => {
   return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86_400_000));
 };
 
-// ── CSV transaction parsing + aggregation ─────────────────────────────────────
-
-interface CsvTx {
-  symbol: string;
-  side: "buy" | "sell";
-  quantity: number;
-  price: number;       // dollars per share
-  date: string;        // ISO or "" if absent
-}
-
-/// CSV line splitter with double-quote support (Schwab quotes every field and
-/// embeds commas inside, e.g. "Tfr JPMORGAN CHASE BAN, N/A").
-function splitCsvLine(line: string, delim: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
-      else inQuotes = !inQuotes;
-    } else if (ch === delim && !inQuotes) {
-      out.push(cur.trim());
-      cur = "";
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur.trim());
-  return out;
-}
-
-type CsvFormat = "coinbase" | "schwab" | "generic";
-
-function detectFormat(lines: string[]): CsvFormat {
-  const head = lines.slice(0, 6).join("\n").toLowerCase();
-  if (head.includes("transaction type") && head.includes("quantity transacted")) return "coinbase";
-  const first = lines[0].toLowerCase();
-  if (first.includes("action") && first.includes("symbol") && (first.includes("fees & comm") || first.includes("amount"))) return "schwab";
-  return "generic";
-}
-
-// ── Coinbase native format ────────────────────────────────────────────────────
-// Preamble lines before the real header; assets without -USD suffix; staking
-// income counts as a buy at market price (that's its cost basis).
-
-const COINBASE_BUY_TYPES = [
-  "buy", "advanced trade buy", "staking income", "learning reward",
-  "rewards income", "inflation reward", "receive", "coinbase earn",
-];
-const COINBASE_SELL_TYPES = ["sell", "advanced trade sell", "send", "withdrawal"];
-
-function parseCoinbase(lines: string[]): { txs: CsvTx[]; ignored: number } {
-  const headerIdx = lines.findIndex((l) => {
-    const lo = l.toLowerCase();
-    return lo.includes("transaction type") && lo.includes("quantity transacted");
-  });
-  if (headerIdx < 0) throw new Error("Header de Coinbase no encontrado");
-  const headers = splitCsvLine(lines[headerIdx], ",").map((h) => h.toLowerCase());
-  const iType = headers.findIndex((h) => h === "transaction type");
-  const iAsset = headers.findIndex((h) => h === "asset");
-  const iQty = headers.findIndex((h) => h === "quantity transacted");
-  const iPrice = headers.findIndex((h) => h.startsWith("price at transaction"));
-  const iDate = headers.findIndex((h) => h === "timestamp");
-  if (iType < 0 || iAsset < 0 || iQty < 0 || iPrice < 0) {
-    throw new Error("Columnas de Coinbase incompletas");
-  }
-
-  const txs: CsvTx[] = [];
-  let ignored = 0;
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], ",");
-    const type = (cols[iType] ?? "").toLowerCase();
-    const asset = (cols[iAsset] ?? "").toUpperCase();
-    // Skip fiat rows (USD deposits/withdrawals are cash moves, not positions)
-    if (!asset || asset === "USD") { ignored++; continue; }
-    const side: "buy" | "sell" | null =
-      COINBASE_BUY_TYPES.includes(type) ? "buy"
-      : COINBASE_SELL_TYPES.includes(type) ? "sell"
-      : null;
-    if (!side) { ignored++; continue; }
-    const quantity = Math.abs(normalizeNum(cols[iQty] ?? "", false));
-    const price = normalizeNum(cols[iPrice] ?? "", false);
-    if (!isFinite(quantity) || quantity <= 0 || !isFinite(price) || price <= 0) { ignored++; continue; }
-    const rawDate = (cols[iDate] ?? "").trim();
-    const date = /^\d{4}-\d{2}-\d{2}/.test(rawDate) ? rawDate.slice(0, 10) : "";
-    // Map to the app's Yahoo-style crypto symbol (BTC → BTC-USD)
-    const symbol = asset.endsWith("-USD") ? asset : `${asset}-USD`;
-    txs.push({ symbol, side, quantity, price, date });
-  }
-  if (txs.length === 0) throw new Error("Ninguna transacción de trading en el CSV de Coinbase");
-  return { txs, ignored };
-}
-
-// ── Charles Schwab native format ──────────────────────────────────────────────
-// "Reinvest Shares" is a real share purchase (dividend reinvestment).
-// Dividends/interest/transfers/splits have no qty+price → skipped automatically.
-// Schwab dates are US-format MM/DD/YYYY, sometimes with "as of ..." suffix.
-
-const SCHWAB_BUY_ACTIONS = ["buy", "reinvest shares"];
-const SCHWAB_SELL_ACTIONS = ["sell"];
-
-function parseSchwab(lines: string[]): { txs: CsvTx[]; ignored: number } {
-  const headers = splitCsvLine(lines[0], ",").map((h) => h.toLowerCase());
-  const iDate = headers.findIndex((h) => h === "date");
-  const iAction = headers.findIndex((h) => h === "action");
-  const iSym = headers.findIndex((h) => h === "symbol");
-  const iQty = headers.findIndex((h) => h === "quantity");
-  const iPrice = headers.findIndex((h) => h === "price");
-  if (iAction < 0 || iSym < 0 || iQty < 0 || iPrice < 0) {
-    throw new Error("Columnas de Schwab incompletas");
-  }
-
-  const txs: CsvTx[] = [];
-  let ignored = 0;
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], ",");
-    const action = (cols[iAction] ?? "").toLowerCase();
-    const symbol = (cols[iSym] ?? "").toUpperCase();
-    const side: "buy" | "sell" | null =
-      SCHWAB_BUY_ACTIONS.includes(action) ? "buy"
-      : SCHWAB_SELL_ACTIONS.includes(action) ? "sell"
-      : null;
-    // Reject non-trades and odd identifiers (CUSIPs from splits start with a digit)
-    if (!side || !symbol || !/^[A-Z][A-Z0-9.]*$/.test(symbol)) { ignored++; continue; }
-    const quantity = Math.abs(normalizeNum(cols[iQty] ?? "", false));
-    const price = normalizeNum(cols[iPrice] ?? "", false);
-    if (!isFinite(quantity) || quantity <= 0 || !isFinite(price) || price <= 0) { ignored++; continue; }
-    const m = (cols[iDate] ?? "").match(/(\d{2})\/(\d{2})\/(\d{4})/);
-    const date = m ? `${m[3]}-${m[1]}-${m[2]}` : "";   // MM/DD/YYYY → ISO
-    txs.push({ symbol, side, quantity, price, date });
-  }
-  if (txs.length === 0) throw new Error("Ninguna transacción Buy/Sell en el CSV de Schwab");
-  return { txs, ignored };
-}
-
-/// Entry point: detect format, dispatch to the right parser.
-function parseAnyCsv(text: string): { txs: CsvTx[]; ignored: number; format: string } {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
-  if (lines.length < 2) throw new Error("CSV vacío o sin filas de datos");
-  const fmtKind = detectFormat(lines);
-  if (fmtKind === "coinbase") return { ...parseCoinbase(lines), format: "Coinbase" };
-  if (fmtKind === "schwab") return { ...parseSchwab(lines), format: "Schwab" };
-  return { txs: parseCsvTransactions(text), ignored: 0, format: "genérico" };
-}
-
-function normalizeNum(raw: string, semicolonCsv: boolean): number {
-  let s = raw.replace(/[$\s"]/g, "");
-  if (s.includes(".") && s.includes(",")) {
-    // "1,234.56" → thousands commas
-    s = s.replace(/,/g, "");
-  } else if (s.includes(",") && (semicolonCsv || !s.includes("."))) {
-    // latin decimal comma "250,50"
-    s = s.replace(",", ".");
-  }
-  return parseFloat(s);
-}
-
-function normalizeDate(raw: string): string {
-  const s = raw.trim().replace(/"/g, "");
-  if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  // DD/MM/YYYY (latin convention)
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) {
-    const [, d, mo, y] = m;
-    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
-  return "";
-}
-
-function parseCsvTransactions(text: string): CsvTx[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
-  if (lines.length < 2) throw new Error("CSV vacío o sin filas de datos");
-
-  const semicolonCsv = lines[0].includes(";") && !lines[0].includes(",");
-  const delim = semicolonCsv ? ";" : ",";
-  const headers = splitCsvLine(lines[0], delim).map((h) => h.toLowerCase().replace(/"/g, ""));
-
-  const find = (names: string[]) => headers.findIndex((h) => names.includes(h));
-  const iSym = find(["symbol", "ticker", "simbolo", "símbolo"]);
-  const iSide = find(["side", "tipo", "operacion", "operación", "type", "transaction"]);
-  const iQty = find(["quantity", "qty", "cantidad", "shares", "unidades"]);
-  const iPrice = find(["price", "precio", "valor", "value", "cost", "costo"]);
-  const iDate = find(["date", "fecha"]);
-
-  const missing: string[] = [];
-  if (iSym < 0) missing.push("symbol");
-  if (iSide < 0) missing.push("side (compra/venta)");
-  if (iQty < 0) missing.push("quantity");
-  if (iPrice < 0) missing.push("price");
-  if (missing.length > 0) {
-    throw new Error(`Columnas faltantes: ${missing.join(", ")}. Encontradas: ${headers.join(", ")}`);
-  }
-
-  const txs: CsvTx[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], delim);
-    const symbol = (cols[iSym] ?? "").replace(/"/g, "").toUpperCase();
-    if (!symbol) continue;
-    const sideRaw = (cols[iSide] ?? "").replace(/"/g, "").toLowerCase();
-    const side: "buy" | "sell" | null =
-      ["buy", "compra", "b", "c", "purchase"].includes(sideRaw) ? "buy"
-      : ["sell", "venta", "v", "s", "sale"].includes(sideRaw) ? "sell"
-      : null;
-    if (!side) continue;
-    const quantity = normalizeNum(cols[iQty] ?? "", semicolonCsv);
-    const price = normalizeNum(cols[iPrice] ?? "", semicolonCsv);
-    if (!isFinite(quantity) || quantity <= 0 || !isFinite(price) || price <= 0) continue;
-    const date = iDate >= 0 ? normalizeDate(cols[iDate] ?? "") : "";
-    txs.push({ symbol, side, quantity, price, date });
-  }
-  if (txs.length === 0) throw new Error("Ninguna fila válida en el CSV");
-  return txs;
-}
-
-/// Aggregate chronological transactions into net positions with average cost.
-function aggregateToPositions(txs: CsvTx[]): ImportPosition[] {
-  // Stable sort by date (rows without date keep their relative order)
-  const sorted = [...txs].sort((a, b) =>
-    a.date && b.date ? a.date.localeCompare(b.date) : 0
-  );
-
-  interface Acc { qty: number; avgCost: number; openedAt: string | null }
-  const acc = new Map<string, Acc>();
-
-  for (const tx of sorted) {
-    const cur = acc.get(tx.symbol) ?? { qty: 0, avgCost: 0, openedAt: null };
-    if (tx.side === "buy") {
-      const newQty = cur.qty + tx.quantity;
-      cur.avgCost = (cur.avgCost * cur.qty + tx.price * tx.quantity) / newQty;
-      if (cur.qty === 0) cur.openedAt = tx.date || null;  // position (re)opened
-      cur.qty = newQty;
-    } else {
-      cur.qty -= tx.quantity;
-      if (cur.qty <= 0.000001) {
-        cur.qty = 0;
-        cur.avgCost = 0;
-        cur.openedAt = null;  // fully closed
-      }
-    }
-    acc.set(tx.symbol, cur);
-  }
-
-  const out: ImportPosition[] = [];
-  for (const [symbol, a] of acc) {
-    // Skip dust positions (< $1 total cost) — e.g. micro staking rewards
-    if (a.qty > 0 && a.avgCost > 0 && a.qty * a.avgCost >= 1) {
-      out.push({
-        symbol,
-        quantity: Math.round(a.qty * 10000) / 10000,
-        avg_cost_cents: Math.round(a.avgCost * 100),
-        opened_at: a.openedAt,
-      });
-    }
-  }
-  if (out.length === 0) throw new Error("El CSV no resulta en ninguna posición abierta (todas las posiciones quedaron en 0)");
-  return out;
-}
-
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
@@ -331,6 +78,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   const [extraPrices, setExtraPrices] = useState<Record<string, number | null>>({});
   const extraPricesRef = useRef<Record<string, number | null>>({});
   const [csvMsg, setCsvMsg] = useState<string | null>(null);
+  const [csvPending, setCsvPending] = useState<ImportPlan | null>(null);
 
   // Risk engine state
   const [risk, setRisk] = useState<PortfolioRiskResponse | null>(null);
@@ -585,26 +333,78 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     catch (e) { console.error(e); }
   };
 
-  // ── CSV import ────────────────────────────────────────────────────────────
+  const currentLots = (): PortfolioLot[] =>
+    positions.map((p) => ({
+      symbol: p.symbol,
+      quantity: p.quantity,
+      avg_cost_cents: p.avg_cost_cents,
+      opened_at: p.opened_at,
+    }));
+
+  const applyCsvPositions = async (
+    format: string,
+    lots: PortfolioLot[],
+    ignored: number,
+    asOf: string | null,
+  ) => {
+    var res = await api.portfolioImport(lots);
+    var msg = `[${format}] ` + t("advisor.csv.result", { created: res.created, updated: res.updated, skipped: res.skipped });
+    if (ignored > 0) msg += ` · ${ignored} filas no-trade omitidas`;
+    if (asOf) localStorage.setItem(BOOK_AS_OF_STORAGE_KEY, asOf);
+    setCsvMsg(msg);
+    extraPricesRef.current = {};
+    setExtraPrices({});
+    refresh();
+    setTimeout(() => setCsvMsg(null), 8000);
+  };
+
   const handleCsvFile = async (file: File | null) => {
     if (!file) return;
     setCsvMsg("…");
+    setCsvPending(null);
     try {
-      const text = await file.text();
-      const { txs, ignored, format } = parseAnyCsv(text);
-      const finals = aggregateToPositions(txs);
-      const res = await api.portfolioImport(finals);
-      let msg = `[${format}] ` + t("advisor.csv.result", { created: res.created, updated: res.updated, skipped: res.skipped });
-      if (ignored > 0) msg += ` · ${ignored} filas no-trade omitidas`;
-      setCsvMsg(msg);
-      // Invalidate price cache for newly added unknown symbols
-      extraPricesRef.current = {};
-      setExtraPrices({});
-      refresh();
+      var text = await file.text();
+      var parsed = parseAnyCsv(text);
+      var plan = planCsvImport(parsed, {
+        lots: currentLots(),
+        bookAsOf: localStorage.getItem(BOOK_AS_OF_STORAGE_KEY),
+      });
+      if (plan.action === "refuse") {
+        var refuseKey = plan.reason === "trades_without_book"
+          ? "advisor.csv.refuseNoBook"
+          : "advisor.csv.refuseNoAsOf";
+        setCsvMsg(`⚠ ${t(refuseKey)}`);
+        setTimeout(() => setCsvMsg(null), 8000);
+        return;
+      }
+      if (plan.action === "upsert_ledger") {
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, null);
+        return;
+      }
+      setCsvMsg(null);
+      setCsvPending(plan);
     } catch (e) {
       setCsvMsg(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setCsvMsg(null), 8000);
     }
-    setTimeout(() => setCsvMsg(null), 8000);
+  };
+
+  const confirmCsvImport = async () => {
+    if (!csvPending) return;
+    var plan = csvPending;
+    setCsvPending(null);
+    try {
+      if (plan.action === "confirm_holdings_replace") {
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf);
+        return;
+      }
+      if (plan.action === "confirm_trades_merge") {
+        await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf);
+      }
+    } catch (e) {
+      setCsvMsg(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setCsvMsg(null), 8000);
+    }
   };
 
   const decisionRows = accuracy.filter(a => a.bucket_type === "decision");
@@ -804,6 +604,37 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
             <span style={{ color: "var(--warning)", fontSize: 11 }}>{t("advisor.form.unknownSymbol")}</span>
           )}
         </div>
+        {csvPending && (csvPending.action === "confirm_holdings_replace" || csvPending.action === "confirm_trades_merge") && (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: "10px 14px",
+              borderRadius: 8,
+              fontSize: 12,
+              lineHeight: 1.45,
+              background: "rgba(251,191,36,0.12)",
+              border: "1px solid rgba(251,191,36,0.45)",
+              color: "var(--text-2)",
+            }}
+          >
+            <div>
+              {csvPending.action === "confirm_holdings_replace"
+                ? t("advisor.csv.warnHoldings", {
+                    count: csvPending.positions.length,
+                    asOf: csvPending.asOf ?? "—",
+                  })
+                : t("advisor.csv.warnTrades", { asOf: csvPending.asOf })}
+            </div>
+            <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+              <button className="congress-sync-btn" onClick={confirmCsvImport}>
+                {t("advisor.csv.confirm")}
+              </button>
+              <button className="btn-ghost" onClick={() => setCsvPending(null)}>
+                {t("advisor.form.cancel")}
+              </button>
+            </div>
+          </div>
+        )}
         <div style={{ fontSize: 10, color: "var(--text-5)", marginBottom: 10 }}>
           {t("advisor.csv.help")}
         </div>

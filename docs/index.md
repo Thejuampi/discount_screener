@@ -8,6 +8,7 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Desktop README](../apps/desktop/README.md) - Rust terminal workstation features, controls, persistence, and verification.
 - [Android README](../apps/android/README.md) - Android module map, current implementation, build, release, and run-on-device flow.
 - [Shared Contracts README](../shared/contracts/README.md) - language-neutral fixtures and behavior contracts.
+- [Advisor CSV import](advisor-csv-import.md) - Windows Advisor holdings snapshot vs Chase 90-day blotter. Warn, then confirm. Merge does not double-count.
 
 ## Operator Documentation
 

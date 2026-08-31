@@ -27,6 +27,12 @@ Use this index to choose the right planning document without loading the full BM
 - Related: [DCF Source Consistency Architecture](../implementation-artifacts/dcf-source-consistency-architecture.md) - provider selection for inputs entering the engine.
 - Related runtime: Windows `dcf_model.rs` + `quant_lens.rs`; Android `DcfAnalysisEngine.kt`; desktop `workstation/app_core.rs` valuation routing.
 
+## Advisor CSV import
+
+- [SPEC — Advisor CSV import](../specs/spec-advisor-csv-import/SPEC.md) - Windows Advisor holdings snapshot vs Chase trades window. Warn then confirm. Merge does not double-count.
+- Contract: [advisor-csv-import-v1.yaml](../../shared/contracts/advisor-csv-import-v1.yaml)
+- Operator: [Advisor CSV import](../../docs/advisor-csv-import.md)
+
 ## Pre-Earnings Risk Gate
 
 - [PRD — Pre-Earnings Risk Gate](prd-pre-earnings-risk-gate-2026-08-27.md) - implied move, SUE regression, risk score, and a decision matrix that keeps event risk apart from the DCF. Built and running on Android: the chain and the consensus both come from Yahoo, the report date from the EDGAR 8-K. Section 13 holds what exists; the 16-20 quarter regression of section 4.2 waits on the log filling up.

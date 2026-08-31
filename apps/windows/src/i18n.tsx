@@ -696,12 +696,29 @@ const T: Record<string, { es: string; en: string }> = {
   "advisor.col.days":           { es: "Días", en: "Days" },
   "advisor.csv.import":         { es: "Importar CSV", en: "Import CSV" },
   "advisor.csv.help":           {
-    es: "Soporta CSVs nativos de Charles Schwab y Coinbase (auto-detectados) o formato genérico (symbol, side, quantity, price, date). Dividendos, transferencias e intereses se omiten automáticamente. Las posiciones se calculan con costo promedio; reinversiones de dividendos cuentan como compras.",
-    en: "Supports native Charles Schwab and Coinbase CSVs (auto-detected) or generic format (symbol, side, quantity, price, date). Dividends, transfers and interest are skipped automatically. Positions use average cost; dividend reinvestments count as buys.",
+    es: "J.P. Morgan positions.csv es un snapshot: avisa y pide confirmación. Chase transactions.csv es un blotter de 90 días: se fusiona después del as-of. También Schwab, Coinbase y genérico (symbol, side, quantity, price, date). Dividendos y cash se omiten. Costo promedio. Reinvest cuenta como compra.",
+    en: "J.P. Morgan positions.csv is a snapshot: warn, then confirm. Chase transactions.csv is a 90-day blotter: merge after as-of. Also Schwab, Coinbase, and generic (symbol, side, quantity, price, date). Dividends and cash skip. Average cost. Reinvest counts as a buy.",
   },
   "advisor.csv.result":         {
     es: "✓ {created} nuevas · {updated} actualizadas · {skipped} ignoradas",
     en: "✓ {created} created · {updated} updated · {skipped} skipped",
+  },
+  "advisor.csv.warnHoldings":   {
+    es: "Este archivo es un snapshot de posiciones (J.P. Morgan). Reemplaza cantidad y costo de {count} símbolos. No importa operaciones. As-of {asOf}.",
+    en: "This file is a holdings snapshot (J.P. Morgan). It replaces quantity and cost for {count} symbols. It does not import trades. As-of {asOf}.",
+  },
+  "advisor.csv.warnTrades":     {
+    es: "Este archivo es un blotter de operaciones (Chase). La app aplica las operaciones posteriores a {asOf} sobre las posiciones actuales. Las operaciones del as-of o anteriores no cambian la cantidad.",
+    en: "This file is a trade blotter (Chase). The app applies trades after {asOf} onto current lots. Trades on or before as-of do not change quantity.",
+  },
+  "advisor.csv.confirm":        { es: "Confirmar importación", en: "Confirm import" },
+  "advisor.csv.refuseNoBook":   {
+    es: "Importá primero el CSV de posiciones. Un blotter de 90 días no reconstruye el libro.",
+    en: "Import the positions CSV first. A 90-day blotter does not rebuild the book.",
+  },
+  "advisor.csv.refuseNoAsOf":   {
+    es: "No hay fecha as-of del libro. Importá el snapshot de posiciones primero.",
+    en: "The book has no as-of date. Import the holdings snapshot first.",
   },
   "advisor.col.position":       { es: "Posición", en: "Position" },
   "advisor.col.qty":            { es: "Cant.", en: "Qty" },
