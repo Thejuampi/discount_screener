@@ -1,0 +1,117 @@
+{
+  "contract": "puml-runtime-v1",
+  "status": "active",
+  "architecture": "_bmad-output/planning-artifacts/puml-runtime-architecture.md",
+  "purpose": "Four-layer runtime for a diagram-backed model. The .puml is the live model. Host holds irreducible primitives only.",
+  "layers": [
+    {
+      "name": "Model",
+      "role": "Common evaluate surface. Any scoring or hunt model.",
+      "kotlin": "com.discountscreener.core.runtime.Model",
+      "evaluate": "evaluate(ModelInput) -> ModelOutput"
+    },
+    {
+      "name": "PumlModel",
+      "role": "A Model whose policy is a parsed PlantUML activity document.",
+      "kotlin": "com.discountscreener.core.puml.PumlModel",
+      "extends": "Model",
+      "fields": ["document"]
+    },
+    {
+      "name": "PumlModelFactory",
+      "role": "Syntax: PUML text in, flow graph out. No I/O. Fail closed on unknown activity syntax.",
+      "kotlin": "com.discountscreener.core.puml.PumlModelFactory",
+      "load": "load(PumlSource, PumlHost) -> PumlModel",
+      "firstDialect": "com.discountscreener.core.puml.ActivityPumlModelFactory"
+    },
+    {
+      "name": "PumlEngine",
+      "role": "Walks the flow graph. Does not encode hunt arithmetic or hunt labels. Named primitives go to PumlHost.",
+      "kotlin": "com.discountscreener.core.puml.PumlEngine",
+      "run": "run(PumlDocument, ModelInput, PumlHost) -> ModelOutput",
+      "firstInterpreter": "com.discountscreener.core.puml.InterpretingPumlEngine"
+    }
+  ],
+  "host": {
+    "name": "PumlHost",
+    "role": "Irreducible primitive catalog. Hunt formulas, ifs, and coefficients live in the .puml.",
+    "kotlin": "com.discountscreener.core.puml.PumlHost",
+    "firstCatalog": "com.discountscreener.core.puml.StandardPumlHost",
+    "evaluate": "evaluate(phrase, env) -> ModelValue. Unknown phrases are Missing.",
+    "call": "call(name, args, env, document) -> ModelValue. Names: count, robust_mean, median, ols, ramp, clamp, min, max, sign, percentile, foreign, classify.",
+    "decorateEmit": "decorateEmit(name, fields, env, flags, document) -> fields. Default is identity. Reasons are written in the box.",
+    "unknownPhrase": "ModelValue.Missing",
+    "forbidden": [
+      "cheapness as a host primitive",
+      "English alias maps",
+      "Watch first-match tables in Kotlin"
+    ]
+  },
+  "values": {
+    "ModelValue": ["Num", "Text", "Flag", "Series", "Empty", "Missing"],
+    "missingIsAValue": true,
+    "zeroIsNotAbsence": true
+  },
+  "output": {
+    "type": "ModelOutput",
+    "kotlin": "com.discountscreener.core.runtime.ModelOutput",
+    "fields": {
+      "bindings": "Map<String, ModelValue>",
+      "flags": "Set<String>",
+      "emission": "ModelEmission | null"
+    },
+    "emission": {
+      "name": "PascalCase box label",
+      "fields": "arg and/or reason copied from the box"
+    },
+    "forbidden": [
+      "ModelOutput.Decided",
+      "ModelOutput.Unavailable as a runtime type",
+      "hard-coded Act/Watch/Avoid/Unavailable in the engine"
+    ]
+  },
+  "activityDialect": {
+    "accepted": [
+      "start",
+      "stop",
+      "partition",
+      "assignment",
+      "clear empty",
+      "flag",
+      "emit PascalCase",
+      "if/elseif/else",
+      "split",
+      "notes",
+      "legend",
+      "function partition name(params)"
+    ],
+    "emitShapes": ["Name", "Name(arg)", "Name reason=x"],
+    "functionPartition": "partition \"name(p, q)\" registers a document function. Not walked as main flow. Call binds args by position and returns the last assignment.",
+    "bareCall": "non-emit activity box with no = or ←; host.evaluate",
+    "unknownSyntax": "fail closed"
+  },
+  "invariants": [
+    "PumlModel is a Model.",
+    "Factory.load is pure and fail-closed.",
+    "Engine.run walks the flow graph and does not hard-code hunt formulas or hunt labels.",
+    "A process loads each PUML source once at start. A restart sees edits. Mid-run reload is out of scope.",
+    "Tape, Street consensus EPS, and Quant Engine stay out unless a document names them.",
+    "A new partition, a new if, a changed coefficient, or a changed hunt formula is a PUML edit. It does not require Kotlin.",
+    "A call resolves document.functions first, then the Kotlin host lib.",
+    "Hunt functions live in the same .puml as callable partitions named name(params).",
+    "host.call is the Kotlin primitive lib included at load. The diagram supplies hunt identities.",
+    "A new hunt is a new PUML document. It needs a new host only when it needs a new primitive name."
+  ],
+  "extensibility": {
+    "newHunt": "new .puml; new host.call names only when a new primitive is required",
+    "newBlockOrIfOrCoefficientOrFormula": "edit the .puml only",
+    "newDialect": "new PumlModelFactory, same PumlModel",
+    "codeModel": "implement Model"
+  },
+  "firstDocument": {
+    "puml": "_bmad-output/planning-artifacts/earnings-cheapness.puml",
+    "title": "EarningsCheapness",
+    "host": "com.discountscreener.core.puml.StandardPumlHost",
+    "binding": "com.discountscreener.core.baratas.BaratasModels"
+  }
+}

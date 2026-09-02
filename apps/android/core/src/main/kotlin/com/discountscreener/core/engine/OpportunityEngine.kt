@@ -2,6 +2,7 @@ package com.discountscreener.core.engine
 
 import com.discountscreener.core.math.isForeignTo
 import com.discountscreener.core.math.medianOf
+import com.discountscreener.core.math.ramp
 import com.discountscreener.core.math.robustCentre
 import com.discountscreener.core.model.AnnualReportedValue
 import com.discountscreener.core.model.BusinessClass
@@ -2680,10 +2681,8 @@ object OpportunityEngine {
      * Returns -1 at or below [lower], +1 at or above [upper], linear interpolation between.
      */
     internal fun smoothRamp(observed: Double, lower: Double, upper: Double): Double {
-        require(upper > lower) { "smoothRamp requires upper ($upper) > lower ($lower)" }
-        if (observed <= lower) return -1.0
-        if (observed >= upper) return 1.0
-        return 2.0 * (observed - lower) / (upper - lower) - 1.0
+        return ramp(observed, lower, upper)
+            ?: error("smoothRamp requires upper ($upper) > lower ($lower)")
     }
 
     private fun growthBandComparison(observedBps: Int) = absoluteBandComparison(
