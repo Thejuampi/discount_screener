@@ -134,8 +134,13 @@ object InterpretingPumlEngine : PumlEngine {
         document: PumlDocument,
     ): ModelValue {
         var value = eval(expr, env, flags, host, document)
-        if (value is ModelValue.Missing && expr is PumlExpr.Ident && expr.name.first().isUpperCase()) {
-            return ModelValue.Text(expr.name)
+        if (value is ModelValue.Missing) {
+            var label = when (expr) {
+                is PumlExpr.Ident -> expr.name
+                is PumlExpr.Phrase -> if (' ' !in expr.text) expr.text else null
+                else -> null
+            }
+            if (label != null && label.first().isUpperCase()) return ModelValue.Text(label)
         }
         return value
     }

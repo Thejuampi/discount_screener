@@ -107,6 +107,24 @@ class BaratasModelTest {
         assertEquals("eps_window_short", out.huntReason())
     }
 
+    @Test
+    fun ruarte_zone_labels_historical_buy() {
+        var out = evaluate(
+            eps = listOf(8.0, 9.0, 10.0, 11.0, 12.0),
+            price = 100.0,
+        )
+        assertEquals("HistoricalBuy", out.text("ruarte_zone"))
+    }
+
+    @Test
+    fun ruarte_zone_labels_alert_on_high_multiple() {
+        var out = evaluate(
+            eps = listOf(8.0, 9.0, 10.0, 11.0, 12.0),
+            price = 1000.0,
+        )
+        assertEquals("Alert", out.text("ruarte_zone"))
+    }
+
     private fun evaluateMutated(from: String, to: String): ModelOutput {
         var model = BaratasModels.load(PumlModelFactoryTest.frozenPumlText().replace(from, to))
         return model.evaluate(
