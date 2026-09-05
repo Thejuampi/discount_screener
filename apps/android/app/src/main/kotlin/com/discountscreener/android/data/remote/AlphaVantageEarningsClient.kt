@@ -19,7 +19,7 @@ class AlphaVantageEarningsClient(
     private val keyFile: File,
     private val budgetFile: File,
     private val now: () -> Long = { System.currentTimeMillis() / 1_000 },
-    private val get: (String) -> String = Companion::httpGet,
+    private val httpClient: OkHttpClient = defaultHttpClient(),
 ) {
     fun saveKey(key: String) {
         keyFile.parentFile?.mkdirs()
@@ -65,7 +65,7 @@ class AlphaVantageEarningsClient(
         writeBudget(admitted)
         return functions.mapNotNull { function ->
             var body = runCatching {
-                get("https://www.alphavantage.co/query?function=$function&symbol=$symbol&apikey=$key")
+                httpGet("https://www.alphavantage.co/query?function=$function&symbol=$symbol&apikey=$key")
             }.getOrNull() ?: return@mapNotNull null
             if (alphaVantageRefusal(body) != null) return@mapNotNull null
             writeCache(function, symbol, body)
@@ -98,24 +98,25 @@ class AlphaVantageEarningsClient(
         budgetFile.writeText(Json.encodeToString(AlphaVantageBudget.serializer(), budget))
     }
 
+    private fun httpGet(url: String): String {
+        var request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "DiscountScreener-Android/1")
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "identity")
+            .get()
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            var body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error("Alpha Vantage HTTP ${response.code}")
+            return body
+        }
+    }
+
     companion object {
-        private val http = OkHttpClient.Builder()
+        fun defaultHttpClient() = OkHttpClient.Builder()
             .callTimeout(Duration.ofSeconds(20))
             .protocols(listOf(Protocol.HTTP_1_1))
             .build()
-
-        private fun httpGet(url: String): String {
-            var request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "DiscountScreener-Android/1")
-                .header("Accept", "application/json")
-                .get()
-                .build()
-            http.newCall(request).execute().use { response ->
-                var body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) error("Alpha Vantage HTTP ${response.code}")
-                return body
-            }
-        }
     }
 }
