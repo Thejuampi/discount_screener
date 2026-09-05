@@ -8,7 +8,7 @@ Valuation parameters and growth paths are **market/policy-driven** (not eternal 
 
 - `apps/desktop` — Rust terminal workstation with candlestick charts, MACD, EMA overlays, volume profile, and model-family valuation
 - `apps/windows` — Tauri/React Windows workstation with opportunity scoring, Quant Lens, and residual-income / FCFF valuation
-- `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose (`core` owns valuation engines)
+- `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose (`core` owns valuation engines and the pre-earnings risk gate)
 - `shared/contracts` — shared fixtures and golden cases (ranking, DCF source selection, valuation model family)
 
 ## Android screenshots

@@ -1,6 +1,6 @@
 # PRD: Pre-Earnings Risk Gate
 
-Status: proposed, 2026-08-27. Actualizado 2026-08-28 con §4.7. Author: Juan. Not planned, not scoped, no wave assigned.
+Status: Wave 0, 1-A y §4.4 construidos en Android (2026-09-05). Wave 1-B, paper-trade y SUE en la celda siguen abiertos. Author: Juan.
 
 ## 1. Objetivo
 
@@ -83,7 +83,7 @@ Los umbrales se normalizan por sector y, opcionalmente, por VIX o por el implied
 
 Aplica solo cuando no hay consenso histórico para la métrica sectorial.
 
-Regla explícita: si la métrica real cae por debajo de la mediana de los últimos 4 trimestres en más de 1 desvío estándar, y la decisión base era "mantener", la posición se reduce a la mitad. Todo override queda registrado con esta justificación, para mantener auditabilidad.
+Regla explícita: el último print es el evento. El centro es `robustCentre` de los tres anteriores: se descartan los prints ajenos a la serie y el nivel es la media de lo que queda. La mediana no es el nivel. La escala es la MAD de esos tres. Un print ajeno en los tres anteriores rechaza la trail. Si el último print cae más de una unidad de escala bajo ese centro, y la decisión base era "mantener", la posición se reduce a la mitad. Una trail plana (escala 0) corta cualquier último print estrictamente bajo el modo. No hay un piso de porciento. Todo override queda registrado con esta justificación, para mantener auditabilidad. La celda sigue `CheapNormalRisk`.
 
 ### 4.5 Matriz de decisión
 
@@ -214,7 +214,7 @@ Sigue sin existir:
 Ya existe (2026-09-05), ver §13:
 - **Knobs** en `shared/contracts/earnings-gate-policy.yaml`.
 - **Pendiente SUE** (`SurpriseRegression`) como diagnóstico en la tarjeta.
-- **Override §4.4** sobre el trail de revenue propio (últimos 4 trimestres Yahoo).
+- **Override §4.4** sobre el trail de revenue propio (últimos 4 trimestres Yahoo). El último print es el evento. El centro es `robustCentre` de los tres anteriores.
 
 ## 11. Lo que falta de verdad, y cómo se consigue
 
@@ -269,9 +269,9 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `SurpriseScore.kt` | Puntúa la sorpresa en unidades de dispersión de los analistas, y la sorpresa de revenue contra el consenso guardado antes del reporte. | 4.2, 7 |
 | `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
 | `EarningsGatePolicy.kt` | Lee `earnings-gate-policy.yaml`. Un libro. Cero literales duplicados en Kotlin. | 4.3, 4.4, 4.5, 4.6 |
-| `AlphaVantageEarnings.kt` | Une `EARNINGS` + `EARNINGS_ESTIMATES` en `SueQuarter`. n < 16 rechaza el ajuste. | 4.2 |
-| `SurpriseRegression.kt` | OLS: y = AR bps, x = SUE/10000. La pendiente es diagnóstico. No mueve la celda. | 4.2 |
-| `RevenueTrail.kt` | Últimos 4 revenues Yahoo. Mediana como centro, SD de la muestra como escala. Hold barato+normal a mitad de tamaño si el último print cae más de 1 SD bajo esa mediana. | 4.4 |
+| `AlphaVantageEarnings.kt` | Une `EARNINGS` + `EARNINGS_ESTIMATES` en `SueQuarter`. Un `Note` de throttle es rechazo. n tras el recorte de ajenos bajo `min_sue_quarters` rechaza el ajuste. | 4.2 |
+| `SurpriseRegression.kt` | OLS: y = AR bps, x = SUE/10000. Descarta SUE o AR ajenos a la serie del emisor (`isForeignTo`). `n` es el resto. Bajo `min_sue_quarters` el ajuste es `short_history`. La pendiente es diagnóstico. No mueve la celda. | 4.2 |
+| `RevenueTrail.kt` | Últimos 4 revenues Yahoo. El último print es el evento. Centro: `robustCentre` de los tres anteriores. Escala: MAD de esos tres. Un print ajeno en los tres anteriores rechaza la trail. Hold barato+normal a mitad de tamaño si el último print cae más de una unidad de escala bajo ese centro. Trail plana (escala 0): cualquier último print estrictamente bajo el modo corta. | 4.4 |
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
@@ -284,12 +284,12 @@ Cobertura: el paquete `earnings` de `:core` más el grabador, los endpoints, el 
 | `YahooFinanceClient.fetchOptionChain` | Pega a `/v7/finance/options/{symbol}`. Sin fecha lista los vencimientos; con `date` trae la escalera. |
 | `YahooFinanceClient.fetchConsensus` | Lee `earningsTrend`, que ahora viaja en `QUOTE_SUMMARY_MODULES`. Cero módulos nuevos en el pedido. |
 | `EarningsEventRecorder` | Toma las filas del refresh, filtra las que reportan dentro de 10 días, baja la cadena y escribe el bloque ya decidido. Antes de capturar, liquida los reportes que ya pasaron (1 a 30 días) contra SPY. Lee la bitácora una vez por pasada. Une SUE de Alpha Vantage con AR de EDGAR y escribe `surpriseFitN` / `sueSlopeArBps`. Pasa los revenues Yahoo a `preReportOf` para el override §4.4. |
-| `YahooFinanceClient.fetchReportedQuarters` | Pide `earningsHistory` e `incomeStatementHistoryQuarterly` en su propio par de módulos. Solo un evento que liquida los necesita: meterlos en `QUOTE_SUMMARY_MODULES` haría que cada símbolo de cada refresh cargue un estado de resultados trimestral que nunca lee. |
+| `YahooFinanceClient.fetchReportedQuarters` | Pide `earningsHistory` e `incomeStatementHistoryQuarterly` en su propio par de módulos. El grabador los lee al capturar (trail §4.4) y al liquidar (EPS y revenue reales). Meterlos en `QUOTE_SUMMARY_MODULES` haría que cada símbolo de cada refresh cargue un estado de resultados trimestral que el tablero nunca lee. |
 | `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
 | `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. Arma `AlphaVantageEarningsClient` con `filesDir/earnings/alphavantage.key` y caché bajo `cacheDir/alphavantage`. |
-| `AlphaVantageEarningsClient` | Toma `OkHttpClient` como parámetro. Governor 25/día y hueco de 12 s. Caché fresco 7 días. Un presupuesto gastado cae al caché viejo. La clave nunca entra a git. |
-| `SaveAlphaVantageKeyUseCase` | El campo Password de la pestaña Earnings guarda o borra la clave. |
+| `AlphaVantageEarningsClient` | Toma `OkHttpClient` como parámetro. Governor 25/día. `EARNINGS` y `EARNINGS_ESTIMATES` van en turnos, con el hueco de `60 / av_per_minute` entre ellos. Un `Note` de throttle no se cachea. Un presupuesto corrupto no admite llamadas. Caché fresco 7 días. Un presupuesto gastado cae al caché viejo. La clave nunca entra a git. |
+| `SaveAlphaVantageKeyUseCase` | Save con texto guarda la clave. Save en blanco no hace nada. Clear borra el archivo. Tras guardar, el grabador rellena SUE en eventos ya priceados (append, last-wins) y no toca cadena ni celda. |
 | `EarningsEventRecorder.refreshStaleDates` | Antes de precisar nada, pide a Yahoo la fecha del próximo reporte de los símbolos cuya fecha venció o falta: doce por pasada, rotando con un cursor guardado al lado de la bitácora. La respuesta se guarda con la hora en que se preguntó, así un símbolo sin fecha futura no vuelve a la cola hasta el día siguiente. |
 | `EventSettlement.settlementOf` | Cierra el evento el día del 8-K con ítem 2.02, y toma de ahí también la hora. Si la empresa tiene archivos en EDGAR y ninguno cae a menos de siete días de la fecha del calendario, no cierra: una reacción leída en un día sin reporte entra a la mediana que denomina todos los ratios de riesgo siguientes. El día usado queda escrito en `PostReport.reportedOnEpochDay` y la tarjeta lo muestra cuando difiere del calendario. |
 | `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
@@ -321,7 +321,7 @@ Pestaña **Earnings** en el dashboard.
 | Pieza | Dónde |
 |---|---|
 | `EarningsGatePresentation.kt` | `presentEarningsGate` parte la bitácora en "reportan pronto" y "ya reportaron", y traduce bps a porcentajes, ratios y tamaños. |
-| `EarningsGateScreen.kt` | Una tarjeta por evento: celda de la matriz, movimiento implícito, historia propia del ticker, ratio, precio contra DCF, acción, tamaño, cobertura y lo que la cobertura cuesta. El reporte ya liquidado muestra el movimiento que el índice no explica. La tarjeta nombra el ajuste SUE y el corte de revenue. El campo Password guarda la clave de Alpha Vantage. |
+| `EarningsGateScreen.kt` | Una tarjeta por evento: celda de la matriz, movimiento implícito, historia propia del ticker, ratio, precio contra DCF, acción, tamaño, cobertura y lo que la cobertura cuesta. El reporte ya liquidado muestra el movimiento que el índice no explica. La tarjeta nombra el ajuste SUE y el corte de revenue. El campo Password guarda la clave de Alpha Vantage. Save en blanco no hace nada. Clear borra. La pantalla dice si hay clave en disco y nunca imprime la clave. |
 | `DashboardRepository.earningsEvents` | Lee la bitácora y presenta. Los fallos se loguean y devuelven vacío. |
 | `GetEarningsEventsUseCase` | La pestaña carga al abrirse, como Estimates y Discovery. |
 
@@ -381,3 +381,27 @@ En la celda "barato + riesgo alto":
 Las dos superficies solo leen. Abrir un detalle o tipear en el filtro no baja una cadena ni dispara una captura: el worker conserva su única pasada en rueda.
 
 **Falta:** la pendiente SUE no mueve la celda hasta que Juan lo pida. El paper trading (§6) espera cadenas capturadas.
+
+### Review Findings
+
+Code review of `7d73cf1c..HEAD` (2026-09-05). IBM JSON fixtures were scored by script, not loaded as whole files.
+
+- [x] [Review][Decision] Three equal revenue prints plus any dip always cut Hold — sample SD of `[a,a,a,b]` is always 2.0, so a 1% miss and a 50% miss take the same gate. Locked: centre is `robustCentre` of the prior three. Scale is MAD of the prior three. A foreign prior print refuses the trail. Scale 0 cuts a latest print strictly below the mode. Median is not the trail level. No percent floor. No YAML 5%.
+- [x] [Review][Decision] Empty Save on the Alpha Vantage field deletes a stored key — the field starts blank, so one tap on Save clears `alphavantage.key`. Locked: blank Save is a no-op. Clear deletes. The screen says whether a key is on disk. Never print the key.
+- [x] [Review][Decision] SUE OLS uses the full joined panel — IBM joins 37 quarters, max SUE 47_500 bps, policy has a floor of 16 and no cap. Locked: drop SUE prints that are foreign to the issuer series. `n` is leftover. No YAML max 20.
+- [x] [Review][Patch] Refuse and do not cache Alpha Vantage `Note` throttle bodies [`AlphaVantageEarnings.kt:42`]
+- [x] [Review][Patch] Do not fire EARNINGS and ESTIMATES in one 12 s slot; a later cold ticker must not go blank [`AlphaVantageEarningsClient.kt:64`]
+- [x] [Review][Patch] Empty or refused SUE history must name a reason on the card [`EarningsEventRecorder.kt:270`]
+- [x] [Review][Patch] A priced event must still pick up SUE after a key is saved [`EarningsEventRecorder.kt:111`]
+- [x] [Review][Patch] Assert IBM join length >= `min_sue_quarters` [`AlphaVantageEarningsTest.kt:33`]
+- [x] [Review][Patch] Card copy names the SUE reason and the MAD trail without a hardcoded "16 quarters" / "4-quarter" / "SD" string [`EarningsGatePresentation.kt:130`]
+- [x] [Review][Patch] ViewModel save-key tests must assert the repository write [`DashboardViewModelTest.kt:302`]
+- [x] [Review][Patch] A corrupt budget file must fail closed [`AlphaVantageEarningsClient.kt:90`]
+- [x] [Review][Patch] Worker and UI must not admit against the budget file without a lock [`AlphaVantageEarningsClient.kt:62`]
+- [x] [Review][Patch] Card must say when the SUE slope is the truncated (asymmetric) fit [`SurpriseRegression.kt:55`]
+- [x] [Review][Patch] Revenue-cut tests must assert the cell stays `CheapNormalRisk` [`DecisionMatrixTest.kt:258`]
+- [x] [Review][Patch] Add the `z == revenue_override_z_bps` boundary case [`DecisionMatrix.kt:173`]
+- [x] [Review][Patch] PRD §13 still says `fetchReportedQuarters` is settlement-only [`prd-pre-earnings-risk-gate-2026-08-27.md`]
+- [x] [Review][Patch] Client tests must match `function=EARNINGS` vs `function=EARNINGS_ESTIMATES` on the full URL [`AlphaVantageEarningsClientTest.kt:104`]
+- [x] [Review][Defer] `revenueSurpriseBps` stays null while `revenue_estimate_average` is on every joined IBM row [`AlphaVantageEarnings.kt:112`] — deferred, Wave 1-A prints EPS SUE only
+- [x] [Review][Defer] Live `EARNINGS_ESTIMATES` panel is a revised vintage, not the print-time mean [`AlphaVantageEarnings.kt:100`] — deferred, diagnostic limitation

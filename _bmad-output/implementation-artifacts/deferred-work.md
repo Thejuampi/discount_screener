@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: code review of prd-pre-earnings-risk-gate-2026-08-27.md (2026-09-05)
+
+- **AV revenue surprise unused.** `parseAlphaVantageEstimates` reads `revenue_estimate_average` on every fiscal-quarter row. `sueQuartersOf` always writes `revenueSurpriseBps = null`. IBM join has that revenue field on all 37 rows. Wave 1-A prints EPS SUE only. Leave until Juan asks for AV revenue surprise.
+- **Estimate vintage.** SUE mean and high/low come from live `EARNINGS_ESTIMATES`, not `EARNINGS.estimatedEPS` at the print. Later revisions can shrink the range and inflate |SUE|. Diagnostic only. Leave until the slope enters the cell.
+
 ## Deferred from: code review (2026-09-05)
 
 PR #50 pre-earnings risk gate plus Advisor CSV (`bmad-code-review` automatic). Patched findings are on the branch.
@@ -10,14 +15,14 @@ Closed in this slice:
 - **Weekend stamp** — a shut market still settles past reports. It does not ask the chain and does not stamp capture.
 - **Worker SQLite** — `shutdown()` closes the store.
 - **renameTo cache** — a failed rename copies the bytes onto the target.
-- **Gate knobs** — live in `shared/contracts/earnings-gate-policy.yaml`.
-- **PRD 4.2 SUE diagnostic** — Alpha Vantage `EARNINGS` + `EARNINGS_ESTIMATES` fill 16–20 quarters. The card prints the slope. The cell still uses implied-move / median |AR|.
-- **PRD 4.4 revenue trail** — last four Yahoo revenue prints. Hold cuts to half when the last print sits more than 1 SD below that median. No sector KPI table.
+- **Gate knobs** — YAML. See `AGENTS.md` Earnings gate.
+- **PRD 4.2 SUE diagnostic** — card only. See `AGENTS.md` Earnings gate.
+- **PRD 4.4 revenue trail** — shipped. See PRD §4.4.
 
 These stay open (need history, or the PRD already locked them):
 
 - **PRD 4.2 cell** — the matrix still ignores SUE. Do not route the cell off the slope until Juan asks.
-- **PRD 4.4** — no sector table. The override uses the ticker's own last four revenue prints. Hold + last print more than 1 SD below that median → half size, flag on.
+- **PRD 4.4** — no sector table.
 - **PRD 6** — paper-trading backtest needs 8–12 quarters of captured chains. `HISTORICAL_OPTIONS` is premium. Those chains cannot be backfilled.
 - **PRD §9** — sector-calibrated bands wait for that paper trading.
 - **Low-as-Normal** — PRD §4.5: low risk uses the normal column.

@@ -15,6 +15,7 @@ Use this index to find active implementation work, story files, QA outputs, and 
 
 - [Dip board spec v1](dip-board-spec-v1.md) - Android Plans Dip hunter. Locked cuts after Sensei + Advisor. Does not change V2/V3/V4.
 - [Leftover board spec v1](leftover-board-spec-v1.md) - Android Plans leftover review. Profile universe, Street leftover ≤ 5%, fade latch. Does not change V2/V3/V4.
+- [PRD — Pre-Earnings Risk Gate](../planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android Earnings tab. Open work in [deferred-work.md](deferred-work.md).
 
 - [Story 1.3: Explain Cause And Trust State Directly In List Surfaces](1-3-explain-cause-and-trust-state-directly-in-list-surfaces.md)
 - [Android Volume Profile Replay Slice](android-volume-profile-replay-slice-2026-04-24.md)

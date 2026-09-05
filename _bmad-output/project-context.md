@@ -159,7 +159,7 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - **Live QA findings override build confidence.** Passing unit tests and Gradle builds is insufficient when the installed app hangs, fails to launch, or renders the wrong surface.
 - **Do not “fix” valuation noise with output clamps.** Fix model routing, driver definitions, parameter dynamics, and Quant Lens agreement policy instead.
 - **Windows Advisor CSV kinds stay distinct.** A J.P. Morgan positions file is the full book image. Warn, then confirm. Confirm upserts listed lots and deletes every current lot the file omits. A Chase transactions file is a 90-day trades window. Merge window trades onto current lots after book as-of. Never aggregate a 90-day blotter from zero. Contract: `shared/contracts/advisor-csv-import-v1.yaml`.
-- **Android earnings gate knobs stay in YAML.** `shared/contracts/earnings-gate-policy.yaml`. The cell uses implied-move vs median |AR|. SUE slope is a card diagnostic. Do not route the cell off SUE until Juan asks. §4.4 override uses the ticker's last four Yahoo revenue prints. Cheap+normal Hold cuts to half when the last print sits more than 1 SD below that median. No sector KPI table. Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`.
+- **Earnings gate.** See `AGENTS.md` Earnings gate. Knobs: `shared/contracts/earnings-gate-policy.yaml`. PRD: `_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`.
 
 ---
 
@@ -178,4 +178,4 @@ _Critical rules and patterns AI agents must follow when implementing code in thi
 - Update it when technology versions, architecture boundaries, or verification gates change.
 - Remove rules that become obsolete or too obvious to preserve LLM context efficiency.
 
-Last Updated: 2026-08-16
+Last Updated: 2026-09-05

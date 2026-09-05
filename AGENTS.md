@@ -291,11 +291,11 @@ No test reaches a live provider. A red test says which URL leaked.
 
 ### Earnings gate (Android)
 
-- Policy: [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit that file. Do not put a second copy in Kotlin.
+- Policy: [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit that file. Do not put a second copy in Kotlin. Do not add percents, caps, or floors that are frozen literals. A YAML `5%` is still a hardcoded value.
 - Cell: implied-move vs median |AR|. Cheap ≤ 0.9× DCF. High > 1.3. Low uses the Normal column.
-- SUE from Alpha Vantage 16–20 quarters is a diagnostic. The card prints the slope. The cell ignores it until Juan asks.
-- Revenue trail: last four Yahoo prints. Hold + last print >1 SD below median → half size. Flag on. Cell stays `CheapNormalRisk`.
-- Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`.
+- SUE from Alpha Vantage is a diagnostic. Fit the joined observations that are not foreign to the issuer SUE series or the issuer AR series (`isForeignTo`). `n` is the leftover count. Below `min_sue_quarters` the fit is `short_history`. The card prints the slope and `n`. The cell ignores SUE until Juan asks. Do not add a YAML max quarter cap.
+- Revenue trail: last four Yahoo prints. The latest print is the event. Centre is `robustCentre` of the prior three (trim foreign prints, then the mean of what is left). Scale is the MAD of those prior three. A foreign print in the prior three refuses the trail. Hold + last print strictly more than one scale unit below that centre → half size. Flag on. Cell stays `CheapNormalRisk`. A flat prior three (scale 0) cuts any latest print strictly below the mode. No percent floor. Median is not the trail level.
+- Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`. Blank Save is a no-op. Clear deletes the file. The screen says whether a key is on disk. Never print the key.
 
 ### Commands and gates
 
@@ -325,6 +325,7 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 | Green CI with wrong asserts is theater | Assert user-visible failure modes (wrong class, penny mega-cap, inverted scenarios), not only constants |
 | Quarantine is a ticket, not a trophy | Do not claim “N names green” while slots are quarantined unless acceptance **explicitly** allows reduced N |
 | Stale UI hides backend truth | After policy bumps, verify Detail does not keep a previous absurd DCF |
+| A past failure stayed in chat | Write a row in [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md). Advisor names that row on the next plan |
 
 ### Aggregation — no naked averages (mandatory)
 
@@ -370,7 +371,21 @@ When classifier, CapEx→FCF, WACC/CoE, residual income, model policy version, o
 
 ### Anti-patterns that already bit us
 
-Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md). Read that file before a change that can re-trigger the same failure shape. Add a new row there when a failure mode appears. Do not leave it only in chat.
+Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md).
+
+- Read that file before a change that can re-trigger the same failure shape.
+- Add a new row when a failure mode appears. Do not leave it only in chat.
+- Do not paste the table into this file. The pointer here is the standing gate.
+
+### Advisor (docs gate)
+
+Advisor reads standing docs and names drift. Advisor does not invent product rules.
+
+Every Advisor review opens this file, [`_bmad-output/project-context.md`](_bmad-output/project-context.md), the slice contract, and [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md).
+
+A proposed step that matches a ledger row is a P0 until the plan uses that row's **Do instead**.
+
+A proposed step with no doc home is a doc gap.
 
 
 ## Conventions (general)
@@ -380,7 +395,7 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 - Decouple market-data, persistence, and UI/rendering.
 - Temp work only under `.agents/workspace/tmp`.
 - Seek decision log: append nodes to [`.grok/decisions.json`](.grok/decisions.json). Do not replace the tree.
-- User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments.
+- User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments. One home per fact. Edit the home. Pointers stay pointers.
 - Demand-driven expensive work: history, valuation, and heavy fetches stay bounded and on-demand where practical.
 - Android Detail second open of a warm ticker paints from the session cache. Skip disk and network when memory already holds the chart and DCF. Leftover and dip boards reuse the last assemble when the input fingerprint is unchanged. Session flags (`revisionHistoryHydrated`, `pricingHistoryHydrated`, `liveDcfResolvedSymbols`, replay backing) clear in `resetInMemoryLocked`.
 - Sparse/unavailable/stale states must be explicit — never smooth missing valuation into a fake “Strong” story.
@@ -391,6 +406,7 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 
 | When | Read |
 | --- | --- |
+| Advisor plan review | This file + [`_bmad-output/project-context.md`](_bmad-output/project-context.md) + [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) + the slice contract |
 | Live valuation QA | [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md) |
 | Known operational failure | [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) |
 | Analyst-method / ledger slice | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |

@@ -1,10 +1,10 @@
 # Cross-Platform Parity
 
-Discount Screener has two user-facing clients: the Rust desktop app and the Android app.
+Discount Screener has three user-facing clients: the Rust desktop app, the Windows Tauri app, and the Android app.
 
 ## Default Rule
 
-User-visible functionality should be kept in 1:1 parity across both clients by default.
+User-visible functionality should be kept in 1:1 parity across clients by default.
 
 - If a feature is added to Android, add the equivalent feature to the Rust desktop app.
 - If a feature is added to the Rust desktop app, add the equivalent feature to Android.
@@ -13,6 +13,8 @@ User-visible functionality should be kept in 1:1 parity across both clients by d
 ## Exceptions
 
 - **Android Plans tab (Dip hunter + leftover review, v1)** — Android-only. Windows keeps Dashboard 2.0 Act / Scale / Wait. Specs: [`../_bmad-output/implementation-artifacts/dip-board-spec-v1.md`](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md), [`../_bmad-output/implementation-artifacts/leftover-board-spec-v1.md`](../_bmad-output/implementation-artifacts/leftover-board-spec-v1.md).
+
+- **Android Earnings tab (pre-earnings risk gate)** — Android-only. Cell is implied-move vs own median |AR|. SUE slope is a card diagnostic. Revenue trail can cut a Hold. PRD: [`../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md).
 
 - **SEC companyfacts read (field set, not capability)** — Both clients now sieve the 4 MB body on
   the stream. The field sets differ, and they must. Android keeps `fp` and cuts everything that is

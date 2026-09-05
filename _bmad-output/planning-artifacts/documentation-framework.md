@@ -19,6 +19,12 @@ sources:
 
 This framework defines which documents exist, when to create or update them, and how agents should move through BMad planning and implementation for Discount Screener.
 
+## One home
+
+Each fact has one home. Edit the home. Indexes and READMEs point. A third copy is a defect.
+
+Homes: `AGENTS.md` Documentation Map. Advisor duty lives in `AGENTS.md` Advisor section and `.grok/agents/advisor.md`.
+
 ## Documentation Layers
 
 ### 1. Project Knowledge
@@ -38,9 +44,11 @@ Update this layer when shipped behavior or durable project structure changes.
 
 Lean rules that agents must load before implementing.
 
+- `AGENTS.md`
 - `_bmad-output/project-context.md`
+- `docs/operational-anti-patterns.md`
 
-Update this layer when technology versions, architecture boundaries, validation gates, or high-risk implementation rules change.
+Update this layer when technology versions, architecture boundaries, validation gates, or high-risk implementation rules change. Do not copy `AGENTS.md` into this layer.
 
 ### 3. Current Product Baseline
 
@@ -67,6 +75,7 @@ Existing active feature set:
 - Architecture: `planning-artifacts/architecture.md`
 - UX: `planning-artifacts/ux-design-specification.md`
 - Epics: `planning-artifacts/epics.md`
+- Pre-Earnings Risk Gate PRD: `planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`
 
 ### 5. Implementation Tracking
 
@@ -84,9 +93,10 @@ Documents used once implementation starts.
 Use this path when the question is "what does the app currently do?"
 
 1. `docs/index.md`
-2. `_bmad-output/project-context.md`
-3. `_bmad-output/planning-artifacts/current-functionality-prd.md`
-4. relevant app README or shared contract
+2. `AGENTS.md`
+3. `_bmad-output/project-context.md`
+4. `_bmad-output/planning-artifacts/current-functionality-prd.md`
+5. relevant app README or shared contract
 
 ### Plan A New Feature
 
@@ -118,7 +128,7 @@ Use this path for changes to shipped functionality.
 
 Required documentation checks:
 
-- Read `project-context.md`.
+- Read `AGENTS.md` and `project-context.md`.
 - Read `apps/android/README.md`.
 - If UI-facing, check the active UX spec or create one.
 - If persistence/startup/history changes, check architecture and add explicit startup/performance acceptance criteria.
@@ -128,7 +138,7 @@ Required documentation checks:
 
 Required documentation checks:
 
-- Read `project-context.md`.
+- Read `AGENTS.md` and `project-context.md`.
 - Read `apps/desktop/README.md`.
 - Check `docs/cross-platform-parity.md`.
 - If behavior changes are user-visible, update desktop operator docs and evaluate Android parity.
@@ -183,9 +193,10 @@ Required documentation checks:
 
 Before closing a feature:
 
-- Current behavior updated in `current-functionality-prd.md` if shipped.
-- User-facing docs updated or linked.
-- `docs/index.md` updated for new durable docs.
-- `project-context.md` updated if a new implementation rule emerged.
+- Current behavior updated in `current-functionality-prd.md` if shipped. One line per surface. Link the PRD.
+- User-facing docs updated or linked. Do not copy the lock.
+- `docs/index.md` gained a pointer, not a restatement.
+- New agent rule: edit `AGENTS.md` or `project-context.md`, not both for the same fact.
+- New operational failure: one row in `docs/operational-anti-patterns.md`.
 - Sprint status/story status updated.
 - QA notes captured when app behavior was verified live.

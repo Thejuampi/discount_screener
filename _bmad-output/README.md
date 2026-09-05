@@ -5,7 +5,8 @@ This folder contains planning and implementation artifacts generated through BMa
 ## Required Agent Context
 
 - [Project Context](project-context.md) - critical implementation rules and technology versions. Agents should read this before implementation work.
-- [Agents.md](../Agents.md) - monorepo layout, **valuation model family** (dynamic params, no hard output caps), Quant Lens SNR, numerical conclusion protocol.
+- [Agents.md](../Agents.md) - standing agent rules
+- [Operational anti-patterns](../docs/operational-anti-patterns.md) - failure-mode ledger
 - **[Handover — Honest path and Street stretch 2026-08-16](implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md)** - **next agent on identity cash / holdout / Street stretch starts here** (PR #39).
 - [Handover — Quant Valuation Engine 2026-08-02](implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - older Windows motor brief (waterfall, CHTR, high-signal). Separate workstream.
 
@@ -26,7 +27,7 @@ This folder contains planning and implementation artifacts generated through BMa
 - [Epic Breakdown: Valuation Change Visibility](planning-artifacts/epics.md)
 - [Implementation Readiness Report](planning-artifacts/implementation-readiness-report-2026-04-23.md)
 - [Sprint Change Proposal](planning-artifacts/sprint-change-proposal-2026-04-23.md)
-- [PRD: Pre-Earnings Risk Gate](planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android; implied-move vs own abnormal-return history on a DCF-cheapness matrix. SUE slope is diagnostic. Revenue trail can cut a Hold. Knobs in `shared/contracts/earnings-gate-policy.yaml`.
+- [PRD: Pre-Earnings Risk Gate](planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android earnings tab. Open work in `implementation-artifacts/deferred-work.md`.
 - [SPEC: Reading the earnings log by ticker](specs/spec-earnings-log-by-ticker/SPEC.md) - Android; ticker search on the Earnings tab, earnings section in a ticker's detail
 - [SPEC: Advisor CSV import](specs/spec-advisor-csv-import/SPEC.md) - Windows; holdings snapshot vs Chase 90-day blotter; warn then confirm
 
@@ -39,7 +40,7 @@ This folder contains planning and implementation artifacts generated through BMa
 
 ## Recommended BMad Routing
 
-- **Understand the current project:** start with `docs/index.md`, then `project-context.md`, then `current-functionality-prd.md`.
+- **Understand the current project:** `docs/index.md` → `AGENTS.md` → `project-context.md` → `current-functionality-prd.md`.
 - **Plan a new feature:** create or update a product brief, then PRD, UX spec if UI-facing, architecture, epics, readiness report, sprint plan.
 - **Modify current behavior:** update the current-functionality PRD only if the baseline product behavior changed; otherwise keep changes in feature artifacts.
 - **Implement stories:** use sprint status and story files. Update sprint status as stories move through backlog, ready, in-progress, review, and done.
@@ -47,6 +48,6 @@ This folder contains planning and implementation artifacts generated through BMa
 
 ## Maintenance Rules
 
-- Do not treat feature PRDs as the canonical current-state document after implementation. Promote shipped behavior into `current-functionality-prd.md`.
-- Do not duplicate architecture rules across many docs. Link `project-context.md` for agent implementation rules.
+- Do not treat feature PRDs as the canonical current-state document after implementation. Promote shipped behavior into `current-functionality-prd.md` as one line plus a link.
+- One home per fact. Do not copy `AGENTS.md` into this folder.
 - Keep artifact names stable unless the index files are updated in the same change.
