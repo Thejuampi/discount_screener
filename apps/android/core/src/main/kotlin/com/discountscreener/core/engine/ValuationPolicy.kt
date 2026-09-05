@@ -67,6 +67,17 @@ data class ErpSection(
     val kroll: List<DatedRateRow>,
 )
 
+data class DomicileTaxRow(
+    val countries: List<String>,
+    val statutoryBps: Int,
+    val source: String,
+)
+
+data class TaxSection(
+    val version: String,
+    val rows: List<DomicileTaxRow>,
+)
+
 data class DcfSection(
     val betaCompanyWeightPct: Long,
     val betaIndustryWeightPct: Long,
@@ -162,6 +173,7 @@ data class SustainingCapexSection(
 
 data class ComponentSection(
     val materialRevenueBps: Int,
+    val captiveParentIndustryContains: List<String>,
     val financialTokens: Set<String>,
     val instrumentTokens: Set<String>,
     val operatingTokens: Set<String>,
@@ -462,6 +474,7 @@ data class ValuationPolicyBook(
     val market: MarketSection,
     val macro: MacroSection,
     val erp: ErpSection,
+    val tax: TaxSection,
     val dcf: DcfSection,
     val fcffPath: FcffPathSection,
     val residualPath: ResidualPathSection,
@@ -528,6 +541,7 @@ data class ValuationPolicyBook(
             }
             var market = root.child("market")
             var erp = root.child("erp")
+            var tax = root.child("tax")
             var dcf = root.child("dcf")
             var fcff = root.child("fcff_path")
             var residual = root.child("residual_path")
@@ -582,6 +596,16 @@ data class ValuationPolicyBook(
                     freshDays = erp.long("fresh_days"),
                     impliedIndex = erp.mapList("implied_index").map { datedErp(it) },
                     kroll = erp.mapList("kroll").map { datedErp(it) },
+                ),
+                tax = TaxSection(
+                    version = tax.string("version"),
+                    rows = tax.mapList("rows").map { row ->
+                        DomicileTaxRow(
+                            countries = row.stringList("countries"),
+                            statutoryBps = row.int("statutory_bps"),
+                            source = row.string("source"),
+                        )
+                    },
                 ),
                 dcf = DcfSection(
                     betaCompanyWeightPct = dcf.long("beta_company_weight_pct"),
@@ -680,6 +704,7 @@ data class ValuationPolicyBook(
                 ),
                 component = ComponentSection(
                     materialRevenueBps = component.int("material_revenue_bps"),
+                    captiveParentIndustryContains = component.stringList("captive_parent_industry_contains"),
                     financialTokens = component.stringList("financial_tokens").toSet(),
                     instrumentTokens = component.stringList("instrument_tokens").toSet(),
                     operatingTokens = component.stringList("operating_tokens").toSet(),

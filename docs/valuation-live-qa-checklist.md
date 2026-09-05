@@ -152,6 +152,27 @@ fundamentals) and the rendered `.detail-panel` / `.price-summary .dcf-slot` text
 A backend-only green result does not pass QA if the presentation boundary
 suppresses it.
 
+
+## Card content is data, never composable shape
+
+A screen line the reader sees must come from a pure function that returns the
+ordered lines, with one role per line. The composable maps role to style and
+nothing else. Nesting one block inside another loop is how the LVS card printed
+the price and both series three times, and no test could see it.
+
+Every card of that kind carries invariant tests over a fixture matrix:
+
+- no line text repeats on one card
+- the price prints once
+- no series prints twice
+- one note per bent input
+
+The matrix must cover the count that hides the bug. For the valuation card that
+is the knob count: 0, 1 and 3 bent inputs, plus the no-street case. With one
+bent input a per-loop repeat is invisible.
+
+Reference: `ValuationCardLinesTest`, `ValuationCardLines.kt`.
+
 ## Notes
 
 - Header gap may be **analyst vs market**, not model vs market — do not confuse the two.

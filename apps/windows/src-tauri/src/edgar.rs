@@ -13,7 +13,11 @@ use serde::Deserialize;
 ///   Result: intrinsic value per share in cents
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 
 const EDGAR_USER_AGENT: &str = "DiscountScreener/1.0 contact@example.com";
 const DCF_DISCOUNT_RATE: f64 = 0.10;
@@ -68,7 +72,7 @@ pub fn fetch_cik_map(client: &Client) -> Result<HashMap<String, u64>, String> {
 // ── EDGAR companyfacts ────────────────────────────────────────────────────────
 
 /// A single annual (10-K) cash flow value from EDGAR XBRL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnualValue {
     pub year: i32,
     pub value_dollars: i64,
@@ -956,7 +960,7 @@ pub fn fetch_insider_activity(client: &Client, cik: u64) -> Result<Option<Inside
     }))
 }
 
-/// Fetch EDGAR annual FCF series (OCF − CapEx) for transparent multi-scenario DCF.
+/// Fetch EDGAR annual FCF series (OCF - CapEx) for transparent multi-scenario DCF.
 /// The raw companyfacts document for one issuer.
 ///
 /// Separate from `fetch_fcf_history` so a caller that needs to see which qname a
@@ -967,17 +971,82 @@ pub fn fetch_company_facts(
     symbol: &str,
     cik: u64,
 ) -> Result<serde_json::Value, String> {
-    let url = format!(
-        "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
-        cik
-    );
-    client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .map_err(|e| format!("FetchFailed: EDGAR {}: {}", symbol, e))?
-        .json()
-        .map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))
+    Ok((*shared_company_facts(client, symbol, cik)?).clone())
+}
+
+/// The sieved document, shared instead of copied.
+///
+/// A screen asks for the shares count and then for the driver history of the same issuer, from six
+/// places in this crate. Each of those used to pull 4 MB over the wire and build its own tree. The
+/// document changes once a quarter at most, so the second reader takes the first one's copy.
+pub fn shared_company_facts(
+    client: &Client,
+    symbol: &str,
+    cik: u64,
+) -> Result<Arc<serde_json::Value>, String> {
+    company_facts_cached(cik, || {
+        let url = format!(
+            "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json",
+            cik
+        );
+        let response = client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "identity")
+            .send()
+            .map_err(|e| format!("FetchFailed: EDGAR {}: {}", symbol, e))?;
+        let slim = crate::sec_company_facts_sieve::sieve(response);
+        serde_json::from_str(&slim)
+            .map_err(|e| format!("FetchFailed: EDGAR parse {}: {}", symbol, e))
+    })
+}
+
+struct CachedFacts {
+    at: Instant,
+    facts: Arc<serde_json::Value>,
+}
+
+static COMPANY_FACTS: OnceLock<Mutex<HashMap<u64, CachedFacts>>> = OnceLock::new();
+
+/// SEC restates a filing, so a session that runs for days must not hold yesterday's document.
+const COMPANY_FACTS_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// A sieved document is about 150 KB. This many is the memory a full screen may hold at once.
+const COMPANY_FACTS_CAPACITY: usize = 64;
+
+fn company_facts_cached<F>(cik: u64, fetch: F) -> Result<Arc<serde_json::Value>, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String>,
+{
+    let cache = COMPANY_FACTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(entry) = map.get(&cik) {
+            if entry.at.elapsed() < COMPANY_FACTS_TTL {
+                return Ok(Arc::clone(&entry.facts));
+            }
+        }
+    }
+    let facts = Arc::new(fetch()?);
+    if let Ok(mut map) = cache.lock() {
+        map.retain(|_, entry| entry.at.elapsed() < COMPANY_FACTS_TTL);
+        if map.len() >= COMPANY_FACTS_CAPACITY {
+            let oldest = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.at)
+                .map(|(key, _)| *key);
+            if let Some(key) = oldest {
+                map.remove(&key);
+            }
+        }
+        map.insert(
+            cik,
+            CachedFacts {
+                at: Instant::now(),
+                facts: Arc::clone(&facts),
+            },
+        );
+    }
+    Ok(facts)
 }
 
 pub fn fetch_fcf_history(
@@ -985,7 +1054,7 @@ pub fn fetch_fcf_history(
     symbol: &str,
     cik: u64,
 ) -> Result<Option<Vec<crate::dcf_model::FcfPoint>>, String> {
-    let body = fetch_company_facts(client, symbol, cik)?;
+    let body = shared_company_facts(client, symbol, cik)?;
 
     let ocf = extract_driver_annual(
         &body,
@@ -1130,18 +1199,7 @@ pub fn fetch_shares_outstanding(
     symbol: &str,
     cik: u64,
 ) -> Result<Option<u64>, String> {
-    let cik_padded = format!("{:010}", cik);
-    let url = format!(
-        "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
-        cik_padded
-    );
-    let body: serde_json::Value = client
-        .get(url)
-        .header("Accept", "application/json")
-        .send()
-        .map_err(|e| format!("EDGAR shares {}: {}", symbol, e))?
-        .json()
-        .map_err(|e| format!("EDGAR shares parse {}: {}", symbol, e))?;
+    let body = shared_company_facts(client, symbol, cik)?;
     Ok(extract_current_shares(&body))
 }
 
@@ -1183,6 +1241,142 @@ pub fn fetch_dcf(
         })
         .collect();
     Ok(compute_dcf(&annual, shares_outstanding))
+}
+
+#[cfg(test)]
+mod company_facts_cache_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    /// The screen reads the shares count and the driver history of one issuer from six places in
+    /// this crate. Each read used to pull the whole 4 MB document. The second one takes the first
+    /// one's copy now, and the test says so by counting the fetches, not the bytes.
+    #[test]
+    fn a_second_reader_costs_no_fetch() {
+        let fetches = AtomicUsize::new(0);
+        let facts = || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"facts": {}}))
+        };
+        let cik = 900_000_001;
+        company_facts_cached(cik, facts).expect("first read");
+        company_facts_cached(cik, facts).expect("second read");
+        assert_eq!(1, fetches.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn two_issuers_do_not_share_a_document() {
+        let first = company_facts_cached(900_000_002, || {
+            Ok(serde_json::json!({"facts": {"us-gaap": {"A": {}}}}))
+        })
+        .expect("first issuer");
+        let second = company_facts_cached(900_000_003, || {
+            Ok(serde_json::json!({"facts": {"us-gaap": {"B": {}}}}))
+        })
+        .expect("second issuer");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn an_entry_older_than_the_ttl_is_fetched_again() {
+        let cik = 900_000_004;
+        company_facts_cached(cik, || Ok(serde_json::json!({"facts": {"old": true}})))
+            .expect("first read");
+        if let Ok(mut map) = COMPANY_FACTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        {
+            if let Some(entry) = map.get_mut(&cik) {
+                entry.at = Instant::now() - COMPANY_FACTS_TTL - Duration::from_secs(1);
+            }
+        }
+        let fresh = company_facts_cached(cik, || Ok(serde_json::json!({"facts": {"old": false}})))
+            .expect("second read");
+        assert_eq!(
+            Some(false),
+            fresh.pointer("/facts/old").and_then(|v| v.as_bool())
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_leaves_no_entry_behind() {
+        let cik = 900_000_005;
+        let _ = company_facts_cached(cik, || Err("FetchFailed".to_string()));
+        let held = COMPANY_FACTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map(|map| map.contains_key(&cik))
+            .unwrap_or(false);
+        assert!(!held);
+    }
+}
+
+#[cfg(test)]
+mod sieve_parity_tests {
+    use super::*;
+    use crate::sec_driver_normalization_policy_generated as policy;
+
+    /// The sieve is allowed to drop bytes. It is not allowed to change a number.
+    ///
+    /// Every cut it makes is a cut a reader makes for itself after the parse, so the readers must
+    /// reach the same values whether they walk the source or the sieved copy. The fixture is a
+    /// real JPM companyfacts slice, with its frames, accession numbers and labels in place.
+    fn jpm() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/core/src/test/resources/sec-companyfacts/JPM.json");
+        let raw = std::fs::read_to_string(path).expect("JPM companyfacts fixture");
+        serde_json::from_str(&raw).expect("json")
+    }
+
+    fn sieved_jpm() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/core/src/test/resources/sec-companyfacts/JPM.json");
+        let raw = std::fs::read_to_string(path).expect("JPM companyfacts fixture");
+        let slim = crate::sec_company_facts_sieve::sieve(raw.as_bytes());
+        serde_json::from_str(&slim).expect("sieved json")
+    }
+
+    #[test]
+    fn the_operating_cash_flow_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::OPERATING_CASH_FLOW),
+            extract_driver_annual(&sieved_jpm(), policy::OPERATING_CASH_FLOW)
+        );
+    }
+
+    #[test]
+    fn the_equity_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::STOCKHOLDERS_EQUITY),
+            extract_driver_annual(&sieved_jpm(), policy::STOCKHOLDERS_EQUITY)
+        );
+    }
+
+    #[test]
+    fn the_interest_series_survives_the_sieve() {
+        assert_eq!(
+            extract_driver_annual(&jpm(), policy::INTEREST_EXPENSE),
+            extract_driver_annual(&sieved_jpm(), policy::INTEREST_EXPENSE)
+        );
+    }
+
+    #[test]
+    fn the_investment_evidence_survives_the_sieve() {
+        assert_eq!(
+            extract_normalized_investment_evidence(&jpm()).development_total_by_end,
+            extract_normalized_investment_evidence(&sieved_jpm()).development_total_by_end
+        );
+    }
+
+    #[test]
+    fn the_shares_count_survives_the_sieve() {
+        let raw = "{\"facts\":{\"dei\":{\"EntityCommonStockSharesOutstanding\":{\"units\":{\"shares\":[{\"form\":\"10-Q\",\"end\":\"2025-06-30\",\"val\":2770000000,\"filed\":\"2025-07-30\"}]}}}}}";
+        let slim: serde_json::Value =
+            serde_json::from_str(&crate::sec_company_facts_sieve::sieve(raw.as_bytes()))
+                .expect("json");
+        assert_eq!(Some(2_770_000_000), extract_current_shares(&slim));
+    }
 }
 
 #[cfg(test)]

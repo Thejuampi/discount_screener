@@ -4,6 +4,7 @@ import com.discountscreener.core.engine.FinanceSubsidiaryMatch
 import com.discountscreener.core.engine.IssuerComponentAssembler
 import com.discountscreener.core.engine.IssuerComponentSet
 import com.discountscreener.core.engine.NamedFiler
+import com.discountscreener.core.engine.SecCompanyFactsSieve
 import com.discountscreener.core.engine.XbrlDimensionalFacts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
@@ -17,6 +18,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
@@ -28,15 +30,17 @@ private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfact
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
 private const val TEN_K_FETCH_CONCURRENCY = 2
 
+private fun defaultSecClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(15, TimeUnit.SECONDS)
+    .readTimeout(60, TimeUnit.SECONDS)
+    .build()
+
 class SecIssuerComponentClient(
     private val cacheDir: File? = null,
     private val ttlMillis: Long = DEFAULT_TTL_MILLIS,
+    private val client: OkHttpClient = defaultSecClient(),
 ) : IssuerComponentLookup {
     private val json = Json { ignoreUnknownKeys = true }
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
 
     @Volatile
     private var tickerToCik: Map<String, String>? = null
@@ -97,7 +101,12 @@ class SecIssuerComponentClient(
                 tmp.outputStream().use { out -> body.byteStream().copyTo(out) }
                 if (!tmp.renameTo(target)) {
                     target.delete()
-                    if (!tmp.renameTo(target)) return@use null
+                    if (!tmp.renameTo(target)) {
+                        tmp.inputStream().use { input ->
+                            target.outputStream().use { input.copyTo(it) }
+                        }
+                        tmp.delete()
+                    }
                 }
                 target
             }
@@ -131,21 +140,31 @@ class SecIssuerComponentClient(
         if (stem.isBlank()) return emptyList()
         var found = linkedMapOf<String, NamedFiler>()
         for (arm in listOf("Financial", "Credit", "Capital")) {
-            var query = "\"$stem $arm\""
-            var url = "$EFTS_URL?q=${java.net.URLEncoder.encode(query, Charsets.UTF_8)}&forms=10-K"
-            var body = getText(url) ?: continue
-            var hits = json.parseToJsonElement(body).jsonObject["hits"]
-                ?.jsonObject?.get("hits")?.jsonArray ?: continue
-            for (hit in hits) {
-                var source = hit.jsonObject["_source"]?.jsonObject ?: continue
-                var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
-                var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-                    ?: continue
-                var clean = stripCikSuffix(name)
-                found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
-            }
+            var phrase = "$stem $arm"
+            collectFilers(
+                found,
+                "$EFTS_URL?entityName=${URLEncoder.encode(phrase, "UTF-8")}&forms=10-K",
+            )
+            collectFilers(
+                found,
+                "$EFTS_URL?q=${URLEncoder.encode("\"$phrase\"", "UTF-8")}&forms=10-K",
+            )
         }
         return found.values.toList()
+    }
+
+    private fun collectFilers(found: MutableMap<String, NamedFiler>, url: String) {
+        var body = getText(url) ?: return
+        var hits = json.parseToJsonElement(body).jsonObject["hits"]
+            ?.jsonObject?.get("hits")?.jsonArray ?: return
+        for (hit in hits) {
+            var source = hit.jsonObject["_source"]?.jsonObject ?: continue
+            var cik = source["ciks"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: continue
+            var name = source["display_names"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
+                ?: continue
+            var clean = stripCikSuffix(name)
+            found.putIfAbsent(cik.padStart(10, '0'), NamedFiler(cik.padStart(10, '0'), clean))
+        }
     }
 
     // Cut a "  (CIK 0000320193)" tail: the first "(CIK" that a whitespace char precedes.
@@ -158,17 +177,23 @@ class SecIssuerComponentClient(
         return name.trim()
     }
 
-    private fun loadSievedFacts(cik: String): String? {
+    /**
+     * The sieved companyfacts of one CIK, from the day's cache or from the network.
+     *
+     * This call blocks on the network. Every caller runs it on [Dispatchers.IO]. The provider's
+     * function of the same name is `suspend`; this one is not, so the dispatcher is the caller's
+     * to hold.
+     */
+    internal fun loadSievedFacts(cik: String): String? {
         var slimFile = cacheDir?.let { File(it, companyFactsSlimFileName(cik)) }
         if (slimFile != null && slimFile.isFile) {
             var age = System.currentTimeMillis() - slimFile.lastModified()
             if (age < ttlMillis) return slimFile.readText()
         }
-        var body = getText("${COMPANY_FACTS_URL}CIK$cik.json") ?: return null
-        var slim = com.discountscreener.core.engine.SecCompanyFactsSieve.sieve(body.reader())
-        slimFile?.let {
-            it.parentFile?.mkdirs()
-            it.writeText(slim)
+        var slim = sievedStream("${COMPANY_FACTS_URL}CIK$cik.json") ?: return null
+        slimFile?.let { target ->
+            target.parentFile?.mkdirs()
+            writeAtomically(target, slim)
         }
         return slim
     }
@@ -195,6 +220,29 @@ class SecIssuerComponentClient(
             map
         } catch (_: Exception) {
             emptyMap()
+        }
+    }
+
+    /**
+     * A companyfacts answer, sieved as it arrives.
+     *
+     * The file is about 4 MB and the sieve keeps a small part of it. Reading the body to a string
+     * first would hold all 4 MB, plus the copy the decoder makes, for nothing.
+     */
+    private fun sievedStream(url: String): String? {
+        return try {
+            var request = Request.Builder()
+                .url(url)
+                .header("User-Agent", SEC_USER_AGENT)
+                .header("Accept-Encoding", "identity")
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                var body = response.body ?: return null
+                body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

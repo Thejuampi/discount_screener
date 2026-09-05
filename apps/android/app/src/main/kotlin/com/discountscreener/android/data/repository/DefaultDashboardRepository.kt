@@ -1,6 +1,12 @@
 package com.discountscreener.android.data.repository
 
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
+import com.discountscreener.android.presentation.dashboard.EarningsGateUi
+import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.data.debug.ScoreExport
+import com.discountscreener.android.data.earnings.EarningsEventRecorder
 import com.discountscreener.android.data.persistence.CaptureKind
 import com.discountscreener.android.data.persistence.EvaluatedSymbolState
 import com.discountscreener.android.data.persistence.MetricGroupStatus
@@ -68,6 +74,7 @@ import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
+import com.discountscreener.core.engine.ValuationPolicy
 import com.discountscreener.core.engine.IssuerYieldLookup
 import com.discountscreener.core.engine.IssuerYieldPoint
 import com.discountscreener.core.engine.PeerCouponEvidence
@@ -339,6 +346,11 @@ class DefaultDashboardRepository(
     private val issuerYieldLookup: IssuerYieldLookup? = null,
     private val componentLookup: IssuerComponentLookup? = null,
     /**
+     * Captures the pre-earnings block for rows whose report is near. Null skips the capture, which
+     * is what every test that predates it wants and what an install with no log folder gets.
+     */
+    private val earningsEventRecorder: EarningsEventRecorder? = null,
+    /**
      * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
      * Production leaves this null.
      */
@@ -552,6 +564,53 @@ class DefaultDashboardRepository(
         }
     }
 
+    /**
+     * Every tracked symbol, qualified or not, for the earnings capture to read.
+     *
+     * The product list keeps roughly one symbol in eight, on how cheap it looks today. Which
+     * reports have to be logged has nothing to do with that: an option chain is never republished,
+     * so a name left out today has no implied move on file when it turns cheap next quarter.
+     * Measured on the phone the day this changed, 16 symbols reported inside the ten-day window
+     * and the qualified list carried 2 of them.
+     */
+    override suspend fun earningsCandidateRows(): List<OpportunityListRow> = withContext(computeDispatcher) {
+        val model = loadScoringPreferences().opportunityModel
+        stateMutex.withLock { earningsCandidateRowsLocked(model) }
+    }
+
+    private fun earningsCandidateRowsLocked(
+        scoringModel: OpportunityScoringModel,
+    ): List<OpportunityListRow> = opportunityRowsLocked(ViewFilter(), scoringModel, includeUnqualified = true)
+
+    override suspend fun earningsEvents(): EarningsGateUi = withContext(computeDispatcher) {
+        val recorder = earningsEventRecorder ?: return@withContext EarningsGateUi()
+        val read = runCatching { recorder.events() }
+            .onFailure { error -> logger.error(TAG, "earnings log read failed", error) }
+            .getOrNull() ?: return@withContext EarningsGateUi()
+        presentEarningsGate(
+            events = read.events,
+            damagedLines = read.unreadableLines,
+            today = Instant.ofEpochSecond(nowProvider()).atZone(ZoneOffset.UTC).toLocalDate(),
+            lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
+            nowEpochSeconds = nowProvider(),
+        )
+    }
+
+    /**
+     * The earnings log, ready to be written somewhere the phone cannot reach.
+     *
+     * A release build is not debuggable, so `adb run-as` cannot pull this file. Losing the signing
+     * key forces an uninstall, and an uninstall takes the log with it. Everything else on this
+     * phone can be downloaded again; option chains cannot.
+     */
+    override suspend fun earningsLogBackup(): String = withContext(computeDispatcher) {
+        earningsEventRecorder?.backupText().orEmpty()
+    }
+
+    override suspend fun restoreEarningsLog(text: String): Int = withContext(computeDispatcher) {
+        earningsEventRecorder?.restore(text) ?: 0
+    }
+
     override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> = withContext(computeDispatcher) {
         stateMutex.withLock {
             safeEstimatesReportLocked().also { result ->
@@ -730,6 +789,18 @@ class DefaultDashboardRepository(
         }
     }
 
+    private suspend fun captureEarningsEvents(rows: List<OpportunityListRow>) {
+        val recorder = earningsEventRecorder ?: return
+        if (rows.isEmpty()) return
+        runCatching { recorder.capture(rows) }
+            .onSuccess { written ->
+                if (written > 0) {
+                    logger.info(TAG, "earnings log: captured $written event(s)")
+                }
+            }
+            .onFailure { error -> logger.error(TAG, "earnings capture failed", error) }
+    }
+
     override suspend fun ensureDetailLoaded(
         symbol: String,
         filter: ViewFilter,
@@ -792,16 +863,25 @@ class DefaultDashboardRepository(
         val needsDcfResolve = stateMutex.withLock {
             fundamentals != null && (needsDcfResolutionLocked(symbol) || !secondaryAsked.contains(symbol))
         }
-        if (fundamentals != null && needsDcfResolve && isFinancialServices(fundamentals)) {
-            val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
-            stateMutex.withLock {
-                secondaryAsked.add(symbol)
-                engine.ingestFundamentals(outcome.fundamentals)
-                putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
-                liveDcfResolvedSymbols += symbol
-            }
-            wroteDcf = true
-        } else if (fundamentals != null && needsDcfResolve) {
+        if (fundamentals != null && needsDcfResolve) {
+            var businessClass = businessClassOf(fundamentals)
+            if (isClassificationRefuse(businessClass)) {
+                var analysis = terminalClassificationAnalysis(businessClass, fundamentals)
+                stateMutex.withLock {
+                    putDcfAnalysisLocked(symbol, analysis, fundamentals)
+                    liveDcfResolvedSymbols += symbol
+                }
+                wroteDcf = true
+            } else if (isFinancialServices(fundamentals)) {
+                val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
+                stateMutex.withLock {
+                    secondaryAsked.add(symbol)
+                    engine.ingestFundamentals(outcome.fundamentals)
+                    putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+                    liveDcfResolvedSymbols += symbol
+                }
+                wroteDcf = true
+            } else {
             var peers = peerCouponsFor(symbol, fundamentals)
             var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
             var components = resolveComponents(symbol, detailForDcf?.companyName)
@@ -833,6 +913,7 @@ class DefaultDashboardRepository(
                 resolvedAnalysis?.let { analysis -> putDcfAnalysisLocked(symbol, analysis, fundamentals) }
             }
             captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
+            }
         }
 
         if (captures.isNotEmpty() || wroteDcf) {
@@ -1327,10 +1408,9 @@ class DefaultDashboardRepository(
             }
             trackedSymbols.filter { engine.detail(it) != null }
         }
-        journalScores(
-            stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) },
-            scoringModel,
-        )
+        val scoredRows = stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) }
+        journalScores(scoredRows, scoringModel)
+        captureEarningsEvents(stateMutex.withLock { earningsCandidateRowsLocked(scoringModel) })
         emitUpdate()
         startEnrichment(symbolsToEnrich, generation, skip)
         startMarketReadForCurrentProfile(generation)
@@ -2691,9 +2771,10 @@ class DefaultDashboardRepository(
     private fun opportunityRowsLocked(
         filter: ViewFilter,
         scoringModel: OpportunityScoringModel,
+        includeUnqualified: Boolean = false,
     ): List<OpportunityListRow> {
         val issueMessagesBySymbol = activeIssueMessagesBySymbolLocked()
-        return rankedOpportunityRowsLocked(scoringModel)
+        return rankedOpportunityRowsLocked(scoringModel, includeUnqualified)
         .mapIndexed { currentIndex, row ->
             buildOpportunityRowLocked(row, currentIndex, scoringModel, issueMessagesBySymbol[row.symbol])
         }
@@ -2723,6 +2804,7 @@ class DefaultDashboardRepository(
 
     private fun rankedOpportunityRowsLocked(
         scoringModel: OpportunityScoringModel,
+        includeUnqualified: Boolean = false,
     ) = OpportunityEngine.buildRows(
         engine,
         OpportunityContext(
@@ -2736,6 +2818,7 @@ class DefaultDashboardRepository(
             sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
             timeseriesBySymbol = timeseriesCache,
         ),
+        includeUnqualified = includeUnqualified,
     )
 
     /**
@@ -3781,6 +3864,7 @@ class DefaultDashboardRepository(
         providerFundamentals: FundamentalSnapshot?,
         chartCandles: List<HistoricalCandle>?,
         timeseries: FundamentalTimeseries,
+        peerCoupons: List<PeerCouponEvidence> = emptyList(),
     ): TimeseriesFallback? {
         val latestShares = timeseries.dilutedAverageShares.lastOrNull()?.value?.takeIf { it > 0.0 }
             ?: providerFundamentals?.sharesOutstanding?.toDouble()
@@ -3811,6 +3895,7 @@ class DefaultDashboardRepository(
             timeseries = timeseries,
             marketPriceCents = marketPriceCents,
             marketParams = marketParams(),
+            peerCoupons = peerCoupons,
             issuerYield = cachedIssuerYield(symbol),
             components = cachedComponents(symbol),
         ).getOrNull() ?: return null
@@ -3837,6 +3922,11 @@ class DefaultDashboardRepository(
         if (providerFundamentals == null || !isFinancialServices(providerFundamentals)) {
             resolveIssuerYield(symbol, companyName)
         }
+        var peers = if (providerFundamentals != null) {
+            peerCouponsFor(symbol, providerFundamentals)
+        } else {
+            emptyList()
+        }
         val selection = dcfSourceCoordinator.resolve(symbol, allowSecondary = false) { timeseries ->
             dcfFallbackFromTimeseries(
                 symbol = symbol,
@@ -3844,6 +3934,7 @@ class DefaultDashboardRepository(
                 providerFundamentals = providerFundamentals,
                 chartCandles = chartCandles,
                 timeseries = timeseries,
+                peerCoupons = peers,
             )?.analysis
         }.selection
         val selectedTimeseries = selection.timeseries ?: return null
@@ -3853,6 +3944,7 @@ class DefaultDashboardRepository(
             providerFundamentals = providerFundamentals,
             chartCandles = chartCandles,
             timeseries = selectedTimeseries,
+            peerCoupons = peers,
         ) ?: return null
         return fallback.copy(analysis = selection.analysis ?: fallback.analysis)
     }
@@ -4137,11 +4229,15 @@ class DefaultDashboardRepository(
                 val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
                 val fundamentals = detailForDcf?.fundamentals
                 val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
-                if (fundamentals != null && isFinancialServices(fundamentals)) {
-                    val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, allowSecondary = false)
-                    residualFundamentals = outcome.fundamentals
-                    dcfAnalysis = outcome.analysis
-                } else if (fundamentals != null) {
+                if (fundamentals != null) {
+                    var businessClass = businessClassOf(fundamentals)
+                    if (isClassificationRefuse(businessClass)) {
+                        dcfAnalysis = terminalClassificationAnalysis(businessClass, fundamentals)
+                    } else if (isFinancialServices(fundamentals)) {
+                        val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, allowSecondary = false)
+                        residualFundamentals = outcome.fundamentals
+                        dcfAnalysis = outcome.analysis
+                    } else {
                     var peers = peerCouponsFor(symbol, fundamentals)
                     var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
                     var components = resolveComponents(symbol, detailForDcf?.companyName)
@@ -4171,6 +4267,7 @@ class DefaultDashboardRepository(
                         timeseries = resolution.selection.timeseries
                         fetchedTimeseries = resolution.fetched
                         dcfAnalysis = analysisFromSelection(resolution.selection, fundamentals)
+                    }
                     }
                 }
             } catch (error: Exception) {
@@ -4465,11 +4562,8 @@ class DefaultDashboardRepository(
             fund.industryKey,
             symbol = symbol,
         )
-        if (
-            businessClass == BusinessClass.Unclassified ||
-            businessClass == BusinessClass.NotEligible
-        ) {
-            dcfCache.remove(symbol)
+        if (isClassificationRefuse(businessClass)) {
+            putDcfAnalysisLocked(symbol, terminalClassificationAnalysis(businessClass, fund), fund)
             return
         }
         if (businessClass != BusinessClass.FinancialServices) return
@@ -4506,14 +4600,20 @@ class DefaultDashboardRepository(
 
     private fun marketParams(): MarketParams = lastMarketParams
 
-    private fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+    private fun businessClassOf(fundamentals: FundamentalSnapshot): BusinessClass =
         DcfAnalysisEngine.classifyBusiness(
             fundamentals.sectorName,
             fundamentals.industryName,
             fundamentals.sectorKey,
             fundamentals.industryKey,
             symbol = fundamentals.symbol,
-        ) == BusinessClass.FinancialServices
+        )
+
+    private fun isClassificationRefuse(businessClass: BusinessClass): Boolean =
+        businessClass == BusinessClass.Unclassified || businessClass == BusinessClass.NotEligible
+
+    private fun isFinancialServices(fundamentals: FundamentalSnapshot): Boolean =
+        businessClassOf(fundamentals) == BusinessClass.FinancialServices
 
     /**
      * The residual-income chain for one financial-services symbol.
@@ -4569,19 +4669,17 @@ class DefaultDashboardRepository(
         }
         val fund = engine.detail(symbol)?.fundamentals
         if (fund != null) {
-            val businessClass = DcfAnalysisEngine.classifyBusiness(
-                fund.sectorName,
-                fund.industryName,
-                fund.sectorKey,
-                fund.industryKey,
-                symbol = symbol,
-            )
-            if (
-                businessClass == BusinessClass.Unclassified ||
-                businessClass == BusinessClass.NotEligible
-            ) {
-                dcfCache.remove(symbol)
-                return false
+            val businessClass = businessClassOf(fund)
+            if (isClassificationRefuse(businessClass)) {
+                var reason = DcfAnalysisEngine.classificationUnavailableReason(businessClass)
+                if (
+                    analysis != null &&
+                    analysis.businessClass == businessClass &&
+                    analysis.valuationUnavailableReason == reason
+                ) {
+                    return false
+                }
+                return true
             }
             if (
                 businessClass == BusinessClass.FinancialServices &&
@@ -4723,6 +4821,61 @@ class DefaultDashboardRepository(
                 fallbackReason = reasons.firstOrNull()?.code,
             ),
             providerReasons = reasons,
+        )
+    }
+
+    private fun terminalClassificationAnalysis(
+        businessClass: BusinessClass,
+        fundamentals: FundamentalSnapshot?,
+    ): DcfAnalysis {
+        var reason = DcfAnalysisEngine.classificationUnavailableReason(businessClass).orEmpty()
+        var resolverState = if (businessClass == BusinessClass.NotEligible) {
+            ResolverState.NotEligible
+        } else {
+            ResolverState.Unavailable
+        }
+        var providerState = if (businessClass == BusinessClass.NotEligible) {
+            ProviderState.NotEligible
+        } else {
+            ProviderState.Unavailable
+        }
+        var code = if (businessClass == BusinessClass.NotEligible) {
+            ProviderDecisionReasonCode.FundOrEtfUnsupported
+        } else {
+            ProviderDecisionReasonCode.SymbolUnsupported
+        }
+        var fundFp = fundamentals?.let(::fundamentalsInputFingerprint).orEmpty()
+        return DcfAnalysis(
+            bearIntrinsicValueCents = 0L,
+            baseIntrinsicValueCents = 0L,
+            bullIntrinsicValueCents = 0L,
+            waccBps = 0,
+            baseGrowthBps = 0,
+            netDebtDollars = 0L,
+            source = DcfSource.Unknown,
+            resolverState = resolverState,
+            decisionFingerprint = notEligibleDecisionFingerprint(fundFp, "class|$businessClass"),
+            engineVersion = ENGINE_VERSION,
+            modelPolicyVersion = MODEL_POLICY_VERSION,
+            businessClass = businessClass,
+            model = ValuationModel.None,
+            provenance = DataProvenance(
+                source = DcfSource.Unknown,
+                providerState = providerState,
+                fallbackReason = code,
+            ),
+            providerReasons = listOf(
+                ProviderDecisionReason(
+                    code = code,
+                    provider = DcfSource.Unknown,
+                    upstreamStatus = reason,
+                ),
+            ),
+            reasonCodes = listOf(
+                code.name,
+                "valuation_policy=${ValuationPolicy.VERSION}",
+            ),
+            valuationUnavailableReason = reason,
         )
     }
 

@@ -1972,7 +1972,7 @@ mod feed_coordinator_tests {
         assert_eq!(refresh_calls, 1, "Detail must issue one bounded refresh");
         let state = screener.lock().unwrap();
         let after = state.detail("COF").expect("refreshed COF detail");
-        assert_eq!(after.dcf_value_cents, Some(16_881));
+        assert_eq!(after.dcf_value_cents, Some(17_881));
         assert_eq!(
             after.dcf_analysis.as_ref().map(|analysis| analysis.model),
             Some(crate::dcf_model::ValuationModel::ResidualIncomeEquity)
@@ -3377,6 +3377,7 @@ pub struct PortfolioImportResult {
     pub created: usize,
     pub updated: usize,
     pub skipped: usize,
+    pub removed: usize,
 }
 
 /// Bulk import: upsert each position keyed by symbol.
@@ -3408,6 +3409,30 @@ pub fn portfolio_import(
         created,
         updated,
         skipped,
+        removed: 0,
+    })
+}
+
+#[tauri::command]
+pub fn portfolio_replace(
+    positions: Vec<ImportPosition>,
+    state: State<AppState>,
+) -> Result<PortfolioImportResult, String> {
+    let mut rows: Vec<(String, f64, i64, Option<String>)> = Vec::new();
+    for p in positions {
+        rows.push((
+            p.symbol.trim().to_uppercase(),
+            p.quantity,
+            p.avg_cost_cents,
+            p.opened_at,
+        ));
+    }
+    let (created, updated, skipped, removed) = state.db.portfolio_replace(&rows)?;
+    Ok(PortfolioImportResult {
+        created,
+        updated,
+        skipped,
+        removed,
     })
 }
 

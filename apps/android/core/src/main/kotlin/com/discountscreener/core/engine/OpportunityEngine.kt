@@ -499,8 +499,10 @@ object OpportunityEngine {
          * Score every candidate, not only the ones that clear qualification.
          *
          * The product list is a *selected* population — qualification keeps roughly one symbol in
-         * eight. Any statistic taken over that subset is range-restricted, so an offline study that
-         * wants the cohort must ask for it. No shipped call site does; the default is the list.
+         * eight. Any statistic taken over that subset is range-restricted, so a caller that wants
+         * the cohort must ask for it. The earnings capture does: which reports have to be logged
+         * has nothing to do with how cheap the name looks today, and an option chain is never
+         * republished. Everything else takes the default, which is the list.
          */
         includeUnqualified: Boolean = false,
     ): List<OpportunityRow> {

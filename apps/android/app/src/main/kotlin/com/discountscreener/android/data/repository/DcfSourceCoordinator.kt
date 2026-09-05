@@ -3,6 +3,8 @@ package com.discountscreener.android.data.repository
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.core.engine.DcfSourceSelectionPolicy
+import com.discountscreener.core.engine.attachFiledInterestFrom
+import com.discountscreener.core.engine.attachStatutoryTaxFrom
 import com.discountscreener.core.model.DcfAnalysis
 import com.discountscreener.core.model.DcfSource
 import com.discountscreener.core.model.DcfSourceCandidate
@@ -35,7 +37,8 @@ internal class DcfSourceCoordinator(
      *
      * [allowSecondary] is what keeps a screen of five hundred rows loadable. The secondary provider
      * is SEC EDGAR, and one symbol there costs a whole companyfacts file: about 4 MB, of which the
-     * sieve keeps an eighth. Paid once per symbol on a bulk load, that file is most of the load.
+     * sieve keeps about 3%. Paid once per symbol on a bulk load, that file is most of the
+     * load.
      * So the list resolves from Yahoo, and SEC is asked for only when a symbol is opened.
      */
     suspend fun resolve(
@@ -57,7 +60,12 @@ internal class DcfSourceCoordinator(
 
         val yahooCandidate = candidate(
             source = DcfSource.YahooFinance,
-            timeseries = fetchYahoo(symbol)?.also { fetched[DcfSource.YahooFinance] = it },
+            timeseries = fetchYahoo(symbol)?.also { fetched[DcfSource.YahooFinance] = it }
+                ?.let { raw ->
+                    secCandidate?.timeseries?.let { sec ->
+                        attachFiledInterestFrom(attachStatutoryTaxFrom(raw, sec), sec)
+                    } ?: raw
+                },
             evaluate = evaluate,
         )
         return DcfResolution(DcfSourceSelectionPolicy.select(yahoo = yahooCandidate, sec = secCandidate), fetched)

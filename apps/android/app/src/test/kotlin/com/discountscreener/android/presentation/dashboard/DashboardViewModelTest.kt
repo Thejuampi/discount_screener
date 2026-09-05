@@ -15,7 +15,9 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -24,6 +26,7 @@ import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDiscoveryProgressUseCase
 import com.discountscreener.android.domain.usecase.PersistScoringPreferencesUseCase
 import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
@@ -157,6 +160,167 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun opening_the_earnings_tab_reads_the_event_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(1, repository.earningsEventsCallCount)
+    }
+
+    @Test
+    fun the_earnings_tab_shows_what_the_log_answered() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsGate = EarningsGateUi(damagedLines = 3)
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(3, viewModel.state.value.earningsGate.damagedLines)
+    }
+
+    @Test
+    fun a_failed_earnings_read_tells_the_reader() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsEventsError = IllegalStateException("log unreadable")
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(
+            "Earnings gate failed: log unreadable",
+            viewModel.state.value.earningsGateNotice,
+        )
+    }
+
+    @Test
+    fun asking_to_back_up_the_log_offers_the_text_for_a_file() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsLogBackupText = "a report on a line"
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.BackUpEarningsLog)
+        advanceUntilIdle()
+
+        assertEquals("a report on a line", viewModel.state.value.earningsLogBackup)
+    }
+
+    @Test
+    fun an_empty_log_never_opens_a_file_picker() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.BackUpEarningsLog)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.earningsLogBackup)
+    }
+
+    @Test
+    fun an_empty_log_says_why_nothing_happened() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.BackUpEarningsLog)
+        advanceUntilIdle()
+
+        assertEquals(
+            "No reports logged yet, so nothing to back up.",
+            viewModel.state.value.earningsGateNotice,
+        )
+    }
+
+    @Test
+    fun a_backup_that_was_written_reports_how_many_reports_it_carried() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+
+        viewModel.dispatch(DashboardAction.EarningsLogBackupWritten(12))
+        advanceUntilIdle()
+
+        assertEquals("Backed up 12 report(s).", viewModel.state.value.earningsGateNotice)
+    }
+
+    @Test
+    fun a_backup_the_reader_walked_away_from_leaves_no_text_behind() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsLogBackupText = "a report on a line"
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.BackUpEarningsLog)
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.EarningsLogBackupDropped)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.earningsLogBackup)
+    }
+
+    @Test
+    fun a_restore_hands_the_whole_file_to_the_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.RestoreEarningsLog("one line"))
+        advanceUntilIdle()
+
+        assertEquals("one line", repository.restoredText)
+    }
+
+    @Test
+    fun a_restore_reports_how_many_reports_it_added() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.restoredCount = 7
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.RestoreEarningsLog("whatever"))
+        advanceUntilIdle()
+
+        assertEquals(
+            "Restored 7 report(s) from the backup.",
+            viewModel.state.value.earningsGateNotice,
+        )
+    }
+
+    @Test
+    fun a_restore_that_added_nothing_says_so_instead_of_staying_quiet() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.RestoreEarningsLog("whatever"))
+        advanceUntilIdle()
+
+        assertEquals(
+            "Restored 0 report(s) from the backup.",
+            viewModel.state.value.earningsGateNotice,
+        )
+    }
+
+    @Test
+    fun a_restore_reads_the_log_again_so_the_screen_shows_what_came_back() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.RestoreEarningsLog("whatever"))
+        advanceUntilIdle()
+
+        assertEquals(1, repository.earningsEventsCallCount)
+    }
+
+    @Test
+    fun a_tab_that_is_not_the_earnings_tab_never_reads_the_event_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Watch))
+        advanceUntilIdle()
+
+        assertEquals(0, repository.earningsEventsCallCount)
+    }
+
+    @Test
     fun select_tab_updates_current_tab() = runTest(dispatcher) {
         val repository = RecordingDashboardRepository()
         val viewModel = testViewModel(repository)
@@ -208,7 +372,7 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates"),
+            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates", "Earnings"),
             DashboardTab.entries.map { it.name },
         )
     }
@@ -1247,6 +1411,9 @@ class DashboardViewModelTest {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            getEarningsEvents = GetEarningsEventsUseCase(repository),
+            backUpEarningsLog = EarningsLogBackupUseCase(repository),
+            restoreEarningsLog = RestoreEarningsLogUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
@@ -1475,6 +1642,29 @@ class DashboardViewModelTest {
                 )
             }
             return snapshot
+        }
+
+        var earningsGate: EarningsGateUi = EarningsGateUi()
+        var earningsEventsCallCount = 0
+        var earningsEventsError: Throwable? = null
+
+        override suspend fun earningsCandidateRows(): List<OpportunityListRow> = emptyList()
+
+        override suspend fun earningsEvents(): EarningsGateUi {
+            earningsEventsCallCount++
+            earningsEventsError?.let { throw it }
+            return earningsGate
+        }
+
+        var earningsLogBackupText = ""
+        var restoredText: String? = null
+        var restoredCount = 0
+
+        override suspend fun earningsLogBackup(): String = earningsLogBackupText
+
+        override suspend fun restoreEarningsLog(text: String): Int {
+            restoredText = text
+            return restoredCount
         }
 
         override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> {

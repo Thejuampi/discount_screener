@@ -2,6 +2,14 @@ package com.discountscreener.android.data.remote
 
 import com.discountscreener.android.domain.logging.AppLogger
 import com.discountscreener.android.domain.logging.NoOpAppLogger
+import com.discountscreener.core.earnings.CURRENT_QUARTER
+import com.discountscreener.core.earnings.ConsensusEstimate
+import com.discountscreener.core.earnings.OptionChainSnapshot
+import com.discountscreener.core.earnings.consensusOf
+import com.discountscreener.core.earnings.isOptionChainAnswer
+import com.discountscreener.core.earnings.ReportedQuarter
+import com.discountscreener.core.earnings.reportedQuartersOf
+import com.discountscreener.core.earnings.parseOptionChain
 import com.discountscreener.core.engine.YahooInterestSeries
 import com.discountscreener.core.engine.sanitizeExternalSignal
 import com.discountscreener.core.model.AnnualReportedValue
@@ -119,6 +127,7 @@ private const val QUOTE_BATCH_URL = "https://query1.finance.yahoo.com/v7/finance
 private const val FUNDAMENTALS_TIMESERIES_URL =
     "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
 private const val SEARCH_API_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+private const val OPTIONS_API_URL = "https://query1.finance.yahoo.com/v7/finance/options/"
 private const val LOG_TAG = "DiscountScreener"
 
 private const val USER_AGENT =
@@ -137,7 +146,12 @@ private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
  * - ROE: `financialData.returnOnEquity` only (reported; no synthesis)
  */
 internal const val QUOTE_SUMMARY_MODULES =
-    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents"
+    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend," +
+        "calendarEvents,earningsTrend"
+
+internal const val REPORTED_QUARTER_MODULES = "earningsHistory,incomeStatementHistoryQuarterly"
+
+internal const val CALENDAR_MODULES = "calendarEvents"
 
 /**
  * Symbols a batch quote call asks for at once, and the size below which a failing batch is not
@@ -240,7 +254,7 @@ open class YahooFinanceClient(
         }
 
         currentCoroutineContext().ensureActive()
-        // Primary path: JSON quoteSummary (same modules Yahoo's web JS uses).
+        var quoteSummaryNotFound = false
         var quoteContext = try {
             val root = fetchQuoteSummaryJson(requestSymbol)
             parseQuoteSummary(
@@ -250,6 +264,7 @@ open class YahooFinanceClient(
                 diagnostics = diagnostics,
             )
         } catch (error: IOException) {
+            quoteSummaryNotFound = isNotFound(error)
             diagnostics += ProviderDiagnostic(
                 component = QUOTE_SUMMARY_COMPONENT,
                 kind = ERROR_KIND,
@@ -259,8 +274,7 @@ open class YahooFinanceClient(
             null
         }
 
-        // Optional legacy HTML scrape (off by default).
-        if (quoteContext == null && htmlFallback) {
+        if (quoteContext == null && (htmlFallback || quoteSummaryNotFound)) {
             quoteContext = try {
                 val body = fetchQuotePage(requestSymbol)
                 val quotePrice = parseEmbeddedJsonObject(body, FINANCIAL_DATA_MARKER, diagnostics)
@@ -401,12 +415,15 @@ open class YahooFinanceClient(
         return parseQuoteBatch(root, appSymbolByRequestSymbol)
     }
 
-    private suspend fun fetchQuoteSummaryJson(requestSymbol: String): JsonObject {
+    private suspend fun fetchQuoteSummaryJson(
+        requestSymbol: String,
+        modules: String = QUOTE_SUMMARY_MODULES,
+    ): JsonObject {
         suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
-                .addQueryParameter("modules", QUOTE_SUMMARY_MODULES)
+                .addQueryParameter("modules", modules)
                 .addQueryParameter("crumb", crumb)
                 .build()
             val request = Request.Builder()
@@ -508,6 +525,86 @@ open class YahooFinanceClient(
         val body = executeText(request)
         parseSearchQuotes(json.parseToJsonElement(body).jsonObject)
     }
+
+    /**
+     * The option chain of one expiry, or null when Yahoo has none for the symbol.
+     *
+     * Two calls are needed for one event and that is the provider's shape, not a choice here: the
+     * first answer lists every expiry the ticker has, the second returns the ladder of the one that
+     * covers the report. Callers that already know the expiry pass [expiryEpochSeconds] and pay for
+     * one call.
+     *
+     * Nothing is interpreted here. The body goes straight to `parseOptionChain`, which is the same
+     * function the fixture tests run, so a saved answer and a live one cannot drift apart.
+     */
+    open suspend fun fetchOptionChain(
+        symbol: String,
+        expiryEpochSeconds: Long? = null,
+    ): OptionChainSnapshot? = withContext(Dispatchers.IO) {
+        suspend fun once(): OptionChainSnapshot? {
+            val crumb = session.ensureCrumb()
+            val url = (OPTIONS_API_URL + yahooRequestSymbol(symbol)).toHttpUrl().newBuilder()
+                .apply { expiryEpochSeconds?.let { addQueryParameter("date", it.toString()) } }
+                .addQueryParameter("crumb", crumb)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", QUOTE_PAGE_ACCEPT_LANGUAGE)
+                .build()
+            var body = executeText(request)
+            return parseOptionChain(body)
+                ?: if (isOptionChainAnswer(body)) null
+                else throw OptionChainRefused("Yahoo options answered no chain: ${body.take(160)}")
+        }
+
+        try {
+            once()
+        } catch (error: IOException) {
+            if (!isAuthError(error) && error !is OptionChainRefused) throw error
+            session.clear()
+            once()
+        }
+    }
+
+    private class OptionChainRefused(message: String) : IOException(message)
+
+    open suspend fun fetchConsensus(
+        symbol: String,
+        period: String = CURRENT_QUARTER,
+    ): ConsensusEstimate? = withContext(Dispatchers.IO) {
+        consensusOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol)), period)
+    }
+
+    /**
+     * The quarters the company has already reported: actual EPS, the estimate it was measured
+     * against, and the revenue of the same quarter.
+     *
+     * Its own two modules rather than the shared summary, because only a settling event needs
+     * them. Adding them to [QUOTE_SUMMARY_MODULES] would make every symbol of every refresh carry
+     * a quarterly income statement it never reads.
+     */
+    open suspend fun fetchReportedQuarters(symbol: String): List<ReportedQuarter> =
+        withContext(Dispatchers.IO) {
+            reportedQuartersOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol), REPORTED_QUARTER_MODULES))
+        }
+
+    /**
+     * When this symbol reports next, asked on its own.
+     *
+     * The date on file comes from the last refresh, and a refresh needs the app open. The
+     * background capture has to learn on its own that a report moved, or that the one it knew has
+     * already happened, or it prices nothing.
+     */
+    open suspend fun fetchNextEarningsEpoch(symbol: String, nowEpochSeconds: Long): Long? =
+        withContext(Dispatchers.IO) {
+            var root = fetchQuoteSummaryJson(yahooRequestSymbol(symbol), CALENDAR_MODULES)
+            var calendar = root["quoteSummary"]?.jsonObject
+                ?.get("result")?.jsonArray?.firstOrNull()?.jsonObject
+                ?.get("calendarEvents")?.jsonObject
+            nextEarningsEpochOf(calendar, nowEpochSeconds)
+        }
 
     open suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries = withContext(Dispatchers.IO) {
         val requestSymbol = yahooRequestSymbol(symbol)
@@ -689,6 +786,11 @@ open class YahooFinanceClient(
         return message.contains("Invalid Crumb", ignoreCase = true) ||
             message.contains("Invalid Cookie", ignoreCase = true) ||
             message.contains("HTTP 401")
+    }
+
+    private fun isNotFound(error: IOException): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("HTTP 404")
     }
 }
 
@@ -947,6 +1049,7 @@ private fun buildQuoteContext(
         sectorName = assetProfile.string("sectorDisp") ?: assetProfile.string("sector"),
         industryKey = assetProfile.string("industryKey"),
         industryName = assetProfile.string("industryDisp") ?: assetProfile.string("industry"),
+        country = assetProfile.string("country"),
         marketCapDollars = resolveMarketCapDollars(
             reportedMarketCap = price.rawDouble("marketCap"),
             sharesOutstanding = statistics.rawDouble("sharesOutstanding"),
@@ -1354,7 +1457,8 @@ internal fun resolveRetentionBps(
     val payout = financialData.rawDouble("payoutRatio")
         ?: summaryDetail.rawDouble("payoutRatio")
         ?: return null
-    if (!payout.isFinite() || payout !in 0.0..1.0) return null
+    if (!payout.isFinite() || payout < 0.0) return null
+    if (payout >= 1.0) return 0
     return ((1.0 - payout) * 10_000.0).roundToLong().toInt()
 }
 

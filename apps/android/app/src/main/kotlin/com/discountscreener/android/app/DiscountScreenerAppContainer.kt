@@ -2,33 +2,23 @@ package com.discountscreener.android.app
 
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
-import java.io.File
+import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.data.capture.ScreenCaptureSink
-import com.discountscreener.android.data.persistence.SQLiteStateStore
+import com.discountscreener.android.data.earnings.EarningsEventRecorder
 import com.discountscreener.android.data.market.MarketDataRepository
+import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
 import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.FredDgs10Client
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
+import com.discountscreener.android.data.remote.MarketsInsiderYieldClient
 import com.discountscreener.android.data.remote.SecEdgarCacheGc
 import com.discountscreener.android.data.remote.SecEdgarTimeseriesProvider
 import com.discountscreener.android.data.remote.SecIssuerComponentClient
-import com.discountscreener.android.data.remote.MarketsInsiderYieldClient
 import com.discountscreener.android.data.remote.YahooFinanceClient
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import com.discountscreener.android.data.remote.YahooTnxClient
-import com.discountscreener.android.BuildConfig
 import com.discountscreener.android.data.repository.DefaultDashboardRepository
-import com.discountscreener.core.engine.CachedObservedMarketParamsSource
-import com.discountscreener.core.engine.CachedYahooTnxMarketParamsSource
-import com.discountscreener.core.engine.FredThenTnxMarketParamsSource
 import com.discountscreener.android.domain.logging.AndroidAppLogger
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
@@ -37,14 +27,15 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
+import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
+import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadScoringPreferencesUseCase
-import com.discountscreener.android.domain.usecase.ExportScoresUseCase
-import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
-import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.LoadSymbolNotesUseCase
 import com.discountscreener.android.domain.usecase.LoadSystemStatsUseCase
 import com.discountscreener.android.domain.usecase.ObserveDashboardUpdatesUseCase
@@ -54,6 +45,8 @@ import com.discountscreener.android.domain.usecase.PruneOldRevisionsUseCase
 import com.discountscreener.android.domain.usecase.RecreateDiscoveryUniverseUseCase
 import com.discountscreener.android.domain.usecase.RefreshDashboardUseCase
 import com.discountscreener.android.domain.usecase.RefreshDiscoveryScoresUseCase
+import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
+import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.SaveDiscoveryConfigUseCase
 import com.discountscreener.android.domain.usecase.SaveEstimatesSnapshotUseCase
 import com.discountscreener.android.domain.usecase.SaveSymbolNoteUseCase
@@ -62,6 +55,22 @@ import com.discountscreener.android.domain.usecase.SelectDashboardProfileUseCase
 import com.discountscreener.android.domain.usecase.SelectDashboardSymbolUseCase
 import com.discountscreener.android.domain.usecase.ToggleDashboardWatchlistUseCase
 import com.discountscreener.android.presentation.dashboard.DashboardViewModel
+import com.discountscreener.core.earnings.EarningsEventLog
+import com.discountscreener.core.earnings.dailyCloseOf
+import com.discountscreener.core.engine.CachedObservedMarketParamsSource
+import com.discountscreener.core.engine.CachedYahooTnxMarketParamsSource
+import com.discountscreener.core.engine.FredThenTnxMarketParamsSource
+import com.discountscreener.core.model.ChartRange
+import com.discountscreener.core.model.ViewFilter
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class DiscountScreenerAppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -86,6 +95,29 @@ class DiscountScreenerAppContainer(context: Context) {
             yahooClient = yahooClient,
             fearGreedClient = CnnFearGreedClient(),
             dailyCandleSink = stateStore,
+        )
+    }
+
+    private val secFilings by lazy {
+        SecEdgarTimeseriesProvider(File(appContext.cacheDir, "sec-edgar"))
+    }
+
+    private val earningsEventRecorder by lazy {
+        EarningsEventRecorder(
+            log = EarningsEventLog(File(File(appContext.filesDir, "earnings"), "events.jsonl")),
+            chains = { symbol, expiry -> yahooClient.fetchOptionChain(symbol, expiry) },
+            consensus = { symbol -> yahooClient.fetchConsensus(symbol) },
+            closes = { symbol ->
+                yahooClient.fetchCandles(symbol, "3mo", "1d").map { dailyCloseOf(it.epochSeconds, it.closeCents) }
+            },
+            history = { symbol ->
+                yahooClient.fetchCandles(symbol, "5y", "1d").map { dailyCloseOf(it.epochSeconds, it.closeCents) }
+            },
+            announcements = { symbol -> secFilings.earningsAnnouncements(symbol) },
+            reported = { symbol -> yahooClient.fetchReportedQuarters(symbol) },
+            calendar = { symbol, now -> yahooClient.fetchNextEarningsEpoch(symbol, now) },
+            nowProvider = { System.currentTimeMillis() / 1_000 },
+            logger = AndroidAppLogger(),
         )
     }
 
@@ -122,6 +154,7 @@ class DiscountScreenerAppContainer(context: Context) {
             componentLookup = SecIssuerComponentClient(
                 cacheDir = File(appContext.cacheDir, "sec-edgar"),
             ),
+            earningsEventRecorder = earningsEventRecorder,
             projectionCapture = screenCaptureSink::capture,
         )
     }
@@ -168,6 +201,9 @@ class DiscountScreenerAppContainer(context: Context) {
                 streetDiagnosticSource = { repository.streetDiagnosticUpsideBps() },
                 exportDirectory = appContext.filesDir,
             ),
+            getEarningsEvents = GetEarningsEventsUseCase(repository),
+            backUpEarningsLog = EarningsLogBackupUseCase(repository),
+            restoreEarningsLog = RestoreEarningsLogUseCase(repository),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
@@ -193,9 +229,45 @@ class DiscountScreenerAppContainer(context: Context) {
         ForegroundLoadKeeper(appContext).keep(repository.loadInFlight, backgroundScope)
     }
 
+    /**
+     * Prices every report inside its window from what is already on the phone.
+     *
+     * The universe is restored, never refreshed: the capture needs the symbols and their report
+     * dates, and a background run has no business spending a five-hundred-symbol load to get them.
+     */
+    suspend fun capturePendingEarnings(): Int {
+        var preferences = repository.loadScoringPreferences()
+        repository.bootstrap(
+            filter = ViewFilter(),
+            selectedSymbol = null,
+            selectedRange = ChartRange.Month,
+            opportunityScoringModel = preferences.opportunityModel,
+        )
+        var candidates = repository.earningsCandidateRows()
+        AndroidAppLogger().info(EARNINGS_TAG, "earnings capture: ${candidates.size} symbol(s) on file")
+        return earningsEventRecorder.capture(candidates)
+    }
+
+    /**
+     * Stops everything this container started on its own.
+     *
+     * The activity never needs it: its container lives as long as the process it draws in. A
+     * background run does need it � building the repository starts a cache sweep that loops
+     * forever, and a run that walked away from it would leave one more loop behind every 90
+     * minutes, in a process the platform keeps alive between runs.
+     */
+    fun shutdown() {
+        backgroundScope.cancel()
+        stateStore.close()
+    }
+
+    internal fun runningBackgroundWork(): Boolean = backgroundScope.isActive
+
     fun dashboardViewModelFactory(): ViewModelProvider.Factory =
         DashboardViewModel.factory(dashboardUseCases)
 }
+
+private const val EARNINGS_TAG = "EarningsCapture"
 
 /**
  * Cold-start universe for an installed build.

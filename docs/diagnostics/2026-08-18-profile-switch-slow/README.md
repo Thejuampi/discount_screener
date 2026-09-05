@@ -737,3 +737,62 @@ Emulator-5554, live Yahoo, `sp500` (497 rows), reopened inside the day. "Before"
   refresh: inside the day a plain refresh judges the file's copy of the rejected timeseries.
 
 Each mutation above was applied alone, run against the whole group, and reverted.
+
+## Update 2026-08-29: the sieve keeps a fact, not a concept
+
+The readings above measure the first sieve, which kept a whole concept once the concept was on the
+driver list. Every reader then dropped most of what it parsed: a quarter, a form that is not a
+10-K, and a dimensional breakdown are all refused after the parse. So the phone paid RAM, flash and
+parse time for rows it always threw away.
+
+The sieve now applies that same filter on the stream, and keeps only the seven fields a reader
+reads. `accn`, `fy`, `frame`, and the concept `label` and `description` never reach the output.
+
+Measured on Apple's real companyfacts file, 3 789 099 chars. The reading is a desktop JVM, fastest
+of five, so it is not comparable with the emulator timings in the tables above. It is the same
+machine before and after, which is what the comparison needs.
+
+The 12% in the table above is the average of the twenty-file corpus. Apple's file keeps 15.7%, so
+the two numbers measure different populations, not a change:
+
+| Reading | Before | After |
+| --- | --- | --- |
+| Chars kept | 594 967 | 128 104 |
+| Share of the source | 15.7% | 3.4% |
+| Sieve time | 61 ms | 25 ms |
+
+The kept chars are what the string, the cache file and the parsed tree that follows them all cost a
+multiple of. The time falls because the reader stopped crossing a decoder lock per char.
+
+`JsonStreamReader` also reads the source in 16 KB blocks. It read one char at a time before, and
+the network reader crosses a decoder lock on every one of a companyfacts file's four million chars.
+
+`SecIssuerComponentClient` sieves the response stream too. It read the whole 4 MB body to a string
+first, which spent the memory the sieve exists to save.
+
+That client built its own `OkHttpClient` inside the constructor, so no test could reach the new
+path. It now takes the client as a defaulted parameter, and `cannedHttpClient` answers a named URL
+with one body. A streamed body has no string seam above it, so the double sits under the client.
+
+The whole lookup runs on that seam now: the ticker map, the submissions list, the filing index, the
+instance download, the subsidiary search and the sieved companyfacts, each pinned to its full URL.
+A wrong URL fails the test with that URL in the message.
+
+| Test | Goes red when |
+| --- | --- |
+| `the_sieve_keeps_under_a_fifth_of_the_source` | the sieve keeps a concept whole again |
+| `the_timeseries_reader_reaches_the_same_series_through_the_sieve` | a cut changes the drivers, restatement precedence included |
+| `the_residual_reader_reaches_the_same_drivers_through_the_sieve` | a cut changes the residual drivers on a real JPM or ACGL file |
+| `a_concept_that_is_not_an_object_costs_only_that_concept` | one odd concept costs the whole company its facts |
+| `a_units_that_is_not_an_object_costs_only_that_concept` | one odd `units` costs the whole company its facts |
+| `a_quarter_never_reaches_the_output` | the period filter leaves the stream |
+| `a_form_that_is_not_a_ten_k_never_reaches_the_output` | the form filter leaves the stream |
+| `a_dimensional_fact_never_reaches_the_output` | a segment breakdown reaches the output |
+| `a_null_segment_stays_in_the_output` | a null segment is dropped and a reader changes its mind |
+| `the_fields_no_reader_asks_for_never_reach_the_output` | `accn`, `fy` or `frame` come back |
+| `the_response_arrives_sieved` | the issuer client stops sieving what the network sends |
+| `the_cache_holds_what_the_stream_returned` | the slim cache and the returned facts drift apart |
+| `a_second_read_costs_no_request` | a cached companyfacts file asks the network again |
+| `a_cache_older_than_the_ttl_is_read_again` | a day-old slim cache is served forever |
+| `the_parent_facts_reach_the_operating_component` | a step of the lookup asks SEC for the wrong URL |
+| `the_subsidiary_search_reaches_the_finance_component` | the subsidiary search or its companyfacts read breaks |

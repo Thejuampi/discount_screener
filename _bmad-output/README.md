@@ -26,6 +26,9 @@ This folder contains planning and implementation artifacts generated through BMa
 - [Epic Breakdown: Valuation Change Visibility](planning-artifacts/epics.md)
 - [Implementation Readiness Report](planning-artifacts/implementation-readiness-report-2026-04-23.md)
 - [Sprint Change Proposal](planning-artifacts/sprint-change-proposal-2026-04-23.md)
+- [PRD: Pre-Earnings Risk Gate](planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android; implied move vs the ticker's own abnormal-return history, on a DCF-cheapness x event-risk matrix
+- [SPEC: Reading the earnings log by ticker](specs/spec-earnings-log-by-ticker/SPEC.md) - Android; ticker search on the Earnings tab, earnings section in a ticker's detail
+- [SPEC: Advisor CSV import](specs/spec-advisor-csv-import/SPEC.md) - Windows; holdings snapshot vs Chase 90-day blotter; warn then confirm
 
 ## Implementation Artifacts
 

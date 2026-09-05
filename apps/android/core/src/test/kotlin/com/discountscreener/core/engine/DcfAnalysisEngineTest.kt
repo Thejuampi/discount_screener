@@ -1121,6 +1121,175 @@ class DcfAnalysisEngineTest {
     }
 
     @Test
+    fun latest_positive_fcff_year_keeps_identity_when_window_median_is_negative() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = 11_671_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertTrue(analysis.baseIntrinsicValueCents > 0L)
+    }
+
+    @Test
+    fun latest_positive_fcff_year_stamps_latest_positive_run_rate() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = 11_671_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(
+            true,
+            analysis.reasonCodes.any { it.startsWith("fcff_margin=latest_positive_aligned_annual:") },
+        )
+    }
+
+    @Test
+    fun us_domicile_lets_yahoo_form_fcff_when_filed_tax_is_absent() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(country = "United States"),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(
+            true,
+            analysis.reasonCodes.any { it.startsWith("marginal_tax_source=domicile_tax_proxy") },
+        )
+    }
+
+    @Test
+    fun net_cash_skips_coupon_and_forms_fcff() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                country = "United States",
+                totalDebtDollars = 100_000_000L,
+                totalCashDollars = 250_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                interestExpense = emptyList(),
+                totalDebt = emptyList(),
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        ).getOrThrow()
+        assertEquals(true, analysis.reasonCodes.contains("cost_of_debt=not_applicable_cash_covers_debt"))
+    }
+
+    @Test
+    fun paccar_shape_refuses_as_mixed_issuer_not_missing_coupon() {
+        var xml = javaClass.classLoader!!.getResource("xbrl/pcar-financial-services.xml")!!.readText()
+        var components = IssuerComponentAssembler.fromParentFacts(
+            facts = XbrlDimensionalFacts.parse(xml),
+            finance = null,
+        )
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "PCAR",
+                sectorName = "Industrials",
+                industryName = "Farm & Heavy Construction Machinery",
+            ),
+            timeseries = completeTimeseries().copy(interestExpense = emptyList()),
+            marketParams = MarketParams(provisional = false),
+            components = components,
+        )
+        assertEquals(
+            "fcff unavailable: lender book missing on a mixed issuer",
+            result.exceptionOrNull()?.message,
+        )
+    }
+
+    @Test
+    fun software_credit_karma_shape_stays_on_fcff() {
+        var xml = javaClass.classLoader!!.getResource("xbrl/pcar-financial-services.xml")!!.readText()
+        var components = IssuerComponentAssembler.fromParentFacts(
+            facts = XbrlDimensionalFacts.parse(xml),
+            finance = null,
+        )
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                symbol = "INTU",
+                sectorName = "Technology",
+                industryName = "Software - Application",
+            ),
+            timeseries = completeTimeseries(),
+            marketParams = MarketParams(provisional = false),
+            components = components,
+        ).getOrThrow()
+        assertEquals(ValuationModel.FcffWacc, analysis.model)
+    }
+
+    @Test
+    fun levered_empty_interest_forms_fcff_with_yield_and_peer_coupons() {
+        var analysis = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(interestExpense = emptyList()),
+            marketParams = MarketParams(provisional = false),
+            peerCoupons = listOf(
+                PeerCouponEvidence("P1", 5.0, 100.0),
+                PeerCouponEvidence("P2", 6.0, 100.0),
+                PeerCouponEvidence("P3", 4.0, 100.0),
+            ),
+            issuerYield = IssuerYieldPoint(700, concept = "IssuerInstrumentYield:usd_4_15y_median"),
+        ).getOrThrow()
+        assertEquals(ValuationModel.FcffWacc, analysis.model)
+    }
+
+    @Test
+    fun net_debt_without_interest_still_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals().copy(
+                country = "United States",
+                totalDebtDollars = 200_000_000L,
+                totalCashDollars = 50_000_000L,
+            ),
+            timeseries = completeTimeseries().copy(
+                interestExpense = emptyList(),
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(true, result.isFailure)
+    }
+
+    @Test
+    fun missing_country_still_refuses_without_filed_tax() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = completeFundamentals(),
+            timeseries = completeTimeseries().copy(
+                taxRateForCalcs = completeTimeseries().taxRateForCalcs.map { point ->
+                    point.copy(concept = "TaxRateForCalcs")
+                },
+                marginalTaxRate = emptyList(),
+            ),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(true, result.isFailure)
+    }
+
+    @Test
+    fun all_negative_aligned_fcff_still_refuses() {
+        var result = DcfAnalysisEngine.compute(
+            fundamentals = nandCycleFundamentals(),
+            timeseries = nandCycleTimeseries(latestOcfDollars = -500_000_000.0),
+            marketParams = MarketParams(provisional = false),
+        )
+        assertEquals(
+            true,
+            result.exceptionOrNull()?.message.orEmpty().startsWith("non_positive_normalized_fcff"),
+        )
+    }
+
+    @Test
     fun compute_without_market_cap_or_price_fails_clearly() {
         val fundamentals = completeFundamentals().copy(marketCapDollars = null)
         val result = DcfAnalysisEngine.compute(
@@ -1548,6 +1717,52 @@ class DcfAnalysisEngineTest {
             totalDebt = rows.map { AnnualReportedValue(it.first.first, it.second.third) },
             marginalTaxRate = rows.map {
                 AnnualReportedValue(it.first.first, 0.21, concept = "JurisdictionStatutory")
+            },
+        )
+    }
+
+    private fun nandCycleFundamentals() = completeFundamentals().copy(
+        symbol = "SNDK",
+        sectorName = "Technology",
+        industryName = "Computer Hardware",
+        sectorKey = "technology",
+        industryKey = "computer-hardware",
+        marketCapDollars = 217_000_000_000L,
+        sharesOutstanding = 146_419_001L,
+        totalDebtDollars = 201_000_000L,
+        totalCashDollars = 4_762_000_000L,
+        betaMillis = 1_400,
+    )
+
+    private fun nandCycleTimeseries(latestOcfDollars: Double): FundamentalTimeseries {
+        var years = listOf("2023-06-30", "2024-06-28", "2025-06-27", "2026-07-03")
+        var revenue = listOf(6_086_000_000.0, 6_663_000_000.0, 7_355_000_000.0, 20_248_000_000.0)
+        var ocf = listOf(-713_000_000.0, -309_000_000.0, 84_000_000.0, latestOcfDollars)
+        var capex = listOf(-219_000_000.0, -166_000_000.0, -204_000_000.0, -177_000_000.0)
+        var interest = listOf(31_000_000.0, 40_000_000.0, 63_000_000.0, 73_000_000.0)
+        var debt = listOf(0.0, 0.0, 1_849_000_000.0, 0.0)
+        var shares = listOf(145_000_000.0, 145_000_000.0, 145_000_000.0, 155_000_000.0)
+        fun points(values: List<Double>) = years.mapIndexed { i, date ->
+            AnnualReportedValue(date, values[i])
+        }
+        return FundamentalTimeseries(
+            freeCashFlow = years.mapIndexed { i, date ->
+                AnnualReportedValue(date, ocf[i] + capex[i])
+            },
+            operatingCashFlow = points(ocf),
+            capitalExpenditure = points(capex),
+            revenue = points(revenue),
+            interestExpense = points(interest),
+            taxRateForCalcs = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
+            },
+            totalDebt = points(debt),
+            dilutedAverageShares = points(shares),
+            pretaxIncome = years.mapIndexed { i, date ->
+                AnnualReportedValue(date, ocf[i])
+            },
+            marginalTaxRate = years.map {
+                AnnualReportedValue(it, 0.21, concept = "JurisdictionStatutory")
             },
         )
     }

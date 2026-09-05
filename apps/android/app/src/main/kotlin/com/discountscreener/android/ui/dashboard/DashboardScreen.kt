@@ -235,7 +235,14 @@ fun DashboardScreen(
 
                 DashboardTab.Discovery -> DiscoveryContent(state, onAction)
                 DashboardTab.System -> SystemContent(state, onAction)
-                DashboardTab.Estimates -> EstimatesScreen(
+                DashboardTab.Earnings -> EarningsGateScreen(
+                state = state.earningsGate,
+                loading = state.earningsGateLoading,
+                pendingBackup = state.earningsLogBackup,
+                notice = state.earningsGateNotice,
+                onAction = onAction,
+            )
+            DashboardTab.Estimates -> EstimatesScreen(
                     indexEstimates = state.indexEstimates,
                     loading = state.indexEstimatesLoading,
                     estimatesHistory = state.estimatesHistory,
@@ -776,6 +783,7 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.Watch -> "Watch ${state.watchlistSymbols.size}"
     DashboardTab.Discovery -> discoveryTabLabel(state)
     DashboardTab.System -> "System"
+    DashboardTab.Earnings -> "Earnings"
     DashboardTab.Estimates -> "Estimates"
 }
 

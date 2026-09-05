@@ -67,6 +67,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   evidence ledger for nine user-reported QA cases under `business-class-policy/16`. Its market and analyst values are validation metadata and are forbidden from engine inputs
 - `opportunity-v4.json`:
   the arithmetic unique to the `AggressiveV4` opportunity model — the agreement bonus (centre, spread, bonus, beta haircut, composite) and the sector-relative fundamentals rule, with a case for each of the four `SectorBenchmarks` fields and for the share-count term. **Android-only today**, and the one file here whose expected values are *not* a second implementation's output: they were hand-derived from the constants before the Kotlin validator ran, and regenerating any of them from Kotlin would destroy the only independence the contract has. Kotlin: `OpportunityV4ContractTest`
+- `advisor-csv-import-v1.yaml`:
+  Windows Advisor CSV kinds (holdings snapshot vs trades window vs trades ledger), detect order, Chase/J.P. Morgan parse rules, warn-then-confirm, and merge-without-double-count examples
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

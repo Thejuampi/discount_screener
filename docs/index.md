@@ -8,12 +8,16 @@ This index is the starting point for humans and AI agents trying to understand t
 - [Desktop README](../apps/desktop/README.md) - Rust terminal workstation features, controls, persistence, and verification.
 - [Android README](../apps/android/README.md) - Android module map, current implementation, build, release, and run-on-device flow.
 - [Shared Contracts README](../shared/contracts/README.md) - language-neutral fixtures and behavior contracts.
+- [Advisor CSV import](advisor-csv-import.md) - Windows Advisor holdings snapshot vs Chase 90-day blotter. Warn, then confirm. Merge does not double-count.
 
 ## Operator Documentation
 
 - [Aggressive V4 — what has been measured](aggressive-v4-evidence.md) - bucket overlap, the agreement constant and its population, and the forward-return retrospective including its null result.
 - [Compose test hang, 2026-08-11](diagnostics/2026-08-11-compose-test-hang/README.md) - open, cause unknown: the Android suite spun 27 minutes in `waitForIdle`. Thread dumps kept, escalation bar set at one recurrence.
-- [Profile switch and first load slow, 2026-08-18](diagnostics/2026-08-18-profile-switch-slow/README.md) - fixed: the switch joined an in-flight Yahoo call before publishing, 1 185 ms to 26 ms. The first load asked for four calls at once against a provider that would take sixteen; the window is now adaptive, and the load keeps running in the background.
+- [SP500 missing drivers](diagnostics/sp500-missing-drivers.md) - living list of Android SP500 names that refuse valuation. Refresh with `python scripts/scan-android-missing-drivers.py`. First open class is Yahoo missing marginal tax.
+- [The cohort gate charged the model a year it never claimed, 2026-08-29](diagnostics/2026-08-29-cohort-gate-anchor/README.md) - the durable cohort gate compared a value today with a Street target twelve months out. Bringing the target back at each name's own cost of equity cut the reported mean error from 15.27% to 11.51% and took the one-sided miss out of the holdout, with no driver and no threshold moved. Still red: WYNN, AMZN, MU and CEG carry what is left. The hold-years rule was the obvious suspect and the sweep cleared it - seven of eight high-growth names are best with no hold at all.
+- [Profile switch and first load slow, 2026-08-18](diagnostics/2026-08-18-profile-switch-slow/README.md) - fixed: the switch joined an in-flight Yahoo call before publishing, 1 185 ms to 26 ms. The first load asked for four calls at once against a provider that would take sixteen; the window is now adaptive, and the load keeps running in the background. Updated 2026-08-29: the sieve keeps a fact, not a concept - 595 K chars kept fell to 128 K, and 61 ms to 25 ms, on Apple's real 3.8 M char file. The issuer client streams the same sieve, and its six SEC endpoints now answer from a test double.
+- [Live QA, Windows SEC sieve, 2026-08-29](../_bmad-output/implementation-artifacts/live-qa-windows-sec-sieve-2026-08-29.md) - the streaming companyfacts sieve and the shared per-issuer cache running in the desktop app. AAPL and MSFT returned an FCFF value and JPM returned a residual-income value, which no sieved document can produce if the sieve drops a driver. Both business classes ran live.
 - [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android. Android Plans Dip hunter and leftover review are explicit exceptions.
 - [Dip board spec v1](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md) - Android Plans filter (F, ATR dip, RSI, MACD, Street 20%). Does not change V2/V3/V4 scores.
 - [Leftover board spec v1](../_bmad-output/implementation-artifacts/leftover-board-spec-v1.md) - Android Plans leftover review (profile universe, Street leftover ≤ 5%, tape fade). Does not change V2/V3/V4 scores.
@@ -47,6 +51,8 @@ This index is the starting point for humans and AI agents trying to understand t
 - [High-signal screener cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json) - 26-name recompute goal gate.
 - [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules, numerical conclusion protocol.
 - [Valuation Change Visibility PRD](../_bmad-output/planning-artifacts/prd.md) - feature PRD for valuation-change visibility.
+- [Pre-Earnings Risk Gate PRD](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) - Android-only. Prices the implied move against the ticker's own history of abnormal post-report returns; logs every earnings event because option chains are never republished.
+- [Reading the earnings log by ticker SPEC](../_bmad-output/specs/spec-earnings-log-by-ticker/SPEC.md) - Android-only. Ticker search on the Earnings tab, earnings section in a ticker's detail.
 - [Planning Artifacts Index](../_bmad-output/planning-artifacts/index.md) - local navigation for BMad planning files.
 - [Valuation Change Visibility Architecture](../_bmad-output/planning-artifacts/architecture.md) - technical decisions for that feature slice.
 - [Valuation Change Visibility UX Spec](../_bmad-output/planning-artifacts/ux-design-specification.md) - Android-first UX strategy and interaction rules.
