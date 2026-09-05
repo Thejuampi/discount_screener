@@ -252,12 +252,13 @@ class DiscountScreenerAppContainer(context: Context) {
      * Stops everything this container started on its own.
      *
      * The activity never needs it: its container lives as long as the process it draws in. A
-     * background run does need it — building the repository starts a cache sweep that loops
+     * background run does need it ï¿½ building the repository starts a cache sweep that loops
      * forever, and a run that walked away from it would leave one more loop behind every 90
      * minutes, in a process the platform keeps alive between runs.
      */
     fun shutdown() {
         backgroundScope.cancel()
+        stateStore.close()
     }
 
     internal fun runningBackgroundWork(): Boolean = backgroundScope.isActive

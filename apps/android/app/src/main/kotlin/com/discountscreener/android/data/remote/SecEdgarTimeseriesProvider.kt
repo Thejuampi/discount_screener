@@ -61,10 +61,11 @@ internal fun companyFactsSlimFileName(cikPadded: String): String =
 internal fun writeAtomically(target: File, text: String) {
     var partial = File(target.parentFile, target.name + ".part")
     partial.writeText(text)
-    if (!partial.renameTo(target)) {
-        target.delete()
-        partial.renameTo(target)
-    }
+    if (partial.renameTo(target)) return
+    target.delete()
+    if (partial.renameTo(target)) return
+    target.outputStream().use { out -> partial.inputStream().use { it.copyTo(out) } }
+    partial.delete()
 }
 
 class SecEdgarTimeseriesProvider(

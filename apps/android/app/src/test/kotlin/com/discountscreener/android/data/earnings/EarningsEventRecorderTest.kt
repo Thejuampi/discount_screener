@@ -16,6 +16,7 @@ import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
+import com.discountscreener.core.earnings.EXCHANGE_ZONE
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -390,7 +391,7 @@ class EarningsEventRecorderTest {
         recorder(log).capture(emptyList())
 
         assertEquals(
-            TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond(),
+            TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond(),
             log.read().lastCaptureEpochSeconds,
         )
     }
@@ -534,6 +535,7 @@ class EarningsEventRecorderTest {
             EarningsEventRecorder.ReportedQuarterSource { emptyList() },
         calendar: EarningsEventRecorder.CalendarSource =
             EarningsEventRecorder.CalendarSource { _, _ -> null },
+        nowProvider: () -> Long = { TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond() },
     ) = EarningsEventRecorder(
         log = log,
         chains = chains,
@@ -543,7 +545,7 @@ class EarningsEventRecorderTest {
         announcements = announcements,
         reported = reported,
         calendar = calendar,
-        nowProvider = { TODAY.atStartOfDay(ZoneOffset.UTC).toEpochSecond() },
+        nowProvider = nowProvider,
     )
 
     private fun quarters(endedDaysAgo: Long) = EarningsEventRecorder.ReportedQuarterSource {
@@ -691,7 +693,11 @@ class EarningsEventRecorderTest {
     private val chain = OptionChainSnapshot(
         symbol = "LVS",
         underlyingPriceCents = 4_424L,
-        expiries = listOf(LocalDate.of(2026, 8, 28), LocalDate.of(2026, 9, 18)),
+        expiries = listOf(
+            LocalDate.of(2026, 8, 28),
+            LocalDate.of(2026, 9, 1),
+            LocalDate.of(2026, 9, 18),
+        ),
         expiry = LocalDate.of(2026, 8, 28),
         rows = listOf(
             ChainRow(43.0, OptionQuote(2.22, 2.38), OptionQuote(0.97, 1.07)),
@@ -711,7 +717,7 @@ class EarningsEventRecorderTest {
     )
 
     private companion object {
-        val TODAY: LocalDate = LocalDate.of(2026, 8, 23)
+        val TODAY: LocalDate = LocalDate.of(2026, 8, 26)
     }
 
     @Test
@@ -800,11 +806,33 @@ class EarningsEventRecorderTest {
     }
 
     @Test
-    fun a_report_still_on_the_exchange_day_is_priced_after_utc_midnight() = runTest {
+    fun a_report_on_the_exchange_day_is_priced_during_the_session() = runTest {
         var log = log()
 
-        recorder(log).capture(listOf(row(earningsIn = -1)))
+        recorder(log).capture(listOf(row(earningsIn = 0)))
 
         assertEquals("LVS", log.read().events.single().pre.symbol)
     }
+
+    @Test
+    fun a_shut_market_never_stamps_a_capture() = runTest {
+        var log = log()
+
+        recorder(log, nowProvider = { saturdayNoon() }).capture(listOf(row(earningsIn = 3)))
+
+        assertNull(log.read().lastCaptureEpochSeconds)
+    }
+
+    @Test
+    fun a_shut_market_still_settles_a_report_that_already_happened() = runTest {
+        var log = log()
+        log.append(pastEvent("LVS", day = TODAY.minusDays(3).toEpochDay()))
+
+        recorder(log, closes = closeSource(), nowProvider = { saturdayNoon() }).capture(emptyList())
+
+        assertEquals(500, log.event("LVS", TODAY.minusDays(3).toEpochDay())?.post?.stockReturnBps)
+    }
+
+    private fun saturdayNoon(): Long =
+        TODAY.plusDays(3).atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond()
 }

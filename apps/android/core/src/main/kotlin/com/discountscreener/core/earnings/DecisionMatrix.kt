@@ -8,6 +8,7 @@ const val HIGH_RISK_RATIO_BPS = 13_000
 const val LOW_RISK_RATIO_BPS = 8_000
 const val CHEAP_PRICE_TO_FAIR_BPS = 9_000
 const val HEDGE_COST_CAP_BPS = 100
+const val PROTECTIVE_PUT_COST_CAP_BPS = 150
 const val MAX_QUOTE_SPREAD_BPS = 5_000
 
 fun eventRiskOf(riskRatioBps: Int?): EventRisk = when {
@@ -84,31 +85,49 @@ private fun staleQuote(pre: PreReport) = EventDecision(
 
 private fun cheapHighRisk(pre: PreReport): EventDecision {
     var spread = pre.putSpreadCostBps
-    if (spread != null && spread > HEDGE_COST_CAP_BPS) {
-        return EventDecision(
-            cell = DecisionCell.CheapHighRisk,
-            action = EventAction.Reduce,
-            positionSizeBps = HALF_POSITION_BPS,
-            hedge = HedgeKind.None,
-            hedgeCostBps = spread,
-            sectorOverrideApplied = false,
-            justification = "Cheap on the DCF, and the market pays " +
-                "${ratioText(pre.riskRatioBps)} this ticker's own reaction. The put spread costs " +
-                "${percentText(spread)} of the position, over the ${percentText(HEDGE_COST_CAP_BPS)} " +
-                "cap, so cut the size instead.",
-        )
+    var put = pre.protectivePutCostBps
+    if (spread != null && spread <= HEDGE_COST_CAP_BPS) {
+        return hedgeCall(pre, HedgeKind.PutSpread, spread)
     }
-    return EventDecision(
-        cell = DecisionCell.CheapHighRisk,
-        action = EventAction.Hedge,
-        positionSizeBps = HALF_POSITION_BPS,
-        hedge = HedgeKind.PutSpread,
-        hedgeCostBps = spread,
-        sectorOverrideApplied = false,
-        justification = "Cheap on the DCF, and the market pays " +
-            "${ratioText(pre.riskRatioBps)} this ticker's own reaction. Half size, or a put spread" +
-            (spread?.let { " at ${percentText(it)} of the position" } ?: "") + ".",
-    )
+    if (put != null && put <= PROTECTIVE_PUT_COST_CAP_BPS) {
+        return hedgeCall(pre, HedgeKind.ProtectivePut, put)
+    }
+    if (spread != null && spread > HEDGE_COST_CAP_BPS) {
+        return dearHedge(pre, spread, HEDGE_COST_CAP_BPS, "put spread")
+    }
+    if (put != null && put > PROTECTIVE_PUT_COST_CAP_BPS) {
+        return dearHedge(pre, put, PROTECTIVE_PUT_COST_CAP_BPS, "protective put")
+    }
+    return hedgeCall(pre, HedgeKind.PutSpread, spread)
+}
+
+private fun hedgeCall(pre: PreReport, kind: HedgeKind, cost: Int?) = EventDecision(
+    cell = DecisionCell.CheapHighRisk,
+    action = EventAction.Hedge,
+    positionSizeBps = HALF_POSITION_BPS,
+    hedge = kind,
+    hedgeCostBps = cost,
+    sectorOverrideApplied = false,
+    justification = "Cheap on the DCF, and the market pays " +
+        "${ratioText(pre.riskRatioBps)} this ticker's own reaction. Half size, or a " +
+        hedgeName(kind) + (cost?.let { " at ${percentText(it)} of the position" } ?: "") + ".",
+)
+
+private fun dearHedge(pre: PreReport, cost: Int, cap: Int, name: String) = EventDecision(
+    cell = DecisionCell.CheapHighRisk,
+    action = EventAction.Reduce,
+    positionSizeBps = HALF_POSITION_BPS,
+    hedge = HedgeKind.None,
+    hedgeCostBps = cost,
+    sectorOverrideApplied = false,
+    justification = "Cheap on the DCF, and the market pays " +
+        "${ratioText(pre.riskRatioBps)} this ticker's own reaction. The $name costs " +
+        "${percentText(cost)} of the position, over the ${percentText(cap)} cap, so cut the size instead.",
+)
+
+private fun hedgeName(kind: HedgeKind): String = when (kind) {
+    HedgeKind.ProtectivePut -> "protective put"
+    else -> "put spread"
 }
 
 private fun percentText(bps: Int): String {

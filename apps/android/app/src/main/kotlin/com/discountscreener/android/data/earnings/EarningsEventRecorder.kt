@@ -23,6 +23,7 @@ import com.discountscreener.core.earnings.marketBetaExcludingEvents
 import com.discountscreener.core.earnings.normalDailyMoveBps
 import com.discountscreener.core.earnings.pastAbnormalReturnsOf
 import com.discountscreener.core.earnings.preReportOf
+import com.discountscreener.core.earnings.quotesAreLive
 import com.discountscreener.core.earnings.reportTimingOf
 import com.discountscreener.core.earnings.settlementOf
 import java.time.Instant
@@ -82,8 +83,10 @@ class EarningsEventRecorder(
      * report leaves the capture window.
      */
     suspend fun capture(rows: List<OpportunityListRow>): Int {
-        var today = Instant.ofEpochSecond(nowProvider()).atZone(EXCHANGE_ZONE).toLocalDate()
+        var now = Instant.ofEpochSecond(nowProvider())
+        var today = now.atZone(EXCHANGE_ZONE).toLocalDate()
         var stored = settleDueEvents(log.read().events, today)
+        if (!quotesAreLive(now)) return 0
         var priced = stored
             .filter { it.pre.impliedMoveBps != null && !isQuoteStale(it.pre) }
             .mapTo(HashSet()) { it.pre.symbol to it.pre.reportEpochDay }

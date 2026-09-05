@@ -101,7 +101,12 @@ class SecIssuerComponentClient(
                 tmp.outputStream().use { out -> body.byteStream().copyTo(out) }
                 if (!tmp.renameTo(target)) {
                     target.delete()
-                    if (!tmp.renameTo(target)) return@use null
+                    if (!tmp.renameTo(target)) {
+                        tmp.inputStream().use { input ->
+                            target.outputStream().use { input.copyTo(it) }
+                        }
+                        tmp.delete()
+                    }
                 }
                 target
             }

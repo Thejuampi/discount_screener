@@ -186,6 +186,34 @@ class DecisionMatrixTest {
     }
 
     @Test
+    fun a_dear_spread_falls_back_to_an_affordable_protective_put() {
+        assertEquals(HedgeKind.ProtectivePut, decisionOf(cheapRisky(spread = 150, put = 120)).hedge)
+    }
+
+    @Test
+    fun a_protective_put_at_its_cap_is_still_bought() {
+        assertEquals(
+            EventAction.Hedge,
+            decisionOf(cheapRisky(spread = 150, put = PROTECTIVE_PUT_COST_CAP_BPS)).action,
+        )
+    }
+
+    @Test
+    fun a_protective_put_over_its_cap_cuts_the_position() {
+        assertEquals(EventAction.Reduce, decisionOf(cheapRisky(spread = 150, put = 200)).action)
+    }
+
+    @Test
+    fun an_affordable_spread_is_bought_before_the_protective_put() {
+        assertEquals(HedgeKind.PutSpread, decisionOf(cheapRisky(spread = 80, put = 50)).hedge)
+    }
+
+    @Test
+    fun a_priced_put_with_no_spread_is_the_hedge() {
+        assertEquals(HedgeKind.ProtectivePut, decisionOf(cheapRisky(spread = null, put = 100)).hedge)
+    }
+
+    @Test
     fun an_affordable_hedge_names_its_price_in_the_justification() {
         assertTrue(decisionOf(cheapRisky(spread = 80)).justification.contains("0.8%"))
     }
@@ -213,7 +241,8 @@ class DecisionMatrixTest {
     private fun stale(quote: Int?) =
         pre(price = 3_500L, ratio = 15_000).copy(quoteSpreadBps = quote)
 
-    private fun cheapRisky(spread: Int?) = pre(price = 3_500L, ratio = 15_000, spread = spread)
+    private fun cheapRisky(spread: Int?, put: Int? = null) =
+        pre(price = 3_500L, ratio = 15_000, spread = spread, put = put)
 
     private fun pre(
         price: Long,
@@ -221,6 +250,7 @@ class DecisionMatrixTest {
         fair: Long? = 4_000L,
         impliedMoveBps: Int? = 700,
         spread: Int? = null,
+        put: Int? = null,
     ) = PreReport(
         symbol = "LVS",
         reportEpochDay = 20_692L,
@@ -230,5 +260,6 @@ class DecisionMatrixTest {
         impliedMoveBps = impliedMoveBps,
         riskRatioBps = ratio,
         putSpreadCostBps = spread,
+        protectivePutCostBps = put,
     )
 }
