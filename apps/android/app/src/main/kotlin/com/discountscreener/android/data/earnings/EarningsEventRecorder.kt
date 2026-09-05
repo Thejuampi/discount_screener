@@ -21,6 +21,10 @@ import com.discountscreener.core.earnings.expiryAfterReport
 import com.discountscreener.core.earnings.isQuoteStale
 import com.discountscreener.core.earnings.marketBetaExcludingEvents
 import com.discountscreener.core.earnings.normalDailyMoveBps
+import com.discountscreener.core.earnings.SueQuarter
+import com.discountscreener.core.earnings.datedAbnormalReturnsOf
+import com.discountscreener.core.earnings.fitSurpriseRegression
+import com.discountscreener.core.earnings.joinSueWithReturns
 import com.discountscreener.core.earnings.pastAbnormalReturnsOf
 import com.discountscreener.core.earnings.preReportOf
 import com.discountscreener.core.earnings.quotesAreLive
@@ -39,6 +43,7 @@ class EarningsEventRecorder(
     private val announcements: AnnouncementSource = AnnouncementSource { emptyList() },
     private val reported: ReportedQuarterSource = ReportedQuarterSource { emptyList() },
     private val calendar: CalendarSource = CalendarSource { _, _ -> null },
+    private val sueHistory: SueQuarterSource = SueQuarterSource { emptyList() },
     private val nowProvider: () -> Long,
     private val logger: AppLogger = NoOpAppLogger,
     private val windowDays: Long = CAPTURE_WINDOW_DAYS,
@@ -67,6 +72,10 @@ class EarningsEventRecorder(
 
     fun interface CalendarSource {
         suspend fun nextEarningsEpoch(symbol: String, nowEpochSeconds: Long): Long?
+    }
+
+    fun interface SueQuarterSource {
+        suspend fun quarters(symbol: String): List<SueQuarter>
     }
 
     fun events(): EventLogRead = log.read()
@@ -252,9 +261,25 @@ class EarningsEventRecorder(
             consensus = consensus.consensus(row.symbol),
             pastAbnormalReturnsBps = filed.ifEmpty { pastReactionsBps },
             normalDailyMoveBps = quietDayMoveOf(row.symbol),
+            surpriseFit = surpriseFitOf(row.symbol),
+            reportedQuarters = reportedQuartersOf(row.symbol),
         )
         log.append(EarningsEventRecord(pre = pre, decision = decisionOf(pre)))
     }
+
+    private suspend fun surpriseFitOf(symbol: String) = runCatching {
+        var quarters = sueHistory.quarters(symbol)
+        if (quarters.isEmpty()) return@runCatching null
+        var events = announcements.announcements(symbol)
+        var dated = datedAbnormalReturnsOf(
+            announcements = events,
+            symbolCloses = history.closes(symbol),
+            marketCloses = marketHistory(),
+        )
+        fitSurpriseRegression(joinSueWithReturns(quarters, dated))
+    }
+        .onFailure { error -> logger.error(TAG, "earnings SUE history failed: $symbol", error) }
+        .getOrNull()
 
     private suspend fun filedReactionsOf(symbol: String): List<Int> =
         runCatching {

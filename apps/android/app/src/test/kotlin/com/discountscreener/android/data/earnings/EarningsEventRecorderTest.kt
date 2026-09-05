@@ -16,6 +16,7 @@ import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
+import com.discountscreener.core.earnings.SueQuarter
 import com.discountscreener.core.earnings.EXCHANGE_ZONE
 import java.io.File
 import java.time.LocalDate
@@ -535,6 +536,8 @@ class EarningsEventRecorderTest {
             EarningsEventRecorder.ReportedQuarterSource { emptyList() },
         calendar: EarningsEventRecorder.CalendarSource =
             EarningsEventRecorder.CalendarSource { _, _ -> null },
+        sueHistory: EarningsEventRecorder.SueQuarterSource =
+            EarningsEventRecorder.SueQuarterSource { emptyList() },
         nowProvider: () -> Long = { TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond() },
     ) = EarningsEventRecorder(
         log = log,
@@ -545,8 +548,20 @@ class EarningsEventRecorderTest {
         announcements = announcements,
         reported = reported,
         calendar = calendar,
+        sueHistory = sueHistory,
         nowProvider = nowProvider,
     )
+
+    private fun revenues(vararg amounts: Double) = EarningsEventRecorder.ReportedQuarterSource {
+        amounts.mapIndexed { index, amount ->
+            ReportedQuarter(
+                quarterEndDate = TODAY.minusDays((amounts.size - index) * 90L),
+                epsActual = 0.74,
+                epsEstimate = 0.62,
+                revenueActual = amount,
+            )
+        }
+    }
 
     private fun quarters(endedDaysAgo: Long) = EarningsEventRecorder.ReportedQuarterSource {
         listOf(
@@ -587,16 +602,35 @@ class EarningsEventRecorderTest {
 
     private val marketSymbolName = "SPY"
 
-    private fun reactingCloses(jumpBps: Int) = EarningsEventRecorder.CloseSource { symbol ->
-        var start = TODAY.minusDays(400)
-        var jumpDays = setOf(390L, 300L, 200L, 100L).map { TODAY.minusDays(it) }
+    private fun reactingCloses(
+        jumpBps: Int,
+        jumpDaysAgo: List<Long> = listOf(390L, 300L, 200L, 100L),
+    ) = EarningsEventRecorder.CloseSource { symbol ->
+        var span = (jumpDaysAgo.maxOrNull() ?: 400L) + 20L
+        var start = TODAY.minusDays(span)
+        var jumpDays = jumpDaysAgo.map { TODAY.minusDays(it) }
         var level = 10_000.0
-        (0..400).map { index ->
+        (0..span.toInt()).map { index ->
             var day = start.plusDays(index.toLong())
             if (symbol != "SPY" && jumpDays.any { it.plusDays(1) == day }) {
                 level *= 1.0 + jumpBps / 10_000.0
             }
             DailyClose(day, level.toLong())
+        }
+    }
+
+    private fun sueQuarters(vararg daysAgo: Long) = EarningsEventRecorder.SueQuarterSource {
+        daysAgo.mapIndexed { index, ago ->
+            SueQuarter(
+                fiscalEnd = TODAY.minusDays(ago + 30),
+                reportedOn = TODAY.minusDays(ago),
+                actualEps = 1.0,
+                meanEps = 1.0,
+                lowEps = 0.9,
+                highEps = 1.1,
+                sueBps = (index - daysAgo.size / 2) * 2_000,
+                revenueSurpriseBps = null,
+            )
         }
     }
 
@@ -771,6 +805,62 @@ class EarningsEventRecorderTest {
             log,
             closes = quietDays(),
             announcements = EarningsEventRecorder.AnnouncementSource { error("SEC is down") },
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("LVS", log.read().events.single().pre.symbol)
+    }
+
+    @Test
+    fun four_reported_revenues_write_the_last_print_on_the_block() = runTest {
+        var log = log()
+
+        recorder(
+            log,
+            reported = revenues(100.0, 100.0, 100.0, 50.0),
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals(5_000L, log.read().events.single().pre.revenueTrailLatestCents)
+    }
+
+    @Test
+    fun sixteen_joined_quarters_write_the_sue_fit_count() = runTest {
+        var log = log()
+        var daysAgo = (1..16).map { it * 90L }
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 300, jumpDaysAgo = daysAgo),
+            announcements = filed(*daysAgo.toLongArray()),
+            sueHistory = sueQuarters(*daysAgo.toLongArray()),
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals(16, log.read().events.single().pre.surpriseFitN)
+    }
+
+    @Test
+    fun a_short_sue_history_records_the_reason() = runTest {
+        var log = log()
+        var daysAgo = (1..15).map { it * 90L }
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 300, jumpDaysAgo = daysAgo),
+            announcements = filed(*daysAgo.toLongArray()),
+            sueHistory = sueQuarters(*daysAgo.toLongArray()),
+        ).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("short_history", log.read().events.single().pre.surpriseFitUnavailableReason)
+    }
+
+    @Test
+    fun a_sue_history_that_fails_never_costs_the_event_its_record() = runTest {
+        var log = log()
+
+        recorder(
+            log,
+            sueHistory = EarningsEventRecorder.SueQuarterSource { error("Alpha Vantage is down") },
         ).capture(listOf(row(earningsIn = 3)))
 
         assertEquals("LVS", log.read().events.single().pre.symbol)

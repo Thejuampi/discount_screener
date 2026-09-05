@@ -36,6 +36,8 @@ fun preReportOf(
     consensus: ConsensusEstimate? = null,
     pastAbnormalReturnsBps: List<Int> = emptyList(),
     normalDailyMoveBps: Int? = null,
+    surpriseFit: SurpriseFit? = null,
+    reportedQuarters: List<ReportedQuarter> = emptyList(),
 ): PreReport {
     var forwardCents = chain?.underlyingPriceCents?.takeIf { it > 0L } ?: priceCents
     var forward = forwardCents / 100.0
@@ -49,6 +51,12 @@ fun preReportOf(
         tradingDaysToExpiry = settlementDate?.let { tradingDaysBetween(reportDate, it) } ?: 0,
     )
     var medianAbsolute = medianOf(pastAbnormalReturnsBps.map { abs(it.toDouble()) })
+    var trail = revenueTrailOf(
+        reportedQuarters
+            .filter { it.quarterEndDate < reportDate }
+            .sortedBy { it.quarterEndDate }
+            .mapNotNull { quarter -> quarter.revenueActual?.let(::toCents)?.takeIf { it > 0L } },
+    )
     return PreReport(
         symbol = symbol,
         reportEpochDay = reportDate.toEpochDay(),
@@ -74,6 +82,12 @@ fun preReportOf(
         putSpreadCostBps = hedge?.putSpreadCostBps,
         hedgeLongStrikeCents = hedge?.longStrike?.let { toCents(it) },
         hedgeShortStrikeCents = hedge?.shortStrike?.let { toCents(it) },
+        surpriseFitN = (surpriseFit as? SurpriseFit.Ready)?.n,
+        surpriseFitSueSlopeArBps = (surpriseFit as? SurpriseFit.Ready)?.sueSlopeArBps,
+        surpriseFitUnavailableReason = (surpriseFit as? SurpriseFit.Unavailable)?.reason,
+        revenueTrailLatestCents = trail?.latestCents,
+        revenueTrailMedianCents = trail?.medianCents,
+        revenueTrailShortfallZBps = trail?.shortfallZBps,
     )
 }
 

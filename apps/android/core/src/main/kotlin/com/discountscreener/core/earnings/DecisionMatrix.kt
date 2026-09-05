@@ -4,12 +4,12 @@ import kotlin.math.roundToInt
 
 enum class EventRisk { Low, Normal, High, Unknown }
 
-const val HIGH_RISK_RATIO_BPS = 13_000
-const val LOW_RISK_RATIO_BPS = 8_000
-const val CHEAP_PRICE_TO_FAIR_BPS = 9_000
-const val HEDGE_COST_CAP_BPS = 100
-const val PROTECTIVE_PUT_COST_CAP_BPS = 150
-const val MAX_QUOTE_SPREAD_BPS = 5_000
+val HIGH_RISK_RATIO_BPS: Int get() = EarningsGatePolicy.current.highRiskRatioBps
+val LOW_RISK_RATIO_BPS: Int get() = EarningsGatePolicy.current.lowRiskRatioBps
+val CHEAP_PRICE_TO_FAIR_BPS: Int get() = EarningsGatePolicy.current.cheapPriceToFairBps
+val HEDGE_COST_CAP_BPS: Int get() = EarningsGatePolicy.current.hedgeCostCapBps
+val PROTECTIVE_PUT_COST_CAP_BPS: Int get() = EarningsGatePolicy.current.protectivePutCostCapBps
+val MAX_QUOTE_SPREAD_BPS: Int get() = EarningsGatePolicy.current.maxQuoteSpreadBps
 
 fun eventRiskOf(riskRatioBps: Int?): EventRisk = when {
     riskRatioBps == null -> EventRisk.Unknown
@@ -55,14 +55,17 @@ fun decisionOf(pre: PreReport): EventDecision {
 
         risk == EventRisk.High -> cheapHighRisk(pre)
 
-        else -> EventDecision(
-            cell = DecisionCell.CheapNormalRisk,
-            action = EventAction.Hold,
-            positionSizeBps = FULL_POSITION_BPS,
-            hedge = HedgeKind.None,
-            hedgeCostBps = null,
-            sectorOverrideApplied = false,
-            justification = "Cheap on the DCF and the report is priced like the ones before it. Hold.",
+        else -> applyRevenueOverride(
+            EventDecision(
+                cell = DecisionCell.CheapNormalRisk,
+                action = EventAction.Hold,
+                positionSizeBps = FULL_POSITION_BPS,
+                hedge = HedgeKind.None,
+                hedgeCostBps = null,
+                sectorOverrideApplied = false,
+                justification = "Cheap on the DCF and the report is priced like the ones before it. Hold.",
+            ),
+            pre,
         )
     }
 }
@@ -164,6 +167,18 @@ private fun missingText(pre: PreReport, risk: EventRisk): String = when {
 }
 
 fun ratioText(riskRatioBps: Int?): String = "%.2fx".format((riskRatioBps ?: 0) / 10_000.0)
+
+private fun applyRevenueOverride(decision: EventDecision, pre: PreReport): EventDecision {
+    var z = pre.revenueTrailShortfallZBps ?: return decision
+    if (z <= EarningsGatePolicy.current.revenueOverrideZBps) return decision
+    return decision.copy(
+        action = EventAction.Reduce,
+        positionSizeBps = HALF_POSITION_BPS,
+        sectorOverrideApplied = true,
+        justification = decision.justification.trimEnd('.') +
+            ". Last print revenue sits ${"%.2f".format(z / 10_000.0)} SD below the last-four median, so cut to half.",
+    )
+}
 
 private const val FULL_POSITION_BPS = 10_000
 private const val HALF_POSITION_BPS = 5_000

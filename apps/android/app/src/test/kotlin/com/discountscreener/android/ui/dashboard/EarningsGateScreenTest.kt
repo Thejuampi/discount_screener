@@ -39,6 +39,33 @@ class EarningsGateScreenTest {
     }
 
     @Test
+    fun the_earnings_tab_offers_an_alpha_vantage_key_field() {
+        render(EarningsGateUi())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_AV_KEY).assertIsDisplayed()
+    }
+
+    @Test
+    fun a_revenue_trail_cut_is_named_on_the_card() {
+        render(gate(day = 3, ratio = 10_000, trailZ = 20_000))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("Last print 2.00 SD vs 4-quarter median · size cut"))
+
+        composeRule.onNodeWithText("Last print 2.00 SD vs 4-quarter median · size cut").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_ready_sue_fit_is_named_on_the_card() {
+        render(gate(day = 3, sueN = 16, sueSlope = 300))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("SUE slope 3.00% AR per dispersion, n=16"))
+
+        composeRule.onNodeWithText("SUE slope 3.00% AR per dispersion, n=16").assertIsDisplayed()
+    }
+
+    @Test
     fun a_log_still_being_read_says_so_instead_of_claiming_it_is_empty() {
         render(EarningsGateUi(), loading = true)
 
@@ -174,6 +201,10 @@ class EarningsGateScreenTest {
         damaged: Int = 0,
         spread: Int? = null,
         symbol: String = "LVS",
+        sueN: Int? = null,
+        sueSlope: Int? = null,
+        ratio: Int? = 17_525,
+        trailZ: Int? = null,
     ): EarningsGateUi {
         var pre = PreReport(
             symbol = symbol,
@@ -185,10 +216,13 @@ class EarningsGateScreenTest {
             eventImpliedMoveBps = 677,
             normalDailyMoveBps = 180,
             medianAbsoluteAbnormalReturnBps = 400,
-            riskRatioBps = 17_525,
+            riskRatioBps = ratio,
             putSpreadCostBps = spread,
             hedgeLongStrikeCents = 4_400L,
             hedgeShortStrikeCents = 4_200L,
+            surpriseFitN = sueN,
+            surpriseFitSueSlopeArBps = sueSlope,
+            revenueTrailShortfallZBps = trailZ,
         )
         return presentEarningsGate(
             events = listOf(

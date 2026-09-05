@@ -45,7 +45,13 @@ fun pastAbnormalReturnsOf(
     announcements: List<EarningsAnnouncement>,
     symbolCloses: List<DailyClose>,
     marketCloses: List<DailyClose>,
-): List<Int> {
+): List<Int> = datedAbnormalReturnsOf(announcements, symbolCloses, marketCloses).map { it.abnormalReturnBps }
+
+fun datedAbnormalReturnsOf(
+    announcements: List<EarningsAnnouncement>,
+    symbolCloses: List<DailyClose>,
+    marketCloses: List<DailyClose>,
+): List<DatedAbnormalReturn> {
     if (symbolCloses.isEmpty() || marketCloses.isEmpty()) return emptyList()
     var stock = symbolCloses.sortedBy { it.date }
     var market = marketCloses.sortedBy { it.date }
@@ -53,7 +59,7 @@ fun pastAbnormalReturnsOf(
     return announcements.mapNotNull { event ->
         var own = reactionOf(stock, event.date, event.timing) ?: return@mapNotNull null
         var index = reactionOf(market, event.date, event.timing) ?: return@mapNotNull null
-        abnormalReturnBps(own, index, beta)
+        DatedAbnormalReturn(event.date, abnormalReturnBps(own, index, beta))
     }
 }
 

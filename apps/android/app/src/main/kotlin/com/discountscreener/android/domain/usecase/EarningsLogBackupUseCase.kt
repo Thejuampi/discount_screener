@@ -15,3 +15,7 @@ class EarningsLogBackupUseCase(private val repository: DashboardRepository) {
 class RestoreEarningsLogUseCase(private val repository: DashboardRepository) {
     suspend operator fun invoke(text: String): Int = repository.restoreEarningsLog(text)
 }
+
+class SaveAlphaVantageKeyUseCase(private val repository: DashboardRepository) {
+    suspend operator fun invoke(key: String) = repository.saveAlphaVantageKey(key)
+}

@@ -18,6 +18,7 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -296,6 +297,26 @@ class DashboardViewModelTest {
             "Restored 0 report(s) from the backup.",
             viewModel.state.value.earningsGateNotice,
         )
+    }
+
+    @Test
+    fun a_saved_alpha_vantage_key_tells_the_reader() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+
+        viewModel.dispatch(DashboardAction.SaveAlphaVantageKey("demo"))
+        advanceUntilIdle()
+
+        assertEquals("Alpha Vantage key saved.", viewModel.state.value.earningsGateNotice)
+    }
+
+    @Test
+    fun a_cleared_alpha_vantage_key_tells_the_reader() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+
+        viewModel.dispatch(DashboardAction.SaveAlphaVantageKey("  "))
+        advanceUntilIdle()
+
+        assertEquals("Alpha Vantage key cleared.", viewModel.state.value.earningsGateNotice)
     }
 
     @Test
@@ -1414,6 +1435,7 @@ class DashboardViewModelTest {
             getEarningsEvents = GetEarningsEventsUseCase(repository),
             backUpEarningsLog = EarningsLogBackupUseCase(repository),
             restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }
@@ -1659,12 +1681,17 @@ class DashboardViewModelTest {
         var earningsLogBackupText = ""
         var restoredText: String? = null
         var restoredCount = 0
+        var savedAlphaVantageKey: String? = null
 
         override suspend fun earningsLogBackup(): String = earningsLogBackupText
 
         override suspend fun restoreEarningsLog(text: String): Int {
             restoredText = text
             return restoredCount
+        }
+
+        override suspend fun saveAlphaVantageKey(key: String) {
+            savedAlphaVantageKey = key
         }
 
         override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> {

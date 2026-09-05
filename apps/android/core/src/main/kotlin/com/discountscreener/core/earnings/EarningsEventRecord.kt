@@ -44,6 +44,12 @@ data class PreReport(
     val putSpreadCostBps: Int? = null,
     val hedgeLongStrikeCents: Long? = null,
     val hedgeShortStrikeCents: Long? = null,
+    val surpriseFitN: Int? = null,
+    val surpriseFitSueSlopeArBps: Int? = null,
+    val surpriseFitUnavailableReason: String? = null,
+    val revenueTrailLatestCents: Long? = null,
+    val revenueTrailMedianCents: Long? = null,
+    val revenueTrailShortfallZBps: Int? = null,
 )
 
 @Serializable

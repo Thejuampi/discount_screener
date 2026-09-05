@@ -57,6 +57,30 @@ class EarningsGatePresentationTest {
     }
 
     @Test
+    fun a_ready_sue_fit_reads_back_as_ar_per_dispersion() {
+        assertEquals(
+            "SUE slope 3.00% AR per dispersion, n=16",
+            present(listOf(record(day = 3, sueN = 16, sueSlope = 300))).upcoming.single().sueFit,
+        )
+    }
+
+    @Test
+    fun a_revenue_shortfall_on_hold_reads_back_as_a_size_cut() {
+        assertEquals(
+            "Last print 2.00 SD vs 4-quarter median · size cut",
+            present(listOf(record(day = 3, ratio = 10_000, trailZ = 20_000))).upcoming.single().revenueTrail,
+        )
+    }
+
+    @Test
+    fun a_short_sue_history_tells_the_reader_the_floor() {
+        assertEquals(
+            "SUE history short of 16 quarters",
+            present(listOf(record(day = 3, sueReason = "short_history"))).upcoming.single().sueFit,
+        )
+    }
+
+    @Test
     fun a_high_risk_cheap_ticker_is_named_by_its_cell() {
         assertEquals(
             "Cheap, high event risk",
@@ -343,6 +367,10 @@ class EarningsGatePresentationTest {
         put: Int? = null,
         event: Int? = null,
         quiet: Int? = null,
+        sueN: Int? = null,
+        sueSlope: Int? = null,
+        sueReason: String? = null,
+        trailZ: Int? = null,
     ): EarningsEventRecord {
         var pre = PreReport(
             symbol = symbol,
@@ -359,6 +387,10 @@ class EarningsGatePresentationTest {
             putSpreadCostBps = spread,
             hedgeLongStrikeCents = 4_400L,
             hedgeShortStrikeCents = 4_200L,
+            surpriseFitN = sueN,
+            surpriseFitSueSlopeArBps = sueSlope,
+            surpriseFitUnavailableReason = sueReason,
+            revenueTrailShortfallZBps = trailZ,
         )
         return EarningsEventRecord(
             pre = pre,

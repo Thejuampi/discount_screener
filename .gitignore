@@ -53,6 +53,8 @@ Thumbs.db
 /apps/windows/dist/
 
 # ── Personal / sensitive data — NEVER commit ──
+alphavantage.key
+**/alphavantage.key
 schwab reports/
 *.sqlite
 *.sqlite-journal

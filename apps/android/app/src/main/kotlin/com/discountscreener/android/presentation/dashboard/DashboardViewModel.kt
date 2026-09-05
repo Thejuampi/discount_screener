@@ -30,6 +30,7 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
@@ -198,6 +199,7 @@ sealed interface DashboardAction {
     data class EarningsLogBackupWritten(val eventCount: Int) : DashboardAction
     data object EarningsLogBackupDropped : DashboardAction
     data class RestoreEarningsLog(val text: String) : DashboardAction
+    data class SaveAlphaVantageKey(val key: String) : DashboardAction
 
     data object RunRetrospective : DashboardAction
     data object RunOutcomeReport : DashboardAction
@@ -324,6 +326,7 @@ class DashboardViewModel(
     private val getEarningsEvents: GetEarningsEventsUseCase,
     private val backUpEarningsLog: EarningsLogBackupUseCase,
     private val restoreEarningsLog: RestoreEarningsLogUseCase,
+    private val saveAlphaVantageKey: SaveAlphaVantageKeyUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -398,6 +401,7 @@ class DashboardViewModel(
             is DashboardAction.EarningsLogBackupWritten -> finishEarningsLogBackup(action.eventCount)
             DashboardAction.EarningsLogBackupDropped -> dropEarningsLogBackup()
             is DashboardAction.RestoreEarningsLog -> restoreEarningsLogFrom(action.text)
+            is DashboardAction.SaveAlphaVantageKey -> saveAlphaVantageKeyFrom(action.key)
             DashboardAction.RunRetrospective -> runRetrospectiveReport()
             DashboardAction.RunOutcomeReport -> runOutcomeReportAction()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
@@ -609,6 +613,18 @@ class DashboardViewModel(
             }
             _state.value = _state.value.copy(earningsGateNotice = message)
             loadEarningsGate()
+        }
+    }
+
+    private fun saveAlphaVantageKeyFrom(key: String) {
+        viewModelScope.launch {
+            var message = try {
+                saveAlphaVantageKey(key)
+                if (key.isBlank()) "Alpha Vantage key cleared." else "Alpha Vantage key saved."
+            } catch (error: Throwable) {
+                "Alpha Vantage key failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(earningsGateNotice = message)
         }
     }
 
@@ -1516,6 +1532,7 @@ class DashboardViewModel(
                         getEarningsEvents = useCases.getEarningsEvents,
                         backUpEarningsLog = useCases.backUpEarningsLog,
                         restoreEarningsLog = useCases.restoreEarningsLog,
+                        saveAlphaVantageKey = useCases.saveAlphaVantageKey,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
@@ -181,6 +182,26 @@ private fun EarningsLogButtons(onAction: (DashboardAction) -> Unit) {
             Text("Restore")
         }
     }
+    var key by remember { mutableStateOf("") }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = key,
+            onValueChange = { key = it },
+            label = { Text("Alpha Vantage key") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.weight(1f).testTag(EARNINGS_GATE_AV_KEY),
+        )
+        OutlinedButton(
+            onClick = {
+                onAction(DashboardAction.SaveAlphaVantageKey(key))
+                key = ""
+            },
+            modifier = Modifier.testTag(EARNINGS_GATE_SAVE_KEY),
+        ) {
+            Text("Save key")
+        }
+    }
 }
 
 @Composable
@@ -214,6 +235,8 @@ const val EARNINGS_GATE_LIST = "earningsGateList"
 const val EARNINGS_GATE_LAST_CAPTURE = "earningsGateLastCapture"
 const val EARNINGS_GATE_SEARCH = "earningsGateSearch"
 const val EARNINGS_GATE_NO_MATCH = "earningsGateNoMatch"
+const val EARNINGS_GATE_AV_KEY = "earningsGateAvKey"
+const val EARNINGS_GATE_SAVE_KEY = "earningsGateSaveKey"
 
 @Composable
 internal fun EarningsEventCard(row: EarningsEventRowUi) {
@@ -253,6 +276,8 @@ internal fun EarningsEventCard(row: EarningsEventRowUi) {
             row.reportedOn?.let { GateLine("Reported", it) }
             row.reaction?.let { GateLine("Reaction", it) }
             row.surprise?.let { GateLine("Surprise", it) }
+            row.sueFit?.let { GateLine("SUE fit", it) }
+            row.revenueTrail?.let { GateLine("Revenue trail", it) }
             if (row.justification.isNotBlank()) {
                 Text(text = row.justification, style = MaterialTheme.typography.bodySmall)
             }

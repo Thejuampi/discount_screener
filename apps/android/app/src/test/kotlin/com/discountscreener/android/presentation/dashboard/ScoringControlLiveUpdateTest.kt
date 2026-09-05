@@ -23,6 +23,7 @@ import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseC
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
@@ -210,6 +211,7 @@ class ScoringControlLiveUpdateTest {
             getEarningsEvents = GetEarningsEventsUseCase(repository),
             backUpEarningsLog = EarningsLogBackupUseCase(repository),
             restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }

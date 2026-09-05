@@ -78,6 +78,8 @@ interface DashboardRepository {
     suspend fun earningsLogBackup(): String
 
     suspend fun restoreEarningsLog(text: String): Int
+
+    suspend fun saveAlphaVantageKey(key: String)
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     /**
      * Records an estimates snapshot using [com.discountscreener.core.engine.EstimatesHistoryPolicy]

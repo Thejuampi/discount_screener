@@ -350,6 +350,7 @@ class DefaultDashboardRepository(
      * is what every test that predates it wants and what an install with no log folder gets.
      */
     private val earningsEventRecorder: EarningsEventRecorder? = null,
+    private val alphaVantageKeySink: ((String) -> Unit)? = null,
     /**
      * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
      * Production leaves this null.
@@ -609,6 +610,11 @@ class DefaultDashboardRepository(
 
     override suspend fun restoreEarningsLog(text: String): Int = withContext(computeDispatcher) {
         earningsEventRecorder?.restore(text) ?: 0
+    }
+
+    override suspend fun saveAlphaVantageKey(key: String) = withContext(computeDispatcher) {
+        alphaVantageKeySink?.invoke(key)
+        Unit
     }
 
     override suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport> = withContext(computeDispatcher) {

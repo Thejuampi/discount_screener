@@ -238,6 +238,49 @@ class DecisionMatrixTest {
         assertEquals(DecisionCell.CheapHighRisk, decisionOf(stale(quote = null)).cell)
     }
 
+    @Test
+    fun a_sue_fit_never_changes_the_cell() {
+        var base = pre(price = 3_500L, ratio = 15_000, spread = 80)
+        var fitted = base.copy(surpriseFitN = 16, surpriseFitSueSlopeArBps = 300)
+        assertEquals(decisionOf(base).cell, decisionOf(fitted).cell)
+    }
+
+    @Test
+    fun a_hold_with_revenue_a_sd_below_the_trail_is_cut_in_half() {
+        assertEquals(
+            5_000,
+            decisionOf(pre(price = 3_500L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
+                .positionSizeBps,
+        )
+    }
+
+    @Test
+    fun a_revenue_cut_on_hold_sets_the_override_flag() {
+        assertEquals(
+            true,
+            decisionOf(pre(price = 3_500L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
+                .sectorOverrideApplied,
+        )
+    }
+
+    @Test
+    fun an_expensive_cut_never_wears_the_revenue_flag() {
+        assertEquals(
+            false,
+            decisionOf(pre(price = 5_000L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
+                .sectorOverrideApplied,
+        )
+    }
+
+    @Test
+    fun a_high_risk_hedge_never_wears_the_revenue_flag() {
+        assertEquals(
+            false,
+            decisionOf(pre(price = 3_500L, ratio = 15_000, spread = 80).copy(revenueTrailShortfallZBps = 20_000))
+                .sectorOverrideApplied,
+        )
+    }
+
     private fun stale(quote: Int?) =
         pre(price = 3_500L, ratio = 15_000).copy(quoteSpreadBps = quote)
 

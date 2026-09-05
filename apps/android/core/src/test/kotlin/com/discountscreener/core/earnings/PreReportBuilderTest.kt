@@ -161,6 +161,38 @@ class PreReportBuilderTest {
     }
 
     @Test
+    fun a_ready_revenue_trail_lands_in_the_block() {
+        var block = preReportOf(
+            symbol = "LVS",
+            reportDate = LocalDate.of(2026, 8, 26),
+            timing = ReportTiming.AfterClose,
+            priceCents = 4_424L,
+            reportedQuarters = listOf(1.00, 1.00, 1.00, 0.50).mapIndexed { index, amount ->
+                ReportedQuarter(
+                    quarterEndDate = LocalDate.of(2025, 8, 26).plusMonths(index * 3L),
+                    epsActual = 0.74,
+                    epsEstimate = 0.62,
+                    revenueActual = amount,
+                )
+            },
+        )
+        assertEquals(20_000, block.revenueTrailShortfallZBps)
+    }
+
+    @Test
+    fun a_ready_sue_fit_lands_in_the_block() {
+        var fit = SurpriseFit.Ready(n = 16, interceptBps = 10, sueSlopeArBps = 300, asymmetric = false)
+        var block = preReportOf(
+            symbol = "LVS",
+            reportDate = LocalDate.of(2026, 8, 26),
+            timing = ReportTiming.AfterClose,
+            priceCents = 4_424L,
+            surpriseFit = fit,
+        )
+        assertEquals(300, block.surpriseFitSueSlopeArBps)
+    }
+
+    @Test
     fun the_forward_is_the_chain_underlying_when_the_spot_has_moved() {
         var block = preReportOf(
             symbol = "LVS",

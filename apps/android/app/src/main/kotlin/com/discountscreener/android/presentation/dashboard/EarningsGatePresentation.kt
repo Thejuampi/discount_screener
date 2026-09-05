@@ -3,6 +3,7 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.android.ui.dashboard.formatPct
 import com.discountscreener.core.earnings.DecisionCell
 import com.discountscreener.core.earnings.EarningsEventRecord
+import com.discountscreener.core.earnings.EventDecision
 import com.discountscreener.core.earnings.EventRisk
 import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
@@ -41,6 +42,8 @@ data class EarningsEventRowUi(
     val reaction: String?,
     val surprise: String?,
     val reportedOn: String?,
+    val sueFit: String? = null,
+    val revenueTrail: String? = null,
 )
 
 fun EarningsGateUi.matching(query: String): EarningsGateUi {
@@ -117,7 +120,28 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
         reaction = reactionText(record.post),
         surprise = surpriseText(record.post),
         reportedOn = reportedOnText(pre, record.post),
+        sueFit = sueFitText(pre),
+        revenueTrail = revenueTrailText(pre, decision),
     )
+}
+
+private fun revenueTrailText(pre: PreReport, decision: EventDecision?): String? {
+    var z = pre.revenueTrailShortfallZBps ?: return null
+    var text = "Last print ${"%.2f".format(z / 10_000.0)} SD vs 4-quarter median"
+    return if (decision?.sectorOverrideApplied == true) "$text · size cut" else text
+}
+
+private fun sueFitText(pre: PreReport): String? {
+    var slope = pre.surpriseFitSueSlopeArBps
+    var n = pre.surpriseFitN
+    if (slope != null && n != null) {
+        return "SUE slope ${formatPct(slope)} AR per dispersion, n=$n"
+    }
+    var reason = pre.surpriseFitUnavailableReason ?: return null
+    return when (reason) {
+        "short_history" -> "SUE history short of 16 quarters"
+        else -> "SUE history $reason"
+    }
 }
 
 /**

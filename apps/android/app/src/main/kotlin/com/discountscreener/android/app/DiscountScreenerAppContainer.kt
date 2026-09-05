@@ -9,6 +9,7 @@ import com.discountscreener.android.data.market.MarketDataRepository
 import com.discountscreener.android.data.persistence.SQLiteStateStore
 import com.discountscreener.android.data.profile.ProfileCatalog
 import com.discountscreener.android.data.profile.UniverseCatalog
+import com.discountscreener.android.data.remote.AlphaVantageEarningsClient
 import com.discountscreener.android.data.remote.CnnFearGreedClient
 import com.discountscreener.android.data.remote.FredDgs10Client
 import com.discountscreener.android.data.remote.FundamentalTimeseriesProvider
@@ -30,6 +31,7 @@ import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseC
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
@@ -102,9 +104,19 @@ class DiscountScreenerAppContainer(context: Context) {
         SecEdgarTimeseriesProvider(File(appContext.cacheDir, "sec-edgar"))
     }
 
+    private val earningsDir by lazy { File(appContext.filesDir, "earnings") }
+
+    private val alphaVantageClient by lazy {
+        AlphaVantageEarningsClient(
+            cacheDir = File(appContext.cacheDir, "alphavantage"),
+            keyFile = File(earningsDir, "alphavantage.key"),
+            budgetFile = File(earningsDir, "alphavantage-budget.json"),
+        )
+    }
+
     private val earningsEventRecorder by lazy {
         EarningsEventRecorder(
-            log = EarningsEventLog(File(File(appContext.filesDir, "earnings"), "events.jsonl")),
+            log = EarningsEventLog(File(earningsDir, "events.jsonl")),
             chains = { symbol, expiry -> yahooClient.fetchOptionChain(symbol, expiry) },
             consensus = { symbol -> yahooClient.fetchConsensus(symbol) },
             closes = { symbol ->
@@ -116,6 +128,7 @@ class DiscountScreenerAppContainer(context: Context) {
             announcements = { symbol -> secFilings.earningsAnnouncements(symbol) },
             reported = { symbol -> yahooClient.fetchReportedQuarters(symbol) },
             calendar = { symbol, now -> yahooClient.fetchNextEarningsEpoch(symbol, now) },
+            sueHistory = { symbol -> alphaVantageClient.quarters(symbol) },
             nowProvider = { System.currentTimeMillis() / 1_000 },
             logger = AndroidAppLogger(),
         )
@@ -155,6 +168,7 @@ class DiscountScreenerAppContainer(context: Context) {
                 cacheDir = File(appContext.cacheDir, "sec-edgar"),
             ),
             earningsEventRecorder = earningsEventRecorder,
+            alphaVantageKeySink = alphaVantageClient::saveKey,
             projectionCapture = screenCaptureSink::capture,
         )
     }
@@ -204,6 +218,7 @@ class DiscountScreenerAppContainer(context: Context) {
             getEarningsEvents = GetEarningsEventsUseCase(repository),
             backUpEarningsLog = EarningsLogBackupUseCase(repository),
             restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),
             getEstimatesHistory = GetEstimatesHistoryUseCase(repository),
