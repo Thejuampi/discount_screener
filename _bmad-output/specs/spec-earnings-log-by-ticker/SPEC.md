@@ -73,3 +73,19 @@ On a phone holding a full universe, Juan opens AVGO's detail two days before its
 - Sorting inside the detail follows the tab: `EarningsGateUi.upcoming` is already nearest-first and `settled` already most-recent-first, so the detail takes the first of each.
 - The search field holds its query in local composable state, so it resets to empty on restart and never triggers a reload.
 - The detail earnings section renders expanded. It only appears when the log holds an event for the open ticker, so it is never noise.
+
+## Review Findings (2026-09-05)
+
+Automatic `bmad-code-review` of PR #50. Patched in this slice:
+
+- Capture skip retries a stale (wide) quote. An unpriced report still retries.
+- Capture `today` is the New York session day.
+- Same-day expiry covers a before-open report. After-close still needs the next expiry.
+- Detail absence line waits until the log has been read. It also renders when the score row is missing.
+- A failed earnings read writes `earningsGateNotice`.
+- An 8-K/A with item 2.02 counts as a results filing.
+- Zero after-close is dropped from the quiet-day series and from settlement.
+- The chain underlying is the forward when it is positive.
+- A halted price (0) is not cheap against fair value.
+
+Deferred items sit in `_bmad-output/implementation-artifacts/deferred-work.md` under 2026-09-05.

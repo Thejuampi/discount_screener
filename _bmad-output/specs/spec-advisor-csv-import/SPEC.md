@@ -68,3 +68,12 @@ Juan imports `positions (2).csv`, reads the warning, confirms, then imports `tra
 - The two files share one Self-Directed account.
 - The 90-day blotter is a window. It is not the full history.
 - The snapshot as-of and the newest blotter date can fall on the same day.
+
+## Review Findings (2026-09-05)
+
+Automatic `bmad-code-review` of PR #50. Patched in this slice:
+
+- JPM detect needs `quantity` and `as of` as well as asset class, unit cost, and ticker.
+- A cash-only holdings snapshot refuses with `empty_keep`. It does not empty the book.
+- A trades window that closes a lot lists that symbol in `remove`. Confirm deletes those ids, then imports the rest.
+- A sell larger than the lot is skipped.

@@ -1,5 +1,26 @@
 # Deferred Work
 
+## Deferred from: code review (2026-09-05)
+
+PR #50 pre-earnings risk gate plus Advisor CSV (`bmad-code-review` automatic). Patched findings are on the branch. These stay open:
+
+- **PRD 4.2** — 16–20 settled quarters. The log still uses the history it has.
+- **PRD 4.4** — `sectorOverrideApplied` stays false. Sector-calibrated bands wait for §9.
+- **PRD 6** — paper-trading backtest is not built.
+- **PRD §9** — sector-calibrated bands are not in the product.
+- **Protective put** is priced and never chosen. The matrix buys a put spread.
+- **Low-as-Normal** — a Low risk cell still follows the Normal column.
+- **Calendar 12 lookups/day** — documented cap. A cold universe takes days to refresh dates.
+- **Undecided = Hold full size** — do-nothing encoding. The card names the missing input.
+- **Null put-spread still Hedge** — PRD: a chain that does not quote a spread still asks for the hedge.
+- **Gate knobs** live in Kotlin, not in `shared/contracts`.
+- **quoteSummary 404** recovers from HTML even when `htmlFallback` is false. That recovery stays.
+- **Weekend stamp** — a closed-market pass still stamps capture when quotes are not live.
+- **Late 8-K >7 days** stays unset. The confirm window is seven days.
+- **Worker second SQLite/WAL** — no `close()` on the store. Leave the second handle.
+- **Backup duplicate keys** — `read()` collapses by key, last line wins.
+- **renameTo cache** — lower. A failed rename leaves the previous file.
+
 ## Deferred from: code review (2026-08-24)
 
 PR #48 Cross hunt vs `main` (`review_mode` no-spec).
