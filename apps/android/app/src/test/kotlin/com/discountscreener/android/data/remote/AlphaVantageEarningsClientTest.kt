@@ -1,5 +1,6 @@
 package com.discountscreener.android.data.remote
 
+import com.discountscreener.core.earnings.EarningsGatePolicy
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -48,7 +49,58 @@ class AlphaVantageEarningsClientTest {
         var client = client(recordingHttp(functions))
         client.saveKey("k")
         client.quarters("IBM")
-        assertEquals(listOf("EARNINGS", "ESTIMATES"), functions)
+        assertEquals(listOf("EARNINGS", "EARNINGS_ESTIMATES"), functions)
+    }
+
+    @Test
+    fun a_second_function_waits_the_per_minute_gap() {
+        var waited = 0L
+        var clock = NOW
+        var functions = mutableListOf<String>()
+        var client = AlphaVantageEarningsClient(
+            cacheDir = cacheDir(),
+            keyFile = keyFile(),
+            budgetFile = budgetFile(),
+            now = { clock },
+            nap = { gap ->
+                waited = gap
+                clock += gap
+            },
+            httpClient = recordingHttp(functions),
+        )
+        client.saveKey("k")
+        client.quarters("IBM")
+        assertEquals((60 / EarningsGatePolicy.current.avPerMinute).toLong(), waited)
+    }
+
+    @Test
+    fun a_throttle_note_is_not_cached() {
+        var client = client(noteHttp())
+        client.saveKey("k")
+        client.quarters("IBM")
+        assertFalse(File(cacheDir(), "IBM-EARNINGS.json").isFile)
+    }
+
+    @Test
+    fun a_corrupt_budget_does_not_hit_the_network() {
+        budgetFile().writeText("{")
+        var functions = mutableListOf<String>()
+        var client = client(recordingHttp(functions))
+        client.saveKey("k")
+        client.quarters("IBM")
+        assertTrue(functions.isEmpty())
+    }
+
+    @Test
+    fun a_saved_key_is_present() {
+        var client = client()
+        client.saveKey("demo")
+        assertTrue(client.hasKey())
+    }
+
+    @Test
+    fun a_missing_key_is_absent() {
+        assertFalse(client().hasKey())
     }
 
     @Test
@@ -93,13 +145,17 @@ class AlphaVantageEarningsClientTest {
 
     private fun budgetFile() = File(folder.root, "budget.json")
 
-    private fun client(http: OkHttpClient = offlineHttpClient()) = AlphaVantageEarningsClient(
-        cacheDir = cacheDir(),
-        keyFile = keyFile(),
-        budgetFile = budgetFile(),
-        now = { NOW },
-        httpClient = http,
-    )
+    private fun client(http: OkHttpClient = offlineHttpClient()): AlphaVantageEarningsClient {
+        var clock = NOW
+        return AlphaVantageEarningsClient(
+            cacheDir = cacheDir(),
+            keyFile = keyFile(),
+            budgetFile = budgetFile(),
+            now = { clock },
+            nap = { gap -> clock += gap },
+            httpClient = http,
+        )
+    }
 
     private fun recordingHttp(seen: MutableList<String>): OkHttpClient {
         var json = "application/json".toMediaType()
@@ -107,15 +163,33 @@ class AlphaVantageEarningsClientTest {
             .addInterceptor(
                 Interceptor { chain ->
                     var request = chain.request()
-                    var url = request.url.toString()
-                    seen += if (url.contains("EARNINGS_ESTIMATES")) "ESTIMATES" else "EARNINGS"
-                    var body = if (url.contains("EARNINGS_ESTIMATES")) ESTIMATES else EARNINGS
+                    var function = request.url.queryParameter("function").orEmpty()
+                    seen += function
+                    var body = if (function == "EARNINGS_ESTIMATES") ESTIMATES else EARNINGS
                     Response.Builder()
                         .request(request)
                         .protocol(Protocol.HTTP_1_1)
                         .code(200)
                         .message("OK")
                         .body(body.toResponseBody(json))
+                        .build()
+                },
+            )
+            .build()
+    }
+
+    private fun noteHttp(): OkHttpClient {
+        var json = "application/json".toMediaType()
+        var note = """{"Note":"Thank you for using Alpha Vantage!"}"""
+        return OkHttpClient.Builder()
+            .addInterceptor(
+                Interceptor { chain ->
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(note.toResponseBody(json))
                         .build()
                 },
             )

@@ -129,6 +129,7 @@ class DiscountScreenerAppContainer(context: Context) {
             reported = { symbol -> yahooClient.fetchReportedQuarters(symbol) },
             calendar = { symbol, now -> yahooClient.fetchNextEarningsEpoch(symbol, now) },
             sueHistory = { symbol -> alphaVantageClient.quarters(symbol) },
+            sueKeyPresent = { alphaVantageClient.hasKey() },
             nowProvider = { System.currentTimeMillis() / 1_000 },
             logger = AndroidAppLogger(),
         )
@@ -169,6 +170,7 @@ class DiscountScreenerAppContainer(context: Context) {
             ),
             earningsEventRecorder = earningsEventRecorder,
             alphaVantageKeySink = alphaVantageClient::saveKey,
+            alphaVantageKeyPresent = alphaVantageClient::hasKey,
             projectionCapture = screenCaptureSink::capture,
         )
     }

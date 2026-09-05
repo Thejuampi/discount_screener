@@ -538,6 +538,7 @@ class EarningsEventRecorderTest {
             EarningsEventRecorder.CalendarSource { _, _ -> null },
         sueHistory: EarningsEventRecorder.SueQuarterSource =
             EarningsEventRecorder.SueQuarterSource { emptyList() },
+        sueKeyPresent: () -> Boolean = { false },
         nowProvider: () -> Long = { TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond() },
     ) = EarningsEventRecorder(
         log = log,
@@ -549,6 +550,7 @@ class EarningsEventRecorderTest {
         reported = reported,
         calendar = calendar,
         sueHistory = sueHistory,
+        sueKeyPresent = sueKeyPresent,
         nowProvider = nowProvider,
     )
 
@@ -609,13 +611,14 @@ class EarningsEventRecorderTest {
         var span = (jumpDaysAgo.maxOrNull() ?: 400L) + 20L
         var start = TODAY.minusDays(span)
         var jumpDays = jumpDaysAgo.map { TODAY.minusDays(it) }
-        var level = 10_000.0
+        var base = 10_000L
         (0..span.toInt()).map { index ->
             var day = start.plusDays(index.toLong())
+            var cents = base
             if (symbol != "SPY" && jumpDays.any { it.plusDays(1) == day }) {
-                level *= 1.0 + jumpBps / 10_000.0
+                cents = base + base * jumpBps / 10_000L
             }
-            DailyClose(day, level.toLong())
+            DailyClose(day, cents)
         }
     }
 
@@ -852,6 +855,60 @@ class EarningsEventRecorderTest {
         ).capture(listOf(row(earningsIn = 3)))
 
         assertEquals("short_history", log.read().events.single().pre.surpriseFitUnavailableReason)
+    }
+
+    @Test
+    fun an_empty_sue_source_records_missing_key() = runTest {
+        var log = log()
+
+        recorder(log).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("missing_key", log.read().events.single().pre.surpriseFitUnavailableReason)
+    }
+
+    @Test
+    fun an_empty_sue_source_with_a_key_records_no_history() = runTest {
+        var log = log()
+
+        recorder(log, sueKeyPresent = { true }).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals("no_history", log.read().events.single().pre.surpriseFitUnavailableReason)
+    }
+
+    @Test
+    fun a_priced_event_picks_up_sue_after_the_key_is_saved() = runTest {
+        var log = log()
+        recorder(log).capture(listOf(row(earningsIn = 3)))
+        var daysAgo = (1..16).map { it * 90L }
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 300, jumpDaysAgo = daysAgo),
+            announcements = filed(*daysAgo.toLongArray()),
+            sueHistory = sueQuarters(*daysAgo.toLongArray()),
+            sueKeyPresent = { true },
+        ).overlaySueFits()
+
+        assertEquals(16, log.read().events.single().pre.surpriseFitN)
+    }
+
+    @Test
+    fun a_priced_sue_overlay_keeps_the_implied_move() = runTest {
+        var log = log()
+        recorder(log).capture(listOf(row(earningsIn = 3)))
+        var daysAgo = (1..16).map { it * 90L }
+
+        recorder(
+            log,
+            closes = quietDays(),
+            history = reactingCloses(jumpBps = 300, jumpDaysAgo = daysAgo),
+            announcements = filed(*daysAgo.toLongArray()),
+            sueHistory = sueQuarters(*daysAgo.toLongArray()),
+            sueKeyPresent = { true },
+        ).overlaySueFits()
+
+        assertEquals(701, log.read().events.single().pre.impliedMoveBps)
     }
 
     @Test

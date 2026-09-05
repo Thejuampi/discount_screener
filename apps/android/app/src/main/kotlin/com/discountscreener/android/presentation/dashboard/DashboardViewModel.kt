@@ -200,6 +200,7 @@ sealed interface DashboardAction {
     data object EarningsLogBackupDropped : DashboardAction
     data class RestoreEarningsLog(val text: String) : DashboardAction
     data class SaveAlphaVantageKey(val key: String) : DashboardAction
+    data object ClearAlphaVantageKey : DashboardAction
 
     data object RunRetrospective : DashboardAction
     data object RunOutcomeReport : DashboardAction
@@ -401,7 +402,10 @@ class DashboardViewModel(
             is DashboardAction.EarningsLogBackupWritten -> finishEarningsLogBackup(action.eventCount)
             DashboardAction.EarningsLogBackupDropped -> dropEarningsLogBackup()
             is DashboardAction.RestoreEarningsLog -> restoreEarningsLogFrom(action.text)
-            is DashboardAction.SaveAlphaVantageKey -> saveAlphaVantageKeyFrom(action.key)
+            is DashboardAction.SaveAlphaVantageKey -> {
+                if (action.key.isNotBlank()) saveAlphaVantageKeyFrom(action.key)
+            }
+            is DashboardAction.ClearAlphaVantageKey -> saveAlphaVantageKeyFrom("")
             DashboardAction.RunRetrospective -> runRetrospectiveReport()
             DashboardAction.RunOutcomeReport -> runOutcomeReportAction()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
@@ -625,6 +629,7 @@ class DashboardViewModel(
                 "Alpha Vantage key failed: ${error.message ?: "unknown error"}"
             }
             _state.value = _state.value.copy(earningsGateNotice = message)
+            loadEarningsGate()
         }
     }
 

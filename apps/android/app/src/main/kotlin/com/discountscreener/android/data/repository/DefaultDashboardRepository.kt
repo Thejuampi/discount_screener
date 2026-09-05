@@ -351,6 +351,7 @@ class DefaultDashboardRepository(
      */
     private val earningsEventRecorder: EarningsEventRecorder? = null,
     private val alphaVantageKeySink: ((String) -> Unit)? = null,
+    private val alphaVantageKeyPresent: (() -> Boolean)? = null,
     /**
      * Test probe. Runs while [stateMutex] is held, before the snapshot is built.
      * Production leaves this null.
@@ -594,6 +595,7 @@ class DefaultDashboardRepository(
             today = Instant.ofEpochSecond(nowProvider()).atZone(ZoneOffset.UTC).toLocalDate(),
             lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
             nowEpochSeconds = nowProvider(),
+            alphaVantageKeyPresent = alphaVantageKeyPresent?.invoke() == true,
         )
     }
 
@@ -614,6 +616,8 @@ class DefaultDashboardRepository(
 
     override suspend fun saveAlphaVantageKey(key: String) = withContext(computeDispatcher) {
         alphaVantageKeySink?.invoke(key)
+        runCatching { earningsEventRecorder?.overlaySueFits() }
+            .onFailure { error -> logger.error(TAG, "earnings SUE overlay failed", error) }
         Unit
     }
 

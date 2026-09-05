@@ -22,6 +22,7 @@ import com.discountscreener.core.earnings.isQuoteStale
 import com.discountscreener.core.earnings.marketBetaExcludingEvents
 import com.discountscreener.core.earnings.normalDailyMoveBps
 import com.discountscreener.core.earnings.SueQuarter
+import com.discountscreener.core.earnings.SurpriseFit
 import com.discountscreener.core.earnings.datedAbnormalReturnsOf
 import com.discountscreener.core.earnings.fitSurpriseRegression
 import com.discountscreener.core.earnings.joinSueWithReturns
@@ -44,6 +45,7 @@ class EarningsEventRecorder(
     private val reported: ReportedQuarterSource = ReportedQuarterSource { emptyList() },
     private val calendar: CalendarSource = CalendarSource { _, _ -> null },
     private val sueHistory: SueQuarterSource = SueQuarterSource { emptyList() },
+    private val sueKeyPresent: () -> Boolean = { false },
     private val nowProvider: () -> Long,
     private val logger: AppLogger = NoOpAppLogger,
     private val windowDays: Long = CAPTURE_WINDOW_DAYS,
@@ -115,8 +117,27 @@ class EarningsEventRecorder(
                 .onSuccess { written++ }
                 .onFailure { error -> logger.error(TAG, "earnings capture failed: ${row.symbol}", error) }
         }
+        overlaySueFits()
         log.stampCapture(nowProvider())
         return written
+    }
+
+    suspend fun overlaySueFits() {
+        log.read().events.forEach { record ->
+            if (record.pre.surpriseFitN != null) return@forEach
+            var reason = record.pre.surpriseFitUnavailableReason
+            if (reason != null && reason != "missing_key") return@forEach
+            var quarters = runCatching { sueHistory.quarters(record.pre.symbol) }
+                .onFailure { error -> logger.error(TAG, "earnings SUE overlay failed: ${record.pre.symbol}", error) }
+                .getOrNull() ?: return@forEach
+            if (quarters.isEmpty()) return@forEach
+            var fit = runCatching { fitFrom(record.pre.symbol, quarters) }
+                .onFailure { error -> logger.error(TAG, "earnings SUE overlay failed: ${record.pre.symbol}", error) }
+                .getOrNull() ?: return@forEach
+            var next = withFit(record, fit)
+            if (next.pre == record.pre) return@forEach
+            log.append(next)
+        }
     }
 
     /**
@@ -269,17 +290,46 @@ class EarningsEventRecorder(
 
     private suspend fun surpriseFitOf(symbol: String) = runCatching {
         var quarters = sueHistory.quarters(symbol)
-        if (quarters.isEmpty()) return@runCatching null
+        if (quarters.isEmpty()) {
+            return@runCatching SurpriseFit.Unavailable(
+                if (sueKeyPresent()) "no_history" else "missing_key",
+            )
+        }
+        fitFrom(symbol, quarters)
+    }
+        .onFailure { error -> logger.error(TAG, "earnings SUE history failed: $symbol", error) }
+        .getOrNull()
+
+    private suspend fun fitFrom(symbol: String, quarters: List<SueQuarter>): SurpriseFit {
         var events = announcements.announcements(symbol)
         var dated = datedAbnormalReturnsOf(
             announcements = events,
             symbolCloses = history.closes(symbol),
             marketCloses = marketHistory(),
         )
-        fitSurpriseRegression(joinSueWithReturns(quarters, dated))
+        return fitSurpriseRegression(joinSueWithReturns(quarters, dated))
     }
-        .onFailure { error -> logger.error(TAG, "earnings SUE history failed: $symbol", error) }
-        .getOrNull()
+
+    private fun withFit(record: EarningsEventRecord, fit: SurpriseFit): EarningsEventRecord {
+        var pre = when (fit) {
+            is SurpriseFit.Ready -> record.pre.copy(
+                surpriseFitN = fit.n,
+                surpriseFitSueSlopeArBps = fit.sueSlopeArBps,
+                surpriseFitAsymmetric = fit.asymmetric,
+                surpriseFitUnavailableReason = null,
+            )
+            is SurpriseFit.Unavailable -> {
+                if (record.pre.surpriseFitN != null) return record
+                record.pre.copy(
+                    surpriseFitN = null,
+                    surpriseFitSueSlopeArBps = null,
+                    surpriseFitAsymmetric = null,
+                    surpriseFitUnavailableReason = fit.reason,
+                )
+            }
+        }
+        return record.copy(pre = pre)
+    }
 
     private suspend fun filedReactionsOf(symbol: String): List<Int> =
         runCatching {

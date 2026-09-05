@@ -310,13 +310,46 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun a_cleared_alpha_vantage_key_tells_the_reader() = runTest(dispatcher) {
-        var viewModel = testViewModel(RecordingDashboardRepository())
+    fun a_saved_alpha_vantage_key_reaches_the_repository() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SaveAlphaVantageKey("demo"))
+        advanceUntilIdle()
+
+        assertEquals("demo", repository.savedAlphaVantageKey)
+    }
+
+    @Test
+    fun a_blank_alpha_vantage_save_does_not_touch_the_repository() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
 
         viewModel.dispatch(DashboardAction.SaveAlphaVantageKey("  "))
         advanceUntilIdle()
 
+        assertEquals(null, repository.savedAlphaVantageKey)
+    }
+
+    @Test
+    fun a_cleared_alpha_vantage_key_tells_the_reader() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+
+        viewModel.dispatch(DashboardAction.ClearAlphaVantageKey)
+        advanceUntilIdle()
+
         assertEquals("Alpha Vantage key cleared.", viewModel.state.value.earningsGateNotice)
+    }
+
+    @Test
+    fun a_cleared_alpha_vantage_key_reaches_the_repository() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.ClearAlphaVantageKey)
+        advanceUntilIdle()
+
+        assertEquals("", repository.savedAlphaVantageKey)
     }
 
     @Test

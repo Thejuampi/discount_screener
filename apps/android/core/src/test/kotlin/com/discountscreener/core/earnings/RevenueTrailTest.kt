@@ -12,12 +12,22 @@ class RevenueTrailTest {
     }
 
     @Test
-    fun four_equal_prints_have_no_scale() {
-        assertNull(revenueTrailOf(listOf(100L, 100L, 100L, 100L)))
+    fun a_flat_prior_three_has_zero_scale() {
+        assertEquals(0L, revenueTrailOf(listOf(100L, 100L, 100L, 50L))!!.scaleCents)
     }
 
     @Test
-    fun a_last_print_two_sd_below_the_median_is_a_shortfall() {
-        assertEquals(20_000, revenueTrailOf(listOf(100L, 100L, 100L, 50L))!!.shortfallZBps)
+    fun the_latest_print_does_not_set_the_scale() {
+        assertEquals(20L, revenueTrailOf(listOf(80L, 100L, 120L, 50L))!!.scaleCents)
+    }
+
+    @Test
+    fun the_centre_is_the_robust_mean_of_the_prior_three() {
+        assertEquals(100L, revenueTrailOf(listOf(80L, 100L, 120L, 50L))!!.centreCents)
+    }
+
+    @Test
+    fun a_foreign_prior_print_refuses_the_trail() {
+        assertNull(revenueTrailOf(listOf(80L, 100L, 10_000L, 50L)))
     }
 }

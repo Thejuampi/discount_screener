@@ -31,6 +31,19 @@ class AlphaVantageEarningsTest {
     }
 
     @Test
+    fun a_throttle_note_is_a_refusal() {
+        assertEquals("throttled", alphaVantageRefusal("""{"Note":"Thank you for using Alpha Vantage!"}"""))
+    }
+
+    @Test
+    fun joined_ibm_quarters_fill_the_sue_floor() {
+        assertTrue(
+            sueQuartersOf(body("IBM-EARNINGS.json"), body("IBM-EARNINGS_ESTIMATES.json")).size
+                >= EarningsGatePolicy.current.minSueQuarters,
+        )
+    }
+
+    @Test
     fun joined_ibm_quarters_score_sue_in_units_of_the_range() {
         var quarters = sueQuartersOf(body("IBM-EARNINGS.json"), body("IBM-EARNINGS_ESTIMATES.json"))
         var june = quarters.first { it.fiscalEnd == LocalDate.of(2026, 6, 30) }

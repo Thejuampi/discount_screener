@@ -9,7 +9,9 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
 import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
@@ -19,6 +21,8 @@ import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.decisionOf
 import java.time.LocalDate
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,13 +50,47 @@ class EarningsGateScreenTest {
     }
 
     @Test
+    fun a_blank_save_does_not_dispatch_a_key() {
+        var actions = mutableListOf<DashboardAction>()
+        render(EarningsGateUi(), onAction = { actions += it })
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_SAVE_KEY).performClick()
+
+        assertTrue(actions.none { it is DashboardAction.SaveAlphaVantageKey })
+    }
+
+    @Test
+    fun the_earnings_tab_offers_a_clear_key_button() {
+        var actions = mutableListOf<DashboardAction>()
+        render(EarningsGateUi(), onAction = { actions += it })
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_CLEAR_KEY).performClick()
+
+        assertEquals(listOf(DashboardAction.ClearAlphaVantageKey), actions)
+    }
+
+    @Test
+    fun a_device_with_a_key_says_so() {
+        render(EarningsGateUi(alphaVantageKeyPresent = true))
+
+        composeRule.onNodeWithText("Alpha Vantage key is on this device").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_device_without_a_key_says_so() {
+        render(EarningsGateUi())
+
+        composeRule.onNodeWithText("No Alpha Vantage key on this device").assertIsDisplayed()
+    }
+
+    @Test
     fun a_revenue_trail_cut_is_named_on_the_card() {
-        render(gate(day = 3, ratio = 10_000, trailZ = 20_000))
+        render(gate(day = 3, ratio = 10_000, trailCut = true))
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
-            .performScrollToNode(hasText("Last print 2.00 SD vs 4-quarter median · size cut"))
+            .performScrollToNode(hasText("Last print below a flat trail · size cut"))
 
-        composeRule.onNodeWithText("Last print 2.00 SD vs 4-quarter median · size cut").assertIsDisplayed()
+        composeRule.onNodeWithText("Last print below a flat trail · size cut").assertIsDisplayed()
     }
 
     @Test
@@ -165,10 +203,14 @@ class EarningsGateScreenTest {
         composeRule.onNodeWithText(EMPTY_DETAIL, substring = true).assertIsDisplayed()
     }
 
-    private fun render(state: EarningsGateUi, loading: Boolean = false) {
+    private fun render(
+        state: EarningsGateUi,
+        loading: Boolean = false,
+        onAction: (DashboardAction) -> Unit = {},
+    ) {
         composeRule.setContent {
             DiscountScreenerTheme {
-                EarningsGateScreen(state = state, loading = loading)
+                EarningsGateScreen(state = state, loading = loading, onAction = onAction)
             }
         }
         shadowOf(Looper.getMainLooper()).idle()
@@ -204,7 +246,7 @@ class EarningsGateScreenTest {
         sueN: Int? = null,
         sueSlope: Int? = null,
         ratio: Int? = 17_525,
-        trailZ: Int? = null,
+        trailCut: Boolean = false,
     ): EarningsGateUi {
         var pre = PreReport(
             symbol = symbol,
@@ -222,7 +264,9 @@ class EarningsGateScreenTest {
             hedgeShortStrikeCents = 4_200L,
             surpriseFitN = sueN,
             surpriseFitSueSlopeArBps = sueSlope,
-            revenueTrailShortfallZBps = trailZ,
+            revenueTrailLatestCents = if (trailCut) 50L else null,
+            revenueTrailMedianCents = if (trailCut) 100L else null,
+            revenueTrailScaleCents = if (trailCut) 0L else null,
         )
         return presentEarningsGate(
             events = listOf(

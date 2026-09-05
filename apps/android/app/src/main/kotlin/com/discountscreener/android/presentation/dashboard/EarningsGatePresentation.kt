@@ -18,6 +18,7 @@ data class EarningsGateUi(
     val settled: List<EarningsEventRowUi> = emptyList(),
     val damagedLines: Int = 0,
     val lastCapture: String? = null,
+    val alphaVantageKeyPresent: Boolean = false,
 ) {
     val isEmpty: Boolean get() = upcoming.isEmpty() && settled.isEmpty()
 }
@@ -66,6 +67,7 @@ fun presentEarningsGate(
     today: LocalDate,
     lastCaptureEpochSeconds: Long? = null,
     nowEpochSeconds: Long? = null,
+    alphaVantageKeyPresent: Boolean = false,
 ): EarningsGateUi {
     var upcoming = events.filter { it.pre.reportEpochDay >= today.toEpochDay() }
         .sortedBy { it.pre.reportEpochDay }
@@ -76,6 +78,7 @@ fun presentEarningsGate(
         settled = settled.map(::rowOf),
         damagedLines = damagedLines,
         lastCapture = lastCaptureText(lastCaptureEpochSeconds, nowEpochSeconds),
+        alphaVantageKeyPresent = alphaVantageKeyPresent,
     )
 }
 
@@ -126,20 +129,29 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
 }
 
 private fun revenueTrailText(pre: PreReport, decision: EventDecision?): String? {
+    var latest = pre.revenueTrailLatestCents ?: return null
+    var centre = pre.revenueTrailMedianCents ?: return null
+    var scale = pre.revenueTrailScaleCents ?: return null
+    var cut = if (decision?.sectorOverrideApplied == true) " · size cut" else ""
+    if (scale <= 0L) {
+        return if (latest < centre) "Last print below a flat trail$cut" else null
+    }
     var z = pre.revenueTrailShortfallZBps ?: return null
-    var text = "Last print ${"%.2f".format(z / 10_000.0)} SD vs 4-quarter median"
-    return if (decision?.sectorOverrideApplied == true) "$text · size cut" else text
+    return "Last print ${"%.2f".format(z / 10_000.0)} MAD vs the trail centre$cut"
 }
 
 private fun sueFitText(pre: PreReport): String? {
     var slope = pre.surpriseFitSueSlopeArBps
     var n = pre.surpriseFitN
     if (slope != null && n != null) {
-        return "SUE slope ${formatPct(slope)} AR per dispersion, n=$n"
+        var shape = if (pre.surpriseFitAsymmetric == true) ", truncated at zero SUE" else ""
+        return "SUE slope ${formatPct(slope)} AR per dispersion, n=$n$shape"
     }
     var reason = pre.surpriseFitUnavailableReason ?: return null
     return when (reason) {
-        "short_history" -> "SUE history short of 16 quarters"
+        "short_history" -> "SUE history too short"
+        "missing_key" -> "SUE key missing"
+        "no_history" -> "SUE history empty"
         else -> "SUE history $reason"
     }
 }

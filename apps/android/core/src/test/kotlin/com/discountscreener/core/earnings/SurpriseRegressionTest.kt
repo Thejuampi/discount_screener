@@ -26,6 +26,54 @@ class SurpriseRegressionTest {
     }
 
     @Test
+    fun a_foreign_sue_does_not_set_the_slope() {
+        var fit = fitSurpriseRegression(
+            series(16) + SurpriseObservation(
+                reportDate = LocalDate.of(2026, 6, 30),
+                sueBps = 1_000_000,
+                abnormalReturnBps = 80_000,
+            ),
+        )
+        assertEquals(300, (fit as SurpriseFit.Ready).sueSlopeArBps)
+    }
+
+    @Test
+    fun a_foreign_sue_is_dropped_from_the_count() {
+        var fit = fitSurpriseRegression(
+            series(16) + SurpriseObservation(
+                reportDate = LocalDate.of(2026, 6, 30),
+                sueBps = 1_000_000,
+                abnormalReturnBps = 80_000,
+            ),
+        )
+        assertEquals(16, (fit as SurpriseFit.Ready).n)
+    }
+
+    @Test
+    fun a_foreign_return_does_not_set_the_slope() {
+        var fit = fitSurpriseRegression(
+            series(16) + SurpriseObservation(
+                reportDate = LocalDate.of(2026, 6, 30),
+                sueBps = 0,
+                abnormalReturnBps = 80_000,
+            ),
+        )
+        assertEquals(300, (fit as SurpriseFit.Ready).sueSlopeArBps)
+    }
+
+    @Test
+    fun a_panel_trimmed_below_the_floor_is_short_history() {
+        var fit = fitSurpriseRegression(
+            series(15) + SurpriseObservation(
+                reportDate = LocalDate.of(2026, 6, 30),
+                sueBps = 1_000_000,
+                abnormalReturnBps = 80_000,
+            ),
+        )
+        assertEquals("short_history", (fit as SurpriseFit.Unavailable).reason)
+    }
+
+    @Test
     fun a_quarter_joins_the_abnormal_return_on_its_report_day() {
         var quarter = SueQuarter(
             fiscalEnd = LocalDate.of(2026, 6, 30),

@@ -169,14 +169,24 @@ private fun missingText(pre: PreReport, risk: EventRisk): String = when {
 fun ratioText(riskRatioBps: Int?): String = "%.2fx".format((riskRatioBps ?: 0) / 10_000.0)
 
 private fun applyRevenueOverride(decision: EventDecision, pre: PreReport): EventDecision {
-    var z = pre.revenueTrailShortfallZBps ?: return decision
-    if (z <= EarningsGatePolicy.current.revenueOverrideZBps) return decision
+    var latest = pre.revenueTrailLatestCents ?: return decision
+    var centre = pre.revenueTrailMedianCents ?: return decision
+    var scale = pre.revenueTrailScaleCents ?: return decision
+    if (latest >= centre) return decision
+    var shortfall = (centre - latest).toDouble()
+    var unit = scale.toDouble() * EarningsGatePolicy.current.revenueOverrideZBps / 10_000.0
+    if (shortfall <= unit) return decision
+    var z = if (scale <= 0L) null else (shortfall / scale * 10_000.0).roundToInt()
+    var cut = if (scale <= 0L) {
+        ". Last print sits below a flat trail, so cut to half."
+    } else {
+        ". Last print revenue sits ${"%.2f".format((z ?: 0) / 10_000.0)} MAD below the trail centre, so cut to half."
+    }
     return decision.copy(
         action = EventAction.Reduce,
         positionSizeBps = HALF_POSITION_BPS,
         sectorOverrideApplied = true,
-        justification = decision.justification.trimEnd('.') +
-            ". Last print revenue sits ${"%.2f".format(z / 10_000.0)} SD below the last-four median, so cut to half.",
+        justification = decision.justification.trimEnd('.') + cut,
     )
 }
 

@@ -68,7 +68,7 @@ fun EarningsGateScreen(
                 )
             }
             notice?.let { GateNotice(it) }
-            EarningsLogButtons(onAction)
+            EarningsLogButtons(onAction, keyPresent = state.alphaVantageKeyPresent)
         }
         return
     }
@@ -126,7 +126,7 @@ fun EarningsGateScreen(
         }
         item {
             notice?.let { GateNotice(it) }
-            EarningsLogButtons(onAction)
+            EarningsLogButtons(onAction, keyPresent = state.alphaVantageKeyPresent)
         }
     }
 }
@@ -162,7 +162,10 @@ private fun EarningsLogHandOff(pendingBackup: String?, onAction: (DashboardActio
 }
 
 @Composable
-private fun EarningsLogButtons(onAction: (DashboardAction) -> Unit) {
+private fun EarningsLogButtons(
+    onAction: (DashboardAction) -> Unit,
+    keyPresent: Boolean,
+) {
     var context = LocalContext.current
     var open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { source ->
         var text = source?.let { runCatching { readFrom(context, it) }.getOrNull() }
@@ -182,6 +185,16 @@ private fun EarningsLogButtons(onAction: (DashboardAction) -> Unit) {
             Text("Restore")
         }
     }
+    Text(
+        text = if (keyPresent) {
+            "Alpha Vantage key is on this device"
+        } else {
+            "No Alpha Vantage key on this device"
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.testTag(EARNINGS_GATE_KEY_STATUS),
+    )
     var key by remember { mutableStateOf("") }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         OutlinedTextField(
@@ -194,12 +207,20 @@ private fun EarningsLogButtons(onAction: (DashboardAction) -> Unit) {
         )
         OutlinedButton(
             onClick = {
-                onAction(DashboardAction.SaveAlphaVantageKey(key))
-                key = ""
+                if (key.isNotBlank()) {
+                    onAction(DashboardAction.SaveAlphaVantageKey(key))
+                    key = ""
+                }
             },
             modifier = Modifier.testTag(EARNINGS_GATE_SAVE_KEY),
         ) {
             Text("Save key")
+        }
+        OutlinedButton(
+            onClick = { onAction(DashboardAction.ClearAlphaVantageKey) },
+            modifier = Modifier.testTag(EARNINGS_GATE_CLEAR_KEY),
+        ) {
+            Text("Clear key")
         }
     }
 }
@@ -237,6 +258,8 @@ const val EARNINGS_GATE_SEARCH = "earningsGateSearch"
 const val EARNINGS_GATE_NO_MATCH = "earningsGateNoMatch"
 const val EARNINGS_GATE_AV_KEY = "earningsGateAvKey"
 const val EARNINGS_GATE_SAVE_KEY = "earningsGateSaveKey"
+const val EARNINGS_GATE_CLEAR_KEY = "earningsGateClearKey"
+const val EARNINGS_GATE_KEY_STATUS = "earningsGateKeyStatus"
 
 @Composable
 internal fun EarningsEventCard(row: EarningsEventRowUi) {

@@ -41,6 +41,7 @@ private val AV_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
 
 fun alphaVantageRefusal(body: String): String? {
     var root = readObject(body) ?: return "invalid_payload"
+    if (root.string("Note") != null) return "throttled"
     var information = root.string("Information")
     if (information != null) {
         return if (information.contains("demo", ignoreCase = true)) "demo_key" else "refused"

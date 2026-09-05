@@ -84,10 +84,12 @@ fun preReportOf(
         hedgeShortStrikeCents = hedge?.shortStrike?.let { toCents(it) },
         surpriseFitN = (surpriseFit as? SurpriseFit.Ready)?.n,
         surpriseFitSueSlopeArBps = (surpriseFit as? SurpriseFit.Ready)?.sueSlopeArBps,
+        surpriseFitAsymmetric = (surpriseFit as? SurpriseFit.Ready)?.asymmetric,
         surpriseFitUnavailableReason = (surpriseFit as? SurpriseFit.Unavailable)?.reason,
         revenueTrailLatestCents = trail?.latestCents,
-        revenueTrailMedianCents = trail?.medianCents,
-        revenueTrailShortfallZBps = trail?.shortfallZBps,
+        revenueTrailMedianCents = trail?.centreCents,
+        revenueTrailScaleCents = trail?.scaleCents,
+        revenueTrailShortfallZBps = trail?.let { shortfallZBps(it) },
     )
 }
 
@@ -101,3 +103,9 @@ private fun toBps(fraction: Double): Int? =
 
 private fun toCents(value: Double): Long? =
     if (value.isFinite()) (value * 100.0).roundToLong() else null
+
+private fun shortfallZBps(trail: RevenueTrail): Int? {
+    if (trail.scaleCents <= 0L) return null
+    return ((trail.centreCents - trail.latestCents).toDouble() / trail.scaleCents * 10_000.0)
+        .roundToInt()
+}

@@ -47,8 +47,10 @@ data class PreReport(
     val surpriseFitN: Int? = null,
     val surpriseFitSueSlopeArBps: Int? = null,
     val surpriseFitUnavailableReason: String? = null,
+    val surpriseFitAsymmetric: Boolean? = null,
     val revenueTrailLatestCents: Long? = null,
     val revenueTrailMedianCents: Long? = null,
+    val revenueTrailScaleCents: Long? = null,
     val revenueTrailShortfallZBps: Int? = null,
 )
 

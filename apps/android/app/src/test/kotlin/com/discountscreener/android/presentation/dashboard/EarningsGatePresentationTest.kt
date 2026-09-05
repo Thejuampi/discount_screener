@@ -67,16 +67,54 @@ class EarningsGatePresentationTest {
     @Test
     fun a_revenue_shortfall_on_hold_reads_back_as_a_size_cut() {
         assertEquals(
-            "Last print 2.00 SD vs 4-quarter median · size cut",
-            present(listOf(record(day = 3, ratio = 10_000, trailZ = 20_000))).upcoming.single().revenueTrail,
+            "Last print below a flat trail · size cut",
+            present(listOf(record(day = 3, ratio = 10_000, trailCut = true))).upcoming.single().revenueTrail,
         )
     }
 
     @Test
     fun a_short_sue_history_tells_the_reader_the_floor() {
         assertEquals(
-            "SUE history short of 16 quarters",
+            "SUE history too short",
             present(listOf(record(day = 3, sueReason = "short_history"))).upcoming.single().sueFit,
+        )
+    }
+
+    @Test
+    fun a_truncated_sue_fit_is_named_on_the_card() {
+        assertEquals(
+            "SUE slope 3.00% AR per dispersion, n=16, truncated at zero SUE",
+            present(listOf(record(day = 3, sueN = 16, sueSlope = 300, sueAsymmetric = true)))
+                .upcoming.single().sueFit,
+        )
+    }
+
+    @Test
+    fun a_missing_sue_key_is_named_on_the_card() {
+        assertEquals(
+            "SUE key missing",
+            present(listOf(record(day = 3, sueReason = "missing_key"))).upcoming.single().sueFit,
+        )
+    }
+
+    @Test
+    fun an_empty_sue_history_is_named_on_the_card() {
+        assertEquals(
+            "SUE history empty",
+            present(listOf(record(day = 3, sueReason = "no_history"))).upcoming.single().sueFit,
+        )
+    }
+
+    @Test
+    fun a_device_with_a_key_on_disk_is_flagged() {
+        assertEquals(
+            true,
+            presentEarningsGate(
+                events = emptyList(),
+                damagedLines = 0,
+                today = TODAY,
+                alphaVantageKeyPresent = true,
+            ).alphaVantageKeyPresent,
         )
     }
 
@@ -370,7 +408,8 @@ class EarningsGatePresentationTest {
         sueN: Int? = null,
         sueSlope: Int? = null,
         sueReason: String? = null,
-        trailZ: Int? = null,
+        sueAsymmetric: Boolean? = null,
+        trailCut: Boolean = false,
     ): EarningsEventRecord {
         var pre = PreReport(
             symbol = symbol,
@@ -390,7 +429,10 @@ class EarningsGatePresentationTest {
             surpriseFitN = sueN,
             surpriseFitSueSlopeArBps = sueSlope,
             surpriseFitUnavailableReason = sueReason,
-            revenueTrailShortfallZBps = trailZ,
+            surpriseFitAsymmetric = sueAsymmetric,
+            revenueTrailLatestCents = if (trailCut) 50L else null,
+            revenueTrailMedianCents = if (trailCut) 100L else null,
+            revenueTrailScaleCents = if (trailCut) 0L else null,
         )
         return EarningsEventRecord(
             pre = pre,

@@ -1,14 +1,14 @@
 package com.discountscreener.core.earnings
 
 import com.discountscreener.core.math.medianOf
-import kotlin.math.roundToInt
+import com.discountscreener.core.math.robustCentre
+import kotlin.math.abs
 import kotlin.math.roundToLong
-import kotlin.math.sqrt
 
 data class RevenueTrail(
     val latestCents: Long,
-    val medianCents: Long,
-    val shortfallZBps: Int,
+    val centreCents: Long,
+    val scaleCents: Long,
 )
 
 fun revenueTrailOf(
@@ -18,18 +18,14 @@ fun revenueTrailOf(
     if (revenuesOldestFirst.size < minN) return null
     var window = revenuesOldestFirst.takeLast(minN)
     if (window.any { it <= 0L }) return null
-    var values = window.map { it.toDouble() }
-    var location = medianOf(values) ?: return null
-    var mean = values.average()
-    var variance = values.sumOf { value ->
-        var delta = value - mean
-        delta * delta
-    } / (values.size - 1)
-    if (variance <= 0.0) return null
-    var latest = values.last()
+    var prior = window.dropLast(1).map { it.toDouble() }
+    var priorLocation = medianOf(prior) ?: return null
+    var mad = medianOf(prior.map { abs(it - priorLocation) }) ?: return null
+    if (!mad.isFinite()) return null
+    var centre = if (mad <= 0.0) priorLocation else robustCentre(prior) ?: return null
     return RevenueTrail(
         latestCents = window.last(),
-        medianCents = location.roundToLong(),
-        shortfallZBps = ((location - latest) / sqrt(variance) * 10_000.0).roundToInt(),
+        centreCents = centre.roundToLong(),
+        scaleCents = mad.roundToLong(),
     )
 }

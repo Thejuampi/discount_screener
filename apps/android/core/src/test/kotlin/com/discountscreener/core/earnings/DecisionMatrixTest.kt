@@ -246,40 +246,56 @@ class DecisionMatrixTest {
     }
 
     @Test
-    fun a_hold_with_revenue_a_sd_below_the_trail_is_cut_in_half() {
-        assertEquals(
-            5_000,
-            decisionOf(pre(price = 3_500L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
-                .positionSizeBps,
-        )
+    fun a_hold_below_a_flat_trail_is_cut_in_half() {
+        assertEquals(5_000, decisionOf(flatMiss()).positionSizeBps)
     }
 
     @Test
     fun a_revenue_cut_on_hold_sets_the_override_flag() {
+        assertEquals(true, decisionOf(flatMiss()).sectorOverrideApplied)
+    }
+
+    @Test
+    fun a_revenue_cut_keeps_the_cheap_normal_cell() {
+        assertEquals(DecisionCell.CheapNormalRisk, decisionOf(flatMiss()).cell)
+    }
+
+    @Test
+    fun a_shortfall_equal_to_one_mad_does_not_cut() {
         assertEquals(
-            true,
-            decisionOf(pre(price = 3_500L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
-                .sectorOverrideApplied,
+            EventAction.Hold,
+            decisionOf(
+                pre(price = 3_500L, ratio = 10_000).copy(
+                    revenueTrailLatestCents = 80L,
+                    revenueTrailMedianCents = 100L,
+                    revenueTrailScaleCents = 20L,
+                ),
+            ).action,
         )
     }
 
     @Test
-    fun an_expensive_cut_never_wears_the_revenue_flag() {
-        assertEquals(
-            false,
-            decisionOf(pre(price = 5_000L, ratio = 10_000).copy(revenueTrailShortfallZBps = 20_000))
-                .sectorOverrideApplied,
-        )
+    fun an_expensive_name_never_wears_the_revenue_flag() {
+        assertEquals(false, decisionOf(flatMiss(price = 5_000L)).sectorOverrideApplied)
     }
 
     @Test
     fun a_high_risk_hedge_never_wears_the_revenue_flag() {
         assertEquals(
             false,
-            decisionOf(pre(price = 3_500L, ratio = 15_000, spread = 80).copy(revenueTrailShortfallZBps = 20_000))
-                .sectorOverrideApplied,
+            decisionOf(flatMiss(price = 3_500L, ratio = 15_000, spread = 80)).sectorOverrideApplied,
         )
     }
+
+    private fun flatMiss(
+        price: Long = 3_500L,
+        ratio: Int? = 10_000,
+        spread: Int? = null,
+    ) = pre(price = price, ratio = ratio, spread = spread).copy(
+        revenueTrailLatestCents = 50L,
+        revenueTrailMedianCents = 100L,
+        revenueTrailScaleCents = 0L,
+    )
 
     private fun stale(quote: Int?) =
         pre(price = 3_500L, ratio = 15_000).copy(quoteSpreadBps = quote)

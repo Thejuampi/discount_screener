@@ -1,5 +1,6 @@
 package com.discountscreener.core.earnings
 
+import com.discountscreener.core.math.isForeignTo
 import java.time.LocalDate
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -49,13 +50,20 @@ fun joinSueWithReturns(
 fun fitSurpriseRegression(obs: List<SurpriseObservation>): SurpriseFit {
     var minN = EarningsGatePolicy.current.minSueQuarters
     if (obs.size < minN) return SurpriseFit.Unavailable("short_history")
-    var symmetric = slopeFit(obs)
-    var cvSymmetric = loocv(obs, asymmetric = false)
-    var cvAsymmetric = loocv(obs, asymmetric = true)
+    var sues = obs.map { it.sueBps.toDouble() }
+    var ars = obs.map { it.abnormalReturnBps.toDouble() }
+    var kept = obs.filter {
+        !isForeignTo(it.sueBps.toDouble(), sues) &&
+            !isForeignTo(it.abnormalReturnBps.toDouble(), ars)
+    }
+    if (kept.size < minN) return SurpriseFit.Unavailable("short_history")
+    var symmetric = slopeFit(kept)
+    var cvSymmetric = loocv(kept, asymmetric = false)
+    var cvAsymmetric = loocv(kept, asymmetric = true)
     var asymmetric = cvAsymmetric < cvSymmetric
-    var chosen = if (asymmetric) slopeFit(obs, asymmetric = true) else symmetric
+    var chosen = if (asymmetric) slopeFit(kept, asymmetric = true) else symmetric
     return SurpriseFit.Ready(
-        n = obs.size,
+        n = kept.size,
         interceptBps = chosen.intercept.roundToInt(),
         sueSlopeArBps = chosen.slope.roundToInt(),
         asymmetric = asymmetric,

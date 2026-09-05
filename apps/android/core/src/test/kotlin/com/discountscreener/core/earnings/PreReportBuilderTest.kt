@@ -176,7 +176,7 @@ class PreReportBuilderTest {
                 )
             },
         )
-        assertEquals(20_000, block.revenueTrailShortfallZBps)
+        assertEquals(0L, block.revenueTrailScaleCents)
     }
 
     @Test

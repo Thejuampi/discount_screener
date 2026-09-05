@@ -19,8 +19,11 @@ class AlphaVantageEarningsClient(
     private val keyFile: File,
     private val budgetFile: File,
     private val now: () -> Long = { System.currentTimeMillis() / 1_000 },
+    private val nap: (Long) -> Unit = { seconds -> Thread.sleep(seconds * 1_000L) },
     private val httpClient: OkHttpClient = defaultHttpClient(),
 ) {
+    private val budgetLock = Any()
+
     fun saveKey(key: String) {
         keyFile.parentFile?.mkdirs()
         var trimmed = key.trim()
@@ -29,6 +32,11 @@ class AlphaVantageEarningsClient(
         } else {
             keyFile.writeText(trimmed)
         }
+    }
+
+    fun hasKey(): Boolean {
+        var key = keyFile.takeIf { it.isFile }?.readText()?.trim().orEmpty()
+        return key.isNotEmpty()
     }
 
     fun quarters(symbol: String): List<SueQuarter> {
@@ -61,16 +69,33 @@ class AlphaVantageEarningsClient(
 
     private fun fetch(functions: List<String>, symbol: String, key: String): Map<String, String> {
         if (functions.isEmpty()) return emptyMap()
-        var admitted = admitAlphaVantageCall(readBudget(), now(), count = functions.size) ?: return emptyMap()
-        writeBudget(admitted)
-        return functions.mapNotNull { function ->
+        var out = LinkedHashMap<String, String>()
+        functions.forEachIndexed { index, function ->
+            if (index > 0) {
+                var gap = gapSeconds()
+                if (gap > 0L) nap(gap)
+            }
+            if (!takeSlot()) return@forEachIndexed
             var body = runCatching {
                 httpGet("https://www.alphavantage.co/query?function=$function&symbol=$symbol&apikey=$key")
-            }.getOrNull() ?: return@mapNotNull null
-            if (alphaVantageRefusal(body) != null) return@mapNotNull null
+            }.getOrNull() ?: return@forEachIndexed
+            if (alphaVantageRefusal(body) != null) return@forEachIndexed
             writeCache(function, symbol, body)
-            function to body
-        }.toMap()
+            out[function] = body
+        }
+        return out
+    }
+
+    private fun gapSeconds(): Long {
+        var perMinute = EarningsGatePolicy.current.avPerMinute
+        return if (perMinute <= 0) 0L else 60L / perMinute
+    }
+
+    private fun takeSlot(): Boolean = synchronized(budgetLock) {
+        var budget = readBudget() ?: return false
+        var admitted = admitAlphaVantageCall(budget, now(), count = 1) ?: return false
+        writeBudget(admitted)
+        true
     }
 
     private fun writeCache(function: String, symbol: String, body: String) {
@@ -87,10 +112,10 @@ class AlphaVantageEarningsClient(
     private fun cacheFile(function: String, symbol: String) =
         File(cacheDir, "${symbol.uppercase()}-$function.json")
 
-    private fun readBudget(): AlphaVantageBudget {
+    private fun readBudget(): AlphaVantageBudget? {
         if (!budgetFile.isFile) return AlphaVantageBudget()
         return runCatching { Json.decodeFromString(AlphaVantageBudget.serializer(), budgetFile.readText()) }
-            .getOrDefault(AlphaVantageBudget())
+            .getOrNull()
     }
 
     private fun writeBudget(budget: AlphaVantageBudget) {
