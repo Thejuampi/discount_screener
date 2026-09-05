@@ -1,5 +1,5 @@
 {
-  "last": "warn-copy",
+  "last": "earnings-okhttp",
   "nodes": [
     {"id": "yahoo-interest", "label": "Find if Yahoo sends interest under another timeseries key", "score": 0.85, "status": "taken", "next": ["issuer-yield", "sec-interest"]},
     {"id": "issuer-yield", "label": "Attach issuer market yield when Yahoo interest is empty", "score": 0.7, "status": "taken", "next": ["no-coupon-names"]},
@@ -20,6 +20,11 @@
     {"id": "csv-confirm", "label": "Warn then confirm; no silent snapshot upsert", "score": 0.9, "status": "taken", "next": ["full-image"]},
     {"id": "csv-merge", "label": "Chase 90-day blotter merges after book as-of; never from zero", "score": 0.9, "status": "taken", "next": []},
     {"id": "full-image", "label": "Holdings snapshot is the full book; delete omitted lots", "score": 0.95, "status": "taken", "next": ["warn-copy"]},
-    {"id": "warn-copy", "label": "Warning names load count, remove count, and omitted symbols", "score": 0.7, "status": "taken", "next": []}
+    {"id": "warn-copy", "label": "Warning names load count, remove count, and omitted symbols", "score": 0.7, "status": "taken", "next": ["earnings-yaml"]},
+    {"id": "earnings-yaml", "label": "Gate knobs live in earnings-gate-policy.yaml", "score": 0.9, "status": "taken", "next": ["earnings-sue-diag"]},
+    {"id": "earnings-sue-diag", "label": "AV 16-20q SUE is diagnostic, cell stays implied-move", "score": 0.88, "status": "taken", "next": ["earnings-revenue-44"]},
+    {"id": "earnings-revenue-44", "label": "4.4 override uses own revenue trail", "score": 0.86, "status": "taken", "next": ["earnings-docs"]},
+    {"id": "earnings-docs", "label": "match docs to live earnings gate", "score": 0.95, "status": "taken", "next": ["earnings-okhttp"]},
+    {"id": "earnings-okhttp", "label": "AlphaVantage takes OkHttpClient ctor param", "score": 0.88, "status": "taken", "next": []}
   ]
 }

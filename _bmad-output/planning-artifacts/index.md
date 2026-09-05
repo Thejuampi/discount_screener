@@ -35,7 +35,7 @@ Use this index to choose the right planning document without loading the full BM
 
 ## Pre-Earnings Risk Gate
 
-- [PRD — Pre-Earnings Risk Gate](prd-pre-earnings-risk-gate-2026-08-27.md) - implied move, SUE regression, risk score, and a decision matrix that keeps event risk apart from the DCF. Built and running on Android: the chain and the consensus both come from Yahoo, the report date from the EDGAR 8-K. Section 13 holds what exists; the 16-20 quarter regression of section 4.2 waits on the log filling up.
+- [PRD — Pre-Earnings Risk Gate](prd-pre-earnings-risk-gate-2026-08-27.md) - implied move, SUE diagnostic, risk score, and a decision matrix that keeps event risk apart from the DCF. Built and running on Android: chain and consensus from Yahoo, report date from the EDGAR 8-K, 16–20 quarter SUE from Alpha Vantage. The slope prints on the card. The cell still uses implied-move / median |AR|. Section 13 holds what exists. Knobs: `shared/contracts/earnings-gate-policy.yaml`.
 - [SPEC — Reading the earnings log by ticker](../specs/spec-earnings-log-by-ticker/SPEC.md) - the ticker search on the Earnings tab and the earnings section in a ticker's detail. Companion `reading-surfaces.md` holds the per-surface detail. Derives from section 4.7 of the PRD.
 
 ## Proposed Feature: Company Performance Lens

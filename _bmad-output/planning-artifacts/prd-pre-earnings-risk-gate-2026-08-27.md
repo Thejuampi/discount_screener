@@ -209,7 +209,12 @@ Faltaba en esa fecha y ya se construyó (ver §13):
 
 Sigue sin existir:
 - **Arnés de paper trading** (§6).
-- **Regresión de §4.2.** Espera a que la bitácora junte 16–20 trimestres.
+- **SUE en la celda de la matriz** (§4.2). El diagnóstico OLS ya corre con 16 trimestres de Alpha Vantage. La celda sigue en implied-move / mediana |AR| hasta que Juan lo pida.
+
+Ya existe (2026-09-05), ver §13:
+- **Knobs** en `shared/contracts/earnings-gate-policy.yaml`.
+- **Pendiente SUE** (`SurpriseRegression`) como diagnóstico en la tarjeta.
+- **Override §4.4** sobre el trail de revenue propio (últimos 4 trimestres Yahoo).
 
 ## 11. Lo que falta de verdad, y cómo se consigue
 
@@ -224,13 +229,13 @@ Ninguna pieza del módulo está bloqueada por dinero. Lo único que no se compra
 | Retorno de mercado y beta ex-evento | Serie de precios de un índice por el mismo endpoint de chart que ya se usa. | Gratis |
 | **Fechas exactas de reportes pasados** | EDGAR: el 8-K con item 2.02 es el anuncio de resultados, fechado por la propia empresa. La marca de aceptación dice si salió antes de la apertura o después del cierre. AVGO da 20 trimestres. | Gratis, mismo host que el proveedor SEC que ya usa la app |
 | **Historia de implied move** | **No se backfillea gratis.** O se compra (ORATS y similares venden cadenas históricas), o se empieza a capturar hoy, un registro por evento. | Compra, o dos años de espera |
-| **Historia de consenso más allá de 4 trimestres** | Misma respuesta: capturar desde hoy, o comprar. | Compra, o espera |
+| **Historia de consenso más allá de 4 trimestres** | Alpha Vantage `EARNINGS` + `EARNINGS_ESTIMATES` (clave gratis, 25 llamadas/día). Yahoo sigue en 4. | Gratis, clave local |
 
 ### Qué implica esto para el orden de trabajo
 
 El log de eventos (§7) deja de ser el último paso y pasa a ser el primero. Es la única pieza que empieza a pagar el día que se escribe: cada reporte que pasa sin log es un evento que no vuelve. Con el log corriendo, la historia se acumula sola mientras se construye el resto.
 
-Con la historia que existe hoy (4 trimestres de `earningsHistory`) no se puede correr la regresión de §4.2, que pide 16–20 trimestres. El 8-K de EDGAR sí llega: da 20 trimestres de fechas exactas, y con las series de precio eso alcanza para la regresión y para el denominador de §4.3.
+Con cuatro trimestres de `earningsHistory` no alcanza para la regresión de §4.2. Alpha Vantage `EARNINGS` + `EARNINGS_ESTIMATES` sí da 16–20 trimestres. El diagnóstico OLS ya corre. La pendiente no mueve la celda hasta que Juan lo pida. El 8-K de EDGAR da las fechas exactas y, con las series de precio, el denominador de §4.3.
 
 El denominador de §4.3 sale de ahí desde la primera pasada. Antes salía solo de la bitácora propia, y en una instalación nueva la bitácora está vacía: cada tarjeta decía `Undecided` hasta que la app viera pasar sus propios reportes, o sea años. Ahora la bitácora acumula el implied move, que EDGAR no tiene, y EDGAR aporta las fechas, que la bitácora todavía no juntó.
 
@@ -255,7 +260,7 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `PreReportBuilder.kt` | Arma el bloque pre-reporte y el ratio de riesgo. `reportTimingOf` decide antes/después de la campana en hora de Nueva York. | 4.3, 7 |
 | `EarningsEventLog.kt` | Bitácora JSONL, solo agrega. La última copia gana; las líneas dañadas se cuentan. | 7 |
 | `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal descontando beta × mercado. Al liquidar también escribe el EPS y el revenue reales del trimestre, con sus dos sorpresas. | 4.2, 7 |
-| `DecisionMatrix.kt` | Clasifica el riesgo (>1.3 alto, <0.8 bajo), resuelve la celda de la matriz con el precio contra el DCF (barato ≤ 0.9×) y aplica el tope de costo de cobertura. | 4.3, 4.5, 4.6 |
+| `DecisionMatrix.kt` | Clasifica el riesgo (alto / bajo desde YAML), resuelve la celda con el precio contra el DCF y aplica el tope de cobertura. Low usa la columna Normal. | 4.3, 4.5, 4.6 |
 | `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
 | `MarketBeta.kt` | Estima cuánto del movimiento diario del ticker explica el índice, excluyendo los días de reporte y el día de cada lado. Bajo 60 días pareados no devuelve nada, y el retorno anormal vuelve a la resta uno a uno. | 4.2, 4.3 |
 | `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
@@ -263,10 +268,14 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `ReportedQuarter.kt` | Lee los trimestres que la empresa ya reportó: EPS real, el estimado contra el que se lo midió, y el revenue del mismo trimestre. Une `earningsHistory` con `incomeStatementHistoryQuarterly` por fecha de cierre. | 4.2, 7 |
 | `SurpriseScore.kt` | Puntúa la sorpresa en unidades de dispersión de los analistas, y la sorpresa de revenue contra el consenso guardado antes del reporte. | 4.2, 7 |
 | `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
+| `EarningsGatePolicy.kt` | Lee `earnings-gate-policy.yaml`. Un libro. Cero literales duplicados en Kotlin. | 4.3, 4.4, 4.5, 4.6 |
+| `AlphaVantageEarnings.kt` | Une `EARNINGS` + `EARNINGS_ESTIMATES` en `SueQuarter`. n < 16 rechaza el ajuste. | 4.2 |
+| `SurpriseRegression.kt` | OLS: y = AR bps, x = SUE/10000. La pendiente es diagnóstico. No mueve la celda. | 4.2 |
+| `RevenueTrail.kt` | Últimos 4 revenues Yahoo. Mediana como centro, SD de la muestra como escala. Hold barato+normal a mitad de tamaño si el último print cae más de 1 SD bajo esa mediana. | 4.4 |
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
-Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del grabador, 11 de los endpoints, 34 del presentador y 14 de la pantalla. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
+Cobertura: el paquete `earnings` de `:core` más el grabador, los endpoints, el presentador y la pantalla en `:app`. Wave 0/1-A/4.4 suma pruebas de policy, SUE, revenue trail y el cliente Alpha Vantage. Cada bloque se verificó por mutación — se rompió la lógica a propósito y se confirmó que las pruebas se ponen en rojo.
 
 ### Cableado en la app
 
@@ -274,11 +283,13 @@ Cobertura: 240 pruebas en el paquete `earnings` de `:core`; en `:app`, 37 del gr
 |---|---|
 | `YahooFinanceClient.fetchOptionChain` | Pega a `/v7/finance/options/{symbol}`. Sin fecha lista los vencimientos; con `date` trae la escalera. |
 | `YahooFinanceClient.fetchConsensus` | Lee `earningsTrend`, que ahora viaja en `QUOTE_SUMMARY_MODULES`. Cero módulos nuevos en el pedido. |
-| `EarningsEventRecorder` | Toma las filas del refresh, filtra las que reportan dentro de 10 días, baja la cadena y escribe el bloque ya decidido. Antes de capturar, liquida los reportes que ya pasaron (1 a 30 días) contra SPY. Lee la bitácora una vez por pasada. |
+| `EarningsEventRecorder` | Toma las filas del refresh, filtra las que reportan dentro de 10 días, baja la cadena y escribe el bloque ya decidido. Antes de capturar, liquida los reportes que ya pasaron (1 a 30 días) contra SPY. Lee la bitácora una vez por pasada. Une SUE de Alpha Vantage con AR de EDGAR y escribe `surpriseFitN` / `sueSlopeArBps`. Pasa los revenues Yahoo a `preReportOf` para el override §4.4. |
 | `YahooFinanceClient.fetchReportedQuarters` | Pide `earningsHistory` e `incomeStatementHistoryQuarterly` en su propio par de módulos. Solo un evento que liquida los necesita: meterlos en `QUOTE_SUMMARY_MODULES` haría que cada símbolo de cada refresh cargue un estado de resultados trimestral que nunca lee. |
 | `SecEdgarTimeseriesProvider.earningsAnnouncements` | Pide `data.sec.gov/submissions/CIK##########.json` por el mismo gobernador de pedidos y el mismo caché en disco que el resto de SEC. Un solo cliente por host: dos habrían inventado su propio límite. |
 | `DefaultDashboardRepository.finishRefresh` | Llama al grabador al lado de `journalScores`, con la misma política: los fallos se loguean y se descartan. |
-| `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. |
+| `DiscountScreenerAppContainer` | Arma el grabador con `filesDir/earnings/events.jsonl`. No `cacheDir`: el sistema borra el caché primero y esta es la única cosa de la app que no se puede volver a bajar. Arma `AlphaVantageEarningsClient` con `filesDir/earnings/alphavantage.key` y caché bajo `cacheDir/alphavantage`. |
+| `AlphaVantageEarningsClient` | Toma `OkHttpClient` como parámetro. Governor 25/día y hueco de 12 s. Caché fresco 7 días. Un presupuesto gastado cae al caché viejo. La clave nunca entra a git. |
+| `SaveAlphaVantageKeyUseCase` | El campo Password de la pestaña Earnings guarda o borra la clave. |
 | `EarningsEventRecorder.refreshStaleDates` | Antes de precisar nada, pide a Yahoo la fecha del próximo reporte de los símbolos cuya fecha venció o falta: doce por pasada, rotando con un cursor guardado al lado de la bitácora. La respuesta se guarda con la hora en que se preguntó, así un símbolo sin fecha futura no vuelve a la cola hasta el día siguiente. |
 | `EventSettlement.settlementOf` | Cierra el evento el día del 8-K con ítem 2.02, y toma de ahí también la hora. Si la empresa tiene archivos en EDGAR y ninguno cae a menos de siete días de la fecha del calendario, no cierra: una reacción leída en un día sin reporte entra a la mediana que denomina todos los ratios de riesgo siguientes. El día usado queda escrito en `PostReport.reportedOnEpochDay` y la tarjeta lo muestra cuando difiere del calendario. |
 | `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
@@ -310,7 +321,7 @@ Pestaña **Earnings** en el dashboard.
 | Pieza | Dónde |
 |---|---|
 | `EarningsGatePresentation.kt` | `presentEarningsGate` parte la bitácora en "reportan pronto" y "ya reportaron", y traduce bps a porcentajes, ratios y tamaños. |
-| `EarningsGateScreen.kt` | Una tarjeta por evento: celda de la matriz, movimiento implícito, historia propia del ticker, ratio, precio contra DCF, acción, tamaño, cobertura y lo que la cobertura cuesta. El reporte ya liquidado muestra el movimiento que el índice no explica. |
+| `EarningsGateScreen.kt` | Una tarjeta por evento: celda de la matriz, movimiento implícito, historia propia del ticker, ratio, precio contra DCF, acción, tamaño, cobertura y lo que la cobertura cuesta. El reporte ya liquidado muestra el movimiento que el índice no explica. La tarjeta nombra el ajuste SUE y el corte de revenue. El campo Password guarda la clave de Alpha Vantage. |
 | `DashboardRepository.earningsEvents` | Lee la bitácora y presenta. Los fallos se loguean y devuelven vacío. |
 | `GetEarningsEventsUseCase` | La pestaña carga al abrirse, como Estimates y Discovery. |
 
@@ -369,4 +380,4 @@ En la celda "barato + riesgo alto":
 
 Las dos superficies solo leen. Abrir un detalle o tipear en el filtro no baja una cadena ni dispara una captura: el worker conserva su única pasada en rueda.
 
-**Falta:** la regresión de §4.2 espera a que la bitácora junte 16–20 trimestres.
+**Falta:** la pendiente SUE no mueve la celda hasta que Juan lo pida. El paper trading (§6) espera cadenas capturadas.
