@@ -183,6 +183,21 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun a_failed_earnings_read_tells_the_reader() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        repository.earningsEventsError = IllegalStateException("log unreadable")
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Earnings))
+        advanceUntilIdle()
+
+        assertEquals(
+            "Earnings gate failed: log unreadable",
+            viewModel.state.value.earningsGateNotice,
+        )
+    }
+
+    @Test
     fun asking_to_back_up_the_log_offers_the_text_for_a_file() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository()
         repository.earningsLogBackupText = "a report on a line"
@@ -1631,11 +1646,13 @@ class DashboardViewModelTest {
 
         var earningsGate: EarningsGateUi = EarningsGateUi()
         var earningsEventsCallCount = 0
+        var earningsEventsError: Throwable? = null
 
         override suspend fun earningsCandidateRows(): List<OpportunityListRow> = emptyList()
 
         override suspend fun earningsEvents(): EarningsGateUi {
             earningsEventsCallCount++
+            earningsEventsError?.let { throw it }
             return earningsGate
         }
 

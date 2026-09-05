@@ -160,6 +160,19 @@ class PreReportBuilderTest {
         assertEquals(701, full().eventImpliedMoveBps)
     }
 
+    @Test
+    fun the_forward_is_the_chain_underlying_when_the_spot_has_moved() {
+        var block = preReportOf(
+            symbol = "LVS",
+            reportDate = LocalDate.of(2026, 8, 26),
+            timing = ReportTiming.AfterClose,
+            priceCents = 10_000L,
+            chain = chain,
+        )
+
+        assertEquals(701, block.impliedMoveBps)
+    }
+
     private fun withHistory(): PreReport = preReportOf(
         symbol = "LVS",
         reportDate = LocalDate.of(2026, 8, 26),

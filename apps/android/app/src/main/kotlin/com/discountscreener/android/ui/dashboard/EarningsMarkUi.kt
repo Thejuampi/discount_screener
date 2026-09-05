@@ -1,6 +1,7 @@
 package com.discountscreener.android.ui.dashboard
 
 import com.discountscreener.core.earnings.CAPTURE_WINDOW_DAYS
+import com.discountscreener.core.earnings.EXCHANGE_ZONE
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -64,7 +65,7 @@ private val EARNINGS_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPatter
 internal fun earningsGateAbsence(
     nextEarningsEpoch: Long?,
     nowEpochSeconds: Long,
-    zone: ZoneId = ZoneId.systemDefault(),
+    zone: ZoneId = EXCHANGE_ZONE,
 ): String {
     var epoch = nextEarningsEpoch ?: return NO_DATE_YET
     var today = Instant.ofEpochSecond(nowEpochSeconds).atZone(zone).toLocalDate()

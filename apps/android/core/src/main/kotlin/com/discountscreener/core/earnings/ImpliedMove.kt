@@ -46,5 +46,14 @@ internal fun midOf(quote: OptionQuote): Double? {
     return (quote.bid + quote.ask) / 2.0
 }
 
-fun expiryAfterReport(expiries: List<LocalDate>, reportDate: LocalDate): LocalDate? =
-    expiries.filter { it.isAfter(reportDate) }.minOrNull()
+fun expiryAfterReport(
+    expiries: List<LocalDate>,
+    reportDate: LocalDate,
+    timing: ReportTiming = ReportTiming.AfterClose,
+): LocalDate? =
+    expiries.filter { expiry ->
+        when (timing) {
+            ReportTiming.BeforeOpen -> !expiry.isBefore(reportDate)
+            else -> expiry.isAfter(reportDate)
+        }
+    }.minOrNull()

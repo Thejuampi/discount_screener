@@ -555,7 +555,10 @@ class DashboardViewModel(
                 throw error
             } catch (error: Throwable) {
                 earningsGateLoaded = false
-                _state.value = _state.value.copy(earningsGate = EarningsGateUi())
+                _state.value = _state.value.copy(
+                    earningsGate = EarningsGateUi(),
+                    earningsGateNotice = "Earnings gate failed: ${error.message ?: "unknown error"}",
+                )
             } finally {
                 _state.value = _state.value.copy(earningsGateLoading = false)
             }

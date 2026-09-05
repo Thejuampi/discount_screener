@@ -20,6 +20,7 @@ fun eventRiskOf(riskRatioBps: Int?): EventRisk = when {
 fun priceToFairBps(pre: PreReport): Int? {
     var fair = pre.dcfFairValueCents ?: return null
     if (fair <= 0L) return null
+    if (pre.priceCents <= 0L) return null
     return (pre.priceCents * 10_000.0 / fair).roundToInt()
 }
 

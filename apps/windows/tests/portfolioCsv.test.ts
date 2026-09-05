@@ -189,3 +189,46 @@ test("an empty opened_at takes the earliest blotter buy", () => {
   var amzn = merged.positions.find((row) => row.symbol === "AMZN");
   assert.equal(amzn?.opened_at, "2026-06-02");
 });
+
+test("a cash-only holdings snapshot refuses instead of emptying the book", () => {
+  var plan = planCsvImport(parseAnyCsv([JPM_HEADER, CASH, SWEEP].join("\n")), {
+    lots: [AMZN_LOT],
+    bookAsOf: null,
+  });
+  assert.equal(plan.action === "refuse" ? plan.reason : "", "empty_keep");
+});
+
+test("a file with ticker and unit cost but no quantity is not jpm holdings", () => {
+  var err = "";
+  try {
+    parseAnyCsv("Asset Class,Ticker,Unit Cost,As of,Side,Price\nEquity,AMZN,100,08/31/2026,buy,100\n");
+  } catch (e) {
+    err = e instanceof Error ? e.message : String(e);
+  }
+  assert.match(err, /Columnas faltantes/);
+});
+
+test("a file with ticker and unit cost but no as-of is not jpm holdings", () => {
+  var text = "Asset Class,Ticker,Unit Cost,Quantity,Side,Price\nEquity,AMZN,100,1,buy,100\n";
+  assert.equal(parseAnyCsv(text).format, "genérico");
+});
+
+test("a sell larger than the lot is skipped", () => {
+  var merged = mergeTradesOntoLots({
+    lots: [AMZN_LOT],
+    trades: [{ symbol: "AMZN", side: "sell", quantity: 11, price: 220, date: "2026-09-01" }],
+    bookAsOf: "2026-08-31",
+  });
+  assert.equal(merged.skipped, 1);
+});
+
+test("a trades window that closes a lot lists it for removal", () => {
+  var plan = planCsvImport(parseAnyCsv(chaseSample()), {
+    lots: [
+      { symbol: "AXON", quantity: 4, avg_cost_cents: 43600, opened_at: "2024-01-01" },
+      AMZN_LOT,
+    ],
+    bookAsOf: "2026-08-15",
+  });
+  assert.deepEqual(plan.action === "confirm_trades_merge" ? plan.remove : [], ["AXON"]);
+});

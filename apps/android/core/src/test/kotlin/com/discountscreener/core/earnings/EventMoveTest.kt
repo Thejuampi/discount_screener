@@ -40,6 +40,14 @@ class EventMoveTest {
     }
 
     @Test
+    fun a_close_of_zero_after_the_move_never_enters_the_quiet_day() {
+        var closes = series(21, stepBps = 100).toMutableList()
+        closes[closes.lastIndex] = closes.last().copy(closeCents = 0L)
+
+        assertNull(normalDailyMoveBps(closes))
+    }
+
+    @Test
     fun a_move_priced_to_the_day_of_the_report_is_all_event() {
         assertEquals(700, eventMoveBps(totalMoveBps = 700, normalDailyBps = 120, tradingDaysToExpiry = 1))
     }

@@ -724,6 +724,10 @@ const T: Record<string, { es: string; en: string }> = {
     es: "No hay fecha as-of del libro. Importá el snapshot de posiciones primero.",
     en: "The book has no as-of date. Import the holdings snapshot first.",
   },
+  "advisor.csv.refuseEmptyKeep": {
+    es: "El snapshot no deja ninguna posición. La app no vacía el libro.",
+    en: "The snapshot keeps no positions. The app does not empty the book.",
+  },
   "advisor.col.position":       { es: "Posición", en: "Position" },
   "advisor.col.qty":            { es: "Cant.", en: "Qty" },
   "advisor.col.avgCost":        { es: "Costo", en: "Cost" },

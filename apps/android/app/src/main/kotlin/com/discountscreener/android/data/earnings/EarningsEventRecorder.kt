@@ -16,7 +16,9 @@ import com.discountscreener.core.earnings.OptionChainSnapshot
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
 import com.discountscreener.core.earnings.decisionOf
+import com.discountscreener.core.earnings.EXCHANGE_ZONE
 import com.discountscreener.core.earnings.expiryAfterReport
+import com.discountscreener.core.earnings.isQuoteStale
 import com.discountscreener.core.earnings.marketBetaExcludingEvents
 import com.discountscreener.core.earnings.normalDailyMoveBps
 import com.discountscreener.core.earnings.pastAbnormalReturnsOf
@@ -80,10 +82,10 @@ class EarningsEventRecorder(
      * report leaves the capture window.
      */
     suspend fun capture(rows: List<OpportunityListRow>): Int {
-        var today = Instant.ofEpochSecond(nowProvider()).atZone(ZoneOffset.UTC).toLocalDate()
+        var today = Instant.ofEpochSecond(nowProvider()).atZone(EXCHANGE_ZONE).toLocalDate()
         var stored = settleDueEvents(log.read().events, today)
         var priced = stored
-            .filter { it.pre.impliedMoveBps != null }
+            .filter { it.pre.impliedMoveBps != null && !isQuoteStale(it.pre) }
             .mapTo(HashSet()) { it.pre.symbol to it.pre.reportEpochDay }
         var reactions = stored
             .mapNotNull { record -> record.post?.abnormalReturnBps?.let { record.pre.symbol to it } }
@@ -231,7 +233,7 @@ class EarningsEventRecorder(
         today: LocalDate,
     ) {
         var expiries = chains.chain(row.symbol, null)?.expiries.orEmpty()
-        var expiry = expiryAfterReport(expiries, reportDate)
+        var expiry = expiryAfterReport(expiries, reportDate, timing)
         var chain = expiry?.let {
             chains.chain(row.symbol, it.atStartOfDay(ZoneOffset.UTC).toEpochSecond())
         }

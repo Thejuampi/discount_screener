@@ -378,8 +378,9 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
         bookAsOf: localStorage.getItem(BOOK_AS_OF_STORAGE_KEY),
       });
       if (plan.action === "refuse") {
-        var refuseKey = plan.reason === "trades_without_book"
-          ? "advisor.csv.refuseNoBook"
+        var refuseKey =
+          plan.reason === "trades_without_book" ? "advisor.csv.refuseNoBook"
+          : plan.reason === "empty_keep" ? "advisor.csv.refuseEmptyKeep"
           : "advisor.csv.refuseNoAsOf";
         setCsvMsg(`⚠ ${t(refuseKey)}`);
         setTimeout(() => setCsvMsg(null), 8000);
@@ -407,6 +408,10 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
         return;
       }
       if (plan.action === "confirm_trades_merge") {
+        for (var symbol of plan.remove) {
+          var match = positions.find((p) => p.symbol === symbol);
+          if (match) await api.portfolioDelete(match.id);
+        }
         await applyCsvPositions(plan.format, plan.positions, plan.ignored, plan.asOf, false);
       }
     } catch (e) {
@@ -634,7 +639,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                   })
                 : t("advisor.csv.warnTrades", { asOf: csvPending.asOf })}
             </div>
-            {csvPending.action === "confirm_holdings_replace" && csvPending.remove.length > 0 && (
+            {csvPending.remove.length > 0 && (
               <div style={{ marginTop: 6, fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
                 {t("advisor.csv.warnHoldingsRemove", { names: csvPending.remove.join(", ") })}
               </div>

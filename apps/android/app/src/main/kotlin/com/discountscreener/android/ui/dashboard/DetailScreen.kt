@@ -867,11 +867,11 @@ private fun SnapshotContent(
                 )
             }
             items(earningsEvents, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
-        } else if (!earningsLoading && scoreRow != null) {
+        } else if (!earningsLoading) {
             item {
                 Text(
                     text = earningsGateAbsence(
-                        scoreRow.nextEarningsEpoch,
+                        scoreRow?.nextEarningsEpoch,
                         System.currentTimeMillis() / 1_000L,
                     ),
                     style = MaterialTheme.typography.labelSmall,

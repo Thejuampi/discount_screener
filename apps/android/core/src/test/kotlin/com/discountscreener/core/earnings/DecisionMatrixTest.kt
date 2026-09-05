@@ -123,6 +123,11 @@ class DecisionMatrixTest {
     }
 
     @Test
+    fun a_halted_price_never_counts_as_cheap() {
+        assertEquals(null, priceToFairBps(pre(price = 0L, ratio = 10_000)))
+    }
+
+    @Test
     fun the_justification_names_the_multiple_the_market_is_paying() {
         assertTrue(decisionOf(pre(price = 3_500L, ratio = 15_000)).justification.contains("1.50x"))
     }

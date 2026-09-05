@@ -4563,6 +4563,7 @@ class DefaultDashboardRepository(
             symbol = symbol,
         )
         if (isClassificationRefuse(businessClass)) {
+            putDcfAnalysisLocked(symbol, terminalClassificationAnalysis(businessClass, fund), fund)
             return
         }
         if (businessClass != BusinessClass.FinancialServices) return

@@ -785,4 +785,26 @@ class EarningsEventRecorderTest {
 
         assertEquals(701, log.event("LVS", TODAY.plusDays(3).toEpochDay())?.pre?.impliedMoveBps)
     }
+
+    @Test
+    fun a_wide_quote_is_asked_again_while_the_market_is_open() = runTest {
+        var log = log()
+        var wide = chain.copy(
+            rows = listOf(ChainRow(44.0, OptionQuote(0.1, 10.0), OptionQuote(0.1, 10.0))),
+        )
+        recorder(log, chains = { _, _ -> wide }).capture(listOf(row(earningsIn = 3)))
+
+        recorder(log, chains = { _, _ -> chain }).capture(listOf(row(earningsIn = 3)))
+
+        assertEquals(701, log.event("LVS", TODAY.plusDays(3).toEpochDay())?.pre?.impliedMoveBps)
+    }
+
+    @Test
+    fun a_report_still_on_the_exchange_day_is_priced_after_utc_midnight() = runTest {
+        var log = log()
+
+        recorder(log).capture(listOf(row(earningsIn = -1)))
+
+        assertEquals("LVS", log.read().events.single().pre.symbol)
+    }
 }

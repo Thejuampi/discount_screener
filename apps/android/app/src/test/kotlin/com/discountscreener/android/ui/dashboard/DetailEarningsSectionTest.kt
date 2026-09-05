@@ -119,9 +119,30 @@ class DetailEarningsSectionTest {
         composeRule.onNodeWithTag(DETAIL_EARNINGS_ABSENT).assertIsDisplayed()
     }
 
+    @Test
+    fun the_detail_hides_the_absence_while_the_gate_is_still_loading() {
+        render(emptyList(), earningsLoading = true)
+
+        composeRule.onNodeWithTag(DETAIL_EARNINGS_ABSENT).assertDoesNotExist()
+    }
+
+    @Test
+    fun the_detail_without_a_score_row_still_says_why_it_has_no_event() {
+        render(emptyList(), scoreRow = null)
+
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST)
+            .performScrollToNode(hasTestTag(DETAIL_EARNINGS_ABSENT))
+
+        composeRule.onNodeWithTag(DETAIL_EARNINGS_ABSENT).assertIsDisplayed()
+    }
+
     private fun epochOf(days: Long): Long = TODAY.plusDays(days).atStartOfDay(UTC).toEpochSecond()
 
-    private fun render(events: List<EarningsEventRowUi>) {
+    private fun render(
+        events: List<EarningsEventRowUi>,
+        earningsLoading: Boolean = false,
+        scoreRow: OpportunityListRow? = scoreRow(),
+    ) {
         composeRule.setContent {
             DiscountScreenerTheme {
                 DetailScreen(
@@ -134,8 +155,9 @@ class DetailEarningsSectionTest {
                     charts = emptyMap(),
                     history = emptyList(),
                     alerts = emptyList(),
-                    scoreRow = scoreRow(),
+                    scoreRow = scoreRow,
                     earningsEvents = events,
+                    earningsLoading = earningsLoading,
                     onAction = {},
                 )
             }

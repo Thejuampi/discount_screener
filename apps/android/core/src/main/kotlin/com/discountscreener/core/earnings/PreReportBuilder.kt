@@ -37,7 +37,8 @@ fun preReportOf(
     pastAbnormalReturnsBps: List<Int> = emptyList(),
     normalDailyMoveBps: Int? = null,
 ): PreReport {
-    var forward = priceCents / 100.0
+    var forwardCents = chain?.underlyingPriceCents?.takeIf { it > 0L } ?: priceCents
+    var forward = forwardCents / 100.0
     var move: ImpliedMove? = chain?.let { impliedMove(it.rows, forward) }
     var hedge = move?.let { hedgeQuoteOf(chain?.rows.orEmpty(), it, forward) }
     var impliedMoveBps = move?.fraction?.let { toBps(it) }
@@ -60,7 +61,7 @@ fun preReportOf(
         normalDailyMoveBps = normalDailyMoveBps,
         quoteSpreadBps = move?.quoteSpreadBps,
         expiryEpochDay = settlementDate?.toEpochDay(),
-        forwardPriceCents = move?.let { priceCents },
+        forwardPriceCents = move?.let { forwardCents },
         strikeCents = move?.strike?.let { toCents(it) },
         medianAbsoluteAbnormalReturnBps = medianAbsolute?.let { it.roundToInt() },
         riskRatioBps = riskRatioBps(eventMove, medianAbsolute),

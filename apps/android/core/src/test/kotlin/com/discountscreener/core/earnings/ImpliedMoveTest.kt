@@ -104,6 +104,20 @@ class ImpliedMoveTest {
         assertNull(expiryAfterReport(expiries, reportDate = LocalDate.of(2026, 8, 26)))
     }
 
+    @Test
+    fun an_expiry_on_the_report_day_covers_a_before_open_report() {
+        var expiries = listOf(LocalDate.of(2026, 8, 26))
+
+        assertEquals(
+            LocalDate.of(2026, 8, 26),
+            expiryAfterReport(
+                expiries,
+                reportDate = LocalDate.of(2026, 8, 26),
+                timing = ReportTiming.BeforeOpen,
+            ),
+        )
+    }
+
     private fun atTheMoney(strike: Double, call: Double, put: Double) = ChainRow(
         strike = strike,
         call = OptionQuote(bid = call - 0.1, ask = call + 0.1),

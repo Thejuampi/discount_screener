@@ -943,4 +943,29 @@ class YahooFinanceClientTest {
             }.buffer()
         }
     }
+
+    @Test
+    fun fetch_symbol_reads_country_from_quote_summary() = runTest {
+        var body = javaClass.classLoader!!.getResource("yahoo/quoteSummary/AAPL.json")!!.readText()
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            var (code, payload, type) = when {
+                url.contains("getcrumb") -> Triple(200, "testcrumb", "text/plain")
+                url.contains("quoteSummary") -> Triple(200, body, "application/json")
+                else -> Triple(200, "<html></html>", "text/html")
+            }
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(code)
+                .message("OK")
+                .body(payload.toResponseBody(type.toMediaType()))
+                .build()
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+
+        assertEquals("United States", client.fetchSymbol("AAPL").fundamentals?.country)
+    }
 }

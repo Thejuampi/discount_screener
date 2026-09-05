@@ -30,7 +30,7 @@ fun parseEarningsAnnouncements(body: String): List<EarningsAnnouncement> {
     if (size == 0) return emptyList()
     var found = ArrayList<EarningsAnnouncement>(size)
     for (index in 0 until size) {
-        if (forms[index] != EARNINGS_FORM) continue
+        if (!isEarningsForm(forms[index])) continue
         if (!carriesResults(items[index])) continue
         var accepted = acceptedAt(stamps.getOrNull(index))
         var date = accepted?.toLocalDate()
@@ -56,6 +56,9 @@ fun pastAbnormalReturnsOf(
         abnormalReturnBps(own, index, beta)
     }
 }
+
+private fun isEarningsForm(form: String): Boolean =
+    form == EARNINGS_FORM || form == "$EARNINGS_FORM/A"
 
 private fun carriesResults(items: String): Boolean =
     items.split(',').any { it.trim() == RESULTS_OF_OPERATIONS_ITEM }

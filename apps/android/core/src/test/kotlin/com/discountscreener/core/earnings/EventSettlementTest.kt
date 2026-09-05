@@ -65,6 +65,13 @@ class EventSettlementTest {
     }
 
     @Test
+    fun a_close_of_zero_after_the_report_refuses_instead_of_a_total_loss() {
+        var broken = stock.map { if (it.date == REPORT.plusDays(1)) it.copy(closeCents = 0L) else it }
+
+        assertNull(settlementOf(pre(ReportTiming.AfterClose), broken, market))
+    }
+
+    @Test
     fun an_epoch_second_reads_back_as_the_exchange_day_it_belongs_to() {
         assertEquals(LocalDate.of(2026, 8, 20), dailyCloseOf(1_787_232_600L, 4_200L).date)
     }

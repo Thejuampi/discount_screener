@@ -24,7 +24,7 @@ fun tradingDaysBetween(from: LocalDate, to: LocalDate): Int {
 fun normalDailyMoveBps(closes: List<DailyClose>): Int? {
     var moves = closes.sortedBy { it.date }
         .zipWithNext()
-        .filter { (before, _) -> before.closeCents > 0L }
+        .filter { (before, after) -> before.closeCents > 0L && after.closeCents > 0L }
         .map { (before, after) -> abs(after.closeCents.toDouble() / before.closeCents - 1.0) * 10_000.0 }
     if (moves.size < MIN_DAILY_SAMPLES) return null
     return medianOf(moves)?.roundToInt()

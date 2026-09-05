@@ -74,6 +74,6 @@ internal fun reactionOf(closes: List<DailyClose>, reportDate: LocalDate, timing:
         ReportTiming.BeforeOpen -> ordered.firstOrNull { it.date >= reportDate }
         else -> ordered.firstOrNull { it.date > reportDate }
     } ?: return null
-    if (reaction.date <= base.date || base.closeCents <= 0L) return null
+    if (reaction.date <= base.date || base.closeCents <= 0L || reaction.closeCents <= 0L) return null
     return ((reaction.closeCents.toDouble() / base.closeCents - 1.0) * 10_000.0).roundToInt()
 }

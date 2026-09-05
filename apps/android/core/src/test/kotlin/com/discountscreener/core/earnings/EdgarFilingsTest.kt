@@ -83,6 +83,11 @@ class EdgarFilingsTest {
     }
 
     @Test
+    fun an_amended_results_filing_still_counts_as_a_report() {
+        assertEquals(1, parseEarningsAnnouncements(amended).size)
+    }
+
+    @Test
     fun a_body_that_is_not_json_refuses() {
         assertTrue(parseEarningsAnnouncements("<html>429 Too Many Requests</html>").isEmpty())
     }
@@ -174,6 +179,11 @@ class EdgarFilingsTest {
         """{"form":["8-K","8-K"],"filingDate":["2026-06-03","2026-06-03"],
         "items":["2.02,9.01","2.02,8.01"],
         "acceptanceDateTime":["2026-06-03T20:21:35.000Z","2026-06-03T21:40:00.000Z"]}""",
+    )
+
+    private val amended = filings(
+        """{"form":["8-K/A"],"filingDate":["2026-06-03"],"items":["2.02,9.01"],
+        "acceptanceDateTime":["2026-06-03T20:21:35.000Z"]}""",
     )
 
     private val submissions: String = fixture("edgar/AVGO-submissions-2026-08-28.json")

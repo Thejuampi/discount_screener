@@ -25,7 +25,7 @@ export interface ParsedCsv {
   asOf: string | null;
 }
 
-export type RefuseReason = "trades_without_book" | "missing_book_as_of";
+export type RefuseReason = "trades_without_book" | "missing_book_as_of" | "empty_keep";
 
 export type ImportPlan =
   | {
@@ -43,6 +43,7 @@ export type ImportPlan =
       kind: "trades_window";
       asOf: string;
       positions: PortfolioLot[];
+      remove: string[];
       applied: number;
       skipped: number;
       ignored: number;
@@ -93,7 +94,15 @@ function detectFormat(lines: string[]): CsvFormatId {
   if (first.includes("action") && first.includes("symbol") && (first.includes("fees & comm") || first.includes("amount"))) {
     return "schwab";
   }
-  if (first.includes("asset class") && first.includes("unit cost") && first.includes("ticker")) return "jpm_holdings";
+  if (
+    first.includes("asset class") &&
+    first.includes("unit cost") &&
+    first.includes("ticker") &&
+    first.includes("quantity") &&
+    first.includes("as of")
+  ) {
+    return "jpm_holdings";
+  }
   if (first.includes("trade date") && first.includes("price usd") && first.includes("type")) return "chase_trades";
   return "generic";
 }
@@ -307,7 +316,6 @@ function parseJpmHoldings(lines: string[]): { txs: CsvTx[]; ignored: number; asO
     var date = iAcq >= 0 ? normalizeUsDate(cols[iAcq] ?? "") : "";
     txs.push({ symbol, side: "buy", quantity, price, date });
   }
-  if (txs.length === 0) throw new Error("Ninguna posición en el CSV de J.P. Morgan");
   return { txs, ignored, asOf };
 }
 
@@ -479,6 +487,9 @@ export function planCsvImport(
   ctx: { lots: PortfolioLot[]; bookAsOf: string | null },
 ): ImportPlan {
   if (parsed.kind === "holdings_snapshot") {
+    if (parsed.txs.length === 0) {
+      return { action: "refuse", reason: "empty_keep", format: parsed.format };
+    }
     var holdings = aggregateToPositions(parsed.txs);
     var keep = new Set(holdings.map((row) => row.symbol));
     var remove = ctx.lots
@@ -507,12 +518,18 @@ export function planCsvImport(
       trades: parsed.txs,
       bookAsOf: ctx.bookAsOf,
     });
+    var mergedKeep = new Set(merged.positions.map((row) => row.symbol));
+    var closed = ctx.lots
+      .map((lot) => lot.symbol)
+      .filter((symbol) => !mergedKeep.has(symbol))
+      .sort();
     return {
       action: "confirm_trades_merge",
       format: parsed.format,
       kind: "trades_window",
       asOf: ctx.bookAsOf,
       positions: merged.positions,
+      remove: closed,
       applied: merged.applied,
       skipped: merged.skipped,
       ignored: parsed.ignored,
