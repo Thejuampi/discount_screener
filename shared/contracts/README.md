@@ -33,6 +33,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
 - `valuation-policy.yaml`:
   single Android engine policy book (`valuation-policy/1`); industry path, DCF bands, coupons, ranking, dip/leftover. Industry beta stays in `industry-beta-policy-v1.json`
+- `earnings-gate-policy.yaml`:
+  Android pre-earnings gate knobs (`earnings-gate-policy/1`); risk cuts, hedge caps, Alpha Vantage budget, SUE floor. Edit this file. Do not put a second copy in Kotlin.
 - `industry-beta-policy-v1.json`:
   versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:

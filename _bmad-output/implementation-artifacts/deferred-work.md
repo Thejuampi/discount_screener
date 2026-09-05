@@ -10,18 +10,20 @@ Closed in this slice:
 - **Weekend stamp** — a shut market still settles past reports. It does not ask the chain and does not stamp capture.
 - **Worker SQLite** — `shutdown()` closes the store.
 - **renameTo cache** — a failed rename copies the bytes onto the target.
+- **Gate knobs** — live in `shared/contracts/earnings-gate-policy.yaml`.
+- **PRD 4.2 SUE diagnostic** — Alpha Vantage `EARNINGS` + `EARNINGS_ESTIMATES` fill 16–20 quarters. The card prints the slope. The cell still uses implied-move / median |AR|.
+- **PRD 4.4 revenue trail** — last four Yahoo revenue prints. Hold cuts to half when the last print sits more than 1 SD below that median. No sector KPI table.
 
 These stay open (need history, or the PRD already locked them):
 
-- **PRD 4.2** — 16–20 settled quarters. The log still uses the history it has. Yahoo consensus history is four quarters. Wait for the log, or buy a history.
-- **PRD 4.4** — `sectorOverrideApplied` stays false. Sector metric has no consensus series yet.
-- **PRD 6** — paper-trading backtest needs 8–12 quarters of captured chains. Those chains cannot be backfilled.
+- **PRD 4.2 cell** — the matrix still ignores SUE. Do not route the cell off the slope until Juan asks.
+- **PRD 4.4** — no sector table. The override uses the ticker's own last four revenue prints. Hold + last print more than 1 SD below that median → half size, flag on.
+- **PRD 6** — paper-trading backtest needs 8–12 quarters of captured chains. `HISTORICAL_OPTIONS` is premium. Those chains cannot be backfilled.
 - **PRD §9** — sector-calibrated bands wait for that paper trading.
 - **Low-as-Normal** — PRD §4.5: low risk uses the normal column.
 - **Calendar 12 lookups/day** — documented cap in PRD §8.
 - **Undecided = Hold full size** — do-nothing encoding. The card names the missing input.
 - **Null put-spread still Hedge** — PRD: a chain that quotes neither spread nor put still asks for the hedge.
-- **Gate knobs** live in Kotlin, not in `shared/contracts`.
 - **quoteSummary 404** recovers from HTML even when `htmlFallback` is false. That recovery stays.
 - **Late 8-K >7 days** stays unset. The confirm window is seven days.
 - **Backup duplicate keys** — `read()` and `backupText()` collapse by key, last line wins. The file on disk stays append-only.
