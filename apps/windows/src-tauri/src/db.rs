@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 
 const SCHEMA: &str = r#"
@@ -3813,6 +3813,69 @@ impl Db {
                 Ok(true)
             }
         }
+    }
+
+    pub fn portfolio_replace(
+        &self,
+        rows: &[(String, f64, i64, Option<String>)],
+    ) -> Result<(usize, usize, usize, usize), String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("portfolio replace begin: {}", e))?;
+        let now = now_secs();
+        let mut created = 0usize;
+        let mut updated = 0usize;
+        let mut skipped = 0usize;
+        let mut keep: Vec<String> = Vec::new();
+        for (symbol, quantity, avg_cost_cents, opened_at) in rows {
+            if symbol.is_empty() || *quantity <= 0.0 || *avg_cost_cents <= 0 {
+                skipped += 1;
+                continue;
+            }
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM portfolio_positions WHERE symbol = ?1 LIMIT 1",
+                    params![symbol],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("portfolio replace lookup: {}", e))?;
+            match existing {
+                Some(id) => {
+                    tx.execute(
+                        "UPDATE portfolio_positions
+                         SET quantity = ?2, avg_cost_cents = ?3, opened_at = ?4, updated_at = ?5
+                         WHERE id = ?1",
+                        params![id, quantity, avg_cost_cents, opened_at, now],
+                    )
+                    .map_err(|e| format!("portfolio replace update: {}", e))?;
+                    updated += 1;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO portfolio_positions
+                         (symbol, quantity, avg_cost_cents, opened_at, notes, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
+                        params![symbol, quantity, avg_cost_cents, opened_at, now],
+                    )
+                    .map_err(|e| format!("portfolio replace insert: {}", e))?;
+                    created += 1;
+                }
+            }
+            keep.push(symbol.clone());
+        }
+        if keep.is_empty() {
+            return Err("holdings replace needs at least one lot".into());
+        }
+        let placeholders = keep.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM portfolio_positions WHERE symbol NOT IN ({placeholders})");
+        let removed = tx
+            .execute(&sql, params_from_iter(keep.iter()))
+            .map_err(|e| format!("portfolio replace delete: {}", e))?;
+        tx.commit()
+            .map_err(|e| format!("portfolio replace commit: {}", e))?;
+        Ok((created, updated, skipped, removed))
     }
 
     pub fn portfolio_delete(&self, id: i64) -> Result<(), String> {

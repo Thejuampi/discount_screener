@@ -33,6 +33,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   business-class classifier and model-selection goldens (FCFF vs residual income); forbids price-multiple hard caps as acceptance; ACGL-class regression notes
 - `valuation-policy.yaml`:
   single Android engine policy book (`valuation-policy/1`); industry path, DCF bands, coupons, ranking, dip/leftover. Industry beta stays in `industry-beta-policy-v1.json`
+- `earnings-gate-policy.yaml`:
+  Android pre-earnings gate knobs (`earnings-gate-policy/1`). Edit this file. Do not put a second copy in Kotlin.
 - `industry-beta-policy-v1.json`:
   versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:
@@ -67,6 +69,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   evidence ledger for nine user-reported QA cases under `business-class-policy/16`. Its market and analyst values are validation metadata and are forbidden from engine inputs
 - `opportunity-v4.json`:
   the arithmetic unique to the `AggressiveV4` opportunity model — the agreement bonus (centre, spread, bonus, beta haircut, composite) and the sector-relative fundamentals rule, with a case for each of the four `SectorBenchmarks` fields and for the share-count term. **Android-only today**, and the one file here whose expected values are *not* a second implementation's output: they were hand-derived from the constants before the Kotlin validator ran, and regenerating any of them from Kotlin would destroy the only independence the contract has. Kotlin: `OpportunityV4ContractTest`
+- `advisor-csv-import-v1.yaml`:
+  Windows Advisor CSV kinds (holdings snapshot vs trades window vs trades ledger), detect order, Chase/J.P. Morgan parse rules, warn-then-confirm, and merge-without-double-count examples
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

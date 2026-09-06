@@ -11,7 +11,6 @@ import com.discountscreener.android.data.remote.ProviderFetchResult
 import com.discountscreener.android.data.remote.QuoteBatchEntry
 import com.discountscreener.android.data.remote.YahooFinanceClient
 import com.discountscreener.android.data.remote.offlineHttpClient
-import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.ExternalValuationSignal
 import com.discountscreener.core.model.FundamentalTimeseries
@@ -21,14 +20,17 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.discountscreener.android.StuckTestWatchdog
 import org.robolectric.RobolectricTestRunner
 import java.io.File
 
@@ -53,6 +55,9 @@ import java.io.File
  */
 @RunWith(RobolectricTestRunner::class)
 class RefreshButtonReplacesRefreshTest {
+    @get:Rule
+    val watchdog = StuckTestWatchdog()
+
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val model = OpportunityScoringModel.Legacy
     private lateinit var store: SQLiteStateStore
@@ -104,15 +109,7 @@ class RefreshButtonReplacesRefreshTest {
     }
 
     private suspend fun awaitSettled(repository: DefaultDashboardRepository) {
-        var deadline = System.currentTimeMillis() + DEADLINE_MILLIS
-        while (true) {
-            var snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
-            if (snapshot.startupPhase == DashboardStartupPhase.Ready && !repository.loadInFlight.value) return
-            if (System.currentTimeMillis() >= deadline) {
-                fail("Timed out waiting for a settled load; last phase=${snapshot.startupPhase}")
-            }
-            delay(POLL_MILLIS)
-        }
+        withTimeout(DEADLINE_MILLIS) { repository.loadInFlight.first { running -> !running } }
     }
 
     private fun deleteFiles() {
@@ -176,12 +173,12 @@ class RefreshButtonReplacesRefreshTest {
         /** The opening refresh plus seven presses of the button, all asked for at once. */
         const val RACERS = 8
         const val CALL_MILLIS = 40L
-        const val POLL_MILLIS = 50L
 
         /**
-         * The same wait the other repository tests take. Eight passes over the qa profile settle in
-         * a few seconds alone, and this timed out at 60 s when the whole suite ran beside it: the
-         * deadline was measuring the machine. The assertion below is on the peak and not on time.
+         * A bound on a hang, and nothing else. The wait itself is on the in-flight flag rather than
+         * on a poll of the snapshot: eight passes settle in under a second alone, and the old poll
+         * rebuilt a full snapshot every 50 ms, so under the whole suite it was the wait that loaded
+         * the machine it was timing. The assertion is on the peak, never on the clock.
          */
         const val DEADLINE_MILLIS = 120_000L
         const val SETTLE_MILLIS = 300L

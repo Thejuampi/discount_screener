@@ -25,7 +25,7 @@ object SecResidualFacts {
         get() = ValuationPolicy.current.secNormalization.minimumDurationDays
     private val MAX_DURATION_DAYS: Int
         get() = ValuationPolicy.current.secNormalization.maximumDurationDays
-    private val ACCEPTED_FORMS = setOf("10-K", "10-K/A")
+    internal val acceptedForms = setOf("10-K", "10-K/A")
     private val BOOK_QNAMES = listOf(
         "StockholdersEquity",
         "CommonStockholdersEquity",
@@ -295,7 +295,7 @@ object SecResidualFacts {
                 var obj = element.jsonObject
                 var fp = obj["fp"]?.jsonPrimitive?.contentOrNull ?: continue
                 var form = obj["form"]?.jsonPrimitive?.contentOrNull ?: continue
-                if (fp != "FY" || form !in ACCEPTED_FORMS) continue
+                if (fp != "FY" || form !in acceptedForms) continue
                 if (obj["segment"] != null) continue
                 var end = obj["end"]?.jsonPrimitive?.contentOrNull ?: continue
                 var value = obj["val"]?.jsonPrimitive?.doubleOrNull ?: continue

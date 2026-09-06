@@ -22,7 +22,7 @@ import kotlin.math.roundToLong
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */
-const val MODEL_POLICY_VERSION = "business-class-policy/36-ocf-prior-franchise"
+const val MODEL_POLICY_VERSION = "business-class-policy/37-latest-positive-fcff"
 /** Sole industry-prior table version for CoE shrink (parity with Windows). */
 const val INDUSTRY_BETA_POLICY_VERSION = "industry-beta-policy/2"
 
@@ -166,10 +166,14 @@ object DcfAnalysisEngine {
             BusinessClass.FinancialServices ->
                 residualIncome(fundamentals, marketPriceCents, marketParams)
             BusinessClass.OperatingNonFinancial -> {
-                if (components?.missingLenderBook() == true) {
+                var captiveParent = ComponentFamilyPolicy.parentHostsCaptive(
+                    fundamentals.industryName,
+                    fundamentals.sectorName,
+                )
+                if (captiveParent && components?.missingLenderBook() == true) {
                     error("fcff unavailable: lender book missing on a mixed issuer")
                 }
-                if (components?.isMixed() == true) {
+                if (captiveParent && components?.isMixed() == true) {
                     ComponentSumValuation.value(
                         fundamentals = fundamentals,
                         parentTimeseries = timeseries,
@@ -598,6 +602,7 @@ object DcfAnalysisEngine {
         val interestAssumedZeroYears: List<Int> = emptyList(),
         val interestMissingWithDebtPeriods: List<String> = emptyList(),
         val estimatedCoupons: List<CouponYear> = emptyList(),
+        val latestPositiveFcffBase: Boolean = false,
     )
 
     /**
@@ -811,8 +816,12 @@ object DcfAnalysisEngine {
 
         // Parity with Windows owner-earnings / sustaining CapEx policy.
         val nonnegMargins = margins.filter { it >= 0 }
+        val latestFcffMargin = driverPoints.lastOrNull()?.fcffMarginBps
+        val latestPositiveFcffBase = nonnegMargins.size < 2 && (latestFcffMargin ?: 0) > 0
         val annualBaseMargin = if (nonnegMargins.size >= 2) {
             medianBps(nonnegMargins)
+        } else if (latestPositiveFcffBase) {
+            latestFcffMargin!!
         } else {
             medianBps(margins)
         }
@@ -889,6 +898,7 @@ object DcfAnalysisEngine {
             interestAssumedZeroYears = raw.filter { it.interestAssumedZero }.map { it.year },
             interestMissingWithDebtPeriods = raw.filter { it.interestMissingWithDebt }.map { it.date },
             estimatedCoupons = raw.mapNotNull { it.estimatedCoupon },
+            latestPositiveFcffBase = latestPositiveFcffBase && !ownerEarningsBase,
         )
     }
 
@@ -1214,6 +1224,8 @@ object DcfAnalysisEngine {
                 drivers.maintenanceCapexIntensityBps?.let {
                     add("capex=maintenance_intensity_bps:$it")
                 }
+            } else if (drivers.latestPositiveFcffBase) {
+                add("fcff_margin=latest_positive_aligned_annual:${drivers.baseFcffMarginBps}")
             } else {
                 add("fcff_margin=median_nonneg_aligned_annual:${drivers.baseFcffMarginBps}")
             }
@@ -1538,11 +1550,24 @@ object DcfAnalysisEngine {
         marketPriceCents: Long?,
         marketParams: MarketParams,
     ): ResolvedWacc {
+        var reportedDebt = fundamentals.totalDebtDollars
+        var reportedCash = fundamentals.totalCashDollars
+        var cashCoversDebt = reportedDebt != null && reportedCash != null &&
+            reportedDebt >= 0L && reportedCash >= reportedDebt
         val resolvedRates = resolveRateInputs(
-            timeseries = timeseries,
+            timeseries = attachDomicileTax(timeseries, fundamentals.country),
             reportedTotalDebtDollars = fundamentals.totalDebtDollars,
             _riskFreeBps = marketParams.rfBps,
-        ).getOrElse { error(it.message ?: "fcff rate inputs unavailable") }
+        ).fold(
+            onSuccess = { rates -> rates },
+            onFailure = { error ->
+                if (cashCoversDebt) {
+                    null
+                } else {
+                    error(error.message ?: "fcff rate inputs unavailable")
+                }
+            },
+        )
         val (marketCap, marketCapSource) = resolveMarketCapDollars(fundamentals, timeseries, marketPriceCents)
             ?: error("market cap is missing")
         val (costOfEquityBps, betaSource, betaProv) = costOfEquityBps(fundamentals, marketParams)
@@ -1592,15 +1617,16 @@ object DcfAnalysisEngine {
                 waccClamped = betaProv || marketParams.provisional ||
                     resolvedRates?.quality == DriverEvidenceQuality.Provisional || provisionalUplift > 0,
             ),
-            rateReasons = resolvedRates?.reasons.orEmpty().let { reasons ->
-                if (reasons.isEmpty()) {
-                    listOf(
-                        "cost_of_debt=not_applicable_explicit_zero_debt",
-                        "marginal_tax=not_applicable_no_debt_tax_shield",
-                    )
-                } else {
-                    reasons
-                }
+            rateReasons = when {
+                cashCoversDebt && (reportedDebt ?: 0L) > 0L -> listOf(
+                    "cost_of_debt=not_applicable_cash_covers_debt",
+                    "marginal_tax=not_applicable_no_debt_tax_shield",
+                )
+                resolvedRates?.reasons.isNullOrEmpty() -> listOf(
+                    "cost_of_debt=not_applicable_explicit_zero_debt",
+                    "marginal_tax=not_applicable_no_debt_tax_shield",
+                )
+                else -> resolvedRates?.reasons.orEmpty()
             },
         )
     }

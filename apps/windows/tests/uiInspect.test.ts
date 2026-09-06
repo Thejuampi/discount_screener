@@ -59,6 +59,7 @@ const KNOWN_API_COMMANDS = new Set([
   "portfolio_update",
   "portfolio_delete",
   "portfolio_import",
+  "portfolio_replace",
   "get_quote_prices",
   "get_model_accuracy",
   "get_portfolio_risk",

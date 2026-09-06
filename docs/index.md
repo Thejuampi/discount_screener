@@ -1,67 +1,76 @@
 # Discount Screener Documentation Index
 
-This index is the starting point for humans and AI agents trying to understand the current project state. It points to durable product, architecture, operations, and BMad planning artifacts without duplicating their content.
+Start here. This file only points. Edit the home, not this list.
 
-## Product Overview
+## Product
 
-- [Repository README](../README.md) - monorepo overview, app entrypoints, validation commands, and requirements.
-- [Desktop README](../apps/desktop/README.md) - Rust terminal workstation features, controls, persistence, and verification.
-- [Android README](../apps/android/README.md) - Android module map, current implementation, build, release, and run-on-device flow.
-- [Shared Contracts README](../shared/contracts/README.md) - language-neutral fixtures and behavior contracts.
+- [Repository README](../README.md) — layout, commands
+- [Desktop README](../apps/desktop/README.md) — terminal workstation
+- [Android README](../apps/android/README.md) — Android client
+- [Windows README](../apps/windows/README.md) — Tauri workstation
+- [Shared contracts](../shared/contracts/README.md) — goldens and policy YAML
+- [Current functionality PRD](../_bmad-output/planning-artifacts/current-functionality-prd.md) — what ships today
+- [Cross-platform parity](cross-platform-parity.md) — default 1:1; named exceptions
 
-## Operator Documentation
+## Operator
 
-- [Aggressive V4 — what has been measured](aggressive-v4-evidence.md) - bucket overlap, the agreement constant and its population, and the forward-return retrospective including its null result.
-- [Compose test hang, 2026-08-11](diagnostics/2026-08-11-compose-test-hang/README.md) - open, cause unknown: the Android suite spun 27 minutes in `waitForIdle`. Thread dumps kept, escalation bar set at one recurrence.
-- [Profile switch and first load slow, 2026-08-18](diagnostics/2026-08-18-profile-switch-slow/README.md) - fixed: the switch joined an in-flight Yahoo call before publishing, 1 185 ms to 26 ms. The first load asked for four calls at once against a provider that would take sixteen; the window is now adaptive, and the load keeps running in the background.
-- [Cross-Platform Parity](cross-platform-parity.md) - default rule for user-visible parity between desktop and Android. Android Plans Dip hunter and leftover review are explicit exceptions.
-- [Dip board spec v1](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md) - Android Plans filter (F, ATR dip, RSI, MACD, Street 20%). Does not change V2/V3/V4 scores.
-- [Leftover board spec v1](../_bmad-output/implementation-artifacts/leftover-board-spec-v1.md) - Android Plans leftover review (profile universe, Street leftover ≤ 5%, tape fade). Does not change V2/V3/V4 scores.
-- [Desktop Quick Start](../apps/desktop/docs/QUICK_START.md) - first-run desktop workflow.
-- [Desktop Screen Guide](../apps/desktop/docs/SCREENS.md) - terminal UI layout and behavior.
-- [Desktop User Manual](../apps/desktop/docs/USER_MANUAL.md) - keyboard controls and operational behavior.
-- [Desktop History and Time-Series Manual](../apps/desktop/docs/HISTORY_TIME_SERIES.md) - persistence, time-series queries, and exports.
-- [Windows Dashboard 2.0 — Manual Regression Spec](windows-dashboard-2.0-manual-regression.md) - Classic vs 2.0 screen-by-screen functional spec and manual regression cases.
+- [Desktop quick start](../apps/desktop/docs/QUICK_START.md)
+- [Desktop screens](../apps/desktop/docs/SCREENS.md)
+- [Desktop user manual](../apps/desktop/docs/USER_MANUAL.md)
+- [Desktop history](../apps/desktop/docs/HISTORY_TIME_SERIES.md)
+- [Windows Dashboard 2.0 regression](windows-dashboard-2.0-manual-regression.md)
+- [Advisor CSV import](advisor-csv-import.md) — holdings vs Chase blotter
+- [Valuation live QA](valuation-live-qa-checklist.md) — profile `qa` only
+- [Aggressive V4 evidence](aggressive-v4-evidence.md)
+- [Dip board spec](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md)
+- [Leftover board spec](../_bmad-output/implementation-artifacts/leftover-board-spec-v1.md)
 
-## BMad Planning Artifacts
+### Diagnostics
 
-- [BMad Artifact Map](../_bmad-output/README.md) - current BMad documentation set and routing rules.
-- [Project Context](../_bmad-output/project-context.md) - lean implementation rules AI agents must read before coding.
-- [Current Functionality PRD](../_bmad-output/planning-artifacts/current-functionality-prd.md) - baseline PRD for what exists today.
-- [Documentation Framework](../_bmad-output/planning-artifacts/documentation-framework.md) - when to create or update each BMad document type.
+- [Compose test hang](diagnostics/2026-08-11-compose-test-hang/README.md)
+- [SP500 missing drivers](diagnostics/sp500-missing-drivers.md)
+- [Cohort gate year](diagnostics/2026-08-29-cohort-gate-anchor/README.md)
+- [Profile switch slow](diagnostics/2026-08-18-profile-switch-slow/README.md)
+- [Live QA, Windows SEC sieve](../_bmad-output/implementation-artifacts/live-qa-windows-sec-sieve-2026-08-29.md)
 
-## Feature Planning
+## Agent
 
-- [Valuation Model Family Architecture](../_bmad-output/planning-artifacts/valuation-model-family-architecture.md) - FCFF vs residual income by business class; dynamic market params; no hard output caps.
-- [Aggressive V4 Contract](../shared/contracts/opportunity-v4.json) - agreement-bonus and sector-relative goldens for the Android-only V4 model; hand-derived, never regenerated from Kotlin.
-- [Valuation Model Family Contract](../shared/contracts/valuation-model-family.json) - classifier / model-selection goldens.
-- [Evidence/SOTP Contract](../shared/contracts/valuation-evidence-sotp.json) - point-in-time evidence, component families, SOTP bridge, refusal, and validation goldens.
-- [Evidence/SOTP Implementation Notes](../_bmad-output/implementation-artifacts/spec-valuation-evidence-sotp-implementation.md) - executable-slice ownership, refusal boundaries, and provider/QA boundaries.
-- [Operational anti-patterns](operational-anti-patterns.md) - failure-mode ledger that already bit this repo; keep it out of always-on `AGENTS.md` context.
-- [Analyst-method lifecycle](analyst-method-lifecycle.md) - proof obligations for evidence-ledger / analyst-import / model-run closure.
-- [Valuation live QA checklist](valuation-live-qa-checklist.md) - **Windows live QA = profile `qa` only** (`npm run tauri:dev:qa`); checklist T/AMZN/CI/bank/industrial + merge-bar tests.
-- [Multi-name valuation baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md) - `valuation_baseline` merge bar; quarantine ≠ success.
-- [Handover — Honest path and Street stretch (2026-08-16)](../_bmad-output/implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md) - **current** continuity for identity cash, holdout measure, and Street-implied stretch (PR #39).
-- [Handover — Quant Valuation Engine (2026-08-02)](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md) - older Windows motor brief (waterfall, CHTR, high-signal). Separate workstream.
-- [Gap attribution contract](../shared/contracts/valuation-gap-attribution-v1.json) - Shapley policy-delta telemetry; Street diagnostic only.
-- [High-signal screener cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json) - 26-name recompute goal gate.
-- [Agent Guidelines](../Agents.md) - monorepo architecture, valuation conventions, Quant Lens SNR rules, numerical conclusion protocol.
-- [Valuation Change Visibility PRD](../_bmad-output/planning-artifacts/prd.md) - feature PRD for valuation-change visibility.
-- [Planning Artifacts Index](../_bmad-output/planning-artifacts/index.md) - local navigation for BMad planning files.
-- [Valuation Change Visibility Architecture](../_bmad-output/planning-artifacts/architecture.md) - technical decisions for that feature slice.
-- [Valuation Change Visibility UX Spec](../_bmad-output/planning-artifacts/ux-design-specification.md) - Android-first UX strategy and interaction rules.
-- [Valuation Change Visibility Epics](../_bmad-output/planning-artifacts/epics.md) - implementable epics and stories.
-- [Implementation Readiness Report](../_bmad-output/planning-artifacts/implementation-readiness-report-2026-04-23.md) - readiness assessment across PRD, UX, architecture, and epics.
+- [AGENTS.md](../Agents.md) — standing rules. Advisor section is the docs gate.
+- [Project context](../_bmad-output/project-context.md) — traps AGENTS does not already say
+- [Operational anti-patterns](operational-anti-patterns.md) — failure ledger
+- [Analyst-method lifecycle](analyst-method-lifecycle.md)
+- [Documentation framework](../_bmad-output/planning-artifacts/documentation-framework.md) — when to write which doc
+- [BMad artifact map](../_bmad-output/README.md)
+- [Planning index](../_bmad-output/planning-artifacts/index.md)
+- [Implementation index](../_bmad-output/implementation-artifacts/index.md)
 
-## Implementation Tracking
+## Feature
 
-- [Sprint Status](../_bmad-output/implementation-artifacts/sprint-status.yaml) - current story and epic status.
-- [Implementation Artifacts Index](../_bmad-output/implementation-artifacts/index.md) - local navigation for stories, specs, and QA artifacts.
-- [QA universe stance table 2026-08-15](../_bmad-output/implementation-artifacts/qa-universe-stance-table-2026-08-15.md) - Wave 1 measure of Android `qa` identity vs Street. Predicted Wave-2 stance. No policy change.
-- [QA Test Summary](../_bmad-output/implementation-artifacts/tests/test-summary.md) - generated/verified QA coverage notes.
+- [Valuation model family](../_bmad-output/planning-artifacts/valuation-model-family-architecture.md)
+- [Valuation model family contract](../shared/contracts/valuation-model-family.json)
+- [Aggressive V4 contract](../shared/contracts/opportunity-v4.json)
+- [Evidence/SOTP contract](../shared/contracts/valuation-evidence-sotp.json)
+- [Evidence/SOTP notes](../_bmad-output/implementation-artifacts/spec-valuation-evidence-sotp-implementation.md)
+- [Pre-earnings risk gate PRD](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md)
+- [Earnings log by ticker](../_bmad-output/specs/spec-earnings-log-by-ticker/SPEC.md)
+- [Valuation change visibility PRD](../_bmad-output/planning-artifacts/prd.md)
+- [Valuation change visibility architecture](../_bmad-output/planning-artifacts/architecture.md)
+- [Valuation change visibility UX](../_bmad-output/planning-artifacts/ux-design-specification.md)
+- [Valuation change visibility epics](../_bmad-output/planning-artifacts/epics.md)
+- [Implementation readiness](../_bmad-output/planning-artifacts/implementation-readiness-report-2026-04-23.md)
+- [Handover — honest path](../_bmad-output/implementation-artifacts/handover-honest-path-street-stretch-2026-08-16.md)
+- [Handover — quant engine](../_bmad-output/implementation-artifacts/handover-quant-valuation-engine-2026-08-02.md)
+- [Gap attribution contract](../shared/contracts/valuation-gap-attribution-v1.json)
+- [High-signal cohort contract](../shared/contracts/valuation-high-signal-screener-cohort-v1.json)
+- [Multi-name baseline policy](../_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md)
+- [Deferred work](../_bmad-output/implementation-artifacts/deferred-work.md)
+- [Sprint status](../_bmad-output/implementation-artifacts/sprint-status.yaml)
+- [QA universe stance](../_bmad-output/implementation-artifacts/qa-universe-stance-table-2026-08-15.md)
+- [QA test summary](../_bmad-output/implementation-artifacts/tests/test-summary.md)
 
-## Maintenance Rules
+## Maintenance
 
-- Keep this index updated when durable docs are added, renamed, or retired.
-- Prefer linking existing docs over copying guidance into another file.
-- If a user-visible feature is Android-only or desktop-only, link the parity exception from this index or the relevant feature doc.
+- One home per fact. Edit the home. Pointers stay pointers.
+- A third copy is a defect.
+- Add, rename, or retire a durable doc here in the same change.
+- Platform-only features: name the exception in [parity](cross-platform-parity.md).

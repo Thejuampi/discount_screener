@@ -81,6 +81,32 @@ class SecResidualFactsTest {
     }
 
     @Test
+    fun trough_loss_year_keeps_a_positive_median_roe() {
+        var json = """
+            {"facts":{"us-gaap":{
+              "StockholdersEquity":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","end":"2021-12-31","val":26795000000,"filed":"2022-02-20"},
+                {"fp":"FY","form":"10-K","end":"2022-12-31","val":24057000000,"filed":"2023-02-20"},
+                {"fp":"FY","form":"10-K","end":"2023-12-31","val":25840000000,"filed":"2024-02-20"},
+                {"fp":"FY","form":"10-K","end":"2024-12-31","val":26410000000,"filed":"2025-02-20"},
+                {"fp":"FY","form":"10-K","end":"2025-12-31","val":19953000000,"filed":"2026-02-20"}
+              ]}},
+              "NetIncomeLoss":{"units":{"USD":[
+                {"fp":"FY","form":"10-K","start":"2022-01-01","end":"2022-12-31","val":1202000000,"filed":"2023-02-20"},
+                {"fp":"FY","form":"10-K","start":"2023-01-01","end":"2023-12-31","val":2702000000,"filed":"2024-02-20"},
+                {"fp":"FY","form":"10-K","start":"2024-01-01","end":"2024-12-31","val":3305000000,"filed":"2025-02-20"},
+                {"fp":"FY","form":"10-K","start":"2025-01-01","end":"2025-12-31","val":-6674000000,"filed":"2026-02-20"}
+              ]}},
+              "WeightedAverageNumberOfDilutedSharesOutstanding":{"units":{"shares":[
+                {"fp":"FY","form":"10-K","start":"2025-01-01","end":"2025-12-31","val":493116000,"filed":"2026-02-20"}
+              ]}}
+            }}}
+        """.trimIndent()
+        var drivers = SecResidualFacts.extract(json)
+        assertEquals(1_123, drivers?.returnOnEquityBps)
+    }
+
+    @Test
     fun median_roe_writes_count_in_provenance() {
         var json = """
             {"facts":{"us-gaap":{

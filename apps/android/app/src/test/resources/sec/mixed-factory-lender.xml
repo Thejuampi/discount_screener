@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2025"
+      xmlns:gm="http://www.example.com/issuer"
+      xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+    <context id="c-total-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="srt:ConsolidationItemsAxis">us-gaap:OperatingSegmentsMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <context id="c-fin-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="srt:ConsolidationItemsAxis">us-gaap:OperatingSegmentsMember</xbrldi:explicitMember>
+                <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">gm:GMFinancialSegmentMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <context id="c-fin-geo-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="gm:BusinessGroupAxis">gm:GmFinancialMember</xbrldi:explicitMember>
+                <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">country:US</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <context id="c-auto-debt-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="gm:BusinessGroupAxis">gm:AutomotiveMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <instant>2025-12-31</instant>
+        </period>
+    </context>
+    <context id="c-auto-int-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="gm:BusinessGroupAxis">gm:AutomotiveMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <context id="c-na-rev-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="srt:ConsolidationItemsAxis">us-gaap:OperatingSegmentsMember</xbrldi:explicitMember>
+                <xbrldi:explicitMember dimension="gm:BusinessGroupAxis">gm:AutomotiveMember</xbrldi:explicitMember>
+                <xbrldi:explicitMember dimension="gm:RegionAxis">gm:GmnaMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <context id="c-credit-fac-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:CreditFacilityAxis">gm:TenBillionDollarRevolvingCreditFacilityMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-01-01</startDate>
+            <endDate>2025-12-31</endDate>
+        </period>
+    </context>
+    <us-gaap:Revenues contextRef="c-na-rev-25" unitRef="usd" decimals="-6">154317000000</us-gaap:Revenues>
+    <us-gaap:Revenues contextRef="c-total-25" unitRef="usd" decimals="-6">184805000000</us-gaap:Revenues>
+    <us-gaap:Revenues contextRef="c-fin-25" unitRef="usd" decimals="-6">17060000000</us-gaap:Revenues>
+    <us-gaap:Revenues contextRef="c-fin-geo-25" unitRef="usd" decimals="-6">2472000000</us-gaap:Revenues>
+    <us-gaap:Revenues contextRef="c-credit-fac-25" unitRef="usd" decimals="-6">111111111</us-gaap:Revenues>
+    <gm:EarningsLossBeforeAutomotiveInterestAndTaxesAdjusted contextRef="c-total-25" unitRef="usd" decimals="-6">13718000000</gm:EarningsLossBeforeAutomotiveInterestAndTaxesAdjusted>
+    <gm:EarningsLossBeforeAutomotiveInterestAndTaxesAdjusted contextRef="c-fin-25" unitRef="usd" decimals="-6">2802000000</gm:EarningsLossBeforeAutomotiveInterestAndTaxesAdjusted>
+    <us-gaap:SegmentExpenditureAdditionToLongLivedAssets contextRef="c-total-25" unitRef="usd" decimals="-6">9206000000</us-gaap:SegmentExpenditureAdditionToLongLivedAssets>
+    <us-gaap:SegmentExpenditureAdditionToLongLivedAssets contextRef="c-fin-25" unitRef="usd" decimals="-6">51000000</us-gaap:SegmentExpenditureAdditionToLongLivedAssets>
+    <us-gaap:DepreciationDepletionAndAmortization contextRef="c-total-25" unitRef="usd" decimals="-6">11936000000</us-gaap:DepreciationDepletionAndAmortization>
+    <us-gaap:DepreciationDepletionAndAmortization contextRef="c-fin-25" unitRef="usd" decimals="-6">4976000000</us-gaap:DepreciationDepletionAndAmortization>
+    <us-gaap:InterestExpenseNonoperating contextRef="c-auto-int-25" unitRef="usd" decimals="-6">727000000</us-gaap:InterestExpenseNonoperating>
+    <gm:DebtandFinanceLeaseLiabilities contextRef="c-auto-debt-25" unitRef="usd" decimals="-6">16247000000</gm:DebtandFinanceLeaseLiabilities>
+</xbrl>

@@ -1,5 +1,38 @@
 # Deferred Work
 
+## Deferred from: code review of prd-pre-earnings-risk-gate-2026-08-27.md (2026-09-05)
+
+- **AV revenue surprise unused.** `parseAlphaVantageEstimates` reads `revenue_estimate_average` on every fiscal-quarter row. `sueQuartersOf` always writes `revenueSurpriseBps = null`. IBM join has that revenue field on all 37 rows. Wave 1-A prints EPS SUE only. Leave until Juan asks for AV revenue surprise.
+- **Estimate vintage.** SUE mean and high/low come from live `EARNINGS_ESTIMATES`, not `EARNINGS.estimatedEPS` at the print. Later revisions can shrink the range and inflate |SUE|. Diagnostic only. Leave until the slope enters the cell.
+
+## Deferred from: code review (2026-09-05)
+
+PR #50 pre-earnings risk gate plus Advisor CSV (`bmad-code-review` automatic). Patched findings are on the branch.
+
+Closed in this slice:
+
+- **Protective put** — cheap + high risk buys an affordable protective put when the spread is missing or over 1%. Over 1.5% it cuts size.
+- **Weekend stamp** — a shut market still settles past reports. It does not ask the chain and does not stamp capture.
+- **Worker SQLite** — `shutdown()` closes the store.
+- **renameTo cache** — a failed rename copies the bytes onto the target.
+- **Gate knobs** — YAML. See `AGENTS.md` Earnings gate.
+- **PRD 4.2 SUE diagnostic** — card only. See `AGENTS.md` Earnings gate.
+- **PRD 4.4 revenue trail** — shipped. See PRD §4.4.
+
+These stay open (need history, or the PRD already locked them):
+
+- **PRD 4.2 cell** — the matrix still ignores SUE. Do not route the cell off the slope until Juan asks.
+- **PRD 4.4** — no sector table.
+- **PRD 6** — paper-trading backtest needs 8–12 quarters of captured chains. `HISTORICAL_OPTIONS` is premium. Those chains cannot be backfilled.
+- **PRD §9** — sector-calibrated bands wait for that paper trading.
+- **Low-as-Normal** — PRD §4.5: low risk uses the normal column.
+- **Calendar 12 lookups/day** — documented cap in PRD §8.
+- **Undecided = Hold full size** — do-nothing encoding. The card names the missing input.
+- **Null put-spread still Hedge** — PRD: a chain that quotes neither spread nor put still asks for the hedge.
+- **quoteSummary 404** recovers from HTML even when `htmlFallback` is false. That recovery stays.
+- **Late 8-K >7 days** stays unset. The confirm window is seven days.
+- **Backup duplicate keys** — `read()` and `backupText()` collapse by key, last line wins. The file on disk stays append-only.
+
 ## Deferred from: code review (2026-08-24)
 
 PR #48 Cross hunt vs `main` (`review_mode` no-spec).

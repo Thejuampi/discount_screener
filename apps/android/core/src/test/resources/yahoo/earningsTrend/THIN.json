@@ -1,0 +1,31 @@
+{
+  "quoteSummary": {
+    "result": [
+      {
+        "price": {"currency": "USD"},
+        "earningsTrend": {
+          "trend": [
+            {
+              "period": "0q",
+              "endDate": "2026-09-30",
+              "earningsEstimate": {
+                "avg": {"raw": 0.19, "fmt": "0.19"},
+                "low": {},
+                "high": {},
+                "numberOfAnalysts": {"raw": 2, "fmt": "2"},
+                "earningsCurrency": "USD"
+              },
+              "revenueEstimate": {
+                "avg": {},
+                "numberOfAnalysts": {},
+                "revenueCurrency": "USD"
+              },
+              "maxAge": 1
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

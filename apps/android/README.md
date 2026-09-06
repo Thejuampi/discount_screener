@@ -11,7 +11,7 @@ This directory contains the native Android client for Discount Screener.
 
 - `app/` — composition root and Android entrypoints
 - `domain/` — repository contracts and use cases
-- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), profile loading, Discovery universe seed loading, persistence, and repository implementation
+- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), Alpha Vantage earnings SUE (key in `filesDir`, never git), profile loading, Discovery universe seed loading, persistence, and repository implementation
 - `presentation/` — `DashboardViewModel`, UI state, and actions
 - `ui/` — Compose screens, dialogs, and detail/chart components
 
@@ -36,6 +36,7 @@ This directory contains the native Android client for Discount Screener.
 - Discount rates and growth use dynamic market/policy inputs (risk-free, ERP, industry beta shrink, recent-window growth fade to \(g_{stable}\)). Hard `MIN_WACC` / price-multiple caps are not valuation truth; defaults are provisional when used. Production Android reads FRED DGS10 first, then Yahoo `^TNX` (1-day cache) and `erp-policy/1` (default school: Damodaran implied index ERP). Bootstrap 430/450 stays for tests and for a live miss.
 - WACC/CoE provenance remains transparent: missing market cap may fall back to price × shares; beta / debt / cash / cost of debt / tax sources are recorded; detail Valuation shows rate kind (`WACC` vs \(r_e\)), marks provisional inputs, and lists caveats (for example `tax=default`, `market cap=price×shares`). Industry beta shrink is intentional estimation, not provisional noise.
 - legacy warm-start DCF payloads without `waccInputs` still restore; live refresh recomputes with current fundamentals and model routing
+- **Earnings tab** (Android-only). PRD: `_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`. Knobs: `shared/contracts/earnings-gate-policy.yaml`.
 - Agent conventions: root `Agents.md`; design: `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`; contracts: `shared/contracts/valuation-model-family.json`
 
 ## Prerequisites

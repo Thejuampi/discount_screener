@@ -2,7 +2,7 @@
 //!
 //! Primary path (Android parity): authenticated JSON `v10/finance/quoteSummary`
 //! via cookie + crumb session. Chart / search remain public REST endpoints.
-//! HTML quote-page scrape is optional fallback only (`html_fallback`, default off).
+//! HTML quote-page scrape runs on quoteSummary HTTP 404, and when `html_fallback` is on.
 
 use std::io;
 use std::time::Duration;
@@ -288,21 +288,17 @@ impl YahooClient {
             match self.fetch_quote_summary_json(&request_symbol) {
                 Ok(root) => parse_quote_summary(&root, &display),
                 Err(e) => {
-                    if self.html_fallback {
+                    if should_scrape_quote_html(self.html_fallback, &e) {
                         match self.fetch_symbol_html(&display) {
                             Ok(r) => r,
-                            Err(_) => {
-                                let _ = e;
-                                FetchResult {
-                                    symbol: display.clone(),
-                                    snapshot: None,
-                                    signal: None,
-                                    fundamentals: None,
-                                }
-                            }
+                            Err(_) => FetchResult {
+                                symbol: display.clone(),
+                                snapshot: None,
+                                signal: None,
+                                fundamentals: None,
+                            },
                         }
                     } else {
-                        let _ = e;
                         FetchResult {
                             symbol: display.clone(),
                             snapshot: None,
@@ -858,6 +854,40 @@ fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
     }
 
     Ok(candles)
+}
+
+fn is_not_found(error: &io::Error) -> bool {
+    error.to_string().contains("HTTP 404")
+}
+
+fn should_scrape_quote_html(html_fallback: bool, error: &io::Error) -> bool {
+    html_fallback || is_not_found(error)
+}
+
+#[cfg(test)]
+mod quote_html_recovery_tests {
+    use super::should_scrape_quote_html;
+    use std::io;
+
+    #[test]
+    fn quote_summary_404_scrapes_the_quote_page() {
+        let error = io::Error::other("HTTP 404 Not Found for quoteSummary BK: Quote not found");
+        assert!(should_scrape_quote_html(false, &error));
+    }
+
+    #[test]
+    fn quote_summary_server_error_does_not_scrape_the_quote_page() {
+        let error =
+            io::Error::other("HTTP 500 Internal Server Error for quoteSummary BK: upstream");
+        assert!(!should_scrape_quote_html(false, &error));
+    }
+
+    #[test]
+    fn html_fallback_still_scrapes_on_server_error() {
+        let error =
+            io::Error::other("HTTP 500 Internal Server Error for quoteSummary BK: upstream");
+        assert!(should_scrape_quote_html(true, &error));
+    }
 }
 
 #[cfg(test)]

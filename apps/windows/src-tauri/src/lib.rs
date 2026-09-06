@@ -41,6 +41,7 @@ mod scalp_ws;
 mod scalping;
 mod schwab;
 mod schwab_api;
+mod sec_company_facts_sieve;
 mod sec_driver_normalization_policy_generated;
 mod sec_normalization;
 mod smc;
@@ -302,6 +303,7 @@ pub fn run() {
             commands::portfolio_update,
             commands::portfolio_delete,
             commands::portfolio_import,
+            commands::portfolio_replace,
             commands::get_quote_prices,
             commands::get_model_accuracy,
             commands::compute_congress_metrics,

@@ -20,19 +20,19 @@ This document is the product baseline for what Discount Screener currently does.
 
 ## Product Summary
 
-Discount Screener is a monorepo with two user-facing clients:
+Discount Screener is a personal workstation for Juan. The monorepo has three user-facing clients:
 
 - a Rust terminal workstation under `apps/desktop`
+- a Tauri/React Windows workstation under `apps/windows`
 - a native Android app under `apps/android`
 
-Both clients help users identify profitable companies trading below public fair-value signals from Yahoo Finance data. The product combines quote data, analyst targets, historical candles, local persistence, ranking, watchlists, and detail/history views. The project is not investment advice.
+The clients rank public companies from quotes, analyst targets, candles, local persistence, and a valuation model family. The project is not investment advice.
 
 ## Users And Jobs
 
 ### Primary Users
 
-- Self-directed analysts and investors who review many public companies.
-- Power users who want a fast workstation-style interface rather than a portfolio-tracking social app.
+- Juan, a single self-directed analyst. Multi-user growth and onboarding are out of scope.
 
 ### Core Jobs
 
@@ -40,6 +40,7 @@ Both clients help users identify profitable companies trading below public fair-
 - Reopen the app and quickly understand which names deserve attention.
 - Drill into a ticker to inspect valuation, consensus, price history, technical indicators, and evidence.
 - Preserve local context across sessions through warm-start persistence.
+- On Android, judge pre-earnings event risk without mixing it into DCF.
 
 ## Current Product Surfaces
 
@@ -56,6 +57,11 @@ Both clients help users identify profitable companies trading below public fair-
 - Issue rail, popup issue notices, and issue log viewer.
 - SQLite warm-start persistence with automatic session restore.
 
+### Windows Workstation
+
+- Opportunity scoring, Quant Lens, and residual-income / FCFF valuation.
+- Advisor CSV import: holdings snapshot vs Chase 90-day blotter. Warn, then confirm.
+
 ### Android App
 
 - Opportunities as the default landing surface.
@@ -68,6 +74,8 @@ Both clients help users identify profitable companies trading below public fair-
 - History detail experience that summarizes analyst-target movement and saved price history.
 - Startup splash during warm restore and one-time disclaimer gate.
 - Local warm-start persistence for tracked symbols, watchlist, issues, chart cache, revision history, and on-demand complete ticker price history.
+- Plans tab (Android-only). Specs: `dip-board-spec-v1.md`, `cross-board-spec-v1.md`, `leftover-board-spec-v1.md`.
+- Earnings tab (Android-only). PRD: `prd-pre-earnings-risk-gate-2026-08-27.md`.
 
 ## Core Functional Requirements
 
@@ -103,7 +111,8 @@ Both clients help users identify profitable companies trading below public fair-
 
 ### External Data
 
-- The system uses Yahoo Finance public endpoints/HTML pages for quotes, fundamentals, coverage, analyst targets, cash-flow history, and candles.
+- The system uses Yahoo Finance public endpoints/HTML pages for quotes, fundamentals, coverage, analyst targets, cash-flow history, candles, and option chains.
+- Android earnings also reads EDGAR 8-K item 2.02 for report dates and Alpha Vantage for SUE history. The Alpha Vantage key lives on device. It never enters git.
 - Provider parsing must handle missing, sparse, stale, or unavailable fields without inventing values.
 
 ## Nonfunctional Requirements
@@ -112,7 +121,7 @@ Both clients help users identify profitable companies trading below public fair-
 - List triage should remain usable while live refresh is in progress.
 - Business rules should be deterministic for the same input state.
 - UI should expose evidence for summary claims rather than hiding raw supporting values.
-- User-visible cross-platform capability should remain in parity by default unless a platform-specific exception is documented.
+- User-visible cross-platform capability should remain in parity by default unless a platform-specific exception is documented. Android Plans and Android Earnings are documented exceptions.
 - Financial values should preserve fixed-point integer style.
 - Rendering should not perform network or storage work.
 
@@ -120,7 +129,7 @@ Both clients help users identify profitable companies trading below public fair-
 
 - Rust desktop business logic belongs in `apps/desktop/src/lib.rs` or owning modules; `main.rs` stays orchestration-focused.
 - Desktop Yahoo fetching, persistence, profiles, rendering, and event-loop responsibilities stay separated.
-- Android `core/` is pure Kotlin business logic.
+- Android `core/` is pure Kotlin business logic. Valuation, ranking, and the pre-earnings gate live there.
 - Android `app/` is the imperative Android shell with `domain`, `data`, `presentation`, and `ui` boundaries.
 - Compose screens are passive views; presenters and repositories provide state.
 - Shared behavior belongs in `shared/contracts` when cross-platform semantics matter.
@@ -137,7 +146,7 @@ Both clients help users identify profitable companies trading below public fair-
 
 - The Valuation Change Visibility feature has PRD, UX, architecture, epics, readiness report, and sprint status artifacts.
 - Several list/history foundations are already implemented.
-- Detail explanation and remaining degraded-state delivery should continue through the existing BMad sprint/story flow.
+- Android pre-earnings Wave 0, 1-A, and §4.4 are built. Open work: `deferred-work.md`.
 
 ## Out Of Scope For This Baseline
 

@@ -44,9 +44,23 @@ Technical names stay as they are: `AggressiveV3`, `robust_mean`, `:core`, commit
 
 ## BMAD Method
 
-Installed. Menu, not a pipeline. Process, lanes, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
+A requirement runs the closed cycle. No step is optional, and no step is skipped because the change looks small:
 
-**Default:** implement against this file + `project-context.md`. Do not start a full ceremony unless Juan asks or the change is large.
+**PRD → spec → build → review → repeat**
+
+| Step | Skill | Leaves behind |
+| --- | --- | --- |
+| PRD | `/bmad-prd` | The WHY and the acceptance bar, in `_bmad-output/planning-artifacts/` |
+| Spec | `/bmad-spec` | The WHAT, locked: contracts, edge cases, the examples that must pass |
+| Build | `/bmad-quick-dev` | The code, TDD, plus the docs the change makes untrue |
+| Review | `/bmad-code-review` | An adversarial read of the diff against the spec |
+| Repeat | — | Next slice, or `/bmad-correct-course` when reality diverged |
+
+**Review does not close while docs are stale.** A user-visible change that leaves `docs/`, this file, `project-context.md`, or a contract describing the old behavior is not reviewed - it is half built. Write the docs in the build step so the review has something to check.
+
+Bugfix, rename, or spike: implement directly with TDD. That exemption covers a fix, never a requirement.
+
+Process, lanes, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
 
 This file + `project-context.md` + contracts **outrank** generic BMAD templates. Unsure: `bmad-help` once.
 
@@ -65,7 +79,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 | BusinessClass | Primary model | Discount rate | Cash / driver |
 | --- | --- | --- | --- |
-| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing |
+| `OperatingNonFinancial` | FCFF + WACC; **or** factory + lender (`component-sotp/2`) when the parent industry hosts a captive and the filing prints both | WACC on the factory; cost of equity on the lender | Factory cash = NOPAT + depreciation − sustaining CapEx; lender book from the finance subsidiary filing. Software, IT services, and ratings stay on FCFF. |
 | `FinancialServices` (banks, insurance, brokers, managed care / healthcare plans, **lenders** such as COF) | **Residual income / excess return on equity** | **Cost of equity only** | Book equity + ROE path; long-run ROE = min(ROE0, CoE+500) |
 | Payment networks (`V`, `MA`) even if Yahoo says Credit Services | **FCFF + WACC** | WACC | Fee cash flow — residual on book prints ~book |
 | `NotEligible` (ETF, fund, crypto shell, REIT, …) | none | — | — |
@@ -79,7 +93,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 ### Dynamic parameters — no eternal magic constants
 
-Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Edit that file. Do not put a second copy in Kotlin.
+Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Android pre-earnings knobs live in [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit those files. Do not put a second copy in Kotlin.
 
 - **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
 - Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
@@ -95,6 +109,10 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 - Missing required drivers → `Unavailable` / `NotEligible` with reason codes
 - Beta missing → industry shrink
 - Latest OCF is the run-rate only when the prior window already printed two positive OCF years. A first-cash ramp keeps the recent OCF centre.
+- Latest FCFF margin is the base run-rate when the recent-window median is non-positive and that latest aligned year is positive (`fcff_margin=latest_positive_aligned_annual`). Refuse `non_positive_normalized_fcff` only when the latest year is also non-positive.
+- Yahoo latest reported FCF sign does not block driver FCFF. `LatestFcfNonPositive` stays only when aligned OCF/CapEx/revenue years are short.
+- When reported cash covers reported debt, a failed coupon path is not-applicable. WACC is cost of equity. Material net debt with no yield, spread, or filed interest still refuses.
+- WACC tax is filing statutory first. When that series is empty, attach the versioned domicile row (`DomicileTaxProxy`, provisional) from `valuation-policy.yaml` `tax.rows` using the issuer country. Missing country stays unavailable. Historical effective tax is not the shield.
 
 **Forbidden**
 
@@ -133,11 +151,12 @@ For domestic US-GAAP `10-K`/`10-K/A` operating issuers with a CIK, SEC facts cro
 - Sum plant, capitalized software (`PaymentsForSoftware`, `PaymentsToDevelopSoftware`), purchased intangibles (`PaymentsToAcquireIntangibleAssets`), and the oil well program. Drop software and intangibles when the tangible tag is `PaymentsToAcquireProductiveAssets` (those components are already inside that aggregate).
 - `PaymentsToAcquireOilAndGasPropertyAndEquipment` is the well program. Sum it with other plant. `PaymentsToAcquireOilAndGasProperty` (no equipment) stays acreage acquisition.
 - Material acquisition cash in fiscal year Y contaminates only the revenue-growth transition Y−1 → Y. Exclude that transition and retain clean recent observations when ≥2 exist and the latest is clean; otherwise use zero near-term growth and record `acquisition_normalized` provenance.
-- `FinanceLeaseInterestExpense` is not an interest-expense equivalent. It is the lease subset. Signed net interest (`InterestIncomeExpenseNonoperatingNet`) uses the magnitude.
+- `FinanceLeaseInterestExpense` is not an interest-expense equivalent. It is the lease subset. Signed net interest (`InterestIncomeExpenseNonoperatingNet`) uses the magnitude. Yahoo years that lack a coupon take that filed SEC interest on Detail, the same way they take statutory tax. Skip cash-paid tags.
 - Missing coupon years: estimate when `coupon-resolution/1` confidence allows. Own last effective rate first. Else the median of similar issuers' filed rates. Label method and band. A later filed tag replaces the estimate. No own points and fewer than three peers stay Absent. Never invent a coupon from Other income, `InterestPaid*`, or a note rate range.
 - Android `debt-resolution/1` owns stock, coupon, and published k_d. Stock is the filed year-end instant. Estimated coupons enter year-cash only. k_d stays market yield, then rated/coverage synthetic, then the filed coupon over average debt. `InterestPaid*` is not a filed coupon. A current instrument yield attaches through `issuer-market-yield/2` onto `marketYieldBps`. The yield sets k_d. It does not shrink the tax-year window. Android reads Markets Insider issuer bond rows, keeps USD quotes, and takes the median of remaining 4–15 year yields. Missing yield leaves the rung empty.
 - Unknown issuer extensions are audit candidates, not inferred mappings. Missing approved CapEx, OCF, or tax evidence is **unavailable** — not zero.
 - Financial services remain on residual income.
+- The Android sieve is the boundary of what SEC facts exist downstream. It keeps an annual (`fp=FY`), consolidated `10-K`/`10-K/A` fact of a policy concept, with the seven fields a reader reads. A reader that needs a quarter, another form, or a dropped field must widen `SecCompanyFactsSieve` **and** bump `COMPANY_FACTS_SIEVE_VERSION`, or the cache answers with the old shape.
 
 ## Quant Lens (signal vs noise)
 
@@ -245,6 +264,39 @@ claim this tool rests on: a captured file replays into the rows the app had on s
 Capture is the only step that touches a device, and it obeys the standing rule — no live provider
 calls from a test. Replay reads a file.
 
+### SEC companyfacts arrives sieved on both clients (mandatory)
+
+A companyfacts file is about 4 MB and every reader uses a small part of it. Both clients cut it on
+the stream: `SecCompanyFactsSieve` on Android, `sec_company_facts_sieve` on the desktop. Nothing
+downstream sees a fact the sieve dropped, so widening a reader means widening its own sieve first.
+
+The two field sets differ on purpose. See
+[`docs/cross-platform-parity.md`](docs/cross-platform-parity.md) before you touch either.
+
+### Network doubles — a client that streams has no string seam (mandatory)
+
+Every http client takes its `OkHttpClient` as a defaulted constructor parameter. A client that
+builds one inside itself cannot be reached by a test, and the path it owns ships unproven.
+
+Two doubles live in `apps/android/app/src/test/.../`:
+
+- `offlineHttpClient()` — throws an `AssertionError` naming the URL. Use it under any double that
+  overrides some of a client's calls, so the calls it forgot land on the test.
+- `cannedHttpClient(fragment, body)`, or `cannedHttpClient(routes)` for a flow that crosses several
+  endpoints — answers a named URL with one body, and throws on the rest. Use it when the client
+  consumes the response as a stream: no string of the body exists above the client, so the double
+  must sit under it. Name the full URL, so a wrong path fails instead of matching by accident.
+
+No test reaches a live provider. A red test says which URL leaked.
+
+### Earnings gate (Android)
+
+- Policy: [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit that file. Do not put a second copy in Kotlin. Do not add percents, caps, or floors that are frozen literals. A YAML `5%` is still a hardcoded value.
+- Cell: implied-move vs median |AR|. Cheap ≤ 0.9× DCF. High > 1.3. Low uses the Normal column.
+- SUE from Alpha Vantage is a diagnostic. Fit the joined observations that are not foreign to the issuer SUE series or the issuer AR series (`isForeignTo`). `n` is the leftover count. Below `min_sue_quarters` the fit is `short_history`. The card prints the slope and `n`. The cell ignores SUE until Juan asks. Do not add a YAML max quarter cap.
+- Revenue trail: last four Yahoo prints. The latest print is the event. Centre is `robustCentre` of the prior three (trim foreign prints, then the mean of what is left). Scale is the MAD of those prior three. A foreign print in the prior three refuses the trail. Hold + last print strictly more than one scale unit below that centre → half size. Flag on. Cell stays `CheapNormalRisk`. A flat prior three (scale 0) cuts any latest print strictly below the mode. No percent floor. Median is not the trail level.
+- Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`. Blank Save is a no-op. Clear deletes the file. The screen says whether a key is on disk. Never print the key.
+
 ### Commands and gates
 
 - Strict TDD for behavior changes: failing test → smallest green → refactor while green.
@@ -273,6 +325,7 @@ Automated tests and baselines **reduce** risk; they do **not** eliminate operati
 | Green CI with wrong asserts is theater | Assert user-visible failure modes (wrong class, penny mega-cap, inverted scenarios), not only constants |
 | Quarantine is a ticket, not a trophy | Do not claim “N names green” while slots are quarantined unless acceptance **explicitly** allows reduced N |
 | Stale UI hides backend truth | After policy bumps, verify Detail does not keep a previous absurd DCF |
+| A past failure stayed in chat | Write a row in [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md). Advisor names that row on the next plan |
 
 ### Aggregation — no naked averages (mandatory)
 
@@ -318,7 +371,21 @@ When classifier, CapEx→FCF, WACC/CoE, residual income, model policy version, o
 
 ### Anti-patterns that already bit us
 
-Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md). Read that file before a change that can re-trigger the same failure shape. Add a new row there when a failure mode appears. Do not leave it only in chat.
+Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md).
+
+- Read that file before a change that can re-trigger the same failure shape.
+- Add a new row when a failure mode appears. Do not leave it only in chat.
+- Do not paste the table into this file. The pointer here is the standing gate.
+
+### Advisor (docs gate)
+
+Advisor reads standing docs and names drift. Advisor does not invent product rules.
+
+Every Advisor review opens this file, [`_bmad-output/project-context.md`](_bmad-output/project-context.md), the slice contract, and [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md).
+
+A proposed step that matches a ledger row is a P0 until the plan uses that row's **Do instead**.
+
+A proposed step with no doc home is a doc gap.
 
 
 ## Conventions (general)
@@ -327,7 +394,8 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 - Type-driven design: encode invariants in types; validate at boundaries; keep invalid states unrepresentable.
 - Decouple market-data, persistence, and UI/rendering.
 - Temp work only under `.agents/workspace/tmp`.
-- User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments.
+- Seek decision log: append nodes to [`.grok/decisions.json`](.grok/decisions.json). Do not replace the tree.
+- User-visible behavior changes: update or link docs (this file, project-context, contracts, operator docs) — do not bury long operational guidance only in comments. One home per fact. Edit the home. Pointers stay pointers.
 - Demand-driven expensive work: history, valuation, and heavy fetches stay bounded and on-demand where practical.
 - Android Detail second open of a warm ticker paints from the session cache. Skip disk and network when memory already holds the chart and DCF. Leftover and dip boards reuse the last assemble when the input fingerprint is unchanged. Session flags (`revisionHistoryHydrated`, `pricingHistoryHydrated`, `liveDcfResolvedSymbols`, replay backing) clear in `resetInMemoryLocked`.
 - Sparse/unavailable/stale states must be explicit — never smooth missing valuation into a fake “Strong” story.
@@ -338,9 +406,13 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 
 | When | Read |
 | --- | --- |
+| Advisor plan review | This file + [`_bmad-output/project-context.md`](_bmad-output/project-context.md) + [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) + the slice contract |
 | Live valuation QA | [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md) |
 | Known operational failure | [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) |
 | Analyst-method / ledger slice | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |
 | Valuation ADRs | [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) |
 | Contracts | [`shared/contracts/README.md`](shared/contracts/README.md) |
+| Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/2`) |
+| Pre-earnings risk gate | [`_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) · [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml) (`earnings-gate-policy/1`) |
 | BMAD process | [`.grok/rules/bmad.md`](.grok/rules/bmad.md) |
+| Seek decision log | [`.grok/decisions.json`](.grok/decisions.json) — append `open` / `taken` / `failed` / `skipped` nodes. Do not replace the tree. |

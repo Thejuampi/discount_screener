@@ -20,6 +20,10 @@ import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseCase
+import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
+import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
@@ -204,6 +208,10 @@ class ScoringControlLiveUpdateTest {
             cancelDiscoveryJob = CancelDiscoveryJobUseCase(repository),
             clearDiscoveryData = ClearDiscoveryDataUseCase(repository),
             observeDiscoveryProgress = ObserveDiscoveryProgressUseCase(repository),
+            getEarningsEvents = GetEarningsEventsUseCase(repository),
+            backUpEarningsLog = EarningsLogBackupUseCase(repository),
+            restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
     }

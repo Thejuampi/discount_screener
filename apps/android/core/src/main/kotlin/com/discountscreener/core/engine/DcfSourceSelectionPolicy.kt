@@ -107,7 +107,7 @@ object DcfSourceSelectionPolicy {
                 reasons = listOf(reason(ProviderDecisionReasonCode.InsufficientAnnualPeriods, candidate.source)),
             )
         }
-        if (annualFreeCashFlow.last().value <= 0.0) {
+        if (annualFreeCashFlow.last().value <= 0.0 && driverPoints < MIN_ANNUAL_FCF_POINTS) {
             return DcfProviderQuality(
                 source = candidate.source,
                 providerState = ProviderState.NotEligible,

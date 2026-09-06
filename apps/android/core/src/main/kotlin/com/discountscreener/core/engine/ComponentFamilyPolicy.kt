@@ -22,6 +22,14 @@ object ComponentFamilyPolicy {
     val MATERIAL_REVENUE_BPS: Int
         get() = ValuationPolicy.current.component.materialRevenueBps
 
+    fun parentHostsCaptive(industryName: String?, sectorName: String?): Boolean {
+        var blob = "${industryName.orEmpty()} ${sectorName.orEmpty()}".lowercase()
+        if (blob.isBlank()) return false
+        return ValuationPolicy.current.component.captiveParentIndustryContains.any { needle ->
+            needle.isNotBlank() && blob.contains(needle.lowercase())
+        }
+    }
+
     private val FINANCIAL_TOKENS: Set<String>
         get() = ValuationPolicy.current.component.financialTokens
     private val INSTRUMENT_TOKENS: Set<String>

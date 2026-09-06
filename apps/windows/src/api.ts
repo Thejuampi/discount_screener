@@ -865,6 +865,8 @@ export const api = {
   portfolioDelete: (id: number) => invoke<void>("portfolio_delete", { id }),
   portfolioImport: (positions: ImportPosition[]) =>
     invoke<PortfolioImportResult>("portfolio_import", { positions }),
+  portfolioReplace: (positions: ImportPosition[]) =>
+    invoke<PortfolioImportResult>("portfolio_replace", { positions }),
   getQuotePrices: (symbols: string[]) =>
     invoke<Record<string, number>>("get_quote_prices", { symbols }),
   getModelAccuracy: (horizonDays: number) =>
@@ -1220,6 +1222,7 @@ export interface PortfolioImportResult {
   created: number;
   updated: number;
   skipped: number;
+  removed: number;
 }
 
 export interface PortfolioPosition {

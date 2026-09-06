@@ -17,6 +17,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.discountscreener.core.earnings.EarningsAnnouncement
+import com.discountscreener.core.earnings.parseEarningsAnnouncements
 import okhttp3.Response
 import kotlin.math.abs
 import java.io.File
@@ -27,14 +29,16 @@ import java.util.concurrent.TimeUnit
 
 private const val COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 private const val COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
+private const val SUBMISSIONS_URL = "https://data.sec.gov/submissions/"
 private const val SEC_USER_AGENT = "DiscountScreener research@discountscreener.com"
 private const val DEFAULT_TTL_MILLIS = 24L * 60L * 60L * 1000L
 /**
- * Bumped whenever the sieve keeps a new concept. A slim cache written by an older version has the
- * old concept set and no way to say so, so it would answer "this company reports no impairment"
- * for a file that simply never looked. The name changes, and the old file is left to expire.
+ * Bumped whenever the sieve keeps a different set of facts: a new concept, a wider period or form,
+ * or another field per fact. A slim cache written by an older version has the old shape and no way
+ * to say so, so it would answer "this company reports no impairment" for a file that simply never
+ * looked. The name changes, and the old file is left to expire.
  */
-internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-intangibles-nonrecurring-1"
+internal const val COMPANY_FACTS_SIEVE_VERSION = "fcff-annual-consolidated-1"
 private const val VALIDATOR_SUFFIX = ".etag"
 private const val NOT_MODIFIED = 304
 
@@ -47,6 +51,22 @@ private const val SEC_MAX_IN_FLIGHT = 4
 
 internal fun companyFactsSlimFileName(cikPadded: String): String =
     "CIK$cikPadded.sieve-$COMPANY_FACTS_SIEVE_VERSION.json"
+
+/**
+ * Write the whole text, or leave the file as it was.
+ *
+ * Two clients write this name. A process that stops in the middle of a plain write leaves a
+ * truncated file that both of them then read as the company's facts for the rest of the day.
+ */
+internal fun writeAtomically(target: File, text: String) {
+    var partial = File(target.parentFile, target.name + ".part")
+    partial.writeText(text)
+    if (partial.renameTo(target)) return
+    target.delete()
+    if (partial.renameTo(target)) return
+    target.outputStream().use { out -> partial.inputStream().use { it.copyTo(out) } }
+    partial.delete()
+}
 
 class SecEdgarTimeseriesProvider(
     private val cacheDir: File? = null,
@@ -83,6 +103,25 @@ class SecEdgarTimeseriesProvider(
         loadSievedFacts(symbol)
     }
 
+    /**
+     * Every past earnings announcement of one ticker, dated by the company itself.
+     *
+     * An 8-K carrying item 2.02 is the results release. Its acceptance timestamp says whether the
+     * report landed before the open or after the close, which is what decides the reaction window.
+     */
+    suspend fun earningsAnnouncements(symbol: String): List<EarningsAnnouncement> =
+        withContext(Dispatchers.IO) {
+            var cik = resolveCik(symbol) ?: return@withContext emptyList()
+            var body = cachedText("CIK$cik.submissions.json") {
+                var request = Request.Builder()
+                    .url("${SUBMISSIONS_URL}CIK$cik.json")
+                    .header("User-Agent", SEC_USER_AGENT)
+                    .build()
+                governedText(request)
+            } ?: return@withContext emptyList()
+            parseEarningsAnnouncements(body)
+        }
+
     private suspend fun resolveCik(symbol: String): String? {
         val map = tickerToCik ?: loadTickerMap()
         return map[symbol.uppercase()]
@@ -116,7 +155,7 @@ class SecEdgarTimeseriesProvider(
      * The sieved facts for one symbol, from the cache when it is fresh and from SEC when it is not.
      *
      * Two costs decide the shape of this. A companyfacts file is about 4 MB and the sieve keeps
-     * about 12% of it, so the answer is never written whole: it is sieved as it arrives. And an
+     * about 3% of it, so the answer is never written whole: it is sieved as it arrives. And an
      * expired cache does not mean a changed filing, so the refresh asks conditionally. A company
      * that filed nothing new answers 304 with no body, and the file already on disk is kept.
      */
@@ -157,12 +196,12 @@ class SecEdgarTimeseriesProvider(
                     }
                     val body = response.body
                         ?: return@use RequestGovernor.Attempt.Failed(false, IOException("empty SEC body"))
-                    // Sieved as it arrives: the whole file is about 4 MB and 12% of it is kept, so
+                    // Sieved as it arrives: the whole file is about 4 MB and 3% of it is kept, so
                     // it is never held in memory whole and never written whole.
                     val slim = body.charStream().use { reader -> SecCompanyFactsSieve.sieve(reader) }
                     if (slimFile != null) {
                         slimFile.parentFile?.mkdirs()
-                        slimFile.writeText(slim)
+                        writeAtomically(slimFile, slim)
                         response.header("ETag")?.let { tag -> validatorFile?.writeText(tag) }
                     }
                     RequestGovernor.Attempt.Ok(slim)
