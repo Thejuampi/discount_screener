@@ -1470,6 +1470,25 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun confirm_import_rebuilds_the_snapshot() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        var before = repository.currentSnapshotCallCount
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv(
+                "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,AMZN,10,200.00,08/31/2026\n",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ConfirmImportBook)
+        advanceUntilIdle()
+
+        assertEquals(true, repository.currentSnapshotCallCount > before)
+    }
+
+    @Test
     fun confirm_of_a_refuse_plan_writes_nothing() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository()
         var viewModel = testViewModel(repository)

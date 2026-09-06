@@ -175,6 +175,28 @@ class PortfolioImportRepositoryTest {
     }
 
     @Test
+    fun confirm_then_snapshot_marks_held_tracked_rows() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = repository(store)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.Legacy)
+            repository.confirmPortfolioPlan(repository.planPortfolioCsv(JPM))
+
+            assertEquals(
+                true,
+                repository.currentSnapshot(
+                    ViewFilter(),
+                    null,
+                    ChartRange.Year,
+                    OpportunityScoringModel.Legacy,
+                ).trackedRows.single { it.symbol == "AMZN" }.held,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun bootstrap_pins_held_tracked_rows() = runTest(dispatcher) {
         var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {

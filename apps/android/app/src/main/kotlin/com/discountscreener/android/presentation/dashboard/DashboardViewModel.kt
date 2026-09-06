@@ -647,6 +647,14 @@ class DashboardViewModel(
             try {
                 importPortfolioBook.confirm(plan)
                 if (_state.value.importBookPlan !== plan) return@launch
+                render(
+                    getDashboardSnapshot(
+                        currentFilter(),
+                        _state.value.detailRoute?.symbol,
+                        _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                        _state.value.opportunityScoringModel,
+                    ),
+                )
                 _state.value = _state.value.copy(importBookPlan = null, importBookNotice = "Book updated.")
                 if (earningsGateLoaded) {
                     loadEarningsGate()
