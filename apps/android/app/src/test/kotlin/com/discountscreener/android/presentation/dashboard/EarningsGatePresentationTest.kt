@@ -448,6 +448,14 @@ class EarningsGatePresentationTest {
     }
 
     @Test
+    fun a_phyl_lot_does_not_mint_an_earnings_row() {
+        assertEquals(
+            listOf("LVS"),
+            present(listOf(record(day = 3)), held = setOf("PHYL")).upcoming.map { it.symbol },
+        )
+    }
+
+    @Test
     fun a_ticker_the_log_never_saw_gets_no_event_in_its_detail() {
         assertTrue(present(listOf(record(day = 3))).eventsFor("AVGO").isEmpty())
     }

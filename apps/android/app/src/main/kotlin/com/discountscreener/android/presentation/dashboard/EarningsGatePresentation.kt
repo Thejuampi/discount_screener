@@ -49,6 +49,7 @@ data class EarningsEventRowUi(
     val sueFit: String? = null,
     val revenueTrail: String? = null,
     val held: Boolean = false,
+    val reportEpochDay: Long? = null,
 )
 
 fun EarningsGateUi.matching(query: String): EarningsGateUi {
@@ -136,6 +137,7 @@ private fun rowOf(record: EarningsEventRecord, held: Set<String>): EarningsEvent
         sueFit = sueFitText(pre),
         revenueTrail = revenueTrailText(pre, decision),
         held = isHeld(pre.symbol, held),
+        reportEpochDay = pre.reportEpochDay,
     )
 }
 

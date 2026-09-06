@@ -39,6 +39,8 @@ import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.PositionsRow
+import com.discountscreener.core.portfolio.closenessLabel
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.core.engine.DiscoveryScoreRow
@@ -53,6 +55,8 @@ import com.discountscreener.core.model.QualificationStatus
 import kotlin.math.max
 
 const val TRACKED_HELD = "trackedHeld"
+const val POSITIONS_LIST = "positionsList"
+const val POSITIONS_GATE_IMPORT = "positionsGateImport"
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -167,29 +171,7 @@ internal fun OpportunityList(
                         ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
                     }
                     OpportunityRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
-                        MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
-                        MetricToken("Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}", forecastMetricColor())
-                        // Only when it is actually in the composite. The dense row has no space to
-                        // say why a dimension is absent, and a token reading "--" would look like a
-                        // measurement that came back empty rather than one that was never taken.
-                        if (row.regimeStatus == RegimeScoreStatus.Included) {
-                            MetricToken(
-                                "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(row.regimeScore, scoringModel)}",
-                                marketMetricColor(),
-                            )
-                        }
-                        if (row.gapBps != null && row.upsideBps != null) {
-                            MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
-                            MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
-                        } else {
-                            row.valuationStanceLabel?.let { stance ->
-                                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
-                            }
-                        }
-                        MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))
-                    }
+                    OpportunityMetricTokens(row, scoringModel)
                     row.providerIssue?.let { issue ->
                         Text(
                             text = issue,
@@ -316,7 +298,101 @@ internal fun parseDiscoveryConfidence(raw: String?): ConfidenceBand? =
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<QuantLensChipUi>) {
+internal fun OpportunityMetricTokens(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
+        MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
+        MetricToken("Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}", forecastMetricColor())
+        if (row.regimeStatus == RegimeScoreStatus.Included) {
+            MetricToken(
+                "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(row.regimeScore, scoringModel)}",
+                marketMetricColor(),
+            )
+        }
+        if (row.gapBps != null && row.upsideBps != null) {
+            MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
+            MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
+        } else {
+            row.valuationStanceLabel?.let { stance ->
+                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
+            }
+        }
+        MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun PositionsList(
+    rows: List<PositionsRow>,
+    scoringModel: OpportunityScoringModel,
+    quantLensChipsBySymbol: Map<String, List<QuantLensChipUi>>,
+    onAction: (DashboardAction) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier = modifier.testTag(POSITIONS_LIST),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        items(rows, key = { it.symbol }) { row ->
+            var scored = row.opportunity
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (scored != null) {
+                            Modifier.clickable { onAction(DashboardAction.OpenDetail(row.symbol)) }
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = row.symbol,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        closenessLabel(row.closeness)?.let { tag ->
+                            Text(
+                                text = tag,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier.padding(start = 8.dp),
+                            )
+                        }
+                    }
+                    Text(
+                        text = "${row.quantityLabel} · ${money(row.avgCostCents)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (scored != null) {
+                        OpportunityRowSignals(scored, quantLensChipsBySymbol[row.symbol].orEmpty())
+                        OpportunityMetricTokens(scored, scoringModel)
+                        scored.providerIssue?.let { issue ->
+                            Text(
+                                text = issue,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<QuantLensChipUi>) {
     val freshness = freshnessColors(row.freshness)
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)

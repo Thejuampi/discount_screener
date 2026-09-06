@@ -16,7 +16,7 @@ User-visible functionality should be kept in 1:1 parity across clients by defaul
 
 - **Android Earnings tab (pre-earnings risk gate)** — Android-only. Cell is implied-move vs own median |AR|. SUE slope is a card diagnostic. Revenue trail can cut a Hold. PRD: [`../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md).
 
-- **Android Chase book (Import book)** — Android-only paint of Held and pin. Parse/merge goldens are shared in `advisor-csv-import-v1.yaml` `/3`. Windows Advisor UI stays. Desktop has no import. Android persists lots in SQLite and refuses ledger apply. Spec: [`../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md).
+- **Android Chase book (Import book)** — Android-only paint of Held, pin, and the Positions tab. Parse/merge goldens are shared in `advisor-csv-import-v1.yaml` `/3`. Windows Advisor UI stays. Desktop has no import. Android persists lots in SQLite and refuses ledger apply. Positions closeness is a Core enum on the New York session day. Spec: [`../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md).
 
 - **SEC companyfacts read (field set, not capability)** — Both clients now sieve the 4 MB body on
   the stream. The field sets differ, and they must. Android keeps `fp` and cuts everything that is

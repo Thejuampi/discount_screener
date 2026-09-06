@@ -1,8 +1,8 @@
 ---
 id: SPEC-android-chase-portfolio
-status: done
+status: draft
 baseline_commit: 9da7dd34b4cb0991616e7ccc28635bf8e849af40
-review_loop_iteration: 1
+review_loop_iteration: 2
 policyVersion: advisor-csv-import/3
 companions:
   - examples.md
@@ -13,13 +13,13 @@ sources:
   - ../../brainstorming/brainstorm-android-chase-portfolio-2026-09-05/brainstorm-intent.md
 ---
 
-> **Canonical contract.** Yaml `/3` is the only parse/merge home. Windows is a peer. Share quantity stays in yaml. Android SQLite converts to integer ten-thousandths. Held, pin, persist scale, and Confirm replay live in `examples.md`.
+> **Canonical contract.** Yaml `/3` is the only parse/merge home. Windows is a peer. Share quantity stays in yaml. Android SQLite converts to integer ten-thousandths. Held, pin, persist scale, Confirm replay, Positions, and closeness live in `examples.md`.
 
 # Android Chase book
 
 ## Why
 
-Juan’s Chase book lives on Windows. The phone has no lots, so Earnings treats every name as research. A 90-day blotter cannot rebuild the book. Flag and pin without lots are decoration.
+Juan’s Chase book now lives on the phone as lots. Earnings and Opps pin Held names. Off-feed lots stay invisible. Positions is the book home: every lot, report closeness, and the same Opps flags when a score exists.
 
 ## Capabilities
 
@@ -47,12 +47,28 @@ Juan’s Chase book lives on Windows. The phone has no lots, so Earnings treats 
   - **intent:** Owned names sit first without buying the pin with scores.
   - **success:** Core helper `pinHeldFirst` sorts. Compose does not decide Held. Upcoming: Held then date asc. Settled: Held then date desc. Opportunities/watchlist/Tracked: Held then current sort. Scores unchanged. Printed rank is pre-pin. Tracked SQLite order stays. Watchlist membership stays a set. Absent lot invents no row. Discovery and Plans out. Cases: PIN-*.
 
+- **CAP-7**
+  - **intent:** Juan reads the full book on one tab, including names that never join Opps.
+  - **success:** Positions paints every lot. Off-feed PHYL is a row with shares from ten-thousandths / 10000 (decimals only when remainder non-zero, max four) and `avg_cost_cents`. Empty book shows empty state plus Import book. Import book stays on a non-empty tab. Same writer as Earnings and System. Sort ordinal Today < Tomorrow < This week < Later < blank, then ticker ASC. Held mark omitted. Pin-held-first does not run. Off-feed lots stay absent on Opps, Watch, Tracked. Pin does not mint them. Assemble does not call `ensure_symbol_loaded` and does not add a feed symbol. Tap off-feed does not open Detail and does not enqueue Yahoo. Cases: POS-PHYL, POS-AMZN, POS-SORT, POS-SORT-TICKER, POS-SORT-ORDINAL, POS-EMPTY, POS-IMPORT-NONEMPTY, POS-NO-HYDRATE, POS-TAP-PHYL, POS-PHYL-BOARDS.
+
+- **CAP-8**
+  - **intent:** Juan sees how near the next report is without a frozen percent.
+  - **success:** Core emits `Today` / `Tomorrow` / `ThisWeek` / `Later` / `None`. Compose paints that enum. Compose does not read a date and does not call `LocalDate.now()`. Clock is the earnings-log New York session day. Today = that date. Tomorrow = today+1. This week = after tomorrow, same ISO week. Later = upcoming, other. Sunday→Monday is Tomorrow. Friday or Saturday → next Monday is Later. Source 1: `EarningsGateUi.upcoming` for that ticker (load the log once if missing). Source 2: existing score-row `nextEarningsEpoch` on the NY session day (not a fetch). Else `None`. Chosen date before NY today is `None`. Off-feed PHYL uses the log only. No invented date. Not the Opps earnings-mark sentence. Cases: CLOSE-TODAY, CLOSE-TOMORROW, CLOSE-WEEK, CLOSE-LATER, CLOSE-SUN-MON, CLOSE-FRI-MON, CLOSE-SAT-MON, CLOSE-SETTLED, CLOSE-MISSING, CLOSE-LOG, CLOSE-YAHOO, CLOSE-NO-DATE, CLOSE-YAHOO-PAST, CLOSE-TZ.
+
+- **CAP-9**
+  - **intent:** A scored lot on Positions carries the same flags Juan already reads on Opps.
+  - **success:** Positions scored row points at the Opps engine row on the same snapshot fingerprint. Join is exact ticker equality. Opps view filters do not hide the strip here. The Opps strip composable paints that row. Positions does not compute Act, Disc, Upside, Conf, or Lens. Token-for-token equal on that snapshot. Off-feed type has ticker, qty, cost only. No score fields. No dash badge. Scores stay. Tap scored lot opens Detail. Tap off-feed is a no-op: no Detail, no Yahoo, no feed add. Cases: POS-FLAGS-AMZN, POS-FLAGS-PHYL, POS-TAP-PHYL.
+
 ## Constraints
 
 - Yaml `/3` examples are the parse/merge goldens. Do not copy detect headers as a second Kotlin policy table.
-- Android `:core` owns parse, plan, merge, Held set, and pin sort. App owns SAF, Dialog, SQLite.
-- Import book is one writer. Earnings and System call it. Restore log never plans a lot write.
-- Pin is paint.
+- Android `:core` owns parse, plan, merge, Held set, pin sort, Positions projection, and closeness. App owns SAF, Dialog, SQLite, Compose paint.
+- Import book is one writer. Earnings, System, and Positions call it. Restore log never plans a lot write.
+- Pin is paint. Positions does not run pin-held-first.
+- Closeness is a Core enum on the earnings-log New York session day. No frozen percent. No 14-day soon window. Compose paints the token. Compose does not own the clock.
+- Off-feed lots are a row shape without score fields. Positions does not invent Act/Watch/Avoid. Assemble and off-feed tap do not hydrate Yahoo or grow the feed.
+- Yahoo `nextEarningsEpoch` is the existing score-row field. It is not a fetch for PHYL.
+- Do not put closeness percents in `earnings-gate-policy.yaml`.
 - Live path is `make android-run-qa`. Never `pm clear`. Never `sp500`. Off-feed PHYL is a `:core` Case.
 
 ## Non-goals
@@ -62,17 +78,19 @@ Juan’s Chase book lives on Windows. The phone has no lots, so Earnings treats 
 - Auto-add lots to the Yahoo feed.
 - Lot dollars into hedge or `positionSizeBps`.
 - V2/V3/V4 score change.
-- New Portfolio tab. Windows UI. Desktop import.
+- P&L or market-value overlay on Positions.
+- Windows UI. Desktop import.
 - Plans / Discovery pin.
 
 ## Success signal
 
-Juan confirms snapshot then blotter. PHYL stays 1273 shares (persisted 12730000 ten-thousandths). A `<= as-of` row does not change qty. A second confirm of the same blotter does not double qty. A held earnings fixture ticker shows Held and sits first. Composite score and printed rank stay the pre-pin values.
+Juan confirms snapshot then blotter. PHYL stays 1273 shares (persisted 12730000 ten-thousandths). A `<= as-of` row does not change qty. A second confirm of the same blotter does not double qty. A held earnings fixture ticker shows Held and sits first. Composite score and printed rank stay the pre-pin values. Positions shows PHYL with 1273 shares, no Act badge, no Detail on tap, no hydrate. PHYL comes from Import book only. A scored `qa` resident shows the same Opps strip and tokens. Closeness is a Core enum. Four tags: CLOSE-* is the proof.
 
 ## Assumptions
 
 - One Self-Directed account in the file.
 - The 90-day blotter is a window.
+- Positions sits next to Earnings in the tab bar.
 - `generic` CSV detects as `trades_ledger` and refuses `ledger_apply_unsupported` (Case GENERIC).
 
 ## Review Triage Log

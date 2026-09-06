@@ -181,6 +181,7 @@ open class FakeDashboardRepository : DashboardRepository {
         watchlistSymbols = emptyList(),
         candidateRows = emptyList(),
         opportunityRows = emptyList(),
+        opportunityUniverse = emptyList(),
         opportunityScoringModel = model,
         issues = emptyList(),
         selectedDetail = null,
@@ -192,5 +193,6 @@ open class FakeDashboardRepository : DashboardRepository {
         refreshCompletedSymbols = 0,
         refreshTargetSymbols = 0,
         statusMessage = null,
+        portfolioLots = lots,
     )
 }

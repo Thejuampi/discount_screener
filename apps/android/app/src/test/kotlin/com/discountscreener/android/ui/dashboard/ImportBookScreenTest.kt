@@ -14,6 +14,8 @@ import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
+import com.discountscreener.android.presentation.dashboard.PositionsRow
+import com.discountscreener.core.portfolio.Closeness
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
 import com.discountscreener.core.model.OpportunityScoringModel
@@ -98,6 +100,63 @@ class ImportBookScreenTest {
         )
 
         composeRule.onNodeWithText("Held").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_positions_tab_offers_import_book() {
+        render(
+            DashboardUiState(
+                loading = false,
+                currentTab = DashboardTab.Positions,
+                startupPhase = DashboardStartupPhase.Ready,
+            ),
+        )
+
+        composeRule.onNodeWithTag(POSITIONS_GATE_IMPORT).assertIsDisplayed()
+    }
+
+    @Test
+    fun phyl_on_positions_has_no_act_badge() {
+        render(
+            DashboardUiState(
+                loading = false,
+                currentTab = DashboardTab.Positions,
+                startupPhase = DashboardStartupPhase.Ready,
+                positionsRows = listOf(
+                    PositionsRow(
+                        symbol = "PHYL",
+                        quantityLabel = "1273",
+                        avgCostCents = 3_528L,
+                        closeness = Closeness.None,
+                        opportunity = null,
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithText("Act").assertDoesNotExist()
+    }
+
+    @Test
+    fun phyl_on_positions_shows_the_ticker() {
+        render(
+            DashboardUiState(
+                loading = false,
+                currentTab = DashboardTab.Positions,
+                startupPhase = DashboardStartupPhase.Ready,
+                positionsRows = listOf(
+                    PositionsRow(
+                        symbol = "PHYL",
+                        quantityLabel = "1273",
+                        avgCostCents = 3_528L,
+                        closeness = Closeness.None,
+                        opportunity = null,
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithText("PHYL").assertIsDisplayed()
     }
 
     @Test

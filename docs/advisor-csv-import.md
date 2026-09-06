@@ -35,7 +35,7 @@ Android stores share quantity as integer ten-thousandths. PHYL 1273 shares is `1
 - Buy, Sell, and Reinvest form positions. Dividend and cash moves skip.
 - Empty lots plus a 90-day blotter refuse. Import the snapshot first.
 - Android refuses Coinbase, Schwab, and generic ledger apply with `ledger_apply_unsupported`.
-- Android Import book lives on Earnings and System. Restore log is a second Earnings action and never plans a lot write.
+- Android Import book lives on Earnings, System, and Positions. Restore log is a second Earnings action and never plans a lot write. Positions paints every lot. Closeness is a Core enum. Off-feed tap is a no-op. PHYL comes from Import book only. Live path is `make android-run-qa`. A scored `qa` resident reuses the Opps strip. CLOSE-* is the four-tag proof.
 
 ## Confirm
 

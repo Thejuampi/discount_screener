@@ -1,5 +1,13 @@
 # Deferred Work
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-android-positions-tab.md`
+  summary: Confirm then process death, and Cancel then death, still need a public Positions restart Case (Advisor S-2).
+  evidence: Frozen matrix has no restart row. Warm start already reloads lots into bootstrap; the Gherkin is not in this slice.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-android-positions-tab.md`
+  summary: Advisor/Sensei r3 and r4 files sit under both the PRD folder and the spec folder.
+  evidence: Planning copies from the lock loop. Product docs already point at one spec.
+
 - source_spec: `_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`
   summary: Clear All leaves `portfolio_lot` and book as-of, the same way it leaves notes.
   evidence: `resetWarmStartState` does not delete `portfolio_lot`. The book is imported user data.

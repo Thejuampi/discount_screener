@@ -2,7 +2,7 @@
 title: Android Chase book
 status: final
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 
 # PRD: Android Chase book
@@ -19,7 +19,7 @@ This PRD states why the Android app must own the Chase / J.P. Morgan book, and t
 
 ## 1. Vision
 
-Juan opens Earnings on the phone and sees which names he holds. Those names sit first. He loads the same two files he loads on Windows: the J.P. Morgan snapshot, then the Chase 90-day blotter. The phone refuses a blotter with no book. Scores do not change.
+Juan opens Earnings on the phone and sees which names he holds. Those names sit first. He opens **Positions** and sees every lot, including names that never join Opps. A small closeness tag marks a report that is near. The same Opps flags sit on a lot that already has a scored row. He loads the same two files he loads on Windows: the J.P. Morgan snapshot, then the Chase 90-day blotter. The phone refuses a blotter with no book. Scores do not change.
 
 ## 2. Target User
 
@@ -27,6 +27,7 @@ Juan opens Earnings on the phone and sees which names he holds. Those names sit 
 
 - Know which logged earnings names are lots.
 - Put owned risk above research names on the lists he already uses.
+- Read the full book on one tab, with report closeness and the same Opps flags when a score exists.
 - Restore the Chase book from the two export files without rebuilding 90 days from zero.
 
 ### 2.2 Non-Users (v1)
@@ -42,6 +43,8 @@ Juan opens Earnings on the phone and sees which names he holds. Those names sit 
 
 - **UJ-3. Juan picks a Coinbase or Schwab file.** Detect names `trades_ledger`. The app refuses with `ledger_apply_unsupported`. Cancel/dismiss writes nothing.
 
+- **UJ-4. Juan reads the book on Positions.** Warm profile `qa` after Confirm of the snapshot. He opens **Positions**. Every lot is a row, including off-feed PHYL. AMZN shows the same Opps signal strip and F/T/Fc/Disc/Upside/Conf tokens as Opps. A closeness tag is Today, Tomorrow, This week, or Later when an upcoming report date exists. PHYL with no scored row and no report date shows lot qty and cost only. Import book lives on this tab too. Scores stay.
+
 ## 3. Glossary
 
 - **Lot** — One open position keyed by one trimmed uppercase ticker: quantity, average cost in cents, optional opened-at.
@@ -50,13 +53,15 @@ Juan opens Earnings on the phone and sees which names he holds. Those names sit 
 - **Trades window** — Chase `transactions*.csv`. Last-90-days blotter. Merges onto the book after as-of.
 - **Held** — A list or earnings row whose ticker equals a lot ticker after trim and uppercase. Exact equality. Earnings search may stay prefix; Held does not.
 - **Pin** — Paint only. Held rows sit above other rows. SQLite tracked order and watchlist membership do not change. A lot absent from a list does not insert a row and does not join the watchlist.
+- **Positions** — Dashboard tab that paints every lot. Off-feed lots are rows here. They still do not invent Opps, Watch, or Tracked rows.
+- **Closeness** — Small tag on a Positions row for an upcoming report date. Four calendar levels: Today, Tomorrow, This week, Later.
 - **Kind** — `holdings_snapshot` | `trades_window` | `trades_ledger`. Named before any write.
 
 ## 4. Features
 
 ### 4.1 Import the two files
 
-**Description:** Import book is one writer. Earnings and System both call it. Earnings restore log is a different action. Detect kind from headers. Snapshot and window plan a confirm that lives only in memory until Confirm. Ledger detect may succeed; Android refuses apply. Realizes UJ-1, UJ-2, UJ-3.
+**Description:** Import book is one writer. Earnings, System, and Positions all call it. Earnings restore log is a different action. Detect kind from headers. Snapshot and window plan a confirm that lives only in memory until Confirm. Ledger detect may succeed; Android refuses apply. Realizes UJ-1, UJ-2, UJ-3, UJ-4.
 
 **Functional Requirements:**
 
@@ -138,6 +143,58 @@ Held rows sit first on screen. Persist stays.
 - A lot whose ticker is absent from the list stays in SQLite and does not invent a row.
 - Discovery, Plans (Dip / Cross / Leftover) are out of pin scope.
 
+### 4.3 Read the book on Positions
+
+**Description:** Positions is a dashboard tab. It paints every Lot. Off-feed lots are rows here. A scored lot reuses the Opps signal strip and metric tokens. A small Closeness tag marks an upcoming report. Import book is a third caller of the same writer. Realizes UJ-4.
+
+#### FR-7: Positions shows every lot
+
+Juan opens Positions and sees the full Book.
+
+**Consequences:**
+- Every lot is a row, including off-feed PHYL.
+- Empty book shows an empty state and Import book. No invented row.
+- Import book stays on a non-empty tab. Same writer as Earnings and System.
+- Qty is shares from `quantity_ten_thousandths / 10000`. Show decimals only when the remainder is non-zero. Max four decimal places. Cost is `avg_cost_cents`.
+- Sort ordinal: Today < Tomorrow < This week < Later < blank, then ticker ASC.
+- The Held mark stays off this tab. Every row is already a lot. Pin-held-first does not run here.
+- Off-feed lots stay absent on Opps, Watch, and Tracked. Pin-held-first does not mint those rows. Earnings does not grow a PHYL universe row.
+- Assemble Positions does not call `ensure_symbol_loaded` and does not add a feed symbol. No Yahoo enqueue.
+- Tab label is Positions. It sits next to Earnings in the dashboard tab bar.
+- Build also edits these homes: AGENTS.md Import-book sentence, `project-context.md`, `docs/advisor-csv-import.md`, Android README, `docs/cross-platform-parity.md` Chase-book row. Do not put closeness percents in `earnings-gate-policy.yaml`.
+
+#### FR-8: Closeness is four calendar tags
+
+A Positions row shows one small Closeness tag when an upcoming report date exists.
+
+**Consequences:**
+- Core emits `Today` | `Tomorrow` | `ThisWeek` | `Later` | `None`. Compose paints the token or omits it. Compose does not read a date. Compose does not call `LocalDate.now()`.
+- Today: report date equals today on the New York session day (earnings-log capture `today`).
+- Tomorrow: report date equals that today plus one calendar day.
+- This week: report date is after tomorrow and in the same ISO week as that today.
+- Later: an upcoming report date exists and is not Today, Tomorrow, or This week.
+- Sunday → Monday is Tomorrow. Friday or Saturday → next Monday is Later.
+- Source 1: `EarningsGateUi.upcoming` for that ticker. Load the log once if missing, same path as Earnings.
+- Source 2: existing score-row `nextEarningsEpoch` converted on the New York session day. This is not a fetch.
+- Else `None`. Chosen date before New York today is `None`. Off-feed PHYL uses the log only.
+- Settled and missing stay `None`. No invented date.
+- Clock home is the earnings-log New York session day. Not device local. Not a second UTC today.
+- No frozen percent. No 14-day soon window. Not the Opps earnings-mark sentence. Do not add closeness knobs to `earnings-gate-policy.yaml`.
+
+#### FR-9: Positions reuses Opps flags when a score exists
+
+A lot that already has a scored Opportunities row shows the same flags as Opps.
+
+**Consequences:**
+- Positions scored row points at the Opps engine row on the same snapshot fingerprint. Join is exact ticker equality, same as Held. Opps view filters do not hide the strip here.
+- The Opps strip composable paints that row. Positions does not compute Act, Disc, Upside, Conf, or Lens.
+- Signal strip: DecisionBadge Act/Watch/Avoid, valuation-change, rank-movement, explanation, freshness+time, trust note, Watchlist, Lens chips (max 3).
+- Metric tokens: F, T, Fc, Market when included, Disc, Upside, Conf. `providerIssue` when present.
+- Token-for-token equal to Opps for that ticker on that snapshot.
+- Off-feed type has ticker, qty, and cost only. No score fields. No Act/Watch/Avoid chip. No dash placeholder.
+- Scores stay. Positions does not recompute V2/V3/V4.
+- Tap a scored lot opens Detail. Tap an off-feed lot is a no-op: no Detail, no Yahoo, no feed add.
+
 ## 5. Non-Goals (Explicit)
 
 - Coinbase / Schwab / generic ledger apply on Android.
@@ -146,7 +203,7 @@ Held rows sit first on screen. Persist stays.
 - Auto-add lots to the Yahoo feed or earnings capture.
 - Lot dollars into hedge or `positionSizeBps`.
 - V2 / V3 / V4 score change.
-- New Portfolio tab.
+- P&L or market-value overlay on Positions.
 - Windows UI change. Desktop import.
 - Class-share ticker map (`BRK.B` vs `BRK/B`). Exact ticker only this spike.
 - Live QA on `sp500`. Agent path is `make android-run-qa`. Never `pm clear`.
@@ -157,8 +214,9 @@ Held rows sit first on screen. Persist stays.
 
 - Contract `/3` plus Android `:core` parse, plan, merge. Yaml examples must pass as Gherkin Cases.
 - SQLite lots + as-of. Unique ticker. Schema bump.
-- Import book on Earnings and System. Confirm Dialog. Restore log stays separate.
+- Import book on Earnings, System, and Positions. Confirm Dialog. Restore log stays separate.
 - Held flag and pin on Earnings, Opportunities, watchlist, Tracked.
+- Positions tab. Every lot. Closeness four tags. Opps flags reuse when a scored row exists.
 
 ### 6.2 Out of Scope for MVP
 
@@ -174,25 +232,29 @@ Held rows sit first on screen. Persist stays.
 
 **Secondary**
 - **SM-2**: Fixture ticker that already sits on the earnings list: after import it shows Held and sits above a non-lot with an earlier date in the same section. PHYL 1273 is a `:core` Case. If `qa` ∩ book is empty, live SM-2 is unreachable and the test is the proof. Do not grow the feed. Validates FR-5, FR-6.
+- **SM-3**: After the same snapshot, Positions shows PHYL with 1273 shares, no Act badge, no Detail on tap, no hydrate. PHYL comes from Import book only. Never one-shot. Never feed add. A scored `qa` resident (AMZN if present, else one scored `qa` name) shows the same Opps strip and tokens. A closeness tag is one of Today, Tomorrow, This week, Later when an upcoming report date exists, and blank when settled or missing. Four tags: CLOSE-* is the proof. Live cannot hit all four in one session. Profile stays `qa`. Validates FR-7, FR-8, FR-9.
 
 **Counter-metrics (do not optimize)**
 - **SM-C1**: Composite score of a Held name equals the score before pin. Printed rank ordinal equals pre-pin rank. Counterbalances FR-6.
 - **SM-C2**: Held name with lots present: `positionSizeBps` equals the no-lot cell.
+- **SM-C3**: Off-feed PHYL does not appear on Opps, Watch, or Tracked. Positions does not invent a score for PHYL. Counterbalances FR-7, FR-9.
 
 ## 8. Verification
 
 - `:core` yaml examples, as-of skip, blotter replay, unique ticker, `empty_keep`, `ledger_apply_unsupported`.
 - SQLite/repository: confirm, cancel, restart restore of lots and as-of.
 - Presenter pin/flag tests. Compose does not own Held.
-- Live: when Juan says the product is ready, `make android-run-qa` only. Never `pm clear`. Never switch UI to `sp500`.
+- Positions: every-lot Cases, closeness calendar Cases, Opps-flag reuse vs off-feed blank. Compose does not own Closeness. POS-NO-HYDRATE, POS-TAP-PHYL, CLOSE-TZ required.
+- Live: when Juan says the product is ready, `make android-run-qa` only. Never `pm clear`. Never switch UI to `sp500`. PHYL from Import book only.
 
 ## 9. Open Questions
 
-None that block the spike. Ledger apply waits for a later spike.
+None that block this slice. Ledger apply waits for a later spike. Off-feed tap is a no-op.
 
 ## 10. Assumptions Index
 
 - The two files share one Self-Directed account.
 - The 90-day blotter is a window.
-- Import book on Earnings and System is one writer.
+- Import book on Earnings, System, and Positions is one writer.
 - Watch in this PRD is the watchlist surface.
+- Positions sits next to Earnings in the tab bar.

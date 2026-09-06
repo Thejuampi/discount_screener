@@ -70,11 +70,20 @@ import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.earnings.EXCHANGE_ZONE
+import com.discountscreener.core.earnings.EarningsEventRecord
+import com.discountscreener.core.earnings.PreReport
+import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.portfolio.BookContext
+import com.discountscreener.core.portfolio.Closeness
 import com.discountscreener.core.portfolio.ImportPlan
 import com.discountscreener.core.portfolio.PortfolioLot
 import com.discountscreener.core.portfolio.planParsedCsv
 import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +96,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -431,7 +441,7 @@ class DashboardViewModelTest {
     @Test
     fun dashboard_tabs_match_default_order() {
         assertEquals(
-            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates", "Earnings"),
+            listOf("Opportunities", "Market", "Plans", "Tracked", "Watch", "Discovery", "System", "Estimates", "Earnings", "Positions"),
             DashboardTab.entries.map { it.name },
         )
     }
@@ -461,6 +471,150 @@ class DashboardViewModelTest {
 
         assertEquals(DashboardTab.Opportunities, state.currentTab)
         assertEquals(OpportunityScoringModel.AggressiveV2, state.opportunityScoringModel)
+    }
+
+    @Test
+    fun positions_assemble_does_not_open_detail() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(null, repository.lastOpenedSymbol)
+    }
+
+    @Test
+    fun positions_assemble_does_not_add_a_feed_symbol() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(0, repository.addSymbolsCallCount)
+    }
+
+    @Test
+    fun phyl_lot_does_not_join_opps() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(opportunityRows = listOf(listRow("AMZN")))
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+
+        assertEquals(listOf("AMZN"), viewModel.state.value.opportunityRows.map { it.symbol })
+    }
+
+    @Test
+    fun phyl_lot_does_not_join_tracked() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(trackedRows = listOf(trackedRow("AMZN")))
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+
+        assertEquals(listOf("AMZN"), viewModel.state.value.trackedRows.map { it.symbol })
+    }
+
+    @Test
+    fun phyl_lot_does_not_join_watch() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(
+            trackedRows = listOf(trackedRow("AMZN").copy(isWatched = true)),
+        )
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Watch))
+        advanceUntilIdle()
+
+        assertEquals(listOf("AMZN"), viewModel.state.value.trackedRows.filter { it.isWatched }.map { it.symbol })
+    }
+
+    @Test
+    fun positions_search_of_a_name_that_is_not_a_lot_opens_detail() = runTest(dispatcher) {
+        var viewModel = testViewModel(RecordingDashboardRepository())
+        importPhyl(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals("AAPL", viewModel.state.value.detailRoute?.symbol)
+    }
+
+    @Test
+    fun scored_positions_detail_walks_opportunities() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(opportunityRows = listOf(listRow("AMZN")))
+        var viewModel = testViewModel(repository)
+        importAmzn(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.OpenDetail("AMZN"))
+        advanceUntilIdle()
+
+        assertEquals(DetailSourceTab.Opportunities, viewModel.state.value.detailRoute?.sourceTab)
+    }
+
+    @Test
+    fun a_filtered_opps_list_still_scores_the_lot() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository(
+            opportunityRows = emptyList(),
+            universeRows = listOf(listRow("AMZN")),
+        )
+        var viewModel = testViewModel(repository)
+        importAmzn(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals("AMZN", viewModel.state.value.positionsRows.single().opportunity?.symbol)
+    }
+
+    @Test
+    fun a_failed_earnings_load_reprojects_lots() = runTest(dispatcher) {
+        var monday = LocalDate.of(2026, 9, 7)
+        var repository = RecordingDashboardRepository()
+        repository.earningsGate = amznGate(monday)
+        var viewModel = testViewModel(repository, nowEpochSeconds = { nyNoon(monday) })
+        importAmzn(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+        repository.earningsEventsError = RuntimeException("boom")
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(Closeness.None, viewModel.state.value.positionsRows.single().closeness)
+    }
+
+    @Test
+    fun positions_clock_is_ny_today_in_madrid() = runTest(dispatcher) {
+        var prior = TimeZone.getDefault()
+        TimeZone.setDefault(TimeZone.getTimeZone("Europe/Madrid"))
+        try {
+            var monday = LocalDate.of(2026, 9, 7)
+            var repository = RecordingDashboardRepository()
+            repository.earningsGate = amznGate(monday)
+            var nyEvening = LocalDateTime.of(2026, 9, 7, 23, 30)
+                .atZone(EXCHANGE_ZONE)
+                .toInstant()
+                .epochSecond
+            var viewModel = testViewModel(repository, nowEpochSeconds = { nyEvening })
+            importAmzn(viewModel)
+            viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+            advanceUntilIdle()
+
+            assertEquals(Closeness.Today, viewModel.state.value.positionsRows.single().closeness)
+        } finally {
+            TimeZone.setDefault(prior)
+        }
+    }
+
+    @Test
+    fun off_feed_positions_tap_does_not_open_detail() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        importPhyl(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.OpenDetail("PHYL"))
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.detailRoute)
     }
 
     @Test
@@ -1470,6 +1624,35 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun opening_the_positions_tab_reads_the_event_log() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(1, repository.earningsEventsCallCount)
+    }
+
+    @Test
+    fun confirm_import_fills_positions() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv(
+                "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,PHYL,\"1,273\",35.28,08/31/2026\n",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ConfirmImportBook)
+        advanceUntilIdle()
+
+        assertEquals(listOf("PHYL"), viewModel.state.value.positionsRows.map { it.symbol })
+    }
+
+    @Test
     fun confirm_import_rebuilds_the_snapshot() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository()
         var viewModel = testViewModel(repository)
@@ -1502,7 +1685,51 @@ class DashboardViewModelTest {
         assertEquals(0, repository.confirmCalls)
     }
 
-    private fun testViewModel(repository: DashboardRepository): DashboardViewModel {
+    private suspend fun TestScope.importPhyl(viewModel: DashboardViewModel) {
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,PHYL,\"1,273\",35.28,08/31/2026\n",
+        )
+    }
+
+    private suspend fun TestScope.importAmzn(viewModel: DashboardViewModel) {
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,AMZN,10,200.00,08/31/2026\n",
+        )
+    }
+
+    private suspend fun TestScope.importCsv(viewModel: DashboardViewModel, csv: String) {
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ImportBookCsv(csv))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ConfirmImportBook)
+        advanceUntilIdle()
+    }
+
+    private fun amznGate(today: LocalDate) = presentEarningsGate(
+        events = listOf(
+            EarningsEventRecord(
+                pre = PreReport(
+                    symbol = "AMZN",
+                    reportEpochDay = today.toEpochDay(),
+                    timing = ReportTiming.AfterClose,
+                    priceCents = 10_000L,
+                ),
+            ),
+        ),
+        damagedLines = 0,
+        today = today,
+    )
+
+    private fun nyNoon(day: LocalDate): Long =
+        day.atTime(12, 0).atZone(EXCHANGE_ZONE).toInstant().epochSecond
+
+    private fun testViewModel(
+        repository: DashboardRepository,
+        nowEpochSeconds: () -> Long = { Instant.now().epochSecond },
+    ): DashboardViewModel {
         return DashboardViewModel(
             observeDashboardUpdates = ObserveDashboardUpdatesUseCase(repository),
             bootstrapDashboard = BootstrapDashboardUseCase(repository),
@@ -1555,6 +1782,7 @@ class DashboardViewModelTest {
             importPortfolioBook = ImportPortfolioBookUseCase(repository),
             saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
+            nowEpochSeconds = nowEpochSeconds,
         )
     }
 
@@ -1645,6 +1873,7 @@ class DashboardViewModelTest {
     private class RecordingDashboardRepository(
         private val trackedRows: List<TrackedSymbolRow> = emptyList(),
         private val opportunityRows: List<OpportunityListRow> = emptyList(),
+        private val universeRows: List<OpportunityListRow> = opportunityRows,
         private val aggressiveRows: List<OpportunityListRow> = opportunityRows,
         private val detailHistory: List<SymbolRevision> = emptyList(),
         private var detailData: SymbolDetail? = null,
@@ -1674,6 +1903,7 @@ class DashboardViewModelTest {
         var lastTickerSuggestionQuery: String? = null
         var searchTickersCallCount = 0
         var lastOpenedSymbol: String? = null
+        var addSymbolsCallCount = 0
         var loadDiscoveryCallCount = 0
         var recreateDiscoveryCallCount = 0
         var refreshDiscoveryCallCount = 0
@@ -1883,7 +2113,10 @@ class DashboardViewModelTest {
             selectedSymbol: String?,
             selectedRange: ChartRange,
             opportunityScoringModel: OpportunityScoringModel,
-        ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
+        ): DashboardSnapshot {
+            addSymbolsCallCount++
+            return emptySnapshot(opportunityScoringModel)
+        }
 
         override suspend fun selectProfile(
             profile: String,
@@ -2053,6 +2286,7 @@ class DashboardViewModelTest {
                 watchlistSymbols = emptyList(),
                 candidateRows = emptyList(),
                 opportunityRows = rows,
+                opportunityUniverse = universeRows,
                 opportunityScoringModel = opportunityScoringModel,
                 regimeScoringEnabled = regimeScoringEnabled,
                 issues = emptyList(),
@@ -2066,6 +2300,7 @@ class DashboardViewModelTest {
                 refreshCompletedSymbols = 0,
                 refreshTargetSymbols = 0,
                 statusMessage = statusMessage,
+                portfolioLots = lots,
                 screenData = ProjectedDashboardData(
                     selectedDetail = projectedDetailData,
                     estimates = ProjectedEstimatesData(report = projectedEstimatesReport),

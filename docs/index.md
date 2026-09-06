@@ -19,7 +19,7 @@ Start here. This file only points. Edit the home, not this list.
 - [Desktop user manual](../apps/desktop/docs/USER_MANUAL.md)
 - [Desktop history](../apps/desktop/docs/HISTORY_TIME_SERIES.md)
 - [Windows Dashboard 2.0 regression](windows-dashboard-2.0-manual-regression.md)
-- [Advisor CSV import](advisor-csv-import.md) — holdings vs Chase blotter
+- [Advisor CSV import](advisor-csv-import.md) — holdings vs Chase blotter, Android Positions
 - [Valuation live QA](valuation-live-qa-checklist.md) — profile `qa` only
 - [Aggressive V4 evidence](aggressive-v4-evidence.md)
 - [Dip board spec](../_bmad-output/implementation-artifacts/dip-board-spec-v1.md)

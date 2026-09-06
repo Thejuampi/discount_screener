@@ -175,6 +175,27 @@ class PortfolioImportRepositoryTest {
     }
 
     @Test
+    fun confirm_then_snapshot_carries_lots() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = repository(store)
+            repository.confirmPortfolioPlan(repository.planPortfolioCsv(JPM))
+
+            assertEquals(
+                listOf("AMZN"),
+                repository.currentSnapshot(
+                    ViewFilter(),
+                    null,
+                    ChartRange.Year,
+                    OpportunityScoringModel.Legacy,
+                ).portfolioLots.map { it.symbol },
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun confirm_then_snapshot_marks_held_tracked_rows() = runTest(dispatcher) {
         var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {

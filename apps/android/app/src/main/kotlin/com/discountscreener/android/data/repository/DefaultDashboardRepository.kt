@@ -2184,6 +2184,11 @@ class DefaultDashboardRepository(
         var held = heldTickers(portfolioLots)
         trackedRows = pinTrackedRows(trackedRows, held)
         opportunityRows = pinOpportunityRows(opportunityRows, held)
+        var opportunityUniverse = opportunityRowsLocked(
+            ViewFilter(),
+            opportunityScoringModel,
+            includeUnqualified = true,
+        )
 
         return DashboardSnapshot(
             availableProfiles = profileCatalog.availableProfiles(),
@@ -2193,6 +2198,7 @@ class DefaultDashboardRepository(
             watchlistSymbols = engine.watchlistSymbols(),
             candidateRows = dashboardCandidateRows,
             opportunityRows = opportunityRows,
+            opportunityUniverse = opportunityUniverse,
             opportunityScoringModel = opportunityScoringModel,
             regimeScoringEnabled = regimeScoringEnabled,
             issues = issueRecords,
@@ -2232,6 +2238,7 @@ class DefaultDashboardRepository(
             leftoverBoard = boards?.leftover,
             crossBoard = boards?.cross,
             crossBoardProfile = boards?.crossProfile,
+            portfolioLots = portfolioLots,
         )
     }
 

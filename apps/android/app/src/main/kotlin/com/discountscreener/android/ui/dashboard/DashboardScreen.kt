@@ -249,6 +249,7 @@ fun DashboardScreen(
                     estimatesHistory = state.estimatesHistory,
                     notice = state.estimatesNotice,
                 )
+                DashboardTab.Positions -> PositionsContent(state, onAction)
             }
         }
     }
@@ -766,6 +767,34 @@ internal fun maintenanceLayoutMode(maxWidth: Dp): MaintenanceLayoutMode =
     if (maxWidth < 320.dp) MaintenanceLayoutMode.Stacked else MaintenanceLayoutMode.Split
 
 @Composable
+private fun PositionsContent(state: DashboardUiState, onAction: (DashboardAction) -> Unit) {
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.positionsRows.isEmpty()) {
+            Box(modifier = Modifier.weight(1f)) {
+                EmptyState(
+                    title = "No lots",
+                    detail = "Import a J.P. Morgan snapshot, then a Chase blotter.",
+                )
+            }
+        } else {
+            PositionsList(
+                rows = state.positionsRows,
+                scoringModel = state.opportunityScoringModel,
+                quantLensChipsBySymbol = state.rowQuantLensChipsBySymbol,
+                onAction = onAction,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        state.importBookNotice?.let { Text(it) }
+        ImportBookButton(
+            onAction = onAction,
+            modifier = Modifier.fillMaxWidth(),
+            testTag = POSITIONS_GATE_IMPORT,
+        )
+    }
+}
+
+@Composable
 internal fun EmptyState(title: String, detail: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -802,6 +831,7 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.System -> "System"
     DashboardTab.Earnings -> "Earnings"
     DashboardTab.Estimates -> "Estimates"
+    DashboardTab.Positions -> "Positions ${state.positionsRows.size}"
 }
 
 internal fun discoveryTabLabel(state: DashboardUiState): String {

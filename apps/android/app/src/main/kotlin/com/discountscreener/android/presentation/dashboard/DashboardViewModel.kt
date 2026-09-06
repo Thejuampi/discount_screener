@@ -81,6 +81,9 @@ import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.nySessionDay
+import java.time.Instant
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -100,6 +103,7 @@ enum class DashboardTab {
     System,
     Estimates,
     Earnings,
+    Positions,
 }
 
 enum class PlanHunt {
@@ -239,6 +243,7 @@ data class DashboardUiState(
     val symbolNotes: Map<String, String> = emptyMap(),
     val candidateRows: List<CandidateRow> = emptyList(),
     val opportunityRows: List<OpportunityListRow> = emptyList(),
+    val opportunityUniverse: List<OpportunityListRow> = emptyList(),
     val opportunityScoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
     /** The market dimension's runtime switch. Only V3 rows are affected by it. */
     val regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
@@ -295,6 +300,8 @@ data class DashboardUiState(
     val earningsGateNotice: String? = null,
     val importBookPlan: ImportPlan? = null,
     val importBookNotice: String? = null,
+    val positionsRows: List<PositionsRow> = emptyList(),
+    val portfolioLots: List<PortfolioLot> = emptyList(),
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -348,6 +355,7 @@ class DashboardViewModel(
     private val clearDiscoveryData: ClearDiscoveryDataUseCase,
     private val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
     private val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
+    private val nowEpochSeconds: () -> Long = { Instant.now().epochSecond },
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
@@ -558,7 +566,7 @@ class DashboardViewModel(
         if (tab == DashboardTab.Discovery) {
             loadDiscovery()
         }
-        if (tab == DashboardTab.Earnings) {
+        if (tab == DashboardTab.Earnings || tab == DashboardTab.Positions) {
             loadEarningsGate()
         }
     }
@@ -569,14 +577,32 @@ class DashboardViewModel(
         _state.value = _state.value.copy(earningsGateLoading = true)
         activeEarningsJob = viewModelScope.launch {
             try {
-                _state.value = _state.value.copy(earningsGate = getEarningsEvents())
+                var gate = getEarningsEvents()
+                var current = _state.value
+                _state.value = current.copy(
+                    earningsGate = gate,
+                    positionsRows = projectPositions(
+                        lots = current.portfolioLots,
+                        scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
+                        upcomingReport = upcomingReportDates(gate),
+                        today = nySessionDay(nowEpochSeconds()),
+                    ),
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 earningsGateLoaded = false
-                _state.value = _state.value.copy(
-                    earningsGate = EarningsGateUi(),
+                var current = _state.value
+                var empty = EarningsGateUi()
+                _state.value = current.copy(
+                    earningsGate = empty,
                     earningsGateNotice = "Earnings gate failed: ${error.message ?: "unknown error"}",
+                    positionsRows = projectPositions(
+                        lots = current.portfolioLots,
+                        scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
+                        upcomingReport = upcomingReportDates(empty),
+                        today = nySessionDay(nowEpochSeconds()),
+                    ),
                 )
             } finally {
                 _state.value = _state.value.copy(earningsGateLoading = false)
@@ -922,9 +948,15 @@ class DashboardViewModel(
 
     private fun openDetail(symbol: String) {
         val state = _state.value
+        if (state.currentTab == DashboardTab.Positions &&
+            state.positionsRows.any { it.symbol == symbol && it.opportunity == null }
+        ) {
+            return
+        }
         val sourceTab = when (state.currentTab) {
             DashboardTab.Opportunities,
             DashboardTab.Plans,
+            DashboardTab.Positions,
             -> DetailSourceTab.Opportunities
             else -> DetailSourceTab.Tracked
         }
@@ -1453,6 +1485,7 @@ class DashboardViewModel(
         var keepStaleDetail = currentRoute != null && currentState.detailData?.symbol == currentRoute.symbol
         var scoreRow = if (scoringMatches) snapshot.selectedScoreRow else currentState.selectedScoreRow
         var opportunityRows = if (scoringMatches) snapshot.opportunityRows else currentState.opportunityRows
+        var opportunityUniverse = if (scoringMatches) snapshot.opportunityUniverse else currentState.opportunityUniverse
         _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
@@ -1464,6 +1497,7 @@ class DashboardViewModel(
             watchlistSymbols = snapshot.watchlistSymbols,
             candidateRows = snapshot.candidateRows,
             opportunityRows = opportunityRows,
+            opportunityUniverse = opportunityUniverse,
             selectedScoreRow = if (currentRoute != null && scoreRow?.symbol == currentRoute.symbol) {
                 scoreRow
             } else {
@@ -1549,6 +1583,13 @@ class DashboardViewModel(
             leftoverBoard = presentLeftoverBoard(snapshot.leftoverBoard),
             crossBoardOpps = presentCrossBoard(snapshot.crossBoard),
             crossBoardProfile = presentCrossBoard(snapshot.crossBoardProfile),
+            portfolioLots = snapshot.portfolioLots,
+            positionsRows = projectPositions(
+                lots = snapshot.portfolioLots,
+                scored = scoredLots(opportunityUniverse, opportunityRows),
+                upcomingReport = upcomingReportDates(_state.value.earningsGate),
+                today = nySessionDay(nowEpochSeconds()),
+            ),
         )
         rememberDetailSession(_state.value)
     }
