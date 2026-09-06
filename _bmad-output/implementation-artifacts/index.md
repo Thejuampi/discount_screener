@@ -1,11 +1,13 @@
 # Implementation Artifacts Index
 
-Use this index to find active implementation work, story files, QA outputs, and sprint state.
+Use this index to find active implementation work, specs, QA outputs, and archive files.
 
-## Sprint State
+## Archive — sprint files
 
-- [Sprint Status](sprint-status.yaml) - current epic/story status for Valuation Change Visibility.
-- [Company Performance Lens Sprint Status](company-performance-lens-sprint-status.yaml) - feature-specific implementation track for Company Performance Lens.
+These files are historical. Do not update them as live process.
+
+- [Sprint Status](sprint-status.yaml) - archive for Valuation Change Visibility.
+- [Company Performance Lens Sprint Status](company-performance-lens-sprint-status.yaml) - archive.
 
 - [Valuation judgment core](spec-valuation-judgment-core-2026-08-15.md) - Android `core` object above exclusive identity. Stance Identity / Street / Tension / Disputed / Unavailable. Tension names no primary. List Disc% follows `primaryCents` only.
 - [QA universe stance table 2026-08-15](qa-universe-stance-table-2026-08-15.md) - Wave 1/1b measure of the 20 Android `qa.txt` names. Official width/`differenceBps`. Wave 2 after-column uses thinkability `/2`.
@@ -47,19 +49,16 @@ Use this index to find active implementation work, story files, QA outputs, and 
 - [Analyst-Method Automation Pre-1C Retrospective](retro-analyst-method-automation-pre-1c-2026-08-02.md) - autonomous team retro; independent closure protocol and the publication-readiness 1B.3 gate.
 - [Quant Method Mathematical Specification and Redesign](quant-method-mathematical-specification-2026-08-03.md) - the shipped valuation math in closed form, the 62 hand-fitted constants it rests on, and a measured-parameter replacement.
 
-## Story Workflow
+## Workflow
 
-1. Check `sprint-status.yaml`.
-2. Open the next story or spec artifact.
-3. Verify acceptance criteria against planning docs.
-4. Implement with strict TDD.
-5. Run required validation commands.
-6. Add live QA notes when the installed app surface changes.
-7. Update `sprint-status.yaml`.
-8. Run code review and retrospective when appropriate.
+1. Open the spec and the spike memlog.
+2. Check acceptance criteria against the PRD and architecture.
+3. Implement with strict TDD (`bmad-build`).
+4. Run required validation commands.
+5. Add live QA notes when the installed app surface changes.
+6. Run `/bmad-review`. Append findings to the memlog.
 
 ## Maintenance
 
-- Add new story/spec files here when they are created.
-- Keep statuses in `sprint-status.yaml`; this file is navigation, not state.
+- Add new spec files here when they are created.
 - Put generated QA reports under `tests/` and link them from this index.

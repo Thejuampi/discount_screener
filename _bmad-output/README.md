@@ -41,9 +41,9 @@ This folder contains planning and implementation artifacts generated through BMa
 ## Recommended BMad Routing
 
 - **Understand the current project:** `docs/index.md` → `AGENTS.md` → `project-context.md` → `current-functionality-prd.md`.
-- **Plan a new feature:** create or update a product brief, then PRD, UX spec if UI-facing, architecture, epics, readiness report, sprint plan.
+- **Plan a new feature:** open a spike (more than one idea, lock one). PRD → `/sensei-advisor` → spec → `/sensei-advisor`. Add UX if the UI changes. Add architecture if structure or boundaries change. Keep the spike memlog. Juan is a one-person team: do not create epics, user stories, or sprint status.
 - **Modify current behavior:** update the current-functionality PRD only if the baseline product behavior changed; otherwise keep changes in feature artifacts.
-- **Implement stories:** use sprint status and story files. Update sprint status as stories move through backlog, ready, in-progress, review, and done.
+- **Implement:** `bmad-build` from the spec and the memlog. Then `/bmad-review`.
 - **Validate UI/app behavior:** include live QA notes when behavior reaches an installed app surface, especially Android via `make android-run-qa`.
 
 ## Maintenance Rules

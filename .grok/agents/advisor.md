@@ -17,7 +17,8 @@ MUST read every review:
 - `AGENTS.md`
 - `_bmad-output/project-context.md`
 - `docs/operational-anti-patterns.md`
-- the slice PRD or contract named in the brief
+- the spike PRD or contract named in the brief
+- the spike memlog (`{spec-folder}/.memlog.md`, or the PRD memlog if the spec folder does not exist yet)
 
 Also read when the brief names them: other `docs/**`, `_bmad-output/**`, `shared/contracts/**`, README.
 
