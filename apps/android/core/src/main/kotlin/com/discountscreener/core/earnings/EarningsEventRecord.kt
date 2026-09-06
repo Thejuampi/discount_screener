@@ -49,10 +49,13 @@ data class PreReport(
     val surpriseFitUnavailableReason: String? = null,
     val surpriseFitAsymmetric: Boolean? = null,
     val revenueTrailLatestCents: Long? = null,
+    val revenueTrailCentreCents: Long? = null,
     val revenueTrailMedianCents: Long? = null,
     val revenueTrailScaleCents: Long? = null,
     val revenueTrailShortfallZBps: Int? = null,
-)
+) {
+    fun trailCentre(): Long? = revenueTrailCentreCents ?: revenueTrailMedianCents
+}
 
 @Serializable
 data class EventDecision(
@@ -61,9 +64,13 @@ data class EventDecision(
     val positionSizeBps: Int,
     val hedge: HedgeKind,
     val hedgeCostBps: Int?,
-    val sectorOverrideApplied: Boolean,
+    val sectorOverrideApplied: Boolean? = null,
     val justification: String,
-)
+    val revenueTrailCut: Boolean? = null,
+    val unavailableReason: String? = null,
+) {
+    fun trailCut(): Boolean = revenueTrailCut ?: sectorOverrideApplied ?: false
+}
 
 @Serializable
 enum class DecisionCell {

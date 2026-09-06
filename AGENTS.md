@@ -100,7 +100,7 @@ Contracts: [`shared/contracts/valuation-model-family.json`](shared/contracts/val
 
 ### Dynamic parameters — no eternal magic constants
 
-Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Android pre-earnings knobs live in [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit those files. Do not put a second copy in Kotlin.
+Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` from market series / `MarketParams`, ERP from versioned policy, company beta **shrunk** toward industry/sector beta, near-term growth from a recent window (~3–5 years, not full-history CAGR), `g_stable = min(macro ceiling, r_f − buffer, r − ε)`, CoE/WACC derived from those. Cost of debt uses market yield, then a rated or coverage-synthetic spread (EBIT / interest), then the accounting coupon. The cheap coupon on old debt does not set WACC. Android engine knobs live in [`shared/contracts/valuation-policy.yaml`](shared/contracts/valuation-policy.yaml). Android pre-earnings counts and AV budget live in [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml) (`earnings-gate-policy/2`). Edit those files. Do not put a second copy in Kotlin. Cell identities live in the engine.
 
 - **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
 - Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
@@ -298,11 +298,12 @@ No test reaches a live provider. A red test says which URL leaked.
 
 ### Earnings gate (Android)
 
-- Policy: [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml). Edit that file. Do not put a second copy in Kotlin. Do not add percents, caps, or floors that are frozen literals. A YAML `5%` is still a hardcoded value.
-- Cell: implied-move vs median |AR|. Cheap ≤ 0.9× DCF. High > 1.3. Low uses the Normal column.
+- Policy: [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml) (`earnings-gate-policy/2`). Edit that file. The loader reads the six live keys. Kotlin holds no literals for them. Do not add percents, caps, or floors. Identities live in the engine.
+- Cell: event-move vs median |AR|. Cheap = price < DCF. High = ratio > 1. Stale = quote width ≥ straddle. Hedge iff cost bps < event-move bps. Quiet ≥ total refuses the event move.
 - SUE from Alpha Vantage is a diagnostic. Fit the joined observations that are not foreign to the issuer SUE series or the issuer AR series (`isForeignTo`). `n` is the leftover count. Below `min_sue_quarters` the fit is `short_history`. The card prints the slope and `n`. The cell ignores SUE until Juan asks. Do not add a YAML max quarter cap.
-- Revenue trail: last four Yahoo prints. The latest print is the event. Centre is `robustCentre` of the prior three (trim foreign prints, then the mean of what is left). Scale is the MAD of those prior three. A foreign print in the prior three refuses the trail. Hold + last print strictly more than one scale unit below that centre → half size. Flag on. Cell stays `CheapNormalRisk`. A flat prior three (scale 0) cuts any latest print strictly below the mode. No percent floor. Median is not the trail level.
+- Revenue trail: last `min_revenue_trail_quarters` Yahoo prints. The latest print is the event. Centre is `robustCentre` of the prior window. Scale is the MAD of that window. A foreign print in the prior window refuses the trail. A short window refuses the trail. Hold + last print strictly more than one scale unit below that centre → half size. Flag `revenueTrailCut`. Cell stays `CheapNormalRisk`. A flat prior window (scale 0) cuts any latest print strictly below the mode. No percent floor. Median is not the trail level. Field `revenueTrailCentreCents`.
 - Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`. Blank Save is a no-op. Clear deletes the file. The screen says whether a key is on disk. Never print the key.
+- Import book is one writer on Earnings and System. Restore log is a second Earnings SAF action and never plans a lot write. Held is exact ticker equality. Pin is paint (`pinHeldFirst`). Lot qty does not write `positionSizeBps`. Contract: `shared/contracts/advisor-csv-import-v1.yaml` (`advisor-csv-import/3`).
 
 ### Commands and gates
 
@@ -420,7 +421,7 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 | Analyst-method / ledger | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |
 | Valuation ADRs | [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) |
 | Contracts | [`shared/contracts/README.md`](shared/contracts/README.md) |
-| Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/2`) |
-| Pre-earnings risk gate | [`_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) · [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml) (`earnings-gate-policy/1`) |
+| Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/3`) · Android: [`_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](_bmad-output/specs/spec-android-chase-portfolio/SPEC.md) |
+| Pre-earnings risk gate | [`_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md) · [`shared/contracts/earnings-gate-policy.yaml`](shared/contracts/earnings-gate-policy.yaml) (`earnings-gate-policy/2`) · [`_bmad-output/specs/spec-earnings-gate-identities/SPEC.md`](_bmad-output/specs/spec-earnings-gate-identities/SPEC.md) |
 | BMAD process | [`.grok/rules/bmad.md`](.grok/rules/bmad.md) |
 | Seek decision log | [`.grok/decisions.json`](.grok/decisions.json) — append `open` / `taken` / `failed` / `skipped` nodes. Do not replace the tree. |

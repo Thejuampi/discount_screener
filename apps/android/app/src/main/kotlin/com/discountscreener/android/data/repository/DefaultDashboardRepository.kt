@@ -4,6 +4,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
+import com.discountscreener.android.presentation.dashboard.pinOpportunityRows
+import com.discountscreener.android.presentation.dashboard.pinTrackedRows
 import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.data.debug.ScoreExport
 import com.discountscreener.android.data.earnings.EarningsEventRecorder
@@ -71,6 +73,11 @@ import com.discountscreener.android.domain.model.rankMovement
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
+import com.discountscreener.core.portfolio.BookContext
+import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.heldTickers
+import com.discountscreener.core.portfolio.planParsedCsv
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
@@ -400,6 +407,8 @@ class DefaultDashboardRepository(
 
     private var engine = ReportingEngine()
     private var trackedSymbols = mutableListOf<String>()
+    private var portfolioLots: List<PortfolioLot> = emptyList()
+    private var bookAsOf: String? = null
     private val revisions = linkedMapOf<String, MutableList<SymbolRevision>>()
     private val chartCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
@@ -596,6 +605,7 @@ class DefaultDashboardRepository(
             lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
             nowEpochSeconds = nowProvider(),
             alphaVantageKeyPresent = alphaVantageKeyPresent?.invoke() == true,
+            held = heldTickers(stateMutex.withLock { portfolioLots }),
         )
     }
 
@@ -612,6 +622,32 @@ class DefaultDashboardRepository(
 
     override suspend fun restoreEarningsLog(text: String): Int = withContext(computeDispatcher) {
         earningsEventRecorder?.restore(text) ?: 0
+    }
+
+    override suspend fun planPortfolioCsv(text: String): ImportPlan = withContext(computeDispatcher) {
+        stateMutex.withLock { planParsedCsv(text, BookContext(portfolioLots, bookAsOf)) }
+    }
+
+    override suspend fun confirmPortfolioPlan(plan: ImportPlan) = withContext(computeDispatcher) {
+        var nextLots: List<PortfolioLot>
+        var nextAsOf: String?
+        when (plan) {
+            is ImportPlan.ConfirmHoldingsReplace -> {
+                nextLots = plan.positions
+                nextAsOf = plan.asOf
+            }
+            is ImportPlan.ConfirmTradesMerge -> {
+                nextLots = plan.positions
+                nextAsOf = plan.nextBookAsOf
+            }
+            is ImportPlan.Refuse -> return@withContext
+        }
+        stateMutex.withLock {
+            stateStore.replacePortfolioBook(nextLots, nextAsOf)
+            portfolioLots = nextLots
+            bookAsOf = nextAsOf
+        }
+        emitUpdate()
     }
 
     override suspend fun saveAlphaVantageKey(key: String) = withContext(computeDispatcher) {
@@ -1146,11 +1182,12 @@ class DefaultDashboardRepository(
         runCatching { stateStore.loadWarmStart(symbols) }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
+                var book = runCatching { stateStore.loadPortfolioBook() }.getOrDefault(emptyList<PortfolioLot>() to null)
                 stateMutex.withLock {
                     resetInMemoryLocked()
                     statusMessage = "SQLite warm-start reset after restore failure: ${error.message ?: "unknown error"}"
                 }
-                PersistenceBootstrap()
+                PersistenceBootstrap(portfolioLots = book.first, bookAsOf = book.second)
             }
 
     /**
@@ -2144,6 +2181,9 @@ class DefaultDashboardRepository(
         screenData = screenData.copy(
             providerState = screenData.providerState.copy(issues = issueRecords),
         )
+        var held = heldTickers(portfolioLots)
+        trackedRows = pinTrackedRows(trackedRows, held)
+        opportunityRows = pinOpportunityRows(opportunityRows, held)
 
         return DashboardSnapshot(
             availableProfiles = profileCatalog.availableProfiles(),
@@ -3425,6 +3465,8 @@ class DefaultDashboardRepository(
         .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
 
     private fun hydrateWarmStartLocked(bootstrap: PersistenceBootstrap) {
+        portfolioLots = bootstrap.portfolioLots
+        bookAsOf = bootstrap.bookAsOf
         val trackedSymbolSet = trackedSymbols.toSet()
         val hydratedStates = bootstrap.symbolStates.filter { it.symbol in trackedSymbolSet }
         val watchlist = bootstrap.watchlist.filter { it in trackedSymbolSet }

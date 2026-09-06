@@ -34,7 +34,7 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
 - `valuation-policy.yaml`:
   single Android engine policy book (`valuation-policy/1`); industry path, DCF bands, coupons, ranking, dip/leftover. Industry beta stays in `industry-beta-policy-v1.json`
 - `earnings-gate-policy.yaml`:
-  Android pre-earnings gate knobs (`earnings-gate-policy/1`). Edit this file. Do not put a second copy in Kotlin.
+  Android pre-earnings gate counts and Alpha Vantage budget (`earnings-gate-policy/2`). Edit this file. The loader reads these keys. Kotlin holds no copy. Cell, stale, hedge, and trail identities live in the engine.
 - `industry-beta-policy-v1.json`:
   versioned sector/industry levered-beta priors for CoE shrink; through-cycle commodity flags (DVN-class); unmapped default is provisional; Windows/Android exact fixed-point goldens
 - `valuation-evidence-sotp.json`:
@@ -70,7 +70,7 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
 - `opportunity-v4.json`:
   the arithmetic unique to the `AggressiveV4` opportunity model — the agreement bonus (centre, spread, bonus, beta haircut, composite) and the sector-relative fundamentals rule, with a case for each of the four `SectorBenchmarks` fields and for the share-count term. **Android-only today**, and the one file here whose expected values are *not* a second implementation's output: they were hand-derived from the constants before the Kotlin validator ran, and regenerating any of them from Kotlin would destroy the only independence the contract has. Kotlin: `OpportunityV4ContractTest`
 - `advisor-csv-import-v1.yaml`:
-  Windows Advisor CSV kinds (holdings snapshot vs trades window vs trades ledger), detect order, Chase/J.P. Morgan parse rules, warn-then-confirm, and merge-without-double-count examples
+  Windows Advisor and Android Import book (`advisor-csv-import/3`). Kinds (holdings snapshot vs trades window vs trades ledger), detect order, Chase/J.P. Morgan parse rules, warn-then-confirm, merge-without-double-count examples. Android persists ten-thousandths and refuses ledger apply (`ledger_apply_unsupported`). Parse/merge goldens live only in this file.
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
 

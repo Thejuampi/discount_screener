@@ -1,6 +1,6 @@
 # PRD: Pre-Earnings Risk Gate
 
-Status: Wave 0, 1-A y §4.4 construidos en Android (2026-09-05). Wave 1-B, paper-trade y SUE en la celda siguen abiertos. Author: Juan.
+Status: Wave 0, 1-A y §4.4 construidos en Android (2026-09-05). Spike 2026-09-06: gate identities replace YAML percents (`earnings-gate-policy/2`). Wave 1-B, paper-trade y SUE en la celda siguen abiertos. Author: Juan.
 
 ## 1. Objetivo
 
@@ -70,41 +70,45 @@ ratio_riesgo = movimiento_de_evento / mediana(|retorno_anormal| histórico del t
 
 El numerador es el movimiento del evento, no el straddle entero. El straddle precia el reporte más los días tranquilos que faltan hasta el vencimiento; la mediana es de un día. La separación está en §13, "El horizonte del ratio".
 
-Categorías iniciales, calibradas después con distribución empírica por sector:
-- ratio_riesgo > 1.3 → riesgo alto.
-- ratio_riesgo < 0.8 → riesgo bajo.
-- 0.8–1.3 → riesgo normal.
+Categorías (identidades, no percents YAML):
+- ratio_riesgo > 1 → riesgo alto.
+- ratio_riesgo ≤ 1 → riesgo normal.
+- No hay banda Low. Un movimiento priceado por debajo de la historia del ticker no pide cobertura.
 
-Una cadena que no cotiza, o que cotiza con una horquilla por encima del 50% del straddle, no da ratio. El evento se guarda igual y la celda queda `Undecided`.
+Una cadena que no cotiza, o cuya horquilla es ≥ el straddle, no da ratio. `quoteSpreadBps` es `width / straddle × 10000`. Stale cuando `quoteSpreadBps >= 10000`. El evento se guarda igual y la celda queda `Undecided` con razón `option_width_ge_straddle`.
 
-Los umbrales se normalizan por sector y, opcionalmente, por VIX o por el implied move promedio del sector en el mismo período.
+Bandas por sector esperan el paper trading (§6). No entran en este spike.
 
 ### 4.4 Override de métrica sectorial
 
 Aplica solo cuando no hay consenso histórico para la métrica sectorial.
 
-Regla explícita: el último print es el evento. El centro es `robustCentre` de los tres anteriores: se descartan los prints ajenos a la serie y el nivel es la media de lo que queda. La mediana no es el nivel. La escala es la MAD de esos tres. Un print ajeno en los tres anteriores rechaza la trail. Si el último print cae más de una unidad de escala bajo ese centro, y la decisión base era "mantener", la posición se reduce a la mitad. Una trail plana (escala 0) corta cualquier último print estrictamente bajo el modo. No hay un piso de porciento. Todo override queda registrado con esta justificación, para mantener auditabilidad. La celda sigue `CheapNormalRisk`.
+Regla explícita: el último print es el evento. La ventana es `min_revenue_trail_quarters` en YAML `/2`. El centro es `robustCentre` de la ventana previa: se descartan los prints ajenos a la serie y el nivel es la media de lo que queda. La mediana no es el nivel. El campo es `revenueTrailCentreCents`. La escala es la MAD de esa ventana. Un print ajeno en la ventana previa rechaza la trail. Si el último print cae estrictamente más de una unidad de escala bajo ese centro (`latest < centre - scale`), y la decisión base era "mantener", la posición se reduce a la mitad. Una trail plana (escala 0) corta cualquier último print estrictamente bajo el modo. No hay un piso de porciento. No hay `revenue_override_z_bps` en YAML. El corte se marca `revenueTrailCut`. No se marca `sectorOverrideApplied`. La justificación nombra el recorte. La celda sigue `CheapNormalRisk`. El lector de la bitácora acepta las claves viejas. Las escrituras nuevas usan los nombres honestos.
 
 ### 4.5 Matriz de decisión
 
 | Valuación DCF | Riesgo pre-reporte | Acción |
 |---|---|---|
-| Caro (precio > DCF justo) | Alto | Reducir o salir antes del reporte |
+| Caro (precio ≥ DCF justo) | Alto | Reducir o salir antes del reporte |
 | Caro | Normal | Reducir por valuación, no por el evento |
-| Justo/barato (precio ≤ 0.9 × DCF justo) | Alto | Mantener con tamaño reducido (media posición o un tercio), o cubrir |
-| Justo/barato | Normal | Mantener |
+| Barato (precio < DCF justo) | Alto | Media posición, o cubrir si el hedge cuesta menos que el movimiento del evento |
+| Barato | Normal | Mantener |
 
-El riesgo bajo se trata igual que el normal: la matriz tiene dos columnas de riesgo, no tres. Un movimiento priceado por debajo de la historia del ticker no pide acción, solo deja de pedir cobertura. `DecisionMatrix.kt` resuelve `Low` y `Normal` a la misma celda.
+La matriz tiene dos columnas de riesgo. `ratio > 1` es Alto. `ratio ≤ 1` es Normal.
 
-"Justo/barato" se define como precio ≤ 0.9 × DCF justo. Por encima de ese umbral, se trata como "caro".
+Barato es precio < DCF justo. Precio igual al DCF es caro. No hay banda 0.9×.
+
+Sin DCF justo la celda es `Undecided` con razón `dcf_unavailable`. Sin mediana |AR| la celda es `Undecided` con razón `ar_unavailable`. No se inventa Barato, Caro, Alto ni Normal.
 
 ### 4.6 Regla de cobertura
 
 En la celda "justo/barato + riesgo alto", la cobertura preferida es put protector o put spread, no collar. Vender un call limita el upside que la posición barata busca capturar.
 
-Tope de costo:
-- Put protector: si cuesta más del 1.5–2% del valor de la posición, se reduce tamaño en vez de cubrir.
-- Put spread: si cuesta más del 1%, se reduce tamaño en vez de cubrir.
+Identidad de costo: se cubre si el costo del hedge (bps sobre el forward) es estrictamente menor que `eventImpliedMoveBps`. Si falta el movimiento del evento, o el hedge cuesta tanto o más, se reduce tamaño y no se cubre.
+
+El put ATM cuesta cerca de la mitad del straddle. Un tope 1% / 1.5% del precio de la acción casi nunca compra un hedge de earnings. Esa identidad deja que el hedge exista.
+
+La pata corta del put spread es el primer put cotizado más barato debajo del ATM. No hay un offset 5%.
 
 ### 4.7 Lectura por ticker
 
@@ -160,8 +164,8 @@ Pre-reporte:
 
 Decisión:
 - celda_matriz, accion, tamano_posicion
-- tipo_cobertura, costo_cobertura_pct
-- override_sectorial_aplicado (bool), justificacion
+- tipo_cobertura, costo_cobertura_bps
+- revenue_trail_cut (bool), justificacion
 
 Post-reporte:
 - eps_real, sue_calculado
@@ -188,7 +192,7 @@ La pantalla escribe la bitácora a un archivo que el lector elige, y la vuelve a
 
 - El módulo corre sin intervención manual para cualquier ticker con datos de opciones y consenso disponibles.
 - Después del paper trading, la matriz de decisión muestra una diferencia medible en retorno anormal entre los casos "riesgo alto" y "riesgo normal".
-- Los umbrales quedan calibrados por sector, con evidencia empírica documentada, no fijados a mano.
+- Las identidades de celda, horquilla, hedge y trail no son percents YAML. Bandas por sector esperan evidencia del paper trading. No se fijan a mano mientras tanto.
 - Un reporte de la cartera se lee sin buscarlo: el evento del ticker aparece en el detalle del ticker, y la lista se filtra a un símbolo en tres letras (§4.7).
 - La bitácora sobrevive una reinstalación. Un respaldo escrito antes de desinstalar devuelve todos los reportes que el teléfono había capturado (§7).
 
@@ -212,9 +216,9 @@ Sigue sin existir:
 - **SUE en la celda de la matriz** (§4.2). El diagnóstico OLS ya corre con 16 trimestres de Alpha Vantage. La celda sigue en implied-move / mediana |AR| hasta que Juan lo pida.
 
 Ya existe (2026-09-05), ver §13:
-- **Knobs** en `shared/contracts/earnings-gate-policy.yaml`.
+- **Policy** en `shared/contracts/earnings-gate-policy.yaml`. Spike 2026-09-06: `earnings-gate-policy/2` guarda solo conteos y presupuesto Alpha Vantage (`min_sue_quarters`, `min_revenue_trail_quarters`, `av_daily_limit`, `av_per_minute`, `av_cache_fresh_days`, `sue_match_days`). Las identidades de celda, horquilla, hedge y trail viven en el motor. Un percent YAML es un valor congelado.
 - **Pendiente SUE** (`SurpriseRegression`) como diagnóstico en la tarjeta.
-- **Override §4.4** sobre el trail de revenue propio (últimos 4 trimestres Yahoo). El último print es el evento. El centro es `robustCentre` de los tres anteriores.
+- **Override §4.4** sobre el trail de revenue propio. La ventana es `min_revenue_trail_quarters` en `earnings-gate-policy/2`. El último print es el evento. El centro es `robustCentre` de la ventana previa.
 
 ## 11. Lo que falta de verdad, y cómo se consigue
 
@@ -260,18 +264,18 @@ Todo en `apps/android/core/src/main/kotlin/com/discountscreener/core/earnings/`.
 | `PreReportBuilder.kt` | Arma el bloque pre-reporte y el ratio de riesgo. `reportTimingOf` decide antes/después de la campana en hora de Nueva York. | 4.3, 7 |
 | `EarningsEventLog.kt` | Bitácora JSONL, solo agrega. La última copia gana; las líneas dañadas se cuentan. | 7 |
 | `EventSettlement.kt` | Precia la reacción: cierre base y cierre de reacción según el horario, retorno del índice en la misma ventana, retorno anormal descontando beta × mercado. Al liquidar también escribe el EPS y el revenue reales del trimestre, con sus dos sorpresas. | 4.2, 7 |
-| `DecisionMatrix.kt` | Clasifica el riesgo (alto / bajo desde YAML), resuelve la celda con el precio contra el DCF y aplica el tope de cobertura. Low usa la columna Normal. | 4.3, 4.5, 4.6 |
+| `DecisionMatrix.kt` | Clasifica el riesgo por identidad: alto si ratio > 1. Barato si precio < DCF. Horquilla ≥ straddle deja `Undecided`. Hedge si el costo < movimiento del evento. Trail: `latest < centre - scale`. | 4.3, 4.5, 4.6 |
 | `YahooLiveShapeTest` | Corre los dos parsers contra cuerpos reales de Yahoo, guardados sin tocar. Ninguna prueba llama a la red. | 7 |
 | `MarketBeta.kt` | Estima cuánto del movimiento diario del ticker explica el índice, excluyendo los días de reporte y el día de cada lado. Bajo 60 días pareados no devuelve nada, y el retorno anormal vuelve a la resta uno a uno. | 4.2, 4.3 |
-| `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. | 4.3 |
+| `EventMove.kt` | Separa el movimiento del evento de la deriva de los días tranquilos que quedan hasta el vencimiento. Cuenta días hábiles y lee el movimiento diario típico del ticker por mediana. Si quiet ≥ total, el evento queda no disponible. No hay piso 30%. | 4.3 |
 | `EdgarFilings.kt` | Lee las presentaciones de EDGAR y saca cada anuncio de resultados: forma 8-K con item 2.02. Fecha por marca de aceptación en hora de Nueva York, porque `filingDate` pasa al día hábil siguiente después de las 17:30. Calcula los retornos anormales pasados con la misma regla de ventana que la liquidación. | 4.2, 4.3 |
 | `ReportedQuarter.kt` | Lee los trimestres que la empresa ya reportó: EPS real, el estimado contra el que se lo midió, y el revenue del mismo trimestre. Une `earningsHistory` con `incomeStatementHistoryQuarterly` por fecha de cierre. | 4.2, 7 |
 | `SurpriseScore.kt` | Puntúa la sorpresa en unidades de dispersión de los analistas, y la sorpresa de revenue contra el consenso guardado antes del reporte. | 4.2, 7 |
-| `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el strike más cercano a 5% abajo. El costo se lee contra el precio de la acción, en bps. | 4.6 |
-| `EarningsGatePolicy.kt` | Lee `earnings-gate-policy.yaml`. Un libro. Cero literales duplicados en Kotlin. | 4.3, 4.4, 4.5, 4.6 |
+| `HedgeQuote.kt` | Precia la cobertura sobre la misma escalera del straddle: put ATM solo, y put spread contra el primer put cotizado más barato debajo del ATM. El costo se lee contra el forward, en bps, y se compara con el movimiento del evento. | 4.6 |
+| `EarningsGatePolicy.kt` | Lee `earnings-gate-policy.yaml` `/2`. Conteos y presupuesto AV. Cero percents de celda, hedge, horquilla o trail. | 4.2, 4.4 |
 | `AlphaVantageEarnings.kt` | Une `EARNINGS` + `EARNINGS_ESTIMATES` en `SueQuarter`. Un `Note` de throttle es rechazo. n tras el recorte de ajenos bajo `min_sue_quarters` rechaza el ajuste. | 4.2 |
 | `SurpriseRegression.kt` | OLS: y = AR bps, x = SUE/10000. Descarta SUE o AR ajenos a la serie del emisor (`isForeignTo`). `n` es el resto. Bajo `min_sue_quarters` el ajuste es `short_history`. La pendiente es diagnóstico. No mueve la celda. | 4.2 |
-| `RevenueTrail.kt` | Últimos 4 revenues Yahoo. El último print es el evento. Centro: `robustCentre` de los tres anteriores. Escala: MAD de esos tres. Un print ajeno en los tres anteriores rechaza la trail. Hold barato+normal a mitad de tamaño si el último print cae más de una unidad de escala bajo ese centro. Trail plana (escala 0): cualquier último print estrictamente bajo el modo corta. | 4.4 |
+| `RevenueTrail.kt` | Ventana `min_revenue_trail_quarters` de YAML `/2`. El último print es el evento. Centro: `robustCentre` de la ventana previa. Escala: MAD de esa ventana. Un print ajeno en la ventana previa rechaza la trail. Hold barato+normal a mitad de tamaño si `latest < centre - scale`. Trail plana (escala 0): cualquier último print estrictamente bajo el modo corta. Campo `revenueTrailCentreCents`. Flag `revenueTrailCut`. | 4.4 |
 
 Fixtures: `core/src/test/resources/yahoo/options/LVS-2026-08-28.json` y `yahoo/earningsTrend/{LVS,THIN}.json`. Además, dos cuerpos bajados de Yahoo en vivo el 2026-08-27 y guardados tal cual: `LVS-live-2026-08-27.json` de la cadena y del quoteSummary. `YahooLiveShapeTest` corre los dos parsers contra ellos.
 
@@ -294,7 +298,9 @@ Cobertura: el paquete `earnings` de `:core` más el grabador, los endpoints, el 
 | `EventSettlement.settlementOf` | Cierra el evento el día del 8-K con ítem 2.02, y toma de ahí también la hora. Si la empresa tiene archivos en EDGAR y ninguno cae a menos de siete días de la fecha del calendario, no cierra: una reacción leída en un día sin reporte entra a la mediana que denomina todos los ratios de riesgo siguientes. El día usado queda escrito en `PostReport.reportedOnEpochDay` y la tarjeta lo muestra cuando difiere del calendario. |
 | `EarningsCaptureWorker` | Trabajo periódico de WorkManager, cada 90 minutos, con red exigida. Pregunta primero si la rueda está abierta y, si lo está, restaura el universo que ya vive en el teléfono y pide solo las cadenas de los reportes dentro de la ventana. Nunca refresca el tablero. |
 
-Un evento con la cadena ya preciada se escribe una sola vez. La segunda pasada sobre él no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.
+Un evento con la cadena ya preciada no vuelve a pedir la cadena. La segunda pasada no hace ni una llamada de red, así que el precio y la cadena guardados son los del primer día en que el reporte apareció.
+
+Un evento todavía no liquidado vuelve a correr la matriz sobre los campos pre ya guardados cuando la policy cambia (`earnings-gate-policy/2`). Last-wins. Cero fetch de cadena. Un evento ya liquidado conserva la celda que se decidió.
 
 Un evento que quedó sin implied move se vuelve a pedir en cada pasada, mientras el reporte siga dentro de la ventana de captura. Una cadena de opciones no se vuelve a publicar: una sola consulta fallida le costaría al evento su movimiento priceado para siempre, que es justo la pérdida que esta bitácora existe para evitar.
 
@@ -340,7 +346,7 @@ evento² = total² − (movimiento diario típico)² × (días hábiles hasta el
 - El movimiento diario típico sale de la mediana del movimiento absoluto diario de los últimos 3 meses del ticker. La mediana aguanta el salto del reporte anterior sin moverse.
 - Vencimiento el mismo día del reporte: el total ya es todo evento, no se resta nada.
 - Ticker sin historia legible (menos de 20 días): se queda el total. No se inventa una resta.
-- La resta nunca deja el evento por debajo del 30% del total. Un ticker tranquilo con un vencimiento lejano no puede quedar con riesgo de evento cero.
+- Si la deriva tranquila es ≥ el total, el movimiento del evento queda no disponible. Un ticker tranquilo con un vencimiento lejano no inventa un piso 30%. El ratio queda sin numerador y la celda `Undecided`.
 
 El ratio de §4.3 se lee contra este número, no contra el total. La pantalla muestra los dos: el movimiento priceado al vencimiento y el que queda para el evento.
 
@@ -348,11 +354,11 @@ El ratio de §4.3 se lee contra este número, no contra el total. La pantalla mu
 
 Los parsers se escribieron contra fixtures a mano. Bajar la cadena real de LVS el 2026-08-27, fuera de rueda, mostró dos cosas que la fixture no tenía.
 
-**Strikes sin oferta.** Todos los strikes por debajo del dinero venían con `bid` en cero. La pata corta del spread se elegía por cercanía al 5% y después se descartaba por no tener precio, así que el spread quedaba sin cotizar aunque más abajo hubiera un strike que sí se opera. Ahora la elección solo mira strikes cotizables.
+**Strikes sin oferta.** Todos los strikes por debajo del dinero venían con `bid` en cero. La pata corta del spread se elegía por cercanía al 5% y después se descartaba por no tener precio, así que el spread quedaba sin cotizar aunque más abajo hubiera un strike que sí se opera. La identidad: el primer put cotizado más barato debajo del ATM. Solo strikes cotizables.
 
 **Cadena cotizada más ancha que su propio mid.** El call ATM venía 0.25 / 2.49 contra un straddle de 1.74: la horquilla era 154% del straddle. El mid de eso no precia el reporte, precia el spread del market maker.
 
-La respuesta no es descartar el evento. Una cadena no se vuelve a publicar, así que el evento se guarda igual, con `quoteSpreadBps` al lado del movimiento. Lo que se frena es la decisión: por encima del 50% de ancho, la celda queda `Undecided` y la justificación dice que hay que leerla con el mercado abierto. La bitácora conserva el número crudo; el gate no actúa sobre él.
+La respuesta no es descartar el evento. Una cadena no se vuelve a publicar, así que el evento se guarda igual, con `quoteSpreadBps` al lado del movimiento. Lo que se frena es la decisión: horquilla ≥ straddle (`quoteSpreadBps >= 10000`) deja la celda `Undecided` y la justificación dice que hay que leerla con el mercado abierto. La bitácora conserva el número crudo; el gate no actúa sobre él.
 
 ### El tope de costo (§4.6)
 
@@ -360,9 +366,9 @@ El bloque pre-reporte guarda `putSpreadCostBps`, `protectivePutCostBps` y los do
 
 En la celda "barato + riesgo alto":
 
-- Put spread hasta 1% del valor de la posición: se cubre, a media posición, y la justificación dice el precio.
-- Put spread por encima del 1%: se recorta el tamaño y no se cubre. La justificación nombra el costo y el tope que lo dejó afuera.
-- Cadena que no cotiza spread: se pide la cobertura sin precio, como antes.
+- Hedge (spread primero, si falta el put) cuyo costo en bps es < movimiento del evento: se cubre, a media posición, y la justificación dice el precio.
+- Hedge que cuesta tanto o más que el evento: se recorta el tamaño y no se cubre. La justificación nombra el costo y el movimiento del evento.
+- Cadena que no cotiza hedge: se pide la cobertura sin precio, como antes. No hay tope 1% / 1.5%.
 
 ### Lectura por ticker (§4.7)
 
@@ -400,7 +406,7 @@ Code review of `7d73cf1c..HEAD` (2026-09-05). IBM JSON fixtures were scored by s
 - [x] [Review][Patch] Worker and UI must not admit against the budget file without a lock [`AlphaVantageEarningsClient.kt:62`]
 - [x] [Review][Patch] Card must say when the SUE slope is the truncated (asymmetric) fit [`SurpriseRegression.kt:55`]
 - [x] [Review][Patch] Revenue-cut tests must assert the cell stays `CheapNormalRisk` [`DecisionMatrixTest.kt:258`]
-- [x] [Review][Patch] Add the `z == revenue_override_z_bps` boundary case [`DecisionMatrix.kt:173`]
+- [x] [Review][Patch] Add the `z == revenue_override_z_bps` boundary case [`DecisionMatrix.kt:173`] — superseded 2026-09-06: drop the YAML z. Cut when `latest < centre - scale`.
 - [x] [Review][Patch] PRD §13 still says `fetchReportedQuarters` is settlement-only [`prd-pre-earnings-risk-gate-2026-08-27.md`]
 - [x] [Review][Patch] Client tests must match `function=EARNINGS` vs `function=EARNINGS_ESTIMATES` on the full URL [`AlphaVantageEarningsClientTest.kt:104`]
 - [x] [Review][Defer] `revenueSurpriseBps` stays null while `revenue_estimate_average` is on every joined IBM row [`AlphaVantageEarnings.kt:112`] — deferred, Wave 1-A prints EPS SUE only

@@ -18,6 +18,7 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.ImportPortfolioBookUseCase
 import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
@@ -69,6 +70,10 @@ import com.discountscreener.core.model.QualificationStatus
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.portfolio.BookContext
+import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.planParsedCsv
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -1418,6 +1423,66 @@ class DashboardViewModelTest {
         assertEquals(mapOf("ULTA" to "Target partnership ends."), viewModel.state.value.symbolNotes)
     }
 
+    @Test
+    fun import_book_stays_in_memory_until_confirm() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv(
+                "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,AMZN,10,200.00,08/31/2026\n",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(0, repository.confirmCalls)
+    }
+
+    @Test
+    fun cancel_import_writes_nothing() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv(
+                "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,AMZN,10,200.00,08/31/2026\n",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.CancelImportBook)
+        advanceUntilIdle()
+
+        assertEquals(0, repository.confirmCalls)
+    }
+
+    @Test
+    fun confirm_import_writes_the_plan() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv(
+                "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,AMZN,10,200.00,08/31/2026\n",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ConfirmImportBook)
+        advanceUntilIdle()
+
+        assertEquals(1, repository.confirmCalls)
+    }
+
+    @Test
+    fun confirm_of_a_refuse_plan_writes_nothing() = runTest(dispatcher) {
+        var repository = RecordingDashboardRepository()
+        var viewModel = testViewModel(repository)
+        viewModel.dispatch(
+            DashboardAction.ImportBookCsv("fecha;ticker;cantidad;precio\n01/02/2026;AMZN;1;100\n"),
+        )
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.ConfirmImportBook)
+        advanceUntilIdle()
+
+        assertEquals(0, repository.confirmCalls)
+    }
+
     private fun testViewModel(repository: DashboardRepository): DashboardViewModel {
         return DashboardViewModel(
             observeDashboardUpdates = ObserveDashboardUpdatesUseCase(repository),
@@ -1468,6 +1533,7 @@ class DashboardViewModelTest {
             getEarningsEvents = GetEarningsEventsUseCase(repository),
             backUpEarningsLog = EarningsLogBackupUseCase(repository),
             restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            importPortfolioBook = ImportPortfolioBookUseCase(repository),
             saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             ensureReplayBackingLoaded = EnsureReplayBackingLoadedUseCase(repository),
         )
@@ -1721,6 +1787,30 @@ class DashboardViewModelTest {
         override suspend fun restoreEarningsLog(text: String): Int {
             restoredText = text
             return restoredCount
+        }
+
+        var lots = emptyList<PortfolioLot>()
+        var bookAsOf: String? = null
+        var lastConfirmed: ImportPlan? = null
+        var confirmCalls = 0
+
+        override suspend fun planPortfolioCsv(text: String) =
+            planParsedCsv(text, BookContext(lots, bookAsOf))
+
+        override suspend fun confirmPortfolioPlan(plan: ImportPlan) {
+            confirmCalls++
+            lastConfirmed = plan
+            when (plan) {
+                is ImportPlan.ConfirmHoldingsReplace -> {
+                    lots = plan.positions
+                    bookAsOf = plan.asOf
+                }
+                is ImportPlan.ConfirmTradesMerge -> {
+                    lots = plan.positions
+                    bookAsOf = plan.nextBookAsOf
+                }
+                is ImportPlan.Refuse -> Unit
+            }
         }
 
         override suspend fun saveAlphaVantageKey(key: String) {

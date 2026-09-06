@@ -32,6 +32,31 @@ class EarningsEventRecordTest {
         )
     }
 
+    @Test
+    fun an_old_median_key_still_reads_as_the_trail_centre() {
+        var json =
+            """{"pre":{"symbol":"LVS","reportEpochDay":20692,"timing":"AfterClose","priceCents":3500,"revenueTrailLatestCents":80,"revenueTrailMedianCents":100,"revenueTrailScaleCents":10}}"""
+        var record = Json.decodeFromString(EarningsEventRecord.serializer(), json)
+
+        assertEquals(100L, record.pre.trailCentre())
+    }
+
+    @Test
+    fun an_old_sector_flag_still_reads_as_the_trail_cut() {
+        var json =
+            """{"pre":{"symbol":"LVS","reportEpochDay":20692,"timing":"AfterClose","priceCents":3500},"decision":{"cell":"CheapNormalRisk","action":"Reduce","positionSizeBps":5000,"hedge":"None","hedgeCostBps":null,"sectorOverrideApplied":true,"justification":"cut"}}"""
+
+        assertEquals(true, Json.decodeFromString(EarningsEventRecord.serializer(), json).decision?.trailCut())
+    }
+
+    @Test
+    fun the_new_cut_flag_wins_over_the_old_sector_flag() {
+        var json =
+            """{"pre":{"symbol":"LVS","reportEpochDay":20692,"timing":"AfterClose","priceCents":3500},"decision":{"cell":"CheapNormalRisk","action":"Hold","positionSizeBps":10000,"hedge":"None","hedgeCostBps":null,"sectorOverrideApplied":true,"revenueTrailCut":false,"justification":"hold"}}"""
+
+        assertEquals(false, Json.decodeFromString(EarningsEventRecord.serializer(), json).decision?.trailCut())
+    }
+
     private val pre = PreReport(
         symbol = "LVS",
         reportEpochDay = 20_692L,

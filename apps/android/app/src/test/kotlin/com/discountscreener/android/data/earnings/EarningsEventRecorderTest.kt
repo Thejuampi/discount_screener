@@ -7,6 +7,9 @@ import com.discountscreener.core.earnings.ChainRow
 import com.discountscreener.core.earnings.ConsensusEstimate
 import com.discountscreener.core.earnings.DailyClose
 import com.discountscreener.core.earnings.DecisionCell
+import com.discountscreener.core.earnings.EventAction
+import com.discountscreener.core.earnings.EventDecision
+import com.discountscreener.core.earnings.HedgeKind
 import com.discountscreener.core.earnings.EarningsAnnouncement
 import com.discountscreener.core.earnings.EarningsEventLog
 import com.discountscreener.core.earnings.OptionQuote
@@ -18,6 +21,7 @@ import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
 import com.discountscreener.core.earnings.SueQuarter
 import com.discountscreener.core.earnings.EXCHANGE_ZONE
+import com.discountscreener.core.earnings.decisionOf
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -154,6 +158,71 @@ class EarningsEventRecorderTest {
         recorder.capture(listOf(row(earningsIn = 3, priceCents = 9_999L)))
 
         assertEquals(4_424L, log.read().events.single().pre.priceCents)
+    }
+
+    @Test
+    fun an_upcoming_priced_event_re_runs_the_matrix_without_a_chain_call() = runTest {
+        var log = log()
+        log.append(oldPercentCell(settled = false))
+        var chains = CountingChains(chain)
+
+        recorder(log, chains = chains).capture(emptyList())
+
+        assertEquals(DecisionCell.CheapHighRisk, log.read().events.single().decision?.cell)
+        assertEquals(0, chains.calls)
+    }
+
+    @Test
+    fun a_settled_event_keeps_the_cell_that_was_decided() = runTest {
+        var log = log()
+        log.append(oldPercentCell(settled = true))
+
+        recorder(log).capture(emptyList())
+
+        assertEquals(DecisionCell.ExpensiveHighRisk, log.read().events.single().decision?.cell)
+    }
+
+    @Test
+    fun a_settled_event_costs_no_chain_call() = runTest {
+        var log = log()
+        log.append(oldPercentCell(settled = true))
+        var chains = CountingChains(chain)
+
+        recorder(log, chains = chains).capture(emptyList())
+
+        assertEquals(0, chains.calls)
+    }
+
+    @Test
+    fun an_upcoming_quiet_floor_re_runs_to_undecided() = runTest {
+        var log = log()
+        var stored = oldPercentCell(settled = false)
+        log.append(
+            stored.copy(
+                pre = stored.pre.copy(
+                    eventImpliedMoveBps = 210,
+                    normalDailyMoveBps = 900,
+                    expiryEpochDay = stored.pre.reportEpochDay + 7,
+                ),
+            ),
+        )
+
+        recorder(log).capture(emptyList())
+
+        assertEquals(null, log.read().events.single().pre.eventImpliedMoveBps)
+    }
+
+    @Test
+    fun an_identity_row_with_the_old_flag_does_not_append() = runTest {
+        var file = File(folder.newFolder(), "events.jsonl")
+        var log = EarningsEventLog(file)
+        var pre = oldPercentCell(settled = false).pre
+        var next = decisionOf(pre)
+        log.append(EarningsEventRecord(pre = pre, decision = next.copy(sectorOverrideApplied = false)))
+
+        recorder(log).capture(emptyList())
+
+        assertEquals(1, file.readLines().size)
     }
 
     @Test
@@ -676,6 +745,29 @@ class EarningsEventRecorderTest {
             closesOf(4_000L, 4_000L, 4_200L, from = TODAY.minusDays(4))
         }
     }
+
+    private fun oldPercentCell(settled: Boolean) = EarningsEventRecord(
+        pre = PreReport(
+            symbol = "LVS",
+            reportEpochDay = if (settled) TODAY.minusDays(90).toEpochDay() else TODAY.plusDays(3).toEpochDay(),
+            timing = ReportTiming.AfterClose,
+            priceCents = 3_800L,
+            dcfFairValueCents = 4_000L,
+            impliedMoveBps = 700,
+            eventImpliedMoveBps = 700,
+            riskRatioBps = 11_000,
+            putSpreadCostBps = 80,
+        ),
+        decision = EventDecision(
+            cell = DecisionCell.ExpensiveHighRisk,
+            action = EventAction.Exit,
+            positionSizeBps = 0,
+            hedge = HedgeKind.None,
+            hedgeCostBps = null,
+            justification = "old percent cell",
+        ),
+        post = if (settled) PostReport(abnormalReturnBps = 400) else null,
+    )
 
     private fun pastEvent(symbol: String, day: Long) = EarningsEventRecord(
         pre = PreReport(

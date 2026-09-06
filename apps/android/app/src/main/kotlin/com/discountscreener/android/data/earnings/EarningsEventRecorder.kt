@@ -16,6 +16,8 @@ import com.discountscreener.core.earnings.OptionChainSnapshot
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.ReportedQuarter
 import com.discountscreener.core.earnings.decisionOf
+import com.discountscreener.core.earnings.identityChanged
+import com.discountscreener.core.earnings.identityPreOf
 import com.discountscreener.core.earnings.EXCHANGE_ZONE
 import com.discountscreener.core.earnings.expiryAfterReport
 import com.discountscreener.core.earnings.isQuoteStale
@@ -97,6 +99,8 @@ class EarningsEventRecorder(
         var now = Instant.ofEpochSecond(nowProvider())
         var today = now.atZone(EXCHANGE_ZONE).toLocalDate()
         var stored = settleDueEvents(log.read().events, today)
+        refreshIdentityDecisions(stored)
+        stored = log.read().events
         if (!quotesAreLive(now)) return 0
         var priced = stored
             .filter { it.pre.impliedMoveBps != null && !isQuoteStale(it.pre) }
@@ -356,6 +360,18 @@ class EarningsEventRecorder(
     private fun isInWindow(reportDate: LocalDate, today: LocalDate): Boolean {
         var days = reportDate.toEpochDay() - today.toEpochDay()
         return days in 0..windowDays
+    }
+
+    private fun refreshIdentityDecisions(stored: List<EarningsEventRecord>) {
+        stored.forEach { record ->
+            if (record.post != null) return@forEach
+            if (record.pre.impliedMoveBps == null) return@forEach
+            var pre = identityPreOf(record.pre)
+            var next = decisionOf(pre)
+            if (identityChanged(next, record.decision) || pre != record.pre) {
+                log.append(record.copy(pre = pre, decision = next))
+            }
+        }
     }
 
     private companion object {

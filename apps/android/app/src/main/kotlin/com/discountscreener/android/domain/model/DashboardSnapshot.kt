@@ -163,6 +163,7 @@ data class TrackedSymbolRow(
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
     val valuationStanceLabel: String? = null,
+    val held: Boolean = false,
 )
 
 data class OpportunityListRow(
@@ -230,6 +231,8 @@ data class OpportunityListRow(
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
     val valuationStanceLabel: String? = null,
+    val held: Boolean = false,
+    val scoreRank: Int? = null,
 )
 
 data class DashboardSnapshot(

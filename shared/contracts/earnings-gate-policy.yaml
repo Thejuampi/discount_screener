@@ -1,16 +1,9 @@
-# Single source for Android pre-earnings gate numbers.
-# Edit this file to change a knob. Do not put a second copy in Kotlin.
-version: earnings-gate-policy/1
-high_risk_ratio_bps: 13000
-low_risk_ratio_bps: 8000
-cheap_price_to_fair_bps: 9000
-hedge_cost_cap_bps: 100
-protective_put_cost_cap_bps: 150
-max_quote_spread_bps: 5000
+# Android pre-earnings gate. Counts and Alpha Vantage budget only.
+# Cell, stale, hedge, and trail identities live in the engine. Do not put percents here.
+version: earnings-gate-policy/2
 min_sue_quarters: 16
 av_daily_limit: 25
 av_per_minute: 5
 av_cache_fresh_days: 7
 sue_match_days: 7
 min_revenue_trail_quarters: 4
-revenue_override_z_bps: 10000

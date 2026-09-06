@@ -22,6 +22,7 @@ data class DashboardUseCases(
     val getEarningsEvents: GetEarningsEventsUseCase,
     val backUpEarningsLog: EarningsLogBackupUseCase,
     val restoreEarningsLog: RestoreEarningsLogUseCase,
+    val importPortfolioBook: ImportPortfolioBookUseCase,
     val saveAlphaVantageKey: SaveAlphaVantageKeyUseCase,
     val getIndexEstimates: GetIndexEstimatesUseCase,
     val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,

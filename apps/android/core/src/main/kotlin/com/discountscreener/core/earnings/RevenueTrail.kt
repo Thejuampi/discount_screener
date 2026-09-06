@@ -1,5 +1,6 @@
 package com.discountscreener.core.earnings
 
+import com.discountscreener.core.math.isForeignTo
 import com.discountscreener.core.math.medianOf
 import com.discountscreener.core.math.robustCentre
 import kotlin.math.abs
@@ -19,6 +20,7 @@ fun revenueTrailOf(
     var window = revenuesOldestFirst.takeLast(minN)
     if (window.any { it <= 0L }) return null
     var prior = window.dropLast(1).map { it.toDouble() }
+    if (prior.any { candidate -> isForeignTo(candidate, prior) }) return null
     var priorLocation = medianOf(prior) ?: return null
     var mad = medianOf(prior.map { abs(it - priorLocation) }) ?: return null
     if (!mad.isFinite()) return null

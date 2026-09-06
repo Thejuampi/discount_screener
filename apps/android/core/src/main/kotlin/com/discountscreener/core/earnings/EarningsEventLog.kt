@@ -157,7 +157,7 @@ class EarningsEventLog(private val file: File) {
         runCatching { json.decodeFromString(EarningsEventRecord.serializer(), line) }.getOrNull()
 
     private companion object {
-        val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
         const val LINE = "\n"
         const val NO_DATE = "-"
     }

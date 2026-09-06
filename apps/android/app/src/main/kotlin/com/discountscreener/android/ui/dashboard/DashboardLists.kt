@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -51,6 +52,8 @@ import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.QualificationStatus
 import kotlin.math.max
 
+const val TRACKED_HELD = "trackedHeld"
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TrackedList(
@@ -74,10 +77,24 @@ internal fun TrackedList(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        SymbolCompanyTitle(
-                            symbol = row.symbol,
-                            companyName = row.companyName,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            SymbolCompanyTitle(
+                                symbol = row.symbol,
+                                companyName = row.companyName,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (row.held) {
+                                Text(
+                                    text = "Held",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag(TRACKED_HELD),
+                                )
+                            }
+                        }
                         TrackedRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
                         TrackedRowMetrics(row)
                     }
@@ -134,12 +151,19 @@ internal fun OpportunityList(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RankOrdinal(index = index)
+                        RankOrdinal(index = (row.scoreRank ?: (index + 1)) - 1)
                         SymbolCompanyTitle(
                             symbol = row.symbol,
                             companyName = row.companyName,
                             modifier = Modifier.weight(1f),
                         )
+                        if (row.held) {
+                            Text(
+                                text = "Held",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                         ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
                     }
                     OpportunityRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())

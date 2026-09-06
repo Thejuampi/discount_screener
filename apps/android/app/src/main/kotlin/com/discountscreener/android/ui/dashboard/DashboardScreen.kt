@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
+import com.discountscreener.android.presentation.dashboard.pinWatchedRows
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedProviderState
 import java.time.Instant
@@ -172,7 +173,7 @@ fun DashboardScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             val visibleTrackedRows = if (state.currentTab == DashboardTab.Watch) {
-                state.trackedRows.filter { it.isWatched }
+                pinWatchedRows(state.trackedRows)
             } else {
                 state.trackedRows
             }
@@ -239,7 +240,7 @@ fun DashboardScreen(
                 state = state.earningsGate,
                 loading = state.earningsGateLoading,
                 pendingBackup = state.earningsLogBackup,
-                notice = state.earningsGateNotice,
+                notice = state.importBookNotice ?: state.earningsGateNotice,
                 onAction = onAction,
             )
             DashboardTab.Estimates -> EstimatesScreen(
@@ -271,6 +272,14 @@ fun DashboardScreen(
                 onAction(DashboardAction.SelectProfile(it))
                 showProfiles = false
             },
+        )
+    }
+
+    state.importBookPlan?.let { plan ->
+        ImportBookDialog(
+            plan = plan,
+            onConfirm = { onAction(DashboardAction.ConfirmImportBook) },
+            onDismiss = { onAction(DashboardAction.CancelImportBook) },
         )
     }
 }
@@ -421,6 +430,7 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
         item {
             MaintenanceCard(
                 state = state,
+                onAction = onAction,
                 onRefreshStats = { onAction(DashboardAction.RefreshSystemStats) },
                 onPrune = { showPruneDialog = true },
                 onClearAll = { showClearDialog = true },
@@ -660,6 +670,7 @@ private fun MeasurementCard(
 @Composable
 private fun MaintenanceCard(
     state: DashboardUiState,
+    onAction: (DashboardAction) -> Unit,
     onRefreshStats: () -> Unit,
     onPrune: () -> Unit,
     onClearAll: () -> Unit,
@@ -674,6 +685,12 @@ private fun MaintenanceCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text("Maintenance", fontWeight = FontWeight.Bold)
+            state.importBookNotice?.let { Text(it) }
+            ImportBookButton(
+                onAction = onAction,
+                modifier = Modifier.fillMaxWidth(),
+                testTag = SYSTEM_GATE_IMPORT,
+            )
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 when (maintenanceLayoutMode(maxWidth)) {
                     MaintenanceLayoutMode.Stacked -> {

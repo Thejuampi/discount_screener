@@ -30,6 +30,7 @@ import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.ImportPortfolioBookUseCase
 import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
@@ -79,6 +80,7 @@ import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.portfolio.ImportPlan
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -199,6 +201,9 @@ sealed interface DashboardAction {
     data class EarningsLogBackupWritten(val eventCount: Int) : DashboardAction
     data object EarningsLogBackupDropped : DashboardAction
     data class RestoreEarningsLog(val text: String) : DashboardAction
+    data class ImportBookCsv(val text: String) : DashboardAction
+    data object ConfirmImportBook : DashboardAction
+    data object CancelImportBook : DashboardAction
     data class SaveAlphaVantageKey(val key: String) : DashboardAction
     data object ClearAlphaVantageKey : DashboardAction
 
@@ -288,6 +293,8 @@ data class DashboardUiState(
     val earningsGateLoading: Boolean = false,
     val earningsLogBackup: String? = null,
     val earningsGateNotice: String? = null,
+    val importBookPlan: ImportPlan? = null,
+    val importBookNotice: String? = null,
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -327,6 +334,7 @@ class DashboardViewModel(
     private val getEarningsEvents: GetEarningsEventsUseCase,
     private val backUpEarningsLog: EarningsLogBackupUseCase,
     private val restoreEarningsLog: RestoreEarningsLogUseCase,
+    private val importPortfolioBook: ImportPortfolioBookUseCase,
     private val saveAlphaVantageKey: SaveAlphaVantageKeyUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
@@ -402,6 +410,9 @@ class DashboardViewModel(
             is DashboardAction.EarningsLogBackupWritten -> finishEarningsLogBackup(action.eventCount)
             DashboardAction.EarningsLogBackupDropped -> dropEarningsLogBackup()
             is DashboardAction.RestoreEarningsLog -> restoreEarningsLogFrom(action.text)
+            is DashboardAction.ImportBookCsv -> planImportBook(action.text)
+            DashboardAction.ConfirmImportBook -> confirmImportBook()
+            DashboardAction.CancelImportBook -> cancelImportBook()
             is DashboardAction.SaveAlphaVantageKey -> {
                 if (action.key.isNotBlank()) saveAlphaVantageKeyFrom(action.key)
             }
@@ -608,6 +619,52 @@ class DashboardViewModel(
      * Silence would read the same whether the file was the wrong one or the phone already
      * held everything in it, and those call for opposite next moves.
      */
+    private fun planImportBook(text: String) {
+        viewModelScope.launch {
+            var plan = try {
+                importPortfolioBook.plan(text)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    importBookPlan = null,
+                    importBookNotice = error.message ?: "unreadable",
+                )
+                return@launch
+            }
+            _state.value = _state.value.copy(
+                importBookPlan = plan,
+                importBookNotice = if (plan is ImportPlan.Refuse) refuseReasonCode(plan.reason) else null,
+            )
+        }
+    }
+
+    private var importConfirmJob: Job? = null
+
+    private fun confirmImportBook() {
+        var plan = _state.value.importBookPlan ?: return
+        if (plan is ImportPlan.Refuse) return
+        importConfirmJob?.cancel()
+        importConfirmJob = viewModelScope.launch {
+            try {
+                importPortfolioBook.confirm(plan)
+                if (_state.value.importBookPlan !== plan) return@launch
+                _state.value = _state.value.copy(importBookPlan = null, importBookNotice = "Book updated.")
+                if (earningsGateLoaded) {
+                    loadEarningsGate()
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _state.value = _state.value.copy(
+                    importBookNotice = error.message ?: "unreadable",
+                )
+            }
+        }
+    }
+
+    private fun cancelImportBook() {
+        importConfirmJob?.cancel()
+        _state.value = _state.value.copy(importBookPlan = null)
+    }
+
     private fun restoreEarningsLogFrom(text: String) {
         viewModelScope.launch {
             var message = try {
@@ -1206,7 +1263,7 @@ class DashboardViewModel(
 
     private fun visibleTrackedRows(state: DashboardUiState): List<TrackedSymbolRow> =
         if (state.currentTab == DashboardTab.Watch) {
-            state.trackedRows.filter { it.isWatched }
+            pinWatchedRows(state.trackedRows)
         } else {
             state.trackedRows
         }
@@ -1537,6 +1594,7 @@ class DashboardViewModel(
                         getEarningsEvents = useCases.getEarningsEvents,
                         backUpEarningsLog = useCases.backUpEarningsLog,
                         restoreEarningsLog = useCases.restoreEarningsLog,
+                        importPortfolioBook = useCases.importPortfolioBook,
                         saveAlphaVantageKey = useCases.saveAlphaVantageKey,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,

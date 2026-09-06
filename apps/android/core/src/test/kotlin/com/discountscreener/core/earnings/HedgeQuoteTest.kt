@@ -12,7 +12,7 @@ class HedgeQuoteTest {
     }
 
     @Test
-    fun the_short_leg_sits_five_percent_below_the_long_leg() {
+    fun the_short_leg_is_the_first_cheaper_put_below_the_money() {
         assertEquals(95.0, quote()?.shortStrike)
     }
 
@@ -72,10 +72,17 @@ class HedgeQuoteTest {
     }
 
     @Test
-    fun the_short_leg_is_the_strike_nearest_the_five_percent_target() {
+    fun the_short_leg_takes_the_adjacent_cheaper_put_not_the_five_percent_target() {
         var wide = listOf(row(100.0, put = 4.0), row(97.0, put = 2.6), row(94.0, put = 1.4))
 
-        assertEquals(94.0, hedgeQuoteOf(wide, move(100.0), forward = 100.0)?.shortStrike)
+        assertEquals(97.0, hedgeQuoteOf(wide, move(100.0), forward = 100.0)?.shortStrike)
+    }
+
+    @Test
+    fun an_equal_mid_below_the_money_is_skipped_for_the_next_cheaper_put() {
+        var equal = listOf(row(100.0, put = 4.0), row(99.0, put = 4.0), row(97.0, put = 3.5))
+
+        assertEquals(97.0, hedgeQuoteOf(equal, move(100.0), forward = 100.0)?.shortStrike)
     }
 
     @Test

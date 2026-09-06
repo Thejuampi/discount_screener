@@ -43,6 +43,30 @@ class EarningsGateScreenTest {
     }
 
     @Test
+    fun the_earnings_tab_offers_import_book() {
+        render(EarningsGateUi())
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_IMPORT).assertIsDisplayed()
+    }
+
+    @Test
+    fun a_populated_log_still_offers_import_book() {
+        render(gate(day = 3))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("Import book"))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_IMPORT).assertIsDisplayed()
+    }
+
+    @Test
+    fun a_held_row_shows_the_held_mark() {
+        render(gate(day = 3, held = setOf("LVS")))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_HELD).assertIsDisplayed()
+    }
+
+    @Test
     fun the_earnings_tab_offers_an_alpha_vantage_key_field() {
         render(EarningsGateUi())
 
@@ -140,7 +164,7 @@ class EarningsGateScreenTest {
 
     @Test
     fun a_captured_report_shows_the_action_and_the_size_it_carries() {
-        render(gate(day = 3))
+        render(gate(day = 3, spread = 80))
 
         composeRule.onNodeWithText("Hedge · 50%").assertIsDisplayed()
     }
@@ -184,7 +208,7 @@ class EarningsGateScreenTest {
 
     @Test
     fun a_hedge_too_dear_to_buy_shows_the_smaller_position_instead() {
-        render(gate(day = 3, spread = 150))
+        render(gate(day = 3, spread = 800))
 
         composeRule.onNodeWithText("Reduce · 50%").assertIsDisplayed()
     }
@@ -247,6 +271,7 @@ class EarningsGateScreenTest {
         sueSlope: Int? = null,
         ratio: Int? = 17_525,
         trailCut: Boolean = false,
+        held: Set<String> = emptySet(),
     ): EarningsGateUi {
         var pre = PreReport(
             symbol = symbol,
@@ -265,7 +290,7 @@ class EarningsGateScreenTest {
             surpriseFitN = sueN,
             surpriseFitSueSlopeArBps = sueSlope,
             revenueTrailLatestCents = if (trailCut) 50L else null,
-            revenueTrailMedianCents = if (trailCut) 100L else null,
+            revenueTrailCentreCents = if (trailCut) 100L else null,
             revenueTrailScaleCents = if (trailCut) 0L else null,
         )
         return presentEarningsGate(
@@ -278,6 +303,7 @@ class EarningsGateScreenTest {
             ),
             damagedLines = damaged,
             today = TODAY,
+            held = held,
         )
     }
 

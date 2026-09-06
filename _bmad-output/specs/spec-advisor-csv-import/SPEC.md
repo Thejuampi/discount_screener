@@ -55,7 +55,7 @@ The generic importer asked for a `side` column and a column named `price`. The s
 
 - No tax lots. Average cost only.
 - No second account merge.
-- No Android import in this slice.
+- Android import lives in [`../spec-android-chase-portfolio/SPEC.md`](../spec-android-chase-portfolio/SPEC.md). This slice named Windows first. That non-goal is retracted.
 - No schema change on `portfolio_positions`.
 - No change to Coinbase, Schwab, or generic ledger apply.
 

@@ -42,6 +42,8 @@ import com.discountscreener.core.engine.DiscoveryMembershipMerge
 import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.DiscoveryUniverseEngine
 import com.discountscreener.core.engine.OpportunityEngine
+import com.discountscreener.core.portfolio.BOOK_AS_OF_META_KEY
+import com.discountscreener.core.portfolio.PortfolioLot
 import com.discountscreener.core.model.OpportunityScoringModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -107,6 +109,8 @@ data class PersistenceBootstrap(
     val chartCache: List<PersistedChartRecord> = emptyList(),
     val issues: List<PersistedIssueRecord> = emptyList(),
     val lastPersistedAtEpochSeconds: Long? = null,
+    val portfolioLots: List<PortfolioLot> = emptyList(),
+    val bookAsOf: String? = null,
 )
 
 enum class CaptureKind {
@@ -283,6 +287,9 @@ open class SQLiteStateStore(
         if (oldVersion < 9 && newVersion >= 9) {
             createSymbolNoteSchema(db)
         }
+        if (oldVersion < 11 && newVersion >= 11) {
+            createPortfolioLotSchema(db)
+        }
         if (oldVersion < 10 && newVersion >= 10) {
             // A database that reached v8 through the normal path carries score_journal, so the
             // ALTER applies. A bare version-stamped file (crash recovery, partial creation) may
@@ -316,6 +323,8 @@ open class SQLiteStateStore(
             chartCache = emptyList(),
             issues = loadIssues(db),
             lastPersistedAtEpochSeconds = loadMetaValue(db, META_KEY_LAST_PERSISTED_AT)?.toLongOrNull(),
+            portfolioLots = loadPortfolioLots(db),
+            bookAsOf = loadMetaValue(db, BOOK_AS_OF_META_KEY),
         )
     }
 
@@ -1041,6 +1050,7 @@ open class SQLiteStateStore(
         createTipRanksSchema(db)
         createScoreJournalSchema(db)
         createSymbolNoteSchema(db)
+        createPortfolioLotSchema(db)
     }
 
     /**
@@ -1050,6 +1060,77 @@ open class SQLiteStateStore(
      * something a provider will send again; a note exists once. That is why it is written on its own
      * and why the warm-start reset leaves it alone.
      */
+    private fun createPortfolioLotSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_lot (
+                symbol TEXT PRIMARY KEY,
+                quantity_ten_thousandths INTEGER NOT NULL,
+                avg_cost_cents INTEGER NOT NULL,
+                opened_at TEXT
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun loadPortfolioLots(db: SQLiteDatabase): List<PortfolioLot> =
+        db.rawQuery(
+            "SELECT symbol, quantity_ten_thousandths, avg_cost_cents, opened_at FROM portfolio_lot ORDER BY symbol",
+            emptyArray(),
+        ).useRows { cursor ->
+            var lots = ArrayList<PortfolioLot>()
+            while (cursor.moveToNext()) {
+                lots.add(
+                    PortfolioLot(
+                        symbol = cursor.getString(0),
+                        quantityTenThousandths = cursor.getLong(1),
+                        avgCostCents = cursor.getLong(2),
+                        openedAt = cursor.getNullableString(3),
+                    ),
+                )
+            }
+            lots
+        }
+
+    suspend fun replacePortfolioBook(lots: List<PortfolioLot>, bookAsOf: String?) = withContext(ioDispatcher) {
+        var db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("portfolio_lot", null, null)
+            var unique = LinkedHashMap<String, PortfolioLot>()
+            for (lot in lots) {
+                var symbol = lot.symbol.trim().uppercase()
+                unique[symbol] = lot.copy(symbol = symbol)
+            }
+            for (lot in unique.values) {
+                db.insertWithOnConflict(
+                    "portfolio_lot",
+                    null,
+                    ContentValues().apply {
+                        put("symbol", lot.symbol)
+                        put("quantity_ten_thousandths", lot.quantityTenThousandths)
+                        put("avg_cost_cents", lot.avgCostCents)
+                        if (lot.openedAt == null) putNull("opened_at") else put("opened_at", lot.openedAt)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            if (bookAsOf != null) {
+                setMetaValue(db, BOOK_AS_OF_META_KEY, bookAsOf)
+            } else {
+                db.delete("meta", "key = ?", arrayOf(BOOK_AS_OF_META_KEY))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    suspend fun loadPortfolioBook(): Pair<List<PortfolioLot>, String?> = withContext(ioDispatcher) {
+        var db = readableDatabase
+        loadPortfolioLots(db) to loadMetaValue(db, BOOK_AS_OF_META_KEY)
+    }
+
     private fun createSymbolNoteSchema(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -2331,7 +2412,7 @@ open class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 10
+        private const val SQLITE_SCHEMA_VERSION = 11
 
         /**
          * The `chart_range` value the retrospective's daily bars are stored under.
@@ -2380,7 +2461,7 @@ open class SQLiteStateStore(
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
             "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
-            "score_journal", "symbol_note",
+            "score_journal", "symbol_note", "portfolio_lot",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),

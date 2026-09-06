@@ -1,6 +1,6 @@
 # Advisor CSV import
 
-Windows Advisor import. Contract: [`shared/contracts/advisor-csv-import-v1.yaml`](../shared/contracts/advisor-csv-import-v1.yaml). Spec: [`_bmad-output/specs/spec-advisor-csv-import/SPEC.md`](../_bmad-output/specs/spec-advisor-csv-import/SPEC.md).
+Windows Advisor and Android Import book. Contract: [`shared/contracts/advisor-csv-import-v1.yaml`](../shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/3`). Specs: [`_bmad-output/specs/spec-advisor-csv-import/SPEC.md`](../_bmad-output/specs/spec-advisor-csv-import/SPEC.md), [`_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md).
 
 ## Files Juan exports
 
@@ -22,6 +22,10 @@ A snapshot is the book. A 90-day blotter is a window. Do not swap them.
 
 The app applies only trades after the snapshot as-of. Trades on that day stay in the snapshot. They do not add size.
 
+Android Confirm of a merge that applied at least one trade moves book as-of to `max(prior, max applied trade_date)`. Windows snapshot as-of stays.
+
+Android stores share quantity as integer ten-thousandths. PHYL 1273 shares is `12730000`. Cost stays cents. Book as-of lives in SQLite meta `ds_advisor_book_as_of`.
+
 ## Rules that matter
 
 - The positions file is the full book. Confirm removes lots the file does not name.
@@ -30,6 +34,8 @@ The app applies only trades after the snapshot as-of. Trades on that day stay in
 - Cash and the Chase sweep `QACDS` drop.
 - Buy, Sell, and Reinvest form positions. Dividend and cash moves skip.
 - Empty lots plus a 90-day blotter refuse. Import the snapshot first.
+- Android refuses Coinbase, Schwab, and generic ledger apply with `ledger_apply_unsupported`.
+- Android Import book lives on Earnings and System. Restore log is a second Earnings action and never plans a lot write.
 
 ## Confirm
 

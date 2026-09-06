@@ -1,5 +1,13 @@
 # Deferred Work
 
+- source_spec: `_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`
+  summary: Clear All leaves `portfolio_lot` and book as-of, the same way it leaves notes.
+  evidence: `resetWarmStartState` does not delete `portfolio_lot`. The book is imported user data.
+
+- source_spec: `_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`
+  summary: Import book reads the chosen CSV on the UI thread.
+  evidence: `OpenDocument` callback calls `readCsv` before `ImportBookCsv`. Chase files are small. A Uri hop onto IO is new surface.
+
 ## Deferred from: code review of prd-pre-earnings-risk-gate-2026-08-27.md (2026-09-05)
 
 - **AV revenue surprise unused.** `parseAlphaVantageEstimates` reads `revenue_estimate_average` on every fiscal-quarter row. `sueQuartersOf` always writes `revenueSurpriseBps = null`. IBM join has that revenue field on all 37 rows. Wave 1-A prints EPS SUE only. Leave until Juan asks for AV revenue surprise.

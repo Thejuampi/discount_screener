@@ -18,6 +18,47 @@ import org.junit.Test
 class EarningsGatePresentationTest {
 
     @Test
+    fun a_held_upcoming_name_sits_first() {
+        assertEquals(
+            listOf("AMZN", "MSFT"),
+            present(
+                listOf(record(day = 1, symbol = "MSFT"), record(day = 3, symbol = "AMZN")),
+                held = setOf("AMZN"),
+            ).upcoming.map { it.symbol },
+        )
+    }
+
+    @Test
+    fun a_held_name_already_first_stays_first() {
+        assertEquals(
+            listOf("AMZN", "MSFT"),
+            present(
+                listOf(record(day = 1, symbol = "AMZN"), record(day = 3, symbol = "MSFT")),
+                held = setOf("AMZN"),
+            ).upcoming.map { it.symbol },
+        )
+    }
+
+    @Test
+    fun held_is_exact_ticker_equality() {
+        assertEquals(true, present(listOf(record(day = 1, symbol = "AMZN")), held = setOf("AMZN")).upcoming.single().held)
+    }
+
+    @Test
+    fun a_prefix_lot_does_not_hold_amzn() {
+        assertEquals(false, present(listOf(record(day = 1, symbol = "AMZN")), held = setOf("A")).upcoming.single().held)
+    }
+
+    @Test
+    fun a_lot_does_not_write_position_size() {
+        assertEquals(
+            "100%",
+            present(listOf(record(day = 1, symbol = "AMZN", ratio = 5_000)), held = setOf("AMZN"))
+                .upcoming.single().positionSize,
+        )
+    }
+
+    @Test
     fun a_report_still_ahead_lands_in_the_upcoming_list() {
         assertEquals(listOf("LVS"), present(listOf(record(day = 3))).upcoming.map { it.symbol })
     }
@@ -148,6 +189,39 @@ class EarningsGatePresentationTest {
         var ui = present(listOf(record(day = 3, ratio = null)))
 
         assertEquals("Waiting on data", ui.upcoming.single().headline)
+    }
+
+    @Test
+    fun a_quiet_eaten_move_does_not_paint_high() {
+        assertEquals(
+            EventRisk.Unknown,
+            present(listOf(record(day = 3, event = null, ratio = 15_000))).upcoming.single().risk,
+        )
+    }
+
+    @Test
+    fun an_undecided_card_prints_the_reason() {
+        assertEquals(
+            true,
+            present(listOf(record(day = 3, event = null)))
+                .upcoming.single().justification.startsWith("quiet_dominates_implied"),
+        )
+    }
+
+    @Test
+    fun a_trail_without_z_still_prints() {
+        var pre = record(day = 3, ratio = 10_000).pre.copy(
+            revenueTrailLatestCents = 50L,
+            revenueTrailCentreCents = 100L,
+            revenueTrailScaleCents = 20L,
+            revenueTrailShortfallZBps = null,
+        )
+
+        assertEquals(
+            "Last print 2.50 MAD vs the trail centre · size cut",
+            present(listOf(EarningsEventRecord(pre = pre, decision = decisionOf(pre))))
+                .upcoming.single().revenueTrail,
+        )
     }
 
     @Test
@@ -306,7 +380,7 @@ class EarningsGatePresentationTest {
 
     @Test
     fun a_ticker_with_no_chain_shows_no_event_move() {
-        assertEquals("—", present(listOf(record(day = 3))).upcoming.single().eventMove)
+        assertEquals("—", present(listOf(record(day = 3, event = null))).upcoming.single().eventMove)
     }
 
     private fun moveRow() =
@@ -383,8 +457,11 @@ class EarningsGatePresentationTest {
         assertEquals(1, present(listOf(record(day = 3))).eventsFor("lvs").size)
     }
 
-    private fun present(events: List<EarningsEventRecord>, damaged: Int = 0) =
-        presentEarningsGate(events = events, damagedLines = damaged, today = TODAY)
+    private fun present(
+        events: List<EarningsEventRecord>,
+        damaged: Int = 0,
+        held: Set<String> = emptySet(),
+    ) = presentEarningsGate(events = events, damagedLines = damaged, today = TODAY, held = held)
 
     private fun checked(agoSeconds: Long) = presentEarningsGate(
         events = listOf(record(day = 3)),
@@ -401,9 +478,9 @@ class EarningsGatePresentationTest {
         timing: ReportTiming = ReportTiming.AfterClose,
         abnormalReturnBps: Int? = null,
         post: PostReport? = null,
-        spread: Int? = null,
+        spread: Int? = 80,
         put: Int? = null,
-        event: Int? = null,
+        event: Int? = 701,
         quiet: Int? = null,
         sueN: Int? = null,
         sueSlope: Int? = null,
@@ -431,7 +508,7 @@ class EarningsGatePresentationTest {
             surpriseFitUnavailableReason = sueReason,
             surpriseFitAsymmetric = sueAsymmetric,
             revenueTrailLatestCents = if (trailCut) 50L else null,
-            revenueTrailMedianCents = if (trailCut) 100L else null,
+            revenueTrailCentreCents = if (trailCut) 100L else null,
             revenueTrailScaleCents = if (trailCut) 0L else null,
         )
         return EarningsEventRecord(
