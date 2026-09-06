@@ -62,12 +62,10 @@ Use this as the baseline before writing future PRDs. Update it after a feature s
 
 Documents for proposed or in-progress capabilities.
 
-- Product brief or PRFAQ.
 - PRD.
+- Spec.
 - UX design specification when user experience changes.
 - Architecture decision document when technical structure or boundaries change.
-- Epics and stories.
-- Implementation readiness report.
 
 Existing active feature set:
 
@@ -81,10 +79,10 @@ Existing active feature set:
 
 Documents used once implementation starts.
 
-- Sprint status: `_bmad-output/implementation-artifacts/sprint-status.yaml`
-- Story files: `_bmad-output/implementation-artifacts/*.md`
+- Specs: `_bmad-output/specs/`
+- Spike memlog: `{spec-folder}/.memlog.md` via `uv run _bmad/scripts/memlog.py`
+- Implementation notes: `_bmad-output/implementation-artifacts/*.md`
 - QA outputs: `_bmad-output/implementation-artifacts/tests/`
-- Retrospectives after epic completion.
 
 ## Workflow Routing
 
@@ -102,17 +100,16 @@ Use this path when the question is "what does the app currently do?"
 
 Use this path when the user wants new functionality.
 
-1. Create product brief or PRFAQ if the product concept is not already crisp.
-2. Create PRD.
-3. Create UX spec if any user-facing workflow, screen, or copy changes.
-4. Create architecture if persistence, external boundaries, cross-platform contracts, startup, performance, or core/app layering changes.
-5. Create epics and stories.
-6. Check implementation readiness.
-7. Run sprint planning.
-8. Create/dev/review stories.
-9. Run QA automation or live QA as appropriate.
-10. Run retrospective when an epic completes.
-11. Promote shipped behavior into `current-functionality-prd.md` and relevant README/docs.
+1. Open a spike. Create PRD. Init the spike memlog. Log the options. Lock one.
+2. Run `/sensei-advisor` on the PRD. Advisor wins. Append the verdict to the memlog.
+3. Create spec from the PRD and the memlog.
+4. Run `/sensei-advisor` on the spec. Advisor wins. Append the verdict to the memlog.
+5. Create UX spec if any user-facing workflow, screen, or copy changes.
+6. Create architecture if persistence, external boundaries, cross-platform contracts, startup, performance, or core/app layering changes.
+7. Implement with `bmad-build`. Read the memlog first.
+8. Run `/bmad-review`. Append findings to the memlog.
+9. Run live QA as appropriate.
+10. Promote shipped behavior into `current-functionality-prd.md` and relevant README/docs.
 
 ### Modify Existing Behavior
 
@@ -121,7 +118,7 @@ Use this path for changes to shipped functionality.
 1. Check `current-functionality-prd.md`.
 2. Decide if the change is a small implementation correction or a product change.
 3. For product changes, create or edit the relevant PRD/UX/architecture docs.
-4. For implementation corrections, document the acceptance criteria in the story/spec artifact.
+4. For implementation corrections, document the acceptance criteria in the spec.
 5. Update the current-functionality PRD only after the behavior is shipped.
 
 ### Android App Work

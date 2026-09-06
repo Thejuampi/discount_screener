@@ -46,21 +46,28 @@ Technical names stay as they are: `AggressiveV3`, `robust_mean`, `:core`, commit
 
 A requirement runs the closed cycle. No step is optional, and no step is skipped because the change looks small:
 
-**PRD → spec → build → review → repeat**
+**PRD → Sensei+Advisor → spec → Sensei+Advisor → build → bmad-review**
 
 | Step | Skill | Leaves behind |
 | --- | --- | --- |
-| PRD | `/bmad-prd` | The WHY and the acceptance bar, in `_bmad-output/planning-artifacts/` |
-| Spec | `/bmad-spec` | The WHAT, locked: contracts, edge cases, the examples that must pass |
-| Build | `/bmad-quick-dev` | The code, TDD, plus the docs the change makes untrue |
-| Review | `/bmad-code-review` | An adversarial read of the diff against the spec |
-| Repeat | — | Next slice, or `/bmad-correct-course` when reality diverged |
+| PRD | `/bmad-prd` | The WHY and the acceptance bar. Init the spike memlog. Log the options. Lock one. |
+| PRD review | `/sensei-advisor` | Sensei and Advisor on the PRD. Advisor wins. Append the verdict to the memlog. |
+| Spec | `/bmad-spec` | The WHAT, locked. Read the PRD and the memlog first. |
+| Spec review | `/sensei-advisor` | Sensei and Advisor on the spec. Advisor wins. Append the verdict to the memlog. |
+| Build | `/bmad-build` | The code, TDD, plus the docs the change makes untrue. Read the memlog first. |
+| Review | `/bmad-review` | Adversarial read of the diff against the spec. Append findings to the memlog. |
+
+Do not start spec while the PRD review is `revise`. Do not start build while the spec review is `revise`.
+
+Work is a **spike**. A spike explores more than one idea, logs each idea, and locks the best one for the task. The cycle builds that lock.
+
+The memlog is the working memory of the spike. Artifacts are distilled from it. Use `uv run _bmad/scripts/memlog.py`. Home is `{spec-folder}/.memlog.md` once that folder exists. Append-only. A review that does not append to the memlog did not happen.
 
 **Review does not close while docs are stale.** A user-visible change that leaves `docs/`, this file, `project-context.md`, or a contract describing the old behavior is not reviewed - it is half built. Write the docs in the build step so the review has something to check.
 
-Bugfix, rename, or spike: implement directly with TDD. That exemption covers a fix, never a requirement.
+A bugfix, rename, or small tweak still ships direct with TDD. That exemption covers a fix, never a requirement.
 
-Process, lanes, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
+Process, lanes, memlog, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
 
 This file + `project-context.md` + contracts **outrank** generic BMAD templates. Unsure: `bmad-help` once.
 
@@ -97,7 +104,7 @@ Prefer **live or versioned market/policy inputs** over frozen literals: `r_f` fr
 
 - **Do not** use `MIN_WACC` / `MAX_WACC` as valuation truth.
 - Bootstrap defaults (e.g. `MarketParams()` 430/450) are bootstrapping only when live series miss; mark them **provisional** in provenance, never high-confidence.
-- Android production is wired: FRED DGS10 → Yahoo `^TNX` (1-day cache) → bootstrap; `ErpPolicy` (Damodaran implied *index* ERP, Kroll overlay, **no firm ICC**), `g_stable` via dated `MacroPolicy`. Windows is still on `from_live_risk_free` and out of this slice. Per-input detail: the canonical doc above.
+- Android production is wired: FRED DGS10 → Yahoo `^TNX` (1-day cache) → bootstrap; `ErpPolicy` (Damodaran implied *index* ERP, Kroll overlay, **no firm ICC**), `g_stable` via dated `MacroPolicy`. Windows is still on `from_live_risk_free` and is later work. Per-input detail: the canonical doc above.
 
 ### Structural constraints only — forbidden patches
 
@@ -352,7 +359,7 @@ Before you present a dollar / share / rate to Juan as a **conclusion**, show thi
 
 ### Analyst-method lifecycle closure (mandatory when in scope)
 
-Applies to evidence-ledger, analyst-import, model-run, or current-projection work. Full proof table: [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md). **Read that file before you implement or close those slices.**
+Applies to evidence-ledger, analyst-import, model-run, or current-projection work. Full proof table: [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md). **Read that file before you implement or close that work.**
 
 Keep three states distinct: **design-ready**, **implemented**, and **independently closed**. A green builder handoff is not independent closure.
 
@@ -381,7 +388,7 @@ Full ledger: [`docs/operational-anti-patterns.md`](docs/operational-anti-pattern
 
 Advisor reads standing docs and names drift. Advisor does not invent product rules.
 
-Every Advisor review opens this file, [`_bmad-output/project-context.md`](_bmad-output/project-context.md), the slice contract, and [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md).
+Every Advisor review opens this file, [`_bmad-output/project-context.md`](_bmad-output/project-context.md), the spike contract, [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md), and the spike memlog (`{spec-folder}/.memlog.md`, or the PRD memlog if the spec folder does not exist yet).
 
 A proposed step that matches a ledger row is a P0 until the plan uses that row's **Do instead**.
 
@@ -406,10 +413,11 @@ Hub: [`docs/index.md`](docs/index.md). Read [`_bmad-output/project-context.md`](
 
 | When | Read |
 | --- | --- |
-| Advisor plan review | This file + [`_bmad-output/project-context.md`](_bmad-output/project-context.md) + [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) + the slice contract |
+| Advisor plan review | This file + [`_bmad-output/project-context.md`](_bmad-output/project-context.md) + [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) + the spike contract + the spike memlog |
+| Spike memory | `{spec-folder}/.memlog.md` via [`_bmad/scripts/memlog.py`](_bmad/scripts/memlog.py) — append-only; read before you invent |
 | Live valuation QA | [`docs/valuation-live-qa-checklist.md`](docs/valuation-live-qa-checklist.md) |
 | Known operational failure | [`docs/operational-anti-patterns.md`](docs/operational-anti-patterns.md) |
-| Analyst-method / ledger slice | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |
+| Analyst-method / ledger | [`docs/analyst-method-lifecycle.md`](docs/analyst-method-lifecycle.md) |
 | Valuation ADRs | [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md) |
 | Contracts | [`shared/contracts/README.md`](shared/contracts/README.md) |
 | Advisor CSV import | [`docs/advisor-csv-import.md`](docs/advisor-csv-import.md) · [`shared/contracts/advisor-csv-import-v1.yaml`](shared/contracts/advisor-csv-import-v1.yaml) (`advisor-csv-import/2`) |

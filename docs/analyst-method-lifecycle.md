@@ -2,7 +2,7 @@
 
 Applies to evidence-ledger, analyst-import, model-run, or current-projection work.
 
-Read this file before you implement or close those slices. A green builder handoff is not independent closure.
+Read this file before you implement or close that work. A green builder handoff is not independent closure.
 
 ## Three states
 
@@ -10,7 +10,7 @@ Keep these distinct: **design-ready**, **implemented**, and **independently clos
 
 A green builder handoff may establish the second state. It cannot establish the third by itself.
 
-Before the next slice may expose or consume the result, an independent adversarial checkpoint must trace the complete command from control-envelope admission through semantic admission, persistence, invalidation, restart, and read projection.
+Before the next spike may expose or consume the result, an independent adversarial checkpoint must trace the complete command from control-envelope admission through semantic admission, persistence, invalidation, restart, and read projection.
 
 ## Reserved claims
 
@@ -23,9 +23,9 @@ Before the next slice may expose or consume the result, an independent adversari
 | `dual-lock` | Both platforms execute the same shared negative and positive fixtures. A contract field silently ignored by both readers is not coverage. |
 | `fail-closed` | Counterexamples prove refusal **and** the required state effect: no partial writes, no foreign invalidation, no stale projection after a trusted rejected revision. |
 
-## Slice closure
+## Independent closure
 
-Slice closure requires:
+Independent closure requires:
 
 - a named invariant/attack matrix
 - negative mutations for every semantic fingerprint field
