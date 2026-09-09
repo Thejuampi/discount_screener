@@ -76,6 +76,10 @@ interface DashboardRepository {
 
     suspend fun earningsEvents(): EarningsGateUi
 
+    suspend fun cachedEarningsCalendar(): Map<String, Long?>
+
+    suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?>
+
     suspend fun earningsLogBackup(): String
 
     suspend fun restoreEarningsLog(text: String): Int

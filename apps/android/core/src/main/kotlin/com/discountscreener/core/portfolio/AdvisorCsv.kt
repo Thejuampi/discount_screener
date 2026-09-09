@@ -45,6 +45,10 @@ data class ParsedCsv(
     val format: String,
     val kind: CsvKind,
     val asOf: String?,
+    /** Rows that the file format tells us to skip, such as cash or non-trade types. */
+    val expectedExclusions: Int = 0,
+    /** Rows that fail required symbol or numeric parsing. */
+    val parseFailures: Int = 0,
 )
 
 data class BookContext(
@@ -59,6 +63,8 @@ sealed class ImportPlan {
         val positions: List<PortfolioLot>,
         val remove: List<String>,
         val ignored: Int,
+        val expectedExclusions: Int = 0,
+        val parseFailures: Int = 0,
     ) : ImportPlan()
 
     data class ConfirmTradesMerge(
@@ -70,6 +76,8 @@ sealed class ImportPlan {
         val skipped: Int,
         val ignored: Int,
         val nextBookAsOf: String,
+        val expectedExclusions: Int = 0,
+        val parseFailures: Int = 0,
     ) : ImportPlan()
 
     data class Refuse(
@@ -128,6 +136,8 @@ fun planAdvisorCsv(parsed: ParsedCsv, ctx: BookContext): ImportPlan {
             positions = holdings,
             remove = remove,
             ignored = parsed.ignored,
+            expectedExclusions = parsed.expectedExclusions,
+            parseFailures = parsed.parseFailures,
         )
     }
     if (ctx.lots.isEmpty()) {
@@ -147,6 +157,8 @@ fun planAdvisorCsv(parsed: ParsedCsv, ctx: BookContext): ImportPlan {
         skipped = merged.skipped,
         ignored = parsed.ignored,
         nextBookAsOf = nextBookAsOf(bookAsOf, merged.appliedDates),
+        expectedExclusions = parsed.expectedExclusions,
+        parseFailures = parsed.parseFailures,
     )
 }
 
@@ -236,6 +248,8 @@ private fun parseJpmHoldings(lines: List<String>): ParsedCsv? {
     if (iTicker < 0 || iQty < 0 || iUnit < 0) return null
     var txs = ArrayList<CsvTx>()
     var ignored = 0
+    var expectedExclusions = 0
+    var parseFailures = 0
     var asOf: String? = null
     for (i in 1 until lines.size) {
         var cols = splitCsvLine(lines[i])
@@ -247,22 +261,33 @@ private fun parseJpmHoldings(lines: List<String>): ParsedCsv? {
         }
         if (symbol.isEmpty() || symbol == "QACDS" || assetClass.startsWith("cash")) {
             ignored++
+            expectedExclusions++
             continue
         }
         if (!symbol.matches(Regex("^[A-Z][A-Z0-9.]*$"))) {
             ignored++
+            parseFailures++
             continue
         }
         var quantity = normalizeUsNum(cols.getOrElse(iQty) { "" })
         var price = normalizeUsNum(cols.getOrElse(iUnit) { "" })
         if (!quantity.isFinite() || quantity <= 0 || !price.isFinite() || price <= 0) {
             ignored++
+            parseFailures++
             continue
         }
         var date = if (iAcq >= 0) normalizeUsDate(cols.getOrElse(iAcq) { "" }) else ""
         txs.add(CsvTx(symbol, Side.Buy, quantity, price, date))
     }
-    return ParsedCsv(txs, ignored, "J.P. Morgan", CsvKind.HoldingsSnapshot, asOf)
+    return ParsedCsv(
+        txs = txs,
+        ignored = ignored,
+        format = "J.P. Morgan",
+        kind = CsvKind.HoldingsSnapshot,
+        asOf = asOf,
+        expectedExclusions = expectedExclusions,
+        parseFailures = parseFailures,
+    )
 }
 
 private fun parseChaseTrades(lines: List<String>): ParsedCsv? {
@@ -277,6 +302,8 @@ private fun parseChaseTrades(lines: List<String>): ParsedCsv? {
     var sell = setOf("sell")
     var txs = ArrayList<CsvTx>()
     var ignored = 0
+    var expectedExclusions = 0
+    var parseFailures = 0
     for (i in 1 until lines.size) {
         var cols = splitCsvLine(lines[i])
         var type = cols.getOrElse(iType) { "" }.replace("\"", "").lowercase()
@@ -288,18 +315,32 @@ private fun parseChaseTrades(lines: List<String>): ParsedCsv? {
         }
         if (side == null || symbol.isEmpty() || !symbol.matches(Regex("^[A-Z][A-Z0-9.]*$"))) {
             ignored++
+            if (side == null) {
+                expectedExclusions++
+            } else {
+                parseFailures++
+            }
             continue
         }
         var quantity = abs(normalizeUsNum(cols.getOrElse(iQty) { "" }))
         var price = normalizeUsNum(cols.getOrElse(iPrice) { "" })
         if (!quantity.isFinite() || quantity <= 0 || !price.isFinite() || price <= 0) {
             ignored++
+            parseFailures++
             continue
         }
         var date = normalizeUsDate(cols.getOrElse(iDate) { "" })
         txs.add(CsvTx(symbol, side, quantity, price, date))
     }
-    return ParsedCsv(txs, ignored, "Chase", CsvKind.TradesWindow, null)
+    return ParsedCsv(
+        txs = txs,
+        ignored = ignored,
+        format = "Chase",
+        kind = CsvKind.TradesWindow,
+        asOf = null,
+        expectedExclusions = expectedExclusions,
+        parseFailures = parseFailures,
+    )
 }
 
 internal fun aggregateToPositions(txs: List<CsvTx>): List<PortfolioLot> {
@@ -327,18 +368,7 @@ internal fun aggregateToPositions(txs: List<CsvTx>): List<PortfolioLot> {
         }
         acc[tx.symbol] = cur
     }
-    return acc.mapNotNull { (symbol, a) ->
-        if (a.qty > 0 && a.avgCost > 0 && a.qty * a.avgCost >= 1) {
-            PortfolioLot(
-                symbol = symbol,
-                quantityTenThousandths = sharesToTenThousandths(a.qty),
-                avgCostCents = (a.avgCost * 100.0).roundToLong(),
-                openedAt = a.openedAt,
-            )
-        } else {
-            null
-        }
-    }
+    return acc.mapNotNull { (symbol, a) -> positionOf(symbol, a) }
 }
 
 data class MergeResult(
@@ -410,19 +440,21 @@ fun mergeTradesOntoLots(
         }
         acc[tx.symbol] = cur
     }
-    var positions = acc.mapNotNull { (symbol, a) ->
-        if (a.qty > 0 && a.avgCost > 0 && a.qty * a.avgCost >= 1) {
-            PortfolioLot(
-                symbol = symbol,
-                quantityTenThousandths = sharesToTenThousandths(a.qty),
-                avgCostCents = (a.avgCost * 100.0).roundToLong(),
-                openedAt = a.openedAt,
-            )
-        } else {
-            null
-        }
-    }
+    var positions = acc.mapNotNull { (symbol, a) -> positionOf(symbol, a) }
     return MergeResult(positions, applied, skipped, appliedDates)
 }
 
 private class Acc(var qty: Double, var avgCost: Double, var openedAt: String?)
+
+private fun positionOf(symbol: String, acc: Acc): PortfolioLot? {
+    if (!acc.qty.isFinite() || !acc.avgCost.isFinite()) return null
+    var quantityTenThousandths = sharesToTenThousandths(acc.qty)
+    var avgCostCents = (acc.avgCost * 100.0).roundToLong()
+    if (quantityTenThousandths <= 0L || avgCostCents <= 0L) return null
+    return PortfolioLot(
+        symbol = symbol,
+        quantityTenThousandths = quantityTenThousandths,
+        avgCostCents = avgCostCents,
+        openedAt = acc.openedAt,
+    )
+}

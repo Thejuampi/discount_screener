@@ -58,6 +58,44 @@ test("jpm snapshot aggregates to open lots", () => {
   assert.equal(phyl?.avg_cost_cents, 3528);
 });
 
+test("a positive snapshot lot below one dollar stays in the book", () => {
+  var positions = aggregateToPositions([
+    { symbol: "PENNY", side: "buy", quantity: 0.5, price: 0.5, date: "" },
+  ]);
+  assert.deepEqual(positions, [{
+    symbol: "PENNY",
+    quantity: 0.5,
+    avg_cost_cents: 50,
+    opened_at: null,
+  }]);
+});
+
+test("a quantity below the supported scale does not emit a zero quantity lot", () => {
+  var positions = aggregateToPositions([
+    { symbol: "PENNY", side: "buy", quantity: 0.00001, price: 0.5, date: "" },
+    { symbol: "AMZN", side: "buy", quantity: 1, price: 2, date: "" },
+  ]);
+  assert.deepEqual(positions, [{
+    symbol: "AMZN",
+    quantity: 1,
+    avg_cost_cents: 200,
+    opened_at: null,
+  }]);
+});
+
+test("a sub-cent cost does not emit a zero-cent basis lot", () => {
+  var positions = aggregateToPositions([
+    { symbol: "PENNY", side: "buy", quantity: 0.5, price: 0.001, date: "" },
+    { symbol: "AMZN", side: "buy", quantity: 1, price: 2, date: "" },
+  ]);
+  assert.deepEqual(positions, [{
+    symbol: "AMZN",
+    quantity: 1,
+    avg_cost_cents: 200,
+    opened_at: null,
+  }]);
+});
+
 test("jpm as-of becomes the book as-of", () => {
   assert.equal(parseAnyCsv(sample()).asOf, "2026-08-31");
 });
@@ -165,6 +203,20 @@ test("trades on as-of do not change quantity or cost", () => {
     { quantity: amzn?.quantity, avg_cost_cents: amzn?.avg_cost_cents },
     { quantity: 10, avg_cost_cents: 20000 },
   );
+});
+
+test("an unchanged trade window keeps a positive lot below one dollar", () => {
+  var merged = mergeTradesOntoLots({
+    lots: [{ symbol: "PENNY", quantity: 0.5, avg_cost_cents: 50, opened_at: null }],
+    trades: [{ symbol: "PENNY", side: "buy", quantity: 0.1, price: 0.5, date: "2026-08-31" }],
+    bookAsOf: "2026-08-31",
+  });
+  assert.deepEqual(merged.positions, [{
+    symbol: "PENNY",
+    quantity: 0.5,
+    avg_cost_cents: 50,
+    opened_at: "2026-08-31",
+  }]);
 });
 
 test("a buy after as-of adds size and blends cost", () => {

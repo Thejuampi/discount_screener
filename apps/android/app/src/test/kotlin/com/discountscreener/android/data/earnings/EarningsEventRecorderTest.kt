@@ -546,6 +546,90 @@ class EarningsEventRecorderTest {
     }
 
     @Test
+    fun cached_calendar_omits_an_expired_positive_answer() = runTest {
+        var log = log()
+        var now = TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond()
+        log.rememberCalendarAsks(
+            mapOf(
+                "LVS" to CalendarAsk(
+                    nextEarningsEpoch = TODAY.minusDays(1).atTime(12, 0)
+                        .atZone(EXCHANGE_ZONE).toEpochSecond(),
+                    askedAtEpochSeconds = now - 2L * 24L * 60L * 60L,
+                ),
+            ),
+        )
+
+        assertEquals(mapOf("LVS" to null), recorder(log, nowProvider = { now }).cachedCalendar())
+        var asked = mutableListOf<String>()
+        recorder(log, calendar = asking(asked), nowProvider = { now }).refreshCalendar(listOf("LVS"))
+        assertEquals(listOf("LVS"), asked)
+    }
+
+    @Test
+    fun cached_calendar_omits_an_expired_negative_answer() = runTest {
+        var log = log()
+        var now = TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond()
+        log.rememberCalendarAsks(
+            mapOf(
+                "LVS" to CalendarAsk(
+                    nextEarningsEpoch = null,
+                    askedAtEpochSeconds = now - 2L * 24L * 60L * 60L,
+                ),
+            ),
+        )
+
+        assertEquals(mapOf("LVS" to null), recorder(log, nowProvider = { now }).cachedCalendar())
+        var asked = mutableListOf<String>()
+        recorder(log, calendar = asking(asked), nowProvider = { now }).refreshCalendar(listOf("LVS"))
+        assertEquals(listOf("LVS"), asked)
+    }
+
+    @Test
+    fun cached_calendar_keeps_a_recent_negative_answer_out_of_the_refresh_queue() = runTest {
+        var log = log()
+        var now = TODAY.atTime(12, 0).atZone(EXCHANGE_ZONE).toEpochSecond()
+        log.rememberCalendarAsks(
+            mapOf(
+                "LVS" to CalendarAsk(
+                    nextEarningsEpoch = null,
+                    askedAtEpochSeconds = now - 60L,
+                ),
+            ),
+        )
+
+        var asked = mutableListOf<String>()
+        var result = recorder(log, calendar = asking(asked), nowProvider = { now })
+            .refreshCalendar(listOf("LVS"))
+
+        assertEquals(mapOf("LVS" to null), result)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun refresh_calendar_asks_a_book_lot_once() = runTest {
+        var log = log()
+        var asked = mutableListOf<String>()
+        var recorder = recorder(log, calendar = asking(asked))
+
+        recorder.refreshCalendar(listOf("BSX"))
+        recorder.refreshCalendar(listOf("BSX"))
+
+        assertEquals(listOf("BSX"), asked)
+    }
+
+    @Test
+    fun refresh_calendar_reuses_a_cached_future_date() = runTest {
+        var log = log()
+        var first = recorder(log, calendar = answering(TODAY.plusDays(14)))
+        first.refreshCalendar(listOf("CAT"))
+        var asked = mutableListOf<String>()
+
+        recorder(log, calendar = asking(asked)).refreshCalendar(listOf("CAT"))
+
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
     fun a_date_the_calendar_already_answered_is_never_asked_for_twice() = runTest {
         var log = log()
         recorder(log, calendar = answering(TODAY.plusDays(40))).capture(listOf(row(earningsIn = -20)))

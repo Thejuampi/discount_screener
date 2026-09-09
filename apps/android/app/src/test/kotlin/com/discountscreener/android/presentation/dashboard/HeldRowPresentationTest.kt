@@ -3,6 +3,8 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.core.model.ConfidenceBand
+import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -76,6 +78,30 @@ class HeldRowPresentationTest {
                 ).let { pinTrackedRows(it, setOf("AMZN", "GOOG")) },
             ).map { it.symbol },
         )
+    }
+
+    @Test
+    fun trade_import_warning_shows_all_counts_and_removed_symbols() {
+        var warning = importPlanWarning(
+            ImportPlan.ConfirmTradesMerge(
+                format = "Chase",
+                asOf = "2026-08-31",
+                positions = listOf(PortfolioLot("AMZN", 100_000L, 20_000L, null)),
+                remove = listOf("AXON", "MSFT"),
+                applied = 3,
+                skipped = 2,
+                ignored = 4,
+                expectedExclusions = 2,
+                parseFailures = 2,
+                nextBookAsOf = "2026-09-01",
+            ),
+        )
+
+        org.junit.Assert.assertTrue("applied count", warning.contains("3"))
+        org.junit.Assert.assertTrue("skipped count", warning.contains("2"))
+        org.junit.Assert.assertTrue("ignored count", warning.contains("4"))
+        org.junit.Assert.assertTrue("AXON removal", warning.contains("AXON"))
+        org.junit.Assert.assertTrue("MSFT removal", warning.contains("MSFT"))
     }
 
     private fun opp(symbol: String, score: Int) = OpportunityListRow(

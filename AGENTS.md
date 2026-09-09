@@ -69,6 +69,8 @@ A bugfix, rename, or small tweak still ships direct with TDD. That exemption cov
 
 Process, lanes, memlog, and skills: [`.grok/rules/bmad.md`](.grok/rules/bmad.md).
 
+Canonical skill catalog: [`.agents/skills/`](.agents/skills/). Edit that folder only. Grok and Codex already scan it once. Do not copy it to `.grok/skills`, `.claude/skills`, or `.codex/skills`. After a skill edit, run `pwsh -File scripts/check-skill-catalog.ps1`.
+
 This file + `project-context.md` + contracts **outrank** generic BMAD templates. Unsure: `bmad-help` once.
 
 ## Architecture (desktop terminal)
@@ -202,6 +204,19 @@ Opening Quant Lens may compute residual income from fundamentals when analysis i
 
 ## Build And Test
 
+### Personal Android delivery (mandatory)
+
+This is Juan's personal project. Juan sideloads the Android app to his phone.
+
+- Use the debug APK for normal delivery and sideloads.
+- Treat "release" and "production ready" as readiness for personal sideload unless Juan explicitly requests another artifact.
+- Custom signed release APKs remain supported. They are optional, not required, and not a release gate.
+- Do not build, export, or test a custom signed release APK unless Juan explicitly requests one.
+- Android debug APKs use the automatic debug signature. This does not require the custom release signing workflow.
+- Preserve the installed app data and compatible debug signature during updates. Never uninstall or wipe data to change certificates.
+- Check the final debug APK. Do not require a signed-release certificate check or a separate signed-release emulator.
+- Keep the existing test and `qa` profile rules. This delivery policy does not waive those checks.
+
 ### Iterate on the harness first (mandatory while developing)
 
 Use `QuantHarness.hardcoded()` → `cached()` → `live()` (`DS_QUANT_LIVE=true` to refresh a pack). Do **not** run device `make android-run-qa` until Juan says the product is ready for live QA.
@@ -303,7 +318,8 @@ No test reaches a live provider. A red test says which URL leaked.
 - SUE from Alpha Vantage is a diagnostic. Fit the joined observations that are not foreign to the issuer SUE series or the issuer AR series (`isForeignTo`). `n` is the leftover count. Below `min_sue_quarters` the fit is `short_history`. The card prints the slope and `n`. The cell ignores SUE until Juan asks. Do not add a YAML max quarter cap.
 - Revenue trail: last `min_revenue_trail_quarters` Yahoo prints. The latest print is the event. Centre is `robustCentre` of the prior window. Scale is the MAD of that window. A foreign print in the prior window refuses the trail. A short window refuses the trail. Hold + last print strictly more than one scale unit below that centre → half size. Flag `revenueTrailCut`. Cell stays `CheapNormalRisk`. A flat prior window (scale 0) cuts any latest print strictly below the mode. No percent floor. Median is not the trail level. Field `revenueTrailCentreCents`.
 - Alpha Vantage key lives in `filesDir/earnings/alphavantage.key`. Never commit `alphavantage.key`. Blank Save is a no-op. Clear deletes the file. The screen says whether a key is on disk. Never print the key.
-- Import book is one writer on Earnings, System, and Positions. Restore log is a second Earnings SAF action and never plans a lot write. Held is exact ticker equality. Pin is paint (`pinHeldFirst`). Lot qty does not write `positionSizeBps`. Positions paints every lot. Closeness is a Core enum on the New York session day. Off-feed tap is a no-op. Contract: `shared/contracts/advisor-csv-import-v1.yaml` (`advisor-csv-import/3`).
+- Detail Snapshot always paints an earnings card first. A priced log event reuses `EarningsEventCard`. A dated name without a model uses the same card chrome. No dated report uses the title `No report on the calendar`.
+- Import book is one writer on Earnings, System, and Positions. Restore log is a second Earnings SAF action and never plans a lot write. Held is exact ticker equality. Pin is paint (`pinHeldFirst`). Lot qty does not write `positionSizeBps`. Positions paints every lot. Closeness is a Core enum on the New York session day. Later means the next report is after this ISO week. Dates come from the earnings log, then the shared Yahoo calendar cache, then a scored row. They do not depend on the active universe profile. Off-feed tap is a no-op. Contract: `shared/contracts/advisor-csv-import-v1.yaml` (`advisor-csv-import/3`).
 
 ### Commands and gates
 
@@ -319,6 +335,15 @@ No test reaches a live provider. A red test says which URL leaked.
 - **A field the engine writes needs a reader.** Grep the field name under `src/main` and name the consumer before the work is done.
 - **A numeric gate must state the sign it expects**, not only the magnitude.
 - **A property no live QA can reach is verified by test or it is not verified.** Check `qa`-universe path reachability before arming a live stage.
+
+### Android Positions UX
+
+- Canonical guide: [`docs/android-positions-ux.md`](docs/android-positions-ux.md).
+- Core owns exact exposure arithmetic and research eligibility. Partial stock totals suppress every portfolio weight.
+- P/L pairs market value and cost for the same eligible lots. Its coverage can differ from quote coverage.
+- Off-feed primary row taps remain a no-op. The local facts control works without Detail or provider work.
+- Detail shows every exact-symbol lot from the same book snapshot. Never select an arbitrary first lot.
+- The dashboard header yields space on downward content scroll and returns on upward scroll. Search focus keeps it visible.
 
 ## Preventing repeat operational errors (critical)
 

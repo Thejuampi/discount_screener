@@ -13,6 +13,7 @@ import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
 import com.discountscreener.android.presentation.dashboard.eventsFor
+import com.discountscreener.android.presentation.dashboard.QUIET_EARNINGS_TITLE
 import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import com.discountscreener.core.model.ConfidenceBand
@@ -59,17 +60,23 @@ class DetailEarningsSectionTest {
     }
 
     @Test
-    fun the_detail_of_a_ticker_the_log_never_saw_shows_no_earnings_section() {
+    fun the_detail_of_a_ticker_the_log_never_saw_still_shows_the_earnings_section() {
         render(emptyList())
 
-        composeRule.onNodeWithTag(DETAIL_EARNINGS_SECTION).assertDoesNotExist()
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST)
+            .performScrollToNode(hasTestTag(DETAIL_EARNINGS_SECTION))
+
+        composeRule.onNodeWithTag(DETAIL_EARNINGS_SECTION).assertIsDisplayed()
     }
 
     @Test
     fun another_tickers_event_never_reaches_this_detail() {
-        render(eventsOf("AVGO"))
+        render(eventsOf("AVGO"), scoreRow = scoreRow().copy(nextEarningsEpoch = null))
 
-        composeRule.onNodeWithTag(DETAIL_EARNINGS_SECTION).assertDoesNotExist()
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST)
+            .performScrollToNode(hasText(QUIET_EARNINGS_TITLE))
+
+        composeRule.onNodeWithText(QUIET_EARNINGS_TITLE).assertIsDisplayed()
     }
 
     @Test
@@ -111,12 +118,12 @@ class DetailEarningsSectionTest {
 
     @Test
     fun the_detail_of_a_ticker_the_log_never_saw_says_why_it_has_no_event() {
-        render(emptyList())
+        render(emptyList(), scoreRow = scoreRow().copy(nextEarningsEpoch = null))
 
         composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST)
             .performScrollToNode(hasTestTag(DETAIL_EARNINGS_ABSENT))
 
-        composeRule.onNodeWithTag(DETAIL_EARNINGS_ABSENT).assertIsDisplayed()
+        composeRule.onNodeWithText(QUIET_EARNINGS_TITLE).assertIsDisplayed()
     }
 
     @Test
@@ -158,6 +165,7 @@ class DetailEarningsSectionTest {
                     scoreRow = scoreRow,
                     earningsEvents = events,
                     earningsLoading = earningsLoading,
+                    earningsToday = TODAY,
                     onAction = {},
                 )
             }

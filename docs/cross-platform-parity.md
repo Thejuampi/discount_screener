@@ -1,5 +1,12 @@
 # Cross-Platform Parity
 
+## Android Positions UX
+
+Android shows stock exposure, research labels, local position facts, and a dashboard header that returns on upward scroll.
+Windows and desktop keep their existing presentation. No import, valuation, or score policy changes accompany this Android view.
+Partial stock totals suppress all weights. P/L uses paired value and cost coverage.
+See [Android Positions](android-positions-ux.md) for the field and interaction contract.
+
 Discount Screener has three user-facing clients: the Rust desktop app, the Windows Tauri app, and the Android app.
 
 ## Default Rule
@@ -16,7 +23,7 @@ User-visible functionality should be kept in 1:1 parity across clients by defaul
 
 - **Android Earnings tab (pre-earnings risk gate)** — Android-only. Cell is implied-move vs own median |AR|. SUE slope is a card diagnostic. Revenue trail can cut a Hold. PRD: [`../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md`](../_bmad-output/planning-artifacts/prd-pre-earnings-risk-gate-2026-08-27.md).
 
-- **Android Chase book (Import book)** — Android-only paint of Held, pin, and the Positions tab. Parse/merge goldens are shared in `advisor-csv-import-v1.yaml` `/3`. Windows Advisor UI stays. Desktop has no import. Android persists lots in SQLite and refuses ledger apply. Positions closeness is a Core enum on the New York session day. Spec: [`../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md).
+- **Android Chase book (Import book)** — Android-only paint of Held, pin, and the Positions tab. Parse/merge goldens are shared in `advisor-csv-import-v1.yaml` `/3`. Windows Advisor UI stays. Desktop has no import. Android persists lots in SQLite and refuses ledger apply. Positions closeness is a Core enum on the New York session day. Android reads SAF input on IO with a four MiB bound, cancellation, and visible errors. Both clients keep supported quantities and reject costs that round to zero cents. Android warning metadata separates expected exclusions from parse failures while preserving total `ignored`. Spec: [`../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md`](../_bmad-output/specs/spec-android-chase-portfolio/SPEC.md).
 
 - **SEC companyfacts read (field set, not capability)** — Both clients now sieve the 4 MB body on
   the stream. The field sets differ, and they must. Android keeps `fp` and cuts everything that is

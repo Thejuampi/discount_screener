@@ -81,7 +81,10 @@ import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.DetailEarningsUi
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
+import com.discountscreener.android.presentation.dashboard.PositionsRow
+import com.discountscreener.android.presentation.dashboard.presentDetailEarnings
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
@@ -128,6 +131,71 @@ const val DETAIL_EARNINGS_SECTION = "detailEarningsSection"
 const val DETAIL_EARNINGS_ABSENT = "detailEarningsAbsent"
 const val DETAIL_SNAPSHOT_LIST = "detailSnapshotList"
 
+@Composable
+internal fun DetailEarningsPanel(earnings: DetailEarningsUi) {
+    when (earnings) {
+        is DetailEarningsUi.Priced -> {
+            Column(modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION)) {
+                earnings.events.forEach { row -> EarningsEventCard(row) }
+            }
+        }
+        is DetailEarningsUi.Scheduled -> EarningsStatusCard(
+            kicker = earnings.symbol,
+            title = "${earnings.closenessLabel} · ${earnings.reportDate}",
+            body = earnings.body,
+            tag = DETAIL_EARNINGS_SECTION,
+        )
+        is DetailEarningsUi.Quiet -> Column(modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION)) {
+            EarningsStatusCard(
+                title = earnings.title,
+                body = earnings.body,
+                tag = DETAIL_EARNINGS_ABSENT,
+            )
+        }
+        DetailEarningsUi.Loading -> EarningsStatusCard(
+            title = "Reading the earnings calendar",
+            body = "The next report date comes from the shared earnings cache.",
+            tag = DETAIL_EARNINGS_SECTION,
+        )
+    }
+}
+
+@Composable
+private fun EarningsStatusCard(
+    title: String,
+    body: String,
+    tag: String,
+    kicker: String? = null,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(tag),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            kicker?.let { symbol ->
+                Text(
+                    text = symbol,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DetailScreen(
@@ -152,6 +220,9 @@ fun DetailScreen(
     symbolNote: String = "",
     earningsEvents: List<EarningsEventRowUi> = emptyList(),
     earningsLoading: Boolean = false,
+    earningsCalendarEpoch: Long? = null,
+    earningsToday: java.time.LocalDate? = null,
+    positionRows: List<PositionsRow> = emptyList(),
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -314,8 +385,15 @@ fun DetailScreen(
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
                     symbolNote = symbolNote,
-                    earningsEvents = earningsEvents.filter { it.symbol.equals(route.symbol, ignoreCase = true) },
-                    earningsLoading = earningsLoading,
+                    positionRows = positionRows,
+                    earnings = presentDetailEarnings(
+                        symbol = route.symbol,
+                        events = earningsEvents.filter { it.symbol.equals(route.symbol, ignoreCase = true) },
+                        calendarEpoch = earningsCalendarEpoch,
+                        scoreEpoch = scoreRow?.nextEarningsEpoch,
+                        today = earningsToday ?: java.time.LocalDate.ofEpochDay(0),
+                        loading = earningsLoading,
+                    ),
                     onAction = onAction,
                 )
                 DetailSubtab.Score -> ScoreContent(
@@ -804,8 +882,8 @@ private fun SnapshotContent(
     projectedDetail: ProjectedDetailData?,
     detailNotice: DashboardNotice? = null,
     symbolNote: String = "",
-    earningsEvents: List<EarningsEventRowUi> = emptyList(),
-    earningsLoading: Boolean = false,
+    positionRows: List<PositionsRow> = emptyList(),
+    earnings: DetailEarningsUi,
     onAction: (DashboardAction) -> Unit,
 ) {
     var replayCandles = replayBackingCandles ?: candles
@@ -856,27 +934,13 @@ private fun SnapshotContent(
                 onAction = onAction,
             )
         }
+        item { DetailEarningsPanel(earnings) }
 
-        if (earningsEvents.isNotEmpty()) {
-            item {
-                Text(
-                    text = "EARNINGS",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION),
-                )
-            }
-            items(earningsEvents, key = { it.symbol + it.reportDate }) { row -> EarningsEventCard(row) }
-        } else if (!earningsLoading) {
-            item {
-                Text(
-                    text = earningsGateAbsence(
-                        scoreRow?.nextEarningsEpoch,
-                        System.currentTimeMillis() / 1_000L,
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag(DETAIL_EARNINGS_ABSENT),
+        positionRows.forEach { row ->
+            item(key = "position:${row.symbol}:${row.inputIndex}") {
+                PositionFactsBlock(
+                    row = row,
+                    heading = "Position lot ${row.inputIndex + 1}",
                 )
             }
         }

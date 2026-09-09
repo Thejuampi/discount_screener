@@ -1,12 +1,16 @@
 package com.discountscreener.android.ui.dashboard
 
 import android.os.Looper
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import com.discountscreener.android.ui.verticalList
 import com.discountscreener.android.domain.model.DashboardStartupPhase
@@ -22,6 +26,7 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.portfolio.ImportPlan
 import com.discountscreener.core.portfolio.PortfolioLot
 import com.discountscreener.core.portfolio.RefuseReason
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +64,33 @@ class ImportBookScreenTest {
         )
 
         composeRule.onNodeWithText("Confirm").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_trade_plan_shows_counts_and_closed_symbols_before_confirm() {
+        render(
+            DashboardUiState(
+                loading = false,
+                startupPhase = DashboardStartupPhase.Ready,
+                importBookPlan = ImportPlan.ConfirmTradesMerge(
+                    format = "Chase",
+                    asOf = "2026-08-31",
+                    positions = listOf(PortfolioLot("AMZN", 100_000L, 20_000L, null)),
+                    remove = listOf("AXON"),
+                    applied = 3,
+                    skipped = 2,
+                    ignored = 4,
+                    expectedExclusions = 2,
+                    parseFailures = 2,
+                    nextBookAsOf = "2026-09-01",
+                ),
+            ),
+        )
+
+        composeRule.onNode(hasText("It applies 3 trades", substring = true)).assertIsDisplayed()
+        composeRule.onNode(hasText("skips 2 trades", substring = true)).assertIsDisplayed()
+        composeRule.onNode(hasText("parse failures", substring = true)).assertIsDisplayed()
+        composeRule.onNode(hasText("AXON", substring = true)).assertIsDisplayed()
     }
 
     @Test
@@ -113,6 +145,35 @@ class ImportBookScreenTest {
         )
 
         composeRule.onNodeWithTag(POSITIONS_GATE_IMPORT).assertIsDisplayed()
+        composeRule.onNodeWithText("Stock value").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Positions menu").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_positions_menu_import_control_launches_document_picker() {
+        render(
+            DashboardUiState(
+                loading = false,
+                currentTab = DashboardTab.Positions,
+                startupPhase = DashboardStartupPhase.Ready,
+                positionsRows = listOf(
+                    PositionsRow(
+                        symbol = "PHYL",
+                        quantityLabel = "1273",
+                        avgCostCents = 3_528L,
+                        closeness = Closeness.None,
+                        opportunity = null,
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasContentDescription("Positions menu"))
+        composeRule.onNodeWithContentDescription("Positions menu").performClick()
+        composeRule.onNodeWithTag(POSITIONS_GATE_IMPORT).performClick()
+
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, shadowOf(composeRule.activity).nextStartedActivity.action)
     }
 
     @Test
@@ -156,6 +217,8 @@ class ImportBookScreenTest {
             ),
         )
 
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasText("PHYL"))
         composeRule.onNodeWithText("PHYL").assertIsDisplayed()
     }
 

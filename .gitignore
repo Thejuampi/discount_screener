@@ -24,6 +24,9 @@
 *.jks
 mutants.out*/
 .claude/
+.codex/skills/
+.grok/skills/
+.cursor/skills/
 .opencode/
 .idea/
 apps/.agents/

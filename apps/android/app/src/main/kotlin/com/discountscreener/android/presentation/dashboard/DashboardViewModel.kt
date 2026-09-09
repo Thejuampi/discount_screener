@@ -84,12 +84,15 @@ import com.discountscreener.core.portfolio.ImportPlan
 import com.discountscreener.core.portfolio.PortfolioLot
 import com.discountscreener.core.portfolio.nySessionDay
 import java.time.Instant
+import java.time.LocalDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.system.measureTimeMillis
 
@@ -302,6 +305,7 @@ data class DashboardUiState(
     val importBookNotice: String? = null,
     val positionsRows: List<PositionsRow> = emptyList(),
     val portfolioLots: List<PortfolioLot> = emptyList(),
+    val earningsCalendar: Map<String, Long?> = emptyMap(),
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -359,6 +363,8 @@ class DashboardViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
+
+    fun sessionDay(): LocalDate = nySessionDay(nowEpochSeconds())
 
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
@@ -573,41 +579,86 @@ class DashboardViewModel(
 
     private fun loadEarningsGate() {
         activeEarningsJob?.cancel()
+        activeCalendarJob?.cancel()
         earningsGateLoaded = true
         _state.value = _state.value.copy(earningsGateLoading = true)
         activeEarningsJob = viewModelScope.launch {
             try {
                 var gate = getEarningsEvents()
+                var calendar = getEarningsEvents.cachedCalendar()
                 var current = _state.value
                 _state.value = current.copy(
                     earningsGate = gate,
-                    positionsRows = projectPositions(
-                        lots = current.portfolioLots,
-                        scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
-                        upcomingReport = upcomingReportDates(gate),
-                        today = nySessionDay(nowEpochSeconds()),
-                    ),
+                    earningsCalendar = calendar,
+                    positionsRows = projectLotRows(current, gate, calendar),
                 )
+                hydrateEarningsCalendar(current.portfolioLots.map { it.symbol } + listOfNotNull(current.detailRoute?.symbol))
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 earningsGateLoaded = false
                 var current = _state.value
                 var empty = EarningsGateUi()
+                var calendar = runCatching { getEarningsEvents.cachedCalendar() }.getOrDefault(emptyMap())
                 _state.value = current.copy(
                     earningsGate = empty,
+                    earningsCalendar = calendar,
                     earningsGateNotice = "Earnings gate failed: ${error.message ?: "unknown error"}",
-                    positionsRows = projectPositions(
-                        lots = current.portfolioLots,
-                        scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
-                        upcomingReport = upcomingReportDates(empty),
-                        today = nySessionDay(nowEpochSeconds()),
-                    ),
+                    positionsRows = projectLotRows(current, empty, calendar),
                 )
             } finally {
                 _state.value = _state.value.copy(earningsGateLoading = false)
             }
         }
+    }
+
+    private var activeCalendarJob: Job? = null
+
+    private fun hydrateEarningsCalendar(symbols: List<String>) {
+        activeCalendarJob?.cancel()
+        var current = _state.value
+        var today = nySessionDay(nowEpochSeconds())
+        var wanted = symbols.map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct()
+            .filter { needsCalendar(it, current, today) }
+        if (wanted.isEmpty()) return
+        activeCalendarJob = viewModelScope.launch {
+            wanted.chunked(12).forEach { chunk ->
+                currentCoroutineContext().ensureActive()
+                var asked = getEarningsEvents.refreshCalendar(chunk)
+                currentCoroutineContext().ensureActive()
+                var next = _state.value
+                var calendar = next.earningsCalendar + asked
+                _state.value = next.copy(
+                    earningsCalendar = calendar,
+                    positionsRows = projectLotRows(next, next.earningsGate, calendar),
+                )
+            }
+        }
+    }
+
+    private fun needsCalendar(symbol: String, current: DashboardUiState, today: LocalDate): Boolean {
+        var day = reportDatesForLots(current.earningsGate, current.earningsCalendar, today)[symbol]
+        if (day != null) return false
+        var scoreDay = scoredLots(current.opportunityUniverse, current.opportunityRows)
+            .firstOrNull { it.symbol.equals(symbol, ignoreCase = true) }
+            ?.nextEarningsEpoch
+            ?.let(::nySessionDay)
+        return scoreDay == null || scoreDay.isBefore(today)
+    }
+
+    private fun projectLotRows(
+        current: DashboardUiState,
+        gate: EarningsGateUi,
+        calendar: Map<String, Long?>,
+    ): List<PositionsRow> {
+        var today = sessionDay()
+        return projectPositions(
+            lots = current.portfolioLots,
+            scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
+            upcomingReport = reportDatesForLots(gate, calendar, today),
+            today = today,
+            quotes = portfolioQuotesFromTrackedRows(current.trackedRows),
+        )
     }
 
     private fun prepareEarningsLogBackup() {
@@ -982,6 +1033,8 @@ class DashboardViewModel(
         )
         if (!earningsGateLoaded) {
             loadEarningsGate()
+        } else {
+            hydrateEarningsCalendar(listOf(symbol) + _state.value.portfolioLots.map { it.symbol })
         }
         detailLoadJob?.cancel()
         detailLoadJob = viewModelScope.launch {
@@ -1172,6 +1225,8 @@ class DashboardViewModel(
         previousSelect?.cancel()
         previousDetail?.cancel()
         previousRefresh?.cancel()
+        activeEarningsJob?.cancel()
+        activeCalendarJob?.cancel()
         selectProfileJob = viewModelScope.launch {
             previousSelect?.join()
             previousDetail?.join()
@@ -1486,6 +1541,7 @@ class DashboardViewModel(
         var scoreRow = if (scoringMatches) snapshot.selectedScoreRow else currentState.selectedScoreRow
         var opportunityRows = if (scoringMatches) snapshot.opportunityRows else currentState.opportunityRows
         var opportunityUniverse = if (scoringMatches) snapshot.opportunityUniverse else currentState.opportunityUniverse
+        var today = sessionDay()
         _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
@@ -1587,8 +1643,13 @@ class DashboardViewModel(
             positionsRows = projectPositions(
                 lots = snapshot.portfolioLots,
                 scored = scoredLots(opportunityUniverse, opportunityRows),
-                upcomingReport = upcomingReportDates(_state.value.earningsGate),
-                today = nySessionDay(nowEpochSeconds()),
+                upcomingReport = reportDatesForLots(
+                    _state.value.earningsGate,
+                    _state.value.earningsCalendar,
+                    today,
+                ),
+                today = today,
+                quotes = portfolioQuotesFromTrackedRows(snapshot.trackedRows),
             ),
         )
         rememberDetailSession(_state.value)

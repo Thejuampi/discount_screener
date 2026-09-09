@@ -365,6 +365,16 @@ class DefaultDashboardRepository(
      */
     private val beforeSnapshotLocked: (suspend () -> Unit)? = null,
     /**
+     * Test probe. Runs after a refresh marks a load, before it registers its active pass.
+     * Production leaves this null.
+     */
+    private val afterRefreshLoadStarted: (suspend () -> Unit)? = null,
+    /**
+     * Test probe. Runs after a refresh registers its active pass.
+     * Production leaves this null.
+     */
+    private val afterRefreshPassRegistered: (suspend () -> Unit)? = null,
+    /**
      * Offered every screen input, so it can be replayed off the device.
      *
      * The repository does not know what the sink does with it. Production wires a file writer that
@@ -532,6 +542,8 @@ class DefaultDashboardRepository(
 
     internal fun peekPeakRefreshPasses(): Int = peakRefreshPassesRunning
 
+    internal fun peekRefreshPassesRunning(): Int = refreshPassesRunning
+
     /**
      * When the running refresh was asked for.
      *
@@ -592,6 +604,15 @@ class DefaultDashboardRepository(
     private fun earningsCandidateRowsLocked(
         scoringModel: OpportunityScoringModel,
     ): List<OpportunityListRow> = opportunityRowsLocked(ViewFilter(), scoringModel, includeUnqualified = true)
+
+    override suspend fun cachedEarningsCalendar(): Map<String, Long?> = withContext(computeDispatcher) {
+        earningsEventRecorder?.cachedCalendar() ?: emptyMap()
+    }
+
+    override suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?> =
+        withContext(computeDispatcher) {
+            earningsEventRecorder?.refreshCalendar(symbols) ?: emptyMap()
+        }
 
     override suspend fun earningsEvents(): EarningsGateUi = withContext(computeDispatcher) {
         val recorder = earningsEventRecorder ?: return@withContext EarningsGateUi()
@@ -1326,9 +1347,6 @@ class DefaultDashboardRepository(
             stateStore.loadScoringPreferences().opportunityModel,
             force = false,
         )
-        if (stateMutex.withLock { request.generation == activeProfileGeneration }) {
-            startMarketReadForCurrentProfile(request.generation)
-        }
     }
 
     private suspend fun startRefreshForCurrentProfile(
@@ -1397,11 +1415,15 @@ class DefaultDashboardRepository(
                 activeRefreshJob = repositoryScope.launch {
                     val thisJob = coroutineContext.job
                     loadStarted()
-                    stateMutex.withLock {
-                        refreshPassesRunning += 1
-                        peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
-                    }
+                    var refreshPassRegistered = false
                     try {
+                        afterRefreshLoadStarted?.invoke()
+                        stateMutex.withLock {
+                            refreshPassesRunning += 1
+                            refreshPassRegistered = true
+                            peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
+                        }
+                        afterRefreshPassRegistered?.invoke()
                         runRefresh(symbols, generation, skip)
                         finishRefresh(generation, scoringModel, skip)
                     } finally {
@@ -1411,7 +1433,9 @@ class DefaultDashboardRepository(
                         // ended the refresh; only the enrichment above needs the refresh to be whole.
                         withContext(NonCancellable) {
                             stateMutex.withLock {
-                                refreshPassesRunning -= 1
+                                if (refreshPassRegistered) {
+                                    refreshPassesRunning -= 1
+                                }
                                 if (activeRefreshJob === thisJob) {
                                     activeRefreshJob = null
                                 }

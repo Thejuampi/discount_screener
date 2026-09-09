@@ -98,6 +98,7 @@ class DiscountScreenerAppContainer(context: Context) {
             yahooClient = yahooClient,
             fearGreedClient = CnnFearGreedClient(),
             dailyCandleSink = stateStore,
+            candleStagingDirectory = File(appContext.cacheDir, "market-candle-stage"),
         )
     }
 

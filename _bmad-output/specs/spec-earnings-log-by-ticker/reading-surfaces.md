@@ -52,21 +52,18 @@ The back-up and restore buttons live at the tail of the same list and stay reach
 
 **Selection.** From the loaded `EarningsGateUi`, take rows whose `symbol` equals `DetailRoute.symbol`: the first of `upcoming` (already sorted nearest-first) and the first of `settled` (already sorted most-recent-first).
 
-**Zero matches.** No card, and one line naming why, read from `scoreRow.nextEarningsEpoch`:
+**Zero matches.** The Snapshot tab still paints one earnings card immediately under the top of the list.
 
-| Days to the report | Line |
+| State | Card |
 |---|---|
-| beyond `CAPTURE_WINDOW_DAYS` | `Earnings gate: the chain is priced inside 10 days of the report.` |
-| within the window | `Earnings gate: inside the window, still unpriced. A pass has to land with the market open.` |
-| no date, or a date already past | `Earnings gate: no report date yet, so nothing to price.` |
+| Priced event in the log | the same `EarningsEventCard` the Earnings tab uses |
+| Future date, no priced model | status card: ticker, closeness · date, body that the gate has not priced it yet |
+| No date | status card title `No report on the calendar` |
+| Still loading, no cached date | status card `Reading the earnings calendar` |
 
-A date the calendar left behind reads the same as no date. Yahoo drops a report date after it files and before it publishes the next one, so a stale date says nothing the reader can act on.
+A date the calendar left behind (already past) reads as no date. Yahoo drops a report date after it files and before it publishes the next one.
 
-The line waits for `earningsLoading` to clear. Naming a reason while the log is still being read can name the wrong one.
-
-Only the middle line points at something that can fail. The other two are the gate working.
-
-The line never repeats the date: `DetailScoreHeader` already prints `earningsMark`, which carries it. That is why `earningsGateAbsence` lives beside `earningsMark` — both turn the same epoch into a sentence, and splitting them would let the two disagree.
+The card waits to name Quiet until loading clears, unless a cached future date is already in `calendarAsks`.
 
 `CAPTURE_WINDOW_DAYS` moved out of `EarningsEventRecorder`'s private companion into `:core` (`PreReportBuilder.kt`). The screen and the recorder have to name the same window or the explanation lies about what the gate is waiting for.
 

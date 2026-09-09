@@ -28,6 +28,16 @@ class AdvisorCsvTest {
     }
 
     @Test
+    fun parser_separates_expected_cash_exclusions_from_parse_failures() {
+        var malformed = PHYL.replace("\"1,273\"", "\"not-a-number\"")
+        var parsed = parseAdvisorCsv(listOf(JPM_HEADER, CASH, malformed).joinToString("\n"))!!
+
+        assertEquals(2, parsed.ignored)
+        assertEquals(1, parsed.expectedExclusions)
+        assertEquals(1, parsed.parseFailures)
+    }
+
+    @Test
     fun jpm_snapshot_aggregates_to_open_lots() {
         var phyl = aggregateToPositions(parseAdvisorCsv(jpmSample())!!.txs).single { it.symbol == "PHYL" }
         assertEquals(3528L, phyl.avgCostCents)
@@ -43,6 +53,40 @@ class AdvisorCsvTest {
     fun jpm_fractional_quantity_rounds_half_up_to_four_decimals() {
         var amzn = aggregateToPositions(parseAdvisorCsv(jpmSample())!!.txs).single { it.symbol == "AMZN" }
         assertEquals(362_954L, amzn.quantityTenThousandths)
+    }
+
+    @Test
+    fun a_positive_snapshot_lot_below_one_dollar_stays_in_the_book() {
+        var lot = aggregateToPositions(
+            listOf(CsvTx("PENNY", Side.Buy, quantityShares = 0.5, price = 0.5, date = "")),
+        ).single()
+
+        assertEquals(5_000L, lot.quantityTenThousandths)
+        assertEquals(50L, lot.avgCostCents)
+    }
+
+    @Test
+    fun a_subcent_cost_does_not_emit_a_zero_cent_lot() {
+        var positions = aggregateToPositions(
+            listOf(
+                CsvTx("PENNY", Side.Buy, quantityShares = 0.5, price = 0.001, date = ""),
+                CsvTx("AMZN", Side.Buy, quantityShares = 1.0, price = 2.0, date = ""),
+            ),
+        )
+
+        assertEquals(listOf("AMZN"), positions.map { it.symbol })
+    }
+
+    @Test
+    fun an_unchanged_trade_window_keeps_a_positive_lot_below_one_dollar() {
+        var merged = mergeTradesOntoLots(
+            listOf(lot("PENNY", qty = 5_000, cost = 50)),
+            listOf(CsvTx("PENNY", Side.Buy, quantityShares = 0.1, price = 0.5, date = "2026-08-31")),
+            "2026-08-31",
+        )
+
+        assertEquals(5_000L, merged.positions.single().quantityTenThousandths)
+        assertEquals(50L, merged.positions.single().avgCostCents)
     }
 
     @Test
@@ -191,6 +235,8 @@ class AdvisorCsvTest {
             ParsedCsv(
                 txs = listOf(CsvTx("AMZN", Side.Buy, 10.0, 220.0, "2026-09-01")),
                 ignored = 0,
+                expectedExclusions = 0,
+                parseFailures = 0,
                 format = "Chase",
                 kind = CsvKind.TradesWindow,
                 asOf = null,

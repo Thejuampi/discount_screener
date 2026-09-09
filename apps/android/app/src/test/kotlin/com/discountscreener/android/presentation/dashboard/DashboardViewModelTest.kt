@@ -9,6 +9,8 @@ import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
+import com.discountscreener.android.domain.model.RowFreshness
+import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.repository.DashboardRepository
 import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
@@ -83,6 +85,7 @@ import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.ZoneOffset
 import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -563,6 +566,28 @@ class DashboardViewModelTest {
         advanceUntilIdle()
 
         assertEquals("AMZN", viewModel.state.value.positionsRows.single().opportunity?.symbol)
+    }
+
+    @Test
+    fun tracked_price_without_research_keeps_position_quote() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(
+                trackedRow("AMZN").copy(
+                    state = TrackedRowState.Live,
+                    freshness = RowFreshness.Updated,
+                ),
+            ),
+        )
+        val viewModel = testViewModel(repository)
+        importAmzn(viewModel)
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        val row = viewModel.state.value.positionsRows.single()
+        assertEquals(10_000L, row.quoteCents)
+        assertEquals(true, row.quoteIsCurrent)
+        assertEquals(100_000L, row.marketValueCents)
+        assertEquals("Missing analysis", row.researchReason)
     }
 
     @Test
@@ -1624,6 +1649,75 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun a_book_lot_outside_the_profile_still_gets_a_closeness_tag() = runTest(dispatcher) {
+        var monday = LocalDate.of(2026, 9, 7)
+        var later = LocalDateTime.of(2026, 9, 14, 12, 0).toEpochSecond(ZoneOffset.UTC)
+        var repository = RecordingDashboardRepository()
+        repository.refreshCalendarResult = mapOf("BSX" to later)
+        var viewModel = testViewModel(repository, nowEpochSeconds = { nyNoon(monday) })
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,BSX,9.3357,45.76,08/31/2026\n",
+        )
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(Closeness.Later, viewModel.state.value.positionsRows.single().closeness)
+    }
+
+    @Test
+    fun a_cached_calendar_date_is_not_asked_again() = runTest(dispatcher) {
+        var monday = LocalDate.of(2026, 9, 7)
+        var later = LocalDateTime.of(2026, 9, 14, 12, 0).toEpochSecond(ZoneOffset.UTC)
+        var repository = RecordingDashboardRepository()
+        repository.earningsCalendar = mapOf("BSX" to later)
+        var viewModel = testViewModel(repository, nowEpochSeconds = { nyNoon(monday) })
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,BSX,9.3357,45.76,08/31/2026\n",
+        )
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertEquals(false, repository.calendarRefreshCalls.flatten().contains("BSX"))
+    }
+
+    @Test
+    fun an_expired_calendar_date_reaches_the_calendar_owner() = runTest(dispatcher) {
+        var monday = LocalDate.of(2026, 9, 7)
+        var expired = LocalDateTime.of(2026, 9, 6, 12, 0).toEpochSecond(ZoneOffset.UTC)
+        var later = LocalDateTime.of(2026, 9, 14, 12, 0).toEpochSecond(ZoneOffset.UTC)
+        var repository = RecordingDashboardRepository()
+        repository.earningsCalendar = mapOf("BSX" to expired)
+        repository.refreshCalendarResult = mapOf("BSX" to later)
+        var viewModel = testViewModel(repository, nowEpochSeconds = { nyNoon(monday) })
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,BSX,9.3357,45.76,08/31/2026\n",
+        )
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertTrue(repository.calendarRefreshCalls.flatten().contains("BSX"))
+    }
+
+    @Test
+    fun an_expired_empty_calendar_answer_reaches_the_calendar_owner() = runTest(dispatcher) {
+        var monday = LocalDate.of(2026, 9, 7)
+        var repository = RecordingDashboardRepository()
+        repository.earningsCalendar = mapOf("BSX" to null)
+        var viewModel = testViewModel(repository, nowEpochSeconds = { nyNoon(monday) })
+        importCsv(
+            viewModel,
+            "Asset Class,Ticker,Quantity,Unit Cost,As of\nEquity,BSX,9.3357,45.76,08/31/2026\n",
+        )
+        viewModel.dispatch(DashboardAction.SelectTab(DashboardTab.Positions))
+        advanceUntilIdle()
+
+        assertTrue(repository.calendarRefreshCalls.flatten().contains("BSX"))
+    }
+
+    @Test
     fun opening_the_positions_tab_reads_the_event_log() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository()
         var viewModel = testViewModel(repository)
@@ -2024,6 +2118,17 @@ class DashboardViewModelTest {
             earningsEventsCallCount++
             earningsEventsError?.let { throw it }
             return earningsGate
+        }
+
+        var earningsCalendar: Map<String, Long?> = emptyMap()
+        var refreshCalendarResult: Map<String, Long?> = emptyMap()
+        var calendarRefreshCalls: MutableList<List<String>> = mutableListOf()
+
+        override suspend fun cachedEarningsCalendar(): Map<String, Long?> = earningsCalendar
+
+        override suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?> {
+            calendarRefreshCalls += symbols
+            return symbols.associateWith { refreshCalendarResult[it] }
         }
 
         var earningsLogBackupText = ""

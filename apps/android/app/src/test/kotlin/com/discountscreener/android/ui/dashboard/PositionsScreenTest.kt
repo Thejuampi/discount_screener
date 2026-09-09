@@ -8,6 +8,10 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import com.discountscreener.android.domain.model.DashboardStartupPhase
 import com.discountscreener.android.domain.model.OpportunityListRow
@@ -17,6 +21,7 @@ import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
 import com.discountscreener.android.presentation.dashboard.PositionsRow
+import com.discountscreener.android.presentation.dashboard.PositionsBookSummary
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
 import com.discountscreener.android.presentation.dashboard.projectPositions
@@ -26,6 +31,7 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.QuantLensLensId
 import com.discountscreener.core.portfolio.Closeness
 import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.PortfolioQuote
 import java.io.File
 import java.time.LocalDate
 import java.util.TimeZone
@@ -56,6 +62,7 @@ class PositionsScreenTest {
     fun pos_import_nonempty_keeps_import_book() {
         render(positionsState(listOf(amznScoredRow())))
 
+        composeRule.onNodeWithContentDescription("Positions menu").performClick()
         composeRule.onNodeWithTag(POSITIONS_GATE_IMPORT).assertIsDisplayed()
     }
 
@@ -63,7 +70,9 @@ class PositionsScreenTest {
     fun pos_phyl_paints_qty_and_cost() {
         render(positionsState(listOf(phylRow())))
 
-        composeRule.onNodeWithText("1273 · $35.28").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Show position facts for PHYL").performClick()
+        composeRule.onNodeWithText("Shares 1273").assertIsDisplayed()
+        composeRule.onNodeWithText("Average cost $35.28").assertIsDisplayed()
     }
 
     @Test
@@ -84,21 +93,17 @@ class PositionsScreenTest {
     fun pos_amzn_paints_qty_and_cost() {
         render(positionsState(listOf(amznScoredRow())))
 
-        composeRule.onNodeWithText("36.2954 · $214.03").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Show position facts for AMZN").performClick()
+        composeRule.onNodeWithText("Shares 36.2954").assertIsDisplayed()
+        composeRule.onNodeWithText("Average cost $214.03").assertIsDisplayed()
     }
 
     @Test
-    fun pos_flags_amzn_matches_the_opps_strip() {
+    fun pos_flags_amzn_shows_compact_research_and_score() {
         render(positionsState(listOf(amznScoredRow()), chips = amznChips()))
         var expected = listOf(
-            "Act",
-            "F 20",
-            "T 18",
-            "Fc 12",
-            "Disc 50.00%",
-            "Upside 50.00%",
-            "Conf high",
-            "+ Strong signals",
+            "Check data · Missing analysis",
+            "Score 40 · V3",
         )
 
         assertEquals(expected, expected.filter(::shown))
@@ -172,30 +177,6 @@ class PositionsScreenTest {
     }
 
     @Test
-    fun pos_sort_ordinal_paints_today_then_later_then_blank() {
-        var monday = LocalDate.of(2026, 9, 7)
-        var rows = projectPositions(
-            lots = listOf(
-                PortfolioLot("PHYL", 12_730_000L, 3_528L, null),
-                PortfolioLot("AMZN", 362_954L, 21_403L, null),
-                PortfolioLot("MSFT", 100_000L, 10_000L, null),
-            ),
-            scored = listOf(scored("AMZN"), scored("MSFT")),
-            upcomingReport = mapOf(
-                "MSFT" to monday,
-                "AMZN" to LocalDate.of(2026, 9, 14),
-            ),
-            today = monday,
-        )
-        render(positionsState(rows))
-        var msft = composeRule.onNodeWithText("MSFT").getUnclippedBoundsInRoot()
-        var amzn = composeRule.onNodeWithText("AMZN").getUnclippedBoundsInRoot()
-        var phyl = composeRule.onNodeWithText("PHYL").getUnclippedBoundsInRoot()
-
-        assertTrue(msft.top < amzn.top && amzn.top < phyl.top)
-    }
-
-    @Test
     fun positions_compose_does_not_own_the_clock() {
         var candidates = listOf(
             File("src/main/kotlin/com/discountscreener/android/ui/dashboard"),
@@ -205,6 +186,178 @@ class PositionsScreenTest {
         var text = File(dir, "DashboardLists.kt").readText() + File(dir, "DashboardScreen.kt").readText()
 
         assertEquals(false, "LocalDate.now" in text)
+    }
+
+    @Test
+    fun positions_summary_shows_stock_value_pl_and_two_decimal_weight() {
+        val rows = projectPositions(
+            lots = listOf(
+                PortfolioLot("AAA", 10_000L, 5_000L, null),
+                PortfolioLot("BBB", 30_000L, 10_000L, null),
+            ),
+            scored = listOf(scored("AAA"), scored("BBB")),
+            upcomingReport = emptyMap(),
+            today = LocalDate.of(2026, 9, 7),
+            quotes = mapOf(
+                "AAA" to PortfolioQuote(10_000L),
+                "BBB" to PortfolioQuote(10_000L),
+            ),
+        )
+        render(positionsState(rows))
+
+        composeRule.onNodeWithText("Stock value").assertIsDisplayed()
+        composeRule.onNodeWithText("$400.00").assertIsDisplayed()
+        composeRule.onNodeWithText("Unrealized P/L").assertIsDisplayed()
+        composeRule.onNodeWithText("$50.00").assertIsDisplayed()
+        composeRule.onNodeWithText("25.00%").assertIsDisplayed()
+        composeRule.onNodeWithText("75.00%").assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_summary_discloses_stored_quote_and_lot_status() {
+        val rows = projectPositions(
+            lots = listOf(PortfolioLot("AAA", 10_000L, 5_000L, null)),
+            scored = listOf(scored("AAA")),
+            upcomingReport = emptyMap(),
+            today = LocalDate.of(2026, 9, 7),
+            quotes = mapOf("AAA" to PortfolioQuote(10_000L, isCurrent = false)),
+        )
+        render(positionsState(rows))
+
+        composeRule.onNodeWithText("Some quote ages are unconfirmed").assertIsDisplayed()
+        composeRule.onNodeWithText("Score 40 · V3 · Stored").assertExists()
+        composeRule.onNodeWithContentDescription("Show position facts for AAA").performClick()
+        composeRule.onNodeWithText("Quote status Unconfirmed").assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_summary_explains_aggregate_overflow_without_losing_coverage() {
+        composeRule.setContent {
+            DiscountScreenerTheme {
+                PositionsSummary(
+                    PositionsBookSummary(
+                        totalValueCents = null,
+                        valueCoverage = com.discountscreener.core.portfolio.Coverage.Complete,
+                        valueEligibleLots = 1,
+                        totalLots = 1,
+                        profitLossCents = null,
+                        profitLossBps = null,
+                        profitLossCoverage = com.discountscreener.core.portfolio.Coverage.Complete,
+                        profitLossEligibleLots = 1,
+                        hasNonCurrentQuotes = false,
+                    ),
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Unavailable: total exceeds supported range").assertIsDisplayed()
+        composeRule.onNodeWithText("P/L % unavailable: total exceeds supported range").assertIsDisplayed()
+        composeRule.onNodeWithText("Value coverage: Complete (1/1)").assertIsDisplayed()
+        composeRule.onNodeWithText("P/L coverage: Complete (1/1)").assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_summary_keeps_zero_cost_percentage_reason_separate_from_overflow() {
+        composeRule.setContent {
+            DiscountScreenerTheme {
+                PositionsSummary(
+                    PositionsBookSummary(
+                        totalValueCents = 10_000L,
+                        valueCoverage = com.discountscreener.core.portfolio.Coverage.Complete,
+                        valueEligibleLots = 1,
+                        totalLots = 1,
+                        profitLossCents = 5_000L,
+                        profitLossBps = null,
+                        profitLossCoverage = com.discountscreener.core.portfolio.Coverage.Complete,
+                        profitLossEligibleLots = 1,
+                        hasNonCurrentQuotes = false,
+                    ),
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("P/L % unavailable").assertIsDisplayed()
+        composeRule.onNodeWithText("P/L % unavailable: total exceeds supported range").assertDoesNotExist()
+    }
+
+    @Test
+    fun positions_partial_book_shows_coverage_and_unavailable_weights() {
+        val rows = projectPositions(
+            lots = listOf(
+                PortfolioLot("AAA", 10_000L, 5_000L, null),
+                PortfolioLot("BBB", 30_000L, 10_000L, null),
+            ),
+            scored = listOf(scored("AAA")),
+            upcomingReport = emptyMap(),
+            today = LocalDate.of(2026, 9, 7),
+        )
+        render(positionsState(rows))
+
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasText("Value coverage: Partial (1/2)"))
+        composeRule.onNodeWithText("Value coverage: Partial (1/2)").assertIsDisplayed()
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasTestTag("$POSITION_ROW_PREFIX${rows[1].symbol}:${rows[1].inputIndex}"))
+        composeRule.onNodeWithContentDescription("Show position facts for BBB").performClick()
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasText("Weight unavailable: Incomplete book"))
+        composeRule.onNodeWithText("Weight unavailable: Incomplete book").assertIsDisplayed()
+        composeRule.onNodeWithTag(POSITIONS_LIST)
+            .performScrollToNode(hasText("Price unavailable: Missing quote"))
+        composeRule.onNodeWithText("Price unavailable: Missing quote").assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_local_facts_expand_without_dispatching_off_feed_detail() {
+        val rows = projectPositions(
+            lots = listOf(PortfolioLot("PHYL", 12_730_000L, 3_528L, null)),
+            scored = emptyList(),
+            upcomingReport = emptyMap(),
+            today = LocalDate.of(2026, 9, 7),
+            quotes = mapOf("PHYL" to PortfolioQuote(4_000L)),
+        )
+        val actions = mutableListOf<DashboardAction>()
+        render(positionsState(rows), onAction = { actions += it })
+
+        composeRule.onNodeWithContentDescription("Show position facts for PHYL").performClick()
+        composeRule.onNodeWithText("Shares 1273").assertIsDisplayed()
+        composeRule.onNodeWithText("Average cost $35.28").assertIsDisplayed()
+        assertEquals(emptyList<DashboardAction>(), actions)
+    }
+
+    @Test
+    fun positions_menu_keeps_import_and_sort_choices() {
+        render(positionsState(listOf(amznScoredRow())))
+
+        composeRule.onNodeWithContentDescription("Positions menu").performClick()
+        composeRule.waitForIdle()
+        composeRule.onAllNodesWithText("Largest position").get(1).assertExists()
+        composeRule.onNodeWithText("Needs review").assertExists()
+        composeRule.onNodeWithText("Earnings soon").assertExists()
+        composeRule.onNodeWithTag(POSITIONS_GATE_IMPORT).assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_narrow_layout_keeps_reason_and_required_values_visible() {
+        val rows = projectPositions(
+            lots = listOf(PortfolioLot("PHYL", 12_730_000L, 3_528L, null)),
+            scored = emptyList(),
+            upcomingReport = emptyMap(),
+            today = LocalDate.of(2026, 9, 7),
+            quotes = emptyMap(),
+        )
+        render(positionsState(rows))
+
+        composeRule.onNodeWithTag(POSITIONS_LIST).performScrollToNode(hasText("PHYL"))
+        composeRule.onNodeWithText("PHYL").assertIsDisplayed()
+        composeRule.onNodeWithText("Check data · Missing quote").assertIsDisplayed()
+    }
+
+    @Test
+    fun positions_money_keeps_large_cent_values_exact() {
+        assertEquals("$92,233,720,368,547,758.07", positionMoney(Long.MAX_VALUE))
     }
 
     private fun shown(text: String): Boolean =

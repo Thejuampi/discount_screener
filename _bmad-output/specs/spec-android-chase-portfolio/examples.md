@@ -6,6 +6,62 @@ Parse and merge goldens live only in `shared/contracts/advisor-csv-import-v1.yam
 
 Yaml `/3` holds `JPM-FRAC-AMZN`, `JPM-DUP-TICKER`, `MERGE-BEFORE-ASOF`, `MERGE-CLOSE-LOT`, `LEDGER-REFUSE`. `MERGE-REPLAY` stays Confirm-scoped in this file.
 
+## Import safety and warning detail
+
+The shared contract keeps total `ignored`. Android adds warning metadata for expected exclusions and parse failures.
+
+```gherkin
+Scenario Outline: import projection respects fixed point boundaries
+  Given the importer receives Case <case>
+  When it projects the snapshot or unchanged trade window
+  Then each emitted lot has supported quantity and positive cost cents
+
+  Examples:
+    | Case                  | Automated test |
+    | JPM-SMALL-POSITION    | Android `a_positive_snapshot_lot_below_one_dollar_stays_in_the_book`; Windows `a positive snapshot lot below one dollar stays in the book` |
+    | MERGE-SMALL-UNCHANGED | Android `an_unchanged_trade_window_keeps_a_positive_lot_below_one_dollar`; Windows `an unchanged trade window keeps a positive lot below one dollar` |
+    | WINDOWS-SCALE-ROUND   | Windows `a quantity below the supported scale does not emit a zero quantity lot` |
+    | SUBCENT-COST          | Android `a_subcent_cost_does_not_emit_a_zero_cent_lot`; Windows `a sub-cent cost does not emit a zero-cent basis lot` |
+```
+
+```gherkin
+Scenario Outline: selected book input stays bounded and cancellable
+  Given the selected URI produces Case <case>
+  When the reader starts
+  Then the reader handles the provider without a main-thread block
+
+  Examples:
+    | Case                | Automated test |
+    | BOOK-TOO-LARGE      | `reader_rejects_input_above_the_bound` |
+    | BOOK-CANCEL-BEFORE  | `reader_honors_cancellation_before_open` |
+    | BOOK-CANCEL-BLOCKED | `reader_cancels_a_blocked_document_provider_after_open` |
+    | BOOK-OFF-MAIN       | `reader_runs_a_slow_document_provider_off_the_main_thread` |
+```
+
+```gherkin
+Scenario Outline: import warnings show the planned change before Confirm
+  Given the importer creates Case <case>
+  When the dialog opens
+  Then the warning shows counts and removed symbols
+
+  Examples:
+    | Case                  | Automated test |
+    | WARNING-TRADE-ROWS    | `trade_import_warning_shows_all_counts_and_removed_symbols` |
+    | WARNING-TRADE-DIALOG  | `a_trade_plan_shows_counts_and_closed_symbols_before_confirm` |
+```
+
+```gherkin
+Scenario Outline: Positions labels book facts
+  Given Positions paints Case <case>
+  When the row appears
+  Then the row labels shares and average cost
+
+  Examples:
+    | Case           | Automated test |
+    | POS-LABEL-PHYL | `pos_phyl_paints_qty_and_cost` |
+    | POS-LABEL-AMZN | `pos_amzn_paints_qty_and_cost` |
+```
+
 ## Kind (Android refuse)
 
 Yaml already names JPM-KIND and CHASE-KIND. Android adds refuse for ledger.
@@ -153,7 +209,9 @@ Scenario Outline: Positions does not hydrate off-feed lots
 
   Examples:
     | Case            | action                         | then                                              |
-    | POS-NO-HYDRATE  | Positions assembles            | no Yahoo; no feed add; no ensure_symbol_loaded    |
+    | POS-NO-HYDRATE  | Positions assembles            | no feed add; no ensure_symbol_loaded; calendar cache ok |
+    | CLOSE-CALENDAR  | lot BSX; calendarAsks 2026-09-14; no score row | Later |
+    | CLOSE-BOOK-NOT-PROFILE | lot CAT; qa feed omits CAT; calendar cache has a date | closeness from that date |
     | POS-TAP-PHYL    | Juan taps the PHYL row         | no Detail; no Yahoo; no feed add; qty and cost stay |
     | POS-PHYL-BOARDS | Opps Watch Tracked Earnings paint | PHYL absent on all three boards; Earnings does not grow a PHYL universe row; pin does not mint |
     | POS-IMPORT-NONEMPTY | book has AMZN; Positions is open | Import book present; same writer as Earnings and System |
@@ -197,7 +255,7 @@ Scenario Outline: closeness prefers the earnings log
     | CLOSE-YAHOO-PAST  | (none)     | 2026-09-06 | None     |
 ```
 
-CLOSE-YAHOO Given includes a scored Opps row that already holds `nextEarningsEpoch`. That field is not a fetch. Off-feed PHYL has no Yahoo path.
+CLOSE-YAHOO Given includes a scored Opps row that already holds `nextEarningsEpoch`. CLOSE-CALENDAR is a lot with no score row whose date lives in `calendarAsks`. Positions may ask Yahoo calendar for a lot missing from that cache. That ask does not add a feed symbol.
 
 ```gherkin
 Scenario Outline: Core emits closeness; Compose does not own the clock
@@ -210,9 +268,12 @@ Scenario Outline: Core emits closeness; Compose does not own the clock
   And Compose does not call LocalDate.now
 
   Examples:
-    | Case     | zone          |
-    | CLOSE-TZ | Europe/Madrid |
+    | Case         | zone          |
+    | CLOSE-TZ     | Europe/Madrid |
+    | CLOSE-TZ-UTC | UTC           |
 ```
+
+Test mapping: `PositionsPresentationTest` covers both New York session-day cases.
 
 Core emits `Today` / `Tomorrow` / `ThisWeek` / `Later` / `None`. Compose paints the token or omits `None`.
 

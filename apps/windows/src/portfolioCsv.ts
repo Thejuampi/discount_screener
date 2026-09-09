@@ -404,11 +404,13 @@ export function aggregateToPositions(txs: CsvTx[]): PortfolioLot[] {
 
   var out: PortfolioLot[] = [];
   for (var [symbol, a] of acc) {
-    if (a.qty > 0 && a.avgCost > 0 && a.qty * a.avgCost >= 1) {
+    var quantity = Math.round(a.qty * 10000) / 10000;
+    var avgCostCents = Math.round(a.avgCost * 100);
+    if (Number.isFinite(quantity) && quantity > 0 && Number.isFinite(avgCostCents) && avgCostCents > 0) {
       out.push({
         symbol,
-        quantity: Math.round(a.qty * 10000) / 10000,
-        avg_cost_cents: Math.round(a.avgCost * 100),
+        quantity,
+        avg_cost_cents: avgCostCents,
         opened_at: a.openedAt,
       });
     }
@@ -470,11 +472,13 @@ export function mergeTradesOntoLots(args: {
 
   var positions: PortfolioLot[] = [];
   for (var [symbol, a] of acc) {
-    if (a.qty > 0 && a.avgCost > 0 && a.qty * a.avgCost >= 1) {
+    var quantity = Math.round(a.qty * 10000) / 10000;
+    var avgCostCents = Math.round(a.avgCost * 100);
+    if (Number.isFinite(quantity) && quantity > 0 && Number.isFinite(avgCostCents) && avgCostCents > 0) {
       positions.push({
         symbol,
-        quantity: Math.round(a.qty * 10000) / 10000,
-        avg_cost_cents: Math.round(a.avgCost * 100),
+        quantity,
+        avg_cost_cents: avgCostCents,
         opened_at: a.openedAt,
       });
     }

@@ -9,16 +9,61 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.DashboardUiState
 import com.discountscreener.android.presentation.dashboard.DashboardViewModel
 import com.discountscreener.android.presentation.dashboard.eventsFor
 import com.discountscreener.android.ui.dashboard.DashboardScreen
 import com.discountscreener.android.ui.dashboard.DetailScreen
 import com.discountscreener.android.ui.theme.DiscountScreenerTheme
 import kotlinx.coroutines.delay
+import java.time.LocalDate
+
+@Composable
+internal fun DashboardRouteContent(
+    state: DashboardUiState,
+    earningsToday: LocalDate,
+    onAction: (DashboardAction) -> Unit,
+) {
+    val dashboardStateHolder = rememberSaveableStateHolder()
+    when (val detailRoute = state.detailRoute) {
+        null -> dashboardStateHolder.SaveableStateProvider("dashboard") {
+            DashboardScreen(state = state, onAction = onAction)
+        }
+        else -> DetailScreen(
+            route = detailRoute,
+            detail = state.detailData,
+            charts = state.detailCharts,
+            replayBackingCharts = state.replayBackingCharts,
+            history = state.detailHistory,
+            alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
+            quantLens = state.detailQuantLens,
+            detailNotice = state.detailNotice,
+            tickerSearchQuery = state.tickerSearchQuery,
+            tickerSearchSuggestions = state.tickerSearchSuggestions,
+            tickerSearchExpanded = state.tickerSearchExpanded,
+            tickerSearchLoading = state.tickerSearchLoading,
+            tickerSearchNotice = state.tickerSearchNotice,
+            projectedDetail = state.projectedDetailData,
+            scoreRow = state.detailScoreRow,
+            scoringModel = state.opportunityScoringModel,
+            regimeScoringEnabled = state.regimeScoringEnabled,
+            symbolNote = state.symbolNotes[detailRoute.symbol].orEmpty(),
+            earningsEvents = state.earningsGate.eventsFor(detailRoute.symbol),
+            earningsLoading = state.earningsGateLoading,
+            earningsCalendarEpoch = state.earningsCalendar[detailRoute.symbol],
+            earningsToday = earningsToday,
+            positionRows = state.positionsRows.filter {
+                it.symbol.equals(detailRoute.symbol, ignoreCase = true)
+            },
+            onAction = onAction,
+        )
+    }
+}
 
 @Composable
 fun DiscountScreenerApp(viewModel: DashboardViewModel) {
@@ -63,32 +108,11 @@ fun DiscountScreenerApp(viewModel: DashboardViewModel) {
                     },
                 )
                 StartupStage.Content -> {
-                    when (val detailRoute = state.detailRoute) {
-                        null -> DashboardScreen(state = state, onAction = viewModel::dispatch)
-                        else -> DetailScreen(
-                            route = detailRoute,
-                            detail = state.detailData,
-                            charts = state.detailCharts,
-                            replayBackingCharts = state.replayBackingCharts,
-                            history = state.detailHistory,
-                            alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
-                            quantLens = state.detailQuantLens,
-                            detailNotice = state.detailNotice,
-                            tickerSearchQuery = state.tickerSearchQuery,
-                            tickerSearchSuggestions = state.tickerSearchSuggestions,
-                            tickerSearchExpanded = state.tickerSearchExpanded,
-                            tickerSearchLoading = state.tickerSearchLoading,
-                            tickerSearchNotice = state.tickerSearchNotice,
-                            projectedDetail = state.projectedDetailData,
-                            scoreRow = state.detailScoreRow,
-                            scoringModel = state.opportunityScoringModel,
-                            regimeScoringEnabled = state.regimeScoringEnabled,
-                            symbolNote = state.symbolNotes[detailRoute.symbol].orEmpty(),
-                            earningsEvents = state.earningsGate.eventsFor(detailRoute.symbol),
-                            earningsLoading = state.earningsGateLoading,
-                            onAction = viewModel::dispatch,
-                        )
-                    }
+                    DashboardRouteContent(
+                        state = state,
+                        earningsToday = viewModel.sessionDay(),
+                        onAction = viewModel::dispatch,
+                    )
                 }
             }
         }

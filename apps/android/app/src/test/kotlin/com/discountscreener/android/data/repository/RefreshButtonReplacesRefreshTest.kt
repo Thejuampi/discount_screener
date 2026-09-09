@@ -18,9 +18,13 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.MarketSnapshot
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -33,6 +37,7 @@ import org.junit.runner.RunWith
 import com.discountscreener.android.StuckTestWatchdog
 import org.robolectric.RobolectricTestRunner
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The Refresh button replaces the refresh that is running, and never runs beside it.
@@ -93,15 +98,91 @@ class RefreshButtonReplacesRefreshTest {
         assertEquals(1, repository.peekPeakRefreshPasses())
     }
 
-    private suspend fun launch(): DefaultDashboardRepository {
+    @Test
+    fun cancel_before_pass_registration_balances_load() = runBlocking {
+        val firstStarted = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val invocation = AtomicInteger()
+        val repository = launch(
+            afterRefreshLoadStarted = {
+                if (invocation.incrementAndGet() == 1) {
+                    firstStarted.complete(Unit)
+                    currentCoroutineContext().job.cancel()
+                    awaitCancellation()
+                } else {
+                    secondStarted.complete(Unit)
+                }
+            },
+        )
+
+        val firstRefresh = launch {
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, model, force = false)
+        }
+        firstStarted.await()
+        withTimeout(REGISTRATION_DEADLINE_MILLIS) {
+            repository.loadInFlight.first { running -> !running }
+        }
+        firstRefresh.join()
+
+        assertEquals(0, repository.peekRefreshPassesRunning())
+
+        repository.refreshAll(ViewFilter(), null, ChartRange.Year, model, force = false)
+        withTimeout(DEADLINE_MILLIS) {
+            secondStarted.await()
+            repository.loadInFlight.first { running -> !running }
+        }
+        assertEquals(0, repository.peekRefreshPassesRunning())
+        assertEquals(1, repository.peekPeakRefreshPasses())
+    }
+
+    @Test
+    fun cancel_after_pass_registration_balances_load() = runBlocking {
+        val fetchStarted = CompletableDeferred<Unit>()
+        val fetchGate = CompletableDeferred<Unit>()
+        val secondRegistered = CompletableDeferred<Unit>()
+        val registrationCount = AtomicInteger()
+        val repository = launch(
+            afterRefreshPassRegistered = {
+                val count = registrationCount.incrementAndGet()
+                if (count == 2) {
+                    secondRegistered.complete(Unit)
+                }
+            },
+            yahoo = SlowYahoo(fetchStarted, fetchGate, includeDetail = false),
+        )
+
+        val firstRefresh = launch {
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, model, force = false)
+        }
+        fetchStarted.await()
+        repository.refreshAll(ViewFilter(), null, ChartRange.Year, model, force = false)
+        secondRegistered.await()
+        fetchGate.complete(Unit)
+        firstRefresh.join()
+        withTimeout(DEADLINE_MILLIS) {
+            repository.loadInFlight.first { running -> !running }
+        }
+
+        assertEquals(false, repository.loadInFlight.value)
+        assertEquals(0, repository.peekRefreshPassesRunning())
+        assertEquals(1, repository.peekPeakRefreshPasses())
+    }
+
+    private suspend fun launch(
+        afterRefreshLoadStarted: (suspend () -> Unit)? = null,
+        afterRefreshPassRegistered: (suspend () -> Unit)? = null,
+        yahoo: YahooFinanceClient = SlowYahoo(),
+    ): DefaultDashboardRepository {
         var repository = DefaultDashboardRepository(
             stateStore = store,
             profileCatalog = ProfileCatalog(context.assets),
-            yahooClient = SlowYahoo(),
+            yahooClient = yahoo,
             universeCatalog = UniverseCatalog(context.assets),
             secondaryTimeseriesProvider = CountingSecProvider(),
             nowProvider = { NOW_EPOCH },
             defaultProfile = PROFILE,
+            afterRefreshLoadStarted = afterRefreshLoadStarted,
+            afterRefreshPassRegistered = afterRefreshPassRegistered,
         )
         open += repository
         repository.bootstrap(ViewFilter(), null, ChartRange.Year, model)
@@ -122,8 +203,14 @@ class RefreshButtonReplacesRefreshTest {
      * A provider that answers at once would let every racer finish before the next one started,
      * and a peak of one would then say nothing about whether two passes can overlap.
      */
-    private class SlowYahoo : YahooFinanceClient(httpClient = offlineHttpClient()) {
+    private class SlowYahoo(
+        private val fetchStarted: CompletableDeferred<Unit>? = null,
+        private val fetchGate: CompletableDeferred<Unit>? = null,
+        private val includeDetail: Boolean = true,
+    ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
         override suspend fun fetchQuotes(symbols: List<String>): Map<String, QuoteBatchEntry> {
+            fetchStarted?.complete(Unit)
+            fetchGate?.await()
             delay(CALL_MILLIS)
             return symbols.associateWith { symbol ->
                 QuoteBatchEntry(symbol, "$symbol Holdings", priceFor(symbol), true, null)
@@ -131,8 +218,25 @@ class RefreshButtonReplacesRefreshTest {
         }
 
         override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+            fetchStarted?.complete(Unit)
+            fetchGate?.await()
             delay(CALL_MILLIS)
             var price = priceFor(symbol)
+            if (!includeDetail) {
+                return ProviderFetchResult(
+                    symbol = symbol,
+                    snapshot = null,
+                    externalSignal = null,
+                    fundamentals = null,
+                    companyName = null,
+                    coverage = ProviderCoverage(
+                        core = ProviderComponentState.Missing,
+                        external = ProviderComponentState.Missing,
+                        fundamentals = ProviderComponentState.Missing,
+                    ),
+                    diagnostics = emptyList(),
+                )
+            }
             return ProviderFetchResult(
                 symbol = symbol,
                 snapshot = MarketSnapshot(
@@ -181,6 +285,7 @@ class RefreshButtonReplacesRefreshTest {
          * the machine it was timing. The assertion is on the peak, never on the clock.
          */
         const val DEADLINE_MILLIS = 120_000L
+        const val REGISTRATION_DEADLINE_MILLIS = 5_000L
         const val SETTLE_MILLIS = 300L
     }
 }

@@ -37,7 +37,7 @@ Juan opens Earnings on the phone and sees which names he holds. Those names sit 
 
 ### 2.3 Key User Journeys
 
-- **UJ-1. Juan restores the book, then reads earnings.** Warm profile `qa`. He taps **Import book** on Earnings (System has the same action, one writer). Restore log stays a second Earnings action and never plans a lot write. He picks `positions*.csv` via SAF, reads the warning (kind, load count, remove count, omitted symbols, as-of), confirms. He imports `transactions*.csv`, reads the merge warning, confirms. He opens Earnings. Held names show Held and sit first in Reporting soon and Already reported. He opens Opportunities. Held names sit first. Score badges and printed rank ordinals stay the pre-pin values.
+- **UJ-1. Juan restores the book, then reads earnings.** Warm profile `qa`. He taps **Import book** on Earnings (System has the same action, one writer). Restore log stays a second Earnings action and never plans a lot write. He picks `positions*.csv` via SAF. The app reads it on IO, shows read state, and preserves read errors. The warning shows kind, load count, remove count, omitted symbols, as-of, and ignored-row categories. Juan confirms. He imports `transactions*.csv`, reads the merge warning, and sees applied, skipped, ignored, parse-failure, and removal counts. He confirms. He opens Earnings. Held names show Held and sit first in Reporting soon and Already reported. He opens Opportunities. Held names sit first. Score badges and printed rank ordinals stay the pre-pin values.
 
 - **UJ-2. Juan tries the blotter first.** He picks `transactions*.csv` with an empty book. The app refuses with `trades_without_book`. The book stays empty.
 
@@ -75,6 +75,8 @@ Juan picks a CSV. The importer names kind and format before it plans a write.
 - Detect order matches the yaml: Coinbase, Schwab, J.P. Morgan, Chase, generic.
 - `trades_ledger` → refuse `ledger_apply_unsupported`. The dialog prints that code. No write.
 - Unknown or unreadable file → refuse with a reason. No write.
+- SAF reads run on IO with a four MiB bound. Cancellation stops the read and leaves the book unchanged.
+- The UI shows read state and preserves provider errors before parse planning starts.
 - A planned confirm that never confirms dies with process death. Disk is unchanged.
 
 #### FR-2: Snapshot confirm replace
@@ -82,13 +84,16 @@ Juan picks a CSV. The importer names kind and format before it plans a write.
 A holdings snapshot shows a warning, then Confirm and Cancel.
 
 **Consequences:**
-- Warning names snapshot, load count, remove count, omitted symbols, as-of.
+- Warning names snapshot, load count, remove count, omitted symbols, as-of, and ignored-row categories.
 - Confirm upserts listed lots and deletes every current lot the file omits.
 - Cancel writes nothing.
 - Empty keep (zero equity rows after Cash/`QACDS` drop, including cash-only) refuses `empty_keep`. Prior book stays.
 - Duplicate ticker in the file aggregates under snapshot rules. The book stores one lot per ticker.
 - Quantity `"1,273"` is 1273. Cost is Unit Cost, not Price. Cash and `QACDS` drop.
 - Fractional share quantities stay as parsed (AMZN 36.29536 is valid).
+- Positive lots within the supported quantity scale stay in the book, even below one dollar of cost basis.
+- No total cost-basis floor removes a positive lot. Quantity rounds to four decimals at the Windows boundary.
+- Cost stores in cents. A positive lot whose cost rounds to zero cents is not representable and drops.
 
 #### FR-3: Window confirm merge
 
@@ -104,6 +109,8 @@ A Chase blotter merges onto current lots after book as-of. Source of law: yaml e
 - A window that closes a lot lists that symbol in `remove`. Confirm deletes it.
 - Buy, Reinvest → buy. Sell → sell. Quantity uses abs. Dividend, DBS, WDL, DBT, BNK, Name Change, and unknown Type skip.
 - The blotter never aggregates from zero.
+- An unchanged trade window preserves a positive lot below one dollar of cost basis.
+- The warning shows applied, skipped, ignored, parse-failure, and removed-symbol details before Confirm.
 - After Confirm of a merge that applied at least one trade, Android book as-of becomes `max(prior as-of, max applied trade_date)`. A second confirm of the same file then sees those rows as `<= as-of` and does not double qty.
 
 #### FR-4: Durable book
@@ -155,11 +162,12 @@ Juan opens Positions and sees the full Book.
 - Every lot is a row, including off-feed PHYL.
 - Empty book shows an empty state and Import book. No invented row.
 - Import book stays on a non-empty tab. Same writer as Earnings and System.
-- Qty is shares from `quantity_ten_thousandths / 10000`. Show decimals only when the remainder is non-zero. Max four decimal places. Cost is `avg_cost_cents`.
+- Qty is shares from `quantity_ten_thousandths / 10000`. Show decimals only when the remainder is non-zero. Max four decimal places. Label it `Shares`. Label `avg_cost_cents` as `Average cost`.
 - Sort ordinal: Today < Tomorrow < This week < Later < blank, then ticker ASC.
 - The Held mark stays off this tab. Every row is already a lot. Pin-held-first does not run here.
 - Off-feed lots stay absent on Opps, Watch, and Tracked. Pin-held-first does not mint those rows. Earnings does not grow a PHYL universe row.
-- Assemble Positions does not call `ensure_symbol_loaded` and does not add a feed symbol. No Yahoo enqueue.
+- Assemble Positions does not call `ensure_symbol_loaded` or add a feed symbol.
+- The calendar path can request missing or expired lot dates through the shared calendar owner.
 - Tab label is Positions. It sits next to Earnings in the dashboard tab bar.
 - Build also edits these homes: AGENTS.md Import-book sentence, `project-context.md`, `docs/advisor-csv-import.md`, Android README, `docs/cross-platform-parity.md` Chase-book row. Do not put closeness percents in `earnings-gate-policy.yaml`.
 
@@ -174,9 +182,13 @@ A Positions row shows one small Closeness tag when an upcoming report date exist
 - This week: report date is after tomorrow and in the same ISO week as that today.
 - Later: an upcoming report date exists and is not Today, Tomorrow, or This week.
 - Sunday → Monday is Tomorrow. Friday or Saturday → next Monday is Later.
-- Source 1: `EarningsGateUi.upcoming` for that ticker. Load the log once if missing, same path as Earnings.
-- Source 2: existing score-row `nextEarningsEpoch` converted on the New York session day. This is not a fetch.
-- Else `None`. Chosen date before New York today is `None`. Off-feed PHYL uses the log only.
+- Source 1: an eligible earnings-log date for that ticker. Load the log once if missing.
+- Source 2: the shared Yahoo calendar cache. Its owner applies the existing freshness policy.
+- Source 3: existing score-row `nextEarningsEpoch`, converted on the New York session day.
+- Expired dates and old empty answers can request fresh evidence through the shared calendar owner.
+- A fresh future date or recent empty answer does not repeat the Yahoo request.
+- Off-feed lots can use the log and shared calendar. These requests do not add feed symbols.
+- Else `None`. A date before New York today is not an eligible upcoming date.
 - Settled and missing stay `None`. No invented date.
 - Clock home is the earnings-log New York session day. Not device local. Not a second UTC today.
 - No frozen percent. No 14-day soon window. Not the Opps earnings-mark sentence. Do not add closeness knobs to `earnings-gate-policy.yaml`.
@@ -241,7 +253,10 @@ A lot that already has a scored Opportunities row shows the same flags as Opps.
 
 ## 8. Verification
 
-- `:core` yaml examples, as-of skip, blotter replay, unique ticker, `empty_keep`, `ledger_apply_unsupported`.
+- `:core` yaml examples, as-of skip, blotter replay, unique ticker, small positive lots, `empty_keep`, `ledger_apply_unsupported`.
+- Windows parity tests cover small positive lots and rounded zero quantities.
+- Book input tests cover the four MiB bound, cancellation before open, blocked-read cancellation, and IO dispatch.
+- Import warning tests cover counts, parse failures, expected exclusions, removed symbols, and labels.
 - SQLite/repository: confirm, cancel, restart restore of lots and as-of.
 - Presenter pin/flag tests. Compose does not own Held.
 - Positions: every-lot Cases, closeness calendar Cases, Opps-flag reuse vs off-feed blank. Compose does not own Closeness. POS-NO-HYDRATE, POS-TAP-PHYL, CLOSE-TZ required.

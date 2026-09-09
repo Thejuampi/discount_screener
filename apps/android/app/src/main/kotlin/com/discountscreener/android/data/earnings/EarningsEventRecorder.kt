@@ -36,6 +36,9 @@ import com.discountscreener.core.earnings.settlementOf
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 class EarningsEventRecorder(
     private val log: EarningsEventLog,
@@ -87,6 +90,34 @@ class EarningsEventRecorder(
     fun backupText(): String = log.backupText()
 
     fun restore(text: String): Int = log.restore(text)
+
+    fun cachedCalendar(): Map<String, Long?> {
+        var today = Instant.ofEpochSecond(nowProvider()).atZone(EXCHANGE_ZONE).toLocalDate()
+        return log.calendarAsks().mapValues { (_, ask) ->
+            ask.nextEarningsEpoch?.takeIf { !isStale(it, today) }
+        }
+    }
+
+    suspend fun refreshCalendar(symbols: List<String>): Map<String, Long?> {
+        var now = nowProvider()
+        var today = Instant.ofEpochSecond(now).atZone(EXCHANGE_ZONE).toLocalDate()
+        var asks = log.calendarAsks()
+        var found = HashMap<String, CalendarAsk>()
+        var out = HashMap<String, Long?>()
+        symbols.map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct().forEach { symbol ->
+            var ask = asks[symbol]
+            if (ask != null && (askedRecently(ask, now) || !isStale(ask.nextEarningsEpoch, today))) {
+                out[symbol] = ask.nextEarningsEpoch?.takeIf { !isStale(it, today) }
+                return@forEach
+            }
+            var epoch = nextCalendarEpoch(symbol, now)
+            found[symbol] = CalendarAsk(epoch, now)
+            out[symbol] = epoch?.takeIf { !isStale(it, today) }
+        }
+        currentCoroutineContext().ensureActive()
+        log.rememberCalendarAsks(found)
+        return out
+    }
 
     /**
      * A report the chain never priced is asked again on the next pass.
@@ -164,27 +195,39 @@ class EarningsEventRecorder(
                 ask.nextEarningsEpoch?.takeIf { !isStale(it, today) }?.let { symbol to it }
             }
             .toMap()
-        var open = stale.filterNot { it in known || askedRecently(asks[it]) }.sorted()
+        var now = nowProvider()
+        var open = stale.filterNot { it in known || askedRecently(asks[it], now) }.sorted()
         if (open.isEmpty()) return known
         var cursor = log.calendarCursor()
         var start = cursor?.let { mark -> open.indexOfFirst { it > mark }.takeIf { it >= 0 } } ?: 0
         var asked = List(minOf(CALENDAR_LOOKUPS_PER_PASS, open.size)) { open[(start + it) % open.size] }
         var found = HashMap<String, CalendarAsk>()
         asked.forEach { symbol ->
-            var epoch = runCatching { calendar.nextEarningsEpoch(symbol, nowProvider()) }
-                .onFailure { error -> logger.error(TAG, "earnings calendar failed: $symbol", error) }
-                .getOrNull()
-            found[symbol] = CalendarAsk(epoch, nowProvider())
+            var epoch = nextCalendarEpoch(symbol, now)
+            found[symbol] = CalendarAsk(epoch, now)
         }
+        currentCoroutineContext().ensureActive()
         log.stampCalendarCursor(asked.last())
         log.rememberCalendarAsks(found)
         logger.info(TAG, "earnings calendar: asked ${asked.size} of ${open.size} stale date(s)")
         return known + found.mapNotNull { (symbol, ask) -> ask.nextEarningsEpoch?.let { symbol to it } }
     }
 
-    private fun askedRecently(ask: CalendarAsk?): Boolean {
+    private fun askedRecently(ask: CalendarAsk?, now: Long = nowProvider()): Boolean {
         var at = ask?.askedAtEpochSeconds ?: return false
-        return nowProvider() - at < CALENDAR_RECHECK_SECONDS
+        return now - at < CALENDAR_RECHECK_SECONDS
+    }
+
+    private suspend fun nextCalendarEpoch(symbol: String, now: Long): Long? {
+        currentCoroutineContext().ensureActive()
+        return try {
+            calendar.nextEarningsEpoch(symbol, now)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            logger.error(TAG, "earnings calendar failed: $symbol", error)
+            null
+        }
     }
 
     private fun isStale(epochSeconds: Long?, today: LocalDate): Boolean {

@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,6 +39,7 @@ internal fun TickerSearchBar(
     onExpandedChange: (Boolean) -> Unit,
     onSubmit: () -> Unit,
     onSelect: (String) -> Unit,
+    onFocusChanged: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -51,7 +53,9 @@ internal fun TickerSearchBar(
                     onQueryChange(it)
                     onExpandedChange(it.isNotBlank())
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .onFocusChanged { focusState -> onFocusChanged?.invoke(focusState.isFocused) },
                 singleLine = true,
                 label = { Text(label) },
                 placeholder = placeholder?.let { value -> ({ Text(value) }) },

@@ -36,16 +36,30 @@ fun refuseReasonCode(reason: RefuseReason): String = when (reason) {
 
 fun importPlanWarning(plan: ImportPlan): String = when (plan) {
     is ImportPlan.ConfirmHoldingsReplace -> {
+        var removedLots = if (plan.remove.size == 1) "lot" else "lots"
         var omit = if (plan.remove.isEmpty()) {
             ""
         } else {
             " Removing: ${plan.remove.joinToString(", ")}."
         }
         "This file is the full book image (${plan.format}). It loads ${plan.positions.size} lots " +
-            "and removes ${plan.remove.size} lots the file omits. As-of ${plan.asOf}.$omit"
+            "and removes ${plan.remove.size} $removedLots the file omits. As-of ${plan.asOf}. " +
+            "It ignores ${plan.ignored} rows (${plan.expectedExclusions} expected exclusions, " +
+            "${plan.parseFailures} parse failures).$omit"
     }
-    is ImportPlan.ConfirmTradesMerge ->
+    is ImportPlan.ConfirmTradesMerge -> {
+        var removedLots = if (plan.remove.size == 1) "closed lot" else "closed lots"
+        var closed = if (plan.remove.isEmpty()) {
+            ""
+        } else {
+            " Closed lots: ${plan.remove.joinToString(", ")}."
+        }
         "This file is a trade blotter (${plan.format}). The app applies trades after ${plan.asOf} " +
-            "onto current lots. Trades on or before as-of do not change quantity."
+            "onto current lots. Trades on or before as-of do not change quantity. " +
+            "It applies ${plan.applied} trades, skips ${plan.skipped} trades, and ignores " +
+            "${plan.ignored} rows (${plan.expectedExclusions} expected exclusions, " +
+            "${plan.parseFailures} parse failures). It removes ${plan.remove.size} $removedLots." +
+            "$closed Next as-of ${plan.nextBookAsOf}."
+    }
     is ImportPlan.Refuse -> refuseReasonCode(plan.reason)
 }

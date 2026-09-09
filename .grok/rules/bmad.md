@@ -70,8 +70,8 @@ uv run {project-root}/_bmad/scripts/memlog.py append --workspace {dir} --type de
 | --- | --- | --- |
 | Bugfix, rename, small tweak, “just ship it” | **Direct** | Implement with TDD; skip BMAD unless Juan invokes a skill |
 | Any requirement or feature, however small | **Spike + cycle** | Explore options, lock one, then the six-step cycle |
-| Large / cross-platform / domain-hard (valuation, ranking, Quant Lens) | **Spike + cycle + architecture** | The cycle, with `bmad-architecture` after the PRD review and before spec |
-| Idea still unproven | **Forge / recon** | `bmad-forge-idea` or `bmad-deep-recon`. Those skills write a memlog too. |
+| Large / cross-platform / domain-hard (valuation, ranking, Quant Lens) | **Spike + cycle** | The cycle. Put structure decisions in the PRD and the memlog |
+| Idea still unproven | **Brainstorm** | `bmad-brainstorming`. Log the options. Lock one |
 | Lost in brownfield process state | **Help** | `bmad-help` once — not a tour |
 
 ## Full-scope new feature
@@ -79,9 +79,9 @@ uv run {project-root}/_bmad/scripts/memlog.py append --workspace {dir} --type de
 A complete feature from zero (new model, new screen/flow, multi-platform change):
 
 1. Read existing `_bmad-output/` + `AGENTS.md` + `project-context.md` (reuse; do not rewrite).
-2. Open the spike. Forge/recon if the idea is still soft. Keep that memlog.
-3. `bmad-prd` → `/sensei-advisor` → `bmad-ux` if UI → `bmad-architecture` when structure changes → `bmad-spec` → `/sensei-advisor` → `bmad-build` → `/bmad-review`.
-4. If reality diverges: `bmad-correct-course`, append to the memlog, and update artifacts.
+2. Open the spike. Brainstorm if the idea is still soft. Keep that memlog.
+3. `bmad-prd` → `/sensei-advisor` → `bmad-spec` → `/sensei-advisor` → `bmad-build` → `/bmad-review`.
+4. If reality diverges: append a course-change to the memlog, then update the PRD and the spec.
 5. New standing domain rules go into `project-context.md` / contracts / `AGENTS.md`, not only chat.
 
 Stop and implement only when product decisions, architecture invariants, executable scope, and verification gates exist (or Juan waives planning). Lean docs are enough.
@@ -96,24 +96,45 @@ Stop and implement only when product decisions, architecture invariants, executa
 | 4 | `bmad-build` | Cycle step 5. Implement loop, docs included |
 | 5 | `bmad-review` | Cycle step 6. Review the built change |
 
-`bmad-prd` is cycle step 1. Architecture, forge, recon, brainstorm, and party mode are situational.
+`bmad-prd` is cycle step 1. Brainstorm and party mode stay optional.
+
+## Installed skills (subset)
+
+Canonical home: `.agents/skills/` (Agent Skills spec). Edit that folder only. Grok and Codex scan it once. A copy in `.grok/skills` or `.codex/skills` makes the same skill load twice. Keep those folders empty. Claude Code does not auto-scan `.agents`. `CLAUDE.md` tells Claude to read a skill once when it applies.
+
+| Path | Role |
+| --- | --- |
+| `.agents/skills/` | Canonical. Grok, Codex, OpenCode. |
+
+`_bmad/` is installer config.
+
+| Skill | Why |
+| --- | --- |
+| `bmad-prd` | Cycle step 1 |
+| `/sensei-advisor` | Cycle steps 2 and 4 |
+| `bmad-spec` | Cycle step 3 |
+| `bmad-build` | Cycle step 5 |
+| `bmad-review` | Cycle step 6 |
+| `bmad-help` | Router |
+| `bmad-customize` | Overrides for the set above |
+| `bmad-brainstorming` | Ideation |
+| `bmad-party-mode` | Contested decisions |
 
 ## Standing rules
 
 - A requirement is a spike, then the full cycle. Lanes size the work below a requirement, never around the cycle.
-- Write a new PRD / architecture only when no existing artifact covers this spike.
+- Write a new PRD only when no existing artifact covers this spike.
 - Use **fresh sessions** for heavy skills; implement from artifacts and the memlog, not from a long chat.
 - Keep BMAD outputs under `_bmad-output/`. Keep BMAD commits separate from product changes.
-- Do not hand-edit `.agents/skills` copies; customize via `_bmad/custom` or project rules.
-- After a BMAD installer update, drop epic, story, sprint, QA, retro, PRFAQ, brief, build-auto, walkthrough, and project-context from `.agents/skills` if they return.
+- Edit skills only in `.agents/skills/`. Customize via `_bmad/custom` or project rules. Do not copy the catalog into `.grok/skills/`, `.claude/skills/`, or `.codex/skills/`. After a skill edit, run `pwsh -File scripts/check-skill-catalog.ps1`.
+- After a BMAD installer dump into `.agents/skills/`, keep only the subset table plus `sensei-advisor`. Drop epic, story, sprint, QA, retro, PRFAQ, brief, build-auto, walkthrough, project-context, agent personas, architecture, UX, forge, recon, code-review, correct-course, and advanced-elicitation if they return.
 - Party mode only for contested product or architecture decisions.
 
 ## Quick start
 
 - `/bmad-help` — orientation / next step
 - Cycle: `/bmad-prd` → `/sensei-advisor` → `/bmad-spec` → `/sensei-advisor` → `/bmad-build` → `/bmad-review`
-- Personas only when multi-perspective is useful: `/bmad-agent-pm` (John), `/bmad-agent-architect` (Winston), `/bmad-agent-dev` (Amelia), `/bmad-agent-analyst` (Mary), `/bmad-agent-ux-designer` (Sally)
-- Also: `/bmad-brainstorming`, `/bmad-party-mode`, `/bmad-architecture`
+- Optional: `/bmad-brainstorming`, `/bmad-party-mode`, `/bmad-customize`
 
 ## Paths
 
@@ -123,5 +144,8 @@ Stop and implement only when product decisions, architecture invariants, executa
 | `_bmad/scripts/memlog.py` | Append-only spike memory |
 | `_bmad-output/` | Planning + implementation artifacts |
 | `{spec-folder}/.memlog.md` | Spike memlog (home once spec exists) |
-| `.agents/skills/` | BMAD skills (Grok, Cursor, Codex) |
-| `.grok/skills/` | Project skills (`sensei-advisor`) |
+| `.agents/skills/` | Canonical catalog: the subset table plus `sensei-advisor` |
+| `.grok/skills/` | Leave empty. Grok prefers this path and would hide or double `.agents`. |
+| `.codex/skills/` | Leave empty. Codex lists same-name skills from both folders. |
+| `.claude/skills/` | Leave empty. Claude Code has no skills-path setting. |
+| `scripts/check-skill-catalog.ps1` | Fails if a second catalog copy exists |

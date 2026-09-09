@@ -13,6 +13,7 @@ notes:
   - The importer never silent-replaces trade-derived lots with a snapshot.
   - A 90-day blotter never rebuilds the book from zero.
   - Refuse over invent. Skip cash. Skip unknown Type values.
+  - Preserve positive positions within the supported quantity scale. Do not apply a total cost-basis floor.
   - Unit tests in apps/windows/tests/portfolioCsv.test.ts and apps/android/core/src/test/kotlin/com/discountscreener/core/portfolio/AdvisorCsvTest.kt encode every case below.
 
 kinds:
@@ -318,3 +319,24 @@ examples:
     expect:
       action: refuse
       reason: ledger_apply_unsupported
+
+  - id: JPM-SMALL-POSITION
+    case: a positive snapshot lot below one dollar stays in the book
+    input:
+      symbol: PENNY
+      quantity: 0.5
+      unitCost: 0.5
+    expect:
+      quantity: 0.5
+      avg_cost_cents: 50
+
+  - id: MERGE-SMALL-UNCHANGED
+    case: an unchanged trade window keeps a positive lot below one dollar
+    input:
+      lots: [{ symbol: PENNY, quantity: 0.5, avg_cost_cents: 50, opened_at: null }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { symbol: PENNY, date: "2026-08-31", side: buy, quantity: 0.1, price: 0.5 }
+    expect:
+      quantity: 0.5
+      avg_cost_cents: 50

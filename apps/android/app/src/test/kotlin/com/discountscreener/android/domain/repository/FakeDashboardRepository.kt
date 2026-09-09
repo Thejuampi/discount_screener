@@ -110,6 +110,10 @@ open class FakeDashboardRepository : DashboardRepository {
 
     override suspend fun earningsEvents(): EarningsGateUi = EarningsGateUi()
 
+    override suspend fun cachedEarningsCalendar(): Map<String, Long?> = emptyMap()
+
+    override suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?> = emptyMap()
+
     override suspend fun earningsLogBackup(): String = ""
 
     override suspend fun restoreEarningsLog(text: String): Int = 0
