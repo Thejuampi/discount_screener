@@ -18,6 +18,7 @@ import com.discountscreener.core.model.ScoreFactor
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.plan.PlanBoard
+import com.discountscreener.core.portfolio.PortfolioLot
 import com.discountscreener.core.regime.MarketContextUnavailableReason
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeCause
@@ -163,6 +164,7 @@ data class TrackedSymbolRow(
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
     val valuationStanceLabel: String? = null,
+    val held: Boolean = false,
 )
 
 data class OpportunityListRow(
@@ -230,6 +232,8 @@ data class OpportunityListRow(
     val decisionState: RowDecisionState? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
     val valuationStanceLabel: String? = null,
+    val held: Boolean = false,
+    val scoreRank: Int? = null,
 )
 
 data class DashboardSnapshot(
@@ -240,6 +244,7 @@ data class DashboardSnapshot(
     val watchlistSymbols: List<String>,
     val candidateRows: List<CandidateRow>,
     val opportunityRows: List<OpportunityListRow>,
+    val opportunityUniverse: List<OpportunityListRow> = emptyList(),
     val opportunityScoringModel: OpportunityScoringModel,
     /** How these rows were scored. A later snapshot with a different flag is stale. */
     val regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
@@ -272,6 +277,7 @@ data class DashboardSnapshot(
     val leftoverBoard: PlanBoard? = null,
     val crossBoard: PlanBoard? = null,
     val crossBoardProfile: PlanBoard? = null,
+    val portfolioLots: List<PortfolioLot> = emptyList(),
 )
 
 data class TickerSearchSuggestion(

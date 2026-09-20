@@ -2,6 +2,9 @@ package com.discountscreener.android.ui.dashboard
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -42,9 +45,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import com.discountscreener.android.presentation.dashboard.DashboardAction
 import com.discountscreener.android.presentation.dashboard.DashboardTab
 import com.discountscreener.android.presentation.dashboard.DashboardUiState
+import com.discountscreener.android.presentation.dashboard.pinWatchedRows
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedProviderState
 import java.time.Instant
@@ -68,6 +77,7 @@ fun DashboardScreen(
     state: DashboardUiState,
     onAction: (DashboardAction) -> Unit,
 ) {
+    val positionsStateHolder = rememberSaveableStateHolder()
     var showAddDialog by remember { mutableStateOf(false) }
     var showProfiles by remember { mutableStateOf(false) }
     val tickerSearchActive = state.tickerSearchExpanded ||
@@ -75,12 +85,36 @@ fun DashboardScreen(
         state.tickerSearchSuggestions.isNotEmpty() ||
         state.tickerSearchLoading ||
         state.tickerSearchNotice != null
+    val headerScrollDensity = LocalDensity.current
+    val headerScrollState = remember(headerScrollDensity) {
+        ReturningDashboardHeaderState(with(headerScrollDensity) { 8.dp.toPx() })
+    }
+    val headerScrollConnection = remember(headerScrollState) {
+        headerScrollState.nestedScrollConnection()
+    }
+    val contentBoundaryScrollState = rememberScrollableState { 0f }
+    var tickerSearchFocused by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val headerPinned = tickerSearchActive ||
+        tickerSearchFocused ||
+        showAddDialog ||
+        showProfiles ||
+        state.importBookPlan != null ||
+        rememberTouchExplorationEnabled()
 
-    BackHandler(enabled = tickerSearchActive) {
-        onAction(DashboardAction.ClearTickerSearch)
+    BackHandler(enabled = tickerSearchActive || tickerSearchFocused) {
+        focusManager.clearFocus(force = false)
+        if (tickerSearchActive) {
+            onAction(DashboardAction.ClearTickerSearch)
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        ReturningDashboardHeader(
+            state = headerScrollState,
+            pinned = headerPinned,
+            resetKey = state.currentTab,
+        ) {
         TopAppBar(
             title = {
                 Text(
@@ -143,6 +177,7 @@ fun DashboardScreen(
             onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
             onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
             onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },
+            onFocusChanged = { tickerSearchFocused = it },
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         )
 
@@ -165,14 +200,18 @@ fun DashboardScreen(
                 )
             }
         }
+        }
 
         Box(
             modifier = Modifier
                 .weight(1f)
+                .nestedScroll(headerScrollConnection)
+                .scrollable(contentBoundaryScrollState, Orientation.Vertical)
+                .testTag(DASHBOARD_CONTENT_TAG)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             val visibleTrackedRows = if (state.currentTab == DashboardTab.Watch) {
-                state.trackedRows.filter { it.isWatched }
+                pinWatchedRows(state.trackedRows)
             } else {
                 state.trackedRows
             }
@@ -239,7 +278,7 @@ fun DashboardScreen(
                 state = state.earningsGate,
                 loading = state.earningsGateLoading,
                 pendingBackup = state.earningsLogBackup,
-                notice = state.earningsGateNotice,
+                notice = state.importBookNotice ?: state.earningsGateNotice,
                 onAction = onAction,
             )
             DashboardTab.Estimates -> EstimatesScreen(
@@ -248,6 +287,9 @@ fun DashboardScreen(
                     estimatesHistory = state.estimatesHistory,
                     notice = state.estimatesNotice,
                 )
+                DashboardTab.Positions -> positionsStateHolder.SaveableStateProvider("positions") {
+                    PositionsContent(state, onAction)
+                }
             }
         }
     }
@@ -271,6 +313,14 @@ fun DashboardScreen(
                 onAction(DashboardAction.SelectProfile(it))
                 showProfiles = false
             },
+        )
+    }
+
+    state.importBookPlan?.let { plan ->
+        ImportBookDialog(
+            plan = plan,
+            onConfirm = { onAction(DashboardAction.ConfirmImportBook) },
+            onDismiss = { onAction(DashboardAction.CancelImportBook) },
         )
     }
 }
@@ -421,6 +471,7 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
         item {
             MaintenanceCard(
                 state = state,
+                onAction = onAction,
                 onRefreshStats = { onAction(DashboardAction.RefreshSystemStats) },
                 onPrune = { showPruneDialog = true },
                 onClearAll = { showClearDialog = true },
@@ -660,6 +711,7 @@ private fun MeasurementCard(
 @Composable
 private fun MaintenanceCard(
     state: DashboardUiState,
+    onAction: (DashboardAction) -> Unit,
     onRefreshStats: () -> Unit,
     onPrune: () -> Unit,
     onClearAll: () -> Unit,
@@ -674,6 +726,12 @@ private fun MaintenanceCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text("Maintenance", fontWeight = FontWeight.Bold)
+            state.importBookNotice?.let { Text(it) }
+            ImportBookButton(
+                onAction = onAction,
+                modifier = Modifier.fillMaxWidth(),
+                testTag = SYSTEM_GATE_IMPORT,
+            )
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 when (maintenanceLayoutMode(maxWidth)) {
                     MaintenanceLayoutMode.Stacked -> {
@@ -785,6 +843,7 @@ private fun tabLabel(tab: DashboardTab, state: DashboardUiState): String = when 
     DashboardTab.System -> "System"
     DashboardTab.Earnings -> "Earnings"
     DashboardTab.Estimates -> "Estimates"
+    DashboardTab.Positions -> "Positions ${state.positionsRows.size}"
 }
 
 internal fun discoveryTabLabel(state: DashboardUiState): String {

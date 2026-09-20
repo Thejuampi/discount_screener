@@ -2,7 +2,7 @@
   "contract": "industry-beta-policy",
   "version": "2",
   "policyVersion": "industry-beta-policy/2",
-  "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
+  "architecture": "docs/architecture/valuation-model-family.md",
   "notes": [
     "Versioned sector/industry levered-beta priors for CoE shrink. Sole industry-prior source for Windows dcf_model and Android DcfAnalysisEngine.",
     "Through-cycle industries (commodity E&P, integrated oil, specialty chemicals) carry higher priors so temporarily bond-like trailing betas are pulled toward cycle risk — not max(re, magic_constant) floors.",

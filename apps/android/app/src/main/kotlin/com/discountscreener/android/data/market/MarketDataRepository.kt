@@ -12,7 +12,15 @@ import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.regime.RegimeScoringPolicy
 import com.discountscreener.core.regime.SymbolDailyView
 import com.discountscreener.core.regime.computeMarketRegime
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.util.UUID
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
@@ -35,10 +43,8 @@ import kotlinx.coroutines.withContext
  *
  * The daily *bars* are the exception, and the reason the earlier rule changed. The retrospective
  * needs dated prices and nothing else in the app has them: these bars are fetched at `1y`/`1d`,
- * used once, and were dropped on exit. They now go to a [DailyCandleSink] — written here, where
- * they are already in hand, rather than kept in the cache for a caller to collect later. That
- * distinction is the whole design: five hundred symbols of daily bars is several megabytes, and
- * retaining them for the life of the process to save a layering hop would be the worse defect.
+ * used once, and were dropped on exit. They now go through a bounded [CandleSpool] before a
+ * [DailyCandleSink] writes them. Only a usable reading drains that spool into the store.
  *
  * The original rule's last clause still holds. The sink stores them under a key that is not a
  * `ChartRange` name, so the second per-symbol series stays off a published contract.
@@ -57,7 +63,13 @@ open class MarketDataRepository(
      * caller that needs the bars kept, so a repository built without one is not silently storing.
      */
     private val dailyCandleSink: DailyCandleSink? = null,
+    /** Directory for the bounded on-disk candle stage used before regime usability is known. */
+    private val candleStagingDirectory: File? = null,
 ) {
+    init {
+        candleStagingDirectory?.let { directory -> CandleSpool.cleanupOrphanedFiles(directory) }
+    }
+
     private val mutex = Mutex()
     private var cached: MarketRegime? = null
     private var lastComputed: MarketRegime? = null
@@ -121,14 +133,22 @@ open class MarketDataRepository(
             return mutex.withLock { cached ?: lastComputed }
         }
 
+        val sink = dailyCandleSink
+        var spool: CandleSpool? = null
         try {
-            val fetched = fetchUniverse(symbols)
+            spool = sink?.let { CandleSpool(candleStagingDirectory ?: defaultCandleStagingDirectory()) }
+            val fetched = fetchUniverse(symbols, now, spool)
             val regime = computeMarketRegime(
                 bundle = fetchBundle(now),
                 universe = fetched.views,
                 previousExposurePct = cachedRegime()?.suggestedExposurePct,
             )
             val usable = RegimeScoringPolicy.fromRegime(regime) != null
+            // Persist first. A malformed or failed spool must not publish a fresh regime that
+            // prevents the next refresh from retrying its evidence.
+            if (usable && sink != null) {
+                spool?.persistInto(sink, now)
+            }
             mutex.withLock {
                 lastComputed = regime
                 if (usable) {
@@ -141,21 +161,8 @@ open class MarketDataRepository(
                     lastFailureEpochSeconds = now
                 }
             }
-            // Only a usable reading is kept, and only its bars are stored. A round that failed
-            // hard enough to be unusable is a round whose bars are as likely to be partial.
-            // Persist one chunk and drop it so a 501-name universe does not keep every year of
-            // bars in RAM until the last write returns.
-            if (usable) {
-                var sink = dailyCandleSink
-                if (sink != null) {
-                    fetched.candleChunks.forEach { chunk ->
-                        if (chunk.isNotEmpty()) {
-                            sink.persistBacktestCandles(chunk, now)
-                        }
-                    }
-                }
-            }
         } finally {
+            spool?.close()
             // A cancelled read must still let the next one in; a cancelled coroutine cannot take
             // the mutex without this.
             withContext(NonCancellable) {
@@ -186,29 +193,33 @@ open class MarketDataRepository(
      * weekly bars would compare a 200-period average against 52 of them, so this is a second
      * request per symbol rather than a reuse of the summary the dashboard already holds.
      */
-    private suspend fun fetchUniverse(symbols: List<String>): UniverseFetch {
+    private suspend fun fetchUniverse(
+        symbols: List<String>,
+        capturedAtEpochSeconds: Long,
+        spool: CandleSpool?,
+    ): UniverseFetch {
         val views = ArrayList<SymbolDailyView>(symbols.size)
-        val candleChunks = ArrayList<Map<String, List<HistoricalCandle>>>(
-            (symbols.size + UNIVERSE_PERSIST_CHUNK - 1) / UNIVERSE_PERSIST_CHUNK,
-        )
         symbols.chunked(UNIVERSE_PERSIST_CHUNK).forEach { chunk ->
             val fetched = fetchConcurrently(chunk) { symbol ->
                 val candles = dailyCandlesOrEmpty(symbol, YEAR_RANGE)
                 SymbolDailyView(
                     symbol = symbol,
                     summary = candles.takeIf { it.isNotEmpty() }
-                        ?.let { ChartAnalysis.buildSummary(ChartRange.Year, it, nowEpochSeconds()) },
+                        ?.let { ChartAnalysis.buildSummary(ChartRange.Year, it, capturedAtEpochSeconds) },
                     closes = closesOf(candles),
                 ) to candles
             }
             views.addAll(fetched.map { it.first })
-            candleChunks.add(
-                fetched.filter { it.second.isNotEmpty() }.associate { it.first.symbol to it.second },
-            )
+            spool?.let { candleSpool ->
+                fetched
+                    .filter { it.second.isNotEmpty() }
+                    .associate { it.first.symbol to it.second }
+                    .takeIf { it.isNotEmpty() }
+                    ?.let(candleSpool::append)
+            }
         }
         return UniverseFetch(
             views = views,
-            candleChunks = candleChunks,
         )
     }
 
@@ -218,8 +229,161 @@ open class MarketDataRepository(
      */
     private class UniverseFetch(
         val views: List<SymbolDailyView>,
-        val candleChunks: List<Map<String, List<HistoricalCandle>>>,
     )
+
+    /** Stores one fetched universe chunk on disk until the whole reading proves usable. */
+    private class CandleSpool(directory: File) {
+        private val sessionDirectory: File
+        private val file: File
+        private var output: DataOutputStream?
+
+        init {
+            sessionDirectory = openSessionDirectory(directory)
+            try {
+                file = File.createTempFile(STAGING_FILE_PREFIX, STAGING_FILE_SUFFIX, sessionDirectory)
+                output = DataOutputStream(BufferedOutputStream(FileOutputStream(file)))
+            } catch (error: Throwable) {
+                releaseSessionDirectory(sessionDirectory)
+                sessionDirectory.deleteRecursively()
+                throw error
+            }
+        }
+
+        fun append(candlesBySymbol: Map<String, List<HistoricalCandle>>) {
+            val stream = output ?: error("market candle spool is closed")
+            stream.writeInt(candlesBySymbol.size)
+            candlesBySymbol.forEach { (symbol, candles) ->
+                stream.writeUTF(symbol)
+                stream.writeInt(candles.size)
+                candles.forEach { candle ->
+                    stream.writeLong(candle.epochSeconds)
+                    stream.writeLong(candle.openCents)
+                    stream.writeLong(candle.highCents)
+                    stream.writeLong(candle.lowCents)
+                    stream.writeLong(candle.closeCents)
+                    stream.writeLong(candle.volume)
+                }
+            }
+            stream.flush()
+        }
+
+        suspend fun persistInto(sink: DailyCandleSink, capturedAtEpochSeconds: Long) {
+            closeOutput()
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                while (readChunkOrNull(input) != null) {
+                    // Read every chunk before the first store write. A truncated tail must not
+                    // leave an earlier chunk persisted as if the whole stage were valid.
+                }
+            }
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                while (true) {
+                    val chunk = readChunkOrNull(input) ?: break
+                    if (chunk.isNotEmpty()) {
+                        sink.persistBacktestCandles(chunk, capturedAtEpochSeconds)
+                    }
+                }
+            }
+        }
+
+        fun close() {
+            try {
+                runCatching { closeOutput() }
+                file.delete()
+            } finally {
+                releaseSessionDirectory(sessionDirectory)
+                sessionDirectory.deleteRecursively()
+            }
+        }
+
+        private fun closeOutput() {
+            output?.let { stream ->
+                output = null
+                stream.close()
+            }
+        }
+
+        private fun readChunkOrNull(input: DataInputStream): Map<String, List<HistoricalCandle>>? {
+            val firstHeaderByte = input.read()
+            if (firstHeaderByte < 0) {
+                return null
+            }
+            val symbolCount =
+                (firstHeaderByte shl 24) or
+                    (input.readUnsignedByte() shl 16) or
+                    (input.readUnsignedByte() shl 8) or
+                    input.readUnsignedByte()
+            if (symbolCount < 0 || symbolCount > MAX_SPOOL_SYMBOLS) {
+                throw IOException("invalid market candle spool symbol count $symbolCount")
+            }
+            val chunk = linkedMapOf<String, List<HistoricalCandle>>()
+            repeat(symbolCount) {
+                val symbol = input.readUTF()
+                val candleCount = input.readInt()
+                if (candleCount < 0 || candleCount > MAX_CANDLES_PER_SYMBOL) {
+                    throw IOException("invalid market candle spool candle count $candleCount for $symbol")
+                }
+                chunk[symbol] = List(candleCount) {
+                    HistoricalCandle(
+                        epochSeconds = input.readLong(),
+                        openCents = input.readLong(),
+                        highCents = input.readLong(),
+                        lowCents = input.readLong(),
+                        closeCents = input.readLong(),
+                        volume = input.readLong(),
+                    )
+                }
+            }
+            return chunk
+        }
+
+        companion object {
+            private val lock = Any()
+            private val activeSessionDirectories = mutableSetOf<String>()
+
+            fun openSessionDirectory(directory: File): File = synchronized(lock) {
+                if (!directory.exists() && !directory.mkdirs()) {
+                    throw IOException("cannot create market candle staging directory ${directory.path}")
+                }
+                if (!directory.isDirectory) {
+                    throw IOException("market candle staging path is not a directory: ${directory.path}")
+                }
+                cleanupOrphanedFilesLocked(directory)
+                val session = File(directory, "$SESSION_DIRECTORY_PREFIX${UUID.randomUUID()}")
+                if (!session.mkdirs()) {
+                    throw IOException("cannot create market candle session directory ${session.path}")
+                }
+                activeSessionDirectories += session.absolutePath
+                session
+            }
+
+            fun releaseSessionDirectory(directory: File) = synchronized(lock) {
+                activeSessionDirectories -= directory.absolutePath
+            }
+
+            fun cleanupOrphanedFiles(directory: File) = synchronized(lock) {
+                if (directory.isDirectory) {
+                    cleanupOrphanedFilesLocked(directory)
+                }
+            }
+
+            private fun cleanupOrphanedFilesLocked(directory: File) {
+                directory.listFiles()
+                    .orEmpty()
+                    .filter { candidate ->
+                        candidate.isDirectory &&
+                            candidate.name.startsWith(SESSION_DIRECTORY_PREFIX) &&
+                            candidate.absolutePath !in activeSessionDirectories
+                    }
+                    .forEach(File::deleteRecursively)
+            }
+
+            const val SESSION_DIRECTORY_PREFIX = "market-session-"
+            const val MAX_SPOOL_SYMBOLS = UNIVERSE_PERSIST_CHUNK
+            const val MAX_CANDLES_PER_SYMBOL = 10_000
+            const val STAGING_FILE_PREFIX = "market-candle-"
+            const val STAGING_FILE_SUFFIX = ".stage"
+        }
+    }
 
     /** One symbol failing costs its pillar a sample; it must not cost the whole reading. */
     private suspend fun dailyCandlesOrEmpty(symbol: String, rangeToken: String): List<HistoricalCandle> =
@@ -263,5 +427,10 @@ open class MarketDataRepository(
          * of bars before the next Yahoo round.
          */
         const val UNIVERSE_PERSIST_CHUNK = 40
+
+        fun defaultCandleStagingDirectory(): File = File(
+            System.getProperty("java.io.tmpdir") ?: ".",
+            "discount-screener-market-candle-stage",
+        )
     }
 }

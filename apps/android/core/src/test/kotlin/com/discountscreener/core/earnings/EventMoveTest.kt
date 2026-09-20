@@ -70,13 +70,41 @@ class EventMoveTest {
     }
 
     @Test
-    fun a_quiet_drift_wider_than_the_priced_move_never_zeroes_the_event() {
-        assertEquals(210, eventMoveBps(totalMoveBps = 700, normalDailyBps = 900, tradingDaysToExpiry = 5))
+    fun a_quiet_drift_that_eats_the_priced_move_refuses_the_event() {
+        assertEquals(null, eventMoveBps(totalMoveBps = 700, normalDailyBps = 900, tradingDaysToExpiry = 5))
     }
 
     @Test
-    fun an_event_left_under_the_floor_is_lifted_to_the_floor() {
-        assertEquals(210, eventMoveBps(totalMoveBps = 700, normalDailyBps = 340, tradingDaysToExpiry = 5))
+    fun a_quiet_drift_equal_to_the_priced_move_refuses_the_event() {
+        assertEquals(null, eventMoveBps(totalMoveBps = 1_000, normalDailyBps = 500, tradingDaysToExpiry = 5))
+    }
+
+    @Test
+    fun quiet_below_the_total_keeps_the_residual() {
+        assertEquals(800, eventMoveBps(totalMoveBps = 1_000, normalDailyBps = 300, tradingDaysToExpiry = 5))
+    }
+
+    @Test
+    fun a_residual_under_thirty_percent_stays_the_residual() {
+        assertEquals(166, eventMoveBps(totalMoveBps = 700, normalDailyBps = 340, tradingDaysToExpiry = 5))
+    }
+
+    @Test
+    fun identity_pre_clears_a_quiet_floor() {
+        var pre = PreReport(
+            symbol = "LVS",
+            reportEpochDay = LocalDate.of(2026, 8, 20).toEpochDay(),
+            timing = ReportTiming.AfterClose,
+            priceCents = 3_500L,
+            impliedMoveBps = 700,
+            eventImpliedMoveBps = 210,
+            normalDailyMoveBps = 900,
+            expiryEpochDay = LocalDate.of(2026, 8, 27).toEpochDay(),
+            medianAbsoluteAbnormalReturnBps = 400,
+            riskRatioBps = 11_000,
+        )
+
+        assertEquals(null, identityPreOf(pre).eventImpliedMoveBps)
     }
 
     @Test

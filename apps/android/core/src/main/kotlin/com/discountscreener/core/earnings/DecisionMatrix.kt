@@ -4,17 +4,11 @@ import kotlin.math.roundToInt
 
 enum class EventRisk { Low, Normal, High, Unknown }
 
-val HIGH_RISK_RATIO_BPS: Int get() = EarningsGatePolicy.current.highRiskRatioBps
-val LOW_RISK_RATIO_BPS: Int get() = EarningsGatePolicy.current.lowRiskRatioBps
-val CHEAP_PRICE_TO_FAIR_BPS: Int get() = EarningsGatePolicy.current.cheapPriceToFairBps
-val HEDGE_COST_CAP_BPS: Int get() = EarningsGatePolicy.current.hedgeCostCapBps
-val PROTECTIVE_PUT_COST_CAP_BPS: Int get() = EarningsGatePolicy.current.protectivePutCostCapBps
-val MAX_QUOTE_SPREAD_BPS: Int get() = EarningsGatePolicy.current.maxQuoteSpreadBps
+const val UNITY_BPS = 10_000
 
 fun eventRiskOf(riskRatioBps: Int?): EventRisk = when {
     riskRatioBps == null -> EventRisk.Unknown
-    riskRatioBps > HIGH_RISK_RATIO_BPS -> EventRisk.High
-    riskRatioBps < LOW_RISK_RATIO_BPS -> EventRisk.Low
+    riskRatioBps > UNITY_BPS -> EventRisk.High
     else -> EventRisk.Normal
 }
 
@@ -25,12 +19,30 @@ fun priceToFairBps(pre: PreReport): Int? {
     return (pre.priceCents * 10_000.0 / fair).roundToInt()
 }
 
+fun identityChanged(next: EventDecision, prior: EventDecision?): Boolean {
+    if (prior == null) return true
+    return next.cell != prior.cell ||
+        next.action != prior.action ||
+        next.hedge != prior.hedge ||
+        next.positionSizeBps != prior.positionSizeBps ||
+        next.justification != prior.justification
+}
+
 fun decisionOf(pre: PreReport): EventDecision {
-    var risk = eventRiskOf(pre.riskRatioBps)
-    var valuation = priceToFairBps(pre)
+    if (pre.impliedMoveBps == null) return undecided(pre, EventRisk.Unknown, "chain_unavailable")
+    if (pre.eventImpliedMoveBps == null) {
+        return undecided(pre, EventRisk.Unknown, "quiet_dominates_implied")
+    }
     if (isQuoteStale(pre)) return staleQuote(pre)
-    if (risk == EventRisk.Unknown || valuation == null) return undecided(pre, risk)
-    var cheap = valuation <= CHEAP_PRICE_TO_FAIR_BPS
+    if (pre.priceCents <= 0L) return undecided(pre, eventRiskOf(pre.riskRatioBps), "price_unavailable")
+    var fair = pre.dcfFairValueCents
+    if (fair == null || fair <= 0L) {
+        return undecided(pre, eventRiskOf(pre.riskRatioBps), "dcf_unavailable")
+    }
+    var risk = eventRiskOf(pre.riskRatioBps)
+    if (risk == EventRisk.Unknown) return undecided(pre, risk, "ar_unavailable")
+    var valuation = priceToFairBps(pre) ?: return undecided(pre, risk, "dcf_unavailable")
+    var cheap = valuation < UNITY_BPS
     return when {
         !cheap && risk == EventRisk.High -> EventDecision(
             cell = DecisionCell.ExpensiveHighRisk,
@@ -38,7 +50,6 @@ fun decisionOf(pre: PreReport): EventDecision {
             positionSizeBps = 0,
             hedge = HedgeKind.None,
             hedgeCostBps = null,
-            sectorOverrideApplied = false,
             justification = "Expensive on the DCF and the market pays " +
                 "${ratioText(pre.riskRatioBps)} this ticker's own reaction. Leave before the report.",
         )
@@ -49,7 +60,6 @@ fun decisionOf(pre: PreReport): EventDecision {
             positionSizeBps = HALF_POSITION_BPS,
             hedge = HedgeKind.None,
             hedgeCostBps = null,
-            sectorOverrideApplied = false,
             justification = "Expensive on the DCF. Reduce for the price, not for the report.",
         )
 
@@ -62,7 +72,6 @@ fun decisionOf(pre: PreReport): EventDecision {
                 positionSizeBps = FULL_POSITION_BPS,
                 hedge = HedgeKind.None,
                 hedgeCostBps = null,
-                sectorOverrideApplied = false,
                 justification = "Cheap on the DCF and the report is priced like the ones before it. Hold.",
             ),
             pre,
@@ -72,7 +81,7 @@ fun decisionOf(pre: PreReport): EventDecision {
 
 fun isQuoteStale(pre: PreReport): Boolean {
     var spread = pre.quoteSpreadBps ?: return false
-    return spread > MAX_QUOTE_SPREAD_BPS
+    return spread >= UNITY_BPS
 }
 
 private fun staleQuote(pre: PreReport) = EventDecision(
@@ -81,27 +90,22 @@ private fun staleQuote(pre: PreReport) = EventDecision(
     positionSizeBps = FULL_POSITION_BPS,
     hedge = HedgeKind.None,
     hedgeCostBps = null,
-    sectorOverrideApplied = false,
-    justification = "The chain is quoted ${percentText(pre.quoteSpreadBps ?: 0)} wide against its own " +
-        "mid, so the priced move is the spread and not the report. Read it again while the market is open.",
+    unavailableReason = "option_width_ge_straddle",
+    justification = "option_width_ge_straddle. The chain is quoted ${percentText(pre.quoteSpreadBps ?: 0)} " +
+        "wide against its own mid, so the priced move is the spread and not the report. " +
+        "Read it again while the market is open.",
 )
 
 private fun cheapHighRisk(pre: PreReport): EventDecision {
+    var event = pre.eventImpliedMoveBps ?: return reduceUnpriced(pre)
     var spread = pre.putSpreadCostBps
     var put = pre.protectivePutCostBps
-    if (spread != null && spread <= HEDGE_COST_CAP_BPS) {
-        return hedgeCall(pre, HedgeKind.PutSpread, spread)
-    }
-    if (put != null && put <= PROTECTIVE_PUT_COST_CAP_BPS) {
-        return hedgeCall(pre, HedgeKind.ProtectivePut, put)
-    }
-    if (spread != null && spread > HEDGE_COST_CAP_BPS) {
-        return dearHedge(pre, spread, HEDGE_COST_CAP_BPS, "put spread")
-    }
-    if (put != null && put > PROTECTIVE_PUT_COST_CAP_BPS) {
-        return dearHedge(pre, put, PROTECTIVE_PUT_COST_CAP_BPS, "protective put")
-    }
-    return hedgeCall(pre, HedgeKind.PutSpread, spread)
+    if (spread != null && spread < event) return hedgeCall(pre, HedgeKind.PutSpread, spread)
+    if (put != null && put < event) return hedgeCall(pre, HedgeKind.ProtectivePut, put)
+    if (spread == null && put == null) return reduceUnpriced(pre)
+    var cost = listOfNotNull(spread, put).minOrNull() ?: return reduceUnpriced(pre)
+    var name = if (spread != null && spread >= event) "put spread" else "protective put"
+    return dearHedge(pre, cost, event, name)
 }
 
 private fun hedgeCall(pre: PreReport, kind: HedgeKind, cost: Int?) = EventDecision(
@@ -110,22 +114,32 @@ private fun hedgeCall(pre: PreReport, kind: HedgeKind, cost: Int?) = EventDecisi
     positionSizeBps = HALF_POSITION_BPS,
     hedge = kind,
     hedgeCostBps = cost,
-    sectorOverrideApplied = false,
     justification = "Cheap on the DCF, and the market pays " +
         "${ratioText(pre.riskRatioBps)} this ticker's own reaction. Half size, or a " +
         hedgeName(kind) + (cost?.let { " at ${percentText(it)} of the position" } ?: "") + ".",
 )
 
-private fun dearHedge(pre: PreReport, cost: Int, cap: Int, name: String) = EventDecision(
+private fun dearHedge(pre: PreReport, cost: Int, event: Int, name: String) = EventDecision(
     cell = DecisionCell.CheapHighRisk,
     action = EventAction.Reduce,
     positionSizeBps = HALF_POSITION_BPS,
     hedge = HedgeKind.None,
     hedgeCostBps = cost,
-    sectorOverrideApplied = false,
     justification = "Cheap on the DCF, and the market pays " +
         "${ratioText(pre.riskRatioBps)} this ticker's own reaction. The $name costs " +
-        "${percentText(cost)} of the position, over the ${percentText(cap)} cap, so cut the size instead.",
+        "${percentText(cost)} of the position, at or over the ${percentText(event)} event move, " +
+        "so cut the size instead.",
+)
+
+private fun reduceUnpriced(pre: PreReport) = EventDecision(
+    cell = DecisionCell.CheapHighRisk,
+    action = EventAction.Reduce,
+    positionSizeBps = HALF_POSITION_BPS,
+    hedge = HedgeKind.None,
+    hedgeCostBps = null,
+    justification = "Cheap on the DCF, and the market pays " +
+        "${ratioText(pre.riskRatioBps)} this ticker's own reaction. No quoted hedge costs less " +
+        "than the event, so cut the size instead.",
 )
 
 private fun hedgeName(kind: HedgeKind): String = when (kind) {
@@ -138,44 +152,43 @@ private fun percentText(bps: Int): String {
     return "${(percent * 100).roundToInt() / 100.0}%"
 }
 
-private fun undecided(pre: PreReport, risk: EventRisk) = EventDecision(
+private fun undecided(pre: PreReport, risk: EventRisk, reason: String) = EventDecision(
     cell = DecisionCell.Undecided,
     action = EventAction.Hold,
     positionSizeBps = FULL_POSITION_BPS,
     hedge = HedgeKind.None,
     hedgeCostBps = null,
-    sectorOverrideApplied = false,
-    justification = missingText(pre, risk),
+    unavailableReason = reason,
+    justification = "$reason. ${missingText(pre, risk, reason)}",
 )
 
-/**
- * A chain that answered with nothing quoted is not the same as no chain at all.
- *
- * Outside the session Yahoo returns the whole ladder with a bid and an ask of zero, which the
- * straddle refuses on purpose. AVGO read "no option chain" all morning while the chain was there
- * and simply shut, so the card sent the reader looking for a fault that did not exist. The expiry
- * is on file whenever the chain answered, and that is enough to tell the two apart.
- */
-private fun missingText(pre: PreReport, risk: EventRisk): String = when {
-    risk == EventRisk.Unknown && pre.impliedMoveBps == null && pre.expiryEpochDay != null ->
-        "The chain for this expiry is not quoted yet, so the report carries no priced move."
-    risk == EventRisk.Unknown && pre.impliedMoveBps == null ->
-        "No option chain for this expiry, so the report carries no priced move yet."
-    risk == EventRisk.Unknown ->
+private fun missingText(pre: PreReport, risk: EventRisk, reason: String): String = when (reason) {
+    "quiet_dominates_implied" ->
+        "Quiet-day drift eats the priced move, so the report carries no event numerator."
+    "price_unavailable" ->
+        "The last price is missing or halted, so cheap versus fair cannot be read."
+    "dcf_unavailable" ->
+        "No fair value for this ticker yet."
+    "ar_unavailable" ->
         "No settled reaction of this ticker yet, so the priced move has nothing to be measured against."
-    else -> "No fair value for this ticker yet."
+    else -> when {
+        risk == EventRisk.Unknown && pre.impliedMoveBps == null && pre.expiryEpochDay != null ->
+            "The chain for this expiry is not quoted yet, so the report carries no priced move."
+        risk == EventRisk.Unknown && pre.impliedMoveBps == null ->
+            "No option chain for this expiry, so the report carries no priced move yet."
+        else -> "No fair value for this ticker yet."
+    }
 }
 
 fun ratioText(riskRatioBps: Int?): String = "%.2fx".format((riskRatioBps ?: 0) / 10_000.0)
 
 private fun applyRevenueOverride(decision: EventDecision, pre: PreReport): EventDecision {
     var latest = pre.revenueTrailLatestCents ?: return decision
-    var centre = pre.revenueTrailMedianCents ?: return decision
+    var centre = pre.trailCentre() ?: return decision
     var scale = pre.revenueTrailScaleCents ?: return decision
     if (latest >= centre) return decision
     var shortfall = (centre - latest).toDouble()
-    var unit = scale.toDouble() * EarningsGatePolicy.current.revenueOverrideZBps / 10_000.0
-    if (shortfall <= unit) return decision
+    if (shortfall <= scale.toDouble()) return decision
     var z = if (scale <= 0L) null else (shortfall / scale * 10_000.0).roundToInt()
     var cut = if (scale <= 0L) {
         ". Last print sits below a flat trail, so cut to half."
@@ -185,7 +198,7 @@ private fun applyRevenueOverride(decision: EventDecision, pre: PreReport): Event
     return decision.copy(
         action = EventAction.Reduce,
         positionSizeBps = HALF_POSITION_BPS,
-        sectorOverrideApplied = true,
+        revenueTrailCut = true,
         justification = decision.justification.trimEnd('.') + cut,
     )
 }

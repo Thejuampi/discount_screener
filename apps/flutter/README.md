@@ -56,13 +56,10 @@ From **repository root**:
 | Command | What it does |
 |---|---|
 | `make flutter-test` | Full validation (`scripts/validate-flutter.ps1`) |
-| `make flutter-devices` | `flutter devices` + `flutter emulators` |
 | `make flutter-build-windows` | Release `.exe` via junction script (no Dev Mode) |
 | `make flutter-run-windows` | Build Release **and launch** the desktop app |
 | `make flutter-build-android` | Debug APK → `dist/discount-screener-flutter-debug.apk` |
 | `make flutter-run-android` | Hot-reload run on a connected emulator/device |
-| `make flutter-run-ios` | macOS only — iPhone simulator/device |
-| `make flutter-run-ipad` | macOS only — same target family; pick iPad id if many |
 
 ### Launch each platform
 
@@ -91,9 +88,9 @@ adb shell am start -n com.discountscreener.discount_screener/.MainActivity
 **iPhone / iPad (free only with a free/borrowed Mac + Xcode):**
 ```bash
 # on macOS:
-make flutter-run-ios
-# or:
-cd apps/flutter && flutter devices && flutter run -d <ipad_or_iphone_id>
+cd apps/flutter
+flutter devices
+flutter run -d <ipad_or_iphone_id>
 ```
 On Windows these targets fail by design — no free official iOS toolchain.
 

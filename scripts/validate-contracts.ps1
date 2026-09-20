@@ -18,3 +18,15 @@ try {
 } finally {
     Pop-Location
 }
+
+$flutter = Get-Command flutter -ErrorAction SilentlyContinue
+if ($null -eq $flutter) {
+    Write-Warning "Flutter is not available. The Flutter contract fixture was not run."
+} else {
+    Push-Location "$PSScriptRoot/../apps/flutter"
+    try {
+        & $flutter.Source test packages/ds_core/test/contract_fixture_test.dart
+    } finally {
+        Pop-Location
+    }
+}

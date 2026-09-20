@@ -2,13 +2,14 @@
 
 Discount Screener is a multi-app monorepo that ranks public-market opportunities using Yahoo Finance data. Each company is evaluated through a **valuation model family** (FCFF DCF for operating firms, residual income for financial services), analyst consensus, and confidence-weighted scoring. Stocks are triaged into Act / Watch / Avoid buckets so you can focus on the most actionable candidates first.
 
-Valuation parameters and growth paths are **market/policy-driven** (not eternal hard floors/caps). Quant Lens prefers independent evidence and marks **Disputed** when model and analyst anchors diverge. Design notes: [`_bmad-output/planning-artifacts/valuation-model-family-architecture.md`](_bmad-output/planning-artifacts/valuation-model-family-architecture.md); agent rules: [`Agents.md`](Agents.md).
+Valuation parameters and growth paths are **market/policy-driven**. Quant Lens marks **Disputed** when model and analyst anchors diverge. See the [valuation architecture](docs/architecture/valuation-model-family.md) and [agent rules](AGENTS.md).
 
 ## What's here
 
 - `apps/desktop` — Rust terminal workstation with candlestick charts, MACD, EMA overlays, volume profile, and model-family valuation
 - `apps/windows` — Tauri/React Windows workstation with opportunity scoring, Quant Lens, and residual-income / FCFF valuation
 - `apps/android` — Android client built with Kotlin, Gradle, and Jetpack Compose (`core` owns valuation engines and the pre-earnings risk gate)
+- `apps/flutter` — Flutter client for Android, iOS, Windows, macOS, and Linux
 - `shared/contracts` — shared fixtures and golden cases (ranking, DCF source selection, valuation model family)
 
 ## Android screenshots
@@ -88,26 +89,38 @@ From `apps/windows`, run `npm install`, then:
 | `npm run tauri:dev` | Launch the live Tauri workstation (normal use; often full universe) |
 | `npm run tauri:dev:qa` | **Required for agent/manual live QA** — always profile `qa` (≤20 symbols) unless user explicitly asks otherwise |
 
+### Flutter
+
+| Command | Purpose |
+|---|---|
+| `make flutter-test` | Run analysis and tests |
+| `make flutter-build-windows` | Build the Windows client |
+| `make flutter-build-android` | Build the Android debug APK |
+
 ### Cross-platform
 
 | Command | Purpose |
 |---|---|
-| `make contracts-test` | Validate shared fixture contracts across both apps |
+| `make contracts-test` | Validate shared fixtures; report unavailable optional toolchains |
+| `make repo-check` | Check the repository structure, active links, and contract JSON |
 
 ## Requirements
 
 - **Desktop:** Rust toolchain (`rustup` + `cargo`)
 - **Windows:** Node.js, Rust toolchain, Tauri prerequisites, and Microsoft WebView2
 - **Android:** JDK 17+, an Android SDK — set `ANDROID_HOME` or add `sdk.dir=<path>` to `apps/android/local.properties`
+- **Flutter:** Flutter stable, plus the target platform toolchain
 
 ## Documentation
 
 - [Desktop README](apps/desktop/README.md)
 - [Android README](apps/android/README.md)
 - [Windows README](apps/windows/README.md)
+- [Flutter README](apps/flutter/README.md)
 - [Shared contracts](shared/contracts/README.md)
-- [Quick Start](docs/QUICK_START.md)
-- [User Manual](docs/USER_MANUAL.md)
+- [Documentation index](docs/index.md)
+- [Desktop quick start](apps/desktop/docs/QUICK_START.md)
+- [Desktop user manual](apps/desktop/docs/USER_MANUAL.md)
 
 ---
 

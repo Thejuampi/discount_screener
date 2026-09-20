@@ -87,7 +87,7 @@ fun preReportOf(
         surpriseFitAsymmetric = (surpriseFit as? SurpriseFit.Ready)?.asymmetric,
         surpriseFitUnavailableReason = (surpriseFit as? SurpriseFit.Unavailable)?.reason,
         revenueTrailLatestCents = trail?.latestCents,
-        revenueTrailMedianCents = trail?.centreCents,
+        revenueTrailCentreCents = trail?.centreCents,
         revenueTrailScaleCents = trail?.scaleCents,
         revenueTrailShortfallZBps = trail?.let { shortfallZBps(it) },
     )

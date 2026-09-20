@@ -11,7 +11,10 @@ import com.discountscreener.core.earnings.ratioText
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.eventRiskOf
 import com.discountscreener.core.earnings.priceToFairBps
+import com.discountscreener.core.portfolio.isHeld
+import com.discountscreener.core.portfolio.pinHeldFirst
 import java.time.LocalDate
+import kotlin.math.roundToInt
 
 data class EarningsGateUi(
     val upcoming: List<EarningsEventRowUi> = emptyList(),
@@ -45,6 +48,8 @@ data class EarningsEventRowUi(
     val reportedOn: String?,
     val sueFit: String? = null,
     val revenueTrail: String? = null,
+    val held: Boolean = false,
+    val reportEpochDay: Long? = null,
 )
 
 fun EarningsGateUi.matching(query: String): EarningsGateUi {
@@ -68,14 +73,16 @@ fun presentEarningsGate(
     lastCaptureEpochSeconds: Long? = null,
     nowEpochSeconds: Long? = null,
     alphaVantageKeyPresent: Boolean = false,
+    held: Set<String> = emptySet(),
 ): EarningsGateUi {
+    var heldSet = held.map { it.trim().uppercase() }.toSet()
     var upcoming = events.filter { it.pre.reportEpochDay >= today.toEpochDay() }
         .sortedBy { it.pre.reportEpochDay }
     var settled = events.filter { it.pre.reportEpochDay < today.toEpochDay() }
         .sortedByDescending { it.pre.reportEpochDay }
     return EarningsGateUi(
-        upcoming = upcoming.map(::rowOf),
-        settled = settled.map(::rowOf),
+        upcoming = pinHeldFirst(upcoming.map { rowOf(it, heldSet) }, heldSet) { it.symbol },
+        settled = pinHeldFirst(settled.map { rowOf(it, heldSet) }, heldSet) { it.symbol },
         damagedLines = damagedLines,
         lastCapture = lastCaptureText(lastCaptureEpochSeconds, nowEpochSeconds),
         alphaVantageKeyPresent = alphaVantageKeyPresent,
@@ -100,14 +107,18 @@ private fun lastCaptureText(lastCaptureEpochSeconds: Long?, nowEpochSeconds: Lon
     }
 }
 
-private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
+private fun rowOf(record: EarningsEventRecord, held: Set<String>): EarningsEventRowUi {
     var pre = record.pre
     var decision = record.decision
     return EarningsEventRowUi(
         symbol = pre.symbol,
         reportDate = LocalDate.ofEpochDay(pre.reportEpochDay).toString(),
         timing = timingLabel(pre.timing),
-        risk = eventRiskOf(pre.riskRatioBps),
+        risk = if (decision?.cell == DecisionCell.Undecided) {
+            EventRisk.Unknown
+        } else {
+            eventRiskOf(pre.riskRatioBps)
+        },
         cell = decision?.cell ?: DecisionCell.Undecided,
         headline = cellLabel(decision?.cell ?: DecisionCell.Undecided),
         impliedMove = pre.impliedMoveBps?.let(::formatPct) ?: MISSING,
@@ -125,18 +136,21 @@ private fun rowOf(record: EarningsEventRecord): EarningsEventRowUi {
         reportedOn = reportedOnText(pre, record.post),
         sueFit = sueFitText(pre),
         revenueTrail = revenueTrailText(pre, decision),
+        held = isHeld(pre.symbol, held),
+        reportEpochDay = pre.reportEpochDay,
     )
 }
 
 private fun revenueTrailText(pre: PreReport, decision: EventDecision?): String? {
     var latest = pre.revenueTrailLatestCents ?: return null
-    var centre = pre.revenueTrailMedianCents ?: return null
+    var centre = pre.trailCentre() ?: return null
     var scale = pre.revenueTrailScaleCents ?: return null
-    var cut = if (decision?.sectorOverrideApplied == true) " · size cut" else ""
+    var cut = if (decision?.trailCut() == true) " · size cut" else ""
     if (scale <= 0L) {
         return if (latest < centre) "Last print below a flat trail$cut" else null
     }
-    var z = pre.revenueTrailShortfallZBps ?: return null
+    var z = pre.revenueTrailShortfallZBps
+        ?: ((centre - latest).toDouble() / scale * 10_000.0).roundToInt()
     return "Last print ${"%.2f".format(z / 10_000.0)} MAD vs the trail centre$cut"
 }
 

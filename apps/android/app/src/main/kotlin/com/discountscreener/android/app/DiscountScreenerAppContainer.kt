@@ -31,6 +31,7 @@ import com.discountscreener.android.domain.usecase.EnsureReplayBackingLoadedUseC
 import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
 import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.ImportPortfolioBookUseCase
 import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
@@ -97,6 +98,7 @@ class DiscountScreenerAppContainer(context: Context) {
             yahooClient = yahooClient,
             fearGreedClient = CnnFearGreedClient(),
             dailyCandleSink = stateStore,
+            candleStagingDirectory = File(appContext.cacheDir, "market-candle-stage"),
         )
     }
 
@@ -220,6 +222,7 @@ class DiscountScreenerAppContainer(context: Context) {
             getEarningsEvents = GetEarningsEventsUseCase(repository),
             backUpEarningsLog = EarningsLogBackupUseCase(repository),
             restoreEarningsLog = RestoreEarningsLogUseCase(repository),
+            importPortfolioBook = ImportPortfolioBookUseCase(repository),
             saveAlphaVantageKey = SaveAlphaVantageKeyUseCase(repository),
             getIndexEstimates = GetIndexEstimatesUseCase(repository),
             saveEstimatesSnapshot = SaveEstimatesSnapshotUseCase(repository),

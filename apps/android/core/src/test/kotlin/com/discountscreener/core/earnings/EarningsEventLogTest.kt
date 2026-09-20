@@ -29,6 +29,13 @@ class EarningsEventLogTest {
     }
 
     @Test
+    fun a_new_write_omits_the_retired_trail_keys() {
+        log().append(event("LVS", day = 20_692L).copy(decision = decision.copy(sectorOverrideApplied = null)))
+
+        assertEquals(false, file().readText().contains("sectorOverrideApplied"))
+    }
+
+    @Test
     fun the_first_write_creates_the_folder_it_needs() {
         var log = EarningsEventLog(folder.resolve("nested/deeper/events.jsonl").toFile())
 

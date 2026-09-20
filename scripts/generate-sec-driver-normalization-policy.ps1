@@ -83,8 +83,11 @@ $(
 }
 "@
 function RustSlice($values, [int]$nestedIndent = 0) {
-    if (@($values).Count -eq 1 -or ($nestedIndent -eq 0 -and @($values).Count -le 2)) {
-        return '&[' + (@($values | ForEach-Object { '"' + $_ + '"' }) -join ', ') + ']'
+    $items = @($values)
+    $inline = '&[' + (@($items | ForEach-Object { '"' + $_ + '"' }) -join ', ') + ']'
+    $shortNestedSlice = $nestedIndent -gt 0 -and (12 + $inline.Length) -le 60
+    if ($items.Count -eq 1 -or ($nestedIndent -eq 0 -and $items.Count -le 2) -or $shortNestedSlice) {
+        return $inline
     }
     $indent = ' ' * (4 + $nestedIndent)
     $quoted = @($values | ForEach-Object { $indent + '"' + $_ + '",' }) -join "`n"

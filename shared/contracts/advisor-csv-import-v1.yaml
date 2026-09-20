@@ -1,15 +1,20 @@
 contract: advisor-csv-import-v1
-policyVersion: advisor-csv-import/2
+policyVersion: advisor-csv-import/3
 status: active
-surface: windows-advisor
-owner: apps/windows/src/portfolioCsv.ts
+surface:
+  - windows-advisor
+  - android
+owner:
+  windows: apps/windows/src/portfolioCsv.ts
+  android: apps/android/core/src/main/kotlin/com/discountscreener/core/portfolio/AdvisorCsv.kt
 
 notes:
   - A holdings snapshot and a trade blotter are different files. The importer names the kind before any write.
   - The importer never silent-replaces trade-derived lots with a snapshot.
   - A 90-day blotter never rebuilds the book from zero.
   - Refuse over invent. Skip cash. Skip unknown Type values.
-  - Unit tests in apps/windows/tests/portfolioCsv.test.ts encode every case below.
+  - Preserve positive positions within the supported quantity scale. Do not apply a total cost-basis floor.
+  - Unit tests in apps/windows/tests/portfolioCsv.test.ts and apps/android/core/src/test/kotlin/com/discountscreener/core/portfolio/AdvisorCsvTest.kt encode every case below.
 
 kinds:
   holdings_snapshot:
@@ -56,9 +61,14 @@ holdings_snapshot:
     - The file is the full book image.
     - On Confirm, upsert listed symbols and delete every current lot the file omits.
     - An empty keep set refuses. It does not wipe the book.
-    - Store book as-of in localStorage key ds_advisor_book_as_of.
+    - Store book as-of on Windows in localStorage key ds_advisor_book_as_of.
+    - Store book as-of on Android in SQLite meta key ds_advisor_book_as_of.
   confirmIsRequired: true
   silentUpsert: forbidden
+  android:
+    quantityPersist: ten_thousandths
+    ledgerApply: refuse
+    ledgerRefuseReason: ledger_apply_unsupported
 
 trades_window:
   sideFromType:
@@ -85,6 +95,10 @@ trades_window:
     startFrom: current lots
     startFromZero: forbidden
   confirmIsRequired: true
+  androidAfterMergeConfirm:
+    whenAppliedAtLeast: 1
+    bookAsOf: max(prior_as_of, max_applied_trade_date)
+    windows: snapshot as-of stays
 
 trades_ledger:
   behavior: existing Coinbase, Schwab, and generic parsers
@@ -264,3 +278,65 @@ examples:
     expect:
       quantity: 10
       opened_at: "2026-06-02"
+
+  - id: JPM-FRAC-AMZN
+    case: jpm fractional quantity rounds half-up to four decimal places
+    input:
+      quantityRaw: "36.29536"
+    expect:
+      quantity: 36.2954
+
+  - id: JPM-DUP-TICKER
+    case: two snapshot rows for one ticker aggregate to one lot
+    input:
+      rows: [AMZN, AMZN]
+    expect:
+      lotCount: 1
+
+  - id: MERGE-BEFORE-ASOF
+    case: trades dated before as-of do not change quantity or cost
+    input:
+      lots: [{ symbol: AMZN, quantity: 10, avg_cost_cents: 20000, opened_at: "2024-01-15" }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { date: "2026-08-28", side: sell, quantity: 4, price: 200 }
+    expect:
+      quantity: 10
+      avg_cost_cents: 20000
+
+  - id: MERGE-CLOSE-LOT
+    case: a trades window that closes a lot lists it for removal
+    input:
+      currentLots: [AXON, AMZN]
+      fileCloses: [AXON]
+    expect:
+      remove: [AXON]
+
+  - id: LEDGER-REFUSE
+    case: android refuses ledger apply
+    input:
+      formatHint: Coinbase
+    expect:
+      action: refuse
+      reason: ledger_apply_unsupported
+
+  - id: JPM-SMALL-POSITION
+    case: a positive snapshot lot below one dollar stays in the book
+    input:
+      symbol: PENNY
+      quantity: 0.5
+      unitCost: 0.5
+    expect:
+      quantity: 0.5
+      avg_cost_cents: 50
+
+  - id: MERGE-SMALL-UNCHANGED
+    case: an unchanged trade window keeps a positive lot below one dollar
+    input:
+      lots: [{ symbol: PENNY, quantity: 0.5, avg_cost_cents: 50, opened_at: null }]
+      bookAsOf: "2026-08-31"
+      trades:
+        - { symbol: PENNY, date: "2026-08-31", side: buy, quantity: 0.1, price: 0.5 }
+    expect:
+      quantity: 0.5
+      avg_cost_cents: 50

@@ -36,14 +36,19 @@ val hasCustomReleaseSigning = listOf(
 val allowDebugSignedRelease = providers.gradleProperty("allowDebugSignedRelease").orNull.toBoolean()
 
 // Date-based version, computed once from git state by scripts/version.ps1 (single source
-// of truth also used by the Windows build). Falls back if git/powershell is unavailable
+// of truth also used by the Windows build). Falls back if git/PowerShell is unavailable
 // so IDE syncs never hard-fail.
 val computedVersion: Pair<String, Int> = run {
     val fallback = "0.0.0-unknown" to 1
     try {
+        val powerShell = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+            "powershell"
+        } else {
+            "pwsh"
+        }
         val output = providers.exec {
             commandLine(
-                "powershell",
+                powerShell,
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",

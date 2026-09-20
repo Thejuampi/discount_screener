@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -17,11 +16,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -38,8 +45,12 @@ import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.model.ValuationChange
 import com.discountscreener.android.domain.model.ValuationChangeTier
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.PositionsRow
 import com.discountscreener.android.presentation.dashboard.QuantLensChipUi
 import com.discountscreener.android.presentation.dashboard.QuantLensQualifier
+import com.discountscreener.android.presentation.dashboard.PositionsBookSummary
+import com.discountscreener.android.presentation.dashboard.PositionsSort
+import com.discountscreener.core.portfolio.closenessLabel
 import com.discountscreener.core.engine.DiscoveryScoreRow
 import com.discountscreener.core.engine.DiscoveryTriage
 import com.discountscreener.core.engine.DiscoveryUniverseEngine
@@ -50,6 +61,11 @@ import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.regime.RegimeScoreStatus
 import com.discountscreener.core.model.QualificationStatus
 import kotlin.math.max
+
+const val TRACKED_HELD = "trackedHeld"
+const val POSITIONS_LIST = "positionsList"
+const val POSITION_ROW_PREFIX = "positionRow:"
+const val POSITIONS_GATE_IMPORT = "positionsGateImport"
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -74,10 +90,24 @@ internal fun TrackedList(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        SymbolCompanyTitle(
-                            symbol = row.symbol,
-                            companyName = row.companyName,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            SymbolCompanyTitle(
+                                symbol = row.symbol,
+                                companyName = row.companyName,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (row.held) {
+                                Text(
+                                    text = "Held",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag(TRACKED_HELD),
+                                )
+                            }
+                        }
                         TrackedRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
                         TrackedRowMetrics(row)
                     }
@@ -134,38 +164,23 @@ internal fun OpportunityList(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RankOrdinal(index = index)
+                        RankOrdinal(index = (row.scoreRank ?: (index + 1)) - 1)
                         SymbolCompanyTitle(
                             symbol = row.symbol,
                             companyName = row.companyName,
                             modifier = Modifier.weight(1f),
                         )
+                        if (row.held) {
+                            Text(
+                                text = "Held",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                         ScoreBadge(score = row.compositeScore, scoringModel = scoringModel)
                     }
                     OpportunityRowSignals(row, quantLensChipsBySymbol[row.symbol].orEmpty())
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
-                        MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
-                        MetricToken("Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}", forecastMetricColor())
-                        // Only when it is actually in the composite. The dense row has no space to
-                        // say why a dimension is absent, and a token reading "--" would look like a
-                        // measurement that came back empty rather than one that was never taken.
-                        if (row.regimeStatus == RegimeScoreStatus.Included) {
-                            MetricToken(
-                                "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(row.regimeScore, scoringModel)}",
-                                marketMetricColor(),
-                            )
-                        }
-                        if (row.gapBps != null && row.upsideBps != null) {
-                            MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
-                            MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
-                        } else {
-                            row.valuationStanceLabel?.let { stance ->
-                                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
-                            }
-                        }
-                        MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))
-                    }
+                    OpportunityMetricTokens(row, scoringModel)
                     row.providerIssue?.let { issue ->
                         Text(
                             text = issue,
@@ -292,7 +307,203 @@ internal fun parseDiscoveryConfidence(raw: String?): ConfidenceBand? =
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<QuantLensChipUi>) {
+internal fun OpportunityMetricTokens(row: OpportunityListRow, scoringModel: OpportunityScoringModel) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MetricToken("F ${formatOpportunityBucket(row.fundamentalsScore, scoringModel)}", fundamentalsMetricColor())
+        MetricToken("T ${formatOpportunityBucket(row.technicalScore, scoringModel)}", technicalMetricColor())
+        MetricToken("Fc ${formatOpportunityBucket(row.forecastScore, scoringModel)}", forecastMetricColor())
+        if (row.regimeStatus == RegimeScoreStatus.Included) {
+            MetricToken(
+                "$MARKET_DIMENSION_LABEL ${formatOpportunityBucket(row.regimeScore, scoringModel)}",
+                marketMetricColor(),
+            )
+        }
+        if (row.gapBps != null && row.upsideBps != null) {
+            MetricToken("Disc ${formatPct(row.gapBps)}", discountColor())
+            MetricToken("Upside ${formatPct(row.upsideBps)}", upsideColor(row.upsideBps))
+        } else {
+            row.valuationStanceLabel?.let { stance ->
+                MetricToken(stance, MaterialTheme.colorScheme.tertiary)
+            }
+        }
+        MetricToken("Conf ${row.confidence.name.lowercase()}", confidenceColor(row.confidence))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun PositionsList(
+    rows: List<PositionsRow>,
+    scoringModel: OpportunityScoringModel,
+    onAction: (DashboardAction) -> Unit,
+    modifier: Modifier = Modifier,
+    summary: PositionsBookSummary? = null,
+    selectedSort: PositionsSort = PositionsSort.LargestPosition,
+    menuExpanded: Boolean = false,
+    onMenuExpandedChange: (Boolean) -> Unit = {},
+    onSortSelected: (PositionsSort) -> Unit = {},
+    importBookNotice: String? = null,
+) {
+    LazyColumn(
+        modifier = modifier.testTag(POSITIONS_LIST),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        summary?.let { bookSummary ->
+            item { PositionsSummary(bookSummary) }
+            item {
+                PositionsMenu(
+                    selectedSort = selectedSort,
+                    expanded = menuExpanded,
+                    onExpandedChange = onMenuExpandedChange,
+                    onSortSelected = onSortSelected,
+                    onAction = onAction,
+                    importBookNotice = importBookNotice,
+                )
+            }
+        }
+        if (rows.isEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("No lots", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Import a J.P. Morgan snapshot, then a Chase blotter.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ImportBookButton(
+                        onAction = onAction,
+                        modifier = Modifier.fillMaxWidth(),
+                        testTag = POSITIONS_GATE_IMPORT,
+                    )
+                }
+            }
+        }
+        itemsIndexed(rows, key = { _, row -> "${row.symbol}:${row.inputIndex}" }) { _, row ->
+            val scored = row.opportunity
+            var factsExpanded by rememberSaveable(row.inputIndex, row.symbol) {
+                androidx.compose.runtime.mutableStateOf(false)
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("$POSITION_ROW_PREFIX${row.symbol}:${row.inputIndex}")
+                    .then(
+                        if (scored != null) {
+                            Modifier.clickable { onAction(DashboardAction.OpenDetail(row.symbol)) }
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    val largeText = LocalDensity.current.fontScale >= 1.3f
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Column(modifier = if (largeText) Modifier.fillMaxWidth() else Modifier) {
+                            Text(
+                                text = row.symbol,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = if (largeText) Modifier.fillMaxWidth() else Modifier,
+                            )
+                            closenessLabel(row.closeness)?.let { tag ->
+                                Text(
+                                    text = tag,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                )
+                            }
+                        }
+                        Text(
+                            text = row.marketValueCents?.let(::positionMoney) ?: "Value unavailable",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = if (largeText) Modifier.fillMaxWidth() else Modifier,
+                        )
+                        Text(
+                            text = row.weightBps?.let(::formatWeight) ?: "Weight unavailable",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = if (largeText) {
+                                Modifier.fillMaxWidth()
+                            } else {
+                                Modifier.padding(start = 8.dp)
+                            },
+                        )
+                    }
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = row.valuationLabel ?: row.valuationSource ?: "Valuation unavailable",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = if (largeText) Modifier.fillMaxWidth() else Modifier,
+                        )
+                        Text(
+                            text = buildString {
+                                append("Score ${row.score?.toString() ?: "unavailable"} · ${scoringModel.chipLabel()}")
+                                row.storedScoreMarker?.let { append(" · $it") }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = if (largeText) Modifier.fillMaxWidth() else Modifier,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val reason = row.researchReason.takeIf { it.isNotBlank() && it != row.reviewLabel }
+                        Text(
+                            text = listOfNotNull(row.reviewLabel, reason).joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (row.reviewLabel == "Check data") {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = { factsExpanded = !factsExpanded },
+                            modifier = Modifier.semantics {
+                                contentDescription = if (factsExpanded) {
+                                    "Hide position facts for ${row.symbol}"
+                                } else {
+                                    "Show position facts for ${row.symbol}"
+                                }
+                            },
+                        ) {
+                            Text(if (factsExpanded) "Hide facts" else "Facts")
+                        }
+                    }
+                    if (factsExpanded) {
+                        PositionFactsBlock(row = row)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun OpportunityRowSignals(row: OpportunityListRow, lensChips: List<QuantLensChipUi>) {
     val freshness = freshnessColors(row.freshness)
     val rankLabel = rankMovementLabel(row.rankMovement)
     val valuationLabel = valuationChangeLabel(row.valuationChange)

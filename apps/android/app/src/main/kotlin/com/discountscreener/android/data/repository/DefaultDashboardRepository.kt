@@ -4,6 +4,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import com.discountscreener.android.presentation.dashboard.EarningsGateUi
+import com.discountscreener.android.presentation.dashboard.pinOpportunityRows
+import com.discountscreener.android.presentation.dashboard.pinTrackedRows
 import com.discountscreener.android.presentation.dashboard.presentEarningsGate
 import com.discountscreener.android.data.debug.ScoreExport
 import com.discountscreener.android.data.earnings.EarningsEventRecorder
@@ -71,6 +73,11 @@ import com.discountscreener.android.domain.model.rankMovement
 import com.discountscreener.android.domain.model.significantValuationChange
 import com.discountscreener.android.domain.model.reduceProfileTransition
 import com.discountscreener.android.domain.repository.DashboardRepository
+import com.discountscreener.core.portfolio.BookContext
+import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.heldTickers
+import com.discountscreener.core.portfolio.planParsedCsv
 import com.discountscreener.core.engine.ChartAnalysis
 import com.discountscreener.core.engine.BootstrapMarketParamsSource
 import com.discountscreener.core.engine.DcfAnalysisEngine
@@ -358,6 +365,16 @@ class DefaultDashboardRepository(
      */
     private val beforeSnapshotLocked: (suspend () -> Unit)? = null,
     /**
+     * Test probe. Runs after a refresh marks a load, before it registers its active pass.
+     * Production leaves this null.
+     */
+    private val afterRefreshLoadStarted: (suspend () -> Unit)? = null,
+    /**
+     * Test probe. Runs after a refresh registers its active pass.
+     * Production leaves this null.
+     */
+    private val afterRefreshPassRegistered: (suspend () -> Unit)? = null,
+    /**
      * Offered every screen input, so it can be replayed off the device.
      *
      * The repository does not know what the sink does with it. Production wires a file writer that
@@ -400,6 +417,8 @@ class DefaultDashboardRepository(
 
     private var engine = ReportingEngine()
     private var trackedSymbols = mutableListOf<String>()
+    private var portfolioLots: List<PortfolioLot> = emptyList()
+    private var bookAsOf: String? = null
     private val revisions = linkedMapOf<String, MutableList<SymbolRevision>>()
     private val chartCache = linkedMapOf<String, List<HistoricalCandle>>()
     private val replayBackingCache = linkedMapOf<String, List<HistoricalCandle>>()
@@ -523,6 +542,8 @@ class DefaultDashboardRepository(
 
     internal fun peekPeakRefreshPasses(): Int = peakRefreshPassesRunning
 
+    internal fun peekRefreshPassesRunning(): Int = refreshPassesRunning
+
     /**
      * When the running refresh was asked for.
      *
@@ -584,6 +605,15 @@ class DefaultDashboardRepository(
         scoringModel: OpportunityScoringModel,
     ): List<OpportunityListRow> = opportunityRowsLocked(ViewFilter(), scoringModel, includeUnqualified = true)
 
+    override suspend fun cachedEarningsCalendar(): Map<String, Long?> = withContext(computeDispatcher) {
+        earningsEventRecorder?.cachedCalendar() ?: emptyMap()
+    }
+
+    override suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?> =
+        withContext(computeDispatcher) {
+            earningsEventRecorder?.refreshCalendar(symbols) ?: emptyMap()
+        }
+
     override suspend fun earningsEvents(): EarningsGateUi = withContext(computeDispatcher) {
         val recorder = earningsEventRecorder ?: return@withContext EarningsGateUi()
         val read = runCatching { recorder.events() }
@@ -596,6 +626,7 @@ class DefaultDashboardRepository(
             lastCaptureEpochSeconds = read.lastCaptureEpochSeconds,
             nowEpochSeconds = nowProvider(),
             alphaVantageKeyPresent = alphaVantageKeyPresent?.invoke() == true,
+            held = heldTickers(stateMutex.withLock { portfolioLots }),
         )
     }
 
@@ -612,6 +643,32 @@ class DefaultDashboardRepository(
 
     override suspend fun restoreEarningsLog(text: String): Int = withContext(computeDispatcher) {
         earningsEventRecorder?.restore(text) ?: 0
+    }
+
+    override suspend fun planPortfolioCsv(text: String): ImportPlan = withContext(computeDispatcher) {
+        stateMutex.withLock { planParsedCsv(text, BookContext(portfolioLots, bookAsOf)) }
+    }
+
+    override suspend fun confirmPortfolioPlan(plan: ImportPlan) = withContext(computeDispatcher) {
+        var nextLots: List<PortfolioLot>
+        var nextAsOf: String?
+        when (plan) {
+            is ImportPlan.ConfirmHoldingsReplace -> {
+                nextLots = plan.positions
+                nextAsOf = plan.asOf
+            }
+            is ImportPlan.ConfirmTradesMerge -> {
+                nextLots = plan.positions
+                nextAsOf = plan.nextBookAsOf
+            }
+            is ImportPlan.Refuse -> return@withContext
+        }
+        stateMutex.withLock {
+            stateStore.replacePortfolioBook(nextLots, nextAsOf)
+            portfolioLots = nextLots
+            bookAsOf = nextAsOf
+        }
+        emitUpdate()
     }
 
     override suspend fun saveAlphaVantageKey(key: String) = withContext(computeDispatcher) {
@@ -1146,11 +1203,12 @@ class DefaultDashboardRepository(
         runCatching { stateStore.loadWarmStart(symbols) }
             .getOrElse { error ->
                 stateStore.resetWarmStartState()
+                var book = runCatching { stateStore.loadPortfolioBook() }.getOrDefault(emptyList<PortfolioLot>() to null)
                 stateMutex.withLock {
                     resetInMemoryLocked()
                     statusMessage = "SQLite warm-start reset after restore failure: ${error.message ?: "unknown error"}"
                 }
-                PersistenceBootstrap()
+                PersistenceBootstrap(portfolioLots = book.first, bookAsOf = book.second)
             }
 
     /**
@@ -1289,9 +1347,6 @@ class DefaultDashboardRepository(
             stateStore.loadScoringPreferences().opportunityModel,
             force = false,
         )
-        if (stateMutex.withLock { request.generation == activeProfileGeneration }) {
-            startMarketReadForCurrentProfile(request.generation)
-        }
     }
 
     private suspend fun startRefreshForCurrentProfile(
@@ -1360,11 +1415,15 @@ class DefaultDashboardRepository(
                 activeRefreshJob = repositoryScope.launch {
                     val thisJob = coroutineContext.job
                     loadStarted()
-                    stateMutex.withLock {
-                        refreshPassesRunning += 1
-                        peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
-                    }
+                    var refreshPassRegistered = false
                     try {
+                        afterRefreshLoadStarted?.invoke()
+                        stateMutex.withLock {
+                            refreshPassesRunning += 1
+                            refreshPassRegistered = true
+                            peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
+                        }
+                        afterRefreshPassRegistered?.invoke()
                         runRefresh(symbols, generation, skip)
                         finishRefresh(generation, scoringModel, skip)
                     } finally {
@@ -1374,7 +1433,9 @@ class DefaultDashboardRepository(
                         // ended the refresh; only the enrichment above needs the refresh to be whole.
                         withContext(NonCancellable) {
                             stateMutex.withLock {
-                                refreshPassesRunning -= 1
+                                if (refreshPassRegistered) {
+                                    refreshPassesRunning -= 1
+                                }
                                 if (activeRefreshJob === thisJob) {
                                     activeRefreshJob = null
                                 }
@@ -2144,6 +2205,14 @@ class DefaultDashboardRepository(
         screenData = screenData.copy(
             providerState = screenData.providerState.copy(issues = issueRecords),
         )
+        var held = heldTickers(portfolioLots)
+        trackedRows = pinTrackedRows(trackedRows, held)
+        opportunityRows = pinOpportunityRows(opportunityRows, held)
+        var opportunityUniverse = opportunityRowsLocked(
+            ViewFilter(),
+            opportunityScoringModel,
+            includeUnqualified = true,
+        )
 
         return DashboardSnapshot(
             availableProfiles = profileCatalog.availableProfiles(),
@@ -2153,6 +2222,7 @@ class DefaultDashboardRepository(
             watchlistSymbols = engine.watchlistSymbols(),
             candidateRows = dashboardCandidateRows,
             opportunityRows = opportunityRows,
+            opportunityUniverse = opportunityUniverse,
             opportunityScoringModel = opportunityScoringModel,
             regimeScoringEnabled = regimeScoringEnabled,
             issues = issueRecords,
@@ -2192,6 +2262,7 @@ class DefaultDashboardRepository(
             leftoverBoard = boards?.leftover,
             crossBoard = boards?.cross,
             crossBoardProfile = boards?.crossProfile,
+            portfolioLots = portfolioLots,
         )
     }
 
@@ -3425,6 +3496,8 @@ class DefaultDashboardRepository(
         .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
 
     private fun hydrateWarmStartLocked(bootstrap: PersistenceBootstrap) {
+        portfolioLots = bootstrap.portfolioLots
+        bookAsOf = bootstrap.bookAsOf
         val trackedSymbolSet = trackedSymbols.toSet()
         val hydratedStates = bootstrap.symbolStates.filter { it.symbol in trackedSymbolSet }
         val watchlist = bootstrap.watchlist.filter { it in trackedSymbolSet }

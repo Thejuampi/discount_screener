@@ -68,6 +68,11 @@ fun EarningsGateScreen(
                 )
             }
             notice?.let { GateNotice(it) }
+            ImportBookButton(
+                onAction = onAction,
+                modifier = Modifier.fillMaxWidth(),
+                testTag = EARNINGS_GATE_IMPORT,
+            )
             EarningsLogButtons(onAction, keyPresent = state.alphaVantageKeyPresent)
         }
         return
@@ -126,6 +131,11 @@ fun EarningsGateScreen(
         }
         item {
             notice?.let { GateNotice(it) }
+            ImportBookButton(
+                onAction = onAction,
+                modifier = Modifier.fillMaxWidth(),
+                testTag = EARNINGS_GATE_IMPORT,
+            )
             EarningsLogButtons(onAction, keyPresent = state.alphaVantageKeyPresent)
         }
     }
@@ -260,6 +270,8 @@ const val EARNINGS_GATE_AV_KEY = "earningsGateAvKey"
 const val EARNINGS_GATE_SAVE_KEY = "earningsGateSaveKey"
 const val EARNINGS_GATE_CLEAR_KEY = "earningsGateClearKey"
 const val EARNINGS_GATE_KEY_STATUS = "earningsGateKeyStatus"
+const val EARNINGS_GATE_HELD = "earningsGateHeld"
+const val EARNINGS_GATE_IMPORT = "earningsGateImport"
 
 @Composable
 internal fun EarningsEventCard(row: EarningsEventRowUi) {
@@ -272,11 +284,21 @@ internal fun EarningsEventCard(row: EarningsEventRowUi) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(
-                    text = row.symbol,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = row.symbol,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    if (row.held) {
+                        Text(
+                            text = "Held",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag(EARNINGS_GATE_HELD),
+                        )
+                    }
+                }
                 Text(
                     text = "${row.reportDate} · ${row.timing}",
                     style = MaterialTheme.typography.labelMedium,

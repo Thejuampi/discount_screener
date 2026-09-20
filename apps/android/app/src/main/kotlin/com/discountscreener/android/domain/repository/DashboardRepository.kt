@@ -15,6 +15,7 @@ import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.portfolio.ImportPlan
 import kotlinx.coroutines.flow.Flow
 
 interface DashboardRepository {
@@ -75,9 +76,17 @@ interface DashboardRepository {
 
     suspend fun earningsEvents(): EarningsGateUi
 
+    suspend fun cachedEarningsCalendar(): Map<String, Long?>
+
+    suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?>
+
     suspend fun earningsLogBackup(): String
 
     suspend fun restoreEarningsLog(text: String): Int
+
+    suspend fun planPortfolioCsv(text: String): ImportPlan
+
+    suspend fun confirmPortfolioPlan(plan: ImportPlan)
 
     suspend fun saveAlphaVantageKey(key: String)
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>

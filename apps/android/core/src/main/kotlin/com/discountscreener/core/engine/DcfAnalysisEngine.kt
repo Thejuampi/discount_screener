@@ -18,7 +18,7 @@ import kotlin.math.roundToLong
 /**
  * Valuation model family (parity with Windows `dcf_model.rs`).
  * Financial services → residual income; operating → FCFF with growth fade.
- * See `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`.
+ * See `docs/architecture/valuation-model-family.md`.
  */
 const val ENGINE_VERSION = "valuation-model-family/1"
 /** Parity with Windows: industry-beta-policy/1 + through-cycle commodity priors. */

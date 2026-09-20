@@ -105,7 +105,7 @@ class PreReportBuilderTest {
 
     @Test
     fun the_event_carries_the_price_of_the_put_spread_that_would_hedge_it() {
-        assertEquals(165, full().putSpreadCostBps)
+        assertEquals(95, full().putSpreadCostBps)
     }
 
     @Test
@@ -120,7 +120,7 @@ class PreReportBuilderTest {
 
     @Test
     fun the_event_names_the_strike_the_hedge_is_sold_at() {
-        assertEquals(4_200L, full().hedgeShortStrikeCents)
+        assertEquals(4_300L, full().hedgeShortStrikeCents)
     }
 
     @Test

@@ -133,4 +133,4 @@ Before this, no amount of correct data could have reached WYNN, because the sign
 closed both doors.
 
 Do not close this gate by moving the threshold. It measures the model against the bar, so green
-comes from a driver or it does not come. See [operational anti-patterns](../../operational-anti-patterns.md).
+comes from a driver or it does not come. See [operational anti-patterns](../../operations/operational-anti-patterns.md).
