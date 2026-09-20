@@ -19,7 +19,7 @@ selected/disputed/unavailable presentation in Detail and Quant Lens. Provider
 payloads, cache state, UI strings, analyst targets, and market prices are never
 added to this engine contract.
 
-This directory holds language-neutral fixtures, golden cases, and behavior notes that both apps validate.
+This directory holds language-neutral fixtures, golden cases, and behavior notes for participating clients.
 
 ## Files
 
@@ -80,6 +80,6 @@ These files are intentionally behavior-focused. They are not shared runtime code
 
 ## Related agent docs
 
-- Root [Agents.md](../Agents.md) — valuation model family and Quant Lens conventions for implementers
-- [Valuation Model Family Architecture](../_bmad-output/planning-artifacts/valuation-model-family-architecture.md) — ADRs and phased delivery
-- [project-context.md](../_bmad-output/project-context.md) — lean AI rules including dynamic parameters and forbidden output clamps
+- Root [agent guide](../../AGENTS.md) — repository-wide implementation rules
+- [Valuation model family](../../docs/architecture/valuation-model-family.md) — current valuation architecture
+- [Valuation baseline policy](../../docs/operations/valuation-baseline-policy.md) — multi-name merge gate

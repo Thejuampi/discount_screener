@@ -74,7 +74,7 @@ Binary (when the frontend/dev server is already up):
 .\src-tauri\target\debug\discount-screener-windows.exe --universe qa
 ```
 
-See also: [`docs/valuation-live-qa-checklist.md`](../../docs/valuation-live-qa-checklist.md) and `AGENTS.md` § Live QA = profile `qa` only.
+See [the live QA checklist](../../docs/operations/valuation-live-qa.md) and [the Windows agent guide](AGENTS.md).
 
 ### Agent / attach UI control (`ds-ui`)
 

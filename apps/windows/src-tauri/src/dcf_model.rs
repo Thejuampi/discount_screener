@@ -18,7 +18,7 @@
 //! Valuation model family: business-class routing, residual income for financials,
 //! FCFF+WACC for operating firms, dynamic market params + beta shrink.
 //!
-//! See `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`.
+//! See `docs/architecture/valuation-model-family.md`.
 
 use serde::{Deserialize, Serialize};
 
