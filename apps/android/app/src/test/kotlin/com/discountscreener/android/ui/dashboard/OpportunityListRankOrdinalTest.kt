@@ -56,7 +56,7 @@ class OpportunityListRankOrdinalTest {
     }
 
     @Test
-    fun the_placing_uses_score_rank_not_list_index() {
+    fun the_placing_follows_visible_order_even_when_saved_ranks_have_gaps() {
         composeRule.setContent {
             DiscountScreenerTheme {
                 DashboardScreen(
@@ -66,8 +66,8 @@ class OpportunityListRankOrdinalTest {
                         currentProfile = "merval",
                         opportunityScoringModel = OpportunityScoringModel.AggressiveV3,
                         opportunityRows = listOf(
-                            listRow("AMZN", score = 40, rank = 2),
-                            listRow("MSFT", score = 80, rank = 1),
+                            listRow("AMZN", score = 40, rank = 9),
+                            listRow("MSFT", score = 80, rank = 12),
                         ),
                     ),
                     onAction = { },
@@ -76,7 +76,8 @@ class OpportunityListRankOrdinalTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNode(hasText("#2") and hasText("AMZN")).assertExists()
+        composeRule.onNode(hasText("#1") and hasText("AMZN")).assertExists()
+        composeRule.onNode(hasText("#2") and hasText("MSFT")).assertExists()
     }
 
     /** Scrolls the list until [ordinal] is composed, then requires it on screen. */

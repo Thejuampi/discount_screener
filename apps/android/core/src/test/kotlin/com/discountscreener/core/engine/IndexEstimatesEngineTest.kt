@@ -153,6 +153,35 @@ class IndexEstimatesEngineTest {
     }
 
     @Test
+    fun scenario_upside_compares_only_symbols_with_that_scenario() {
+        val symbols = listOf(
+            symbol("A", marketPriceCents = 10_000L, marketCapDollars = 1L),
+            symbol("B", marketPriceCents = 1_000_000L, marketCapDollars = 9L),
+        )
+        val result = IndexEstimatesEngine.compute(
+            symbols, mapOf(dcf("A", bear = 18_000L, base = 20_000L, bull = 22_000L)), "test", 0L,
+        )
+
+        assertEquals(10_000, result.scenarios.first { it.scenario == EstimateScenario.BaseDcf }.impliedUpsideBps)
+    }
+
+    @Test
+    fun scenario_upside_uses_market_cap_weighted_symbol_returns() {
+        val symbols = listOf(
+            symbol("A", marketPriceCents = 10_000L, marketCapDollars = 1L),
+            symbol("B", marketPriceCents = 100_000L, marketCapDollars = 3L),
+        )
+        val values = mapOf(
+            dcf("A", bear = 18_000L, base = 20_000L, bull = 22_000L),
+            dcf("B", bear = 45_000L, base = 50_000L, bull = 55_000L),
+        )
+        val result = IndexEstimatesEngine.compute(symbols, values, "test", 0L)
+
+        // One 100% gain and three 50% losses produce a 12.5% loss.
+        assertEquals(-1_250, result.scenarios.first { it.scenario == EstimateScenario.BaseDcf }.impliedUpsideBps)
+    }
+
+    @Test
     fun implied_upside_is_negative_when_fair_value_is_below_current() {
         // current weighted = 10000. bear dcf = 8000 → upside = (8000/10000 - 1)*10000 = -2000 bps
         var symbols = listOf(symbol("AAPL", marketPriceCents = 10_000L, marketCapDollars = 1L))

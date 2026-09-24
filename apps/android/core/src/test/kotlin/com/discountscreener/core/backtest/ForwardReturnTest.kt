@@ -91,6 +91,32 @@ class ForwardReturnTest {
         assertEquals(2, report.droppedNoExitBar)
     }
 
+    @Test
+    fun repeated_refreshes_before_one_entry_bar_keep_only_the_newest_score() {
+        val symbols = List(10) { rank -> "S%02d".format(rank) }
+        val report = forwardReturnByDecile(
+            scores = symbols.flatMapIndexed { rank, symbol ->
+                listOf(
+                    DatedScore(symbol, DAY, 100 + rank),
+                    DatedScore(symbol, DAY + 1, rank),
+                )
+            },
+            candlesBySymbol = symbols.associateWith {
+                listOf(
+                    candle(DAY, ENTRY_CENTS),
+                    candle(2 * DAY, ENTRY_CENTS),
+                    candle(3 * DAY, ENTRY_CENTS),
+                )
+            },
+            horizonBars = 1,
+        )
+
+        assertEquals(10, report.heldCount)
+        assertEquals(10, report.droppedSameEntryBar)
+        assertEquals(0, report.deciles.first().lowestScore)
+        assertEquals(9, report.deciles.last().highestScore)
+    }
+
     /**
      * One hundred observations, one symbol each, one score each, scores 0..99. Every symbol gets a
      * scoring bar, an entry bar and two exit bars, so nothing is dropped and the deciles come out

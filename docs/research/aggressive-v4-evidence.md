@@ -203,20 +203,14 @@ What this does **not** license anyone to conclude:
 
 ## What would change these answers
 
-- **The score journal** (`score_journal`) accumulates one row per symbol per completed refresh, so
-  V3 and V4 can eventually be compared on outcome rather than on tidiness. It starts empty. It is
-  worth nothing until it has weeks in it.
+- **The score journal** (`score_journal`) records V2, V3, V4, and V5 after each completed refresh.
+  Each model uses the same inputs and timestamp. Model selection no longer changes the sample.
 
-  **Read the sampling rule before reading the data, because it is not "every model viewed".** The
-  journal is written from the refresh job, stamped with whichever model was *selected when the
-  refresh completed*. Toggling to V4, reading the list and toggling back writes no V4 row — the
-  toggle re-scores from the cached snapshot and never reaches the write path. So the sample is
-  weighted by which model happened to be selected at refresh time, not by which models were looked
-  at. That is a deliberate consequence of keeping the write off the render path (the alternative
-  lets a user manufacture rows by toggling, and the primary key is per second, so those rows would
-  be several readings of one day). It is fine for a comparison over weeks and it is **not** fine
-  for any claim about a short window: a V3-heavy user's V4 column is a thinner and differently
-  timed sample, not the same days.
+  Rows recorded before 2026-09-19 used only the selected model. Those legacy rows remain available
+  for model-specific reports. The paired V2/V5 experiment excludes them without an exact match.
+
+  Multiple refreshes can still precede one daily entry bar. The evaluator keeps the newest score
+  for each symbol and entry bar. It reports older copies as `same-entry-bar` drops.
 - **The daily bar series** grows past one year now that it is persisted, which is what makes the
   longer horizons reachable.
 - Re-running the retrospective on `sp500` rather than `qa` would raise the cross-section from 20

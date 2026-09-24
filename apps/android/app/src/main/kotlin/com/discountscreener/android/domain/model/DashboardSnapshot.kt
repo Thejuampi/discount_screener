@@ -265,6 +265,7 @@ data class DashboardSnapshot(
     val refreshCompletedSymbols: Int,
     val refreshTargetSymbols: Int,
     val statusMessage: String?,
+    val backgroundWorkMessage: String? = null,
     val estimatesNotice: DashboardNotice? = null,
     val screenData: ProjectedDashboardData = ProjectedDashboardData.empty(),
     val replayBackingCharts: Map<ChartRange, List<HistoricalCandle>> = emptyMap(),

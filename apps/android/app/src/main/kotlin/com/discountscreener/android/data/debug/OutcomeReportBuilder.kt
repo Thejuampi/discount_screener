@@ -2,9 +2,12 @@ package com.discountscreener.android.data.debug
 
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.core.backtest.DatedScore
+import com.discountscreener.core.backtest.ScoreAblationObservation
 import com.discountscreener.core.backtest.ScoreSeries
+import com.discountscreener.core.backtest.V5OutcomeAblations
 import com.discountscreener.core.backtest.outcomeReport
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.OpportunityScoringModel
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -14,7 +17,8 @@ import java.time.format.DateTimeFormatter
  *
  * Built on the score journal — the only point-in-time record of fundamentals, forecast, regime and
  * composite the app has — so every bucket can be judged, where the retrospective can replay the
- * technicals alone. Models are reported side by side over whatever window they share, newest first.
+ * technicals alone. Model sections show their own history. The paired experiment requires exact
+ * V2/V5 symbol-time matches.
  *
  * **The street is a context column, never an input.** Analyst upside is printed once per report,
  * labeled `[DIAGNOSTIC ONLY]`, and no spread on this page can move when it changes. That property
@@ -40,7 +44,7 @@ object OutcomeReportBuilder {
         return buildString {
             appendLine("outcome report — profile ${inputs.profile} — ${date(inputs.generatedAtEpochSeconds)}")
             if (inputs.rows.isEmpty()) {
-                appendLine("no journal rows yet — every refresh adds one pass per viewed model")
+                appendLine("no journal rows yet — every completed refresh adds paired V1 through V5 passes")
                 return@buildString
             }
             appendLine(
@@ -53,6 +57,9 @@ object OutcomeReportBuilder {
             models.entries
                 .sortedBy { modelOrder(it.key) }
                 .forEach { (model, rows) -> append(modelSection(model, rows, inputs.candlesBySymbol)) }
+            if ("AggressiveV2" in models || "AggressiveV5" in models) {
+                append(pairedExperimentSection(inputs.rows, inputs.candlesBySymbol))
+            }
         }
     }
 
@@ -79,12 +86,50 @@ object OutcomeReportBuilder {
         var accounting = "held=${report.heldCount} dropped: " +
             "no-entry-bar=${report.droppedNoEntryBar} " +
             "no-exit-bar=${report.droppedNoExitBar} " +
-            "unpriced-entry=${report.droppedUnpricedEntry}"
+            "unpriced-entry=${report.droppedUnpricedEntry} " +
+            "same-entry-bar=${report.droppedSameEntryBar}"
         var spread = outcome.spreadBps
         if (spread == null) {
             return "horizon $horizon bars: insufficient observations to name a spread ($accounting)"
         }
         return "horizon $horizon bars: top-minus-bottom $spread bps ($accounting)"
+    }
+
+    private fun pairedExperimentSection(
+        rows: List<ScoreJournalRow>,
+        candlesBySymbol: Map<String, List<HistoricalCandle>>,
+    ): String = buildString {
+        val experiment = V5OutcomeAblations.build(rows.mapNotNull { row -> row.toAblationObservation() })
+        appendLine()
+        appendLine("== Paired V2/V5 experiment ==")
+        appendLine("paired rows: ${experiment.pairedRowCount}")
+        if (experiment.pairedRowCount == 0) {
+            appendLine("no exact symbol-time pairs; legacy rows cannot support a controlled comparison")
+            return@buildString
+        }
+        experiment.series.forEach { series ->
+            appendLine("-- ${series.name} --")
+            var report = outcomeReport(listOf(series), candlesBySymbol, HORIZONS)
+            HORIZONS.forEachIndexed { index, horizon ->
+                appendLine(horizonLine(horizon, report.outcomes[index]))
+            }
+        }
+    }
+
+    private fun ScoreJournalRow.toAblationObservation(): ScoreAblationObservation? {
+        val model = runCatching { OpportunityScoringModel.valueOf(scoringModel) }.getOrNull()
+            ?: return null
+        return ScoreAblationObservation(
+            symbol = symbol,
+            model = model,
+            scoredAtEpochSeconds = scoredAtEpochSeconds,
+            fundamentalsScore = fundamentalsScore,
+            technicalScore = technicalScore,
+            forecastScore = forecastScore,
+            regimeScore = regimeScore,
+            compositeScore = compositeScore,
+            compositeScoreBase = compositeScoreBase,
+        )
     }
 
     /**
@@ -124,7 +169,7 @@ object OutcomeReportBuilder {
 
     /** Newest model first; anything unlisted keeps alphabetical order behind the known ones. */
     private fun modelOrder(model: String): Int =
-        listOf("AggressiveV5", "AggressiveV4", "AggressiveV3", "AggressiveV2")
+        listOf("AggressiveV5", "AggressiveV4", "AggressiveV3", "AggressiveV2", "Aggressive")
             .indexOf(model)
             .let { if (it < 0) Int.MAX_VALUE else it }
 

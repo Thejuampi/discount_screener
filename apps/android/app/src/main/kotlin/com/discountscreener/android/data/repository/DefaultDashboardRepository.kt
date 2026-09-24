@@ -131,8 +131,14 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
+import com.discountscreener.android.domain.model.ScoringEvaluationInputs
+import com.discountscreener.android.domain.model.ScoringEvaluationModelResult
+import com.discountscreener.android.domain.model.ScoringEvaluationScore
+import com.discountscreener.android.domain.model.ScoringEvaluationSnapshot
+import com.discountscreener.android.domain.model.ScoringEvaluationSymbolInput
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.core.model.OpportunityScoringModel
+import com.discountscreener.core.model.formulaVersion
 import com.discountscreener.core.model.readsSectorBenchmarks
 import com.discountscreener.core.model.OpportunityRow
 import com.discountscreener.core.model.OutcomeConfidence
@@ -222,6 +228,25 @@ private data class SymbolRefreshResult(
     val retryable: Boolean = false,
     val refreshedAtEpochSeconds: Long,
 )
+
+private data class PendingScoringEvaluation(
+    val capturedAtEpochSeconds: Long,
+    val profileName: String,
+    val policyVersion: String,
+    val regimeScoringEnabled: Boolean,
+    val inputs: ScoringEvaluationInputs,
+    val modelResults: List<ScoringEvaluationModelResult>,
+    val rowsByModel: Map<OpportunityScoringModel, List<OpportunityListRow>>,
+) {
+    fun snapshot(): ScoringEvaluationSnapshot = ScoringEvaluationSnapshot.create(
+        capturedAtEpochSeconds = capturedAtEpochSeconds,
+        profileName = profileName,
+        policyVersion = policyVersion,
+        regimeScoringEnabled = regimeScoringEnabled,
+        inputs = inputs,
+        modelResults = modelResults,
+    )
+}
 
 private data class EnrichmentResult(
     val generation: Long,
@@ -503,12 +528,14 @@ class DefaultDashboardRepository(
     private var refreshTargetSymbols = 0
     private var issueEventCounter = 0
     private var statusMessage: String? = null
+    private var backgroundWorkMessage: String? = null
     private var restored = false
     private var activeProfileGeneration = 0L
     private var activeProfileSwitchJob: Job? = null
     private var activeRefreshJob: Job? = null
     private var activeEnrichmentJob: Job? = null
     private var activeMarketReadJob: Job? = null
+    private var activeEvaluationCaptureJob: Job? = null
 
     /**
      * Held for the whole of [startRefresh], so a refresh replaces the one before it.
@@ -797,8 +824,8 @@ class DefaultDashboardRepository(
     }
 
     /**
-     * Records what this pass scored, so that in some weeks there is evidence about which model
-     * works rather than only about which model is cleaner.
+     * Scores and records every comparison model after one refresh. Shared inputs and one timestamp
+     * make later outcome comparisons valid.
      *
      * Called from the refresh job once the pass has finished, which is the only moment the rows
      * exist. `refreshAll` returns before any of that lands — the dashboard has to render first —
@@ -811,34 +838,38 @@ class DefaultDashboardRepository(
      * Failures are logged and dropped. A journal that could break a refresh would be a feature
      * that costs the app its main job in exchange for a measurement.
      *
-     * One clock, on purpose. The rows are stamped with [now] and the retention cutoff is cut from
-     * the same reading, so the window is always ninety days of *scoring passes*. Letting the store
+     * One clock, on purpose. The final evaluation supplies [scoredAt], and the retention cutoff
+     * uses the same reading. Letting the store
      * fall back to its own clock made a pass whose stamp trailed the wall clock by more than the
      * window delete itself the moment it was written, which is what the wiring test caught.
      */
-    private suspend fun journalScores(rows: List<OpportunityListRow>, model: OpportunityScoringModel) {
-        if (rows.isEmpty()) return
-        val scoredAt = now()
+    private suspend fun journalScores(
+        rowsByModel: Map<OpportunityScoringModel, List<OpportunityListRow>>,
+        scoredAt: Long,
+    ) {
+        if (rowsByModel.values.all { rows -> rows.isEmpty() }) return
         runCatching {
             stateStore.appendScoreJournal(
-                rows = rows.map { row ->
-                    ScoreJournalRow(
-                        symbol = row.symbol,
-                        scoringModel = model.name,
-                        scoredAtEpochSeconds = scoredAt,
-                        fundamentalsScore = row.fundamentalsScore,
-                        technicalScore = row.technicalScore,
-                        forecastScore = row.forecastScore,
-                        regimeScore = row.regimeScore,
-                        compositeScore = row.compositeScore,
-                        compositeScoreBase = row.compositeScoreBase,
-                        marketPriceCents = row.marketPriceCents,
-                        factors = JournalFactors(
-                            fundamentals = row.fundamentalsFactors,
-                            technical = row.technicalFactors,
-                            forecast = row.forecastFactors,
-                        ),
-                    )
+                rows = rowsByModel.flatMap { (model, rows) ->
+                    rows.map { row ->
+                        ScoreJournalRow(
+                            symbol = row.symbol,
+                            scoringModel = model.name,
+                            scoredAtEpochSeconds = scoredAt,
+                            fundamentalsScore = row.fundamentalsScore,
+                            technicalScore = row.technicalScore,
+                            forecastScore = row.forecastScore,
+                            regimeScore = row.regimeScore,
+                            compositeScore = row.compositeScore,
+                            compositeScoreBase = row.compositeScoreBase,
+                            marketPriceCents = row.marketPriceCents,
+                            factors = JournalFactors(
+                                fundamentals = row.fundamentalsFactors,
+                                technical = row.technicalFactors,
+                                forecast = row.forecastFactors,
+                            ),
+                        )
+                    }
                 },
                 retentionSeconds = SCORE_JOURNAL_RETENTION_SECONDS,
                 nowEpochSeconds = scoredAt,
@@ -1339,8 +1370,8 @@ class DefaultDashboardRepository(
         if (stateMutex.withLock { request.generation != activeProfileGeneration }) {
             return
         }
-        // A profile switch carries no model of its own — the caller is changing the universe, not
-        // the scoring — so the journal records the model the user is actually looking at.
+        // A profile switch carries no model of its own. The selected model still controls the
+        // immediate user surface; the final evaluation independently records V1 through V5.
         startRefresh(
             request.symbols,
             request.generation,
@@ -1373,19 +1404,21 @@ class DefaultDashboardRepository(
             refreshRequestedNanos = System.nanoTime()
             refreshFirstSymbolLogged = false
 
-            val (previousRefreshJob, previousEnrichmentJob) = stateMutex.withLock {
+            val previousJobs = stateMutex.withLock {
                 if (generation != activeProfileGeneration) {
                     return
                 }
+                backgroundWorkMessage = null
                 val existingRefresh = activeRefreshJob
                 activeRefreshJob = null
                 val existingEnrichment = activeEnrichmentJob
                 activeEnrichmentJob = null
-                Pair(existingRefresh, existingEnrichment)
+                val existingEvaluation = activeEvaluationCaptureJob
+                activeEvaluationCaptureJob = null
+                listOfNotNull(existingRefresh, existingEnrichment, existingEvaluation)
             }
             timedStage("refresh.cancel-previous") {
-                previousRefreshJob?.cancelAndJoin()
-                previousEnrichmentJob?.cancelAndJoin()
+                previousJobs.forEach { job -> job.cancelAndJoin() }
             }
             val skip = if (force) FreshCaptureSkip() else freshCaptureSkip(symbols, stateStore.loadRefreshMarks())
 
@@ -1459,8 +1492,8 @@ class DefaultDashboardRepository(
     }
 
     /**
-     * What a refresh that ran to its end does next: journal what it scored, publish, and start the
-     * enrichment on the rows it brought and the market read. A refresh that was cancelled does none
+     * What a refresh that ran to its end does next: publish, start enrichment and the market read,
+     * then capture their final scoring state. A refresh that was cancelled does none
      * of this, because a switch or a new refresh is already on its way and would run beside them.
      *
      * The enrichment is counted in before the refresh is counted out, so the two halves of one load
@@ -1479,13 +1512,168 @@ class DefaultDashboardRepository(
             }
             trackedSymbols.filter { engine.detail(it) != null }
         }
-        val scoredRows = stateMutex.withLock { opportunityRowsLocked(ViewFilter(), scoringModel) }
-        journalScores(scoredRows, scoringModel)
         captureEarningsEvents(stateMutex.withLock { earningsCandidateRowsLocked(scoringModel) })
         emitUpdate()
         startEnrichment(symbolsToEnrich, generation, skip)
         startMarketReadForCurrentProfile(generation)
+        startScoringEvaluationCapture(generation)
     }
+
+    /** Waits for both asynchronous input families, then writes one reproducible daily cohort. */
+    private suspend fun startScoringEvaluationCapture(generation: Long) {
+        val previous = stateMutex.withLock {
+            if (generation != activeProfileGeneration) return
+            val existing = activeEvaluationCaptureJob
+            activeEvaluationCaptureJob = null
+            existing
+        }
+        previous?.cancelAndJoin()
+        val dependencies = stateMutex.withLock {
+            if (generation != activeProfileGeneration) return
+            activeEnrichmentJob to activeMarketReadJob
+        }
+        stateMutex.withLock {
+            if (generation != activeProfileGeneration) return
+            activeEvaluationCaptureJob = repositoryScope.launch {
+                val thisJob = coroutineContext.job
+                try {
+                    dependencies.first?.join()
+                    dependencies.second?.join()
+                    setBackgroundWork(generation, "Saving scoring evaluation snapshot…")
+                    val capturedAt = now()
+                    val pending = stateMutex.withLock {
+                        if (
+                            generation != activeProfileGeneration ||
+                            activeEvaluationCaptureJob !== thisJob
+                        ) {
+                            null
+                        } else {
+                            buildScoringEvaluationLocked(capturedAt)
+                        }
+                    } ?: return@launch
+                    val snapshot = pending.snapshot()
+                    runCatching {
+                        stateStore.appendScoringEvaluationSnapshot(snapshot)
+                    }.onSuccess {
+                        journalScores(pending.rowsByModel, capturedAt)
+                    }.onFailure { error ->
+                        logger.error(TAG, "scoring evaluation snapshot append failed", error)
+                    }
+                } finally {
+                    withContext(NonCancellable) {
+                        stateMutex.withLock {
+                            if (activeEvaluationCaptureJob === thisJob) {
+                                activeEvaluationCaptureJob = null
+                            }
+                        }
+                        setBackgroundWork(generation, null)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildScoringEvaluationLocked(capturedAt: Long): PendingScoringEvaluation {
+        val sectorBenchmarks = sectorBenchmarksLocked(OpportunityScoringModel.AggressiveV5)
+        val rowsByModel = EVALUATION_MODELS.associateWith { model ->
+            opportunityRowsLocked(
+                filter = ViewFilter(),
+                scoringModel = model,
+                includeUnqualified = true,
+                sectorBenchmarksOverride = sectorBenchmarks,
+            )
+        }
+        val issuesBySymbol = activeIssueMessagesBySymbolLocked()
+        val detailsBySymbol = trackedSymbols.associateWith { symbol -> engine.detail(symbol) }
+        val inputs = ScoringEvaluationInputs(
+            universe = trackedSymbols.mapIndexed { index, symbol ->
+                val detail = detailsBySymbol[symbol]
+                ScoringEvaluationSymbolInput(
+                    profilePosition = index + 1,
+                    symbol = symbol,
+                    detail = detail,
+                    weeklySummary = preferredChartSummaryLocked(symbol),
+                    dailyRegimeSummary = regimeDailySummaries[symbol],
+                    dcfAnalysis = dcfCache[symbol],
+                    fundamentalTimeseries = timeseriesCache[symbol],
+                    freshnessAsOfEpochSeconds = freshnessTimestampBySymbol[symbol],
+                    stale = detail != null && symbol in staleSymbols,
+                    refreshed = symbol in refreshedSymbols,
+                    providerIssue = issuesBySymbol[symbol],
+                    unavailableReason = if (detail == null) {
+                        issuesBySymbol[symbol] ?: "No normalized company detail after refresh."
+                    } else {
+                        null
+                    },
+                )
+            },
+            sectorBenchmarks = sectorBenchmarks,
+            marketRegime = marketRegime,
+            marketReadAttempted = marketReadAttempted,
+        )
+        val results = rowsByModel.map { (model, rows) ->
+            val visibleRanks = rows
+                .filter { row -> row.qualification == QualificationStatus.Qualified }
+                .mapIndexed { index, row -> row.symbol to index + 1 }
+                .toMap()
+            ScoringEvaluationModelResult(
+                model = model,
+                formulaVersion = model.formulaVersion(),
+                rows = rows.mapIndexed { index, row ->
+                    row.toScoringEvaluationScore(
+                        universeRank = index + 1,
+                        visibleRank = visibleRanks[row.symbol],
+                        analystTargetCents = preferredAnalystTargetFairValueCents(detailsBySymbol[row.symbol]),
+                    )
+                },
+            )
+        }
+        return PendingScoringEvaluation(
+            capturedAtEpochSeconds = capturedAt,
+            profileName = currentProfile,
+            policyVersion = ValuationPolicy.VERSION,
+            regimeScoringEnabled = regimeScoringEnabled,
+            inputs = inputs,
+            modelResults = results,
+            rowsByModel = rowsByModel,
+        )
+    }
+
+    private fun OpportunityListRow.toScoringEvaluationScore(
+        universeRank: Int,
+        visibleRank: Int?,
+        analystTargetCents: Long?,
+    ) = ScoringEvaluationScore(
+        symbol = symbol,
+        universeRank = universeRank,
+        visibleRank = visibleRank,
+        marketPriceCents = marketPriceCents,
+        intrinsicValueCents = intrinsicValueCents,
+        analystTargetCents = analystTargetCents,
+        gapBps = gapBps,
+        upsideBps = upsideBps,
+        confidence = confidence,
+        qualification = qualification,
+        externalStatus = externalStatus,
+        analystCoverageCount = analystCoverageCount,
+        fundamentalsScore = fundamentalsScore,
+        technicalScore = technicalScore,
+        forecastScore = forecastScore,
+        regimeScore = regimeScore,
+        compositeScore = compositeScore,
+        compositeScoreBase = compositeScoreBase,
+        coverageCount = coverageCount,
+        fundamentalsSignals = fundamentalsSignals,
+        technicalSignals = technicalSignals,
+        forecastSignals = forecastSignals,
+        fundamentalsFactors = fundamentalsFactors,
+        technicalFactors = technicalFactors,
+        forecastFactors = forecastFactors,
+        regimeStatus = regimeStatus,
+        regimeCauses = regimeCauses,
+        regimeSignals = regimeSignals,
+        regimeUnavailableReason = regimeUnavailableReason,
+    )
 
     private fun loadStarted() {
         if (loadsInFlight.incrementAndGet() == 1) {
@@ -2073,11 +2261,12 @@ class DefaultDashboardRepository(
             }
         }
         var issueRecords = issues.values
+            .filter { it.active }
             .sortedByDescending { it.lastSeenEvent }
             .map(::toIssueRecord)
             .toMutableList()
         var trackedIssueMessages = issues.values
-            .filter { it.active }
+            .filter(::isRowBlockingIssue)
             .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
         var dashboardCandidateRows = timedPart("snapshot.candidates") { engine.filteredRows(limit = trackedSymbols.size.coerceAtLeast(1), filter = normalizedFilter) }
         var scoredOpportunityRows = timedPart("snapshot.score") { filteredScoredOpportunityRowsLocked(normalizedFilter, opportunityScoringModel) }
@@ -2242,6 +2431,7 @@ class DefaultDashboardRepository(
             refreshCompletedSymbols = refreshCompletedSymbols,
             refreshTargetSymbols = refreshTargetSymbols,
             statusMessage = statusMessage,
+            backgroundWorkMessage = backgroundWorkMessage,
             estimatesNotice = estimatesNotice,
             screenData = screenData,
             replayBackingCharts = if (normalizedSelectedSymbol == null) {
@@ -2853,9 +3043,10 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         scoringModel: OpportunityScoringModel,
         includeUnqualified: Boolean = false,
+        sectorBenchmarksOverride: Map<String, SectorBenchmarks>? = null,
     ): List<OpportunityListRow> {
         val issueMessagesBySymbol = activeIssueMessagesBySymbolLocked()
-        return rankedOpportunityRowsLocked(scoringModel, includeUnqualified)
+        return rankedOpportunityRowsLocked(scoringModel, includeUnqualified, sectorBenchmarksOverride)
         .mapIndexed { currentIndex, row ->
             buildOpportunityRowLocked(row, currentIndex, scoringModel, issueMessagesBySymbol[row.symbol])
         }
@@ -2886,6 +3077,7 @@ class DefaultDashboardRepository(
     private fun rankedOpportunityRowsLocked(
         scoringModel: OpportunityScoringModel,
         includeUnqualified: Boolean = false,
+        sectorBenchmarksOverride: Map<String, SectorBenchmarks>? = null,
     ) = OpportunityEngine.buildRows(
         engine,
         OpportunityContext(
@@ -2896,7 +3088,7 @@ class DefaultDashboardRepository(
             regimeSummariesBySymbol = regimeDailySummaries,
             marketRegime = marketRegime,
             regimeScoringEnabled = regimeScoringEnabled,
-            sectorBenchmarks = sectorBenchmarksLocked(scoringModel),
+            sectorBenchmarks = sectorBenchmarksOverride ?: sectorBenchmarksLocked(scoringModel),
             timeseriesBySymbol = timeseriesCache,
         ),
         includeUnqualified = includeUnqualified,
@@ -3492,8 +3684,11 @@ class DefaultDashboardRepository(
     }
 
     private fun activeIssueMessagesBySymbolLocked(): Map<String, String> = issues.values
-        .filter { it.active }
+        .filter(::isRowBlockingIssue)
         .associateBy({ it.key.substringBefore(':', it.key) }, { it.detail })
+
+    private fun isRowBlockingIssue(issue: PersistedIssueRecord): Boolean =
+        issue.active && ":enrichment:" !in issue.key && ":chart:" !in issue.key
 
     private fun hydrateWarmStartLocked(bootstrap: PersistenceBootstrap) {
         portfolioLots = bootstrap.portfolioLots
@@ -3722,11 +3917,18 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun takeActiveProfileJobs(): List<Job> = stateMutex.withLock {
-        val jobs = listOfNotNull(activeProfileSwitchJob, activeRefreshJob, activeEnrichmentJob, activeMarketReadJob)
+        val jobs = listOfNotNull(
+            activeProfileSwitchJob,
+            activeRefreshJob,
+            activeEnrichmentJob,
+            activeMarketReadJob,
+            activeEvaluationCaptureJob,
+        )
         activeProfileSwitchJob = null
         activeRefreshJob = null
         activeEnrichmentJob = null
         activeMarketReadJob = null
+        activeEvaluationCaptureJob = null
         jobs
     }
 
@@ -3735,6 +3937,11 @@ class DefaultDashboardRepository(
         // enters, and a board built before a refresh reads the prices that refresh replaced.
         if (feedback.startupPhase != DashboardStartupPhase.Ready) {
             heldPlanBoards = null
+        }
+        if (feedback.startupPhase == DashboardStartupPhase.SwitchingProfile ||
+            feedback.startupPhase == DashboardStartupPhase.ShowingCached
+        ) {
+            backgroundWorkMessage = null
         }
         startupPhase = feedback.startupPhase
         refreshCompletedSymbols = feedback.refreshCompletedSymbols
@@ -4119,6 +4326,17 @@ class DefaultDashboardRepository(
         updates.emit(updates.value + 1)
     }
 
+    private suspend fun setBackgroundWork(generation: Long, message: String?) {
+        val current = stateMutex.withLock {
+            if (generation != activeProfileGeneration) false
+            else {
+                backgroundWorkMessage = message
+                true
+            }
+        }
+        if (current) emitUpdate()
+    }
+
     private fun toIssueRecord(issue: PersistedIssueRecord): IssueRecord =
         IssueRecord(
             key = issue.key,
@@ -4198,6 +4416,8 @@ class DefaultDashboardRepository(
             }
             val batch = pending.toList()
             pending.clear()
+            val pass = round + 1
+            setBackgroundWork(generation, "Enriching charts and model inputs 0/${batch.size} · pass $pass/${MAX_RETRY_ROUNDS + 1}")
             val finalRound = round == MAX_RETRY_ROUNDS
             var applied = 0
             val unwritten = PendingDeltas()
@@ -4222,6 +4442,11 @@ class DefaultDashboardRepository(
                     }
                     applied += 1
                     if (applied % EMIT_UPDATE_BATCH == 0) {
+                        stateMutex.withLock {
+                            if (generation == activeProfileGeneration) {
+                                backgroundWorkMessage = "Enriching charts and model inputs $applied/${batch.size} · pass $pass/${MAX_RETRY_ROUNDS + 1}"
+                            }
+                        }
                         emitUpdate()
                     }
                     if (applied % PERSIST_BATCH == 0) {
@@ -4229,11 +4454,17 @@ class DefaultDashboardRepository(
                     }
                 }
             if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
+                stateMutex.withLock {
+                    if (generation == activeProfileGeneration) {
+                        backgroundWorkMessage = "Enriching charts and model inputs $applied/${batch.size} · pass $pass/${MAX_RETRY_ROUNDS + 1}"
+                    }
+                }
                 emitUpdate()
             }
             persistPending(unwritten)
             round += 1
         }
+        setBackgroundWork(generation, "Completing market context and scoring evaluation; duration unknown")
     }
 
     /** The second pass of a refresh, one symbol: its year chart, whatever the cache holds. */
@@ -4265,6 +4496,13 @@ class DefaultDashboardRepository(
             val candles = yahooClient.fetchHistoricalCandles(symbol, range)
             if (candles.isNotEmpty()) {
                 chartCaptures += range to candles
+            } else {
+                errors += ProviderDiagnostic(
+                    component = "enrichment",
+                    kind = "error",
+                    detail = "chart ${range.name} for $symbol: empty result",
+                    retryable = true,
+                )
             }
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -5027,6 +5265,7 @@ class DefaultDashboardRepository(
         activeRefreshJob = null
         activeEnrichmentJob = null
         activeMarketReadJob = null
+        activeEvaluationCaptureJob = null
         marketRegime = null
         marketReadAttempted = false
         regimeDailySummaries = emptyMap()
@@ -5237,13 +5476,19 @@ class DefaultDashboardRepository(
         internal const val STAGE_TIMING_PREFIX = "stage-timing"
 
         /**
-         * How long a journalled score is kept: ninety days.
-         *
-         * Long enough to hold the 21-, 63- and 126-day horizons the retrospective reports on, and
-         * short enough that a five-hundred-symbol profile refreshed daily stays in the low
-         * hundreds of thousands of rows.
+         * The one-year outcome can mature after 252 trading sessions.
+         * The calendar margin covers weekends, holidays, and delayed app openings.
          */
-        internal const val SCORE_JOURNAL_RETENTION_SECONDS = 220L * 24L * 60L * 60L
+        internal const val SCORE_JOURNAL_RETENTION_SECONDS = 460L * 24L * 60L * 60L
+
+        /** V1 through V5, scored from one input snapshot. Legacy remains a separate Buffett view. */
+        private val EVALUATION_MODELS = listOf(
+            OpportunityScoringModel.Aggressive,
+            OpportunityScoringModel.AggressiveV2,
+            OpportunityScoringModel.AggressiveV3,
+            OpportunityScoringModel.AggressiveV4,
+            OpportunityScoringModel.AggressiveV5,
+        )
 
         private fun retryBackoffMillis(round: Int): Long = when (round) {
             0 -> 1_500L

@@ -156,30 +156,27 @@ internal enum class EstimatesVerdict {
 
 internal fun buildEstimatesHeroSummary(report: IndexEstimatesReport): EstimatesHeroSummary {
     val byScenario = report.scenarios.associateBy { it.scenario }
-    val base = byScenario[EstimateScenario.BaseDcf]
-    val bear = byScenario[EstimateScenario.BearDcf]
-    val bull = byScenario[EstimateScenario.BullDcf]
     val analystLow = byScenario[EstimateScenario.AnalystLow]
     val analystHigh = byScenario[EstimateScenario.AnalystHigh]
     val coverage = report.dcfCoverage
     val notEligible = coverage.sourceDistribution.notEligibleCount
     return EstimatesHeroSummary(
         profileLabel = report.profileName.uppercase(),
-        baseUpsideBps = base?.impliedUpsideBps,
-        bearUpsideBps = bear?.impliedUpsideBps,
-        bullUpsideBps = bull?.impliedUpsideBps,
-        analystLowBps = analystLow?.impliedUpsideBps,
-        analystHighBps = analystHigh?.impliedUpsideBps,
-        baseCoverageCount = base?.coverageCount,
+        baseUpsideBps = null,
+        bearUpsideBps = null,
+        bullUpsideBps = null,
+        analystLowBps = analystLow?.takeIf { it.coverageCount > 0 }?.impliedUpsideBps,
+        analystHighBps = analystHigh?.takeIf { it.coverageCount > 0 }?.impliedUpsideBps,
+        baseCoverageCount = null,
         analystCoverageCount = maxOf(analystLow?.coverageCount ?: 0, analystHigh?.coverageCount ?: 0)
             .takeIf { it > 0 },
-        verdict = verdictFor(base?.impliedUpsideBps),
+        verdict = EstimatesVerdict.Unknown,
         coverageLabel = when (coverage.status) {
-            com.discountscreener.core.model.DcfCoverageStatus.Ready -> "Ready"
-            com.discountscreener.core.model.DcfCoverageStatus.Provisional -> "Provisional"
-            com.discountscreener.core.model.DcfCoverageStatus.Partial -> "Partial"
-            com.discountscreener.core.model.DcfCoverageStatus.LowConfidence -> "Low confidence"
-            com.discountscreener.core.model.DcfCoverageStatus.Unavailable -> "Unavailable"
+            com.discountscreener.core.model.DcfCoverageStatus.Ready -> "Data ready"
+            com.discountscreener.core.model.DcfCoverageStatus.Provisional -> "Data provisional"
+            com.discountscreener.core.model.DcfCoverageStatus.Partial -> "Data partial"
+            com.discountscreener.core.model.DcfCoverageStatus.LowConfidence -> "Data sparse"
+            com.discountscreener.core.model.DcfCoverageStatus.Unavailable -> "Data unavailable"
         },
         coverageDetail = buildString {
             append("${coverage.coveredSymbols}/${coverage.totalEligibleSymbols} DCF")
@@ -204,7 +201,7 @@ internal fun verdictSentence(verdict: EstimatesVerdict, baseUpsideBps: Int?): St
     EstimatesVerdict.Fair ->
         "Index looks roughly fair on Base DCF (${formatSignedPctBps(baseUpsideBps)})"
     EstimatesVerdict.Unknown ->
-        "Base DCF upside not available yet"
+        "Index estimate withheld while the DCF model is under validation"
 }
 
 internal fun formatSignedPctBps(bps: Int?): String {

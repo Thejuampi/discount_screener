@@ -214,7 +214,7 @@ class DiscountScreenerAppContainer(context: Context) {
             exportScores = ExportScoresUseCase(repository, appContext.filesDir),
             runRetrospective = RunRetrospectiveUseCase(stateStore, appContext.filesDir),
             runOutcomeReport = RunOutcomeReportUseCase(
-                journalSource = { stateStore.loadScoreJournal() },
+                evaluationSnapshotSource = { profile -> stateStore.loadScoringEvaluationSnapshots(profile) },
                 candleSource = stateStore,
                 streetDiagnosticSource = { repository.streetDiagnosticUpsideBps() },
                 exportDirectory = appContext.filesDir,

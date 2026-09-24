@@ -215,12 +215,38 @@ class MarketDimensionRankingTest {
      * fixture puts seventeen names on the list.
      */
     @Test
-    fun a_refresh_journals_the_scores_it_produced() = runTest(dispatcher) {
+    fun a_refresh_journals_all_comparison_models_on_the_same_pass() = runTest(dispatcher) {
         withRepository { repository ->
+            var expectedSymbols = QA_SYMBOLS.sorted()
+            var rows = journal()
+
+            assertEquals(COMPARISON_MODELS, rows.map { it.scoringModel }.distinct())
+            COMPARISON_MODELS.forEach { model ->
+                assertEquals(
+                    expectedSymbols,
+                    rows.filter { it.scoringModel == model }.map { it.symbol }.sorted(),
+                )
+            }
+            assertEquals(1, rows.map { it.scoredAtEpochSeconds }.distinct().size)
+        }
+    }
+
+    @Test
+    fun a_refresh_stores_one_complete_daily_evaluation_snapshot() = runTest(dispatcher) {
+        withRepository {
+            val snapshot = evaluationSnapshots().single()
+
+            assertEquals(QA_SYMBOLS, snapshot.inputs.universe.map { input -> input.symbol })
+            assertTrue(snapshot.inputs.universe.all { input -> input.detail != null })
+            assertTrue(snapshot.inputs.universe.all { input -> input.weeklySummary != null })
+            assertTrue(snapshot.inputs.universe.all { input -> input.dailyRegimeSummary != null })
             assertEquals(
-                rankedSymbols(repository).sorted(),
-                journal().map { it.symbol }.sorted(),
+                COMPARISON_MODELS,
+                snapshot.modelResults.map { result -> result.model.name },
             )
+            snapshot.modelResults.forEach { result ->
+                assertEquals(QA_SYMBOLS.toSet(), result.rows.map { row -> row.symbol }.toSet())
+            }
         }
     }
 
@@ -316,6 +342,10 @@ class MarketDimensionRankingTest {
         } finally {
             store.close()
         }
+    }
+
+    private suspend fun evaluationSnapshots() = SQLiteStateStore(context, ioDispatcher = dispatcher).use { store ->
+        store.loadScoringEvaluationSnapshots()
     }
 
     private suspend fun rankedSymbols(
@@ -496,6 +526,14 @@ class MarketDimensionRankingTest {
             "BAC" to 32, "XOM" to 32, "JNJ" to 32, "UNH" to 32, "NVDA" to 32,
             "MSFT" to 32, "ACGL" to 32, "JPM" to 32,
             "CI" to 31,
+        )
+
+        val COMPARISON_MODELS = listOf(
+            "Aggressive",
+            "AggressiveV2",
+            "AggressiveV3",
+            "AggressiveV4",
+            "AggressiveV5",
         )
 
         /**

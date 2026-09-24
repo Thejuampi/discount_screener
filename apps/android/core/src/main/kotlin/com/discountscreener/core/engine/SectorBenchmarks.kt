@@ -6,6 +6,7 @@ import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.SymbolDetail
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+import kotlinx.serialization.Serializable
 
 /**
  * What the symbol's own sector trades at, so a multiple can be read against its industry.
@@ -17,6 +18,7 @@ import kotlin.math.roundToLong
  * A field is null when its sector cannot support the question, and the caller then falls back to
  * the absolute band. Null is the common case for the thin sectors, and it is the correct one.
  */
+@Serializable
 data class SectorBenchmarks(
     val forwardPeHundredths: Int?,
     val enterpriseToEbitdaHundredths: Int?,

@@ -9,14 +9,10 @@ import com.discountscreener.core.model.QuantLensPrimaryStatus
 import com.discountscreener.core.model.QuantLensReasonCode
 import com.discountscreener.core.model.ResolverState
 import com.discountscreener.core.model.SymbolDetail
-import com.discountscreener.core.model.ValuationModel
 
 /**
- * Chooses the expected-value anchor without hiding model/analyst disagreement.
- *
- * A usable DCF is not automatically the primary expected value. Provisional or
- * wide models are soft evidence, and a material model-vs-analyst gap is
- * explicitly disputed so the UI cannot headline an absurd single upside.
+ * Uses analyst anchors while DCF model validation remains pending.
+ * DCF anchors can fill a missing analyst range, but remain provisional.
  */
 object QuantLensExpectedValuePolicy {
 
@@ -33,58 +29,15 @@ object QuantLensExpectedValuePolicy {
             ?.let(::normalizedAnchors)
             .orEmpty()
         val analystAnchors = analystAnchors(detail)
-        val modelQuality = modelQuality(dcf, modelAnchors)
-        val disagreement = if (modelAnchors.size == 3 && analystAnchors.size == 3) {
-            ValuationDecisionPolicy.differenceBps(modelAnchors[1], analystAnchors[1])
-        } else {
-            null
-        }
-
-        if (modelAnchors.size == 3 && analystAnchors.size == 3 &&
-            disagreement != null && disagreement > ValuationDecisionPolicy.ALIGNED_MAX_BPS
-        ) {
-            return QuantLensExpectedValueRange(
-                primaryStatus = QuantLensPrimaryStatus.Disputed,
-                band = if (disagreement > ValuationDecisionPolicy.TENSION_MAX_BPS) {
-                    ExpectedValueRangeBand.Disputed
-                } else {
-                    ExpectedValueRangeBand.Tension
-                },
-                modelLowFairValueCents = modelAnchors[0],
-                modelBaseFairValueCents = modelAnchors[1],
-                modelHighFairValueCents = modelAnchors[2],
-                analystLowFairValueCents = analystAnchors[0],
-                analystBaseFairValueCents = analystAnchors[1],
-                analystHighFairValueCents = analystAnchors[2],
-                disagreementBps = disagreement,
-                reasonCodes = listOf(
-                    QuantLensReasonCode.CompleteScenarioAnchors,
-                    QuantLensReasonCode.ModelAnalystDisagreement,
-                ),
-            )
-        }
-
         return when {
-            modelAnchors.size == 3 && (analystAnchors.size != 3 || modelQuality == ModelQuality.Solid) ->
-                scenarioRange(
-                    source = ExpectedValueRangeSource.Dcf,
-                    anchors = modelAnchors,
-                    detail = detail,
-                    modelQuality = modelQuality,
-                    modelAnchors = modelAnchors.takeIf { analystAnchors.size == 3 },
-                    analystAnchors = analystAnchors.takeIf { modelAnchors.size == 3 },
-                    disagreement = disagreement,
-                )
-
             analystAnchors.size == 3 ->
                 scenarioRange(
                     source = ExpectedValueRangeSource.Analyst,
                     anchors = analystAnchors,
                     detail = detail,
-                    modelQuality = modelQuality,
-                    modelAnchors = modelAnchors.takeIf { it.size == 3 },
+                    modelAnchors = null,
                     analystAnchors = analystAnchors,
-                    disagreement = disagreement,
+                    disagreement = null,
                 )
 
             modelAnchors.size == 3 ->
@@ -92,18 +45,17 @@ object QuantLensExpectedValuePolicy {
                     source = ExpectedValueRangeSource.Dcf,
                     anchors = modelAnchors,
                     detail = detail,
-                    modelQuality = modelQuality,
                     modelAnchors = modelAnchors,
                     analystAnchors = null,
-                    disagreement = disagreement,
+                    disagreement = null,
                 )
 
             modelAnchors.isNotEmpty() || analystAnchors.isNotEmpty() ->
                 QuantLensExpectedValueRange(
                     primaryStatus = QuantLensPrimaryStatus.Sparse,
                     band = ExpectedValueRangeBand.ReferenceOnly,
-                    lowFairValueCents = (modelAnchors + analystAnchors).minOrNull(),
-                    highFairValueCents = (modelAnchors + analystAnchors).maxOrNull(),
+                    lowFairValueCents = (analystAnchors.ifEmpty { modelAnchors }).minOrNull(),
+                    highFairValueCents = (analystAnchors.ifEmpty { modelAnchors }).maxOrNull(),
                     reasonCodes = listOf(QuantLensReasonCode.MissingScenarioAnchors),
                 )
 
@@ -120,7 +72,6 @@ object QuantLensExpectedValuePolicy {
         source: ExpectedValueRangeSource,
         anchors: List<Long>,
         detail: SymbolDetail,
-        modelQuality: ModelQuality,
         modelAnchors: List<Long>?,
         analystAnchors: List<Long>?,
         disagreement: Int?,
@@ -130,7 +81,7 @@ object QuantLensExpectedValuePolicy {
         val high = anchors[2]
         val weighted = weightedThree(low, base, high)
         return QuantLensExpectedValueRange(
-            primaryStatus = if (source == ExpectedValueRangeSource.Dcf && modelQuality == ModelQuality.Soft) {
+            primaryStatus = if (source == ExpectedValueRangeSource.Dcf) {
                 QuantLensPrimaryStatus.Provisional
             } else {
                 QuantLensPrimaryStatus.Available
@@ -175,26 +126,7 @@ object QuantLensExpectedValuePolicy {
         return if (anchors.size == 3) anchors.sorted() else anchors
     }
 
-    private fun modelQuality(
-        dcf: DcfAnalysis?,
-        anchors: List<Long>,
-    ): ModelQuality {
-        if (dcf == null || dcf.model == ValuationModel.None || anchors.size != 3) {
-            return ModelQuality.Unusable
-        }
-        return if (ValuationDecisionPolicy.isSoftModel(dcf)) {
-            ModelQuality.Soft
-        } else {
-            ModelQuality.Solid
-        }
-    }
-
     private fun weightedThree(low: Long, base: Long, high: Long): Long =
         (low + (base * 2L) + high) / 4L
 
-    private enum class ModelQuality {
-        Solid,
-        Soft,
-        Unusable,
-    }
 }

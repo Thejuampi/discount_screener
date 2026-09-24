@@ -118,7 +118,7 @@ class DefaultDashboardRepositoryTest {
      */
     @Test
     fun the_score_journal_outlives_the_longest_measured_horizon() {
-        assertEquals(220L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+        assertEquals(460L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
     }
 
     @Test
@@ -137,6 +137,37 @@ class DefaultDashboardRepositoryTest {
             assertTrue(snapshot.trackedSymbols.size in 1..DefaultDashboardRepository.QA_MAX_SYMBOLS)
             assertTrue(snapshot.trackedSymbols.size <= 20)
             assertFalse(snapshot.trackedSymbols.contains("MSTR"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun recovered_issue_history_does_not_reappear_as_active_system_error() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.replaceIssues(listOf(
+                com.discountscreener.android.data.persistence.PersistedIssueRecord(
+                    key = "T:enrichment:error:old",
+                    source = com.discountscreener.android.data.persistence.PersistenceIssueSource.Feed,
+                    severity = com.discountscreener.android.data.persistence.PersistenceIssueSeverity.Warning,
+                    title = "Enrichment failed",
+                    detail = "Recovered chart error",
+                    count = 3,
+                    firstSeenEvent = 1,
+                    lastSeenEvent = 3,
+                    active = false,
+                ),
+            ))
+            val repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertTrue(snapshot.issues.none { it.key == "T:enrichment:error:old" })
         } finally {
             store.close()
         }
@@ -340,7 +371,7 @@ class DefaultDashboardRepositoryTest {
 
             assertEquals(
                 SourceFreeProjectionExpectation(
-                    providerCategory = ProjectedProviderCategory.SourceUnknown,
+                    providerCategory = ProjectedProviderCategory.Restored,
                     trustNote = "Source unknown",
                     confidence = ConfidenceBand.Low,
                     freshness = RowFreshness.Restored,
@@ -1222,7 +1253,7 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun cancelled_refresh_does_not_journal() = runTest(dispatcher) {
+    fun cancelled_refresh_does_not_capture_the_stale_profile() = runTest(dispatcher) {
         val store = CountingJournalStore(context, dispatcher)
         try {
             val client = FakeYahooFinanceClient()
@@ -1230,14 +1261,16 @@ class DefaultDashboardRepositoryTest {
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
             advanceUntilIdle()
-            val journalsAfterLivePass = store.journalWrites
-
             client.delayMs = 5_000
             repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
             dispatcher.scheduler.runCurrent()
+            val qaCapturesBeforeSwitch = store.snapshotProfiles.count { it == "qa" }
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
 
-            assertEquals(journalsAfterLivePass, store.journalWrites)
+            assertEquals(
+                qaCapturesBeforeSwitch,
+                store.snapshotProfiles.count { it == "qa" },
+            )
         } finally {
             store.close()
         }
@@ -1622,6 +1655,40 @@ class DefaultDashboardRepositoryTest {
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
 
             assertEquals(DcfSource.YahooFinance, awaitDcfSource(repository, "AAPL"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun empty_year_chart_is_retried_and_recovers() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var yearCalls = 0
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+                    if (symbol == QA_EXCLUSIVE_LIVE_SYMBOL && range == ChartRange.Year) {
+                        yearCalls += 1
+                        if (yearCalls <= 2) return emptyList()
+                    }
+                    return super.fetchHistoricalCandles(symbol, range)
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val recovered = awaitSnapshot(repository, selectedSymbol = QA_EXCLUSIVE_LIVE_SYMBOL) { snapshot ->
+                snapshot.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty() &&
+                    snapshot.issues.none { issue -> issue.key.startsWith("$QA_EXCLUSIVE_LIVE_SYMBOL:enrichment:") }
+            }
+
+            assertEquals(3, yearCalls)
+            assertTrue(recovered.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty())
         } finally {
             store.close()
         }
@@ -3157,6 +3224,14 @@ class DefaultDashboardRepositoryTest {
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
     ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
         var journalWrites = 0
+        val snapshotProfiles = mutableListOf<String>()
+
+        override suspend fun appendScoringEvaluationSnapshot(
+            snapshot: com.discountscreener.android.domain.model.ScoringEvaluationSnapshot,
+        ) {
+            snapshotProfiles += snapshot.profileName
+            super.appendScoringEvaluationSnapshot(snapshot)
+        }
 
         override suspend fun appendScoreJournal(
             rows: List<com.discountscreener.android.domain.model.ScoreJournalRow>,

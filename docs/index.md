@@ -19,6 +19,7 @@ Use this page to find the current source for each concern.
 - [DCF source consistency](architecture/dcf-source-consistency.md)
 - [Cross-platform parity](architecture/cross-platform-parity.md)
 - [Shared contracts](../shared/contracts/README.md)
+- [Scoring evaluation snapshots](architecture/scoring-evaluation-snapshots.md)
 
 ## Operations
 
@@ -40,6 +41,9 @@ Use this page to find the current source for each concern.
 ## Research And Diagnostics
 
 - [Research](research/)
+- [Aggressive V5 evaluation](research/aggressive-v5-evaluation.md)
+- [Scoring evaluation process design](research/scoring-evaluation-process-design.md)
+- [Scoring evaluation validation](research/scoring-evaluation-validation.md)
 - [Diagnostics](diagnostics/)
 - [Quant references](references/quant/)
 - [Lab evidence](../lab/)

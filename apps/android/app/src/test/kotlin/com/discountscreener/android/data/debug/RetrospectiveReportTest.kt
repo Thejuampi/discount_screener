@@ -2,6 +2,7 @@ package com.discountscreener.android.data.debug
 
 import com.discountscreener.core.model.HistoricalCandle
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -21,6 +22,7 @@ class RetrospectiveReportTest {
             RetrospectiveReport.HORIZONS.size,
             report.lines().count { it.contains("top-minus-bottom") },
         )
+        assertTrue(report.contains("same-entry-bar=0"))
     }
 
     /**

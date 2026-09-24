@@ -1,10 +1,13 @@
 package com.discountscreener.core.regime
 
+import kotlinx.serialization.Serializable
+
 /** Public types for the market regime engine. English copy lives in [enrichRegime]. */
 
 const val REGIME_VERSION: Int = 2
 
 /** One reason a pillar reads the way it does. [contribution] runs roughly −100..+100. */
+@Serializable
 data class RegimeSignal(
     val id: String,
     val label: String,
@@ -14,6 +17,7 @@ data class RegimeSignal(
     val hint: String? = null,
 )
 
+@Serializable
 data class RegimePillar(
     val id: String,
     val name: String,
@@ -86,6 +90,7 @@ data class CnnFearGreed(
  * cold start or a fully offline refresh resolves to — an explicit "Unknown" with a neutral
  * exposure, never a fabricated bullish or bearish call.
  */
+@Serializable
 data class MarketRegime(
     /** StrongBull | Bull | LateBull | Range | Correction | Bear | Capitulation | Snapback | Unknown */
     val primaryRegime: String = "Unknown",
